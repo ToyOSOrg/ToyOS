@@ -67,6 +67,9 @@ unsafe impl UserSafe for toyos_abi::log::LogCursor {}
 // SAFETY: `#[repr(transparent)]` over the `LogCursor` above.
 unsafe impl UserSafe for toyos_abi::trace::TraceCursor {}
 
+// SAFETY: `#[repr(C)] Copy`, two `u64`s and eight `u8`s, 24 bytes with no padding (its own size assertion); `space`, `width` and `write` are bytes, not the enums they name, and are decoded where they are used.
+unsafe impl UserSafe for toyos_abi::acpi::Access {}
+
 pub(crate) use toyos_userbound::Access;
 
 fn translate_now(

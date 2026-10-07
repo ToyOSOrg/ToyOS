@@ -8,14 +8,16 @@
 //! asked for be placed at all, and where does it go? **After a trap**: which
 //! side did the frame come from? **Before an `in` or `out`**: which ports does
 //! this CPU open to the process running on it, and which may no grant reach?
+//! **Before an access the kernel makes for the `acpi` claim's holder**: is the
+//! address the firmware's to have touched?
 //!
 //! [`span`] answers the first, [`segment`] the second, [`place`] the third,
-//! [`fault`] the fourth and [`port`] the fifth.
+//! [`fault`] the fourth, [`port`] the fifth and [`firmware`] the sixth.
 //!
-//! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
-//! nothing named outside this crate. The kernel is the only caller —
+//! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device. The
+//! kernel is the only caller —
 //! `user_ptr.rs`, `mm/`, `syscall/`, `loader/`, `arch/x86_64/percpu.rs`,
-//! `arch/x86_64/pio.rs` and `arch/x86_64/idt/exceptions.rs` — and this is a
+//! `arch/x86_64/pio.rs`, `arch/x86_64/acpi_mode.rs` and `arch/x86_64/idt/exceptions.rs` — and this is a
 //! crate rather than files inside it so that the boundary table below runs on
 //! the host in milliseconds instead of in a boot.
 //!
@@ -28,6 +30,7 @@
 #![forbid(unsafe_code)]
 
 pub mod fault;
+pub mod firmware;
 pub mod place;
 pub mod port;
 pub mod segment;
@@ -35,7 +38,7 @@ pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
-pub use port::{port_access, IoBitmap, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
+pub use port::{port_access, IoBitmap, Mediated, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
     align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,

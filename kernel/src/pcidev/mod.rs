@@ -403,6 +403,31 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     out
 }
 
+/// What a configuration write the `acpi` claim's holder asks for is decided by
+/// (`toyos_userbound::firmware::config_write`): whether this kernel enumerated
+/// the function and nothing has driven it — no kernel driver, no claim now and
+/// none before, whose reset may still be in flight — and where the
+/// capabilities this kernel programs on a function it hands out lie in it.
+pub fn mediated_standing(bus: u8, dev: u8, func: u8) -> (bool, Vec<(u8, u8)>) {
+    let who = ((bus as u16) << 8) | ((dev as u16) << 3) | func as u16;
+    let pci = {
+        let machine = MACHINE.lock();
+        let driven = machine.kernel_driven.contains(&who) || machine.resetting.iter().any(|&(reset, ..)| reset == who);
+        match machine.functions.iter().find(|pci| requester(pci) == who) {
+            Some(pci) if !driven => *pci,
+            _ => return (false, Vec::new()),
+        }
+    };
+    if SLOTS.lock().contains(&Slot::Held(who)) {
+        return (false, Vec::new());
+    }
+    let programmed = pci
+        .capabilities()
+        .filter_map(|cap| toyos_pci::caps::programmed_len(cap.id()).map(|len| (cap.offset() as u8, len)))
+        .collect();
+    (true, programmed)
+}
+
 /// The PCI segment group every enumerated function is on.
 pub fn segment() -> u16 {
     MACHINE.lock().segment

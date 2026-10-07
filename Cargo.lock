@@ -2668,6 +2668,10 @@ dependencies = [
 [[package]]
 name = "toyos-userbound"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-bootmap",
+]
 
 [[package]]
 name = "toyos-wallclock"

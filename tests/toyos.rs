@@ -165,6 +165,10 @@ const RUST_SKIP: &[&str] = &[
     // It holds the boot open to near the runner's bound, and asserts nothing:
     // the `acpi_server_events` metal row runs it.
     "acpi_hold",
+    // It claims the fixed hardware itself, which needs a boot that starts no
+    // server, and stages the firmware's side of the Global Lock, which needs
+    // the test kernel: `acpi_mediated_access` runs it on tests/acpicase.
+    "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
 ];
@@ -259,6 +263,12 @@ const MACHINE_TESTS: &[&str] = &[
     // The press itself: QEMU raises the fixed power-button event on demand,
     // and nothing presses the T14's button but a hand.
     "acpi_power_button",
+    // What the kernel reads and writes for the `acpi` claim's holder and what
+    // it refuses. A red here is a write the kernel made — to RAM, to the
+    // firmware's tables, to COM1, to `PM1a_CNT` — and the take that finds the
+    // Global Lock owned needs the FACS's word staged as only an idle firmware
+    // allows: neither is done to the T14, which nothing powers on again.
+    "acpi_mediated_access",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
@@ -1678,6 +1688,49 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
     bootlog::one_clock(&serial, &serial).map_err(|why| format!("{why}\nserial:\n{serial}"))
 }
 
+/// What `acpi_mediated` says, an arm a line, once the kernel answered each as
+/// its policy says; then the runner's record of its exit.
+const ACPI_MEDIATED_SAID: [&str; 8] = [
+    "acpi: an unbound claim was refused its access and the lock",
+    "acpi: RAM was refused both ways as UsableMemory",
+    "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
+    "acpi: an unlisted address, the interrupt controllers and the HPET were refused",
+    "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
+    "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written",
+    "its header and extended space refused every write, and one register past them took the value it held",
+    "acpi: the lock a dead holder left taken read free; it was taken and given back, and found pending while the firmware owned it",
+];
+
+/// Boot `tests/acpicase`, whose one job is `test_rs_acpi_mediated`, on the
+/// test kernel, and judge the job and what the kernel said beside it: the
+/// lock found at boot, and given back for the holder that died with it.
+fn acpi_mediated_access() -> Result<(), String> {
+    const JOB: &str = "test_rs_acpi_mediated";
+    let case = compile::repo_root().join("tests/acpicase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            kernel_features: toyos_build::build::TEST_KERNEL,
+            ready_marker: "acpi: the ACPI row: ",
+            extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    let end = format!("===TEST_END {JOB} ");
+    await_marker(&mut qemu, &mut console, &end, "the probe to end")?;
+    let said = serial::Serial::named("the probe's boot", console);
+    said.must_be_clean()?;
+    said.must_say("acpi: the Global Lock is the FACS's at ")?;
+    said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
+    for line in ACPI_MEDIATED_SAID {
+        eprintln!("  [acpi] {}", said.must_say(line)?.trim());
+    }
+    said.must_say(&format!("===TEST_END {JOB} exit=0===")).map(|_| ())
+}
+
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
 /// with `cpus` CPUs reporting.
 fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
@@ -2712,6 +2765,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
+        "acpi_mediated_access" => acpi_mediated_access(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         other => Err(format!("unknown machine test {other}")),
     }

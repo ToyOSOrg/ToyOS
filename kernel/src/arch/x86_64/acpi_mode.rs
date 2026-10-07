@@ -27,6 +27,22 @@
 //!
 //! The row is the FADT's PM1a event and GPE0 blocks and the ECDT's two
 //! ports, filled once at boot; the SCI is its one line, level.
+//!
+//! **What the firmware's AML names outside the row, this kernel reads and
+//! writes for the claim's holder, one access at a time** ([`access`]): memory
+//! through the direct map, a port, a function's configuration space through
+//! ECAM, each only with the witness `toyos_userbound::firmware` answered for
+//! it. Firmware's memory is typed by firmware's own map and by its MTRRs: the
+//! direct map's leaves select the PAT's write-back entry, under which the
+//! range registers decide (Intel SDM Vol. 3A, Table 12-7), so a register
+//! window the firmware reserved is read as the firmware typed it.
+//!
+//! **The firmware's Global Lock is taken and given back here** (ACPI 6.5
+//! §5.2.10.1), by compare-and-exchange on the FACS's lock word; a release the
+//! firmware asked for meanwhile is signalled by `GBL_RLS` in `PM1a_CNT`
+//! (§4.8.3.2). A lock its holder left taken goes back with the claim, and
+//! before the power-off, so SMM never waits on a process that is gone. A
+//! machine with no FACS has no lock, and every take is answered taken.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -34,9 +50,13 @@ use alloc::string::String;
 use alloc::vec;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use toyos_abi::acpi::{AcpiInfo, Block, FIXED_POWER_BUTTON};
+use core::sync::atomic::AtomicU32;
+
+use toyos_abi::acpi::{Access, AcpiInfo, Block, Refused, Space, Width, FIXED_POWER_BUTTON};
+use toyos_abi::syscall::SyscallError;
 use toyos_acpi::{Ec, FixedHardware, LegacyMode, PowerButton};
-use toyos_userbound::Ports;
+use toyos_userbound::firmware::{self, ConfigAt, ConfigWrite, Ecam, Function as PciFunction, Memory, MemoryAt, MemoryVerdict, PortAt};
+use toyos_userbound::{Mediated, Ports};
 
 use super::cpu;
 use super::pio::{self, Declared, TakenBack};
@@ -70,7 +90,28 @@ struct Hardware {
     legacy: Option<(Declared, LegacyMode)>,
     /// Or why it is none a holder can be handed.
     ec: Result<Ec, String>,
+    rsdp: u64,
+    /// The window configuration space is reached through, as the MCFG bounds it.
+    ecam: Option<Ecam>,
+    /// The FACS, as `(start, end)`; none on a machine whose FADT names none
+    /// this kernel takes a lock in.
+    facs: Option<(u64, u64)>,
 }
+
+/// The Global Lock, as this kernel knows it.
+struct GlobalLock {
+    /// A claim exists: nothing takes the lock for a holder that is gone.
+    claimed: bool,
+    /// The claim's holder took it and has not given it back.
+    held: bool,
+}
+
+/// Held across every change of the lock word this kernel makes.
+static GLOBAL_LOCK: Lock<GlobalLock> = Lock::new(GlobalLock { claimed: false, held: false });
+
+/// PM1 control's `GBL_RLS` (ACPI 6.5 §4.8.3.2): written by the OS to tell the
+/// firmware the Global Lock it asked for is free.
+const GBL_RLS: u16 = 1 << 2;
 
 /// Written once, by [`init`].
 static HARDWARE: AtomicPtr<Hardware> = AtomicPtr::new(core::ptr::null_mut());
@@ -89,9 +130,14 @@ fn smi_cmd_write() -> Option<LockGuard<'static, ()>> {
     (!crate::quiesce::begun()).then_some(writing)
 }
 
-/// Wait out a write to `SMI_CMD` in flight: the stop has begun, so none follows.
+/// Wait out a write to `SMI_CMD` in flight, and give back a Global Lock the
+/// claim's holder was stopped holding: the stop has begun, so neither a write
+/// nor a take follows.
 pub fn settle(_taken: &TakenBack) {
     drop(SMI_CMD_WRITE.lock());
+    if let Some(hardware) = hardware() {
+        give_back(hardware, &mut GLOBAL_LOCK.lock(), "the machine is stopping");
+    }
 }
 
 fn hardware() -> Option<&'static Hardware> {
@@ -120,7 +166,9 @@ pub fn init(rsdp_addr: u64) {
     let Some(control) = super::power::pm1a_control() else {
         return log!("acpi: no ACPI row — no PM1a control block declared");
     };
-    let declared = |legacy: LegacyMode| pio::declare("SMI_CMD", Ports::one(legacy.smi_cmd)).map(|port| (port, legacy));
+    // Read for the holder and never written: a write is a call into SMM.
+    let declared =
+        |legacy: LegacyMode| pio::declare("SMI_CMD", Ports::one(legacy.smi_cmd), Mediated::ReadOnly).map(|port| (port, legacy));
     let legacy = match fixed.legacy.map(declared).transpose() {
         Ok(legacy) => legacy,
         Err(why) => return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}"),
@@ -158,8 +206,44 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let was = HARDWARE.swap(Box::into_raw(Box::new(Hardware { fixed, control, legacy, ec })), Ordering::Release);
+    let (ecam, facs) = (ecam(rsdp_addr), facs(&fadt));
+    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, facs };
+    let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
+}
+
+/// The ECAM window as the MCFG's first allocation bounds it (PCI Firmware
+/// Specification 3.3, Table 4-3: the segment group at +8 of the entry, the
+/// first and last bus at +10 and +11).
+fn ecam(rsdp_addr: u64) -> Option<Ecam> {
+    let (mcfg, base) = toyos_acpi::ecam_base(crate::drivers::acpi::direct_phys(), rsdp_addr).ok()?;
+    let entry = toyos_acpi::MCFG_FIRST_ENTRY;
+    let (segment, first_bus, last_bus) = (mcfg.u16_at(entry + 8)?, mcfg.byte(entry + 10)?, mcfg.byte(entry + 11)?);
+    if first_bus > last_bus {
+        log!("acpi: the MCFG's window ends at bus {last_bus:#x}, before its first, {first_bus:#x}: no configuration access is mediated");
+        return None;
+    }
+    Some(Ecam { base, segment, first_bus, last_bus })
+}
+
+/// The FACS whose lock word this kernel exchanges, or none, said by name:
+/// one the FADT does not name, one that does not decode, and one in memory
+/// the map hands out as RAM, where the word would be somebody's data.
+fn facs<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>) -> Option<(u64, u64)> {
+    let none = |why: core::fmt::Arguments| {
+        log!("acpi: no Global Lock — {why}: every take is answered taken");
+        None
+    };
+    let facs = match toyos_acpi::facs(fadt.phys(), fadt) {
+        Ok(facs) => facs,
+        Err(refused) => return none(format_args!("the FADT's FACS is none this kernel reads ({refused:?})")),
+    };
+    let ty = crate::mm::firmware_map().iter().find(|entry| (entry.start..entry.end).contains(&facs.base)).map(|entry| entry.uefi_type);
+    if ty.is_none_or(toyos_bootmap::is_usable_type) {
+        return none(format_args!("the FADT puts the FACS at {:#x}, which the firmware's map types {ty:?}", facs.base));
+    }
+    log!("acpi: the Global Lock is the FACS's at {:#x}", facs.base + toyos_acpi::FACS_GLOBAL_LOCK);
+    Some((facs.base, facs.base + u64::from(facs.len)))
 }
 
 fn run(block: Block) -> Ports {
@@ -183,7 +267,10 @@ pub fn claim() -> Result<(usize, AcpiInfo), ClaimError> {
     let hardware = hardware().ok_or(ClaimError::Absent)?;
     let row = isa::claim_row(ROW)?;
     match enter(hardware) {
-        Ok(()) => Ok((row, info(hardware))),
+        Ok(()) => {
+            GLOBAL_LOCK.lock().claimed = true;
+            Ok((row, info(hardware)))
+        }
         Err(refused) => {
             isa::release(row);
             Err(refused)
@@ -197,12 +284,14 @@ fn info(hardware: &Hardware) -> AcpiInfo {
         Err(_) => (Block::NONE, Block::NONE, 0),
     };
     AcpiInfo {
+        rsdp: hardware.rsdp,
         pm1_event: hardware.fixed.pm1a_event,
         gpe0: hardware.fixed.gpe0,
         ec_command,
         ec_data,
         ec_gpe,
         flags: if hardware.fixed.power_button == PowerButton::Fixed { FIXED_POWER_BUTTON } else { 0 },
+        reserved: 0,
     }
 }
 
@@ -279,8 +368,14 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
 /// mint took it out of it, and then the row released, so no claimant finds
 /// `SCI_EN` set by a holder whose disable is still to come.
 pub fn release(row: usize) {
+    let hardware = hardware().expect("a claimed row has its hardware");
+    {
+        let mut lock = GLOBAL_LOCK.lock();
+        lock.claimed = false;
+        give_back(hardware, &mut lock, "its claim is gone");
+    }
     if ENABLED.load(Ordering::Relaxed) {
-        leave(hardware().expect("a claimed row has its hardware"));
+        leave(hardware);
     }
     isa::release(row);
 }
@@ -357,4 +452,279 @@ pub fn quiet(taken: &TakenBack) {
             cpu::outb(gpe.port(byte), 0xFF);
         }
     }
+}
+
+/// The FACS's lock word. One `AtomicU32` and nothing else of the page: the
+/// firmware's SMI handlers change it under this kernel.
+fn lock_word(facs: (u64, u64)) -> &'static AtomicU32 {
+    let at = crate::mm::DirectMap::from_phys(facs.0 + toyos_acpi::FACS_GLOBAL_LOCK);
+    // SAFETY: `facs` decoded the structure at an address aligned to four, 64
+    // bytes or more, inside the direct map and in no memory this kernel hands
+    // out, so the word is mapped for the machine's life and no Rust object.
+    unsafe { &*at.as_ptr::<AtomicU32>() }
+}
+
+/// Try the Global Lock for the claim's holder: `Ok(true)` taken,
+/// `Ok(false)` where the firmware owns it, with the pending bit left set for
+/// the firmware's release to answer with `GBL_STS`.
+pub fn lock_take() -> Result<bool, SyscallError> {
+    let hardware = hardware().expect("a claimed row has its hardware");
+    let mut lock = GLOBAL_LOCK.lock();
+    if !lock.claimed || crate::quiesce::begun() {
+        return Err(SyscallError::Gone);
+    }
+    if lock.held {
+        return Err(SyscallError::AlreadyExists);
+    }
+    let taken = match hardware.facs {
+        None => true,
+        Some(facs) => {
+            let word = lock_word(facs);
+            let mut read = word.load(Ordering::Acquire);
+            loop {
+                let (new, acquired) = toyos_acpi::acquire(read);
+                match word.compare_exchange(read, new, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => break acquired,
+                    Err(now) => read = now,
+                }
+            }
+        }
+    };
+    lock.held = taken;
+    Ok(taken)
+}
+
+/// Give the Global Lock back for the claim's holder.
+pub fn lock_release() -> Result<(), SyscallError> {
+    let hardware = hardware().expect("a claimed row has its hardware");
+    let mut lock = GLOBAL_LOCK.lock();
+    if !lock.held {
+        return Err(SyscallError::InvalidArgument);
+    }
+    give_back(hardware, &mut lock, "");
+    Ok(())
+}
+
+/// Clear the lock word's owner where the claim's holder holds it, and tell
+/// the firmware where it asked meanwhile. `orphaned` says why the holder did
+/// not give it back itself, for the log; empty where it did.
+fn give_back(hardware: &Hardware, lock: &mut GlobalLock, orphaned: &str) {
+    if !core::mem::take(&mut lock.held) {
+        return;
+    }
+    let signalled = hardware.facs.is_some_and(|facs| {
+        let word = lock_word(facs);
+        let mut read = word.load(Ordering::Acquire);
+        let signal = loop {
+            let (new, signal) = toyos_acpi::release(read);
+            match word.compare_exchange(read, new, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break signal,
+                Err(now) => read = now,
+            }
+        };
+        if signal {
+            let control = hardware.control.port(0);
+            // SAFETY: the PM1a control block, declared; `GBL_RLS` over the
+            // register as it reads, whose `SLP_EN` reads clear (§4.8.3.2).
+            unsafe { cpu::outw(control, cpu::inw(control) | GBL_RLS) };
+        }
+        signal
+    });
+    if !orphaned.is_empty() {
+        log!(
+            "acpi: the Global Lock given back for a holder that left it taken ({orphaned}){}",
+            if signalled { ", and the firmware, which asked for it meanwhile, told by GBL_RLS" } else { "" }
+        );
+    }
+}
+
+/// `debug_action::ACPI_FIRMWARE_LOCK`: the firmware's side of the lock word.
+#[cfg(feature = "test-actuators")]
+pub fn debug_firmware_lock(own: bool) -> u64 {
+    let Some(facs) = hardware().and_then(|hardware| hardware.facs) else { return SyscallError::NotSupported.to_u64() };
+    let word = lock_word(facs);
+    let was = if own {
+        word.fetch_or(toyos_acpi::OWNED, Ordering::AcqRel)
+    } else {
+        word.fetch_and(!(toyos_acpi::OWNED | toyos_acpi::PENDING), Ordering::AcqRel)
+    };
+    u64::from(was)
+}
+
+/// Bytes at an address whatever its alignment, moved by one instruction.
+#[repr(C, packed)]
+struct Unaligned<T>(T);
+
+fn read_memory(passed: &MemoryAt) -> u64 {
+    let at = crate::mm::DirectMap::from_phys(passed.at());
+    // SAFETY: the policy passed the range as the firmware's, inside the direct
+    // map and in no memory this kernel hands out: mapped for the machine's
+    // life, and no Rust object.
+    unsafe {
+        match passed.width() {
+            Width::Byte => u64::from(at.as_ptr::<u8>().read_volatile()),
+            Width::Word => u64::from(at.as_ptr::<Unaligned<u16>>().read_volatile().0),
+            Width::DWord => u64::from(at.as_ptr::<Unaligned<u32>>().read_volatile().0),
+            Width::QWord => at.as_ptr::<Unaligned<u64>>().read_volatile().0,
+        }
+    }
+}
+
+fn write_memory(passed: &MemoryAt, value: u64) {
+    let at = crate::mm::DirectMap::from_phys(passed.at());
+    // SAFETY: as `read_memory`, and the policy passed the write: the firmware's
+    // own reserved or non-volatile memory, outside its tables and the FACS.
+    unsafe {
+        match passed.width() {
+            Width::Byte => at.as_mut_ptr::<u8>().write_volatile(value as u8),
+            Width::Word => at.as_mut_ptr::<Unaligned<u16>>().write_volatile(Unaligned(value as u16)),
+            Width::DWord => at.as_mut_ptr::<Unaligned<u32>>().write_volatile(Unaligned(value as u32)),
+            Width::QWord => at.as_mut_ptr::<Unaligned<u64>>().write_volatile(Unaligned(value)),
+        }
+    }
+}
+
+fn read_port(passed: &PortAt) -> u64 {
+    let port = pio::mediated(passed);
+    match passed.width() {
+        Width::Byte => u64::from(cpu::inb(port)),
+        Width::Word => u64::from(cpu::inw(port)),
+        Width::DWord => u64::from(cpu::inl(port)),
+        Width::QWord => unreachable!("the policy passes no qword port access"),
+    }
+}
+
+fn write_port(passed: &PortAt, value: u64) {
+    let port = pio::mediated(passed);
+    // SAFETY: the policy passed a write to every port of the span: none this
+    // kernel declared and keeps, and none another claim's row names.
+    unsafe {
+        match passed.width() {
+            Width::Byte => cpu::outb(port, value as u8),
+            Width::Word => cpu::outw(port, value as u16),
+            Width::DWord => cpu::outl(port, value as u32),
+            Width::QWord => unreachable!("the policy passes no qword port access"),
+        }
+    }
+}
+
+/// The function's configuration space, which the policy bounded by the
+/// window the MCFG names.
+fn config_space(at: &ConfigAt) -> crate::mm::Mmio {
+    let PciFunction { bus, device, function } = at.function();
+    crate::drivers::pci::function_window(bus, device, function).expect("a machine with a claimable ACPI row enumerated its PCI functions")
+}
+
+fn read_config(at: &ConfigAt) -> u64 {
+    let (space, offset) = (config_space(at), u64::from(at.offset()));
+    match at.width() {
+        Width::Byte => u64::from(space.read_u8(offset)),
+        Width::Word => u64::from(space.read_u16(offset)),
+        Width::DWord => u64::from(space.read_u32(offset)),
+        Width::QWord => unreachable!("the policy passes no qword configuration access"),
+    }
+}
+
+fn write_config(passed: &ConfigWrite, value: u64) {
+    let at = passed.at();
+    let (space, offset) = (config_space(&at), u64::from(at.offset()));
+    match at.width() {
+        Width::Byte => space.write_u8(offset, value as u8),
+        Width::Word => space.write_u16(offset, value as u16),
+        Width::DWord => space.write_u32(offset, value as u32),
+        Width::QWord => unreachable!("the policy passes no qword configuration access"),
+    }
+}
+
+/// One configuration access, decided and made.
+fn config(hardware: &Hardware, segment: u16, function: PciFunction, offset: u16, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+    let at = firmware::config(hardware.ecam, segment, function, offset, width)?;
+    let Some(value) = write else { return Ok(read_config(&at)) };
+    let (free, programmed) = crate::pcidev::mediated_standing(function.bus, function.device, function.function);
+    write_config(&firmware::config_write(at, free, programmed)?, value);
+    Ok(0)
+}
+
+/// One memory access, decided and made; the type firmware's map gives its
+/// first byte goes back with either.
+fn memory(hardware: &Hardware, request: &mut Access, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+    let verdict = crate::mm::paging::with_driven_windows(|driven| {
+        let memory = Memory {
+            map: crate::mm::firmware_map(),
+            mapped_end: crate::mm::direct_map_end().get(),
+            ecam: hardware.ecam,
+            driven,
+            facs: hardware.facs,
+        };
+        request.memory_type = memory.type_word(request.address);
+        memory.decide(request.address, width, write.is_some())
+    });
+    match (verdict, write) {
+        (MemoryVerdict::Through(passed), None) => Ok(read_memory(&passed)),
+        (MemoryVerdict::Through(passed), Some(value)) => {
+            write_memory(&passed, value);
+            Ok(0)
+        }
+        (MemoryVerdict::AsConfig(function, offset), _) => {
+            let segment = hardware.ecam.expect("the policy answered a configuration access from an ECAM window").segment;
+            config(hardware, segment, function, offset, width, write)
+        }
+        (MemoryVerdict::Refused(refused), _) => Err(refused),
+    }
+}
+
+/// One port access, decided and made.
+fn port(row: usize, address: u64, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+    let port = u16::try_from(address).map_err(|_| Refused::PortSpan)?;
+    let passed = firmware::port(|port| pio::standing(port, row), port, width, write.is_some())?;
+    match write {
+        None => Ok(read_port(&passed)),
+        Some(value) => {
+            write_port(&passed, value);
+            Ok(0)
+        }
+    }
+}
+
+/// Make the access `request` names for the holder of `row`'s claim, or
+/// refuse it by name: a read's value, the refusal and the memory type are
+/// written back into it. `Err` is a request that names no space, width or direction,
+/// a value wider than its width, or a reserved byte that is not zero.
+pub fn access(row: usize, request: &mut Access) -> Result<(), SyscallError> {
+    let hardware = hardware().expect("a claimed row has its hardware");
+    let (Some(space), Some(width)) = (Space::from_raw(request.space), Width::from_raw(request.width)) else {
+        return Err(SyscallError::InvalidArgument);
+    };
+    let write = match request.write {
+        0 => None,
+        1 if request.value <= width.max_value() => Some(request.value),
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    if request.reserved != [0; 3] {
+        return Err(SyscallError::InvalidArgument);
+    }
+    request.memory_type = toyos_abi::acpi::UNLISTED;
+    let made = match space {
+        Space::SystemMemory => memory(hardware, request, width, write),
+        Space::SystemIo => port(row, request.address, width, write),
+        Space::PciConfig => {
+            // `toyos_abi::acpi::pci_address`: nothing above the segment group.
+            let at = request.address;
+            let function = PciFunction { bus: (at >> 24) as u8, device: (at >> 19 & 0x1F) as u8, function: (at >> 16 & 7) as u8 };
+            match at >> 48 {
+                0 => config(hardware, (at >> 32) as u16, function, at as u16, width, write),
+                _ => Err(Refused::ConfigUnreachable),
+            }
+        }
+    };
+    match made {
+        Ok(value) => {
+            request.refused = 0;
+            if write.is_none() {
+                request.value = value;
+            }
+        }
+        Err(refused) => request.refused = refused as u8,
+    }
+    Ok(())
 }
