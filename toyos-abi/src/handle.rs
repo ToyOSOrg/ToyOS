@@ -6,15 +6,16 @@
 //! up from zero, resolves to that process's own slot or to nothing at all — so
 //! holding a number is never the authority.
 
-/// One entry in a process's handle table.
-///
-/// Twelve bits of slot and twenty of generation, in one `u32` so it costs a
-/// register at the syscall boundary. **A slot at generation 0 encodes as the
-/// bare index**, which is what keeps stdio literally `0`, `1`, `2` and the std
-/// fork's stdio plumbing untouched.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct RawHandle(pub u32);
+crate::user_safe! {
+    /// One entry in a process's handle table.
+    ///
+    /// Twelve bits of slot and twenty of generation, in one `u32` so it costs a
+    /// register at the syscall boundary. **A slot at generation 0 encodes as the
+    /// bare index**, which is what keeps stdio literally `0`, `1`, `2` and the std
+    /// fork's stdio plumbing untouched.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub struct RawHandle(pub u32);
+}
 
 impl RawHandle {
     const SLOT_BITS: u32 = 12;

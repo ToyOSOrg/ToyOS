@@ -114,36 +114,21 @@ impl PartGuid {
     }
 }
 
-/// The partition a claim holds, as its holder reads it once off the claim.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PartitionInfo {
-    /// The partition's length in [`BLOCK_BYTES`] blocks; block numbers
-    /// `0..blocks` are the whole of what the claim addresses.
-    pub blocks: u64,
-    pub unique_guid: [u8; 16],
+crate::user_safe! {
+    /// The partition a claim holds, as its holder reads it once off the claim.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PartitionInfo {
+        /// The partition's length in [`BLOCK_BYTES`] blocks; block numbers
+        /// `0..blocks` are the whole of what the claim addresses.
+        pub blocks: u64,
+        pub unique_guid: [u8; 16],
+    }
 }
-
-/// Every byte belongs to a field: this crosses the boundary through
-/// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<PartitionInfo>() == 8 + 16);
 
 impl PartitionInfo {
     /// The partition's unique GUID, as its `part:` entry names it.
     pub const fn unique(&self) -> PartGuid {
         PartGuid(self.unique_guid)
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self`, readable for `size_of::<Self>()`
-        // bytes, and the const assert above proves the `repr(C)` layout has no
-        // padding, so every byte the slice exposes is an initialized field.
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
     }
 }
 

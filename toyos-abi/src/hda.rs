@@ -18,54 +18,33 @@
 //! [`syscall::device_reg_read`]: crate::syscall::device_reg_read
 //! [`syscall::device_reg_write`]: crate::syscall::device_reg_write
 
-/// The controller and stream the kernel brought up, as the driver needs to see
-/// them.
-///
-/// No register window and no physical address: everything here is a shared
-/// memory token, a shape the driver has to know to fill the ring, or a number
-/// it has to send a codec.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct HdaInfo {
-    /// The PCM ring, mapped writable. `periods` buffers of `period_bytes` laid
-    /// end to end from the start of the region, with the buffer descriptor
-    /// list already pointing at them.
-    pub pcm: crate::RawHandle,
-    pub period_bytes: u32,
-    /// Byte offset of the output stream descriptor inside the register window,
-    /// so the driver names `SDnCTL` and `SDnFMT` by the same arithmetic the
-    /// allow-list does.
-    pub stream_offset: u32,
-    /// Every codec address `STATESTS` reported, one bit per link address. The
-    /// driver enumerates all of them and chooses by capability; the kernel
-    /// read this register to know the link is alive and decided nothing with
-    /// it.
-    pub statests: u16,
-    /// The stream tag the kernel put in the descriptor. It has to reach the
-    /// codec's converter, and sending that verb is the driver's.
-    pub stream_tag: u8,
-    pub periods: u8,
-}
-
-/// Every byte belongs to a field: this crosses the boundary through
-/// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = {
-    let named = 4 + 4 + 4 + 2 + 1 + 1;
-    assert!(core::mem::size_of::<HdaInfo>() == named);
-};
-
-impl HdaInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and the const assert above proves the
-        // `repr(C)` layout has no padding, so every byte the slice exposes is
-        // an initialized field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
+crate::user_safe! {
+    /// The controller and stream the kernel brought up, as the driver needs to see
+    /// them.
+    ///
+    /// No register window and no physical address: everything here is a shared
+    /// memory token, a shape the driver has to know to fill the ring, or a number
+    /// it has to send a codec.
+    #[derive(Clone, Copy)]
+    pub struct HdaInfo {
+        /// The PCM ring, mapped writable. `periods` buffers of `period_bytes` laid
+        /// end to end from the start of the region, with the buffer descriptor
+        /// list already pointing at them.
+        pub pcm: crate::RawHandle,
+        pub period_bytes: u32,
+        /// Byte offset of the output stream descriptor inside the register window,
+        /// so the driver names `SDnCTL` and `SDnFMT` by the same arithmetic the
+        /// allow-list does.
+        pub stream_offset: u32,
+        /// Every codec address `STATESTS` reported, one bit per link address. The
+        /// driver enumerates all of them and chooses by capability; the kernel
+        /// read this register to know the link is alive and decided nothing with
+        /// it.
+        pub statests: u16,
+        /// The stream tag the kernel put in the descriptor. It has to reach the
+        /// codec's converter, and sending that verb is the driver's.
+        pub stream_tag: u8,
+        pub periods: u8,
     }
 }
 

@@ -122,45 +122,28 @@ const _: () = {
     assert!(EVENT_BUFS <= EVENT_QUEUE_SIZE as usize);
 };
 
-/// The device the kernel brought up, as the driver needs to see it.
-///
-/// No physical address and no register window: a shared-memory token, the three
-/// offsets inside the notification region that are the driver's whole write
-/// surface, and what the device said about itself in its configuration space.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct VirtioSoundInfo {
-    /// The shared region, mapped writable, laid out by the constants above.
-    pub dma: crate::RawHandle,
-    /// Byte offsets into the notification region — the offset space
-    /// [`device_reg_write`] names for this device, and the only one it has.
+crate::user_safe! {
+    /// The device the kernel brought up, as the driver needs to see it.
     ///
-    /// [`device_reg_write`]: crate::syscall::device_reg_write
-    pub notify_control: u32,
-    pub notify_event: u32,
-    pub notify_tx: u32,
-    /// The device's configuration space, read once by the kernel, which decided
-    /// nothing with it. Which stream to open and at what rate is the driver's.
-    pub jacks: u32,
-    pub streams: u32,
-    pub chmaps: u32,
-}
-
-/// Every byte belongs to a field: this crosses the boundary through `as_bytes`,
-/// so a gap would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<VirtioSoundInfo>() == 7 * 4);
-
-impl VirtioSoundInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and the const assert above proves the
-        // `repr(C)` layout has no padding, so every byte the slice exposes is
-        // an initialized field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
+    /// No physical address and no register window: a shared-memory token, the three
+    /// offsets inside the notification region that are the driver's whole write
+    /// surface, and what the device said about itself in its configuration space.
+    #[derive(Clone, Copy)]
+    pub struct VirtioSoundInfo {
+        /// The shared region, mapped writable, laid out by the constants above.
+        pub dma: crate::RawHandle,
+        /// Byte offsets into the notification region — the offset space
+        /// [`device_reg_write`] names for this device, and the only one it has.
+        ///
+        /// [`device_reg_write`]: crate::syscall::device_reg_write
+        pub notify_control: u32,
+        pub notify_event: u32,
+        pub notify_tx: u32,
+        /// The device's configuration space, read once by the kernel, which decided
+        /// nothing with it. Which stream to open and at what rate is the driver's.
+        pub jacks: u32,
+        pub streams: u32,
+        pub chmaps: u32,
     }
 }
+

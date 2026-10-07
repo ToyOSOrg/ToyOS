@@ -13,9 +13,8 @@ use toyos_abi::RawHandle;
 
 /// SAFETY: each is `#[repr(C)]` over unsigned integers, arrays of them and
 /// `RawHandle`s (`repr(transparent)` over a `u32`), so none holds a pointer or a field with
-/// an invalid bit pattern, and the padding-free layout is the `const` assertion
-/// beside each declaration in `toyos-abi` — the one its `as_bytes` already
-/// reads on to publish these bytes.
+/// an invalid bit pattern, and each is declared through `user_safe!`,
+/// which refuses a byte outside a field.
 macro_rules! device_info {
     ($($t:ty),* $(,)?) => { $(unsafe impl IpcPayload for $t {})* };
 }

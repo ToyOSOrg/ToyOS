@@ -10,12 +10,13 @@
 //! holder clears the status bits behind it and then acknowledges the claim
 //! ([`ACK`]); a line acknowledged with a status bit still set is taken again.
 
-/// A run of ports a register block occupies; `len` 0 is no block.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Block {
-    pub port: u16,
-    pub len: u16,
+crate::user_safe! {
+    /// A run of ports a register block occupies; `len` 0 is no block.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Block {
+        pub port: u16,
+        pub len: u16,
+    }
 }
 
 impl Block {
@@ -32,35 +33,25 @@ impl Block {
 /// `PWRBTN_EN` in the PM1 event block.
 pub const FIXED_POWER_BUTTON: u16 = 1 << 0;
 
-/// The claim's description.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct AcpiInfo {
-    /// The PM1a event block, its status half then its enable half.
-    pub pm1_event: Block,
-    /// The GPE0 block, its status half then its enable half.
-    pub gpe0: Block,
-    /// The embedded controller's command/status and data ports, as the ECDT
-    /// names them; `len` 0 where the machine named none.
-    pub ec_command: Block,
-    pub ec_data: Block,
-    /// The GPE the embedded controller raises, inside [`Self::gpe0`].
-    pub ec_gpe: u16,
-    pub flags: u16,
+crate::user_safe! {
+    /// The claim's description.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct AcpiInfo {
+        /// The PM1a event block, its status half then its enable half.
+        pub pm1_event: Block,
+        /// The GPE0 block, its status half then its enable half.
+        pub gpe0: Block,
+        /// The embedded controller's command/status and data ports, as the ECDT
+        /// names them; `len` 0 where the machine named none.
+        pub ec_command: Block,
+        pub ec_data: Block,
+        /// The GPE the embedded controller raises, inside [`Self::gpe0`].
+        pub ec_gpe: u16,
+        pub flags: u16,
+    }
 }
 
-/// Every byte belongs to a field: this crosses the boundary through
-/// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<AcpiInfo>() == 4 * 4 + 2 + 2);
-
 impl AcpiInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self`, and the const assert above proves
-        // the `repr(C)` layout of `u16`s has no padding, so every byte the
-        // slice exposes is an initialized field.
-        unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>()) }
-    }
-
     pub fn has_ec(&self) -> bool {
         self.ec_command.len != 0
     }
