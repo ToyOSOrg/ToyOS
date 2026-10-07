@@ -89,9 +89,9 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. No workflow uses the
   combined `actions/cache`, which saves too. The host cache has one writer, nightly's `host`,
   and one reader, ci.yml's `host`, on the same `runs-on`, both caching `src/cicache.rs`'s
-  `PATHS` with its `DRIVER` as their
-  `CARGO_TARGET_DIR`, the one variable an `env:` gives either: an `ImageOS` or `ImageVersion`
-  set there outlives an image move. The reader's `restore-keys` is the writer's `key` up to its
+  `PATHS` with its `DRIVER` as their `CARGO_TARGET_DIR` and `line-tables-only` as their
+  `CARGO_PROFILE_DEV_DEBUG`, the two variables an `env:` gives either: an `ImageOS` or
+  `ImageVersion` set there outlives an image move. The reader's `restore-keys` is the writer's `key` up to its
   run id. A job that names the host cache runs `actions/checkout`, its cache step and
   `cargo run -- --ci <job>`, `seal` in the writer and `host` in the reader, and nothing else;
   the reader restores before that step, and the writer saves after it. The save's guard,
