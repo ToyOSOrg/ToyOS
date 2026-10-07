@@ -21,8 +21,10 @@
 //! The wire is a single frame plus one handle batch, and this module is both
 //! halves of it — std's `Command` encodes and the supervisor decodes.
 
+use toyos_abi::syscall::SyscallError;
+
 use crate::ipc::{Connection, IpcError};
-use crate::{OwnedHandle, RawHandle};
+use crate::{AsHandle, OwnedHandle, RawHandle};
 
 /// The label a holder is endowed its launcher under, and the one name in that
 /// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
@@ -87,9 +89,9 @@ pub enum Parent<H = RawHandle> {
 ///
 /// **Every handle in `slots`, `extras` and `parent` is the caller's to give,
 /// and is named once.** [`launch`] consumes each one that it sends: it is moved
-/// to the launcher, or closed when the kernel refuses the move. A handle named
-/// twice is closed twice, and the second close names a handle this process no
-/// longer holds, which the kernel answers by ending it.
+/// to the launcher, or closed when the kernel refuses the move. A launch that
+/// names one twice, or the connection it is sent on, is refused before any is
+/// consumed.
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
@@ -130,8 +132,10 @@ pub enum EncodeError {
 }
 
 impl Launch<'_> {
-    /// The handles this launch moves: slots, then extras, then the place.
-    pub fn handles(&self) -> ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize) {
+    /// The handles this launch moves over `conn`: slots, then extras, then the
+    /// place. `None` where one is named twice or is `conn` itself: [`launch`]
+    /// takes each as its own, and a number with two owners is closed twice.
+    fn batch(&self, conn: RawHandle) -> Option<([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize)> {
         let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS];
         let mut n = 0;
         let place = match self.parent {
@@ -141,10 +145,13 @@ impl Launch<'_> {
         let slots = self.slots.iter().map(|(_, h)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
         for handle in slots.chain(extras).chain(&place) {
+            if *handle == conn || out[..n].contains(handle) {
+                return None;
+            }
             out[n] = *handle;
             n += 1;
         }
-        (out, n)
+        Some((out, n))
     }
 
     /// Write the request blob into `buf`, answering its length.
@@ -307,7 +314,8 @@ impl<'a> Request<'a> {
 /// side owns them is therefore not a detail of the error but the whole of what
 /// the caller needs from it.
 pub enum LaunchError {
-    /// The request did not encode. The handles are still here to close.
+    /// The request did not encode, or names one handle twice or the
+    /// launcher's own connection. The handles are still here to close.
     NotSent(IpcError),
     /// The handles are gone from this process: moved to the launcher, or
     /// closed on a refused move, and no answer came back.
@@ -342,8 +350,10 @@ pub fn launch<'a>(
     let len = request
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
-    let (handles, count) = request.handles();
-    // Each is the caller's and named once, which is `Launch`'s contract.
+    let (handles, count) = request
+        .batch(conn.as_handle())
+        .ok_or(LaunchError::NotSent(IpcError::Syscall(SyscallError::InvalidArgument)))?;
+    // Each is the caller's, which is `Launch`'s contract, and `batch` named it once.
     conn.send_handles(handles[..count].iter().map(|&h| OwnedHandle(h)))
         .map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
     conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
@@ -395,5 +405,28 @@ mod tests {
             buf[HEADER - 4..HEADER].copy_from_slice(&word.to_le_bytes());
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), None, "word {word}");
         }
+    }
+
+    /// `launch` becomes the one owner of every number in the batch, so a
+    /// number named twice, or the connection's own, has no batch at all.
+    #[test]
+    fn a_batch_names_each_handle_once_and_never_its_connection() {
+        const CONN: RawHandle = RawHandle(3);
+        let h = RawHandle;
+        let batch = |slots: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
+            let request =
+                Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, slots, parent };
+            request.batch(CONN).map(|(handles, count)| handles[..count].to_vec())
+        };
+        assert_eq!(
+            batch(&[(0, h(5)), (1, h(6))], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
+            Some(vec![h(5), h(6), h(7), h(8), h(9)]),
+        );
+        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), None, "two extras");
+        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), None, "two slots");
+        assert_eq!(batch(&[(0, h(7))], &[("a", h(7))], Parent::Supervisor), None, "a slot and an extra");
+        assert_eq!(batch(&[], &[("a", h(9))], Parent::Place(h(9))), None, "an extra and the place");
+        assert_eq!(batch(&[], &[("a", CONN)], Parent::Supervisor), None, "the connection as an extra");
+        assert_eq!(batch(&[], &[], Parent::Place(CONN)), None, "the connection as the place");
     }
 }
