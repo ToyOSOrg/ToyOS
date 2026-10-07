@@ -170,7 +170,7 @@ pub fn off(stopping: crate::quiesce::Stopping) -> ! {
     let (Some(control), true) = (PM1A_CNT.get(), SOFT_OFF.load(Ordering::Acquire)) else { cpu::halt() };
     let control = control.port(0);
     let taken = pio::take_back(&stopping);
-    super::acpi_mode::settle(&taken);
+    super::smi_cmd::settle(&taken);
     let held = cpu::inw(control);
     if held & SCI_EN != 0 {
         super::acpi_mode::quiet(&taken);

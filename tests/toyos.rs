@@ -3643,7 +3643,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let delta = |a: &Read, b: &Read, cpu: usize, name: &str| b[&cpu][name] - a[&cpu][name];
     // The boot's one write to `SMI_CMD`, and what the CPU that made it read after it.
     let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE ")?;
-    let writer: usize = field_between(enabled, "; cpu", "'s SMI count ")?.parse().map_err(|_| format!("no CPU in {enabled:?}"))?;
+    let writer = smi_cmd_writer(enabled)?;
     let after = number_between(enabled, " before the write and ", " after")?;
     if idle0[&writer]["smi"] < after {
         return Err(format!("idle0 read cpu{writer}'s SMI count below what it read after the ACPI enable ({after}): it read before the boot's last write to SMI_CMD"));
@@ -3722,6 +3722,9 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (log, kernel) = (back.log(), back.kernel());
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
+    smi_cmd_writer(enabled)?;
+    eprintln!("  [acpi] {}", enabled.trim());
     kernel.must_say(
         "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
          fixed-hardware power button, embedded controller at 0x66/0x62 on GPE 0x6e; the firmware \
@@ -3753,15 +3756,28 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// The server's death on the T14: the kernel put the machine in ACPI mode for
 /// the job's claim, and when the killed server's claim went it wrote
 /// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
-/// the buttons again.
+/// the buttons again. Each write was made on the boot processor.
 fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_release")?;
     let kernel = back.kernel();
-    kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
-    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
-    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD, PM1a_CNT reads ")?;
-    eprintln!("  [acpi] {}", left.trim());
+    // The kernel says the second only of a `PM1a_CNT` it read with `SCI_EN` clear.
+    for said in ["acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ", "acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 "] {
+        let line = kernel.must_say(said)?;
+        smi_cmd_writer(line)?;
+        eprintln!("  [acpi] {}", line.trim());
+    }
     Ok(())
+}
+
+/// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
+/// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table
+/// 5.9, "from the boot processor").
+fn smi_cmd_writer(line: &str) -> Result<usize, String> {
+    let writer = number_between(line, " written to SMI_CMD 0xb2 on cpu", ", asked from cpu")? as usize;
+    if writer != 0 {
+        return Err(format!("SMI_CMD was written on cpu{writer}, not on the boot processor: {line}"));
+    }
+    Ok(writer)
 }
 
 /// The same, parsed.
