@@ -107,18 +107,17 @@ pub fn selftest() {
         return;
     }
 
-    // Confirms the CPU still takes interrupts afterward; any source works, since only a deaf CPU is ruled out.
-    // Read now the handler has returned, so the probe's own delivery is already in it,
-    // and the one-shot armed so an interrupt comes.
-    let taken = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+    // Confirms the CPU still takes interrupts afterward, by the one it arms here.
+    // The timer's own count and never a total: the hard-lockup sampler's NMI lands whatever `IF` holds.
+    let taken = crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(0);
     apic::arm_within(kernel::sched::fair::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
+        crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(taken) > taken
     });
     if !ran_on {
         crate::log!(
-            "LAPIC: spurious selftest FAILED — cpu{cpu} took no interrupt at all after the \
-             spurious one"
+            "LAPIC: spurious selftest FAILED — cpu{cpu} did not take the timer interrupt armed \
+             after the spurious one"
         );
         return;
     }

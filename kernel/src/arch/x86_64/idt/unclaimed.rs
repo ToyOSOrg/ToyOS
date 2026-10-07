@@ -160,17 +160,16 @@ pub fn selftest() {
         return;
     }
 
-    // Read now the handler has returned, so the probe's own delivery is already in it,
-    // and the one-shot armed so an interrupt comes.
-    let taken = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+    // The timer's own count and never a total: the hard-lockup sampler's NMI lands whatever `IF` holds.
+    let taken = crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(0);
     apic::arm_within(kernel::sched::fair::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
+        crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(taken) > taken
     });
     if !ran_on {
         crate::log!(
-            "LAPIC: unclaimed selftest FAILED — cpu{cpu} took no interrupt at all after the \
-             unclaimed one"
+            "LAPIC: unclaimed selftest FAILED — cpu{cpu} did not take the timer interrupt armed \
+             after the unclaimed one"
         );
         return;
     }
