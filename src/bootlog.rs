@@ -372,6 +372,18 @@ pub fn stopping_line(log: &str) -> Option<&str> {
     })
 }
 
+/// Whether the stop `log` ends on is a power-off: the supervisor's line names
+/// the stop it was asked for, after [`STOPPING`].
+pub fn asked_to_power_off(log: &str) -> bool {
+    stopping_line(log)
+        .and_then(toyos_logstream::program_line)
+        .is_some_and(|said| said.text.strip_prefix(STOPPING) == Some(POWER_OFF_ASKED))
+}
+
+/// What the supervisor's stop line says after [`STOPPING`] when the stop is a
+/// power-off: its `Stop::Shutdown`, debug-printed in parentheses.
+const POWER_OFF_ASKED: &str = " (Shutdown)";
+
 /// The loader's word for its clock, in `bootloader/src/main.rs`: the head of
 /// the line naming the rate the CPU states, and the line where it states none.
 pub const LOADER_CLOCK_STATED: &str =
@@ -529,6 +541,18 @@ mod tests {
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// Only the supervisor's own stop line, naming a shutdown, is a power-off.
+    #[test]
+    fn a_power_off_is_the_supervisors_stop_naming_a_shutdown() {
+        let booted = "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n";
+        let stop = |how: &str| format!("{booted}[16.705 supervisor] {STOPPING} ({how})\n");
+        assert!(asked_to_power_off(&stop("Shutdown")));
+        assert!(!asked_to_power_off(&stop("Reboot")));
+        assert!(!asked_to_power_off(booted));
+        let forged = format!("{booted}[16.705 test-runner] {STOPPING} (Shutdown)\n");
+        assert!(!asked_to_power_off(&forged));
     }
 
     /// The reset is the next pass's to say: its `DONE`, and the kernel's last

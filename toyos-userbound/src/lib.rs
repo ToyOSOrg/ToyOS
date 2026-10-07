@@ -7,7 +7,7 @@
 //! is every one of them pinned? **Before a placement**: can a length userland
 //! asked for be placed at all, and where does it go? **After a trap**: which
 //! side did the frame come from? **Before an `in` or `out`**: which ports does
-//! this CPU open to the process running on it?
+//! this CPU open to the process running on it, and which may no grant reach?
 //!
 //! [`span`] answers the first, [`segment`] the second, [`place`] the third,
 //! [`fault`] the fourth and [`port`] the fifth.
@@ -35,7 +35,7 @@ pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
-pub use port::{port_access, IoBitmap, PortAccess, IO_PORTS};
+pub use port::{port_access, IoBitmap, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
     align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,

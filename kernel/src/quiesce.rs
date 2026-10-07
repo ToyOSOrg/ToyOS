@@ -86,6 +86,11 @@ pub fn stops_this_thread() -> bool {
     stops(STAGE.read())
 }
 
+/// Whether this boot's stop has begun; once it has, it never ends.
+pub fn begun() -> bool {
+    STAGE.read() == STOPPING
+}
+
 fn stops(stage: u32) -> bool {
     if stage != STOPPING {
         return false;
@@ -123,6 +128,10 @@ pub fn note_progress() {
     }
 }
 
+/// This boot's stop has begun: from here every thread but its caller that
+/// returns to Ring 3 is stopped at that boundary, whatever the [`Record`] says.
+pub struct Stopping(());
+
 /// Stop every userland thread but the caller, and answer with what it took.
 ///
 /// Returns when the machine is stopped or when [`PARK`] is spent, never
@@ -130,34 +139,37 @@ pub fn note_progress() {
 /// it lands, because a machine nobody can turn off is worse than one whose
 /// last word overlapped somebody's syscall.
 #[must_use]
-pub fn stop() -> Record {
+pub fn stop() -> (Record, Stopping) {
     // Refused by name rather than defaulted: a caller with no task identity is
     // not a reboot syscall.
     let caller = ThreadId {
         pid: percpu::current_pid().expect("quiesce::stop: the caller holds no process").raw(),
         tid: percpu::current_tid().expect("quiesce::stop: the caller holds no thread").raw(),
     };
+    // Armed before the first sweep, so a transition landing between a sweep
+    // and the park after it leaves a record that park returns on at once; and
+    // before the stage opens, so nothing between the opening and the first
+    // sweep is a point where a pass can take this CPU.
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
+        .expect("quiesce::stop: the caller holds no task to park");
     CALLER_PID.store(caller.pid, Relaxed);
     CALLER_TID.store(caller.tid, Relaxed);
     // Last: a gate that sees the stop sees the caller it must not stop.
     STAGE.open(STOPPING);
 
-    // Armed before the first sweep, so a transition landing between a sweep
-    // and the park after it leaves a record that park returns on at once.
-    let parkable = crate::scheduler::Parkable::at_entry();
-    let armed = watch::arm(&PROGRESS, 0, WaitClass::Other)
-        .expect("quiesce::stop: the caller holds no task to park");
     crate::arch::irqchip::kick_all_but_self();
     let cpus = crate::smp::cpu_count();
 
     let began = crate::clock::now();
-    let deadline = Deadline::at(began + PARK.duration());
+    let budget = if crate::actuator::stop_budget_spent() { Duration::from_nanos(0) } else { PARK.duration() };
+    let deadline = Deadline::at(began + budget);
     let mut sweeps = 0;
     loop {
         let swept = sweep(caller);
         sweeps += 1;
         let elapsed = (crate::clock::now() - began).nanos();
-        if swept.keep_waiting(elapsed, PARK.nanos()) {
+        if swept.keep_waiting(elapsed, budget.nanos()) {
             // Uncancellable: the claim is taken, and a caller that left here
             // would leave a machine nothing else may turn off. The deadline is
             // `keep_waiting`'s own, so an expiry ends the loop at the next sweep.
@@ -168,15 +180,18 @@ pub fn stop() -> Record {
         // moment the stop ended, and every line between here and the record's
         // own would open more.
         let (in_flight, begun) = crate::block::userland_operations();
-        return Record {
-            sweep: swept,
-            elapsed_ms: elapsed / 1_000_000,
-            budget_ms: PARK.nanos() / 1_000_000,
-            sweeps,
-            cpus,
-            in_flight,
-            begun,
-        };
+        return (
+            Record {
+                sweep: swept,
+                elapsed_ms: elapsed / 1_000_000,
+                budget_ms: budget.nanos() / 1_000_000,
+                sweeps,
+                cpus,
+                in_flight,
+                begun,
+            },
+            Stopping(()),
+        );
     }
 }
 

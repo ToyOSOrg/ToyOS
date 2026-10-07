@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 
 use toyos::endow::{self, SVC_LABEL};
 use toyos::process::Process;
-use toyos::{namespace, port, AsHandle};
+use toyos::{namespace, port, AsHandle, OwnedHandle};
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 
@@ -103,7 +103,9 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
 fn place() -> ! {
     let conn = endow::service(BACK).expect("the test endowed a port back");
     let own = syscall::dup(endow::this_process().as_handle()).expect("a copy of this process's self");
-    conn.send_bytes_with_handles(&[own], MSG_SELF, &[]).expect("send the test this process's self");
+    // SAFETY: a fresh duplicate, answered for by nothing else.
+    conn.send_handles([unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
+    conn.send_bytes(MSG_SELF, &[]).expect("announce this process's self");
     park()
 }
 

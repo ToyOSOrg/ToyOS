@@ -1,6 +1,6 @@
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "soundserver", "acpiserver", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
@@ -14,6 +14,14 @@ start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
 service = true
 syscap = ["logread"]
 serves = ["log"]
+
+# The machine's ACPI fixed hardware, as `system.toml` serves it: on the T14
+# every row of this image runs in ACPI mode, and on q35 `acpi_power_button`
+# presses the button it serves.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 [programs.soundserver]
 service = true

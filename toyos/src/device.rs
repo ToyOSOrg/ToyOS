@@ -25,6 +25,7 @@ device_info!(
     toyos_abi::virtio_sound::VirtioSoundInfo,
     toyos_abi::hda::HdaInfo,
     toyos_abi::part::PartitionInfo,
+    toyos_abi::acpi::AcpiInfo,
 );
 
 /// Read a claim's description, whose buffer fields are handles this call
@@ -173,23 +174,49 @@ impl PciDev {
 
     /// The interrupts since the last read, or `Err(WouldBlock)` for none.
     pub fn irq(&self) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
-        let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0 };
-        // SAFETY: the slice covers exactly the record being filled, and every
-        // bit pattern of its one integer field is a valid one.
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                &mut record as *mut _ as *mut u8,
-                toyos_abi::pci::DeviceIrqRecord::SIZE,
-            )
-        };
-        let n = syscall::read_nonblock(self.0.0.0, buf)?;
-        assert_eq!(
-            n,
-            toyos_abi::pci::DeviceIrqRecord::SIZE,
-            "partial device interrupt record ({n} bytes)"
-        );
-        Ok(record)
+        irq_record(&self.0)
     }
+}
+
+/// A claim's interrupts since its last read, or `Err(WouldBlock)` for none.
+fn irq_record(dev: &Device) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
+    let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0 };
+    // SAFETY: the slice covers exactly the record being filled, and every
+    // bit pattern of its one integer field is a valid one.
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(&mut record as *mut _ as *mut u8, toyos_abi::pci::DeviceIrqRecord::SIZE)
+    };
+    let n = syscall::read_nonblock(dev.0.0, buf)?;
+    assert_eq!(n, toyos_abi::pci::DeviceIrqRecord::SIZE, "partial device interrupt record ({n} bytes)");
+    Ok(record)
+}
+
+/// The machine's ACPI fixed hardware, served by this process
+/// ([`toyos_abi::acpi`]): its event blocks and embedded controller as ports,
+/// and its SCI as records.
+///
+/// **Read once as a description, which binds the ports to this process, and
+/// afterwards as interrupts**, as a [`PciDev`] is; the SCI is masked from the
+/// claim, and after every interrupt, until [`Self::ack`].
+pub struct AcpiDev(pub(crate) Device);
+
+impl AcpiDev {
+    pub fn describe(&self) -> Result<toyos_abi::acpi::AcpiInfo, SyscallError> {
+        read_info(&self.0)
+    }
+
+    pub fn irq(&self) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
+        irq_record(&self.0)
+    }
+
+    /// Every status bit behind the SCI is served: unmask it.
+    pub fn ack(&self) -> Result<(), SyscallError> {
+        syscall::write(self.0.0.0, &toyos_abi::acpi::ACK.to_ne_bytes()).map(|_| ())
+    }
+}
+
+impl AsHandle for AcpiDev {
+    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
 impl AsHandle for PciDev {

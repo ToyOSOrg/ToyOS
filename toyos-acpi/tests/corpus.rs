@@ -10,10 +10,13 @@ mod common;
 
 use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
+use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
-    psci, reset_register, rtc_century, s5_slp_typ, Century, MadtEntry, MadtHalt, Phys, Psci, Reset,
-    Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN, S5,
+    dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line, Century,
+    EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
+    Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
+    FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN, S5,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -396,6 +399,8 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     if let Ok(t) = find_table(m, rsdp_at, b"FACP", 36) {
                         let _ = reset_register(&t);
                         let _ = psci(&t);
+                        let _ = fixed_hardware(&t);
+                        let _ = pm1a_control(&t);
                     }
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
@@ -665,4 +670,185 @@ fn an_s5_package_past_the_declared_length_is_not_read() {
     let mut dsdt = sdt(b"DSDT", 2, &s5_package(&[0x01]));
     declare_len(&mut dsdt, 36);
     assert_eq!(s5_of(&dsdt), S5::Absent);
+}
+
+/// A revision-6 FADT of 276 bytes naming q35's fixed hardware in both forms,
+/// for a test to break one field of.
+fn crafted(edit: impl FnOnce(&mut [u8])) -> Vec<u8> {
+    let mut t = vec![0u8; 276];
+    let mut put = |at: usize, bytes: &[u8]| t[at..at + bytes.len()].copy_from_slice(bytes);
+    put(46, &[9, 0]);
+    put(48, &0xb2u32.to_le_bytes());
+    put(52, &[2, 3]);
+    put(56, &0x600u32.to_le_bytes());
+    put(64, &0x604u32.to_le_bytes());
+    put(80, &0x620u32.to_le_bytes());
+    put(88, &[4, 2, 0, 4, 16, 0]);
+    let gas = |address: u16| {
+        let mut g = [1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        g[4..6].copy_from_slice(&address.to_le_bytes());
+        g
+    };
+    put(148, &gas(0x600));
+    put(172, &gas(0x604));
+    put(220, &gas(0x620));
+    edit(&mut t);
+    sdt(b"FACP", 6, &t[36..])
+}
+
+fn fixed(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::FixedHardware, FixedRefused> {
+    let t = crafted(edit);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
+    fixed_hardware(&Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT"))
+}
+
+fn control(edit: impl FnOnce(&mut [u8])) -> Result<Block, FixedRefused> {
+    let t = crafted(edit);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
+    pm1a_control(&Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT"))
+}
+
+#[test]
+fn the_crafted_fixed_hardware_decodes_before_any_field_is_broken() {
+    let decoded = fixed(|_| {}).expect("the unbroken table");
+    assert_eq!(decoded.pm1a_event, Block { port: 0x600, len: 4 });
+    assert_eq!(control(|_| {}), Ok(Block { port: 0x604, len: 2 }));
+    assert_eq!(decoded.gpe0, Block { port: 0x620, len: 16 });
+    assert_eq!(decoded.power_button, PowerButton::Fixed);
+}
+
+/// One field broken at a time, each refused by its own name.
+#[test]
+fn fixed_hardware_this_kernel_does_not_serve_is_refused_by_name() {
+    let reduced = fixed(|t| t[112..116].copy_from_slice(&(1u32 << 20).to_le_bytes()));
+    assert_eq!(reduced, Err(FixedRefused::HardwareReduced));
+    assert_eq!(fixed(|t| t[60] = 0x40), Err(FixedRefused::Pm1b), "PM1b's event block");
+    assert_eq!(fixed(|t| t[184 + 4] = 0x40), Err(FixedRefused::Pm1b), "PM1b's control block in its X_ field alone");
+    assert_eq!(fixed(|t| t[93] = 8), Err(FixedRefused::Gpe1), "a GPE1 length");
+    assert_eq!(
+        fixed(|t| t[148] = 0),
+        Err(FixedRefused::NotSystemIo { field: Field::Pm1aEvent, space: 0 }),
+        "a PM1a event block in memory"
+    );
+    assert_eq!(
+        control(|t| t[172 + 4] = 0x08),
+        Err(FixedRefused::Disagrees { field: Field::Pm1aControl, legacy: 0x604, extended: 0x608 })
+    );
+    assert_eq!(fixed(|t| t[88] = 2), Err(FixedRefused::Length { field: Field::Pm1aEvent, len: 2 }));
+    assert_eq!(control(|t| t[89] = 0), Err(FixedRefused::Length { field: Field::Pm1aControl, len: 0 }));
+    let nowhere = |t: &mut [u8], legacy: usize, x: usize| {
+        t[legacy..legacy + 4].fill(0);
+        t[x + 4..x + 12].fill(0);
+    };
+    assert_eq!(control(|t| nowhere(t, 64, 172)), Err(FixedRefused::Absent { field: Field::Pm1aControl }));
+    assert_eq!(fixed(|t| nowhere(t, 56, 148)), Err(FixedRefused::Absent { field: Field::Pm1aEvent }));
+    assert_eq!(fixed(|t| t[92] = 5), Err(FixedRefused::Length { field: Field::Gpe0, len: 5 }));
+    assert_eq!(
+        fixed(|t| {
+            t[80..84].copy_from_slice(&0xfff8u32.to_le_bytes());
+            t[220 + 4..220 + 6].copy_from_slice(&0xfff8u16.to_le_bytes());
+        }),
+        Err(FixedRefused::PastPorts { field: Field::Gpe0, address: 0xfff8 }),
+        "sixteen bytes from 0xfff8"
+    );
+    assert_eq!(fixed(|t| t[48..52].copy_from_slice(&0x1_0000u32.to_le_bytes())), Err(FixedRefused::SmiCmd(0x1_0000)));
+}
+
+/// What a firmware may leave out and still be served: an `X_` field naming no
+/// address, a 32-bit field left zero beside an `X_` one, no GPE0 block, no
+/// `SMI_CMD`, and a control-method power button said as one.
+#[test]
+fn fixed_hardware_reads_whichever_form_names_a_block() {
+    let x_only = fixed(|t| t[56..60].copy_from_slice(&[0; 4])).expect("an X_ field alone");
+    assert_eq!(x_only.pm1a_event, Block { port: 0x600, len: 4 });
+    let legacy_only = fixed(|t| t[148 + 4..148 + 12].copy_from_slice(&[0; 8])).expect("a 32-bit field alone");
+    assert_eq!(legacy_only.pm1a_event, Block { port: 0x600, len: 4 });
+    let no_gpe = fixed(|t| {
+        t[80..84].copy_from_slice(&[0; 4]);
+        t[220 + 4..220 + 12].copy_from_slice(&[0; 8]);
+    })
+    .expect("no GPE0 block");
+    assert_eq!(no_gpe.gpe0, Block::NONE);
+    let command = |b: u8| core::num::NonZeroU8::new(b).expect("a command");
+    let legacy = LegacyMode { smi_cmd: 0xb2, acpi_enable: command(2), acpi_disable: command(3) };
+    assert_eq!(fixed(|_| {}).map(|f| f.legacy), Ok(Some(legacy)));
+    // No port, no way in, or a way in and no way back.
+    for zeroed in [48..52, 52..53, 53..54] {
+        assert_eq!(fixed(|t| t[zeroed.clone()].fill(0)).map(|f| f.legacy), Ok(None), "{zeroed:?}");
+    }
+    let method = fixed(|t| t[112] = 1 << 4).expect("a control-method button");
+    assert_eq!(method.power_button, PowerButton::ControlMethod);
+}
+
+/// A FADT before revision 2 has no `X_` fields, so the bytes past 116 are not
+/// read even where the table runs on.
+#[test]
+fn a_revision_1_fadt_is_read_at_its_32_bit_fields_alone() {
+    let mut body = vec![0u8; 240];
+    body[56 - 36..60 - 36].copy_from_slice(&0x600u32.to_le_bytes());
+    body[64 - 36..68 - 36].copy_from_slice(&0x604u32.to_le_bytes());
+    body[88 - 36..90 - 36].copy_from_slice(&[4, 2]);
+    // An `X_PM1a_EVT_BLK` that would disagree, were it read.
+    body[148 - 36] = 1;
+    body[152 - 36] = 0x99;
+    let t = sdt(b"FACP", 1, &body);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
+    let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT");
+    assert_eq!(fixed_hardware(&fadt).map(|f| f.pm1a_event), Ok(Block { port: 0x600, len: 4 }));
+}
+
+fn ec_table(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::Ec, EcRefused> {
+    let mut body = vec![0u8; ECDT_NEEDED - 36];
+    body[..12].copy_from_slice(&[1, 8, 0, 0, 0x66, 0, 0, 0, 0, 0, 0, 0]);
+    body[12..24].copy_from_slice(&[1, 8, 0, 0, 0x62, 0, 0, 0, 0, 0, 0, 0]);
+    body[28] = 0x6e;
+    edit(&mut body);
+    let t = sdt(b"ECDT", 1, &body);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
+    ecdt(&Table::open(Machine { regions }, TABLE_AT, b"ECDT", 36).expect("ECDT"))
+}
+
+#[test]
+fn an_ecdt_naming_no_port_controller_is_refused_by_name() {
+    assert_eq!(ec_table(|_| {}), Ok(toyos_acpi::Ec { command: 0x66, data: 0x62, gpe: 0x6e }));
+    assert_eq!(
+        ec_table(|b| b[0] = 0),
+        Err(EcRefused::NotSystemIo { register: Register::Command, space: 0 }),
+        "a controller in memory"
+    );
+    assert_eq!(
+        ec_table(|b| b[13] = 16),
+        Err(EcRefused::Width { register: Register::Data, bit_width: 16, bit_offset: 0 })
+    );
+    assert_eq!(
+        ec_table(|b| b[4] = 0),
+        Err(EcRefused::Address { register: Register::Command, address: 0 }),
+        "an ECDT of zeros, which some firmware publishes"
+    );
+    assert_eq!(
+        ec_table(|b| b[16 + 2] = 1),
+        Err(EcRefused::Address { register: Register::Data, address: 0x1_0062 })
+    );
+    let short = sdt(b"ECDT", 1, &[1, 8, 0, 0, 0x66, 0, 0, 0, 0, 0, 0, 0]);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &short)];
+    let table = Table::open(Machine { regions }, TABLE_AT, b"ECDT", 36).expect("ECDT");
+    assert_eq!(ecdt(&table), Err(EcRefused::Short { len: 48 }));
+}
+
+/// Table 5.9: the OS treats the SCI as level and active low. Where no override
+/// names it, and where one names it conforming, that is what it is; where one
+/// says otherwise, what it says.
+#[test]
+fn the_sci_defaults_to_level_and_active_low_where_nothing_says_otherwise() {
+    let level_low = |gsi| Line { gsi, trigger: Trigger::Level, polarity: Polarity::Low };
+    assert_eq!(sci_line(9, &[]), level_low(9), "no override");
+    let conforms = SourceOverride { bus: 0, source_irq: 9, gsi: 20, flags: 0 };
+    assert_eq!(sci_line(9, &[conforms]), level_low(20), "an override that conforms");
+    let edge_high = SourceOverride { flags: 0b0101, ..conforms };
+    assert_eq!(sci_line(9, &[edge_high]), Line { gsi: 20, trigger: Trigger::Edge, polarity: Polarity::High });
+    let polarity_only = SourceOverride { flags: 0b0001, ..conforms };
+    assert_eq!(sci_line(9, &[polarity_only]), Line { gsi: 20, trigger: Trigger::Level, polarity: Polarity::High });
+    // An ISA line that conforms keeps the ISA bus's edge, active high.
+    assert_eq!(isa_line(9, &[conforms]), Line { gsi: 20, trigger: Trigger::Edge, polarity: Polarity::High });
+    assert_eq!(isa_line(1, &[conforms]), Line { gsi: 1, trigger: Trigger::Edge, polarity: Polarity::High });
 }

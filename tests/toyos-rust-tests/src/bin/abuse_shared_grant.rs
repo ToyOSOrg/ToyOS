@@ -71,7 +71,7 @@ fn owner() {
 
     let conn = acceptor.accept().expect("the invited peer connects");
     let shared = region.share().expect("a second handle to our own region");
-    syscall::handle_send(conn.as_handle(), &[shared]).expect("send the region to its peer");
+    conn.send_handles([shared]).expect("send the region to its peer");
     // The frame the handle was sent ahead of. The peer reads the frame first
     // and is guaranteed to find the handle already queued.
     conn.signal(1).expect("announce the region");

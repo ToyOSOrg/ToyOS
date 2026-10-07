@@ -80,7 +80,6 @@ pub fn selftest() {
         crate::log!("LAPIC: spurious selftest FAILED — this CPU publishes no census block");
         return;
     };
-    let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
 
     // This platform's devices are all MSI/MSI-X and `TPR` is never written, so
     // nothing here raises a spurious interrupt without this call.
@@ -108,14 +107,17 @@ pub fn selftest() {
         return;
     }
 
-    // Confirms the CPU still takes interrupts afterward; any source works, since only a deaf CPU is ruled out.
+    // Confirms the CPU still takes interrupts afterward, by the one it arms here.
+    // The timer's own count and never a total: the hard-lockup sampler's NMI lands whatever `IF` holds.
+    let taken = crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(0);
+    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
+        crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(taken) > taken
     });
     if !ran_on {
         crate::log!(
-            "LAPIC: spurious selftest FAILED — cpu{cpu} took no interrupt at all after the \
-             spurious one"
+            "LAPIC: spurious selftest FAILED — cpu{cpu} did not take the timer interrupt armed \
+             after the spurious one"
         );
         return;
     }

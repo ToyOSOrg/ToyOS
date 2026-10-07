@@ -3150,6 +3150,7 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "tests/acpicase/system.toml",
         "tests/jobcase/system.toml",
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",

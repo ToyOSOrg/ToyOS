@@ -11,7 +11,13 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
-//! **`idle0` waits for the log to be quiet** ([`settle`]): a job starts while
+//! **`idle0` waits for the ACPI server's first lines** ([`acpi_said`]):
+//! `acpiserver` logs its arming, and a query number the first time the
+//! embedded controller raises it, and the kernel the claim's first interrupt,
+//! at times the machine chooses. A query number first raised later, on a quiet
+//! machine, is the `counters` row's to refuse.
+//!
+//! **Then for the log to be quiet** ([`settle`]): a job starts while
 //! logkeeper is still writing the boot so far and the job's own launch lines
 //! to the stick, and a second begun then measures that write.
 //!
@@ -31,10 +37,11 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
+use toyos::Pipe;
 use toyos_abi::clock::stamp_ns;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{program_line, Lines};
+use toyos_logstream::{parse, program_line, Lines, Source};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -53,6 +60,10 @@ const LOADED: Duration = Duration::from_secs(20);
 /// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
 /// at its write budget (`userland/logkeeper/src/policy.rs`, 5 s).
 const SETTLE_BOUND: Duration = Duration::from_secs(10);
+
+/// How long [`acpi_said`] waits for the server to arm and the controller's
+/// first query and SCI to come.
+const ACPI_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
 const EXIT_AT_ONCE: &str = "exit-at-once";
@@ -155,42 +166,80 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
-/// Return once logkeeper has written, and made durable, everything stamped
-/// before this call.
-///
-/// A reader of the `log` port is handed each round only after it is on the
-/// stick, so this prints a line and reads the log until that line comes back.
-/// **Twice**: the round that writes the first may itself put a record in the
-/// log — the stick's first sync is one — and the second writes it. The
-/// `counters` row reds any line stamped inside the idle second.
-fn settle() {
-    let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
-    let poller = Poller::new(1);
-    let mut lines = Lines::new();
-    let mut chunk = vec![0u8; 64 * 1024];
-    for round in ["first", "second"] {
-        let said = format!("counters_metal settle: the log holds this {round} line");
-        println!("{said}");
-        let by = Instant::now() + SETTLE_BOUND;
-        let mut held = false;
-        while !held {
-            match pipe.read_nonblock(&mut chunk) {
-                Ok(0) => panic!("logkeeper closed the log before it held {said:?}"),
-                Ok(n) => lines.push(&chunk[..n], |line, _| {
+/// This boot's log as logkeeper serves it, from its first line. A reader of
+/// the `log` port is handed each round only after it is on the stick.
+struct Log {
+    pipe: Pipe,
+    poller: Poller,
+    lines: Lines,
+    chunk: Vec<u8>,
+}
+
+impl Log {
+    fn open() -> Log {
+        let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
+        Log { pipe, poller: Poller::new(1), lines: Lines::new(), chunk: vec![0u8; 64 * 1024] }
+    }
+
+    /// Hand `seen` each line in turn until it has answered `true`, for at most
+    /// `bound`; `what` names what it waits for.
+    fn until(&mut self, what: &str, bound: Duration, mut seen: impl FnMut(&str) -> bool) {
+        let by = Instant::now() + bound;
+        let mut done = false;
+        while !done {
+            let left = by
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("the log did not show {what} within {bound:?}"));
+            match self.pipe.read_nonblock(&mut self.chunk) {
+                Ok(0) => panic!("logkeeper closed the log before it showed {what}"),
+                Ok(n) => self.lines.push(&self.chunk[..n], |line, _| {
                     let line = std::str::from_utf8(line)
                         .unwrap_or_else(|e| panic!("logkeeper served a line that is not UTF-8 ({e}): {line:?}"));
-                    held |= program_line(line).is_some_and(|line| line.text == said);
+                    done |= seen(line);
                 }),
                 Err(SyscallError::WouldBlock) => {
-                    let left = by.checked_duration_since(Instant::now()).unwrap_or_else(|| {
-                        panic!("the log did not hold {said:?} within {SETTLE_BOUND:?}")
-                    });
-                    poller.watch(&pipe, READABLE, 0);
-                    poller.wait(1, left.as_nanos() as u64, |_| {});
+                    self.poller.watch(&self.pipe, READABLE, 0);
+                    self.poller.wait(1, left.as_nanos() as u64, |_| {});
                 }
                 Err(e) => panic!("the log's pipe refused a read: {e:?}"),
             }
         }
+    }
+}
+
+/// Wait until `acpiserver` has armed and, where it serves an embedded
+/// controller, the kernel has logged the claim's first interrupt and the server
+/// its first query.
+fn acpi_said(log: &mut Log) {
+    let mut armed: Option<bool> = None;
+    let (mut interrupt, mut query) = (false, false);
+    log.until("the ACPI server armed, and its controller's first SCI and query", ACPI_BOUND, |line| {
+        if let Some(said) = program_line(line).filter(|said| said.tag == "acpiserver") {
+            if let Some(rest) = said.text.strip_prefix("acpiserver: armed: ") {
+                armed = Some(!rest.ends_with("embedded controller none"));
+            }
+            query |= said.text.starts_with("acpiserver: embedded controller query ")
+                && said.text.contains(" taken for the first time");
+        }
+        interrupt |= parse(line).is_some_and(|p| {
+            p.source == Source::Kernel && p.text == "isa: the ACPI fixed hardware took its first interrupt"
+        });
+        armed.is_some_and(|ec| !ec || interrupt && query)
+    });
+}
+
+/// Return once logkeeper has written, and made durable, everything stamped
+/// before this call.
+///
+/// This prints a line and reads the log until that line comes back.
+/// **Twice**: the round that writes the first may itself put a record in the
+/// log — the stick's first sync is one — and the second writes it. The
+/// `counters` row reds any line stamped inside the idle second.
+fn settle(log: &mut Log) {
+    for round in ["first", "second"] {
+        let said = format!("counters_metal settle: the log holds this {round} line");
+        println!("{said}");
+        log.until(&format!("{said:?}"), SETTLE_BOUND, |line| program_line(line).is_some_and(|line| line.text == said));
     }
 }
 
@@ -199,7 +248,9 @@ fn main() {
         return;
     }
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
-    settle();
+    let mut log = Log::open();
+    acpi_said(&mut log);
+    settle(&mut log);
     let idle0 = read(&cap);
     std::thread::sleep(IDLE);
     let idle1 = read(&cap);

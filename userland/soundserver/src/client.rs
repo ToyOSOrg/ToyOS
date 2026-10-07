@@ -23,7 +23,6 @@ use toyos::audio::{
 use toyos::shm::SharedMemory;
 use toyos::Connection;
 use toyos_abi::audio::AudioSlotHeader;
-use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_mixer::{
     accumulate, append_planar, client_period_frames, decode_i16_to_f32, interleave,
@@ -202,7 +201,6 @@ pub(crate) fn open_stream(
     let (signal_read, signal_write) = match toyos::pipe_pair() {
         Ok(ends) => ends,
         Err(e) => {
-            syscall::close(client_shm);
             say!("soundserver: no signal pipe for client {client_id} ({e:?})");
             return None;
         }
@@ -210,20 +208,17 @@ pub(crate) fn open_stream(
 
     let slot_reader = AudioSlotReader::new(shm, client_period_bytes, slot_count);
 
-    // Handles first, then the frame that announces them — `send_with_handles`
-    // is that order, and a client reading the frame is guaranteed to find
-    // them. Both are moved whether or not this succeeds.
-    if control.send_with_handles(
-        &[client_shm, signal_read.into_raw()],
-        MSG_STREAM_OPENED,
-        &StreamOpenResponse {
-            client_period_frames,
-            client_period_bytes,
-            device_sample_rate,
-            device_channels,
-            slot_count: slot_count as u16,
-        },
-    ).is_err() {
+    // Handles first, then the frame that announces them, so a client reading
+    // the frame is guaranteed to find them; both are consumed either way.
+    let opened = StreamOpenResponse {
+        client_period_frames,
+        client_period_bytes,
+        device_sample_rate,
+        device_channels,
+        slot_count: slot_count as u16,
+    };
+    let sent = control.send_handles([client_shm, signal_read.into()]);
+    if sent.is_err() || control.send(MSG_STREAM_OPENED, &opened).is_err() {
         // Client died mid-open; the dropped control connection removes it.
         say!("soundserver: client {client_id} vanished during stream open");
     }

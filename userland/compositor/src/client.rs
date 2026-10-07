@@ -18,8 +18,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
-use toyos::AsHandle;
-use toyos::{ipc, Connection};
+use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
 use toyos_desktop::Window;
@@ -294,16 +293,18 @@ pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u3
     }
 }
 
-/// [`deliver`] for a message whose payload names buffers that travel with it.
-pub fn deliver_with_handles<T: ipc::IpcPayload>(
+/// [`deliver`] for a message whose payload names a buffer that travels with
+/// it, consumed whether or not the window takes it.
+pub fn deliver_with_handle<T: ipc::IpcPayload>(
     dead: &mut Vec<Dead>,
     win: &Win,
-    handles: &[RawHandle],
+    handle: OwnedHandle,
     msg_type: u32,
     payload: &T,
 ) {
-    if let Err(e) = win.client.conn.try_send_with_handles(handles, msg_type, payload) {
-        mark_dead(dead, win.client.conn.as_handle(), e.into());
+    match win.client.conn.send_handles([handle]) {
+        Ok(()) => deliver(dead, win, msg_type, payload),
+        Err(e) => mark_dead(dead, win.client.conn.as_handle(), e.into()),
     }
 }
 
