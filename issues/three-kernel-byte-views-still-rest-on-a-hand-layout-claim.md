@@ -16,12 +16,14 @@ user memory through an `unsafe` `from_raw_parts` of the kernel's own whose
 |---|---|---|
 | `DmaGrant` | `grant_bytes`, `kernel/src/syscall/device.rs` | `size_of == 4 + 4 + 8 + 8`, a sum written by hand |
 | `DmaMapping` | inline in `sys_device_dma_map`, the same file | `size_of == 8 + 8`, a sum written by hand |
-| `DeviceIrqRecord` | `record_bytes`, `kernel/src/object/ops.rs` | an assertion that does not exist; the struct is one `u32` |
+| `DeviceIrqRecord` | `record_bytes`, `kernel/src/object/ops.rs` | `SIZE == 4`, a total written by hand; the struct is one `u32` |
 
-Read, nothing run: none of the three has padding today. A field added to
-`DmaGrant` or `DmaMapping` without its sum being moved fails the build only if
-the new total differs from the old sum, and a field added to `DeviceIrqRecord`
-fails nothing: the bytes of a gap are the kernel's stack.
+Read, nothing run: none of the three has padding today. Each assertion
+compares the struct's size with a number a person wrote, and nothing ties
+that number to the fields: a field added to any of the three fails the build
+until the number is moved, and passes once it is moved to the new size,
+whether or not that size holds a gap. The bytes of a gap are the kernel's
+stack.
 
 Found while the eleven `as_bytes` in `toyos-abi` moved to `usersafe::bytes`;
 these three were outside that change's brief.
