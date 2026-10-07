@@ -8,13 +8,12 @@ opened: 2026-10-04
 
 `spurious::selftest` (`kernel/src/arch/x86_64/idt/spurious.rs`) and
 `unclaimed::selftest` (`kernel/src/arch/x86_64/idt/unclaimed.rs`) each claim to
-confirm the CPU still takes interrupts after the probe vector. They read
-`taken_before = deliveries_total(cpu)` before `apic::send_self`. The probe's
-own delivery is counted in that total. Once `delivered` has held, the probe's
-source count is past `before`, so `deliveries_total(cpu) > taken_before` is
-already true at the first poll. A CPU left deaf by the probe's handler passes
-the check, and the `3/3` line says "the CPU took interrupts after it" either
-way.
+confirm the CPU still takes interrupts after the probe vector. Before the fix
+they read a total of the CPU's deliveries before `apic::send_self` and passed
+once it had risen. The probe's own delivery was counted in that total, so the
+check was already true at the first poll after `delivered` held: a CPU left
+deaf by the probe's handler passed, and the `3/3` line said "the CPU took
+interrupts after it" either way.
 
 The code fix is in `main`: each selftest arms the BSP's one-shot with
 `arm_within` once the probe's handler has returned, and waits for the timer's
