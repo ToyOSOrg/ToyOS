@@ -30,10 +30,9 @@
 //! whose work a `cfg` compiles out of a host checks green there: only review
 //! holds that (`.claude/agents/reviewer.md`, Hosts).
 //!
-//! `userland/` is a workspace of its own that cross-compiles by default
-//! (`userland/.cargo/config.toml`), so none of its crates can be a member of the
-//! host workspace [`crate::hostws`] holds; the gate runs `cargo test --target
-//! <host>` in each crate [`survey`] gates instead. There is no list: a crate's
+//! Most of `userland/` builds for ToyOS alone, so no crate under it is among the
+//! workspace's host members ([`crate::hostws`]); the gate runs `cargo test` on
+//! each crate [`survey`] gates instead. There is no list: a crate's
 //! first test gates the merge that adds it.
 //!
 //! **A test is found by reading text**, because cargo's metadata knows targets
@@ -512,8 +511,7 @@ mod tests {
         );
     }
 
-    /// **Every program the images ship is an app or says why it is not**, the
-    /// ones outside the userland workspace too.
+    /// **Every program the images ship is an app or says why it is not**.
     #[test]
     fn every_program_the_images_ship_declares_what_it_is_to_a_host() {
         let root = repo_root();

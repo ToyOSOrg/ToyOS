@@ -195,34 +195,20 @@ fn stale(crate_dir: &Path, identity: &Identity) -> Option<Stale> {
     identity.stale(fs::read_to_string(&stamp).ok().as_deref())
 }
 
-fn clean(root: &Path, crate_dir: &Path, stale: &Stale, identity: &Identity) {
+/// Remove what `stale` names of `crate_dir`'s target directory and stamp it
+/// with `identity`. [`Stale::All`] is the guest profile's host half and every
+/// guest target's directory: the root's `target/` is also the build system's
+/// own, which no sysroot made.
+fn clean(crate_dir: &Path, stale: &Stale, identity: &Identity) {
     let target = crate_dir.join("target");
-    let remove = |dirs: &mut dyn Iterator<Item = PathBuf>| {
-        for dir in dirs.filter(|dir| dir.exists()) {
-            eprintln!("external deps changed: cleaning {}", dir.display());
-            crate::keystore::remove(&dir);
-        }
+    let all: Vec<&str> = std::iter::once(PROFILE).chain(toolchain::GUEST_TARGETS.map(|t| t.triple())).collect();
+    let moved = match stale {
+        Stale::All => &all,
+        Stale::Targets(moved) => moved,
     };
-    match stale {
-        Stale::All => {
-            // `cargo clean` in a member's directory cleans the whole workspace,
-            // this build system's own target directory included. Nothing asks
-            // for that today; refusing it by name is cheaper than finding out.
-            assert!(
-                !hostws::is_member(root, crate_dir),
-                "{} is a host-workspace member, and `cargo clean` there would empty the \
-                 workspace's whole target directory rather than this crate's",
-                crate_dir.display(),
-            );
-            eprintln!("external deps changed: cleaning {}", crate_dir.display());
-            let status = Command::new("cargo")
-                .arg("clean")
-                .current_dir(crate_dir)
-                .status()
-                .unwrap_or_else(|e| panic!("run cargo clean in {}: {e}", crate_dir.display()));
-            assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
-        }
-        Stale::Targets(moved) => remove(&mut moved.iter().map(|t| target.join(t))),
+    for dir in moved.iter().map(|t| target.join(t)).filter(|dir| dir.exists()) {
+        eprintln!("external deps changed: cleaning {}", dir.display());
+        crate::keystore::remove(&dir);
     }
 
     fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
@@ -236,10 +222,8 @@ fn clean(root: &Path, crate_dir: &Path, stale: &Stale, identity: &Identity) {
 /// these cleans removes a tree another builder may be compiling into, and
 /// cargo's own lock cannot cover it — the lock lives at
 /// `target/<profile>/.cargo-lock`, inside what the clean deletes. Two processes
-/// that each decided before either acted would still both clean, which is the
-/// pair of `cargo clean`s that died with ENOENT on each other's files.
+/// that each decided before either acted would still both clean.
 fn invalidate_stale(
-    root: &Path,
     lock: &mut buildlock::Held,
     identity: &Identity,
     targets: &[PathBuf],
@@ -254,25 +238,10 @@ fn invalidate_stale(
         },
         |work| {
             for (dir, stale) in work {
-                clean(root, &dir, &stale, identity);
+                clean(&dir, &stale, identity);
             }
         },
     );
-}
-
-/// Every crate directory whose target directory a config builds into.
-fn config_targets(root: &Path, config: &SystemConfig) -> Vec<PathBuf> {
-    let mut targets: Vec<PathBuf> = Vec::new();
-    for c in config_crates(root, config) {
-        let target = match c.built {
-            Built::Kernel | Built::Bootloader => c.dir,
-            Built::Member => root.join("userland"),
-        };
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-    }
-    targets
 }
 
 /// Which features the build gives a crate.
@@ -298,12 +267,12 @@ impl Features {
     }
 }
 
-/// Where [`build`] runs `cargo build` for one crate of a config.
+/// What one crate of a config is to [`build`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Built {
     Kernel,
     Bootloader,
-    /// A package of the userland workspace, built there with `-p`.
+    /// A program, built with the others in one `cargo build`.
     Member,
 }
 
@@ -320,14 +289,14 @@ struct ConfigCrate {
 fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
     let mut crates = vec![
         ConfigCrate {
-            name: "kernel".to_string(),
-            dir: root.join("kernel"),
+            name: crate::ci::KERNEL.to_string(),
+            dir: root.join(crate::ci::KERNEL),
             built: Built::Kernel,
             features: Features::AnyDeclared,
         },
         ConfigCrate {
-            name: "bootloader".to_string(),
-            dir: root.join("bootloader"),
+            name: LOADER.to_string(),
+            dir: root.join(LOADER),
             built: Built::Bootloader,
             features: Features::Default,
         },
@@ -383,6 +352,8 @@ impl GuestEnv {
     }
 }
 
+/// `cargo build` in `crate_dir`: the root, for a workspace member `extra_args`
+/// names with `-p`, or a crate that keeps its own resolution.
 fn cargo_build(
     crate_dir: &Path,
     target: &str,
@@ -839,7 +810,6 @@ fn build_programs(
     arch: Arch,
     root_files: &mut Vec<(String, Vec<u8>)>,
 ) {
-    let userland_dir = root.join("userland");
     let target = arch.userland();
 
     let programs: Vec<ConfigCrate> = config_crates(root, config)
@@ -863,7 +833,7 @@ fn build_programs(
     }
     let workspace_packages: Vec<&str> = programs.iter().map(|c| c.name.as_str()).collect();
 
-    let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
+    let ws_target = root.join(format!("target/{target}/{PROFILE}"));
 
     // Every userland crate that compiles C compiles it with the toolchain's
     // clang against libc's C sysroot.
@@ -873,7 +843,7 @@ fn build_programs(
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
-    // `userland/target/.../toybox`. Cargo's own lock orders the two *builds* and
+    // `target/.../toybox`. Cargo's own lock orders the two *builds* and
     // says nothing about a read between them — `ioapic_topology` died on
     // `Failed to read binary for toybox` while another worker's config was
     // relinking it, and was green the moment it was re-run alone.
@@ -884,7 +854,7 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(&userland_dir, target, &extra, env, &cc_env, quiet);
+        cargo_build(root, target, &extra, env, &cc_env, quiet);
     }
 
     for c in &programs {
@@ -1658,6 +1628,18 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
     );
 }
 
+/// The loader's package.
+const LOADER: &str = "bootloader";
+
+/// Build the kernel with `features`, comma-separated.
+fn build_kernel(root: &Path, arch: Arch, features: &str, env: &GuestEnv, quiet: bool) {
+    let mut args = vec!["-p", crate::ci::KERNEL];
+    if !features.is_empty() {
+        args.extend(["--features", features]);
+    }
+    cargo_build(root, arch.kernel(), &args, env, &[], quiet);
+}
+
 /// Stage the freshly built kernel under its feature key, read it back, and run
 /// every artifact assertion against it — returning the certified bytes.
 ///
@@ -1674,7 +1656,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
 fn stage_loader(root: &Path, arch: Arch, env: &GuestEnv) -> PathBuf {
     stage_artifact(
         root,
-        &root.join(format!("bootloader/target/{}/{PROFILE}/bootloader.efi", arch.loader())),
+        &root.join(format!("target/{}/{PROFILE}/bootloader.efi", arch.loader())),
         &format!("bootloader-{}.efi", arch.name()),
         loader_key(arch, &env.image_key, env.floor_scope),
     )
@@ -1683,7 +1665,7 @@ fn stage_loader(root: &Path, arch: Arch, env: &GuestEnv) -> PathBuf {
 fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: Arch) -> Vec<u8> {
     let staged = stage_artifact(
         root,
-        &root.join(format!("kernel/target/{}/{PROFILE}/kernel", arch.kernel())),
+        &root.join(format!("target/{}/{PROFILE}/kernel", arch.kernel())),
         &format!("kernel-{}", arch.name()),
         kernel_key(arch, features),
     );
@@ -1784,7 +1766,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     let config = parse_config(&boot.config);
     let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
+    invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
     // `cargo test` share these paths, so this races the harness too. The kernel
@@ -1792,18 +1774,9 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // path uses, so neither can grow an assertion the other lacks.
     let (kernel_bytes, bl_art) = {
         let _artifact = buildlock::artifact(root);
-        std::thread::scope(|threads| {
-            let kernel = threads.spawn(|| {
-                let mut extra = Vec::new();
-                if !kernel_features.is_empty() {
-                    extra.push("--features");
-                    extra.push(&kernel_features);
-                }
-                cargo_build(&root.join("kernel"), arch.kernel(), &extra, &env, &[], false);
-            });
-            cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
-            kernel.join().expect("kernel build thread panicked");
-        });
+        // One after the other: cargo holds one lock on the target directory.
+        build_kernel(root, arch, &kernel_features, &env, false);
+        cargo_build(root, arch.loader(), &["-p", LOADER], &env, &[], false);
         (
             stage_and_certify_kernel(root, &kernel_features, &env, arch),
             stage_loader(root, arch, &env),
@@ -2007,7 +1980,7 @@ pub fn build_test_parts(
     let mut lock = buildlock::shared(root, "test image");
     let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
+    invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
@@ -2018,16 +1991,11 @@ pub fn build_test_parts(
     let (kernel_bytes, bl_bytes) = {
         let _artifact = buildlock::artifact(root);
         let kernel = KERNEL.get_or_build(kernel_key, || {
-            let mut kernel_extra: Vec<&str> = Vec::new();
-            if !features.is_empty() {
-                kernel_extra.push("--features");
-                kernel_extra.push(&features);
-            }
-            cargo_build(&root.join("kernel"), arch.kernel(), &kernel_extra, &env, &[], quiet);
+            build_kernel(root, arch, &features, &env, quiet);
             stage_and_certify_kernel(root, &features, &env, arch)
         });
         let bl = BOOTLOADER.get_or_build(bl_key, || {
-            cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], quiet);
+            cargo_build(root, arch.loader(), &["-p", LOADER], &env, &[], quiet);
             fs::read(stage_loader(root, arch, &env)).expect("Failed to read staged bootloader")
         });
         (kernel, bl)
@@ -2045,7 +2013,7 @@ pub fn build_test_parts(
 /// The host binaries the network judges drive, built here rather than inside a
 /// test: a judge's price is its exchange and not a compile.
 ///
-/// Each of these keeps its own `Cargo.lock` and is excluded from the host
+/// Each of these keeps its own `Cargo.lock` and is excluded from the
 /// workspace. That is what makes them possible: they exist to be
 /// a *second* implementation, and a second implementation's dependency graph is
 /// not the harness's to resolve.
@@ -2078,11 +2046,11 @@ const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
 
 const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
 
-/// Copy to `to` the binary the build leaves for userland workspace program
+/// Copy to `to` the binary the build leaves for the program
 /// `name`: the bytes a swap sends a running machine in place of the ones its
 /// image carries. Read under the artifact lock, as every image build reads it.
 pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Result<(), String> {
-    let from = root.join(format!("userland/target/{}/{PROFILE}/{name}", arch.userland()));
+    let from = root.join(format!("target/{}/{PROFILE}/{name}", arch.userland()));
     let _artifact = buildlock::artifact(root);
     fs::copy(&from, to)
         .map(|_| ())
@@ -2215,7 +2183,7 @@ impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[PathBuf]) -> Self {
         let mut lock = buildlock::shared(root, what);
         let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
-        invalidate_stale(root, &mut lock, &env.sysroot.identity, stale_targets);
+        invalidate_stale(&mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
     }
@@ -2376,45 +2344,41 @@ mod tests {
 
     /// **Moved libraries take what was built for their targets, and nothing
     /// else**: an ABI edit moves the userland targets' libraries, so the
-    /// kernel's and the loader's target directories stay whole and of
-    /// userland's only `target/<userland triple>` goes; a fork edit moves every
-    /// target's, so the kernel's and the loader's builds go too. The host half
-    /// the same compiler built stays either way. A moved compiler, or a stamp
-    /// that names none, is all of it.
+    /// kernels and the loaders stay and only `target/<userland triple>` goes; a
+    /// fork edit moves every target's, so the kernels and the loaders go too.
+    /// The host half the same compiler built stays either way. A moved
+    /// compiler, or a stamp that names none, takes that half too, and never
+    /// what the build system itself is built into.
     #[test]
     fn moved_libraries_take_what_was_built_for_them_and_a_moved_compiler_all() {
         let root = toyos_tmpdir::TempDir::new("moved-libraries");
-        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
         let file = |path: PathBuf| {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, "built").unwrap();
             path
         };
-        let (kernel, loader, userland) = (root.join("kernel"), root.join("bootloader"), root.join("userland"));
-        let crates = [&kernel, &loader, &userland];
-        let kernels = Arch::ALL.map(|arch| file(kernel.join(format!("target/{}/{PROFILE}/kernel", arch.kernel()))));
-        let loaders = Arch::ALL.map(|arch| file(loader.join(format!("target/{}/{PROFILE}/loader.efi", arch.loader()))));
-        let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/supervisor", arch.userland()))));
-        let hosts = crates.map(|dir| file(dir.join(format!("target/{PROFILE}/deps/libproc-1.dylib"))));
+        let built = |name: &str, triple: fn(Arch) -> &'static str| {
+            Arch::ALL.map(|arch| file(root.join(format!("target/{}/{PROFILE}/{name}", triple(arch)))))
+        };
+        let (kernels, loaders, programs) =
+            (built("kernel", Arch::kernel), built("bootloader.efi", Arch::loader), built("supervisor", Arch::userland));
+        let host = file(root.join(format!("target/{PROFILE}/deps/libproc-1.dylib")));
+        let own = file(root.join("target/debug/toyos-build"));
 
         let before = Identity::of_parts("compiler", "freestanding", "toyos");
-        for dir in crates {
-            fs::write(dir.join("target/.deps-stamp"), before.to_string()).unwrap();
-            assert_eq!(stale(dir, &before), None, "{} was stale against its own stamp", dir.display());
-        }
-        let moved = |identity: &Identity, want: Vec<&'static str>| {
-            for dir in crates {
-                let found = stale(dir, identity);
-                assert_eq!(found, Some(Stale::Targets(want.clone())), "{}", dir.display());
-                clean(&root, dir, &found.unwrap(), identity);
-                assert_eq!(stale(dir, identity), None, "{} was not stamped", dir.display());
-            }
+        fs::write(root.join("target/.deps-stamp"), before.to_string()).unwrap();
+        assert_eq!(stale(&root, &before), None, "stale against its own stamp");
+        let moved = |identity: &Identity, want: Stale| {
+            let found = stale(&root, identity);
+            assert_eq!(found, Some(want));
+            clean(&root, &found.unwrap(), identity);
+            assert_eq!(stale(&root, identity), None, "not stamped");
         };
 
         let mut toyos: Vec<&'static str> = Arch::ALL.map(Arch::userland).into();
         toyos.sort();
-        moved(&Identity::of_parts("compiler", "freestanding", "toyos, edited"), toyos);
-        for kept in kernels.iter().chain(&loaders).chain(&hosts) {
+        moved(&Identity::of_parts("compiler", "freestanding", "toyos, edited"), Stale::Targets(toyos));
+        for kept in kernels.iter().chain(&loaders).chain([&host, &own]) {
             assert!(kept.is_file(), "{} went, and nothing it was built from moved", kept.display());
         }
         for gone in &programs {
@@ -2424,18 +2388,20 @@ mod tests {
         let mut all: Vec<&'static str> = Arch::ALL.into_iter().flat_map(|arch| [arch.userland(), arch.kernel(), arch.loader()]).collect();
         all.sort();
         let fork_edit = Identity::of_parts("compiler", "freestanding, edited", "toyos on the edited fork");
-        moved(&fork_edit, all);
+        moved(&fork_edit, Stale::Targets(all));
         for gone in kernels.iter().chain(&loaders) {
             assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
         }
-        for kept in &hosts {
-            assert!(kept.is_file(), "{} went, and the compiler that built it did not move", kept.display());
-        }
+        assert!(host.is_file() && own.is_file(), "the compiler did not move, and what it built for the host went");
 
-        let compiler = Identity::of_parts("another compiler", "freestanding, edited", "toyos on the edited fork");
-        assert_eq!(stale(&kernel, &compiler), Some(Stale::All), "a moved compiler kept the host half");
-        fs::write(userland.join("target/.deps-stamp"), "sysroot:/a/stamp/naming/no/compiler").unwrap();
-        assert_eq!(stale(&userland, &fork_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
+        let rebuilt = built("kernel", Arch::kernel);
+        moved(&Identity::of_parts("another compiler", "freestanding, edited", "toyos on the edited fork"), Stale::All);
+        for gone in rebuilt.iter().chain([&host]) {
+            assert!(!gone.exists(), "{} survived the compiler that built it moving", gone.display());
+        }
+        assert!(own.is_file(), "a moved guest compiler took the build system's own target");
+        fs::write(root.join("target/.deps-stamp"), "sysroot:/a/stamp/naming/no/compiler").unwrap();
+        assert_eq!(stale(&root, &fork_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
     }
 
     /// **A stamp that cannot be written stops the build**: one left behind would
@@ -2443,37 +2409,15 @@ mod tests {
     #[test]
     fn a_stamp_that_cannot_be_written_panics() {
         let root = toyos_tmpdir::TempDir::new("unwritable-stamp");
-        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
         // A directory, not a mode: root writes through any mode, and nobody
         // writes a file over a directory.
-        let stamp = root.join("kernel/target/.deps-stamp");
+        let stamp = root.join("target/.deps-stamp");
         fs::create_dir_all(&stamp).unwrap();
         let identity = Identity::of_parts("compiler", "freestanding", "toyos");
-        let failed = std::panic::catch_unwind(|| {
-            clean(&root, &root.join("kernel"), &Stale::Targets(vec![]), &identity)
-        });
+        let failed = std::panic::catch_unwind(|| clean(&root, &Stale::Targets(vec![]), &identity));
         let refusal = failed.expect_err("a stamp that was not written was taken for written");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
         assert!(refusal.starts_with(&format!("write {}", stamp.display())), "{refusal}");
-    }
-
-    /// **A `cargo clean` that fails stops the build and stamps nothing**: a
-    /// stamp over a target it did not clean calls another compiler's build
-    /// current.
-    #[test]
-    fn a_failed_cargo_clean_panics_and_stamps_nothing() {
-        let root = toyos_tmpdir::TempDir::new("failed-clean");
-        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
-        let kernel = root.join("kernel");
-        fs::create_dir_all(kernel.join("target")).unwrap();
-        fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
-
-        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
-        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, &Stale::All, &identity));
-        let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
-        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
-        assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
-        assert!(!kernel.join("target/.deps-stamp").exists(), "a clean that failed stamped the target");
     }
 
     #[test]
@@ -2798,7 +2742,7 @@ mod tests {
         );
     }
 
-    /// The kernel depends on no libc (root `CLAUDE.md`, Dependencies), and its
+    /// The kernel depends on no libc (root `CLAUDE.md`, Dependencies), and
     /// `Cargo.lock` cannot show it: a lock records every platform's edges and
     /// none of their `cfg`s.
     #[test]
@@ -2808,8 +2752,8 @@ mod tests {
             let out = Command::new("cargo")
                 .args(["tree", "--locked", "--all-features", "-e", "normal,no-proc-macro"])
                 .args(["--prefix", "none", "--format", "{p}", "--target", arch.kernel()])
-                .arg("--manifest-path")
-                .arg(root.join("kernel/Cargo.toml"))
+                .args(["-p", crate::ci::KERNEL])
+                .current_dir(root)
                 .output()
                 .expect("cargo tree failed to launch");
             let tree = String::from_utf8_lossy(&out.stdout);
@@ -2840,7 +2784,7 @@ mod tests {
     /// Each file's own comment beside a name carries the argument for it.
     fn declared_model_controls(root: &Path) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for dir in std::iter::once(crate::ci::KERNEL.to_string()).chain(crate::hostws::members(root)) {
+        for dir in std::iter::once(crate::ci::KERNEL.to_string()).chain(crate::hostws::host_members(root)) {
             let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));

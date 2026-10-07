@@ -466,25 +466,6 @@ entry-df-unclean = []
 pass-spin = []
 heap-lockspin = ["pass-spin"]
 
-# The one profile every guest binary is built with.
-# Optimised, because an unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here.
-# `--release` would turn the last two off silently.
-#
-# `incremental` stays at the dev default (on), which switches rustc's MIR
-# inliner off for every guest crate — LLVM inlines regardless, and a
-# non-incremental kernel edit loop measures 4-10x the wall clock. A codegen
-# backend with no inliner of its own (cranelift) reopens that trade.
-[profile.toyos]
-inherits = "dev"
-opt-level = 2
-debug = true
-# DWARF stays out of the image: symbols name a frame, and `debug = true` is kept
-# for the codegen it decides.
-strip = "debuginfo"
-debug-assertions = true
-overflow-checks = true
-
 [lib]
 path = "pure/lib.rs"
 

@@ -6,13 +6,11 @@ opened: 2026-10-04
 
 # The tree resolves in five Cargo locks, not one
 
-The root, `kernel/`, `bootloader/`, `userland/` and `toyos/` are five
-Cargo resolutions with five locks, and three of them declare their own
-`[profile.toyos]`. A
-crate two of them share is tested on the host against the root's lock and
-shipped from another's. The locks agree on versions: no registry pair of the
-five sits below the highest version another of them carries in the same
-semver range.
+The root, `kernel/`, `bootloader/`, `userland/` and `toyos/` were five
+Cargo resolutions with five locks, and three of them declared their own
+`[profile.toyos]`. A crate two of them shared was tested on the host against
+the root's lock and shipped from another's. The pull request that carries
+this text folds them into one workspace and one lock.
 
 **The owner ruled on 2026-10-04.** Asked "Merge everything into one Cargo
 workspace (after small version-alignment steps; proven by byte-identical
@@ -25,40 +23,57 @@ its measurements, not the ruling.
 
 **Exit:** one workspace and one lock at the root replace the five. The step
 that merges them moves no version: its lock's name and version pairs are the
-union of the aligned locks, and the kernel and the loader, both arches, are
-byte-identical to the build of the last alignment before it. The root
-`.cargo/config.toml` is tracked, which `.gitignore` ignores today and where
-`.claude/agents/implementer.md` has agents list fork clones, so the merge
-moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
-since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
-names none. The alignments
-landed first, each in today's workspace: pull request #724 aligned the root
-and kernel locks, #732 the userland lock, and the third the loader's lock and
-its profile's `strip`, so that the three `[profile.toyos]` tables are one.
+union of the aligned locks. It changes nothing a kernel or a loader is built
+from but the workspace root, shown for both architectures by two
+measurements at one absolute path:
 
-**Constraints, measured** on a scratch workspace seeded from the five locks
-at `8b4f88446`, by type-check and one loader link, with no boot:
+- the kernel and the loader are byte-identical to a control that is the base
+  with only the workspace root moved up, keeping the crate's own base lock,
+  its profile and its flags;
+- every `rustc` command line `cargo build -v` runs for them is the base's,
+  once the tree's path and cargo's path-derived hashes are taken out.
 
-- One lock holds one version per semver range, so every pair below its
-  range's maximum moves up to it. At `8b4f88446` that was 35: the 29 below
-  the maximum then (userland 18, loader 7, root 3, kernel 1), the 3 that
-  userland's moves pull with them (`ureq-proto`, `utf-8`, `zeroize_derive`),
-  and the root's registry `getrandom` 0.2, 0.3 and 0.4, which become the forks
-  userland patches in at the same versions. Those three move no version: they
-  follow from the root `[patch]` and land with it.
-- `userland/Cargo.lock` carries `miniz_oxide` 0.8.9, for `png` 0.18.1,
-  beside 0.9.1, for `flate2` 1.1.10. Built with only `flate2` back at 1.1.9,
-  compositor and files are 204 to 228 bytes of text smaller on x86_64 and
-  704 on aarch64, and in neither build does a symbol of a third
-  `miniz_oxide` ship in them: `flate2`'s and std's are the two they carry.
-  Exit: `png` takes `miniz_oxide` 0.9.
-- Every fork commit the five locks pin stays pinned, and the crypto
-  pre-releases (`ed25519-dalek 3.0.0-pre.6`, `pkcs5 0.8.0-rc.13`) are only in
-  `userland/Cargo.lock` and stay.
+The root `.cargo/config.toml` is tracked, so a fork clone under edit is
+listed in the untracked `.cargo/local.toml` it includes; no
+`rust-toolchain.toml` is tracked outside `rust/`, since step 1 of the rule in
+`issues/the-tree-says-who-uses-each-thing.md` names none. The alignments
+landed first, each in its own workspace: pull request #724 aligned the root
+and kernel locks, #732 the userland lock, and #738 the loader's lock and its
+profile's `strip`.
+
+**The exit's first wording was the orchestrator's and could not be met.** It
+asked for a kernel and a loader byte-identical to the base's own build. Cargo
+hashes each path package's path, relative to the workspace root, into `-C
+metadata`, and hands rustc a path package's source by that relative path, so
+moving the root changes every path crate's symbol names; and the base did not
+reproduce its own bytes either. Measured at `257ebea2a`: the base built at a
+second path differed from itself in all four artifacts, its x86_64 kernel
+carrying 38 strings that name the checkout and its AArch64 kernel 35
+(`issues/two-checkouts-of-one-tree-build-different-guest-bytes.md`). The
+orchestrator ruled the wording above in its place on 2026-10-07.
+
+**What is left:** the T14's run of the metal profile on the folded build,
+which that pull request stages.
+
+**What stays apart, and why:**
+
 - `[patch]` is workspace-wide. `tests/toyos-rust-tests` patches memmap2,
   `tests/toyos-rust-tests/tls-cranelift`, a resolution with its own lock,
   patches target-lexicon, and `tests/ssh-client-host` takes upstream tokio,
   so all three stay outside the workspace.
+- `userland/libc` keeps its own lock: it is built into a sysroot with
+  `--release` and its own `panic = "abort"` profile, which cargo ignores in a
+  member.
 - The guest triples' flags stay per triple: with no
   `[target.x86_64-unknown-uefi]` table, `curve25519-dalek-derive` enters the
   x86_64 loader's graph.
+
+**Constraints the fold kept:**
+
+- One lock holds one version per semver range. The root's registry
+  `getrandom` 0.2, 0.3 and 0.4 became the forks userland patched in at the
+  same versions: they moved no version and followed from the root `[patch]`.
+- `Cargo.lock` carries `miniz_oxide` 0.8.9, for `png` 0.18.1, beside 0.9.1,
+  for `flate2` 1.1.10. Exit of that pair: `png` takes `miniz_oxide` 0.9.
+- Every fork commit the five locks pinned stays pinned, and the crypto
+  pre-releases (`ed25519-dalek 3.0.0-pre.6`, `pkcs5 0.8.0-rc.13`) stay.

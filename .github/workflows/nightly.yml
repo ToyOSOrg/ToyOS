@@ -42,10 +42,6 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-            userland/target
-            toyos/target
-            kernel/target
-            bootloader/target
           key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
 
   toolchain:

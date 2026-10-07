@@ -8,9 +8,7 @@ opened: 2026-09-03
 
 `35383398^:.github/workflows/host-tests.yml`'s `host` job installs no Rust toolchain: it
 runs `rustc -vV; cargo -V; rustup component add clippy` on whatever
-ships that day, and there is no root `rust-toolchain.toml` —
-only `kernel/`, `bootloader/` and `userland/` pin one, each to a target list
-and none to a version.
+ships that day, and no `rust-toolchain.toml` is tracked outside `rust/`.
 
 Measured by the #382 review, same restored cache
 (`host-macOS-ece3092cdf5b…`), same job, back to back:

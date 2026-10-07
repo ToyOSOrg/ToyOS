@@ -10,7 +10,7 @@ opened: 2026-10-04
 keeps it out of the workspace as "a second implementation". It is not one:
 it takes `russh` from `https://github.com/ToyOSOrg/russh`, branch `toyos`,
 and its lock pins commit `389804d3b9908250282746c934c58c059b88fb7e`, the same
-commit `userland/Cargo.lock` pins for `sshserver` through userland's
+commit `Cargo.lock` pins for `sshserver` through the root
 `[patch]`. A defect in the fork's protocol code is on both ends of every SSH
 test, and the two can agree on it.
 
