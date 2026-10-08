@@ -2,10 +2,12 @@
 //! connect or its accept until the node lets it go, a listener from its listen until it is
 //! closed, and a connection the node closed holds the place its stream had until [tcp] has
 //! finished it, because it is still two buffers of [tcp]'s and its peer decides for how long.
-//! A departed client's connection that its peer keeps alive holds its place through both: it is
-//! a stream while its pipe holds bytes (`streams` lets one peer address keep at most
-//! `OWNERLESS_PER_PEER` of them alive), and [tcp]'s to finish after. With no place left a
-//! connect, a listen and an accept are refused with nothing made.
+//! A stream its client can see no more, which its peer keeps alive, holds its place through
+//! both: it is a stream while its pipe holds bytes, and [tcp]'s to finish after. `streams` lets
+//! one peer address keep at most `OWNERLESS_PER_PEER` of them alive and counts no addresses, so
+//! that is each address's share of the cut's clock and no bound on the node: peers at however
+//! many addresses hold no more of them than there are places. With no place left a connect, a
+//! listen and an accept are refused with nothing made.
 //!
 //! The number is the shell's: each stream is two of its client's pipes kept alive and watched,
 //! each listener one. A new node has none.

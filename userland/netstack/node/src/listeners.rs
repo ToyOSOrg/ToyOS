@@ -15,11 +15,17 @@
 //! **A listener lives until its owner lets go**: [`Node::close_listener`], or a wake its pipe
 //! refuses, for whatever reason. [tcp] then resets every connection that still waits, so each
 //! peer learns at once, and the port is free.
+//!
+//! **A stream starts with the options its listener has when it is accepted**, which the node
+//! writes to [tcp] at the accept. The listener's are the node's to hold and not [tcp]'s: [tcp]
+//! hands a listener's options to a connection at its SYN and has no call that reads a
+//! connection's back, so a stream seeded from them would answer for an option its connection,
+//! begun before the option was set, does not have.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 
-use toyos_net_tcp::Endpoint;
+use toyos_net_tcp::{Endpoint, Options};
 use toyos_net_wire::{Instant, Port};
 
 use crate::streams::{Pipes, StreamId, WriteRefusal};
@@ -70,6 +76,8 @@ struct Listener {
     owner: Box<dyn Wake>,
     /// Wakes written that no accept has spent.
     unspent: usize,
+    /// What a stream accepted here starts with.
+    options: Options,
 }
 
 #[derive(Default)]
@@ -95,8 +103,20 @@ impl Node {
         let Some((bound, port)) = self.stack.tcp_listen(port, candidate) else { return Err(ListenRefused::InUse) };
         let id = ListenerId(self.listeners.next);
         self.listeners.next = self.listeners.next.saturating_add(1);
-        self.listeners.live.insert(id, Listener { bound, owner, unspent: 0 });
+        self.listeners.live.insert(id, Listener { bound, owner, unspent: 0, options: Options::default() });
         Ok((id, port))
+    }
+
+    /// Nagle's algorithm off or on (RFC 9293 §3.7.4) for every stream accepted at `id` from here
+    /// on; one already accepted keeps its own. `false` is an id that names no listener.
+    pub fn set_listener_nodelay(&mut self, id: ListenerId, nodelay: bool) -> bool {
+        let Some(listener) = self.listeners.live.get_mut(&id) else { return false };
+        listener.options.nodelay = nodelay;
+        true
+    }
+
+    pub fn listener_nodelay(&self, id: ListenerId) -> Option<bool> {
+        self.listeners.live.get(&id).map(|listener| listener.options.nodelay)
     }
 
     /// The owner's accept: the oldest connection waiting at `id` becomes a stream on `pipes`,
@@ -104,19 +124,20 @@ impl Node {
     pub fn accept(&mut self, now: Instant, id: ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
         let Some(listener) = self.listeners.live.get_mut(&id) else { return Err(AcceptRefused::NoListener) };
         listener.unspent = listener.unspent.saturating_sub(1);
-        let bound = listener.bound;
-        let answer = self.take(bound, pipes);
+        let (bound, options) = (listener.bound, listener.options);
+        let answer = self.take(now, bound, options, pipes);
         self.bridge(now);
         answer
     }
 
-    fn take(&mut self, bound: toyos_net_tcp::ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
+    fn take(&mut self, now: Instant, bound: toyos_net_tcp::ListenerId, options: Options, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
         let Some(pipes) = pipes else { return Err(AcceptRefused::NoPipes) };
         if self.room() == 0 {
             return Err(AcceptRefused::Full);
         }
         let Some((conn, tuple)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
-        let id = self.streams.accepted(conn, tuple.remote.addr, pipes);
+        // The peer's address is what `streams` counts a stream its client can see no more by.
+        let id = self.streams.accepted(now, &mut self.stack, conn, tuple.remote.addr, options, pipes);
         Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port })
     }
 

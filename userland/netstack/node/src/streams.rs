@@ -26,10 +26,10 @@
 //! address restarts that clock for at most [`OWNERLESS_PER_PEER`] streams at once; any other has
 //! [`OWNERLESS_LIFE`] from the pass that first found it so, whatever it gives up, until it
 //! becomes one of them: a pass over the streams that begins with fewer makes it one, the oldest
-//! stream first. The count is an address's and addresses are not counted, so how many such
-//! streams the node holds in all is not bounded here, nor is how slowly a peer may take. A
-//! client that still holds its reading end, or may still write, is never timed here: what it
-//! cannot send is [tcp]'s to give up on.
+//! stream first. The count is an address's and addresses are not counted: how many such streams
+//! the node holds in all is `places`' to bound, of which each holds one, and how slowly a peer
+//! may take is bounded nowhere. A client that still holds its reading end, or may still write,
+//! is never timed here: what it cannot send is [tcp]'s to give up on.
 //!
 //! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here. A
 //! transmit opportunity can only fail a connect, whose next hop it found to answer nobody, and
@@ -170,8 +170,9 @@ struct Stream {
 }
 
 impl Stream {
-    /// An established connection on its client's pipes.
-    fn established(conn: ConnId, remote: Ipv4Addr, pipes: Pipes) -> Self {
+    /// An established connection on its client's pipes. `options` are the ones [tcp] holds for
+    /// it.
+    fn established(conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> Self {
         Self {
             conn,
             remote,
@@ -183,7 +184,7 @@ impl Stream {
             extended: false,
             held: false,
             room: false,
-            options: Options::default(),
+            options,
         }
     }
 
@@ -318,9 +319,10 @@ impl Streams {
     }
 
     /// Holds a connection a listener's owner accepted, established, on the pipes its accept
-    /// handed over.
-    pub(crate) fn accepted(&mut self, conn: ConnId, remote: Ipv4Addr, pipes: Pipes) -> StreamId {
-        self.hold(Stream::established(conn, remote, pipes))
+    /// handed over, and writes it its listener's `options`.
+    pub(crate) fn accepted(&mut self, now: Instant, stack: &mut Stack, conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> StreamId {
+        stack.tcp_set_options(now, conn, options);
+        self.hold(Stream::established(conn, remote, options, pipes))
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
@@ -337,7 +339,8 @@ impl Node {
         }
         let conn = self.stack.tcp_connect(now, remote).map_err(ConnectRefused::Stack)?;
         let deadline = timeout.map(|within| now.after(within));
-        Ok(self.streams.hold(Stream { connecting: true, deadline, ..Stream::established(conn, remote.addr, pipes) }))
+        // An active open has [tcp]'s defaults until `set_nodelay`.
+        Ok(self.streams.hold(Stream { connecting: true, deadline, ..Stream::established(conn, remote.addr, Options::default(), pipes) }))
     }
 
     /// One pass over every stream: netstack calls it when a pipe it watches is ready.
