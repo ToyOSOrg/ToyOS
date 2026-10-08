@@ -403,7 +403,7 @@ pub const NEVER_ANNOUNCED: &str =
 const WINDOW_LINES: usize = 40;
 
 /// The last [`WINDOW_LINES`] lines of `said`, under the count of what was cut.
-pub fn window(said: &str) -> String {
+fn window(said: &str) -> String {
     let lines: Vec<&str> = said.lines().collect();
     let kept = lines.len().min(WINDOW_LINES);
     let head = if lines.len() > kept {

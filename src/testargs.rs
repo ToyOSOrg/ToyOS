@@ -42,8 +42,11 @@ pub struct Parsed<'a> {
 /// Validate the harness's argv and return the run's filters and metal mode.
 ///
 /// `Err` is a refusal to print and exit on. It is asked before the sysroot lock
-/// and before anything is compiled, so a stale command line costs a message
-/// rather than a queue behind it.
+/// and before anything is compiled, so a line this refuses costs a message
+/// rather than a queue behind it. Not every dead word is refused here: under
+/// `--metal`, whether a filter or a [`BOOT`] word takes anything is known only
+/// against the profile's built members, so that refusal comes after the shared
+/// binaries' build.
 pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     let line = SUITE.walk(args);
     if let Some(word) = line.unknown {

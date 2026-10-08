@@ -176,8 +176,6 @@ pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
 /// word at all takes everything.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
-/// A boot taken whole and a member taken by name that would ride a boot of
-/// the same name are two images under one name, which [`batches`] refuses.
 pub fn select(
     names: &[&str],
     boots: &[&str],
@@ -969,10 +967,6 @@ pub fn run(
         shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
         batches.len(),
     );
-    if runs.is_empty() && shared.is_empty() {
-        eprintln!("[metal] nothing to run");
-        return Verdict::Red;
-    }
 
     let (dir, offline): (PathBuf, bool) = match &mode {
         MetalMode::List => {
