@@ -128,11 +128,16 @@ pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     needed as u64
 }
 
-/// Spawn a thread; refuses a `stack_base` above `stack_ptr` (no stack to clamp to).
+/// Spawn a thread; refuses a `stack_base` above `stack_ptr` (no stack to clamp to)
+/// and an `entry` outside the user half, which the return to it would fault on
+/// in the kernel's ring. The stack pointer is the thread's own to fault on.
 pub(super) fn sys_thread_spawn(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> u64 {
     if stack_base > stack_ptr {
         return SyscallError::InvalidArgument.to_u64();
     }
+    let Some(entry) = toyos_userbound::Entry::new(entry) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
     // A None here is a resource failure or teardown race, never a bad argument.
     process::spawn_thread(entry, stack_ptr, arg, stack_base)
         .map_or(SyscallError::ResourceExhausted.to_u64(), |t| t.raw() as u64)

@@ -21,7 +21,7 @@ use crate::sched::payload::ThreadSched;
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
 use crate::UserAddr;
-use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
+use crate::loader::{alloc_kernel_stack, Start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
@@ -923,7 +923,12 @@ impl Drop for Admission {
 }
 
 /// Spawn a thread within the current process.
-pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Option<Tid> {
+pub fn spawn_thread(
+    entry: toyos_userbound::Entry,
+    stack_ptr: u64,
+    arg: u64,
+    stack_base: u64,
+) -> Option<Tid> {
     // Phase 1: parent's data + address space (table lock dropped after).
     let parent_process = current_process();
     let (parent_addr_space, process_data_arc) = {
@@ -962,7 +967,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     };
     let tls_alloc_tcb = tls_alloc.ptr().wrapping_add(tp_offset);
 
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(Start::Thread { entry, sp: stack_ptr, arg }) {
         Some(ks) => ks,
         None => {
             tls_alloc.release(&parent_addr_space);
