@@ -476,10 +476,16 @@ impl Shard {
         connected
     }
 
-    /// `addr` is the local address to listen on, UNSPECIFIED for any, and otherwise one [ip]
-    /// holds assigned or announcing, as a datagram socket's is; port 0 takes `random`'s draws.
+    /// Whether `addr` is one a listener may be at: UNSPECIFIED for any, and otherwise one [ip]
+    /// holds assigned or announcing, as a datagram socket's is.
+    pub fn listens_at(&self, addr: Ipv4Addr) -> bool {
+        addr.is_unspecified() || self.ip.is_assigned(addr)
+    }
+
+    /// `addr` is the local address to listen on, one [`Self::listens_at`]; port 0 takes
+    /// `random`'s draws.
     pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, random: impl FnMut() -> u16) -> Result<ListenerId, ListenError> {
-        if !addr.is_unspecified() && !self.ip.is_assigned(addr) {
+        if !self.listens_at(addr) {
             return Err(ListenError::NotLocal);
         }
         self.tcp.listen(addr, port, random).map_err(ListenError::Tcp)

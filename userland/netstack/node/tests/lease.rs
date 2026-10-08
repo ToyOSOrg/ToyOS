@@ -256,8 +256,8 @@ fn a_listener_at_an_address_the_lease_loses_is_ended_and_one_at_every_address_st
     }
 }
 
-// The address is the lease's for as long as the lease is held: a renewal and a link that went
-// and came back leave it, and the listener at it.
+// [ip] holds the address usable for as long as the lease is held: a renewal and a link that
+// went and came back leave it, and the listener at it.
 #[test]
 fn a_listener_at_the_held_address_outlives_a_renewal_and_a_link_that_returns() {
     let mut wire = Wire::leased(&terms(600, Some(R)));

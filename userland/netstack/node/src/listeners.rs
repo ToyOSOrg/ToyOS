@@ -18,12 +18,13 @@
 //! by which the node could allow that to the first's owner alone.
 //!
 //! **A listener lives until its owner lets go or its address goes**: [`Node::close_listener`],
-//! a wake its pipe refuses, for whatever reason, or a pass that finds the lease naming another
-//! address than the one the listen named, or none. [tcp] then resets every connection that
-//! still waits, so each peer learns at once, the port is free and the place is back. The owner
-//! reads the end of its wake pipe and the shell reads [`Node::drain_ended_listeners`]. A
-//! listener at a lost address is ended and not kept for the address to come back because its
-//! owner makes no call a refusal could answer: it only waits for wakes, and none would come.
+//! a wake its pipe refuses, for whatever reason, or a pass that finds the address the listen
+//! named one a listen would now be refused for, [`ListenRefused::NotLocal`]. [tcp] then resets
+//! every connection that still waits, so each peer learns at once, the port is free and the
+//! place is back. The owner reads the end of its wake pipe and the shell reads
+//! [`Node::drain_ended_listeners`]. A listener at a lost address is ended and not kept for the
+//! address to come back because its owner makes no call a refusal could answer: it only waits
+//! for wakes, and none would come.
 //!
 //! **A stream starts with the options its connection has**, and those are its listener's as
 //! they were when its SYN arrived: [tcp] hands them over then (LS-10), the node reads them
@@ -69,7 +70,7 @@ pub enum ListenRefused {
 pub enum ListenerEnd {
     /// The owner's pipe refused a wake.
     Wake(WriteRefusal),
-    /// The lease names the address the listen named no more.
+    /// The address the listen named is the machine's no more.
     Address,
 }
 
@@ -207,7 +208,7 @@ impl Node {
         let room = self.room();
         let stack = &mut self.stack;
         let ended = self.listeners.live.iter_mut().find_map(|(id, listener)| {
-            if !stack.tcp_listens_at(listener.at.addr) {
+            if !stack.shard().listens_at(listener.at.addr) {
                 return Some((*id, ListenerEnd::Address));
             }
             let owed = stack.tcp_ready(listener.bound).min(room);
