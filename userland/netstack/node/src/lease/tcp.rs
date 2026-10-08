@@ -1,8 +1,10 @@
-//! [tcp]'s calls on the interface, for `streams`. They reach no address, gateway or resolver: the
-//! shard stays `lease`'s to configure.
+//! [tcp]'s calls on the interface, for `streams` and `listeners`. They reach no address, gateway
+//! or resolver: the shard stays `lease`'s to configure.
+
+use core::net::Ipv4Addr;
 
 use toyos_net_shard::ConnectError;
-use toyos_net_tcp::{ConnId, Endpoint, Error, Options, Received, Status};
+use toyos_net_tcp::{ConnId, Endpoint, Error, ListenerId, Options, Received, Status, Tuple};
 use toyos_net_wire::{Instant, Port};
 
 use super::Stack;
@@ -60,5 +62,36 @@ impl Stack {
 
     pub(crate) fn set_options(&mut self, now: Instant, id: ConnId, options: Options) {
         held(self.shard.set_options(now, id, options));
+    }
+
+    /// Connections `close` left [tcp] to finish alone, each until it ends.
+    pub(crate) fn tcp_orphans(&self) -> usize {
+        self.shard.orphans()
+    }
+
+    /// A passive open on every address the interface holds or comes to hold, at `port` or at one
+    /// of `random`'s candidates. `None` is a port that is taken, or no candidate free.
+    pub(crate) fn tcp_listen(&mut self, port: Option<Port>, random: impl FnMut() -> u16) -> Option<(ListenerId, Port)> {
+        match self.shard.listen(Ipv4Addr::UNSPECIFIED, port, random) {
+            Ok(id) => Some((id, held(self.shard.listener_port(id)))),
+            Err(Error::AddrInUse) => None,
+            Err(refusal) => unreachable!("[tcp] refused a passive open for more than its port: {refusal:?}"),
+        }
+    }
+
+    /// How many connections finished their handshake at `id` and wait to be accepted.
+    pub(crate) fn tcp_ready(&mut self, id: ListenerId) -> usize {
+        held(self.shard.ready(id))
+    }
+
+    /// The oldest connection waiting at `id`, the caller's from here, and its two endpoints.
+    pub(crate) fn tcp_accept(&mut self, id: ListenerId) -> Option<(ConnId, Tuple)> {
+        let conn = held(self.shard.accept(id))?;
+        Some((conn, held(self.shard.tuple(conn))))
+    }
+
+    /// [tcp] resets every connection still waiting at `id`; `id` names nothing after.
+    pub(crate) fn tcp_close_listener(&mut self, now: Instant, id: ListenerId) {
+        held(self.shard.close_listener(now, id));
     }
 }

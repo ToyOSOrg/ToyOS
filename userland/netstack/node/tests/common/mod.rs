@@ -29,6 +29,9 @@ pub const R: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 254);
 pub const DNS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 pub const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
+/// The places `Wire`'s node has for streams and listeners.
+pub const PLACES: usize = 8;
+
 pub const DISCOVER: u8 = 1;
 pub const OFFER: u8 = 2;
 pub const REQUEST: u8 = 3;
@@ -272,7 +275,8 @@ impl Wire {
         let now = Instant::from_millis(3_600_000);
         let config = Config { mac: IndividualMac::new(MacAddr(mac)).unwrap(), receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut draws = 0x5a00_0000;
-        let node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
+        let mut node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
+        node.set_places(now, PLACES);
         Self { node, mac, now, sent: Vec::new(), draws }
     }
 

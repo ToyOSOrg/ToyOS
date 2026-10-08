@@ -1,6 +1,6 @@
 [package]
 name = "toyos-net-node"
-description = "Netstack's decisions, pure: one interface of ToyOS's own stack, its DHCP lease and its clients' streams, frames and time in, frames out against the device's credit."
+description = "Netstack's decisions, pure: one interface of ToyOS's own stack, its DHCP lease, its clients' streams and listeners and the bound on both, frames and time in, frames out against the device's credit."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

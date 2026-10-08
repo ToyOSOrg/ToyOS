@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common::{arp, terms, Wire, A, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{FromClient, Node, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
+use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
@@ -437,7 +437,7 @@ fn a_connect_before_the_lease_is_refused_and_sends_nothing() {
     wire.link(true);
     let (client, pipes) = client();
     let refused = wire.node.connect(wire.now, peer(), None, pipes);
-    assert!(matches!(refused, Err(ConnectError::Route(_))), "{refused:?}");
+    assert!(matches!(refused, Err(ConnectRefused::Stack(ConnectError::Route(_)))), "{refused:?}");
     assert_eq!((wire.node.streams(), dropped(&client)), (0, (true, true)));
     // `common::outside` takes no TCP segment.
     wire.pump();

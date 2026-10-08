@@ -6,7 +6,8 @@
 //!
 //! The node carries out what the client asks and tells it what became of its address. What the
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
-//! its types keep. A client's TCP connection and its two pipes are `streams`'.
+//! its types keep. A client's TCP connection and its two pipes are `streams`', a passive open and
+//! its owner's wakes `listeners`', and how many of either the node holds `places`'.
 //!
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
@@ -30,9 +31,12 @@
 extern crate alloc;
 
 mod lease;
+mod listeners;
+mod places;
 mod streams;
 
-pub use streams::{FromClient, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
+pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake};
+pub use streams::{ConnectRefused, FromClient, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -65,10 +69,14 @@ pub struct Node {
     /// Room for the largest message the client accepts.
     datagram: Vec<u8>,
     streams: streams::Streams,
+    listeners: listeners::Listeners,
+    /// How many streams, listeners and connections [tcp] finishes alone the node holds at most.
+    places: usize,
 }
 
 impl Node {
-    /// One interface, link down and unaddressed. The client begins here, and its first DISCOVER
+    /// One interface, link down and unaddressed, with no place for a stream or a listener until
+    /// [`Self::set_places`]. The client begins here, and its first DISCOVER
     /// is not sent: an exchange starts over when the link comes up ([`Self::link`]).
     pub fn new(now: Instant, config: Config, host_name: Option<HostName>, draw: impl FnMut() -> u32) -> Result<Self, toyos_net_tcp::ConfigError> {
         let mac = config.mac;
@@ -81,6 +89,8 @@ impl Node {
             events: Vec::new(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
             streams: streams::Streams::default(),
+            listeners: listeners::Listeners::default(),
+            places: 0,
         })
     }
 

@@ -66,7 +66,15 @@ pub trait FromClient {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, PipeRefusal>;
 }
 
-/// The two ends a client's connect hands over.
+/// Why a connect made no stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectRefused {
+    /// The node holds all it has places for (`places`).
+    Full,
+    Stack(ConnectError),
+}
+
+/// The two ends a client's connect or accept hands over.
 pub struct Pipes {
     pub to_client: Box<dyn ToClient>,
     pub from_client: Box<dyn FromClient>,
@@ -128,6 +136,21 @@ struct Stream {
 }
 
 impl Stream {
+    /// An established connection on its client's pipes.
+    fn established(conn: ConnId, pipes: Pipes) -> Self {
+        Self {
+            conn,
+            to_client: Some(pipes.to_client),
+            from_client: Some(pipes.from_client),
+            connecting: false,
+            deadline: None,
+            done_writing: false,
+            held: false,
+            room: false,
+            nodelay: false,
+        }
+    }
+
     /// One pass. `false` lets the stream go: its pipe ends drop with it, and its connection is
     /// [tcp]'s alone or gone.
     fn pass(&mut self, id: StreamId, now: Instant, stack: &mut Stack, events: &mut VecDeque<StreamEvent>) -> bool {
@@ -237,6 +260,20 @@ pub(crate) struct Streams {
 }
 
 impl Streams {
+    /// Holds `stream` under an id of its own.
+    fn hold(&mut self, stream: Stream) -> StreamId {
+        let id = StreamId(self.next);
+        self.next = self.next.saturating_add(1);
+        self.live.insert(id, stream);
+        id
+    }
+
+    /// Holds a connection a listener's owner accepted, established, on the pipes its accept
+    /// handed over.
+    pub(crate) fn accepted(&mut self, conn: ConnId, pipes: Pipes) -> StreamId {
+        self.hold(Stream::established(conn, pipes))
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.live.values().filter_map(|stream| stream.deadline).min()
     }
@@ -245,23 +282,13 @@ impl Streams {
 impl Node {
     /// An active open to `remote`, answered by a [`StreamEvent`] once the handshake ends or
     /// `timeout` passes. Refused, nothing was sent and the pipe ends are dropped.
-    pub fn connect(&mut self, now: Instant, remote: Endpoint, timeout: Option<Duration>, pipes: Pipes) -> Result<StreamId, ConnectError> {
-        let conn = self.stack.connect(now, remote)?;
-        let id = StreamId(self.streams.next);
-        self.streams.next = self.streams.next.saturating_add(1);
-        let stream = Stream {
-            conn,
-            to_client: Some(pipes.to_client),
-            from_client: Some(pipes.from_client),
-            connecting: true,
-            deadline: timeout.map(|within| now.after(within)),
-            done_writing: false,
-            held: false,
-            room: false,
-            nodelay: false,
-        };
-        self.streams.live.insert(id, stream);
-        Ok(id)
+    pub fn connect(&mut self, now: Instant, remote: Endpoint, timeout: Option<Duration>, pipes: Pipes) -> Result<StreamId, ConnectRefused> {
+        if self.room() == 0 {
+            return Err(ConnectRefused::Full);
+        }
+        let conn = self.stack.connect(now, remote).map_err(ConnectRefused::Stack)?;
+        let deadline = timeout.map(|within| now.after(within));
+        Ok(self.streams.hold(Stream { connecting: true, deadline, ..Stream::established(conn, pipes) }))
     }
 
     /// One pass over every stream: netstack calls it when a pipe it watches is ready.
@@ -269,6 +296,7 @@ impl Node {
         let Streams { live, events, .. } = &mut self.streams;
         let stack = &mut self.stack;
         live.retain(|id, stream| stream.pass(*id, now, stack, events));
+        self.wake_owners(now);
     }
 
     /// The client lets go of the stream: nobody reads it, and what its pipe still holds is sent
@@ -279,6 +307,7 @@ impl Node {
             self.stack.abort(now, stream.conn);
             self.streams.live.remove(&id);
             self.streams.events.push_back(StreamEvent::Closed { id });
+            self.wake_owners(now);
             return;
         }
         stream.to_client = None;
@@ -329,6 +358,7 @@ impl Node {
         if held {
             self.stack.abort(now, stream.conn);
             self.streams.live.remove(&id);
+            self.wake_owners(now);
         }
     }
 
