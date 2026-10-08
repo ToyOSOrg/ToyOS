@@ -210,7 +210,10 @@ otherwise pay to find again:
   most 256 devices above a PCI_Config region while its bridges are asked;
   one operator's string or buffer before the meter holds it, Concatenate's
   the most at its two operands' copies and their sum; a table's bytes while
-  they are read in; and the arena's old slots while a doubling moves it.
+  they are read in; the arena's old slots while a doubling moves it; and
+  the segments and the text of one node's path, as deep as the meter
+  admits a node, for Notify, a reference handed back and the name a
+  refusal carries. A refusal's text is the caller's and outside the meter.
   The meter also holds a namespace node above its cost, at a whole
   map leaf of 104 bytes for its entry in its parent and the arena at its
   doubled capacity: an interpreter filled with field units refuses with

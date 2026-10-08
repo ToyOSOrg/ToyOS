@@ -406,16 +406,33 @@ fn a_returned_value_of_buffers_is_held_while_it_is_built() {
     assert_eq!(built.refused, Some(Error::Bound(FULL)));
 }
 
+/// 40 package elements naming one package of 65,000, defined after them.
+fn packages() -> Vec<u8> {
+    cat(&[&def_name("PKG", &package(&vec![name("WIDE"); 40])), &def_name("WIDE", &var_package(&int(65_000), &[]))])
+}
+
 /// The same of 40 elements naming one package of 65,000: its elements cost
 /// the caller more than they cost the interpreter.
 #[test]
 fn a_returned_value_of_packages_is_held_while_it_is_built() {
-    let body = cat(&[&def_name("PKG", &package(&vec![name("WIDE"); 40])), &def_name("WIDE", &var_package(&int(65_000), &[]))]);
-    let (mut i, before) = start(&body);
+    let (mut i, before) = start(&packages());
     let r = i.evaluate(&mut Sink, "\\PKG", &[]);
     let built = Filled::of(before, r.err());
     assert!(built.peak <= BOUND, "{} bytes held on the way", built.peak);
     assert_eq!(built.refused, Some(Error::Bound(FULL)));
+}
+
+/// What an evaluation held for its caller's value it gives back, once and
+/// whole, when the value is the caller's: the package of 65,000 answers
+/// sixteen times over on one interpreter, each value dropped, where what
+/// sixteen answers hold together is twice the bound and more.
+#[test]
+fn a_returned_value_is_given_back_when_it_is_the_callers() {
+    let (mut i, _) = start(&packages());
+    for n in 0..16 {
+        let v = i.evaluate(&mut Sink, "\\WIDE", &[]);
+        assert_eq!(v.map(|v| matches!(v, Value::Package(p) if p.len() == 65_000)), Ok(true), "evaluation {n}");
+    }
 }
 
 /// Filled with references until 48 bytes more do not fit: a field that fits
