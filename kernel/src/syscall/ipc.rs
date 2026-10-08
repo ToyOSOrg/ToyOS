@@ -2,8 +2,10 @@
 //! that name them, connections, shared memory, and inboxes.
 //! No peer is addressed by name or pid: ports, namespaces and connections are
 //! built only from connectors and handles the caller already holds.
-//! Every all-or-nothing claim here is structural: names and connectors are
-//! resolved and checked before anything is installed or removed.
+//! Every all-or-nothing claim here is structural: whatever can refuse is
+//! resolved and checked before anything is installed or removed, or under the
+//! hold that installs it. No handle is taken back across a released hold: a
+//! sibling thread can close or move one the moment the table's lock is given up.
 
 use alloc::vec::Vec;
 
@@ -240,35 +242,37 @@ fn connect_through(connector: &port::Connector) -> u64 {
     // Cross-wired here only: the server's end is built from the same two queues when it accepts.
     let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues();
 
-    // Client's end installed first: queuing before that would let a server accept a connection whose client has no handle.
     let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
         sc_reader,          // client reads from server→client
         cs_writer,          // client writes to client→server
         to_client.clone(),  // and receives what the server sent
         to_server.clone(),
     ));
-    let h = match process::with_process_data(|data| ops::install(&mut data.handles, object)) {
-        Ok(h) => h,
-        Err(e) => return e.to_u64(),
-    };
-
-    let queued = connector.push(port::PendingConnection {
+    let pending = port::PendingConnection {
         rx: cs_reader, // server reads from client→server
         tx: sc_writer, // server writes to server→client
         inbox: to_server,
         outbox: to_client,
         stamp: connector.stamp(),
+    };
+    // One hold from the room to the install: the port can still refuse, and the client's end is in the table only once it has not.
+    let installed = process::with_process_data(|data| {
+        if !data.handles.has_room(1) {
+            return Err((SyscallError::ResourceExhausted, object, pending));
+        }
+        match connector.push(pending) {
+            Ok(()) => Ok(ops::install(&mut data.handles, object).expect("room was asked for first")),
+            Err((pending, port::PushError::Closed)) => Err((SyscallError::Gone, object, pending)),
+            Err((pending, port::PushError::QueueFull)) => {
+                Err((SyscallError::ResourceExhausted, object, pending))
+            }
+        }
     });
-    if let Err(e) = queued {
-        process::with_process_data(|data| {
-            ops::close(&mut data.handles, h, &mut data.pipe_maps)
-                .expect("the connection this call installed a moment ago");
-        });
-        return match e {
-            port::PushError::Closed => SyscallError::Gone.to_u64(),
-            port::PushError::QueueFull => SyscallError::ResourceExhausted.to_u64(),
-        };
-    }
+    let h = match installed {
+        Ok(h) => h,
+        // Both halves of a refused connection drop here, with the hold given up: their pipes go with them.
+        Err((e, _client, _server)) => return e.to_u64(),
+    };
     // The port's one watch carries both: the server blocked in `accept` and every ring polling it.
     connector.port().watch().post();
     h.0 as u64
@@ -440,12 +444,8 @@ pub(super) fn sys_handle_recv(
     }
 }
 
-/// Make an inbox and tell the caller where it is; the inbox owns its page and only this mapping may name it.
-pub(super) fn sys_inbox_setup(ctx: &SyscallContext, depth: u32, out: u64) -> u64 {
-    let out = match UserAddr::checked(out) {
-        Some(addr) => addr,
-        None => return SyscallError::InvalidArgument.to_u64(),
-    };
+/// Make an inbox and tell the caller where it is; the inbox owns its page and only this mapping may name it. `out` is the window the dispatch took for the answer.
+pub(super) fn sys_inbox_setup(depth: u32, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     let (inbox, vaddr) = match crate::inbox::create(depth) {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
@@ -457,17 +457,8 @@ pub(super) fn sys_inbox_setup(ctx: &SyscallContext, depth: u32, out: u64) -> u64
         Ok(h) => h,
         Err(e) => return e.to_u64(),
     };
-    let answer = toyos_abi::syscall::InboxSetup { handle, _pad: 0, vaddr };
-    match ctx.copy_out(out, &answer) {
-        Ok(()) => 0,
-        Err(e) => {
-            process::with_process_data(|data| {
-                ops::close(&mut data.handles, handle, &mut data.pipe_maps)
-                    .expect("the inbox this call installed a moment ago");
-            });
-            e.to_u64()
-        }
-    }
+    out.write_at(0, toyos_abi::usersafe::bytes(&InboxSetup { handle, _pad: 0, vaddr }));
+    0
 }
 
 pub(super) fn sys_inbox_submit(

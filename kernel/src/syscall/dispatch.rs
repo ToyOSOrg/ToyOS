@@ -533,8 +533,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_namespace_open(RawHandle(a1 as u32), &name)
         }
         SYS_TLS_ALLOC_BLOCK => sys_tls_alloc_block(a1),
-        // ctx carries the copy-out: sys_inbox_setup writes its answer only once setup succeeds.
-        SYS_INBOX_SETUP => sys_inbox_setup(&ctx, a1 as u32, a2),
+        SYS_INBOX_SETUP => {
+            // Taken before the inbox exists: a bad address must not leave a handle the caller was never told.
+            let len = core::mem::size_of::<InboxSetup>() as u64;
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_inbox_setup(a1 as u32, &mut out)
+        }
         SYS_INBOX_SUBMIT => {
             sys_inbox_submit(RawHandle(a1 as u32), a2 as u32, a3 as u32, a4)
         }
