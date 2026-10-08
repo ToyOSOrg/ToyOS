@@ -66,10 +66,15 @@ const DISCARD: u16 = 9;
 /// UDP headers.
 const DATAGRAM: usize = 1500 - 20 - 8;
 
-/// The Intel driver's usable transmit descriptors (`toyos-i219`, a ring of 16),
-/// and how many rings' worth the burst is.
+/// The Intel driver's usable transmit descriptors (`toyos-i219`, a ring of 16).
 const RING: usize = 15;
-const RINGS: usize = 4;
+
+/// Sockets a round of the burst sends from, a ring's worth each: two rings'
+/// worth of frames queued before one of netstack's passes, and with the
+/// question after them one short of the connections netstack lets wait
+/// (`MAX_PENDING_CONNS`, 32).
+const SOCKETS: usize = 2;
+const ROUNDS: usize = 2;
 
 type Snapshot = BTreeMap<String, Value>;
 
@@ -188,30 +193,43 @@ fn neighbour(snapshot: &Snapshot) -> Neighbour {
         .unwrap_or_else(|| panic!("netstack's snapshot carries {NEIGHBOUR} as a word this job has none for"))
 }
 
-/// A burst of [`RINGS`] × [`RING`] full-size datagrams from one socket to the
-/// router's discard port, a ring's worth of requests put to netstack at once
-/// so its pass finds them together; how many netstack took.
+/// A burst of [`ROUNDS`] × [`SOCKETS`] × [`RING`] full-size datagrams to the
+/// router's discard port; how many netstack took.
+///
+/// **A round's requests reach netstack back to back**, so one pass queues
+/// more frames than the ring holds: netstack accepts one connection a pass and
+/// reads a request only from one it has accepted, so every connection of a
+/// round is opened first, a question asked after them is answered only once
+/// each is accepted, and the requests are written then.
 fn burst(router: [u8; 4]) -> u64 {
-    let socket = toyos::net::udp_bind([0; 4], 0).unwrap_or_else(|e| panic!("a datagram socket for the burst: {e:?}"));
+    let sockets: Vec<_> = (0..SOCKETS)
+        .map(|_| toyos::net::udp_bind([0; 4], 0).unwrap_or_else(|e| panic!("a datagram socket for the burst: {e:?}")))
+        .collect();
     let datagram = [0u8; DATAGRAM];
     let mut taken = 0;
-    for _ in 0..RINGS {
-        let askers: Vec<NetstackConn> = (0..RING)
-            .map(|_| NetstackConn::connect().unwrap_or_else(|e| panic!("a connection to netstack for the burst: {e:?}")))
-            .collect();
-        for _ in 0..RING {
-            assert_eq!(socket.tx.write(&datagram), Ok(DATAGRAM), "a datagram into the socket's pipe");
+    for _ in 0..ROUNDS {
+        let mut askers = Vec::new();
+        for socket in &sockets {
+            for _ in 0..RING {
+                assert_eq!(socket.tx.write(&datagram), Ok(DATAGRAM), "a datagram into the socket's pipe");
+                let asker =
+                    NetstackConn::connect().unwrap_or_else(|e| panic!("a connection to netstack for the burst: {e:?}"));
+                let request =
+                    UdpSendToRequest { socket_id: socket.socket_id.0, addr: router, port: DISCARD, len: DATAGRAM as u16 };
+                askers.push((asker, request));
+            }
         }
-        let request =
-            UdpSendToRequest { socket_id: socket.socket_id.0, addr: router, port: DISCARD, len: DATAGRAM as u16 };
+        ask();
         let asked: Vec<_> =
-            askers.into_iter().map(|asker| asker.request(MsgType::UdpSendTo, &request)).collect();
+            askers.into_iter().map(|(asker, request)| asker.request(MsgType::UdpSendTo, &request)).collect();
         // A datagram netstack's queue had no place for is refused, and counted
         // by its absence.
         taken += asked.into_iter().filter_map(|pending| pending.ok()?.response::<u32>().ok()).count() as u64;
     }
-    // Unread, as the anchors' close is.
-    let _ = toyos::net::udp_close(socket.socket_id);
+    for socket in sockets {
+        // Unread, as the anchors' close is.
+        let _ = toyos::net::udp_close(socket.socket_id);
+    }
     taken
 }
 
@@ -245,6 +263,9 @@ fn main() {
                     wake_armed: asked(&after, "net.transmit.wake_armed"),
                     wake_taken: asked(&after, "net.transmit.wake_taken"),
                     unsent: asked(&after, "net.descriptors.unsent"),
+                    descriptors_sent: asked(&after, "net.descriptors.sent"),
+                    wire_sent: asked(&after, "net.wire.sent"),
+                    speed: asked(&after, "net.link.speed_mbps"),
                     taken,
                 });
             }

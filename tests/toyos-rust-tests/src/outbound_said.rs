@@ -185,6 +185,10 @@ pub struct Asked(pub Option<u64>);
 
 const NOT_ASKED: &str = "not-asked";
 
+/// What follows a ring's `full=0`: the burst found room every time, so the
+/// boot read nothing of a full ring or its wake.
+const NEVER_FILLED: &str = " (the ring never filled: nothing read)";
+
 impl Asked {
     fn read(word: &str) -> Option<Self> {
         if word == NOT_ASKED {
@@ -213,9 +217,19 @@ pub enum Line {
     Gateway(Neighbour),
     /// The card's transmit ring after a burst at the router: how often a frame
     /// found it full, how often its wake was armed and taken, the frames a
-    /// link change gave back, and how many of the burst's datagrams netstack
-    /// took.
-    Ring { full: Asked, wake_armed: Asked, wake_taken: Asked, unsent: Asked, taken: u64 },
+    /// link change gave back, the frames the ring and the wire count sent,
+    /// the link's speed in Mb/s, and how many of the burst's datagrams
+    /// netstack took.
+    Ring {
+        full: Asked,
+        wake_armed: Asked,
+        wake_taken: Asked,
+        unsent: Asked,
+        descriptors_sent: Asked,
+        wire_sent: Asked,
+        speed: Asked,
+        taken: u64,
+    },
     /// The job's last line.
     Done,
 }
@@ -239,10 +253,17 @@ impl fmt::Display for Line {
                 write!(f, "anchor name={} lookup={} connect={}", anchor.word(), lookup.word(), connect.word())
             }
             Self::Gateway(neighbour) => write!(f, "gateway neighbour={}", neighbour.word()),
-            Self::Ring { full, wake_armed, wake_taken, unsent, taken } => write!(
-                f,
-                "ring full={full} wake_armed={wake_armed} wake_taken={wake_taken} unsent={unsent} taken={taken}"
-            ),
+            Self::Ring { full, wake_armed, wake_taken, unsent, descriptors_sent, wire_sent, speed, taken } => {
+                write!(f, "ring full={full}")?;
+                if full.0 == Some(0) {
+                    f.write_str(NEVER_FILLED)?;
+                }
+                write!(
+                    f,
+                    " wake_armed={wake_armed} wake_taken={wake_taken} unsent={unsent} \
+                     descriptors_sent={descriptors_sent} wire_sent={wire_sent} speed={speed} taken={taken}"
+                )
+            }
             Self::Done => f.write_str("done"),
         }
     }
@@ -259,6 +280,8 @@ impl Line {
     }
 
     fn read_said(said: &str) -> Option<Self> {
+        // The one remark a line carries, which its writer puts back.
+        let said = said.replacen(NEVER_FILLED, "", 1);
         let mut words = said.split(' ');
         let subject = words.next()?;
         let mut value = |key: &str| words.next()?.strip_prefix(key)?.strip_prefix('=');
@@ -291,6 +314,9 @@ impl Line {
                 wake_armed: Asked::read(value("wake_armed")?)?,
                 wake_taken: Asked::read(value("wake_taken")?)?,
                 unsent: Asked::read(value("unsent")?)?,
+                descriptors_sent: Asked::read(value("descriptors_sent")?)?,
+                wire_sent: Asked::read(value("wire_sent")?)?,
+                speed: Asked::read(value("speed")?)?,
                 taken: Frames::read(value("taken")?)?.0?,
             },
             "done" => Self::Done,
