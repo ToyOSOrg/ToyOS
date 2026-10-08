@@ -10,10 +10,10 @@ use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     century_of, definition_blocks, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
-    isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line,
+    isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line,
     Century, FixedHardware, IoApicEntry, LegacyMode, Line, MadtEntry, Polarity, PowerButton, Psci, Reset,
-    SourceOverride, Table, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
-    MADT_ENTRIES, S5,
+    SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
+    MADT_ENTRIES,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -129,17 +129,6 @@ fn the_definition_blocks_of_qemu_are_its_dsdt_alone() {
     // The boot these tables are of kept its DSDT where this machine holds nothing.
     let blocks: Vec<_> = definition_blocks(machine(), RSDP).expect("the XSDT").map(|block| block.err()).collect();
     assert_eq!(blocks, [Some(TableError::Unmapped { at: 0x7fb7_a000, len: 36 })]);
-}
-
-/// `ACPI: PM1a=0x604 SLP_TYPa=0`, off the DSDT of the boot that logged it
-/// (`fixtures/qemu-11.1.1/SOURCE`): `\_S5_`'s package, found past `\_S4_`'s,
-/// whose first element is 2.
-#[test]
-fn the_dsdt_names_the_sleep_type_that_powers_qemu_off() {
-    const DSDT: u64 = 0x7f77_a000;
-    let regions: &[(u64, &[u8])] = &[(DSDT, include_bytes!("../fixtures/qemu-11.1.1/dsdt.bin"))];
-    let dsdt = Table::open(Machine { regions }, DSDT, b"DSDT", 36).expect("DSDT");
-    assert_eq!(s5_slp_typ(&dsdt), S5::SlpTyp(0));
 }
 
 /// `ACPI: reset register SystemIO 0xcf9 <- 0x0f`, against QEMU 11.1.1's own

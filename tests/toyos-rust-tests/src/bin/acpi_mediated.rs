@@ -11,14 +11,30 @@
 //! machine whose firmware is not using it can take. Each address is found as
 //! a holder finds it, from the RSDP the claim's description names.
 //!
-//! First a child is handed the claim, takes the lock and exits with it: the
-//! claim binds to one process for that process's life, so the parent claims
-//! only after, and reads the lock word free.
+//! The power-off is the kernel's with the sleep type a holder supplies, once
+//! under its claim. On this boot nothing has, so first a shutdown is refused
+//! and the machine goes on.
+//!
+//! Then a child is handed the claim, supplies a sleep type this guest does
+//! not power off on, is refused a second, takes the lock and exits with it:
+//! the claim binds to one process for that process's life, so the parent
+//! claims only after, and reads the lock word free.
+//!
+//! The parent, the next holder, is refused a word the register's field does
+//! not hold, supplies this guest's own over the child's, and is refused a
+//! second in its turn.
 //!
 //! Last it takes the lock once more and asks for the power-off holding it: a
 //! stop ends no process, so the kernel finds a live holder's lock taken and
 //! gives it back before the power-off owns the hardware, which
-//! `acpi_mediated_access` reads in the kernel's own line.
+//! `acpi_mediated_access` reads in the kernel's own line; and the guest
+//! powers off, which it does on the parent's sleep type and not the child's.
+//!
+//! **What a holder supplied stands once it is gone** ([`outlived`]), on a
+//! boot of its own, since a power-off ends one: the boot whose ROOT carries
+//! [`OUTLIVED`] has a child supply this guest's own sleep type and exit, and
+//! the parent, which supplied none, ask for the power-off after the child's
+//! claim and one more have been released.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -33,6 +49,10 @@ use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_acpi_mediated";
 const CLAIM_LABEL: &str = "acpi-claim";
+
+/// The file whose presence on ROOT makes this boot [`outlived`]'s: a job is a
+/// binary's name and takes no argument.
+const OUTLIVED: &str = "/system/share/acpi_mediated_outlived";
 
 /// `EFI_MEMORY_TYPE`s: what the kernel hands out as RAM, and ACPI's two.
 const USABLE: [u8; 5] = [1, 2, 3, 4, 7];
@@ -80,8 +100,10 @@ impl Holder {
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
+        None if std::fs::exists(OUTLIVED).expect("acpi: ask ROOT for this boot's arm") => outlived(),
         None => probe(),
         Some("keeper") => keeper(),
+        Some("supplier") => supplier(),
         other => panic!("acpi: unknown role {other:?}"),
     }
 }
@@ -111,6 +133,13 @@ fn bind(claim: &Device) -> AcpiInfo {
 fn probe() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
 
+    // No server ran on this boot, and nothing has held the claim.
+    assert_eq!(
+        toyos::power::stop(toyos::power::Stop::Shutdown),
+        toyos::power::Refused::Kernel(SyscallError::NotSupported),
+        "acpi: a power-off with no sleep type supplied"
+    );
+
     // A holder that dies with the lock: the kernel gives it back with the claim.
     let kept = Command::new(SELF_PATH)
         .arg("keeper")
@@ -128,8 +157,9 @@ fn probe() {
     let mut post = Access::write(Space::SystemIo, 0x80, Width::Byte, 0);
     assert_eq!(syscall::acpi_access(holder.handle(), &mut post), Err(SyscallError::PermissionDenied));
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Err(SyscallError::PermissionDenied));
+    assert_eq!(syscall::acpi_s5(holder.handle(), Q35_SLP_TYP_A), Err(SyscallError::PermissionDenied));
     let info = bind(&holder.0);
-    println!("acpi: an unbound claim was refused its access and the lock");
+    println!("acpi: an unbound claim was refused its access, the lock and the power-off's sleep type");
 
     // A request that names no space, width or direction, a value wider than
     // its width, and a reserved byte that is set.
@@ -151,6 +181,7 @@ fn probe() {
     ports(&holder, &info);
     configuration(&holder, &info);
     lock(&holder, &info);
+    sleep_type(&holder);
 
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true), "acpi: the lock, for the power-off to find");
     println!("{HELD_INTO_THE_STOP}");
@@ -380,12 +411,68 @@ fn lock(holder: &Holder, info: &AcpiInfo) {
     println!("acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it");
 }
 
+/// What this guest's `\_S5` names for `SLP_TYPa` (ACPI 6.5 §7.4.2), as
+/// `acpiserver` evaluates it on the boots that start one: QEMU's ICH9 powers
+/// off on it.
+const Q35_SLP_TYP_A: u64 = 0;
+
+/// A sleep type the register holds and QEMU's ICH9 does nothing on: a
+/// power-off that entered it would still be running.
+const NO_SLEEP_OF_Q35S: u64 = 5;
+
+fn sleep_type(holder: &Holder) {
+    // `SLP_TYPx` is three bits (Table 4.16): bit 3 would land on `SLP_EN`.
+    for wide in [8u64, 0x100, 1 << 32 | 5, u64::MAX] {
+        assert_eq!(syscall::acpi_s5(holder.handle(), wide), Err(SyscallError::InvalidArgument), "acpi: {wide:#x} as a sleep type");
+    }
+    // The keeper's turn went with its claim, so this holder supplies its own.
+    assert_eq!(syscall::acpi_s5(holder.handle(), Q35_SLP_TYP_A), Ok(()));
+    for second in [NO_SLEEP_OF_Q35S, Q35_SLP_TYP_A] {
+        assert_eq!(syscall::acpi_s5(holder.handle(), second), Err(SyscallError::AlreadyExists), "acpi: a second sleep type under one claim");
+    }
+    println!("acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists");
+}
+
 /// What the keeper says once it holds the lock.
 const KEPT: &str = "keeper: holding the Global Lock, and leaving with it";
 
 fn keeper() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the keeper is endowed the claim");
     bind(&claim);
+    assert_eq!(syscall::acpi_s5(claim.as_handle(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
     assert_eq!(syscall::acpi_lock_take(claim.as_handle()), Ok(true), "keeper: the lock");
     println!("{KEPT}");
+}
+
+/// What the supplier says once the kernel has its sleep type.
+const SUPPLIED: &str = "supplier: this guest's own sleep type supplied, and leaving";
+
+fn supplier() {
+    let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the supplier is endowed the claim");
+    bind(&claim);
+    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Ok(()), "supplier: this guest's sleep type");
+    println!("{SUPPLIED}");
+}
+
+/// What [`outlived`] says before it asks, holding no claim.
+const ASKED_WITH_NO_HOLDER: &str = "acpi: asking for the power-off with no claim held, on what a holder that is gone supplied";
+
+fn outlived() {
+    let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
+    let left = Command::new(SELF_PATH)
+        .arg("supplier")
+        .endow(CLAIM_LABEL, claim(&cap).into_raw().0)
+        .stdout(Stdio::piped())
+        .output()
+        .expect("acpi: spawn the supplier");
+    let said = String::from_utf8_lossy(&left.stdout);
+    assert!(left.status.success() && said.contains(SUPPLIED), "acpi: the supplier ended {:?} having said {said:?}", left.status);
+    // The row is claimable again only once the supplier's claim was
+    // released; and this claim's own release, which supplied nothing, has
+    // returned before the power-off is asked for.
+    drop(claim(&cap));
+    println!("{ASKED_WITH_NO_HOLDER}");
+    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    panic!("acpi: the power-off was refused: {refused:?}");
 }

@@ -17,10 +17,12 @@
 //! kernel's mediated access ([`Claim`]): after the arming, so a press during
 //! the load latches and is served when it ends. A table refused, and a DSDT
 //! refused, are each said and survived; the power button is served either
-//! way.
+//! way. The load hands the kernel `\_S5`'s sleep type, without which the
+//! kernel refuses every power-off.
 //!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
-//! machine through the supervisor, and the controller's GPE drains the
+//! machine through the supervisor, or is said and dropped on a machine with
+//! no power-off, and the controller's GPE drains the
 //! controller of every query waiting, which are then run, one by one, as
 //! [`aml::query`] says, after the drain that took them. An event this server
 //! never enabled, a controller that does not answer, more queries in one
@@ -50,7 +52,7 @@ use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
 use host::{Answer, Kernel, Stopping, Take};
-use sci::{Event, Served, Unserved, PM1_STATUS, PWRBTN};
+use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -72,6 +74,8 @@ struct Server {
     logged: u64,
     scis: u64,
     empty: u32,
+    /// The kernel was handed `\_S5`'s sleep type: a press powers the machine off.
+    power_off: bool,
 }
 
 fn main() {
@@ -94,9 +98,10 @@ fn main() {
         logged: 0,
         scis: 0,
         empty: 0,
+        power_off: false,
     };
     server.arm();
-    aml::load(&Claim(&server.dev), server.info.rsdp);
+    server.power_off = aml::load(&Claim(&server.dev), server.info.rsdp).handed;
     server.serve();
 }
 
@@ -131,6 +136,13 @@ impl Kernel for Claim<'_> {
 
     fn lock_release(&self) -> Result<(), Stopping> {
         Self::answered("the Global Lock's release", self.0.lock_release())
+    }
+
+    fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
+        match self.0.s5(slp_typ_a) {
+            Err(SyscallError::InvalidArgument) => Ok(false),
+            answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
+        }
     }
 }
 
@@ -238,10 +250,15 @@ impl Server {
         self.run_queued();
     }
 
-    fn press(&mut self) -> ! {
+    /// A press: the machine stops, and this comes back only where it has no
+    /// power-off, which the load said and this says again.
+    fn press(&mut self) {
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
         let refused = power::stop(Stop::Shutdown);
-        panic!("acpiserver: the power-off was refused: {refused:?}");
+        match sci::unstopped(refused, self.power_off) {
+            Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
+            Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
+        }
     }
 
     /// Take every query the controller has waiting off it, queued for after.

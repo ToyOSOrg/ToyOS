@@ -1,15 +1,23 @@
 //! Reset and power-off through the FADT: its reset register, and S5 soft-off
-//! through the PM1a control block with the `SLP_TYPa` the DSDT's `\_S5_`
-//! package names.
+//! through the PM1a control block with the `SLP_TYPa` the holder of the `acpi`
+//! claim supplied.
+//!
+//! **This kernel reads no AML, so it knows no sleep type of its own.** `\_S5`
+//! is the firmware's AML to evaluate, and the claim's holder does
+//! (`acpi_mode::s5`); until one has, [`off_refused`] says so and a shutdown is
+//! refused before anything is stopped. A holder supplies it once, and what
+//! it supplied outlives it, until the next claim's holder supplies its own:
+//! it is a fact of the machine's tables and not of the process that read
+//! them.
 //!
 //! All input is firmware-supplied and untrusted: a table that does not decode
-//! is a machine with no reboot or no soft-off, said by name, never a panic.
+//! is a machine with no reboot or no PM1a control block, said by name, never
+//! a panic.
 
-use core::mem::size_of;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use toyos_acpi::{Reset, Table, TableError, S5, SDT_HEADER_LEN, SDT_REVISION};
-
+use toyos_acpi::Reset;
+use toyos_userbound::firmware::SleepType;
 use toyos_userbound::{Mediated, Ports};
 
 use super::cpu;
@@ -18,16 +26,16 @@ use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::time::{Deadline, Duration, Tripwire};
 
-/// PM1 control (ACPI 6.5 Table 4.16): `SCI_EN`, `SLP_TYP` and `SLP_EN`.
+/// PM1 control (ACPI 6.5 Table 4.16): `SCI_EN` and `SLP_EN`.
 pub const SCI_EN: u16 = 1 << 0;
-const SLP_TYP: u16 = 0b111 << 10;
 const SLP_EN: u16 = 1 << 13;
 
-/// Declared whether or not soft-off decodes: `SCI_EN` is read through it too.
+/// `SCI_EN` is read through it too.
 static PM1A_CNT: Slot = Slot::empty();
-/// `\_S5_`'s `SLP_TYPa`, shifted into place; 0 until the DSDT named one.
-static SLP_TYPA: AtomicU8 = AtomicU8::new(0);
-static SOFT_OFF: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `\_S5`'s `SLP_TYPa` as the `acpi` claim's holder supplied it, or
+/// [`UNSUPPLIED`], which is no [`SleepType`].
+static SLP_TYPA: AtomicU8 = AtomicU8::new(UNSUPPLIED);
+const UNSUPPLIED: u8 = u8::MAX;
 
 static RESET: Slot = Slot::empty();
 static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
@@ -60,70 +68,42 @@ pub fn init_reset(rsdp_addr: u64) {
     }
 }
 
-/// Record S5 soft-off, or say by name why this machine has none; it keeps
-/// booting either way. After the IDT, so a fault in the DSDT walk is reported.
-pub fn init_off(rsdp_addr: u64) {
-    const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
-
+/// Declare the FADT's PM1a control block, or say by name why this machine
+/// has none; it keeps booting either way. After the IDT, so a fault in the
+/// table walk is reported.
+pub fn init_control(rsdp_addr: u64) {
     let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE) {
         Ok(table) => table,
-        Err(e) => {
-            log!("ACPI: FADT unusable: {e:?} — no soft-off, shutdown will halt instead");
-            return;
-        }
+        Err(e) => return log!("ACPI: FADT unusable: {e:?} — no PM1a control block, so no ACPI row and no power-off"),
     };
-
     let block = match toyos_acpi::pm1a_control(&fadt) {
         Ok(block) => block,
-        Err(refused) => return log!("ACPI: no PM1a control block this kernel writes ({refused:?}) — no soft-off"),
+        Err(refused) => return log!("ACPI: no PM1a control block this kernel writes ({refused:?}) — no ACPI row and no power-off"),
     };
-    let pm1a = block.port;
-    let run = Ports::new(pm1a, block.len).expect("pm1a_control bounded the block by the port space");
+    let run = Ports::new(block.port, block.len).expect("pm1a_control bounded the block by the port space");
     match pio::declare("the PM1a control block", run, Mediated::ReadOnly) {
         Ok(declared) => PM1A_CNT.set(declared),
-        Err(why) => {
-            log!("ACPI: PM1a control block {pm1a:#x} not declared ({why:?}) — no soft-off");
-            return;
-        }
+        Err(why) => log!("ACPI: PM1a control block {:#x} not declared ({why:?}) — no ACPI row and no power-off", block.port),
     }
+}
 
-    // Prefer X_DSDT over DSDT; a revision claiming 2.0 doesn't prove the field is present, so the length is checked rather than trusting the revision alone.
-    let dsdt_addr = toyos_acpi::dsdt_address(&fadt);
-    if dsdt_addr == 0 {
-        log!(
-            "ACPI: FADT names no DSDT (rev {:?}, needs {FADT_FOR_X_DSDT} bytes for X_DSDT) — no soft-off",
-            fadt.byte(SDT_REVISION)
-        );
-        return;
-    }
+/// Take `\_S5`'s `SLP_TYPa` from the `acpi` claim's holder, which
+/// `acpi_mode::s5` lets supply one: the next claim's holder replaces it, the
+/// last to have read the tables being the one believed.
+pub fn supply(slp_typ: SleepType) {
+    let control = PM1A_CNT.get().expect("an acpi claim exists only over a declared PM1a control block");
+    SLP_TYPA.store(slp_typ.get(), Ordering::Release);
+    log!("power: S5 is PM1a {:#x} with SLP_TYPa={}, as the acpi claim's holder supplied it", control.ports().first(), slp_typ.get());
+}
 
-    let dsdt = match Table::open(direct_phys(), dsdt_addr, b"DSDT", SDT_HEADER_LEN) {
-        Ok(table) => table,
-        Err(TableError::Unmapped { .. }) => {
-            log!("ACPI: FADT points the DSDT at {dsdt_addr:#x}, which is not an address — no soft-off");
-            return;
-        }
-        Err(e) => {
-            log!("ACPI: DSDT at {dsdt_addr:#x} unusable: {e:?} — no soft-off");
-            return;
-        }
-    };
+/// What a holder supplied, if one has.
+fn sleep_type() -> Option<SleepType> {
+    toyos_userbound::firmware::sleep_type(u64::from(SLP_TYPA.load(Ordering::Acquire)))
+}
 
-    let slp_typ = match toyos_acpi::s5_slp_typ(&dsdt) {
-        S5::SlpTyp(slp_typ) => slp_typ,
-        S5::Absent => {
-            log!("ACPI: no \\_S5_ package in the DSDT — no soft-off");
-            return;
-        }
-        S5::Wide(byte) => {
-            log!("ACPI: the DSDT's \\_S5_ names SLP_TYPa {byte:#x}, wider than its three bits — no soft-off");
-            return;
-        }
-    };
-
-    SLP_TYPA.store(slp_typ, Ordering::Relaxed);
-    SOFT_OFF.store(true, Ordering::Release);
-    log!("ACPI: PM1a={pm1a:#x} SLP_TYPa={slp_typ}");
+/// Why this machine has no power-off this kernel performs, where it has none.
+pub fn off_refused() -> Option<&'static str> {
+    sleep_type().is_none().then_some("no ACPI server supplied S5")
 }
 
 pub fn can_reset() -> bool {
@@ -167,7 +147,8 @@ pub fn settle(stopping: crate::quiesce::Stopping) -> Settled {
     Settled(taken)
 }
 
-/// Enter S5, or halt on a machine whose tables named no soft-off.
+/// Enter S5. The caller asked [`off_refused`] before it stopped the machine:
+/// no sleep type here is this kernel's defect, and a panic.
 ///
 /// **Nothing here logs**: the log's last drain is behind it (`power::shutdown`).
 ///
@@ -183,15 +164,16 @@ pub fn settle(stopping: crate::quiesce::Stopping) -> Settled {
 /// where a halt would leave a machine that is on, silent, and indistinguishable
 /// from one the power left.
 pub fn off(Settled(taken): Settled) -> ! {
-    let (Some(control), true) = (PM1A_CNT.get(), SOFT_OFF.load(Ordering::Acquire)) else { cpu::halt() };
-    let control = control.port(0);
+    // Past the settle no holder's call is in flight: the one a supply logged last.
+    let slp_typ = sleep_type().expect("power: the machine was stopped for a power-off with no SLP_TYPa: the acpi claim's holder supplies it, and a shutdown without one is refused before the stop");
+    let control = PM1A_CNT.get().expect("power: a sleep type was supplied over no PM1a control block").port(0);
     let held = cpu::inw(control);
     if held & SCI_EN != 0 {
         super::acpi_mode::quiet(&taken);
     }
-    let typed = held & !(SLP_TYP | SLP_EN) | u16::from(SLP_TYPA.load(Ordering::Relaxed)) << 10;
+    let typed = slp_typ.in_control(held & !SLP_EN);
     let smis_before = super::counters::read().smi;
-    // SAFETY: the block `init_off` declared and the `SLP_TYPa` the DSDT's `\_S5_` names, both decoded before `SOFT_OFF` was set.
+    // SAFETY: the block `init_control` declared, and a `SLP_TYPa` the field holds: what it does is the firmware's, as its `\_S5` names it.
     unsafe {
         cpu::outw(control, typed);
         cpu::outw(control, typed | SLP_EN);

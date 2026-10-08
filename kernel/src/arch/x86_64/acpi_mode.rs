@@ -50,8 +50,11 @@
 //! taken; one whose FACS this kernel refuses has a lock nothing here can
 //! take, and every take is refused ([`GlobalLock`]).
 //!
+//! **The power-off's sleep type is the holder's to supply** ([`s5`]), once
+//! under a claim: `\_S5` is AML, and this kernel reads none.
+//!
 //! **Nothing is done for the holder once the stop has begun**, as nothing is
-//! written to `SMI_CMD`: an access and a lock exchange are each made under
+//! written to `SMI_CMD`: an access, a lock exchange and a sleep type taken are each made under
 //! [`HOLDER`], from the decision to the last instruction, and refused there
 //! once the stop has begun; the power-off takes that lock before it owns the
 //! hardware ([`settle`]), which waits out the one in flight.
@@ -141,6 +144,8 @@ struct Facs {
 struct Holder {
     /// The holder took the Global Lock and has not given it back.
     locked: bool,
+    /// The holder supplied the power-off's sleep type: it supplies no second.
+    supplied: bool,
 }
 
 /// Held across everything this kernel does for the claim's holder, from the
@@ -149,7 +154,7 @@ struct Holder {
 /// (`object::Held`), and `pcidev`'s machine record and then `paging`'s record
 /// of windows under it; nothing holding one of those two takes this or a
 /// claim's.
-static HOLDER: Lock<Holder> = Lock::new(Holder { locked: false });
+static HOLDER: Lock<Holder> = Lock::new(Holder { locked: false, supplied: false });
 
 /// The right to act for the claim's holder, held across the act; none once
 /// the stop has begun. The claim is there for the whole of the act: its row
@@ -402,7 +407,12 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
 /// disable is still to come.
 pub fn release() {
     let hardware = hardware().expect("a claimed row has its hardware");
-    give_back(hardware, &mut HOLDER.lock(), "its claim is gone");
+    {
+        let mut holder = HOLDER.lock();
+        // The next claim's holder supplies its own; this one's stands until then.
+        holder.supplied = false;
+        give_back(hardware, &mut holder, "its claim is gone");
+    }
     if ENABLED.load(Ordering::Relaxed) {
         leave(hardware);
     }
@@ -531,6 +541,22 @@ pub fn lock_release(row: &isa::Row) -> Result<(), SyscallError> {
         return Err(SyscallError::InvalidArgument);
     }
     give_back(hardware, &mut holder, "");
+    Ok(())
+}
+
+/// Take the `SLP_TYPa` of the machine's `\_S5` from the claim's holder, for
+/// the power-off (`power::supply`): `InvalidArgument` is a word wider than
+/// the register's field, and `AlreadyExists` a second one under this claim;
+/// nothing is kept of either. Its line is said under the claim's lock and
+/// [`HOLDER`]: `log::emit` takes no lock.
+pub fn s5(row: &isa::Row, word: u64) -> Result<(), SyscallError> {
+    let slp_typ = firmware::sleep_type(word).ok_or(SyscallError::InvalidArgument)?;
+    let mut holder = acting(row)?;
+    if holder.supplied {
+        return Err(SyscallError::AlreadyExists);
+    }
+    holder.supplied = true;
+    super::power::supply(slp_typ);
     Ok(())
 }
 

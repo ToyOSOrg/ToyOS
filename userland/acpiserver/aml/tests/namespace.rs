@@ -200,8 +200,7 @@ fn a_processor_parses_opens_a_scope_and_takes_notify() {
 const QEMU_DSDT: &[u8] = include_bytes!("../../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin");
 
 /// QEMU 11.1.1's DSDT, as `toyos-acpi/fixtures/qemu-11.1.1/SOURCE` records
-/// it: a boot of it logged `ACPI: PM1a=0x604 SLP_TYPa=0`, which the kernel
-/// read by `toyos_acpi::s5_slp_typ`'s byte scan.
+/// it: QEMU powers its q35 off on `SLP_TYPa` 0.
 #[test]
 fn qemus_dsdt_loads_and_its_s5_is_what_its_boot_logged() {
     let mut m = Machine::default();
@@ -209,8 +208,6 @@ fn qemus_dsdt_loads_and_its_s5_is_what_its_boot_logged() {
     i.load_bytes(&mut m, QEMU_DSDT).unwrap();
     let zero = Value::Integer(0);
     assert_eq!(i.evaluate(&mut m, "\\_S5", &[]), Ok(Value::Package(vec![zero.clone(), zero.clone(), zero.clone(), zero])));
-    let scanned = toyos_acpi::s5_slp_typ(&toyos_acpi::Table::open(Image(QEMU_DSDT), 0, b"DSDT", 0).unwrap());
-    assert_eq!(scanned, toyos_acpi::S5::SlpTyp(0));
     assert_eq!(m.log, vec![]);
 }
 

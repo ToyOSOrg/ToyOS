@@ -15,8 +15,9 @@ syscap = ["logread"]
 # hands none without it; `power` because the job list ends the machine,
 # asking the supervisor.
 #
-# `args` as it stands is the guest's: `acpi_mediated_access` boots this file
-# with its probe on ROOT. A metal row's job list replaces it.
+# `args` as it stands is the guest's: `acpi_mediated_access` and
+# `acpi_supply_outlives_holder` boot this file with their probe on ROOT. A
+# metal row's job list replaces it.
 [programs.test-runner]
 receives = ["power"]
 syscap = ["device", "dup"]
