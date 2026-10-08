@@ -4,7 +4,7 @@
 //! into both kernel and userspace. `OP_WATCH` fires once; userspace re-submits to re-arm.
 //!
 //! **A watch is a poll registered on the watched object's own
-//! [`Watch`](crate::watch::Watch)**, one entry per direction it asked for, and
+//! [`Watch`](crate::watch::Watch)**, one entry per watch its interest names, and
 //! the object's post fires it. There is no table of sources here: what a
 //! handle watches is `ops::read_watch`/`ops::write_watch`'s answer, and the
 //! poll holds no reference to the object at all.
@@ -109,10 +109,11 @@ pub struct WatchFlags(u32);
 impl WatchFlags {
     pub const READABLE: Self = Self(toyos_abi::inbox::READABLE);
     pub const WRITABLE: Self = Self(toyos_abi::inbox::WRITABLE);
+    pub const OTHER_END_GONE: Self = Self(toyos_abi::inbox::OTHER_END_GONE);
     /// Every bit `toyos_abi::inbox` defines for `Submission::op_flags`;
     /// hand-copied and unchecked, for the reason `syscall/vm.rs`'s
     /// `MMAP_PROT_KNOWN` gives for all four of these masks.
-    const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0;
+    const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0 | Self::OTHER_END_GONE.0;
 
     /// A bit outside [`Self::KNOWN`] is an interest this kernel would register
     /// for neither direction, so the whole watch is refused rather than served.
@@ -124,6 +125,7 @@ impl WatchFlags {
     }
     pub fn readable(self) -> bool { self.0 & Self::READABLE.0 != 0 }
     pub fn writable(self) -> bool { self.0 & Self::WRITABLE.0 != 0 }
+    pub fn other_end_gone(self) -> bool { self.0 & Self::OTHER_END_GONE.0 != 0 }
     pub fn raw(self) -> u32 { self.0 }
 }
 
@@ -134,6 +136,7 @@ impl WatchFlags {
 struct Readiness {
     readable: bool,
     writable: bool,
+    other_end_gone: bool,
 }
 
 impl Readiness {
@@ -141,11 +144,12 @@ impl Readiness {
         let mut flags = 0u32;
         if self.readable { flags |= WatchFlags::READABLE.raw(); }
         if self.writable { flags |= WatchFlags::WRITABLE.raw(); }
+        if self.other_end_gone { flags |= WatchFlags::OTHER_END_GONE.raw(); }
         flags
     }
 
     fn any(self) -> bool {
-        self.readable || self.writable
+        self.readable || self.writable || self.other_end_gone
     }
 }
 
@@ -532,8 +536,17 @@ fn arm(
     let ready = readiness_of(object, flags).any();
     let read = if flags.readable() { ops::read_watch(object) } else { None };
     let write = if flags.writable() { ops::write_watch(object) } else { None };
-    // No readiness in either direction: nothing could ever answer this poll, so it is refused, not registered.
-    if !ready && read.is_none() && write.is_none() {
+    // A pipe end's own watch is the one its other end's last holder posts;
+    // an object with no other end is refused the question, whatever else the
+    // watch asks. A direction asked above has taken that watch already.
+    let own = match flags.other_end_gone().then(|| ops::pipe_end_watch(object)) {
+        Some(None) => return Err(SyscallError::NotSupported),
+        Some(Some(_)) if read.is_some() || write.is_some() => None,
+        Some(own) => own,
+        None => None,
+    };
+    // Nothing its interest names: nothing could ever answer this poll, so it is refused, not registered.
+    if !ready && read.is_none() && write.is_none() && own.is_none() {
         return Err(SyscallError::NotSupported);
     }
 
@@ -566,17 +579,21 @@ fn arm(
     if let Some(watch) = &write {
         watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::WRITABLE });
     }
+    if let Some(watch) = &own {
+        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::OTHER_END_GONE });
+    }
     if readiness_of(object, flags).any() {
         poll.fire(0);
     }
     Ok(())
 }
 
-/// Per-direction readiness of the object, restricted to what was asked for.
+/// What the object answers each condition, restricted to what was asked for.
 fn readiness_of(object: &KObjectRef, flags: WatchFlags) -> Readiness {
     Readiness {
         readable: flags.readable() && ops::has_data(object),
         writable: flags.writable() && ops::has_space(object),
+        other_end_gone: flags.other_end_gone() && ops::other_end_gone(object),
     }
 }
 

@@ -9,7 +9,12 @@
 //! what an interpreter holds of tables, namespace and objects is bounded in
 //! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
 //! without anything that table created, and the interpreter holding what it
-//! held before.
+//! held before. What the last load or evaluation took of those bounds is
+//! [`Interpreter::usage`]'s, a refused one's too.
+//!
+//! [`Interpreter::walk`] reads the namespace an interpreter holds, and runs
+//! nothing of it: which objects a caller then evaluates, and in which order,
+//! is the caller's.
 //!
 //! The library touches no hardware. An operation region's field is read and
 //! written through the [`Host`] the caller passes, in SystemMemory,
@@ -193,12 +198,105 @@ pub enum Value {
     Reference(String),
 }
 
+/// What a load or an evaluation took of its bounds, a refused one as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Usage {
+    /// The steps it took: terms, arguments, loop iterations, field access
+    /// units, and the bytes it made, copied, compared or walked.
+    pub steps: u64,
+    /// The time it asked to Sleep, Stall and Wait, in µs, the request its
+    /// limit refused included.
+    pub waited_us: u64,
+    /// The heap the interpreter held at its end, of [`MAX_LIVE`].
+    pub live: usize,
+}
+
+/// What a named object is: the types of Table 19.36, a predefined scope,
+/// which has none, and a reference a Name holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Uninitialized,
+    Integer,
+    String,
+    Buffer,
+    Package,
+    FieldUnit,
+    Device,
+    Event,
+    Method,
+    Mutex,
+    OperationRegion,
+    PowerResource,
+    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
+    Processor,
+    ThermalZone,
+    BufferField,
+    /// `\_SB` and the other scopes of §5.3.1: descended, and no device.
+    Scope,
+    Reference,
+}
+
+/// One object of a [`Walk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    /// How many names its path has: 1 directly below the root. Everything
+    /// below an object follows it at a greater depth, so a caller leaves a
+    /// subtree out by skipping to the next entry no deeper than its top.
+    pub depth: u32,
+    pub name: [u8; 4],
+    pub kind: Kind,
+}
+
+/// The namespace read from the root down ([`Interpreter::walk`]). A table
+/// chooses how deep it nests, and a path is as long as its depth: an entry
+/// is as small at any depth, and is what a caller keeps of a whole
+/// namespace, where the paths of one nested as deep as [`MAX_LIVE`] admits
+/// are gigabytes.
+pub struct Walk<'a>(namespace::Walk<'a>);
+
+impl Walk<'_> {
+    /// The absolute path of the entry last returned, as
+    /// [`Interpreter::evaluate`] takes it.
+    pub fn path(&self) -> &str {
+        self.0.path()
+    }
+}
+
+impl Iterator for Walk<'_> {
+    type Item = Entry;
+
+    fn next(&mut self) -> Option<Entry> {
+        let (depth, seg, object) = self.0.step()?;
+        let kind = match object {
+            Object::Uninit => Kind::Uninitialized,
+            Object::Int(_) => Kind::Integer,
+            Object::Str(_) => Kind::String,
+            Object::Buf(_) => Kind::Buffer,
+            Object::Pkg(_) => Kind::Package,
+            Object::Field(_) => Kind::FieldUnit,
+            Object::BufField(_) => Kind::BufferField,
+            Object::Ref(_) | Object::Lazy(_) => Kind::Reference,
+            Object::Scope => Kind::Scope,
+            Object::Device => Kind::Device,
+            Object::Processor => Kind::Processor,
+            Object::ThermalZone => Kind::ThermalZone,
+            Object::PowerResource => Kind::PowerResource,
+            Object::Method(_) => Kind::Method,
+            Object::Mutex(_) => Kind::Mutex,
+            Object::Event(_) => Kind::Event,
+            Object::Region(_) => Kind::OperationRegion,
+        };
+        Some(Entry { depth, name: seg.0, kind })
+    }
+}
+
 /// One machine's namespace, and what loaded it.
 pub struct Interpreter {
     ns: Namespace,
     meter: Rc<Meter>,
     /// Set by the DSDT's revision (§19.6.29), for every table after it.
     width: Option<Width>,
+    last: Usage,
 }
 
 impl Default for Interpreter {
@@ -228,12 +326,20 @@ impl Interpreter {
         let os = meter.bytes(b"Microsoft Windows NT".to_vec()).expect(held);
         put(b"_OS_", Object::Str(os));
         put(b"_REV", Object::Int(2));
-        Interpreter { ns, meter, width: None }
+        let last = Usage { live: meter.live(), ..Usage::default() };
+        Interpreter { ns, meter, width: None, last }
     }
 
     /// Loads a DSDT or SSDT (§5.4.2): the DSDT first, then each SSDT. The
     /// table's header, length and checksum are [`toyos_acpi::Table::open`]'s.
     pub fn load<P: toyos_acpi::Phys>(&mut self, host: &mut dyn Host, table: &toyos_acpi::Table<P>) -> Result<(), Error> {
+        self.last = Usage::default();
+        let r = self.load_in(host, table);
+        self.last.live = self.meter.live();
+        r
+    }
+
+    fn load_in<P: toyos_acpi::Phys>(&mut self, host: &mut dyn Host, table: &toyos_acpi::Table<P>) -> Result<(), Error> {
         let bytes: Vec<u8> = (0..table.len()).map_while(|i| table.byte(i)).collect();
         let w = match (&bytes[..4], self.width) {
             (b"DSDT", None) => Width { bits: if bytes[toyos_acpi::SDT_REVISION] < 2 { 32 } else { 64 } },
@@ -253,22 +359,25 @@ impl Interpreter {
             exec::Flow::Next => Ok(()),
             _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),
         });
-        let r = m.finish(r);
-        match r {
-            Ok(()) => {
-                self.width = Some(w);
-                Ok(())
-            }
-            Err(e) => {
-                self.ns.unwind(made);
-                Err(e)
-            }
+        let r = m.finish(r, &mut self.last);
+        if r.is_ok() {
+            self.width = Some(w);
+        } else {
+            self.ns.unwind(made);
         }
+        r
     }
 
     /// Evaluates the object at an absolute path, written `\_SB.PCI0._STA`: a
     /// method is invoked with `args`, anything else is its value.
     pub fn evaluate(&mut self, host: &mut dyn Host, path: &str, args: &[Value]) -> Result<Value, Error> {
+        self.last = Usage::default();
+        let r = self.evaluate_in(host, path, args);
+        self.last.live = self.meter.live();
+        r
+    }
+
+    fn evaluate_in(&mut self, host: &mut dyn Host, path: &str, args: &[Value]) -> Result<Value, Error> {
         let w = self.width.ok_or(Error::Table("nothing is loaded"))?;
         let id = self.named(path)?;
         let args = args.iter().map(|a| self.object_of(a, w, 0)).collect::<Result<Vec<_>, _>>()?;
@@ -278,7 +387,23 @@ impl Interpreter {
         let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, &meter, &mut handed, o, 0));
         // The value is the caller's from here, and no longer this interpreter's.
         meter.give(handed);
-        m.finish(r)
+        m.finish(r, &mut self.last)
+    }
+
+    /// What the last load or evaluation took, and what the interpreter held
+    /// at its end.
+    pub fn usage(&self) -> Usage {
+        self.last
+    }
+
+    /// Every object the loaded tables and this interpreter defined, read-only
+    /// and without evaluating any: each after the object it is in, siblings
+    /// in the order they were declared, a table's after those of the tables
+    /// loaded before it. An Alias is not among them; what it names is, where
+    /// it was defined. The walk is held against [`MAX_LIVE`] while it lasts,
+    /// and refused where that has no room for it.
+    pub fn walk(&self) -> Result<Walk<'_>, Error> {
+        self.ns.walk().map(Walk)
     }
 
     fn object_of(&self, v: &Value, w: Width, depth: usize) -> Result<Object, Error> {

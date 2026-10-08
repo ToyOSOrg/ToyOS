@@ -524,6 +524,99 @@ fn waits_and_stalls_are_bounded_in_time_asked() {
     assert!(stalled <= 10_000_000, "{stalled} µs");
 }
 
+fn sleep(ms: u64) -> Vec<u8> {
+    cat(&[&[0x5B, 0x22], &int(ms)])
+}
+
+fn stall(us: u64) -> Vec<u8> {
+    cat(&[&[0x5B, 0x21], &int(us)])
+}
+
+/// Ten seconds is the most an evaluation may ask, to the microsecond, and a
+/// load too. What crosses it is not asked of the host.
+#[test]
+fn the_wait_limit_is_exact_and_a_loads_too() {
+    let (mut i, mut m) = loaded(&cat(&[
+        &method("TEN0", 0, &cat(&[&sleep(9_999), &stall(250), &stall(250), &stall(250), &stall(250), &ret(&int(1))])),
+        &method("TEN1", 0, &cat(&[&sleep(10_000), &stall(1), &ret(&int(1))])),
+    ]));
+    let asleep = Error::Bound("more time asleep than one evaluation may spend");
+    let over = Err(asleep.clone());
+
+    assert_eq!(i.evaluate(&mut m, "\\TEN0", &[]), Ok(Value::Integer(1)));
+    assert_eq!(i.usage().waited_us, 10_000_000);
+    m.log.clear();
+    assert_eq!(i.evaluate(&mut m, "\\TEN1", &[]), over);
+    assert_eq!(i.usage().waited_us, 10_000_001);
+    assert_eq!(m.log, vec![Event::Sleep(10_000)]);
+
+    let mut m = Machine::default();
+    assert_eq!(Interpreter::new().load_bytes(&mut m, &dsdt(&cat(&[&sleep(10_000), &def_name("A", &int(1))]))), Ok(()));
+    assert_eq!(Interpreter::new().load_bytes(&mut m, &dsdt(&cat(&[&sleep(10_000), &stall(1)]))), Err(asleep));
+}
+
+/// What a load or an evaluation took is read after it, a refused one's too,
+/// and is that call's alone.
+#[test]
+fn usage_is_each_calls_own_and_a_refusals_too() {
+    let mut m = Machine::default();
+    let mut i = Interpreter::new();
+    let empty = i.usage();
+    assert_eq!((empty.steps, empty.waited_us), (0, 0));
+    assert!(empty.live > 0 && empty.live < 4096, "{empty:?}");
+
+    let body = cat(&[
+        &def_name("PKG0", &package(&[int(0)])),
+        &method("SPIN", 0, &while_(&int(1), &[0xA3])),
+        &method("NAP0", 0, &cat(&[&sleep(3), &stall(5)])),
+        &method("KEEP", 0, &store(&buffer(&int(1000), &[]), &index(&name("PKG0"), &int(0), ZERO))),
+        &method("DROP", 0, &store(&int(0), &index(&name("PKG0"), &int(0), ZERO))),
+        &method("RETB", 0, &ret(&buffer(&int(1000), &[]))),
+    ]);
+    i.load_bytes(&mut m, &dsdt(&body)).unwrap();
+    let loaded = i.usage();
+    // Six terms and what they hold: a load is counted as an evaluation is.
+    assert!(loaded.steps >= 6 && loaded.steps < 64, "{loaded:?}");
+    assert_eq!(loaded.waited_us, 0);
+    assert!(loaded.live > empty.live + body.len(), "{loaded:?}");
+
+    // The step bound's refusal has taken the bound and the step it refused.
+    assert!(matches!(i.evaluate(&mut m, "\\SPIN", &[]), Err(Error::Bound(_))));
+    assert_eq!(i.usage(), toyos_aml::Usage { steps: (1 << 20) + 1, waited_us: 0, live: loaded.live });
+
+    i.evaluate(&mut m, "\\NAP0", &[]).unwrap();
+    let napped = i.usage();
+    assert_eq!((napped.waited_us, napped.live), (3_005, loaded.live));
+    assert!(napped.steps >= 4 && napped.steps < 16, "{napped:?}");
+
+    // What an evaluation leaves stored is held after it; what it hands its
+    // caller is not.
+    i.evaluate(&mut m, "\\KEEP", &[]).unwrap();
+    let kept = i.usage();
+    assert!(kept.live >= loaded.live + 1000 && kept.live < loaded.live + 1100, "{kept:?}");
+    assert_eq!(kept.waited_us, 0);
+    assert_eq!(i.evaluate(&mut m, "\\RETB", &[]), Ok(Value::Buffer(vec![0; 1000])));
+    assert_eq!(i.usage().live, kept.live);
+    i.evaluate(&mut m, "\\DROP", &[]).unwrap();
+    assert_eq!(i.usage().live, loaded.live);
+
+    // A refusal before anything ran took nothing.
+    assert!(matches!(i.evaluate(&mut m, "\\NONE", &[]), Err(Error::NotFound(_))));
+    assert_eq!(i.usage(), toyos_aml::Usage { steps: 0, waited_us: 0, live: loaded.live });
+
+    // A refused load took its steps, and holds what was held before it.
+    let refused = table(b"SSDT", 2, &cat(&[&def_name("\\NEW0", &buffer(&int(5000), &[])), &sleep(7), &def_name("\\PKG0", &int(1))]));
+    assert!(matches!(i.load_bytes(&mut m, &refused), Err(Error::Exists(_))));
+    let after = i.usage();
+    assert_eq!((after.waited_us, after.live), (7_000, loaded.live));
+    assert!(after.steps >= 3 && after.steps < 256, "{after:?}");
+
+    // A load refused before anything ran took nothing, whatever the call
+    // before it took.
+    assert_eq!(i.load_bytes(&mut m, &dsdt(&[])), Err(Error::Table("a second DSDT")));
+    assert_eq!(i.usage(), toyos_aml::Usage { steps: 0, waited_us: 0, live: loaded.live });
+}
+
 /// BLOCKER 9 (c): a reference to an object a method created names nothing
 /// once the method exits, even after its slot is reused.
 #[test]
