@@ -4,9 +4,11 @@
 //! Exhausting address space is an error return, never an `.expect`.
 //!
 //! **A length from userland is refused before any arithmetic touches it, and
-//! before any lock.** Every arm goes through `vma::window().span`, the bound
-//! `find_gap` places in: one no placement window could hold is
+//! before any lock.** Every arm that places goes through `vma::window().span`,
+//! the bound `find_gap` places in: one no placement window could hold is
 //! `InvalidArgument`, one that could but finds no room is `ResourceExhausted`.
+//! `munmap` does no arithmetic on its length: it is equal to the one the
+//! mapping's `mmap` was asked for, or it is refused.
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
@@ -99,10 +101,13 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
                 }
                 Occupancy::Free => None,
                 Occupancy::Whole => {
+                    // By the length it was asked for, as `munmap` names it: a
+                    // shorter request that rounds to the same span would
+                    // replace pages its caller did not name.
                     let mine = data
                         .mmap_regions
                         .iter()
-                        .position(|r| r.addr == start && r.size == aligned);
+                        .position(|r| r.addr == start && r.len == size);
                     match mine {
                         Some(idx) => Some(idx),
                         None => return Err(SyscallError::InvalidArgument),
@@ -136,7 +141,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
                 );
             }
             data.mmap_regions.push(process::MmapRegion {
-                addr: start, size: aligned, _pages: pages,
+                addr: start, size: aligned, len: size, _pages: pages,
             });
             data.alloc_count += 1;
             let mem = data.mmap_regions.iter().map(|r| r.size as u64).sum::<u64>();
@@ -161,7 +166,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             };
             let Some(vaddr) = placed else { return Err(()) };
             data.mmap_regions.push(process::MmapRegion {
-                addr: vaddr, size: aligned, _pages: pages,
+                addr: vaddr, size: aligned, len: size, _pages: pages,
             });
             data.alloc_count += 1;
             let mem = data.mmap_regions.iter().map(|r| r.size as u64).sum::<u64>();
@@ -176,20 +181,22 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
 }
 
 /// Frees the anonymous mapping that starts at `addr`, whole, and shoots down
-/// every sibling thread's translation for its range. `size` names it as the
-/// `mmap` that made it did: one that does not round to the mapping's recorded
-/// span is `InvalidArgument` and unmaps nothing, a mapping being one region
-/// with no part to take away.
+/// every sibling thread's translation for its range. `size` is the length its
+/// `mmap` was asked for, to the byte: any other is `InvalidArgument` and
+/// unmaps nothing, a mapping being one region with no part to take away.
+///
+/// The two lengths are compared as they were given and never as what they
+/// round to: a shorter one that rounds to the same pages names a part its
+/// caller means to keep, and which lengths those are would move with the page
+/// size. A caller that counts in pages rounds both of its own lengths, as
+/// `userland/libc` does.
 pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
-    let Some(span) = crate::vma::window().span(size) else {
-        return SyscallError::InvalidArgument.to_u64();
-    };
     let pt = process::current_address_space();
     let taken = process::with_process_data(|data| {
         let Some(idx) = data.mmap_regions.iter().position(|r| r.addr.raw() == addr) else {
             return Err(SyscallError::NotFound);
         };
-        if data.mmap_regions[idx].size as u64 != span.bytes() {
+        if data.mmap_regions[idx].len != size {
             return Err(SyscallError::InvalidArgument);
         }
         let region = data.mmap_regions.swap_remove(idx);

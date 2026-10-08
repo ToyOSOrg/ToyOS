@@ -76,10 +76,14 @@ live split of a user leaf.
    process's floor on the T14 against the 10 to 14 MB above.
 4. **Demand-zero anonymous `mmap`.** A fault installs a 2 MiB leaf only for a
    whole aligned 2 MiB span of the mapping; unmapping a range no thread touched
-   sends no IPI; `munmap` refuses a size that is not the whole mapping, by the
-   orchestrator's ruling. Exit: `mmap` of more than the watermark allows
-   refused at `mmap`, and a guest that touches one page of a large mapping
-   holds one frame.
+   sends no IPI. `munmap` refuses a size that is not the whole mapping, by the
+   orchestrator's ruling, and that is in: `SYS_MUNMAP` and a `FIXED` `mmap`
+   over a mapping take only the length the mapping's `mmap` was asked for,
+   compared as given, so this stage's rounding moves nothing either accepts.
+   What the stage still owes of it: a region that splits is where
+   `issues/libc-munmap-refuses-part-of-a-mapping.md` would be answered. Exit:
+   `mmap` of more than the watermark allows refused at `mmap`, and a guest
+   that touches one page of a large mapping holds one frame.
 5. **File-backed faults at 4 KiB.** ROOT's read-only text is shared
    zero-copy. Exit: two processes of one binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when

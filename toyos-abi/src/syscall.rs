@@ -2305,7 +2305,7 @@ pub const MAX_REGIONS: usize = 32_768;
 ///
 /// - Over free space it maps, and the call answers `addr`.
 /// - Over exactly one whole mapping this process's own `mmap` made — the same
-///   address and the same 2 MiB-rounded size — it replaces it, and the address
+///   address and the same `size`, to the byte — it replaces it, and the address
 ///   keeps its meaning while changing what it names. The old range leaves the
 ///   address space and the process's mapping list before the new one enters
 ///   either, its pages go back to the allocator, and the shootdown a sibling
@@ -2330,9 +2330,9 @@ pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags)
 
 /// Unmap the whole mapping `mmap` returned at `addr`.
 ///
-/// `size` names it as the `mmap` that made it did: any length that rounds to
-/// the same 2 MiB span. No mapping starting at `addr` is `NotFound`; a `size`
-/// that rounds to another span — a prefix, more than the mapping, zero — is
+/// `size` is the `size` that `mmap` was passed, to the byte. No mapping
+/// starting at `addr` is `NotFound`; any other `size` — a prefix, more than
+/// the mapping, zero, a length that only rounds to the same pages — is
 /// `InvalidArgument` and unmaps nothing. A mapping has no part to give back.
 ///
 /// # Safety

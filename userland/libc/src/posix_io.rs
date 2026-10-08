@@ -522,7 +522,10 @@ pub unsafe extern "C" fn mmap(
     let mut mf = MmapFlags::PRIVATE | MmapFlags::ANONYMOUS;
     if flags & memreq::MAP_FIXED != 0 { mf = mf | MmapFlags::FIXED; }
 
-    let ptr = unsafe { syscall::mmap(addr, len, mp, mf) };
+    // Asked for in whole pages, the length `munmap` names it by; more pages
+    // than a `usize` counts is the null the kernel answers a size it cannot map.
+    let ptr = memreq::whole_pages(len)
+        .map_or(core::ptr::null_mut(), |len| unsafe { syscall::mmap(addr, len, mp, mf) });
     if ptr.is_null() {
         // The kernel's refusal does not say which it is: ENOMEM is POSIX's
         // for a place or size the address space does not allow.
@@ -555,18 +558,22 @@ pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32
     }
 }
 
-/// Unmaps the whole mapping at `addr` or nothing: the kernel refuses a `len`
-/// that names part of one, which POSIX would unmap. `EINVAL` is the one error
-/// POSIX gives `munmap`, so it is every refusal's.
+/// Unmaps the whole mapping at `addr` or nothing. `len` names it by the pages
+/// it reaches into (`memreq::whole_pages`), as POSIX counts: every page of
+/// the mapping, or the kernel refuses. A `len` that names some of a mapping's
+/// pages, which POSIX would unmap, is refused with the rest
+/// (`issues/libc-munmap-refuses-part-of-a-mapping.md`). `EINVAL` is the one
+/// error POSIX gives `munmap`, so it is every refusal's.
 #[no_mangle]
 pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
-    // SAFETY: the caller's, as C's `munmap` leaves it.
-    match unsafe { syscall::munmap(addr, len) } {
-        Ok(()) => 0,
-        Err(_) => {
-            crate::errno::set(EINVAL);
-            -1
-        }
+    let unmapped = crate::memreq::whole_pages(len)
+        // SAFETY: the caller's, as C's `munmap` leaves it.
+        .is_some_and(|len| unsafe { syscall::munmap(addr, len) }.is_ok());
+    if unmapped {
+        0
+    } else {
+        crate::errno::set(EINVAL);
+        -1
     }
 }
 

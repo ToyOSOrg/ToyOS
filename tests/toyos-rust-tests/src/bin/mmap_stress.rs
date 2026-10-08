@@ -49,9 +49,9 @@ fn main() {
         unsafe { munmap(ptr, size) }.expect("munmap failed");
     }
 
-    // A mapping is unmapped whole or not at all. Each wrong size is followed
-    // by a read of both spans before its answer is judged: a kernel that took
-    // the mapping ends this process there.
+    // A mapping is unmapped by the length it was mapped with, or not at all.
+    // Each other size is followed by a read of both spans before its answer is
+    // judged: a kernel that took the mapping ends this process there.
     let pair = unsafe {
         mmap(core::ptr::null_mut(), 2 * page_2m, MmapProt::READ | MmapProt::WRITE,
              MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)
@@ -64,6 +64,9 @@ fn main() {
         ("its first span", page_2m),
         ("one byte", 1),
         ("one byte more than its two spans", 2 * page_2m + 1),
+        // Both round to the two spans, and neither is the length mapped.
+        ("one byte less than its two spans", 2 * page_2m - 1),
+        ("its first span and a byte", page_2m + 1),
         ("nothing", 0),
         ("every byte there is", usize::MAX),
     ] {
@@ -76,15 +79,34 @@ fn main() {
     let answer = unsafe { munmap(second, page_2m) };
     assert_eq!(unsafe { second.read_volatile() }, 0x3C, "unmapping a mapping's second span took it");
     assert_eq!(answer, Err(SyscallError::NotFound), "unmapping a mapping's second span");
-    // Any length that rounds to the mapping's span names it, as it did to `mmap`.
-    unsafe { munmap(pair, page_2m + 1) }.expect("a two-span mapping unmapped by a length inside its second span");
+    unsafe { munmap(pair, 2 * page_2m) }.expect("a two-span mapping unmapped by the length it was mapped with");
     assert_eq!(unsafe { munmap(pair, 2 * page_2m) }, Err(SyscallError::NotFound), "the mapping was unmapped twice");
+    // Two 4096-byte pages are one span: the first of them rounds to all of the
+    // mapping, and is not the mapping.
     let small = unsafe {
-        mmap(core::ptr::null_mut(), 4096, MmapProt::READ | MmapProt::WRITE,
+        mmap(core::ptr::null_mut(), 8192, MmapProt::READ | MmapProt::WRITE,
              MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)
     };
-    assert!(!small.is_null(), "mmap of 4096 bytes failed");
-    unsafe { munmap(small, 4096) }.expect("4096 bytes mapped, 4096 unmapped");
+    assert!(!small.is_null(), "mmap of 8192 bytes failed");
+    let kept = unsafe { small.add(4096) };
+    unsafe { kept.write(0x77) };
+    let answer = unsafe { munmap(small, 4096) };
+    assert_eq!(unsafe { kept.read_volatile() }, 0x77, "unmapping the first 4096 bytes of 8192 took the second");
+    assert_eq!(answer, Err(SyscallError::InvalidArgument), "unmapping the first 4096 bytes of 8192");
+    // Nor does a FIXED request for them replace it; one for its own length does.
+    let got = unsafe {
+        mmap(small, 4096, MmapProt::READ | MmapProt::WRITE,
+             MmapFlags::ANONYMOUS | MmapFlags::PRIVATE | MmapFlags::FIXED)
+    };
+    assert_eq!(unsafe { kept.read_volatile() }, 0x77, "a FIXED request for the first 4096 bytes of 8192 replaced the second");
+    assert!(got.is_null(), "a FIXED request for the first 4096 bytes of 8192 answered {got:p}");
+    let got = unsafe {
+        mmap(small, 8192, MmapProt::READ | MmapProt::WRITE,
+             MmapFlags::ANONYMOUS | MmapFlags::PRIVATE | MmapFlags::FIXED)
+    };
+    assert_eq!(got, small, "a FIXED request for all 8192 bytes did not replace them");
+    assert_eq!(unsafe { kept.read_volatile() }, 0, "the replacement handed back the page it replaced");
+    unsafe { munmap(small, 8192) }.expect("8192 bytes mapped, 8192 unmapped");
 
     // A FIXED mapping is placed at exactly the address asked for, so a request
     // the 2 MiB page granularity cannot express is refused rather than rounded:
