@@ -569,6 +569,21 @@ fn reports_alone_end_no_lookup_and_ask_no_resolver_twice_inside_a_wait() {
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), rounds);
 }
 
+// And a lease may name one resolver twice (RFC 2132 §3.8 lists addresses and forbids no repeat):
+// it is one resolver, with one interval. Every query is reported back, and one is on the wire a
+// wait, `ROUNDS` for each time the lease names it.
+#[test]
+fn a_resolver_the_lease_names_twice_is_asked_once_a_wait_whatever_it_reports() {
+    let mut net = Net::leased(&[REFUSES, REFUSES], Some(R));
+    let id = net.resolve("www.example").unwrap();
+    assert_eq!(net.run(id, 20 * WAIT_MS), Some(Err(Ended::Failed(Failure::TimedOut))));
+    let turns = 2 * u64::try_from(ROUNDS).unwrap();
+    let left: Vec<u64> = net.refused.iter().map(|query| net.ms_of(query.at)).collect();
+    assert_eq!(left, (0..turns).map(|turn| turn * WAIT_MS).collect::<Vec<_>>());
+    assert_eq!(net.ms(), turns * WAIT_MS);
+    assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), turns, "the premise: every report reached its query's socket");
+}
+
 // A report has crossed a trust boundary: anyone can send an ICMP message. RFC 1122 §4.1.3.3 has
 // the application "demultiplex these messages when they arrive", which [udp] does by the quoted
 // datagram's addresses and ports against the connected socket's, and §3.2.2.1 has a destination

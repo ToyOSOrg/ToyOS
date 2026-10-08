@@ -1148,6 +1148,51 @@ fn a_server_not_reached_is_not_asked_again_at_once_because_another_failed() {
     assert_eq!(lookup.due(), 2 * WAIT_MS);
 }
 
+// The interval is a server's and not its place in the list: a list that names
+// one address twice, as a lease may, asks it once a wait, whatever is
+// reported of each query, twice over, the moment it is sent.
+#[test]
+fn a_server_named_twice_is_one_server_and_is_asked_once_a_wait_whatever_is_reported() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S1], 0, || 1).unwrap();
+    let mut newest = asked(&first).0;
+    let mut sent = vec![0];
+    let mut now = 0;
+    let ended = loop {
+        assert_eq!(lookup.on_report(newest, now, || 9), Step::Wait, "S1 has not answered and was asked this millisecond");
+        assert_eq!(lookup.due(), now + WAIT_MS);
+        assert_eq!(lookup.on_report(newest, now, || 9), Step::Wait, "the same report again");
+        assert_eq!(lookup.on_time(now + WAIT_MS - 1, || 9), Step::Wait);
+        now += WAIT_MS;
+        match lookup.on_time(now, || 1) {
+            Step::Done(result) => break result,
+            step => {
+                assert_eq!(to(&step), (S1, 1));
+                sent.push(now);
+                newest = asked(&step).0;
+            }
+        }
+    };
+    let turns = 2 * ROUNDS as u64;
+    assert_eq!(sent, (0..turns).map(|turn| turn * WAIT_MS).collect::<Vec<_>>(), "ROUNDS queries a place in the list, a wait apart");
+    assert_eq!((now, ended), (turns * WAIT_MS, Err(Failure::TimedOut)));
+}
+
+// Where the newest query is not waited for and the next server may not be
+// asked yet, the lookup wakes at that server's turn, not at the end of a
+// wait nobody is keeping: S1 asked at 0 and reported at 1.5 s, S2 asked then
+// and reported at 1.6 s, and S1 is asked again at 2 s.
+#[test]
+fn a_lookup_whose_newest_query_is_not_waited_for_wakes_at_the_next_servers_turn() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let second = lookup.on_report(asked(&first).0, 1_500, || 2);
+    assert_eq!((to(&second), lookup.due()), ((S2, 2), 1_500 + WAIT_MS));
+    assert_eq!(lookup.on_report(asked(&second).0, 1_600, || 9), Step::Wait, "S1 was asked 1.6 s ago");
+    assert_eq!(lookup.due(), WAIT_MS, "S1's turn");
+    assert_eq!(lookup.on_time(WAIT_MS - 1, || 9), Step::Wait);
+    assert_eq!(to(&lookup.on_time(WAIT_MS, || 3)), (S1, 3));
+    assert_eq!(waiting(&lookup).len(), 3, "every query's answer is still read");
+}
+
 // What the caller knows of a server holds for an interval too: S1's query is
 // known not to have left a second after S2 was asked, so when S2's wait ends
 // the lookup waits on, its answer still read, until S1 may be asked.

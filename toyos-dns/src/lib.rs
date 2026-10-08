@@ -491,9 +491,10 @@ struct Sent {
 /// interval is each server's**: one that has not answered is sent no second
 /// query inside [`WAIT_MS`] of its last, or of the caller's last knowledge
 /// that it was not reached, whatever is said of that query and whatever
-/// another server answers. Where the next server cannot be asked yet, the
-/// lookup waits until it can while any answer is still read, and ends at
-/// once only with none.
+/// another server answers; a server is its address, however often the list
+/// names it. Where the next server cannot be asked yet, the lookup waits
+/// until it can while any answer is still read, and ends at once only with
+/// none.
 ///
 /// **What the caller knows and what it was told are two calls.** A query the
 /// caller itself knows never reached its server ([`Lookup::on_unreached`]) is
@@ -509,7 +510,9 @@ pub struct Lookup {
     aliases: usize,
     /// Each server, and when it may be asked again: [`WAIT_MS`] after its
     /// last query or after it was last known not to be reached, and at once
-    /// when it has answered.
+    /// when it has answered any query, an older one's late failure included.
+    /// An address named twice is one server: every place it has carries the
+    /// same time.
     servers: Vec<([u8; 4], u64)>,
     /// Queries sent for `name`, oldest first; one answered with a server
     /// failure, or known not to have reached its server, is taken out.
@@ -520,8 +523,8 @@ pub struct Lookup {
     next: u32,
     /// Queries sent for `name`, answered or not.
     asked: usize,
-    /// When the newest query is given up on, or the next server may be
-    /// asked if that is later.
+    /// When the newest query is given up on; or, where it is not waited for
+    /// and the next server may not be asked yet, that server's turn.
     due: u64,
     /// The RCODE of the last server failure, which is what a lookup that runs
     /// out of queries reports if any server answered at all.
@@ -568,7 +571,7 @@ impl Lookup {
         let (to, free) = self.servers[turn];
         let spent = self.asked == ROUNDS * self.servers.len();
         if !spent && now >= free {
-            self.servers[turn].1 = now + WAIT_MS;
+            self.free(to, now + WAIT_MS);
             self.asked += 1;
             let asked = Asked(self.next);
             self.next += 1;
@@ -584,7 +587,8 @@ impl Lookup {
             return Step::Done(Err(self.failed.map_or(silence, Failure::ServerFailed)));
         }
         if !spent {
-            self.due = self.due.max(free);
+            // The newest query is not waited for: the next server's turn is.
+            self.due = free;
         }
         Step::Wait
     }
