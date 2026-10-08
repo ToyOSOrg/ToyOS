@@ -6,9 +6,10 @@ opened: 2026-09-29
 
 # A compiler fixture's git commit could not create a temporary file
 
-`src/compiler.rs`'s `a_missing_primary_record_is_refused_and_builds_nothing`
-went red in 1 of 200 full runs of the toyos-build lib test binary at
-`e3a1cdc8`. Those runs went beside a `cargo test --workspace --exclude
+`src/compiler.rs`'s `estate` fixture, which
+`one_compiler_per_key_whichever_checkout_names_it` and every other compiler
+and LLVM test build on, failed under a test since deleted in 1 of 200 full
+runs of the toyos-build lib test binary at `e3a1cdc8`. Those runs went beside a `cargo test --workspace --exclude
 toyos-build` loop as host load, with the 1-minute load average at 62.82 for
 that run. The fixture's own git failed, not the code under test:
 
@@ -22,5 +23,5 @@ that repository's object store failed with EINVAL.
 
 ## Exit condition
 
-The EINVAL is traced to a cause the test can rule out by construction, and a
-loop of 200 loaded runs shows the test green each time.
+The EINVAL is traced to a cause the fixture can rule out by construction, and
+a loop of 200 loaded runs shows every test that builds on it green each time.

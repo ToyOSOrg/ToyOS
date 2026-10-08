@@ -17,8 +17,6 @@ use crate::arch::apic;
 static TAKEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Deliveries that set no ISR bit, so there is no vector to blame.
 static NO_ISR: AtomicU64 = AtomicU64::new(0);
-/// Event count at the last print; process exit logs once per batch.
-static REPORTED: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn unclaimed_entry() {
@@ -86,8 +84,8 @@ pub fn was_taken(vector: u8) -> bool {
     TAKEN[(vector >> 6) as usize].load(Ordering::Relaxed) & (1 << (vector & 63)) != 0
 }
 
-/// Logs which vectors the gate absorbed, at process exit, once per batch.
-pub fn log_vectors() {
+/// Which vectors the gate absorbed, for `crate::census`: said when there are none too.
+pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
     let words = [
         TAKEN[0].load(Ordering::Relaxed),
         TAKEN[1].load(Ordering::Relaxed),
@@ -95,10 +93,6 @@ pub fn log_vectors() {
         TAKEN[3].load(Ordering::Relaxed),
     ];
     let no_isr = NO_ISR.load(Ordering::Relaxed);
-    let events = words.iter().map(|w| w.count_ones() as u64).sum::<u64>() + no_isr;
-    if events == 0 || REPORTED.swap(events, Ordering::Relaxed) == events {
-        return;
-    }
     struct Vectors([u64; 4]);
     impl core::fmt::Display for Vectors {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -110,7 +104,7 @@ pub fn log_vectors() {
             Ok(())
         }
     }
-    crate::log!("irq: unclaimed vectors{} no-isr={no_isr}", Vectors(words));
+    say(format_args!("irq: unclaimed vectors{} no-isr={no_isr}", Vectors(words)));
 }
 
 /// Raises a vector no row claims and verifies the gate counted, remembered,

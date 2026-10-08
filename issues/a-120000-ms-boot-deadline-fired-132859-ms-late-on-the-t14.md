@@ -104,6 +104,12 @@ could not be loaded, and the disk went offline at 5.556 s. A boot with no
 runner asks for no reboot; the deadline was the only bound left, and it fired
 133 s late.
 
+**That tail's census was two processes' ends, and a process's end takes none
+now.** The next occurrence carries one census, the deadline's own: `expire`
+seals the machine's census into the `WEDGED` record above the ring's tail
+(`kernel/src/census.rs`), read at the moment the bound fired rather than at
+whichever process last died before it.
+
 ## The instrument that measures this already exists
 
 `src/metal.rs:1591-1597`'s `deadline_lateness_ms` computes exactly
