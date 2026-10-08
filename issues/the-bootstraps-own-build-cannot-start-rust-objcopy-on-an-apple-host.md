@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-10-09
 ---
 
@@ -24,16 +24,21 @@ the first nothing it finds as `rust-objcopy` has an LLVM library to load; in
 the second it finds one that loads a `libLLVM.dylib` without a symbol it
 needs, which reads as the tree's `llvm-objcopy`, put on `PATH` for the
 stage-1 compiler, started by the beta compiler against the beta's own
-library. That is a reading of the two reasons and the two times; no run has
-shown which file each launch was.
+library. That is a reading of the two reasons and the two times; 8 of the 22
+name `rustc` as the process that started them and the rest a process that
+had exited, and no run has shown which file each launch was.
+
+A developer's Mac does the same. The Apple-silicon Mac this tree is developed
+on holds 18 reports of `rust-objcopy`, 1 of 4 October, 12 of 7 October and 5
+of 8 October, every one `Library not loaded`, none `Symbol not found`. Two
+hosts do it, so it is a defect of the `PATH` the compiler build is given.
 
 Not known: whether bootstrap's binaries are left unstripped by this and
-whether anything reads the difference; whether a developer's Mac does the
-same; and whether #769, which moved the toolchain into a store, changed it.
+whether anything reads the difference; and whether #769, which moved the
+toolchain into a store and landed on 8 October, changed it.
 
-Owner: whoever next changes how a compiler build finds `rust-objcopy`
+Nobody holds it. It is in how a compiler build finds `rust-objcopy`
 (`src/toolchain.rs`).
 
-At its next review: a `--build-only` on an Apple host that leaves no
-`rust-objcopy` report makes this nothing; one that still does is a defect of
-the `PATH` the compiler build is given.
+**Exit**: a compiler built from nothing by `cargo run -- --build-only` on an
+Apple host, at a tree that has #769, that leaves no `rust-objcopy` report.
