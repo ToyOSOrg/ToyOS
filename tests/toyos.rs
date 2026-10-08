@@ -2923,7 +2923,8 @@ fn libc_sockets() -> Result<(), String> {
         }
     });
 
-    let cases = [("sendto_unbound", answering), ("nodelay_kept", holding), ("addr_order", holding)];
+    // The address first: every case names its peer by one.
+    let cases = [("addr_order", holding), ("nodelay_kept", holding), ("sendto_unbound", answering)];
     let case = compile::repo_root().join("tests/netcase");
     let bins: Vec<(String, Vec<u8>)> = cases
         .iter()
