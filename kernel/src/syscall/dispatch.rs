@@ -23,7 +23,7 @@ use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
-    holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    holds_claim, sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_unmap,
     sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
@@ -641,6 +641,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             },
             // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
             DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),
+            DA::ACPI_FIRMWARE_LOCK => crate::arch::acpi_mode::debug_firmware_lock(a2),
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {
@@ -669,6 +670,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             process::set_current_thread_name(&name[..len]);
             0
         },
+        // Gated by the claim handle alone, as a PCI function's calls are: the
+        // kernel decides each access by what its address is.
+        SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
         SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
         _ => SyscallError::InvalidArgument.to_u64(),

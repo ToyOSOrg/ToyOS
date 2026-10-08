@@ -15,8 +15,7 @@ mod symbols;
 mod tls;
 
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
-pub(crate) use start::alloc_kernel_stack;
-pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
+pub(crate) use start::{alloc_kernel_stack, Start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
 use alloc::string::String;
@@ -568,7 +567,12 @@ pub fn spawn<H>(
         return Err(SyscallError::ResourceExhausted.into());
     };
 
-    let entry = (image_start + layout.entry().get()).raw();
+    // Inside the image, which `rebase_base` placed inside the user half.
+    let Some(entry) = toyos_userbound::Entry::new((image_start + layout.entry().get()).raw())
+    else {
+        log!("spawn: {}: the entry is outside the user half", path);
+        return Err(SyscallError::InvalidArgument.into());
+    };
     let image_end = (image_start + layout.span()).raw();
     let sp = user_stack.write_argv(argv);
     let t_tls = crate::clock::nanos_since_boot();
@@ -585,7 +589,7 @@ pub fn spawn<H>(
         bias: base,
     });
 
-    let (ks_alloc, ks_sp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(Start::Process { entry, sp }) {
         Some(ks) => ks,
         None => {
             log!("spawn: {}: failed to allocate kernel stack", path);
@@ -683,7 +687,7 @@ pub fn spawn<H>(
 
     let t3 = crate::clock::nanos_since_boot();
     log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
-        path, pid, tid, dst.0, base, entry, child_pt.lock().root().phys(),
+        path, pid, tid, dst.0, base, entry.addr(), child_pt.lock().root().phys(),
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 

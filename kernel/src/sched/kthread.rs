@@ -1,5 +1,5 @@
 //! Kernel threads: ordinary tasks that name `mm::paging::kernel` as their
-//! address space, enter through `loader::kernel_start`, and hold a process-table
+//! address space, enter through `arch::entry::kernel_start`, and hold a process-table
 //! entry. One is preempted or stolen only at a preemption point its body reaches,
 //! and a Ring 0 loop reaches none. [`ROWS`] holds every one.
 
@@ -74,13 +74,8 @@ pub fn is_kernel_task(id: TaskId) -> bool {
 
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
-    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(
-        crate::loader::kernel_start,
-        body as usize as u64,
-        0,
-        arg,
-    )
-    .unwrap_or_else(|| panic!("kthread: no kernel stack for {name}"));
+    let (stack, entry_sp) = crate::loader::alloc_kernel_stack(crate::loader::Start::Kernel { body, arg })
+        .unwrap_or_else(|| panic!("kthread: no kernel stack for {name}"));
 
     // Before the table lock: a panic holding the process table hangs the machine.
     let claim = Claim::take(name);

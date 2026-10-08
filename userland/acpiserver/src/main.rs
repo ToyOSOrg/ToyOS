@@ -13,6 +13,12 @@
 //! acknowledged: a press after the clear latches and is served, one
 //! before it is lost.
 //!
+//! **Then the machine's tables are loaded** ([`aml::load`]), through the
+//! kernel's mediated access ([`Claim`]): after the arming, so a press during
+//! the load latches and is served when it ends. A table refused, and a DSDT
+//! refused, are each said and survived; the power button is served either
+//! way.
+//!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, and the controller's GPE drains the
 //! controller of every query waiting, which are then run, one by one, as
@@ -26,7 +32,10 @@
 
 mod aml;
 mod ec;
+mod host;
+mod ledger;
 mod sci;
+mod tables;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -36,10 +45,11 @@ use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{AcpiInfo, Block, FIXED_POWER_BUTTON};
+use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
+use host::{Answer, Kernel, Stopping, Take};
 use sci::{Event, Served, Unserved, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
@@ -86,7 +96,42 @@ fn main() {
         empty: 0,
     };
     server.arm();
+    aml::load(&Claim(&server.dev), server.info.rsdp);
     server.serve();
+}
+
+/// The claim as the tables' fetch and their AML ask it for what lies outside
+/// its own ports.
+struct Claim<'a>(&'a AcpiDev);
+
+impl Claim<'_> {
+    /// The kernel's answer; a stopping machine's is the caller's to carry,
+    /// and any other refusal of a call this server formed is this server's
+    /// defect.
+    fn answered<T>(asked: &str, answer: Result<T, SyscallError>) -> Result<T, Stopping> {
+        match answer {
+            Ok(answer) => Ok(answer),
+            Err(SyscallError::Gone) => Err(Stopping),
+            Err(other) => panic!("acpiserver: the kernel answered {asked} {other:?}"),
+        }
+    }
+}
+
+impl Kernel for Claim<'_> {
+    fn access(&self, access: Access) -> Result<Answer, Stopping> {
+        Self::answered("a mediated access", self.0.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
+    }
+
+    fn lock_take(&self) -> Result<Take, Stopping> {
+        match self.0.lock_take() {
+            Err(SyscallError::NotSupported) => Ok(Take::Unusable),
+            answer => Self::answered("a take of the Global Lock", answer).map(|taken| if taken { Take::Taken } else { Take::Pending }),
+        }
+    }
+
+    fn lock_release(&self) -> Result<(), Stopping> {
+        Self::answered("the Global Lock's release", self.0.lock_release())
+    }
 }
 
 /// Each byte of a status-and-enable block: its status port and its enable port.
@@ -224,7 +269,7 @@ impl Server {
             *count += 1;
             self.counted += 1;
             if *count == 1 {
-                println!("acpiserver: embedded controller query {q:#04x} taken for the first time, served by nothing: stage 1 runs no AML");
+                println!("acpiserver: embedded controller query {q:#04x} taken for the first time, served by nothing: no query's method is evaluated yet");
             }
         }
     }

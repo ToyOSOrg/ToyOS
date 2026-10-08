@@ -114,6 +114,38 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
     }
 }
 
+/// One operation on the `acpi` claim (`toyos_abi::acpi::op`), for the process
+/// the claim's first read bound: a handle moved on to another answers
+/// `PermissionDenied`, as its ports answer nothing there.
+pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64) -> u64 {
+    use toyos_abi::acpi::op as ops;
+    let held = process::with_process_data(|data| {
+        data.handles
+            .get::<crate::object::device::DeviceClaim>(handle, Rights::WRITE)
+            .map(|claim| (claim.class(), claim.isa_row()))
+    });
+    let row = match held {
+        Ok((device::DeviceType::Acpi, Some(row))) => row,
+        Ok((class, _)) => {
+            return crate::object::HandleError::WrongType { held: class.class_name(), wanted: "an acpi claim" }.refuse()
+        }
+        Err(e) => return e.refuse(),
+    };
+    if !crate::isa::bound_to(row, process::current_process()) {
+        return SyscallError::PermissionDenied.to_u64();
+    }
+    let done = match op {
+        ops::ACCESS => ctx.copy_in::<toyos_abi::acpi::Access>(UserAddr::new(at)).and_then(|mut request| {
+            crate::arch::acpi_mode::access(row, &mut request)?;
+            ctx.copy_out(UserAddr::new(at), &request).map(|()| 0)
+        }),
+        ops::LOCK_TAKE => crate::arch::acpi_mode::lock_take().map(|taken| if taken { ops::TAKEN } else { ops::PENDING }),
+        ops::LOCK_RELEASE => crate::arch::acpi_mode::lock_release().map(|()| 0),
+        _ => Err(SyscallError::InvalidArgument),
+    };
+    done.unwrap_or_else(|e| e.to_u64())
+}
+
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI

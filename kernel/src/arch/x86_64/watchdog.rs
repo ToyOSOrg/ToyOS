@@ -67,7 +67,7 @@ pub fn init(devices: &[PciDevice]) {
     };
 
     // ICH9 and every PCH since: a 32-byte block.
-    let block = match toyos_userbound::Ports::new(port, 0x20).map(|run| pio::declare("the TCO watchdog", run)) {
+    let block = match toyos_userbound::Ports::new(port, 0x20).map(|run| pio::declare("the TCO watchdog", run, toyos_userbound::Mediated::ReadOnly)) {
         Some(Ok(block)) => block,
         refused => {
             log!("watchdog: the TCO block at {port:#x} is not this kernel's to drive ({:?}) — not armed", refused.map(|r| r.err()));

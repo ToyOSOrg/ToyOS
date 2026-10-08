@@ -230,7 +230,7 @@ fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
     // bridge's own names no bus below it, and nothing is accessed there.
     for unset in [0x00, 0x40, 0x3F] {
         let (m, v) = read(&below(&endpoint), &[(upper(header), &[0x01]), (upper(secondary), &[unset])], ven);
-        assert!(matches!(v, Err(Error::Rule(_))), "{unset:#x}: {v:?}");
+        assert_eq!(v, Err(Error::Bridge { segment: 0, bus: 0x40, device: 3, function: 1, header_type: 0x01, secondary: Some(unset) }));
         assert_eq!(m.accesses(), vec![Event::Read(upper(header), Access::Byte), Event::Read(upper(secondary), Access::Byte)], "{unset:#x}");
     }
 
@@ -239,7 +239,7 @@ fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
     // one that is absent all ones, which is above every bus. Neither is asked.
     for (layout, at_0x19) in [(0x00, 0x45), (0xFF, 0xFF), (0x02, 0x45), (0x80, 0x45)] {
         let (m, v) = read(&below(&endpoint), &[(upper(header), &[layout]), (upper(secondary), &[at_0x19])], ven);
-        assert!(matches!(v, Err(Error::Rule(_))), "{layout:#x}: {v:?}");
+        assert_eq!(v, Err(Error::Bridge { segment: 0, bus: 0x40, device: 3, function: 1, header_type: layout, secondary: None }));
         assert_eq!(m.accesses(), vec![Event::Read(upper(header), Access::Byte)], "{layout:#x}");
     }
 
