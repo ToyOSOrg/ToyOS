@@ -652,12 +652,12 @@ fn apps_for(
     if !status.success() {
         return Err(format!("rustup target add {triple} exited {status}"));
     }
-    let verb = verb(os, host_triple);
+    let how = judged_as(os, host_triple);
     let (attempted, declared) = attempted(programs, os);
     let mut red = Vec::new();
     for program in &attempted {
         let manifest = format!("{}/Cargo.toml", program.dir);
-        let args = [verb, "--manifest-path", manifest.as_str(), "--target", triple];
+        let args = [&how[..], &["--manifest-path", manifest.as_str()]].concat();
         if let Err(exit) = cargo(root, &args) {
             red.push(format!(
                 "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
@@ -669,7 +669,7 @@ fn apps_for(
     if !red.is_empty() {
         return Err(red.join("; "));
     }
-    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
+    let said = format!("{} app(s) pass `cargo {}`", attempted.len(), how.join(" "));
     if declared.is_empty() {
         Ok(said)
     } else {
@@ -677,12 +677,14 @@ fn apps_for(
     }
 }
 
-/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
-fn verb(os: Os, host_triple: &str) -> &'static str {
+/// `build` where the gate runs on `os`'s own triple, and `check --target`
+/// elsewhere. The host's own build names no triple, so it lands in the target
+/// the userland test steps fill and compiles only what they did not.
+fn judged_as(os: Os, host_triple: &str) -> Vec<&'static str> {
     if os.triple() == host_triple {
-        "build"
+        vec!["build"]
     } else {
-        "check"
+        vec!["check", "--target", os.triple()]
     }
 }
 
@@ -1076,7 +1078,11 @@ mod tests {
         assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
         assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
         assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
-        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
+        assert_eq!(Os::ALL.map(|os| judged_as(os, Os::Linux.triple())), [
+            vec!["build"],
+            vec!["check", "--target", Os::Macos.triple()],
+            vec!["check", "--target", Os::Windows.triple()],
+        ]);
     }
 
     #[test]
