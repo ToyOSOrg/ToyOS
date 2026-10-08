@@ -1,5 +1,6 @@
 use crate::mm::pmm;
 
+use kernel::pipe::{End, Holders, Released};
 use toyos_abi::ring::Ring;
 
 use alloc::sync::Arc;
@@ -39,7 +40,7 @@ pub use handle::{PipeReader, PipeWriter};
 /// take a counted reference, so no program point exists between the two where
 /// the last other end could close and free it.
 mod handle {
-    use super::{close_read, close_write, with_pipes_mut, Pipe, PipeId};
+    use super::{release, with_pipes_mut, End, Pipe, PipeId};
 
     /// One counted reference to a pipe's read end — `Arc`, for a reader slot.
     pub struct PipeReader(PipeId);
@@ -50,8 +51,7 @@ mod handle {
     impl PipeReader {
         /// The only constructor: taking and counting the reference is one statement.
         pub(super) fn acquire(pipe: &mut Pipe) -> Self {
-            pipe.readers = pipe.readers.checked_add(1).expect("pipe reader overflow");
-            pipe.publish_ends();
+            pipe.hold(End::Read);
             Self(pipe.id)
         }
 
@@ -60,8 +60,7 @@ mod handle {
 
     impl PipeWriter {
         pub(super) fn acquire(pipe: &mut Pipe) -> Self {
-            pipe.writers = pipe.writers.checked_add(1).expect("pipe writer overflow");
-            pipe.publish_ends();
+            pipe.hold(End::Write);
             Self(pipe.id)
         }
 
@@ -87,13 +86,13 @@ mod handle {
 
     impl Drop for PipeReader {
         fn drop(&mut self) {
-            close_read(self.0);
+            release(self.0, End::Read);
         }
     }
 
     impl Drop for PipeWriter {
         fn drop(&mut self) {
-            close_write(self.0);
+            release(self.0, End::Write);
         }
     }
 }
@@ -113,8 +112,7 @@ struct Pipe {
     id: PipeId,
     /// `None` until first use — allocating eagerly would charge every pending `SYS_CONNECT` 4 MiB before either end sent a byte.
     backing: Option<Backing>,
-    readers: u32,
-    writers: u32,
+    holders: Holders,
     /// The read end's and the write end's watches. Held by `Arc` so a blocking site or a
     /// poll registration can clone one out from under the table lock and hold it across its own park.
     read_watch: Arc<Watch>,
@@ -131,8 +129,7 @@ impl Pipe {
         Self {
             id,
             backing: None,
-            readers: 0,
-            writers: 0,
+            holders: Holders::new(),
             read_watch: Arc::new(Watch::new()),
             write_watch: Arc::new(Watch::new()),
             rt_boost_pending: false,
@@ -154,8 +151,13 @@ impl Pipe {
     /// Republish "is the other end gone?" into the mapped header, for netstack; the kernel itself decides from its own counts.
     fn publish_ends(&mut self) {
         let Some(backing) = self.backing.as_mut() else { return };
-        if self.readers == 0 { backing.ring.close_reader() } else { backing.ring.open_reader() }
-        if self.writers == 0 { backing.ring.close_writer() } else { backing.ring.open_writer() }
+        if self.holders.held(End::Read) { backing.ring.open_reader() } else { backing.ring.close_reader() }
+        if self.holders.held(End::Write) { backing.ring.open_writer() } else { backing.ring.close_writer() }
+    }
+
+    fn hold(&mut self, end: End) {
+        self.holders.hold(end);
+        self.publish_ends();
     }
 
     fn available(&self) -> u32 {
@@ -218,7 +220,7 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
             (Some(n), boost)
-        } else if pipe.writers == 0 {
+        } else if !pipe.holders.held(End::Write) {
             (Some(0), false)
         } else {
             (None, false)
@@ -241,7 +243,7 @@ pub enum PipeWrite {
 pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
     with_pipes_mut(|pipes| {
         let pipe = pipes.get_mut(pipe_id)?;
-        if pipe.readers == 0 {
+        if !pipe.holders.held(End::Read) {
             return Some(PipeWrite::BrokenPipe);
         }
         let Some(backing) = pipe.back() else {
@@ -257,14 +259,19 @@ pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
 
 pub fn has_data(pipe_id: PipeId) -> bool {
     with_pipes(|pipes| {
-        pipes.get(pipe_id).is_some_and(|p| p.available() > 0 || p.writers == 0)
+        pipes.get(pipe_id).is_some_and(|p| p.holders.readable(p.available()))
     })
 }
 
 pub fn has_space(pipe_id: PipeId) -> bool {
     with_pipes(|pipes| {
-        pipes.get(pipe_id).is_some_and(|p| p.space() > 0 || p.readers == 0)
+        pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space()))
     })
+}
+
+/// Whether the end opposite `end` of this pipe has no holder left.
+pub fn other_end_gone(pipe_id: PipeId, end: End) -> bool {
+    with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| p.holders.other_end_gone(end)))
 }
 
 /// Mark the pipe so the next consumer inherits RT priority.
@@ -276,41 +283,22 @@ pub fn set_rt_boost_pending(pipe_id: PipeId) {
     });
 }
 
-fn close_read(pipe_id: PipeId) {
-    // `true` when the pipe still lives and its write end is now the one to wake.
-    let wake_writers = with_pipes_mut(|pipes| {
-        let pipe = pipes.get_mut(pipe_id).expect("close_read: pipe not found");
-        pipe.readers = pipe.readers.checked_sub(1).expect("pipe reader underflow");
+/// One reference to `end` lets go; its end's last posts the other end's watch.
+fn release(pipe_id: PipeId, end: End) {
+    let released = with_pipes_mut(|pipes| {
+        let pipe = pipes.get_mut(pipe_id).expect("release: pipe not found");
+        let released = pipe.holders.release(end);
         pipe.publish_ends();
-        if pipe.readers == 0 && pipe.writers == 0 {
+        if released == Released::PipeGone {
             let pipe = pipes.remove(pipe_id).unwrap();
             free_pipe(pipe);
-            false // pipe freed, no one to wake
-        } else {
-            pipe.readers == 0
         }
+        released
     });
-    if wake_writers {
-        crate::scheduler::wake_pipe_writers(pipe_id);
-    }
-}
-
-fn close_write(pipe_id: PipeId) {
-    // `true` when the pipe still lives and its read end is now the one to wake.
-    let wake_readers = with_pipes_mut(|pipes| {
-        let pipe = pipes.get_mut(pipe_id).expect("close_write: pipe not found");
-        pipe.writers = pipe.writers.checked_sub(1).expect("pipe writer underflow");
-        pipe.publish_ends();
-        if pipe.readers == 0 && pipe.writers == 0 {
-            let pipe = pipes.remove(pipe_id).unwrap();
-            free_pipe(pipe);
-            false // pipe freed, no one to wake
-        } else {
-            pipe.writers == 0
-        }
-    });
-    if wake_readers {
-        crate::scheduler::wake_pipe_readers(pipe_id);
+    match (released, end) {
+        (Released::Held | Released::PipeGone, _) => {}
+        (Released::EndGone, End::Read) => crate::scheduler::wake_pipe_writers(pipe_id),
+        (Released::EndGone, End::Write) => crate::scheduler::wake_pipe_readers(pipe_id),
     }
 }
 

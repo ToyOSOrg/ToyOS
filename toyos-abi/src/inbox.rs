@@ -24,10 +24,14 @@ pub const OP_ACCEPT: u8 = 3;
 
 /// Readiness flags for [`OP_WATCH`], stored in `Submission::op_flags`.
 ///
-/// Honest at both ends: the same two bits are the interest going in and the
+/// Honest at both ends: the same bits are the interest going in and the
 /// result coming back in `Completion::result`.
 pub const READABLE: u32 = 1;
 pub const WRITABLE: u32 = 4;
+/// Of a pipe end: the pipe's other end has no holder left, in any process,
+/// whatever the pipe still holds. It stays so. A handle that is no pipe end
+/// has no other end, and a watch that asks this of it is refused.
+pub const OTHER_END_GONE: u32 = 16;
 
 /// One piece of work. Written by userspace into the submission array.
 #[repr(C)]

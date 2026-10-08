@@ -2712,8 +2712,9 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 }
 
 /// netstack's stream count returns once connections that ended without their
-/// client's close request are let go. The host server here ends each
-/// connection it accepts at once; the guest's comparison is the verdict.
+/// client's close request are let go, and a client that left a connection its
+/// peer holds is counted gone. One host server here ends each connection it
+/// accepts at once and one holds each; the guest's comparisons are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
     const LEASED: &str = "netstack: DHCP: lease ";
@@ -2721,13 +2722,19 @@ fn netstack_socket_churn() -> Result<(), String> {
     let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
     // Ends with the process: a guest that never dials leaves it in `accept`.
     thread::spawn(move || server.incoming().for_each(drop));
+    // A second that holds what it accepts and reads none of it, for as long
+    // as the process lives.
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
+    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
+    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
 
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], BootOptions::default());
     let mut console = qemu.boot_log().to_string();
     await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
-    let result = qemu.run_test(&format!("test_rs_netstack_socket_churn {port}"), Duration::from_secs(120));
+    let result =
+        qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }

@@ -15,6 +15,7 @@ use crate::drivers::serial;
 use crate::file_cache;
 use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
+use kernel::pipe::End;
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
@@ -309,6 +310,32 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+    }
+}
+
+/// The watch of a pipe end, which its other end's last holder posts as it
+/// lets go; `None` for an object that is no pipe end.
+pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
+    match object {
+        KObjectRef::PipeRead(_) => read_watch(object),
+        KObjectRef::PipeWrite(_) => write_watch(object),
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => None,
+    }
+}
+
+/// Whether this pipe end's other end has no holder left; `false` for an
+/// object that is no pipe end.
+pub fn other_end_gone(object: &KObjectRef) -> bool {
+    match object {
+        KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
+        KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => false,
     }
 }
 

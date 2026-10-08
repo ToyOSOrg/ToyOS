@@ -22,7 +22,7 @@ ends the listener the kernel answers `Gone` for, and no watch wakes a pass for
 it, so an idle netstack keeps a dead owner's port until other traffic arrives.
 
 A piped TCP connection is the shape to copy: `bridge_piped` ends it on what
-the kernel says of the client's pipe ends, and the watch on its send pipe is
+the kernel says of the client's pipe ends, and the watch on each of them is
 what wakes that pass.
 
 Read from the code, not measured.

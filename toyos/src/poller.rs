@@ -2,14 +2,14 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use toyos_abi::RawHandle;
-use toyos_abi::syscall;
+use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::inbox::{
     Submission, Completion, RingHeader, RingLayout,
     OP_WATCH, SUBMISSION_RING_OFF, COMPLETION_RING_OFF, SUBMISSIONS_OFF,
 };
 use crate::AsHandle;
 
-pub use toyos_abi::inbox::{READABLE, WRITABLE};
+pub use toyos_abi::inbox::{OTHER_END_GONE, READABLE, WRITABLE};
 
 /// The inbox page, and the only thing in this crate that touches it.
 ///
@@ -248,7 +248,7 @@ impl Poller {
 
     /// Watch the given handle for readiness.
     ///
-    /// `flags` are [`READABLE`] / [`WRITABLE`].
+    /// `flags` are [`READABLE`] / [`WRITABLE`] / [`OTHER_END_GONE`].
     /// `token` is returned in completions to identify which handle is ready.
     pub fn watch(&self, handle: &impl AsHandle, flags: u32, token: u64) {
         self.watch_raw(handle.as_handle(), flags, token);
@@ -307,6 +307,18 @@ impl Poller {
     /// Blocks until at least `min_complete` completions are ready or `timeout_nanos`
     /// elapses. Calls `f` for each completed token.
     pub fn wait(&self, min_complete: u32, timeout_nanos: u64, mut f: impl FnMut(u64)) {
+        self.wait_answers(min_complete, timeout_nanos, |token, _| f(token));
+    }
+
+    /// [`wait`](Self::wait), with what each watch was answered beside its
+    /// token: the conditions its handle met, or the kernel's word for why the
+    /// watch is over and will not fire.
+    pub fn wait_answers(
+        &self,
+        min_complete: u32,
+        timeout_nanos: u64,
+        mut f: impl FnMut(u64, Result<u32, SyscallError>),
+    ) {
         self.submit(min_complete, timeout_nanos);
         self.drain(&mut f);
     }
@@ -315,7 +327,7 @@ impl Poller {
     ///
     /// Split from [`wait`](Self::wait) because it is the half that is a pure
     /// function of the page: a host test can hand it a fake one.
-    fn drain(&self, f: &mut impl FnMut(u64)) {
+    fn drain(&self, f: &mut impl FnMut(u64, Result<u32, SyscallError>)) {
         // Unreachable, and kept for that reason: `capacity` bounds the
         // registrations and the rings are sized from `capacity`, so nothing a
         // conforming caller does can make the kernel drop a completion here.
@@ -345,7 +357,13 @@ impl Poller {
             // to that exactly as to readiness — by looking at the handle again.
             // A zero result is meaningful too: `OP_ACCEPT` reports handle 0
             // that way.
-            f(completion.token);
+            // The kernel writes a refusal as its error's number, negated.
+            let refusal = u64::MAX - u64::from(completion.result.unsigned_abs());
+            let answer = match completion.result {
+                met @ 1.. => Ok(met as u32),
+                _ => Err(SyscallError::from_u64(refusal).unwrap_or(SyscallError::Unknown)),
+            };
+            f(completion.token, answer);
             self.rings.completion_head().store(head.wrapping_add(1), Ordering::Release);
         }
     }
