@@ -10,12 +10,12 @@
 //! **What a process writes into the log is two records**: one where its spawn
 //! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N code=N
 //! cpu=Nms …`, the verdict first and then what that process itself consumed.
-//! A record here is charged to the process it names. A reading of the whole
-//! machine — the interrupt census, the shootdowns', the flushes' — is taken
-//! once, where the machine stops (`syscall::machine`), and no process's start
-//! or end repeats one: the log's volume is then a function of what ran, never
-//! of how many CPUs watched it. A thread that ends before its process says so
-//! in a rate-limited record of its own.
+//! Each is written every time and charged to the process it names: nothing
+//! here is rate-limited, and a thread's end writes nothing. A reading of the
+//! whole machine is `crate::census`'s, taken once, where the machine ends, by
+//! its stop or by its death, and no process's start or end repeats one: the
+//! log's volume is then a function of what ran, never of how many CPUs
+//! watched it.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -1072,7 +1072,7 @@ impl core::fmt::Display for Consumed {
 }
 
 /// Frees an exiting process's resources (mappings, handles, ELF state), and answers what it consumed.
-/// Says nothing of the machine: a reading of every CPU is the stop's (`syscall::machine`), never one process's end.
+/// Says nothing of the machine: a reading of every CPU is `crate::census`'s, never one process's end.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
     thread_data_arc: &Arc<Lock<ThreadData>>,
@@ -1285,7 +1285,7 @@ pub fn thread_exit(code: i32) -> ! {
         proclife::ThreadExit::Sibling { post } => post,
     };
 
-    release_thread(process_pid, tid, code);
+    release_thread(tid);
     leave(Some(code));
     // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
     if let Some(handle) = crate::sched::driver::current_handle() {
@@ -1302,7 +1302,7 @@ pub fn thread_exit(code: i32) -> ! {
 }
 
 /// A child thread's own mappings, released before it leaves; returns rather than diverging for [`leave`]'s reason.
-fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
+fn release_thread(tid: Tid) {
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
 
@@ -1318,12 +1318,6 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     };
     // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock.
     drop(released);
-
-    let guard = PROCESS_TABLE.lock();
-    let proc = guard.as_ref().unwrap().get(process_pid).expect("release_thread: a thread's process is not in the table");
-    let cpu_ms = proc.threads.get(tid).and_then(|t| t.sched()).map_or(0, scheduler::task_cpu_ns) / 1_000_000;
-    let name = proc.name_str();
-    crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
 }
 
 /// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.

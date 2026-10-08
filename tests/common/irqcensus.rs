@@ -1,9 +1,9 @@
 //! The kernel's interrupt census, and the windows a `mask-windows` kernel
 //! reports, read back on the host.
 //!
-//! The kernel prints `irq: cpuN timer=… kick=… …` per online CPU when the
-//! machine stops and in the blocked-task dump (`kernel/src/irq_census.rs`),
-//! and at no process's end. The counters are cumulative since boot, so the
+//! The kernel says `irq: cpuN timer=… kick=… …` per online CPU where the
+//! machine ends, as records at its stop and in the record its death seals
+//! (`kernel/src/census.rs`), and in the blocked-task dump; at no process's end. The counters are cumulative since boot, so the
 //! largest count each source reaches on a CPU's lines is that boot's whole
 //! census ([`Census::raise`]). `irq_census_conservation` asks whether one
 //! boot's census is internally consistent.

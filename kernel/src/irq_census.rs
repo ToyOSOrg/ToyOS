@@ -126,12 +126,12 @@ pub fn taken_here() -> u64 {
     sum_bar_nmi(&percpu::irq_counts_here())
 }
 
-/// Logs one `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.
-/// The machine's reading, so the machine's to take: at its stop and in the blocked-task dump, never at one process's end.
+/// One `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.
+/// The machine's reading, so the machine's to take: `crate::census`'s, and the blocked-task dump's, never one process's end.
 /// Allocates nothing, takes no lock, touches no device.
-pub fn log_census() {
+pub fn census(say: &mut impl FnMut(fmt::Arguments<'_>)) {
     for cpu in 0..crate::smp::cpu_count() {
         let Some(counts) = read(cpu) else { continue };
-        crate::log!("irq: cpu{cpu}{}", Fields(&counts));
+        say(format_args!("irq: cpu{cpu}{}", Fields(&counts)));
     }
 }

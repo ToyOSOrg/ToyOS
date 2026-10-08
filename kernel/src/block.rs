@@ -485,42 +485,9 @@ pub fn file_cache_pages() -> usize {
     (((total / 64) / PAGE_SIZE) as usize).clamp(2048, 65536)
 }
 
-/// Flush-latency census backing the `OPERATION`/`DEADMAN` budgets.
+/// What the storage drivers count for the machine.
 pub mod census {
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
-    use super::DeviceId;
-
-    /// Distinct devices the census can hold apart; extra devices alias into the last slot.
-    const DEVICES: usize = 4;
-    /// log2-µs latency buckets: bucket `i` holds flushes under `2^i` µs; the last holds everything from 2s up.
-    const BUCKETS: usize = 32;
-
-    struct Slot {
-        /// The device id plus one, so zero means empty.
-        id: AtomicU32,
-        flushes: AtomicU64,
-        /// Operations refused on the caller's budget (`BlockError::BudgetExpired`).
-        expiries: AtomicU64,
-    }
-
-    static SLOTS: [Slot; DEVICES] = [const {
-        Slot { id: AtomicU32::new(0), flushes: AtomicU64::new(0), expiries: AtomicU64::new(0) }
-    }; DEVICES];
-    static LATENCY: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
-    static MAX_NS: AtomicU64 = AtomicU64::new(0);
-
-    fn slot(device: DeviceId) -> &'static Slot {
-        let key = device + 1;
-        for slot in &SLOTS {
-            match slot.id.compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => return slot,
-                Err(held) if held == key => return slot,
-                Err(_) => {}
-            }
-        }
-        &SLOTS[DEVICES - 1]
-    }
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     /// Every command a storage driver has put to a disk, counted
     /// where each driver hands one to its transport: the one number that says a
@@ -533,62 +500,5 @@ pub mod census {
 
     pub fn commands_issued() -> u64 {
         COMMANDS.load(Ordering::Relaxed)
-    }
-
-    /// One device flush completed (either way), taking `nanos` of wall clock.
-    pub fn flush_took(device: DeviceId, nanos: u64) {
-        slot(device).flushes.fetch_add(1, Ordering::Relaxed);
-        let micros = nanos / 1_000;
-        let bucket = (64 - u64::leading_zeros(micros | 1) as usize).min(BUCKETS - 1);
-        LATENCY[bucket].fetch_add(1, Ordering::Relaxed);
-        MAX_NS.fetch_max(nanos, Ordering::Relaxed);
-    }
-
-    /// One operation on `device` was refused on the caller's budget.
-    pub fn budget_expired(device: DeviceId) {
-        slot(device).expiries.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Latency ceiling (µs) at or below which `want` percent of `total` samples fall.
-    fn percentile(counts: &[u64; BUCKETS], total: u64, want: u64) -> u64 {
-        let mut seen = 0u64;
-        for (i, &count) in counts.iter().enumerate() {
-            seen += count;
-            if seen * 100 >= total * want {
-                return 1u64 << i;
-            }
-        }
-        1u64 << (BUCKETS - 1)
-    }
-
-    /// What the boot flushed before its stop, said once there: a line per
-    /// device that was flushed or refused, and the latency of them all.
-    pub fn log_census() {
-        let mut counts = [0u64; BUCKETS];
-        let mut total = 0u64;
-        for (bucket, count) in LATENCY.iter().zip(counts.iter_mut()) {
-            *count = bucket.load(Ordering::Relaxed);
-            total += *count;
-        }
-        for slot in &SLOTS {
-            let id = slot.id.load(Ordering::Relaxed);
-            if id == 0 {
-                continue;
-            }
-            crate::log!(
-                "flush-census: dev={} flushes={} expiries={}",
-                id - 1,
-                slot.flushes.load(Ordering::Relaxed),
-                slot.expiries.load(Ordering::Relaxed),
-            );
-        }
-        if total > 0 {
-            crate::log!(
-                "flush-census: p50<={}us p99<={}us max={}us of {total} flushes",
-                percentile(&counts, total, 50),
-                percentile(&counts, total, 99),
-                MAX_NS.load(Ordering::Relaxed) / 1_000,
-            );
-        }
     }
 }

@@ -1,7 +1,7 @@
 //! Each CPU's [`kernel::sched::windows::Windows`], fed where this CPU's
-//! interrupts and preempt count change, and printed at every process's end as
-//! `windows: cpuN irqs_off_ns=… preempt_off_ns=…`, a line per CPU
-//! (`mask-windows` builds only).
+//! interrupts and preempt count change, and printed at every process's end
+//! and at the machine's stop as `windows: cpuN irqs_off_ns=… preempt_off_ns=…`,
+//! a line per CPU (`mask-windows` builds only).
 //!
 //! Each architecture calls [`irqs_masked`] and [`irqs_unmasking`] from every
 //! instruction that changes whether it takes a maskable interrupt: its

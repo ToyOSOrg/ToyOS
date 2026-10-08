@@ -57,16 +57,19 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
     }
 }
 
-/// The newest records the stop's account carries whole. The page's account
-/// reserve is what bounds it: a tail that spent the reserve would leave the
-/// reset's own account under it nowhere to go.
-const TAIL_RECORDS: usize = 16;
-
 /// The head the tail is sealed under, read back by `src/bootlog.rs`.
 const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 
-/// Seal the newest of this boot's records onto the black box, the one channel
-/// a boot's own tail has once the stop has begun.
+/// Seal the stop's own records onto the black box, the one channel a boot's
+/// tail has once the stop has begun: every record stamped at `from` or after,
+/// newest first.
+///
+/// **Bounded by the page and by nothing else.** The records may spend what a
+/// report may ([`toyos_blackbox::REPORT_BYTES`]), which leaves the reset's own
+/// account its reserve; the oldest that do not fit are counted and the count
+/// is said last, in the words a death's tail says it
+/// ([`toyos_blackbox::DROPPED_OPENS_WITH`]). How many records a stop writes is
+/// the machine's to decide, by its CPUs and its disks.
 ///
 /// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
 /// reached `/log`.** `/system/bin/supervisor` has `logkeeper` flush before it asks for the
@@ -76,24 +79,45 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 ///
 /// Called from the quiesce path under [`crate::blackbox::record_done`], where
 /// the page already carries this boot's seal and every lock is still ordinary.
-pub fn seal_tail() {
+pub fn seal_tail(from: LogStamp) {
+    use core::fmt::Write as _;
+    /// How long a line is, without writing it.
+    struct Length(usize);
+    impl core::fmt::Write for Length {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            self.0 += s.len();
+            Ok(())
+        }
+    }
     struct Tail<'a> {
         out: &'a mut dyn core::fmt::Write,
         left: usize,
+        dropped: u64,
     }
     impl read::RecordSink for Tail<'_> {
         fn put(&mut self, record: &LogRecord) -> bool {
+            let mut line = Length(0);
+            let _ = writeln!(line, "log-tail: {record}");
+            // Once one is dropped every older one is: a tail with a hole in it reads as whole.
+            if self.dropped > 0 || line.0 > self.left {
+                self.dropped += 1;
+                return true;
+            }
+            self.left -= line.0;
             // No prefix of its own: the loader that prints this page puts one
             // on every line it reads back.
             let _ = writeln!(self.out, "log-tail: {record}");
-            self.left -= 1;
-            self.left > 0
+            true
         }
     }
     crate::blackbox::append(|out| {
-        let _ = writeln!(out, "{TAIL_HEAD} ({TAIL_RECORDS})");
-        let mut tail = Tail { out, left: TAIL_RECORDS };
-        read::snapshot_committed(LogStamp::ZERO, read::newest_committed(), &mut tail);
+        let _ = writeln!(out, "{TAIL_HEAD}");
+        let left = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1 - toyos_blackbox::DROPPED_LINE_BYTES;
+        let mut tail = Tail { out, left, dropped: 0 };
+        read::snapshot_committed(from, read::newest_committed(), &mut tail);
+        if tail.dropped > 0 {
+            let _ = writeln!(tail.out, "{}{}", toyos_blackbox::DROPPED_OPENS_WITH, tail.dropped);
+        }
     });
 }
 
@@ -262,50 +286,4 @@ macro_rules! boot_phase {
         // for it: a phase not in `deadline::PHASES` does not compile.
         $crate::deadline::reached($crate::deadline::index_of($name));
     }};
-}
-
-/// Records one site may say in [`LIMIT_WINDOW_NS`] before the rest of the
-/// window's are counted instead ([`log_limited!`]).
-pub const LIMIT_BURST: u64 = 16;
-pub const LIMIT_WINDOW_NS: u64 = 1_000_000_000;
-
-/// `log!` for a site a program can drive at any rate: past [`LIMIT_BURST`]
-/// records a second the site's records are counted, the last one said before
-/// that says so, and the next one said carries the count
-/// (`toyos_elide::limit`).
-#[macro_export]
-macro_rules! log_limited {
-    ($($arg:tt)*) => {{
-        static LIMIT: toyos_elide::limit::Limit =
-            toyos_elide::limit::Limit::new($crate::log::LIMIT_BURST, $crate::log::LIMIT_WINDOW_NS);
-        match LIMIT.admit($crate::clock::nanos_since_boot()) {
-            toyos_elide::limit::Admit::Suppress => {}
-            toyos_elide::limit::Admit::Say { suppressed, last } => $crate::log::emit(
-                $crate::log::Severity::Info,
-                format_args!(
-                    "{}{}",
-                    format_args!($($arg)*),
-                    $crate::log::Limited { suppressed, last },
-                ),
-            ),
-        }
-    }};
-}
-
-/// What a limited site's record adds to its line: nothing, or what the limit did.
-pub struct Limited {
-    pub suppressed: u64,
-    pub last: bool,
-}
-
-impl core::fmt::Display for Limited {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.suppressed > 0 {
-            write!(f, " (after {} like it suppressed)", self.suppressed)?;
-        }
-        if self.last {
-            write!(f, " (the rest like it this second are suppressed)")?;
-        }
-        Ok(())
-    }
 }

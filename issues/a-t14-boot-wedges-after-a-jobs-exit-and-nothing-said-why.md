@@ -89,6 +89,10 @@ the job's `exit:`: the window opens at the job's exit and takes in the whole
 spawn, the VFS-lock sites this file eliminated for run 19 among them. Nothing
 the spawn writes on its way places a wedge inside it any more.
 
+The `WEDGED` record this file waits for carries the machine's census, sealed
+by the deadline itself above the ring's tail (`kernel/src/census.rs`): every
+CPU's interrupt counts and the shootdowns' at the moment the bound fired.
+
 **Exit condition**: a `WEDGED` record off the stick naming what the machine was
 doing between a job's `exit:` record and the next `spawn:` record, and then
 whatever that names.

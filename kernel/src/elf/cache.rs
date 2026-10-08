@@ -232,7 +232,7 @@ pub fn cache_loaded_lib(
     }
     // Under the lock that publishes: two concurrent loads must not both find room.
     let (held, entries) = (held_bytes(&cache), cache.len());
-    let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= BUDGET_BYTES) else {
+    if held.checked_add(alloc.size()).is_none_or(|after| after > BUDGET_BYTES) {
         drop(cache);
         // Both allocations drop here, so the refusal gives back what the load took.
         log!(
@@ -241,17 +241,12 @@ pub fn cache_loaded_lib(
             path, held.saturating_add(alloc.size()), entries + 1, BUDGET_BYTES
         );
         return Err(SyscallError::ResourceExhausted);
-    };
+    }
     cache.push((
         String::from(path),
         CachedLib { alloc, snapshot, rw_offset, rw_size, relocs: relocs.clone(), id },
     ));
     drop(cache);
-    log!(
-        "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs, cache now {} of {} bytes",
-        path, relocs.bind.len(), relocs.tpoff64.len(), relocs.tpoff32.len(),
-        relocs.dtpmod64.len(), relocs.dtpoff64.len(), after, BUDGET_BYTES
-    );
 
     Ok(snapshot.into_lib(
         LibMemory::Shared {
@@ -280,7 +275,6 @@ pub fn try_clone_cached(
 
 // Base address stays the cache's: `RELATIVE` relocations need no fixup until spawn/dlopen assigns a user address.
 fn clone_from_cache(cached: &CachedLib) -> Option<LoadedLib> {
-    let t0 = crate::clock::nanos_since_boot();
 
     let rw_alloc = PageAlloc::new(cached.rw_size)?;
     // SAFETY: `rw_offset + rw_size` was validated inside `cached.alloc` when this `CachedLib` was built; `CachedLib` is immortal once cached, so `cached.alloc` is still live.
@@ -290,18 +284,9 @@ fn clone_from_cache(cached: &CachedLib) -> Option<LoadedLib> {
         core::ptr::copy_nonoverlapping(src, rw_alloc.ptr(), cached.rw_size);
     }
 
-    let t1 = crate::clock::nanos_since_boot();
     let rw_delta = rw_alloc.ptr() as i64 - (cached.alloc.ptr() as i64 + cached.rw_offset as i64);
     let image = cached.snapshot.image;
     let phys_base = image.phys();
-
-    log!(
-        "dlopen: cache hit (shared), base={:#x} {}MB total, {}MB private RW, copy={}ms",
-        phys_base,
-        image.size() / (1024 * 1024),
-        cached.rw_size / (1024 * 1024),
-        (t1 - t0) / 1_000_000
-    );
 
     Some(cached.snapshot.into_lib(
         LibMemory::Shared {

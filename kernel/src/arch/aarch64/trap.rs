@@ -233,12 +233,10 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
 static UNCLAIMED: AtomicU64 = AtomicU64::new(0);
 static LAST_UNCLAIMED: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) fn log_unclaimed() {
+/// The unclaimed interrupts' line of `crate::census`, said at zero too.
+pub(crate) fn unclaimed_census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
     let count = UNCLAIMED.load(Relaxed);
-    if count == 0 {
-        return;
-    }
-    log!("irq: unclaimed interrupts={count}, the last INTID {}", LAST_UNCLAIMED.load(Relaxed));
+    say(format_args!("irq: unclaimed interrupts={count}, the last INTID {}", LAST_UNCLAIMED.load(Relaxed)));
 }
 
 /// A synchronous exception from EL0: a syscall, a fault the demand pager may

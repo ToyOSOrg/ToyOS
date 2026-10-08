@@ -92,14 +92,13 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // `/system/bin/supervisor` had it flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
     crate::log::console::drain_for_the_stop();
-    // The boot's one census of the machine, and its only owner: no process's
-    // end takes one. Oldest first is first cut from the sealed tail, so the
-    // flushes lead; the shootdowns' issues follow the deliveries they bound.
-    crate::block::census::log_census();
-    crate::irq_census::log_census();
-    crate::arch::tlb::log_census();
-    crate::arch::trap::log_unclaimed();
-    crate::drivers::panic_console::log_census();
+    // From here on nothing carries a record to a file: the seal below takes
+    // every one written after this stamp.
+    let stop_began = crate::log::read::newest_committed();
+    // The machine's census, which no process's start or end takes.
+    crate::census::log();
+    #[cfg(feature = "mask-windows")]
+    crate::windows::report();
     // A shortfall is the budget spent, not the reset refused: it is said at
     // alert level, and the reset lands anyway.
     if stopped.stopped_the_machine() {
@@ -121,10 +120,10 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // report a kernel that vanished. The reset's own account is appended under
     // it.
     crate::blackbox::record_done();
-    // Under that seal, because it extends it: the boot's newest records, the
-    // stop's own and the last word among them. Nothing wrote them to `/log`,
+    // Under that seal, because it extends it: the stop's own records, the
+    // census and the last word among them. Nothing wrote them to `/log`,
     // and on a machine with no serial port this is their only reader.
-    crate::log::seal_tail();
+    crate::log::seal_tail(stop_began);
     // Whether or not the volume got them: a stick this boot's transport broke
     // on is a stick the next host may not be able to read the log off.
     crate::blackbox::append_recovery();

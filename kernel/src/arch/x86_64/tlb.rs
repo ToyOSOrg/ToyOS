@@ -27,10 +27,9 @@ static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin
 static WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static MAX_NS: AtomicU64 = AtomicU64::new(0);
 
-/// The boot's one machine-wide `tlb:` line, at the machine's stop after
-/// `irq_census::log_census`: the conservation check reads deliveries first.
-/// Said at zero too: the stop's census has one shape on every boot.
-pub fn log_census() {
+/// The machine-wide `tlb:` line of `crate::census`, after the `irq:` lines:
+/// the conservation check reads deliveries first. Said at zero too.
+pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
     let mut counts = [0u64; Origin::COUNT];
     let mut total = 0u64;
     for (slot, count) in ISSUED.iter().zip(counts.iter_mut()) {
@@ -46,12 +45,12 @@ pub fn log_census() {
             Ok(())
         }
     }
-    crate::log!(
+    say(format_args!(
         "tlb: shootdowns={total} wait={}us max={}us{}",
         WAIT_NS.load(Ordering::Relaxed) / 1_000,
         MAX_NS.load(Ordering::Relaxed) / 1_000,
         Fields(&counts)
-    );
+    ));
 }
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too

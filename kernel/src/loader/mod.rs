@@ -7,9 +7,10 @@
 //! Every number the file names is untrusted: a refusal is
 //! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.
 //!
-//! A spawn that lands writes one record, `spawn: <path> pid=…`, once the
-//! process is in the table and placed; a spawn that is refused writes one,
-//! naming why. Nothing is said on the way (`crate::process`'s header).
+//! A spawn that lands writes one record, `spawn: <path> pid=N unresolved=N
+//! (…ms)`, once the process is in the table and placed; a spawn that is
+//! refused writes one, naming why. Nothing is said on the way, by this file or
+//! by `crate::elf` under it (`crate::process`'s header).
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -452,6 +453,8 @@ pub fn spawn<H>(
         }
     }
 
+    // References no module defines. The file chooses how many, so they are a count in the spawn's record and never a record each.
+    let mut unresolved = 0u64;
     if !loaded_libs.libs.is_empty() {
         // A PIE without `--export-dynamic` exports nothing through `.dynsym`;
         // read `.symtab` only when that lookup came back empty.
@@ -472,9 +475,8 @@ pub fn spawn<H>(
             log!("spawn: {}: {}", path, refused.as_str());
             SyscallError::InvalidArgument
         })?;
-        log!("dynamic: {} exe symbols available to libraries", exe_sym_map.len());
         for lib in &loaded_libs.libs {
-            elf::resolve_lib_bind_relocs(lib, &exe_sym_map, &loaded_libs.libs);
+            unresolved += elf::resolve_lib_bind_relocs(lib, &exe_sym_map, &loaded_libs.libs);
         }
 
         for &(r_offset, r_sym) in &exe.relas.glob_dat {
@@ -484,7 +486,7 @@ pub fn spawn<H>(
             let name = elf::relocated_symbol(exe.symbols(), r_sym).name_in(&exe.dynstr);
             match loaded_libs.libs.iter().find_map(|lib| lib.resolve(name)) {
                 Some(addr) => reloc_index.add_u64(r_offset, addr.raw()),
-                None => log!("dynamic: unresolved exe symbol: {}", name),
+                None => unresolved += 1,
             }
         }
     }
@@ -548,11 +550,12 @@ pub fn spawn<H>(
         return Err(SyscallError::ResourceExhausted.into());
     };
 
-    if let Err(refused) = apply_tls_relocs(&exe, &layout, &loaded_libs.libs, &tls_modules, tls,
-        &mut reloc_index)
-    {
-        log!("spawn: {}: {}", path, refused.as_str());
-        return Err(SyscallError::InvalidArgument.into());
+    match apply_tls_relocs(&exe, &layout, &loaded_libs.libs, &tls_modules, tls, &mut reloc_index) {
+        Ok(more) => unresolved += more,
+        Err(refused) => {
+            log!("spawn: {}: {}", path, refused.as_str());
+            return Err(SyscallError::InvalidArgument.into());
+        }
     }
 
     reloc_index.finalize();
@@ -649,7 +652,7 @@ pub fn spawn<H>(
     crate::process::debug_kill_marked_place(parent);
 
     let mut guard = PROCESS_TABLE.lock();
-    let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
+    let ((), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(
             Arc::clone(&object),
             start::make_name(name),
@@ -662,7 +665,7 @@ pub fn spawn<H>(
         let tid = table.get(pid).unwrap().main_tid();
         // Placed while still holding the table lock: kill_process claims teardown
         // under it, so a retire sweep can never see the pid before its thread is scheduled.
-        let (sched, dst) = scheduler::enqueue_new(
+        let (sched, _placed) = scheduler::enqueue_new(
             scheduler::TaskId(pid, tid),
             ks_alloc,
             ks_sp,
@@ -671,7 +674,6 @@ pub fn spawn<H>(
             Some(image),
         );
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
-        (tid, dst)
     });
     drop(guard);
     // Its parent was claimed while it was built, and its walk has passed: the
@@ -684,8 +686,8 @@ pub fn spawn<H>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
-        path, pid, tid, dst.0, base, entry.addr(), child_pt.lock().root().phys(),
+    log!("spawn: {} pid={} unresolved={} (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
+        path, pid, unresolved,
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 
@@ -733,8 +735,6 @@ fn load_needed_libs(exe: &ExeTables, path: &str, from_image: bool) -> Result<Nee
     out.paths.reserve_exact(distinct.len());
 
     for lib_name in distinct {
-        let t_load0 = crate::clock::nanos_since_boot();
-
         // Which spelling opens is decided before the cache is consulted, and is
         // the key from here on: keyed by the exe-dir string it never found, a
         // library loaded through the fallback was mapped a second time by any
@@ -782,9 +782,6 @@ fn load_needed_libs(exe: &ExeTables, path: &str, from_image: bool) -> Result<Nee
 
         match elf::load_shared_lib(so_backing.as_ref()) {
             Ok((lib, rw_offset, rw_size)) => {
-                let t_load1 = crate::clock::nanos_since_boot();
-                log!("dynamic: loaded {} base={:#x} ({} syms, {}ms)",
-                    lib_name, lib.phys_base, lib.symbols().count(), (t_load1 - t_load0) / 1_000_000);
                 out.libs.push(elf::cache_loaded_lib(&lib_path, id, lib, rw_offset, rw_size)?);
                 out.paths.push(lib_path);
             }
@@ -819,7 +816,8 @@ fn map_libs(
 /// Apply the TLS relocations of every startup library, and index the executable's.
 ///
 /// Libraries' land directly; the executable's go into the relocation index
-/// because its pages do not exist yet.
+/// because its pages do not exist yet. Answers how many references name a
+/// symbol no module defines.
 fn apply_tls_relocs(
     exe: &ExeTables,
     layout: &Layout,
@@ -827,18 +825,19 @@ fn apply_tls_relocs(
     tls_modules: &[elf::TlsModule],
     tls: toyos_elf::tls::Static,
     reloc_index: &mut elf::RelocationIndex,
-) -> Result<(), RelocError> {
+) -> Result<u64, RelocError> {
     let tls_info = elf::TlsModuleInfo { libs: loaded_libs, modules: tls_modules };
+    let mut unresolved = 0;
     for lib in loaded_libs {
         // Matched by template pointer, unique per lib; a lib without TLS matches nothing.
         let module = tls_modules.iter().find(|m| m.template == lib.tls_template);
         let base_offset = module.map_or(0, |m| m.base_offset);
         // Initial-exec: references to TLS in the static block.
-        elf::apply_tpoff_relocs(lib, base_offset, tls, &tls_info)?;
+        unresolved += elf::apply_tpoff_relocs(lib, base_offset, tls, &tls_info)?;
         // General-dynamic: this lib's own TLS, reached through the DTV.
         if let Some(m) = module {
-            elf::apply_dtpoff_relocs(lib, &tls_info)?;
-            elf::apply_dtpmod_relocs(lib, m.module_id, &tls_info);
+            unresolved += elf::apply_dtpoff_relocs(lib, &tls_info)?;
+            unresolved += elf::apply_dtpmod_relocs(lib, m.module_id, &tls_info);
         }
     }
 
@@ -849,12 +848,16 @@ fn apply_tls_relocs(
     let exe_tpoff =
         |r| elf::compute_tpoff(r, exe_base_offset, layout.tls(), exe.symbols(), tls, &tls_info);
     for &(r_offset, r) in &exe.relas.tpoff64 {
-        reloc_index.add_u64(r_offset, exe_tpoff(r)? as u64);
+        let value = exe_tpoff(r)?;
+        unresolved += u64::from(value.is_none());
+        reloc_index.add_u64(r_offset, value.unwrap_or(0) as u64);
     }
     for &(r_offset, r) in &exe.relas.tpoff32 {
-        reloc_index.add_i32(r_offset, elf::tpoff32_value(exe_tpoff(r)?)?);
+        let value = exe_tpoff(r)?;
+        unresolved += u64::from(value.is_none());
+        reloc_index.add_i32(r_offset, elf::tpoff32_value(value.unwrap_or(0))?);
     }
-    Ok(())
+    Ok(unresolved)
 }
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every

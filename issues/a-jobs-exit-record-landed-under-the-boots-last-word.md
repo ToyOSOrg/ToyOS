@@ -25,6 +25,11 @@ Not known: whether the job's exit is a transition the stop is meant to have
 seen before it writes the last word, or a record the stop should keep from
 the console once it has.
 
+**The record is gone and the question is not.** A thread's end no longer
+writes a record, so this line cannot reach the console after the last word;
+whether a thread may still be leaving once the stop has said it is what the
+deleted test asked, and nothing asks it now.
+
 ## Exit condition
 
 A job's exit record either precedes the boot's last word or never reaches the

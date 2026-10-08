@@ -983,19 +983,27 @@ mod checks {
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
-        let wedged = |tail: &str| {
+        // What the seal itself writes of the machine, above the ring's tail.
+        let census = "| irq: cpu0 timer=9 kick=2 xhci=1729 userdev=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 \
+                      nmi=0 spurious=0 unclaimed=0\n\
+                      | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
+                      bench=0\n\
+                      | irq: unclaimed vectors no-isr=0\n\
+                      | panel: paints=9 px=2896256 us=5688 max_us=1285\n";
+        let sealed = |census: &str, tail: &str| {
             format!(
                 "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
                  Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
                  and this chain ends here\n\
                  | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
                  machine in `complete`. Where each CPU's timer last found the kernel:\n\
-                 | The tail of the log ring follows ... which is what nothing was draining.\n\
+                 | The tail of the log ring follows ... which is what nothing was draining.\n{census}\
                  | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
                  Loader log: the last boot is accounted for, so this pass resets the machine\n",
                 bootlog::SEPARATOR
             )
         };
+        let wedged = |tail: &str| sealed(census, tail);
         let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
         let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
@@ -1011,6 +1019,10 @@ mod checks {
         let wedge = format!("{staged}{}{}{inside}", awake(1), awake(0));
         assert_eq!(judge(&[&readback("deadlinewedge", &wedged(&wedge), kernel)]), Ok(()));
         assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+        // A death that sealed no census of the machine, and one that sealed all but the shootdowns'.
+        assert!(judge(&[&readback("deadlinewedge", &sealed("", &wedge), kernel)]).is_err());
+        let no_tlb: String = census.split_inclusive('\n').filter(|line| !line.contains("tlb: ")).collect();
+        assert!(judge(&[&readback("deadlinewedge", &sealed(&no_tlb, &wedge), kernel)]).is_err());
         // The staging CPU arrived deaf: the gate masked the syscall's body, and
         // the others' awake lines say nothing of it.
         let gated = format!("{staged}{deaf}{}{inside}", awake(0));

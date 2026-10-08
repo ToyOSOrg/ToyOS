@@ -70,8 +70,8 @@ pub fn poll() {}
 /// waiting for the machine's release.
 pub fn join() {}
 
-/// The boot's one `tlb:` line, at the machine's stop, said at zero too.
-pub fn log_census() {
+/// The `tlb:` line of `crate::census`, said at zero too.
+pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
     let mut counts = [0u64; Origin::COUNT];
     for (slot, count) in ISSUED.iter().zip(counts.iter_mut()) {
         *count = slot.load(Ordering::Relaxed);
@@ -86,7 +86,7 @@ pub fn log_census() {
             Ok(())
         }
     }
-    crate::log!("tlb: broadcast invalidations={total}{}", Fields(counts));
+    say(format_args!("tlb: broadcast invalidations={total}{}", Fields(counts)));
 }
 
 /// x86-64's measures an IPI round trip, and there is none here.

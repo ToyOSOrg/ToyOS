@@ -26,15 +26,19 @@ process's end, were 1,288 of them; `syscalls:` 110, `memory:` 85, `exit:` 95,
 `ELF:` 107 and the two `spawn:` records 304.
 
 A process's end now writes one record, its `exit:`, carrying what `syscalls:`
-and `memory:` said, and the machine's census is taken once, where the machine
-stops. A spawn writes one record too: `ELF: … relocations indexed` and
-`spawn: TLS …` are gone, which no judge read. What remains per child is the
-`spawn:` record and the `exit:` record.
+and `memory:` said; a spawn writes one, its `spawn:`; and the machine's census
+is taken once, where the machine ends (`kernel/src/census.rs`).
 
-**Owed:** `testcases`' log bytes and parts on the T14 with that kernel. A
-child that costs less to log is a child sooner done, so the phase may spawn
-more of them than that boot did, whose last pid was 21,897, and bytes per child times that
-count is not yet a measurement.
+`testcases` on the T14 at `f2b337afd`, the first head with two records a
+process: 8,730,435 bytes, no part deleted, 22,091 `spawn:` and 22,081 `exit: …
+pid=` records, 390 bytes a child against 1,989.
+
+**The margin is a factor, not a bound.** 8.73 MB is 52% of the sixteen
+megabytes kept, 98.7% of it still that one job's `spawn:` and `exit:` records,
+and the phase spawns a child per CPU for twenty seconds: about 1.9 times the
+children, a sixteen-CPU machine or a faster one, outlogs the retention again.
+**The harness is as silent about a hole as it was**: nothing reds a readback
+whose own boot deleted a part of its log.
 
 ## Measured
 
