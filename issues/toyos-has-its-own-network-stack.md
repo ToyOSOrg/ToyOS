@@ -15,6 +15,7 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 - Stage 4: `toyos-net-shard` and `toyos-net-testnet`.
 - Stage 5: netd on one shard, pipe ABI unchanged; smoltcp leaves netd, `Cargo.toml` and `Cargo.lock` in the same PR.
 - Then multi-core, netring (blocked on the owner's ABI ruling), TCP and IP hardening, IPv6, offloads, soak.
+- This track owns the T14's outbound rows, the machine reaching its router and the internet on the I219, judged from the stick: they arrive on this stack and not on smoltcp (owner: "no smoltcp."), and until they do no T14 row reads the wired card (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 
 The listener defects are this track's: `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept.
 

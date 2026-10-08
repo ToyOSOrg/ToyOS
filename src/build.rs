@@ -2944,24 +2944,6 @@ mod tests {
         }
     }
 
-    /// **An image a user boots serves no log on the network.** `logkeeper` answers
-    /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netstack` connector.
-    #[test]
-    fn no_shipped_image_serves_the_log_on_the_network() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
-            let parsed = parse_config(&root.join(config));
-            let logkeeper = parsed.programs.get("logkeeper").expect("every config runs logkeeper");
-            assert!(
-                logkeeper.receives.is_empty(),
-                "{config}: `logkeeper` receives {:?}, and a `netstack` connector is what serves this \
-                 machine's log to anyone on its network",
-                logkeeper.receives,
-            );
-        }
-    }
-
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]

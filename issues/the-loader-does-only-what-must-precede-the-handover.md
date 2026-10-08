@@ -334,12 +334,10 @@ Each stage lands on its own, in this order.
      `issues/a-reset-stops-xhci-and-leaves-every-claimed-pci-function-armed.md`,
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
      `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
-     `issues/most-t14-leases-land-one-dhcp-retry-late.md`,
+     `issues/most-t14-leases-land-one-dhcp-retry-late.md` and
      `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`,
-     which deleted the host's reader and ssh client and records what they
-     still owe,
-     and
-     `issues/a-netstack-that-dies-while-serving-leaves-the-hosts-stream-silent.md`.
+     which deleted the host's reader, its ssh client and the machine's end of
+     the stream, and records what they still owe.
    - #539's issues `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
      `the-bench-reads-no-quiescent-log-volume`,
      `the-bench-runs-with-no-bound-on-its-own-boot`,

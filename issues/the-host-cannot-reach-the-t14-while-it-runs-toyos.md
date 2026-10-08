@@ -45,9 +45,17 @@ text: `lan_talk` and `lan_dhcp_lease`, which read what the host heard, and
   `src/metalswap.rs`, the harness's ssh client `tests/ssh-client-host` with
   `build::build_host_judges`, `build::ssh_client_host` and
   `build::copy_guest_program`, and `toyos-swap`'s readers of the supervisor's
-  words (`heard`, `outcome`, `Word::is_final`). `/system/bin/swap`, the
-  supervisor's half and sshserver ship as before, and nothing on a host asks
-  them for a swap.
+  words (`heard`, `outcome`, `Word::is_final`);
+- the machine's end of the stream, which no image could reach once
+  `lantalkcase` went: `logkeeper`'s network half (`serve_network`, `bind_port`,
+  `Carrier`, `Hub::carrier`, the network readers' count, the `stream` word of
+  its `inspect` snapshot), `toyos_logstream::PORT`, `CARRIER`,
+  `CARRIER_LEAVING` and the `SWAP` frames the supervisor sent `logkeeper` to
+  close that listener across a swap of netstack, and the build's
+  `no_shipped_image_serves_the_log_on_the_network`, which then guarded nothing;
+- sshserver's second key file, `/system/etc/ssh_authorized_keys`, which only a
+  talking boot's staging wrote. It reads `authorized_keys` under its own state
+  directory and nothing else.
 
 `lan_message_delivery` could not move to a boot that does not talk without a
 new job: the card's first message arrived 8.499 s into the last boot read,
@@ -65,10 +73,16 @@ at rate — have not been read on real hardware since they landed; under QEMU
 `iommu_virtio_platform` and the suite's network tests drive the same `pcidev`
 functions through virtio-net's claim.
 
+`/system/bin/swap` and the supervisor's swap path stay, because a shipped
+machine can ask for one: `system.toml` makes the desktop a login session whose
+shell starts `swap`, and gives a login over sshserver the same. No test
+performs a swap: `launch_authority` reads the rows that refuse to start it and
+nothing reads one accepted, stopped, started or restored.
+
 What reads the card next is not these rows restored. The owner ruled that the
 rows judged from the stick alone — the T14 reaching its router and the
 internet — are built on ToyOS's own network stack ("no smoltcp."), so they
-arrive with `issues/toyos-has-its-own-network-stack.md`.
+arrive with `issues/toyos-has-its-own-network-stack.md`, which owns them.
 
 ## What the restored chain still owes
 
@@ -96,6 +110,19 @@ back with it:
 - `Stream::wait_until` is woken only by a line, so `metalswap::swap` waits out
   its window on a stream that can carry no more (124 s at PR #566's
   `7e06a657`). Exit: it returns once the stream's `dialing` goes false.
+- A netstack that dies while serving leaves the host's stream silent: its
+  connections go with no FIN and no reset, and only a swap the supervisor
+  accepted was announced. Exit: a host reader learns of an unannounced death
+  through an event, with a test whose replacement serves and then ends inside
+  probation.
+- Connects to `logkeeper`'s port were turned away for about 6 s after it had
+  bound the port again and the supervisor had said `in service` (PR #566's
+  `7e06a657`: bound at 1.758 s, in service at 6.739 s, admitted at 7.721 s).
+  Exit: what holds a bound listener from accepting is named, and removed or
+  bounded.
+- A network reader that never reads holds one of `MAX_NETWORK_READERS` slots
+  until the pipe, netstack's send buffer and the peer's window are full. Exit:
+  it is let go on a bound that does not depend on how fast the log grows.
 - The ssh client is no second implementation: its lock pins the `russh` commit
   `Cargo.lock` pins for sshserver, so a defect in the fork's protocol code is
   on both ends of every exchange.
