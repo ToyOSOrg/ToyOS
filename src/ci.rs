@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::arch::{Accel, Arch};
@@ -165,8 +165,20 @@ fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// silent guest long before this. A hang ceiling and no measure of a step.
 const QUIET: Duration = Duration::from_secs(15 * 60);
 
-/// How long the processes of a killed group may take to let go of its output.
+/// How long the processes of a signalled group may take to let go of its output.
 const GONE: Duration = Duration::from_secs(10);
+
+/// Whether the output ended within [`GONE`]: every process that held it is gone.
+fn gone(lines: &Receiver<std::io::Result<Vec<u8>>>) -> bool {
+    let deadline = Instant::now() + GONE;
+    loop {
+        match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => return true,
+            Err(RecvTimeoutError::Timeout) => return false,
+        }
+    }
+}
 
 /// `cargo <args>` in `dir`, as [`heard`] runs it, never silent past [`QUIET`].
 fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(ExitStatus, String), String> {
@@ -178,10 +190,13 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(ExitStatus, String), Strin
 /// Run `cmd`, its output passed through and also kept, both streams in the
 /// order they were written: a verdict read off the log needs the whole of it.
 ///
-/// **A command that says nothing for `quiet` is hung, and is killed with all
+/// **A command that says nothing for `quiet` is hung, and is ended with all
 /// it spawned**: it leads a process group of its own, because the process that
 /// hangs is a test binary cargo started, and killing cargo alone would leave it
-/// running. The refusal carries the last line said, which under libtest names
+/// running. The group is sent `SIGQUIT`, and `SIGKILL` if its output has not
+/// ended [`GONE`] later: a host that reports a process a signal ended with a
+/// core, as macOS does with every thread's stack, then holds where the silent
+/// one was. The refusal carries the last line said, which under libtest names
 /// the test: `test <name> has been running for over 60 seconds`. The price of
 /// the group is that a terminal's interrupt reaches the driver and not the
 /// command, which then ends at its next write to a pipe nobody reads.
@@ -211,26 +226,25 @@ fn heard(mut cmd: Command, quiet: Duration) -> Result<(ExitStatus, String), Stri
             }
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
-                // SAFETY: the group the child leads, which no other process can name until it is reaped.
-                let killed = match unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) } {
-                    0 => {
-                        child.wait().map_err(|e| format!("wait: {e}"))?;
-                        "was killed with its process group".to_string()
-                    }
-                    _ => format!("could not be killed: {}", std::io::Error::last_os_error()),
-                };
-                let deadline = Instant::now() + GONE;
-                let left = loop {
-                    match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                        Ok(_) => {}
-                        Err(RecvTimeoutError::Disconnected) => break String::new(),
-                        Err(RecvTimeoutError::Timeout) => {
-                            break format!("; a process outside that group still held its output {GONE:?} later");
-                        }
-                    }
-                };
                 let last = log.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("nothing");
-                return Err(format!("said nothing for {quiet:?} and {killed}{left}; the last it said: {last}"));
+                let quiet = format!("said nothing for {quiet:?}");
+                let mut ended = ("", false);
+                for (signal, name) in [(libc::SIGQUIT, "SIGQUIT"), (libc::SIGKILL, "SIGKILL")] {
+                    // SAFETY: the group the child leads, which no other process can name until it is reaped.
+                    if unsafe { libc::killpg(child.id() as i32, signal) } != 0 {
+                        let why = std::io::Error::last_os_error();
+                        return Err(format!("{quiet} and its process group could not be sent {name}: {why}; the last it said: {last}"));
+                    }
+                    ended = (name, gone(&lines));
+                    if ended.1 {
+                        break;
+                    }
+                }
+                // Dead of the signal its output ended at, or of `SIGKILL`.
+                child.wait().map_err(|e| format!("wait: {e}"))?;
+                let (name, gone) = ended;
+                let left = if gone { "" } else { "; a process outside that group still held its output after it" };
+                return Err(format!("{quiet} and was ended with its process group by {name}{left}; the last it said: {last}"));
             }
         }
     }
@@ -1169,8 +1183,10 @@ mod tests {
     const LAST: &str = "the hung step's last line";
 
     /// A step that goes quiet is a red naming the last line it said, and what
-    /// it spawned is killed with it: the step here is this binary, which starts
+    /// it spawned is ended with it: the step here is this binary, which starts
     /// a second and then says nothing, as cargo does with a test that hangs.
+    /// Both ignore `SIGQUIT`, so it is `SIGKILL` that ends them, and no run of
+    /// this test leaves a host's report of a process `SIGQUIT` ended.
     /// The driver is a process of its own, because it reads the end of a pipe,
     /// which on macOS a process another thread spawns meanwhile can hold open.
     #[test]
@@ -1193,7 +1209,7 @@ mod tests {
         hung.stdin(stdin);
         let refusal = heard(hung, Duration::from_secs(10)).expect_err("a step that hangs is a red");
         drop(held);
-        assert!(refusal.ends_with(LAST) && refusal.contains("was killed") && !refusal.contains("outside"), "{refusal}");
+        assert!(refusal.ends_with(LAST) && refusal.contains("by SIGKILL") && !refusal.contains("outside"), "{refusal}");
     }
 
     /// Until the process that holds the other end of stdin is gone.
@@ -1205,14 +1221,18 @@ mod tests {
     #[test]
     #[ignore = "the step of the driver above; never runs on its own"]
     fn a_hung_step() {
+        // SAFETY: a disposition of this process's own, which what it spawns inherits.
+        assert!(unsafe { libc::signal(libc::SIGQUIT, libc::SIG_IGN) } != libc::SIG_ERR);
         // libtest's own lines go nowhere, so `LAST` is the last line said; its
         // stderr is the step's, which it holds open.
-        let _spawned = crate::buildlock::tests::rerun("ci::tests::a_hung_steps_child")
+        let mut spawned = crate::buildlock::tests::rerun("ci::tests::a_hung_steps_child")
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("spawn what the step spawns");
         eprintln!("{LAST}");
         hang();
+        // Reached only where nothing ended the step: its child's stdin ended with its own.
+        spawned.wait().expect("reap what the step spawned");
     }
 
     #[test]

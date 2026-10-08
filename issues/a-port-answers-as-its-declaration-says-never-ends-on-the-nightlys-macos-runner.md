@@ -35,48 +35,75 @@ workspace's host members`:
 
 - **The driver and cargo.** The process the runner found still alive is the
   test binary, and libtest names the one test of its 20 that had not ended.
-- **A wait on anything.** The crate is `#![no_std]` and
+- **A wait in the test's own code.** The crate is `#![no_std]` and
   `#![forbid(unsafe_code)]`, and the test calls `firmware::port` with a
   function of its own and nothing else: no lock, no file, no clock, no thread.
-  What does not end is a computation.
 - **A panic or an overflow check.** Either ends the test.
 - **The policy's source.** `firmware::port` has one loop,
   `for port in port..=port + (width.bytes() as u16 - 1)`, and the test's
   arrays are fixed. On x86-64 the same source ends.
 
-## What reading does not rule out
+## What was measured, and what it leaves
 
 `a_wide_access_is_held_to_every_port_it_spans`, in the same binary, calls the
-same function and ended on macOS. Its accesses that reach port `0xFFFF` are
-refused as `PortSpan` above the loop. The test that hangs is the only one that
-runs the loop over a range whose inclusive end is `0xFFFF`: `(0xFFFC, DWord)`
-and `(0xFFFF, Byte)`. Every host test is built at `opt-level = 2` (root
-`Cargo.toml`, `[profile.dev]`). That points at the code `rustc 1.99.0` makes of
-that loop for `aarch64-apple-darwin`, and nothing has measured it: the log
-says which test, not which iteration. The `host` job's log names no rustc
-version, so whether x86-64 passed under the same compiler is not known either.
-No run of the test on an arm64 Mac, under any compiler, is on record: #749's
-and every later pull request's host suite ran on CI's Linux.
+same function and ended on the runner; its accesses that reach port `0xFFFF`
+are refused as `PortSpan` above the loop, so the test that hangs is the only
+one that runs the loop over a range whose inclusive end is `0xFFFF`. Every
+host test is built at `opt-level = 2` (root `Cargo.toml`, `[profile.dev]`).
+That pointed at the code `rustc 1.99.0` makes of that loop for
+`aarch64-apple-darwin`, and the measurement does not bear it out.
 
-## The one measurement
+On an Apple-silicon Mac, macOS 27.0.1, at `809c33c0c`'s tree: `cargo
++<toolchain> test --locked -p toyos-userbound --test firmware --no-run`, then
+the binary with `--exact a_port_answers_as_its_declaration_says`, to be ended
+after 60 s:
 
-On an arm64 Mac, the test alone, built three ways, each run ended after 60 s
-if it has not ended by itself, with a stack sample of one that had not:
+| toolchain | profile | build | the test |
+|---|---|---|---|
+| `rustc 1.98.1 (48a229cea 2026-09-01)` | the tree's | exit 0 | exit 0, `ok`, `finished in 0.00s` |
+| `rustc 1.99.0 (b940084d7 2026-09-28)`, LLVM 23.1.1 | the tree's | exit 0 | exit 0, `ok`, `finished in 0.00s` |
+| `rustc 1.99.0 (b940084d7 2026-09-28)` | `opt-level = 0` | exit 0 | exit 0, `ok`, `finished in 0.00s` |
 
-1. the tree's profile under `rustc 1.98.1`;
-2. the tree's profile under `rustc 1.99.0`;
-3. `opt-level = 0` under `rustc 1.99.0`.
+So the runner's compiler, on the runner's architecture, makes a test that
+ends. What still differs between that measurement and the job that hung:
 
-`cargo +<toolchain> test -p toyos-userbound --test firmware --no-run`, then
-the binary with `--exact a_port_answers_as_its_declaration_says`. Arm 2 alone
-hanging, its sample inside `firmware::port`, is the compiler's code for that
-loop; all three ending moves the question to the runner.
+- **The tree.** The job built `8a883a142`; the measurement built `809c33c0c`,
+  where #764 has since added `SleepType`, `sleep_type` and a twenty-first test
+  to the same crate and file. `firmware::port`, `port.rs` and the hanging test
+  are the same bytes in both; what the optimiser makes of a crate can move
+  with what else is in it.
+- **What ran beside it.** The measurement ran the one test; the job ran the
+  binary's 20, libtest's default, a thread each.
+- **The machine.** The job's is a hosted `macos-26-arm64` image, macOS 26.6.2
+  (25G83), in a virtual machine; the measurement's is macOS 27.0.1 on the
+  hardware.
 
-Until then the driver ends the step: `src/ci.rs`'s `heard` kills a cargo that
-has said nothing for 15 minutes with everything it started and reds the step
-with the last line said, which here is libtest's line naming this test, and
-the job goes on to its other steps. The nightly stays red on macOS, in
-minutes and by name.
+Nothing the test calls reaches the machine: `firmware::port` and the test's
+`standing` are arithmetic and two matches, in a `#![no_std]` crate that
+forbids `unsafe`, with no system call, clock, entropy, port I/O or thread of
+their own. What does reach it is libtest around the test: the thread it
+starts for each test, the capture of that thread's output, and the channel
+its result comes back on. libtest's line says only that no result had come
+back, not that the test's body was still running, so a thread that never
+started or never returned its result reads the same in the log as a loop that
+never ends.
+
+## What the next nightly settles
+
+`src/ci.rs`'s `heard` now ends a cargo that has said nothing for 15 minutes:
+it sends the step's process group `SIGQUIT`, then `SIGKILL` to what is left
+10 s later, and reds the step with the last line said, which here is libtest's
+line naming this test. macOS writes a report of a process `SIGQUIT` ends,
+every thread's stack in it, under `~/Library/Logs/DiagnosticReports`, and
+`portability-macos` uploads that directory as the artifact
+`macos-crash-reports` when the job fails. The report of the `firmware-*`
+binary says which of the three it is: a thread inside `firmware::port`, a
+thread inside libtest or std, or no test thread at all. Whether a hosted
+runner writes such a report has not been measured; an artifact without one is
+itself the answer to that, and the next instrument is then a debugger
+attached before the signal.
+
+Until it is fixed the nightly is red on macOS, in minutes and by name.
 
 Owner: the `acpi` claim's author (#749), whose test it is.
 

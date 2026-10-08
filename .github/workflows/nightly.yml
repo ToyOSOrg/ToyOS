@@ -128,3 +128,12 @@ jobs:
       # limit `host` above runs under.
       - timeout-minutes: 90
         run: cargo run -- --ci host
+      # Where macOS reports a process a signal ended with a core, every
+      # thread's stack in it: what the driver's SIGQUIT leaves of a silent step.
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-crash-reports
+          path: ~/Library/Logs/DiagnosticReports
+          if-no-files-found: warn
+          retention-days: 7
