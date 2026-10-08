@@ -3,6 +3,9 @@
 //! [`holds_claim`] checks a claim's class against what the syscall requires;
 //! device register access and protocol stay in the device's own code.
 
+use alloc::sync::Arc;
+
+use crate::object::device::DeviceClaim;
 use crate::object::{ops, KObjectRef};
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
@@ -39,7 +42,8 @@ pub(super) fn holds_claim(
 enum RegTarget {
     Hda,
     VirtioSound,
-    /// A claimed PCI function's own config space, **read-only**.
+    /// A claimed PCI function's own config space, **read-only**, through the
+    /// claim itself: what names the function is lent by it for each access.
     ///
     /// There is no writing counterpart and that is the point: a driver cannot
     /// find its own registers without its capability chain — virtio's four
@@ -48,7 +52,7 @@ enum RegTarget {
     /// mastering, the BARs and the MSI-X control word are all writes, and
     /// refusing them is what stops a holder aiming its device at memory or its
     /// interrupt at a vector.
-    PciConfig(usize),
+    PciConfig(Arc<DeviceClaim>),
 }
 
 /// Reads or writes one register of the claimed device; the device owns its allow-list.
@@ -57,14 +61,12 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
         return SyscallError::InvalidArgument.to_u64();
     };
     let target = process::with_process_data(|data| {
-        data.handles
-            .get::<crate::object::device::DeviceClaim>(handle, Rights::NONE)
-            .map(|claim| match claim.class() {
-                device::DeviceType::HdaAudio => Some(RegTarget::Hda),
-                device::DeviceType::VirtioSound => Some(RegTarget::VirtioSound),
-                device::DeviceType::PciFunction => claim.pci_slot().map(RegTarget::PciConfig),
-                _ => None,
-            })
+        data.handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| match claim.class() {
+            device::DeviceType::HdaAudio => Some(RegTarget::Hda),
+            device::DeviceType::VirtioSound => Some(RegTarget::VirtioSound),
+            device::DeviceType::PciFunction => Some(RegTarget::PciConfig(claim)),
+            _ => None,
+        })
     });
     // `refuse` must run with nothing held; the guard above has already been dropped.
     let target = match target {
@@ -84,8 +86,10 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
                 // witness `pcidev::config_window` answers is the only thing
                 // the register read takes, so an unchecked number cannot
                 // reach the register file.
-                RegTarget::PciConfig(slot) => match crate::pcidev::config_window(offset, width) {
-                    Ok(at) => crate::pcidev::config_read(slot, at, width),
+                RegTarget::PciConfig(claim) => match crate::pcidev::config_window(offset, width) {
+                    Ok(at) => on_function(&claim, |function| {
+                        crate::pcidev::config_read(function, at, width)
+                    }),
                     Err(_) => Err(SyscallError::InvalidArgument),
                 },
             };
@@ -158,34 +162,48 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     })
 }
 
-/// The `pcidev` slot a claim handle names, with the right every substrate call
+/// The PCI function claim a handle names, with the right every substrate call
 /// demands.
 ///
 /// [`Rights::WRITE`] for all three: each one gives the holder control of the
 /// device — a register window, memory the device can reach, its interrupt — and
 /// a claim carries no `DUP`, so no narrower handle to one can exist.
-fn pci_slot(handle: RawHandle) -> Result<usize, crate::object::Refusal> {
-    let slot = process::with_process_data(|data| {
-        data.handles
-            .get::<crate::object::device::DeviceClaim>(handle, Rights::WRITE)
-            .map(|claim| claim.pci_slot())
+///
+/// **The claim, and nothing read out of it**: a call reaches its function only
+/// through [`on_function`], so what it acts on is this claim's or nothing.
+fn pci_claim(handle: RawHandle) -> Result<Arc<DeviceClaim>, crate::object::Refusal> {
+    let claim = process::with_process_data(|data| {
+        data.handles.get::<DeviceClaim>(handle, Rights::WRITE)
     })?;
     // A claim of another class is the wrong kind of thing here, not a missing
     // device: it names a device this call has no meaning for.
-    slot.ok_or(crate::object::HandleError::WrongType {
-        held: device::DeviceType::PciFunction.class_name(),
-        wanted: "a PCI function claim",
+    match claim.class() {
+        device::DeviceType::PciFunction => Ok(claim),
+        other => Err(crate::object::HandleError::WrongType {
+            held: other.class_name(),
+            wanted: "a PCI function claim",
+        }
+        .into()),
     }
-    .into())
+}
+
+/// One `pcidev` call on the function `claim` drives, or [`SyscallError::Gone`]
+/// for a claim whose last handle went under the call: a sibling thread closed
+/// it, and whatever holds its slot now is not this caller's.
+fn on_function<T>(
+    claim: &DeviceClaim,
+    call: impl FnOnce(&crate::pcidev::Binding) -> Result<T, SyscallError>,
+) -> Result<T, SyscallError> {
+    claim.pci(call).unwrap_or(Err(SyscallError::Gone))
 }
 
 /// One memory BAR of a claimed function, as an object to map.
 pub(super) fn sys_device_bar_map(handle: RawHandle, index: u64) -> u64 {
-    let slot = match pci_slot(handle) {
-        Ok(slot) => slot,
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
-    let object = match crate::pcidev::bar_object(slot, index) {
+    let object = match on_function(&claim, |function| crate::pcidev::bar_object(function, index)) {
         Ok(object) => object,
         Err(e) => return e.to_u64(),
     };
@@ -201,8 +219,8 @@ pub(super) fn sys_device_dma_alloc(
     bytes: u64,
     out: UserAddr,
 ) -> u64 {
-    let slot = match pci_slot(handle) {
-        Ok(slot) => slot,
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
     // The output window is taken before the allocation, the same order
@@ -212,7 +230,8 @@ pub(super) fn sys_device_dma_alloc(
     let Some(mut window) = ctx.user_bytes_mut(out, len) else {
         return SyscallError::BadAddress.to_u64();
     };
-    let (memory, device_addr, granted) = match crate::pcidev::dma_alloc(slot, bytes) {
+    let granted = on_function(&claim, |function| crate::pcidev::dma_alloc(function, bytes));
+    let (memory, device_addr, granted) = match granted {
         Ok(grant) => grant,
         Err(e) => return e.to_u64(),
     };
@@ -224,8 +243,9 @@ pub(super) fn sys_device_dma_alloc(
         // The grant goes back rather than staying mapped with nothing naming
         // it: a caller left holding neither the handle nor the quota would be
         // refused every later grant with no way out but dying.
+        // A claim released since took the grant back itself.
         Err(e) => {
-            crate::pcidev::dma_undo(slot, &memory);
+            claim.pci(|function| crate::pcidev::dma_undo(function, &memory));
             return e.to_u64();
         }
     };
@@ -254,8 +274,8 @@ pub(super) fn sys_device_dma_map(
     region: RawHandle,
     out: UserAddr,
 ) -> u64 {
-    let slot = match pci_slot(handle) {
-        Ok(slot) => slot,
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
     let memory = match process::with_process_data(|data| {
@@ -268,7 +288,8 @@ pub(super) fn sys_device_dma_map(
     let Some(mut window) = ctx.user_bytes_mut(out, len) else {
         return SyscallError::BadAddress.to_u64();
     };
-    let (device_addr, bytes) = match crate::pcidev::dma_map(slot, &memory) {
+    let mapped = on_function(&claim, |function| crate::pcidev::dma_map(function, &memory));
+    let (device_addr, bytes) = match mapped {
         Ok(mapped) => mapped,
         Err(e) => return e.to_u64(),
     };
@@ -288,12 +309,13 @@ pub(super) fn sys_device_dma_map(
 
 /// Take back what [`sys_device_dma_map`] put at `device_addr`.
 pub(super) fn sys_device_dma_unmap(handle: RawHandle, device_addr: u64) -> u64 {
-    let slot = match pci_slot(handle) {
-        Ok(slot) => slot,
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
-    match crate::pcidev::dma_unmap(slot, device_addr) {
-        Ok(()) => 0,
+    // The region is let go here, with the claim's lock given back.
+    match on_function(&claim, |function| crate::pcidev::dma_unmap(function, device_addr)) {
+        Ok(_region) => 0,
         Err(e) => e.to_u64(),
     }
 }

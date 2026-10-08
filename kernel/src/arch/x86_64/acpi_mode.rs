@@ -161,16 +161,12 @@ fn embedded_controller(rsdp_addr: u64, gpe0: Block) -> Result<Ec, String> {
 
 /// The row, claimed, with the machine in ACPI mode; or the refusal that
 /// leaves it in legacy mode, said by name.
-pub fn claim() -> Result<(usize, AcpiInfo), ClaimError> {
+pub fn claim() -> Result<(isa::Row, AcpiInfo), ClaimError> {
     let hardware = hardware().ok_or(ClaimError::Absent)?;
+    // Released by the refusal's return, which drops it.
     let row = isa::claim_row(ROW)?;
-    match enter(hardware) {
-        Ok(()) => Ok((row, info(hardware))),
-        Err(refused) => {
-            isa::release(row);
-            Err(refused)
-        }
-    }
+    enter(hardware)?;
+    Ok((row, info(hardware)))
 }
 
 fn info(hardware: &Hardware) -> AcpiInfo {
@@ -247,13 +243,13 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
 }
 
 /// The claim's last handle went: the machine back in legacy mode where the
-/// mint took it out of it, and then the row released, so no claimant finds
-/// `SCI_EN` set by a holder whose disable is still to come.
-pub fn release(row: usize) {
+/// mint took it out of it. Before the row's own release, which its caller's
+/// drop of the row is, so no claimant finds `SCI_EN` set by a holder whose
+/// disable is still to come.
+pub fn release() {
     if ENABLED.load(Ordering::Relaxed) {
         leave(hardware().expect("a claimed row has its hardware"));
     }
-    isa::release(row);
 }
 
 /// `ACPI_DISABLE`, written where the mint wrote `ACPI_ENABLE`, and `SCI_EN`

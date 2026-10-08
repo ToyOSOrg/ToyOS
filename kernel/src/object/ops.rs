@@ -278,10 +278,10 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
             device_registry::DeviceType::PciFunction => {
-                d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
+                d.pci(crate::pcidev::watch).map(WatchRef::Irq)
             }
             device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                d.isa_row().map(|row| WatchRef::Irq(crate::isa::watch(row)))
+                d.isa(crate::isa::watch).map(WatchRef::Irq)
             }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
                 Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
@@ -427,10 +427,10 @@ pub fn read_device(
             if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
                 return Some(SyscallError::InvalidArgument.to_u64());
             }
-            let slot = claim.pci_slot().expect("a PCI claim knows its slot");
-            let record = match crate::pcidev::take_record(slot) {
-                Ok(record) => record?,
-                Err(refused) => return Some(refused.to_u64()),
+            let record = match claim.pci(crate::pcidev::take_record) {
+                Some(Ok(record)) => record?,
+                Some(Err(refused)) => return Some(refused.to_u64()),
+                None => return Some(SyscallError::Gone.to_u64()),
             };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
@@ -438,19 +438,29 @@ pub fn read_device(
         // The PCI shape, but the description is what binds the ports to the
         // reader, and nothing after it answers any other process.
         device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-            let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
             let pid = crate::process::current_process();
             if !claim.info_read() {
-                crate::isa::bind(row, pid);
+                if claim.isa(|row| crate::isa::bind(row, pid)).is_none() {
+                    return Some(SyscallError::Gone.to_u64());
+                }
                 return Some(claim.describe(table, buf));
             }
-            if !crate::isa::bound_to(row, pid) {
-                return Some(SyscallError::PermissionDenied.to_u64());
-            }
-            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let record = crate::isa::take_record(row)?;
+            let room = buf.len() >= toyos_abi::pci::DeviceIrqRecord::SIZE;
+            // The holder's check and the take are one borrow of the row.
+            let taken = claim.isa(|row| {
+                if !crate::isa::held_by(row, pid) {
+                    Err(SyscallError::PermissionDenied)
+                } else if !room {
+                    Err(SyscallError::InvalidArgument)
+                } else {
+                    Ok(crate::isa::take_record(row))
+                }
+            });
+            let record = match taken {
+                Some(Ok(record)) => record?,
+                Some(Err(refused)) => return Some(refused.to_u64()),
+                None => return Some(SyscallError::Gone.to_u64()),
+            };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
@@ -794,11 +804,14 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
             device_registry::DeviceType::Mouse => mouse::has_data(),
+            // A claim its last handle has let go is ready: nothing will post
+            // for it again, so a poll on it is answered and never left
+            // registered on a watch its slot's or row's next holder posts.
             device_registry::DeviceType::PciFunction => {
-                !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
+                !d.info_read() || d.pci(crate::pcidev::has_irq).unwrap_or(true)
             }
             device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                !d.info_read() || d.isa_row().is_some_and(crate::isa::has_irq)
+                !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(true)
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
@@ -876,20 +889,28 @@ fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
         | device_registry::DeviceType::PciFunction
         | device_registry::DeviceType::Partition => return SyscallError::PermissionDenied.to_u64(),
     }
-    let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
-    if !claim.info_read() || !crate::isa::bound_to(row, crate::process::current_process()) {
+    if !claim.info_read() {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut word = [0u8; 4];
-    if buf.len() != word.len() {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    buf.read_at(0, &mut word);
-    if u32::from_ne_bytes(word) != toyos_abi::acpi::ACK {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    match crate::isa::ack(row) {
-        Ok(()) => word.len() as u64,
-        Err(()) => SyscallError::InvalidArgument.to_u64(),
+    let acknowledges = buf.len() == word.len() && {
+        buf.read_at(0, &mut word);
+        u32::from_ne_bytes(word) == toyos_abi::acpi::ACK
+    };
+    let pid = crate::process::current_process();
+    // The holder's check and the unmask are one borrow of the row.
+    let acked = claim.isa(|row| {
+        if !crate::isa::held_by(row, pid) {
+            Err(SyscallError::PermissionDenied)
+        } else if !acknowledges {
+            Err(SyscallError::InvalidArgument)
+        } else {
+            crate::isa::ack(row).map_err(|()| SyscallError::InvalidArgument)
+        }
+    });
+    match acked {
+        Some(Ok(())) => word.len() as u64,
+        Some(Err(refused)) => refused.to_u64(),
+        None => SyscallError::Gone.to_u64(),
     }
 }

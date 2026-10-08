@@ -68,10 +68,9 @@ fn claims() -> Vec<Claim> {
         let data = data.lock();
         for (_, entry) in data.handles.iter() {
             let KObjectRef::Device(claim) = entry.object() else { continue };
-            let on = if let Some(slot) = claim.pci_slot() {
-                // A slot nobody holds any more is a claim whose release is
-                // under way; it names nothing.
-                let Some(at) = crate::pcidev::held_at(slot) else { continue };
+            let on = if claim.class() == toyos_abi::syscall::DeviceType::PciFunction {
+                // A function the last handle has let go names nothing.
+                let Some(at) = claim.pci(crate::pcidev::held_at) else { continue };
                 Claimed::Pci(at)
             } else if claim.class() == toyos_abi::syscall::DeviceType::Partition {
                 // A partition the last handle has let go names nothing.

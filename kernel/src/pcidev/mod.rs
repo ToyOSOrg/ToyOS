@@ -94,6 +94,14 @@
 //! grants are still mapped; the next claim of the slot waits the reset out and
 //! writes back what the reset cleared and [`bring_up`] does not write itself
 //! ([`Kept`]) before it reads a register of the function.
+//!
+//! **A call names its function by its claim's [`Binding`] and never by a slot
+//! number.** A slot is the next claim's once its holder's release is over, so
+//! a number carried from a claim to a call would be another holder's function
+//! by the time it was used. The binding is lent by the claim under the lock
+//! its release takes it with (`object::Held`): a call runs wholly before the
+//! release or finds no binding. Only the two handlers name a slot, by the
+//! vector and the requester the hardware gave them.
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
@@ -368,6 +376,23 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 /// takes it once the teardown is over.
 static SLOTS: Lock<[Slot; MAX_FUNCTIONS]> = Lock::new([Slot::Free; MAX_FUNCTIONS]);
 
+/// One claim's hold on a slot, from its reservation to the release its drop
+/// is: what every call on the claim is made with.
+///
+/// Neither `Copy` nor `Clone` and made only by [`claim`], so there is one per
+/// reservation, and a reference to it is a slot no other claim holds.
+pub struct Binding {
+    slot: usize,
+    /// The requester the slot is held for.
+    who: u16,
+}
+
+impl Drop for Binding {
+    fn drop(&mut self) {
+        release(self.slot);
+    }
+}
+
 /// Take a slot for `who`, or say why not.
 ///
 /// The scan and the take are one critical section: two claims arriving together
@@ -408,10 +433,9 @@ pub fn segment() -> u16 {
     MACHINE.lock().segment
 }
 
-/// The function a claim's slot holds, or `None` for a slot nobody holds.
-pub fn held_at(slot: usize) -> Option<toyos_abi::inventory::PciAddr> {
-    let Some(Slot::Held(who)) = SLOTS.lock().get(slot).copied() else { return None };
-    Some(addr_of(MACHINE.lock().segment, who))
+/// The function a claim holds.
+pub fn held_at(binding: &Binding) -> toyos_abi::inventory::PciAddr {
+    addr_of(MACHINE.lock().segment, binding.who)
 }
 
 pub(crate) fn requester(pci: &PciDevice) -> u16 {
@@ -672,7 +696,7 @@ impl core::fmt::Display for Refusal {
 
 /// Claim `id`, bring the function up to the point a driver takes over, and
 /// answer what that driver needs to know.
-pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
+pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     let (pci, driven) = {
         let machine = MACHINE.lock();
         let mut found: Option<PciDevice> = None;
@@ -708,9 +732,10 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
 
     // `Owned` before `Exhausted`: a second claim on a function somebody holds
     // is a different fact from a machine with no slot left.
-    let slot = reserve(requester(&pci))?;
-    // Dropped by every refusal below, and `release` is what gives the slot back.
-    let claim = Claim::pci(slot);
+    let who = requester(&pci);
+    let slot = reserve(who)?;
+    // Dropped by every refusal below, which is what gives the slot back.
+    let binding = Binding { slot, who };
 
     match bring_up(pci, id, slot) {
         Ok(mut bound) => {
@@ -735,7 +760,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
                 id.device,
                 VECTORS[slot],
             );
-            Ok((info, slot as u8, claim))
+            Ok((info, Claim::pci(binding)))
         }
         Err(why) => {
             log!(
@@ -1395,7 +1420,7 @@ fn alone_in_its_page(claimed: &PciDevice, index: u8, at: u64, span: u64) {
 /// The order is what makes a dying driver safe. A page freed while the function
 /// could still reach it is a device writing into memory the allocator has
 /// already handed to somebody else.
-pub fn release(slot: usize) {
+fn release(slot: usize) {
     // Two statements, because edition 2021 keeps an `if let`'s scrutinee
     // temporaries alive to the end of its block: `BOUND[slot]`'s guard would be
     // held across the unmaps, the reset and the watch's answer.
@@ -1484,22 +1509,22 @@ fn tear_down(slot: usize, mut bound: Bound) {
     );
 }
 
-/// What every call a claim answers checks first.
+/// What every call a claim answers checks first, over what that claim bound.
 fn with_bound<T>(
-    slot: usize,
+    binding: &Binding,
     f: impl FnOnce(&mut Bound) -> Result<T, SyscallError>,
 ) -> Result<T, SyscallError> {
-    if IRQ[slot].faulted() {
+    if IRQ[binding.slot].faulted() {
         return Err(SyscallError::Io);
     }
-    let mut guard = BOUND[slot].lock();
-    let bound = guard.as_mut().ok_or(SyscallError::NotFound)?;
-    f(bound)
+    let mut guard = BOUND[binding.slot].lock();
+    // Bound before `claim` hands the binding out, and unbound only by its drop.
+    f(guard.as_mut().expect("pcidev: a claim's binding has its function bound"))
 }
 
 /// One memory BAR as an object to map; the same object every time.
-pub fn bar_object(slot: usize, index: u64) -> Result<Arc<SharedMemObject>, SyscallError> {
-    with_bound(slot, |bound| {
+pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>, SyscallError> {
+    with_bound(binding, |bound| {
         let index = usize::try_from(index).map_err(|_| SyscallError::InvalidArgument)?;
         if index >= BARS || bound.bar_bytes[index] == 0 {
             return Err(SyscallError::InvalidArgument);
@@ -1522,10 +1547,11 @@ pub fn bar_object(slot: usize, index: u64) -> Result<Arc<SharedMemObject>, Sysca
 
 /// Memory this function may reach, and nothing else may.
 pub fn dma_alloc(
-    slot: usize,
+    binding: &Binding,
     bytes: u64,
 ) -> Result<(Arc<SharedMemObject>, u64, u64), SyscallError> {
-    with_bound(slot, |bound| {
+    let slot = binding.slot;
+    with_bound(binding, |bound| {
         if bytes == 0 || bytes > MAX_GRANT_BYTES {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1574,8 +1600,9 @@ pub fn dma_alloc(
 /// Found by its memory and not by position: a [`dma_map`] on another thread of
 /// the same holder can push between the grant and this, and the address the
 /// caller was *told* is not always the address the grant is at.
-pub fn dma_undo(slot: usize, memory: &Arc<SharedMemObject>) {
-    let _ = with_bound(slot, |bound| {
+pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
+    let slot = binding.slot;
+    let _ = with_bound(binding, |bound| {
         let Some(index) = bound.grants.iter().position(|grant| Arc::ptr_eq(&grant.memory, memory))
         else {
             return Ok(());
@@ -1605,8 +1632,9 @@ pub fn dma_undo(slot: usize, memory: &Arc<SharedMemObject>) {
 /// Counted against [`MAX_GRANT_TOTAL`] with the claim's own grants, so a holder
 /// mapping every region its clients send is bounded by the same number; and a
 /// window with no run of the region's length left free is the same refusal.
-pub fn dma_map(slot: usize, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
-    with_bound(slot, |bound| {
+pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
+    let slot = binding.slot;
+    with_bound(binding, |bound| {
         let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the
@@ -1637,8 +1665,13 @@ pub fn dma_map(slot: usize, region: &Arc<SharedMemObject>) -> Result<(u64, u64),
 /// there is refused at the unit and recorded against this claim — and only
 /// after that is the region's `Arc` let go, so its pages can never be freed
 /// under a translation that still names them.
-pub fn dma_unmap(slot: usize, at: u64) -> Result<(), SyscallError> {
-    let grant = with_bound(slot, |bound| {
+///
+/// **Answers the region, for the caller to let go with nothing held**: the
+/// last `Arc` of one can run its zero-handle teardown, which takes other
+/// objects' locks, and the caller holds its claim's.
+pub fn dma_unmap(binding: &Binding, at: u64) -> Result<Arc<SharedMemObject>, SyscallError> {
+    let slot = binding.slot;
+    with_bound(binding, |bound| {
         let index = bound
             .grants
             .iter()
@@ -1648,12 +1681,8 @@ pub fn dma_unmap(slot: usize, at: u64) -> Result<(), SyscallError> {
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
             panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
         }
-        Ok(grant)
-    })?;
-    // Outside the slot's lock: the last `Arc` of a region can run its
-    // zero-handle teardown, which takes other objects' locks.
-    drop(grant);
-    Ok(())
+        Ok(grant.memory)
+    })
 }
 
 /// The window a claim's configuration reads are checked against, for the one
@@ -1672,8 +1701,8 @@ pub fn config_window(offset: u64, width: RegWidth) -> Result<Register, toyos_dma
 /// **Takes the witness and not an offset.** The number came from a caller, and
 /// [`Register`]'s only constructor is the check, so there is no way to reach
 /// the register file here with one nobody bounded.
-pub fn config_read(slot: usize, at: Register, width: RegWidth) -> Result<u32, SyscallError> {
-    with_bound(slot, |bound| {
+pub fn config_read(binding: &Binding, at: Register, width: RegWidth) -> Result<u32, SyscallError> {
+    with_bound(binding, |bound| {
         Ok(match width {
             RegWidth::U8 => bound.pci.read_config_u8(at.offset()) as u32,
             RegWidth::U16 => bound.pci.read_config_u16(at.offset()) as u32,
@@ -1685,7 +1714,8 @@ pub fn config_read(slot: usize, at: Register, width: RegWidth) -> Result<u32, Sy
 /// The interrupts since the last read, or `None` for none; `Io` once the unit
 /// has refused the function, which is the one answer its holder cannot take
 /// for a quiet device.
-pub fn take_record(slot: usize) -> Result<Option<DeviceIrqRecord>, SyscallError> {
+pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, SyscallError> {
+    let slot = binding.slot;
     if IRQ[slot].faulted() {
         return Err(SyscallError::Io);
     }
@@ -1698,8 +1728,8 @@ pub fn take_record(slot: usize) -> Result<Option<DeviceIrqRecord>, SyscallError>
 
 /// Whether a read of the claim answers at once: a message is waiting, or the
 /// refusal is.
-pub fn has_irq(slot: usize) -> bool {
-    IRQ[slot].armed() || IRQ[slot].faulted()
+pub fn has_irq(binding: &Binding) -> bool {
+    IRQ[binding.slot].armed() || IRQ[binding.slot].faulted()
 }
 
 /// Records one message and posts the claim's watch. Called from the vector's
@@ -1721,7 +1751,11 @@ pub fn note_fault(slot: usize) {
     crate::preempt::set_need_resched();
 }
 
-/// The watch of the function a claim holds at `slot`.
-pub fn watch(slot: usize) -> &'static IrqWatch {
-    &WATCHES[slot]
+/// The watch of the function a claim holds.
+///
+/// It outlives the borrow it was asked with, so a poll can be registered on it
+/// after the claim's release: its registrar's own recheck then finds the claim
+/// released and fires it (`ops::has_data`).
+pub fn watch(binding: &Binding) -> &'static IrqWatch {
+    &WATCHES[binding.slot]
 }
