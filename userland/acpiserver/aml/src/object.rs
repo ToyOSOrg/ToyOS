@@ -39,8 +39,9 @@ pub(crate) type Kept<T> = Rc<Held<T>>;
 /// for: a string, buffer, table or package at its vector's capacity and its
 /// shared record, a fixed record at its size, the namespace's arena at its
 /// capacity and a node's entry among its parent's children at the most a
-/// parent allocates for one (`namespace`), and the value an evaluation is
-/// building for its caller, until the caller has it. What it does not count
+/// parent allocates for one (`namespace`), the value an evaluation is
+/// building for its caller, until the caller has it, and a walk of the
+/// namespace while its caller holds it. What it does not count
 /// is what a load or an evaluation holds while it runs and lets go at its
 /// end: its frames and the mutexes it has acquired, the names it is
 /// reading, the bytes one operator has made and not yet held (`exec`) and
@@ -67,6 +68,10 @@ impl Meter {
         let live = self.live.get().checked_add(n).filter(|&l| l <= MAX_LIVE);
         self.live.set(live.ok_or(Error::Bound("more held live than one interpreter holds"))?);
         Ok(())
+    }
+
+    pub(crate) fn live(&self) -> usize {
+        self.live.get()
     }
 
     pub(crate) fn give(&self, n: usize) {
