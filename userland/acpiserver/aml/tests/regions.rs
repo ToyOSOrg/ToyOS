@@ -254,6 +254,29 @@ fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
     assert_eq!(m.accesses(), walked);
 }
 
+/// A bridge's secondary bus is above the bus it is on, and a bus number is 8
+/// bits: a region below 257 devices is below more bridges than there are
+/// buses for them, and is refused before any is asked, where one below 256
+/// is walked to the root for its host bridge.
+#[test]
+fn a_pci_config_region_below_more_bridges_than_buses_is_refused() {
+    let region = cat(&[&op_region("CFG", 0x02, &int(0), &int(0x10)), &field("CFG", BYTE, &[unit("FLD", 8)])]);
+    let chain = |devices: usize, inner: &[u8]| (0..devices).fold(inner.to_vec(), |body, _| device("D", &body));
+    // 200 devices one inside the other, and the rest inside a Scope naming
+    // the innermost: terms nest no deeper than this interpreter goes.
+    let below = |devices: usize| {
+        let outer = format!("\\{}", ["D"; 200].join("."));
+        let body = cat(&[&chain(200, &[]), &scope(&outer, &chain(devices - 200, &region))]);
+        read(&body, &[], &format!("\\{}.FLD", vec!["D"; devices].join(".")))
+    };
+    let (m, v) = below(257);
+    assert_eq!(v, Err(Error::Rule("a PCI_Config region below more bridges than there are buses for them")));
+    assert_eq!(m.accesses(), vec![]);
+    let (m, v) = below(256);
+    assert_eq!(v, Err(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN")));
+    assert_eq!(m.accesses(), vec![]);
+}
+
 /// A store to a field is of its source as the store found it: the function a
 /// PCI_Config field addresses is asked of firmware's own methods while the
 /// store is under way, and one that stores to the source changes nothing of

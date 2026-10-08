@@ -7,15 +7,21 @@
 //! the Global Lock across the whole access. An IndexField reaches a unit by
 //! writing its byte offset to the index field and then accessing the data
 //! field; a BankField writes its bank value to the bank field first.
+//!
+//! An access runs other fields' accesses and, for a PCI_Config region,
+//! firmware's methods, each of which may access a field again: the buffer a
+//! read gathers and the bytes a store writes from are held against the meter
+//! before the first unit is accessed. A field that fits an Integer is read,
+//! and an Integer stored, without the heap: an interpreter that is full
+//! still does both.
 
-use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::exec::Machine;
 use crate::name::Seg;
 use crate::namespace::NodeId;
-use crate::object::{fit, to_buf, to_int, Bytes, Object};
+use crate::object::{fit, to_buf, to_int, Bytes, Kept, Object};
 use crate::{Address, Error, MAX_BYTES};
 
 pub(crate) struct Region {
@@ -36,9 +42,9 @@ struct Pci {
 
 #[derive(Clone)]
 pub(crate) enum Kind {
-    Region(Rc<Region>),
-    Bank { region: Rc<Region>, bank: Rc<Field>, value: u64 },
-    Index { index: Rc<Field>, data: Rc<Field> },
+    Region(Kept<Region>),
+    Bank { region: Kept<Region>, bank: Kept<Field>, value: u64 },
+    Index { index: Kept<Field>, data: Kept<Field> },
 }
 
 pub(crate) struct Field {
@@ -187,7 +193,10 @@ impl Machine<'_> {
     /// is refused, where any bus chosen for it would be another device's.
     ///
     /// Every access asks again, firmware's methods and the bridges both:
-    /// nothing is kept that a bridge renumbered since would make stale.
+    /// nothing is kept that a bridge renumbered since would make stale. A
+    /// bridge's secondary bus is above the bus it is on and a bus number is
+    /// 8 bits, so a region below more than 255 bridges is on no bus, and is
+    /// refused before any is asked.
     fn pci(&mut self, r: &Region) -> Result<Pci, Error> {
         let bbn = Seg(*b"_BBN");
         let mut below = Vec::new();
@@ -197,6 +206,9 @@ impl Machine<'_> {
             if matches!(self.ns.object(host), Some(Object::Device)) {
                 if self.ns.child(host, bbn).is_some() {
                     break;
+                }
+                if below.len() > usize::from(u8::MAX) {
+                    return Err(Error::Rule("a PCI_Config region below more bridges than there are buses for them"));
                 }
                 below.push(host);
             }
@@ -290,28 +302,46 @@ impl Machine<'_> {
         self.enter()?;
         let r = self.locked(f.lock, |m| m.read_units(f));
         self.leave();
-        self.value(r?, f.len)
+        r
     }
 
-    /// A field's value (§19.6.47): an Integer when it fits one, else a Buffer.
+    /// Whether a field's value is a Buffer (§19.6.47): an Integer when it
+    /// fits one, else a Buffer.
+    fn wide(&self, bits: u64) -> bool {
+        bits > u64::from(self.w.bits)
+    }
+
     fn value(&mut self, b: Vec<u8>, bits: u64) -> Result<Object, Error> {
-        if bits <= u64::from(self.w.bits) { Ok(Object::Int(self.w.int_of_bytes(&b)?)) } else { self.new_buf(b) }
+        if self.wide(bits) { self.new_buf(b) } else { Ok(Object::Int(self.w.int_of_bytes(&b)?)) }
     }
 
-    fn read_units(&mut self, f: &Field) -> Result<Vec<u8>, Error> {
-        let mut out = vec![0u8; bytes_for(f.len)?];
-        self.charge(out.len())?;
+    /// A field's value, gathered unit by unit: an Integer in a word, a
+    /// Buffer in bytes held before the first unit is read.
+    fn read_units(&mut self, f: &Field) -> Result<Object, Error> {
+        let n = bytes_for(f.len)?;
+        let buf = if self.wide(f.len) {
+            Some(self.bytes(vec![0u8; n])?)
+        } else {
+            self.charge(n)?;
+            None
+        };
+        let mut int = 0u64;
         let w = self.unit(f)?;
         let span = 8 * w;
         for u in f.bit / span..=(f.bit + f.len - 1) / span {
             self.step()?;
             let v = self.unit_read(f, u * w, w)?;
             let (lo, hi) = (u * span, (u + 1) * span);
+            let mut bits = buf.as_ref().map(|b| b.bits());
             for b in f.bit.max(lo)..(f.bit + f.len).min(hi) {
-                set_bit(&mut out, b - f.bit, v >> (b - lo) & 1 == 1);
+                let on = v >> (b - lo) & 1;
+                match &mut bits {
+                    Some(bits) => set_bit(bits, b - f.bit, on == 1),
+                    None => int |= on << (b - f.bit),
+                }
             }
         }
-        Ok(out)
+        Ok(buf.map_or(Object::Int(int), Object::Buf))
     }
 
     /// A store to a field unit (Table 19.7): an Integer overwrites the whole

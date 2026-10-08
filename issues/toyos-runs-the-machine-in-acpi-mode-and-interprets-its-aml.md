@@ -182,26 +182,56 @@ otherwise pay to find again:
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
   loaded that way; the interpreter refuses both as unsupported.
 - **A refused evaluation keeps what it stored**, and nothing gives an
-  interpreter's 16 MiB back: after one method has filled it, a name's value
-  still evaluates, `\_S5`'s package among them, and every method that must
-  hold anything new is refused
-  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`).
+  interpreter's 16 MiB back: after one method has filled it, an Integer
+  still evaluates, a field that fits one among them, and every method that
+  must hold anything new is refused; so is a String, Buffer or Package
+  handed to the caller, `\_S5`'s among them, where the bound has no room
+  for the caller's copy while it is built
+  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`;
+  `a_full_interpreter_reads_a_field_that_fits_an_integer`, `userland/acpiserver/aml/tests/heap.rs`).
   Owner: the power-off stage, which decides
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
-- **The interpreter's 16 MiB is its meter's count, not its heap.** The meter
-  counts whatever a table sizes; each namespace node and package element
-  carries a constant beside that which it does not count (`object::Meter`,
-  `userland/acpiserver/aml/src/object.rs`). With the meter full, the heap an
-  interpreter held was 16,776,232 bytes when buffers filled it, 19,549,520
-  when package elements naming objects not yet defined did, and 41,091,744
-  when field units did. A load refused at the bound also leaves the
-  namespace's arena at the capacity it grew to: 24,115,888 bytes held after
-  one table naming 204,000 field units was refused. Owner: the power-off
-  stage, which gives the server its memory. **Exit**: the server states its
-  interpreter's bound in heap bytes, and a host test under a counting
-  allocator holds each of those three fills and that refused load to it.
+- **The interpreter's 16 MiB bounds the heap it holds from one call to the
+  next, not what one call holds while it runs.** The meter counts what an
+  interpreter's allocations ask for (`object::Meter`,
+  `userland/acpiserver/aml/src/object.rs`), and under a counting allocator
+  an interpreter filled until it refuses holds at most `MAX_LIVE`, whatever
+  fills it; a refused load leaves it holding the bytes it held before;
+  ToString, Mid and Concatenate nested in themselves, and fields read
+  through each other, hold one level's bytes past what the meter counts and
+  not a level's each; and the value an evaluation hands its caller is held
+  to the bound while it is built (`userland/acpiserver/aml/tests/heap.rs`).
+  That allocator counts every realloc as one that moves. While a load or an
+  evaluation runs it still holds more, uncounted, and nothing measures the
+  sum. Each part is bounded by the depth or the step bound, by reading and
+  not by a run: its frames, 256 at most; a name read from the table for
+  each, 255 segments at most; 9 bytes for every Mutex acquired and not
+  released, an Acquire two steps at the least; 16 bytes for each of at
+  most 256 devices above a PCI_Config region while its bridges are asked;
+  one operator's string or buffer before the meter holds it, Concatenate's
+  the most at its two operands' copies and their sum; a table's bytes while
+  they are read in; the arena's old slots while a doubling moves it; and
+  the segments and the text of one node's path, as deep as the meter
+  admits a node, for Notify, a reference handed back and the name a
+  refusal carries. A refusal's text is the caller's and outside the meter.
+  The meter also holds a namespace node above its cost, at a whole
+  map leaf of 104 bytes for its entry in its parent and the arena at its
+  doubled capacity: an interpreter filled with field units refuses with
+  11,111,460 bytes of heap held, and one filled with devices of one child
+  with 8,900,612. The real machine's tables have not been loaded since the
+  meter came to count a node's slot, entry and record, a wide field's read
+  came to hold its buffer and the arena's move to cost steps: that reading
+  is owed before the server links the crate, and with it the slots the
+  arena has free after the last table, since a method that defines more
+  names than that moves the arena each time it runs, at a step for every
+  64 bytes of it. Owner: the power-off stage, which gives the server its
+  memory. **Exit**: the server states its interpreter's bound in heap
+  bytes, and a host test under a counting allocator holds the most a load
+  and an evaluation hold while they run to it; and the real machine's
+  tables load under the meter as it stands, the arena's free slots after
+  the last read with them.
 
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:
