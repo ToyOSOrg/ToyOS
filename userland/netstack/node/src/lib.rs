@@ -175,10 +175,7 @@ impl Node {
             };
             self.carry_out(now, out, verified, draw);
         }
-        if let Some(name) = &mut self.name {
-            let unsent = name.pass(now, &mut self.stack);
-            self.counters.add(Counter::NameUnsent, unsent);
-        }
+        self.serve_name(now);
     }
 
     /// What one call of the client's asked for: the lease first, so a message leaves from the

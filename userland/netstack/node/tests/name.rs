@@ -187,6 +187,65 @@ fn an_answer_goes_to_the_group_or_to_the_asker_as_the_query_asked() {
     assert_eq!(since(&lan, from), [unicast(53_000, legacy_response(0xBEEF)), unicast(MDNS, response()), multicast(response())]);
 }
 
+// RFC 6762 §6: "a Multicast DNS responder MUST NOT (except in the one special case of answering
+// probe queries) multicast a record on a given interface until at least one second has elapsed
+// since the last time that record was multicast on that particular interface." The bound is the
+// responder's, on the clock the node hands it; the answer it holds back is a deadline of the
+// node's, and one multicast then answers every query it held.
+#[test]
+fn a_second_query_inside_a_second_waits_for_the_second_to_end() {
+    let mut lan = settled();
+    let from = lan.datagrams().len();
+    let asked = lan.now;
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &ours(0, CLASS_IN)));
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &ours(0, CLASS_IN)));
+    lan.deliver(&to_group(MAC_R, (R, MDNS), &ours(0, CLASS_IN)));
+    assert_eq!(lan.datagrams()[from..], [(asked, &multicast(response()))], "the first is answered at once, the others not yet");
+
+    let owed = lan.node.next_deadline().expect("the held answer is owed");
+    assert!(owed <= asked.after(Duration::from_secs(1)), "and is a deadline of the node's");
+    assert!(lan.run_until(Duration::from_secs(3), |lan| lan.datagrams().len() == from + 2), "the held answer leaves");
+    let (answered, again) = lan.datagrams()[from + 1];
+    assert_eq!(again, &multicast(response()));
+    // The responder's clock is whole milliseconds.
+    let apart = answered.since(asked);
+    assert!(apart <= Duration::from_secs(1) && apart > Duration::from_millis(999), "{apart:?} after the first");
+
+    let later = lan.now.after(Duration::from_secs(10));
+    lan.fire(later);
+    assert_eq!(lan.datagrams().len(), from + 2, "one multicast answered both");
+}
+
+// Present state, and wrong: RFC 3927 §2.6.2 has a host send to 169.254/16 directly on the link
+// whatever address it holds, and §7 never through a router. The responder takes a link-local
+// source for one on this link (RFC 6762 §11), and [ip], with no route for 169.254/16 on a leased
+// interface, hands the answer to the router. The track records it; its exit turns `to` here into
+// the asker's own link address.
+#[test]
+fn an_answer_to_a_link_local_asker_leaves_by_the_router() {
+    let link_local = Ipv4Addr::new(169, 254, 3, 4);
+    let mut lan = settled();
+    let from = lan.datagrams().len();
+    lan.deliver(&to_group(MAC_B, (link_local, 53_000), &ours(5, CLASS_IN)));
+    let by_the_router = Udp { to: MAC_R, source: A, source_port: MDNS, destination: link_local, port: 53_000, ttl: 255, payload: legacy_response(5) };
+    assert_eq!(since(&lan, from), [by_the_router]);
+}
+
+// A lease held before the name is told is as new to the responder as one that comes after:
+// announced by the call (RFC 6762 §8.3), its second a deadline from then.
+#[test]
+fn a_lease_already_held_is_announced_as_the_name_is_told() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    assert!(lan.datagrams().is_empty());
+    let told = lan.now;
+    lan.node.answer_as(told, Host::new("toyos").unwrap()).unwrap();
+    let owed = lan.node.next_deadline().expect("the second announcement is owed");
+    assert!(owed <= told.after(Duration::from_secs(1)));
+    lan.pump();
+    assert_eq!(lan.datagrams(), [(told, &multicast(response()))]);
+}
+
 // RFC 6762 §11: "All Multicast DNS responses (including responses sent via unicast) SHOULD be
 // sent with IP TTL set to 255."
 #[test]

@@ -13,8 +13,9 @@
 //!   address and port. One [udp] refuses is counted and dropped: the asker asks again.
 //!
 //! **Untrusted input.** A query's bytes are read by the responder's parser alone. Its source
-//! address and port are the wire's, and are a destination only once the responder found the
-//! source on this link and [udp] accepted it as one.
+//! address and port are the wire's, and are a destination only once the responder took the
+//! source for one on this link, which is the lease's prefix or 169.254/16, and [udp] accepted it
+//! as one.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -64,7 +65,7 @@ impl Name {
 
     /// Tells the responder what lease is held, sends what the record is owed now, then answers
     /// every query that arrived. Returns how many messages [udp] refused.
-    pub(crate) fn pass(&mut self, now: Instant, stack: &mut Stack) -> u64 {
+    fn pass(&mut self, now: Instant, stack: &mut Stack) -> u64 {
         let link = stack.lease().map(|lease| Link { addr: lease.address.octets(), prefix: lease.prefix_len });
         let (ms, group) = (millis(now), Ipv4Addr::from(GROUP));
         let mut unsent = 0u64;
@@ -92,9 +93,19 @@ impl Name {
 
 impl Node {
     /// Answers for `<host>.local` from here on: the node joins the multicast DNS group and holds
-    /// its port. Refused when the port is taken, by a client's socket or by an earlier call.
+    /// its port, and a lease already held is announced by this call. Refused when the port is
+    /// taken, by a client's socket or by an earlier call.
     pub fn answer_as(&mut self, now: Instant, host: Host<'static>) -> Result<(), toyos_net_udp::Error> {
         self.name = Some(Name::new(now, &mut self.stack, host)?);
+        self.serve_name(now);
         Ok(())
+    }
+
+    /// The name's pass, if it has been started, and the count of what [udp] refused it.
+    pub(crate) fn serve_name(&mut self, now: Instant) {
+        if let Some(name) = &mut self.name {
+            let unsent = name.pass(now, &mut self.stack);
+            self.counters.add(crate::Counter::NameUnsent, unsent);
+        }
     }
 }
