@@ -95,7 +95,7 @@ use crate::device::ClaimError;
 use crate::isa::{self, Function};
 use crate::log;
 use crate::sync::{Lock, LockGuard};
-use crate::time::{Cadence, Deadline, Duration};
+use crate::time::{Deadline, Duration};
 
 /// `isa`'s row for the fixed hardware.
 pub const ROW: usize = 1;
@@ -112,11 +112,6 @@ const POLL: Duration = Duration::from_millis(1);
 /// 6.5 §4.8.2.5 has OSPM poll the bit until it reads reset and names no bound,
 /// and no FADT field carries one: this is this kernel's, and no measurement.
 const HANDBACK: Duration = Duration::from_millis(100);
-/// How often the calls made for the holder are summed in the log.
-const CALLS_SAID: Cadence = Cadence::every(
-    Duration::from_secs(60),
-    "said by the call that finds it due, so a holder that calls nothing says nothing, and one that storms says a line a minute",
-);
 
 struct Hardware {
     fixed: FixedHardware,
@@ -169,21 +164,11 @@ struct Holder {
     calls: Calls,
 }
 
-/// The firmware calls made for the claim's holders, and what has been said
-/// of them.
+/// The firmware calls made for the claim's holders, and which have been said.
 struct Calls {
     rate: CallRate,
     /// A bit a byte, set once a call of it has been said.
     said: [u64; 4],
-    made: u64,
-    spent: Duration,
-    /// The call that held the boot processor longest, and its byte.
-    longest: (Duration, u8),
-    /// Refused past the rate.
-    refused: u64,
-    /// When the sum was last said, on the clock the rate is held on; none
-    /// before the first call.
-    summed_ns: Option<u64>,
 }
 
 /// Held across everything this kernel does for the claim's holder, from the
@@ -195,15 +180,7 @@ struct Calls {
 static HOLDER: Lock<Holder> = Lock::new(Holder {
     locked: false,
     supplied: false,
-    calls: Calls {
-        rate: CallRate::new(),
-        said: [0; 4],
-        made: 0,
-        spent: Duration::from_nanos(0),
-        longest: (Duration::from_nanos(0), 0),
-        refused: 0,
-        summed_ns: None,
-    },
+    calls: Calls { rate: CallRate::new(), said: [0; 4] },
 });
 
 /// The right to act for the claim's holder, held across the act; none once
@@ -265,7 +242,14 @@ pub fn init(rsdp_addr: u64) {
     let Some(control) = super::power::pm1a_control() else {
         return log!("acpi: no ACPI row — no PM1a control block declared");
     };
-    if let Some(Err(why)) = fixed.smi_cmd.map(|named| smi_cmd::declare(named.port, named.named())) {
+    let facs = toyos_acpi::facs(fadt.phys(), &fadt);
+    // A FACS this kernel cannot read leaves `S4BIOS_F` unread, and the byte kept.
+    let s4bios = match facs {
+        Ok(facs) => facs.s4bios,
+        Err(toyos_acpi::FacsRefused::Absent) => false,
+        Err(_) => true,
+    };
+    if let Some(Err(why)) = fixed.smi_cmd.map(|named| smi_cmd::declare(named.port, named.named(s4bios))) {
         return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}");
     }
     let ec = embedded_controller(rsdp_addr, fixed.gpe0);
@@ -301,7 +285,7 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(rsdp_addr), global_lock(&fadt));
+    let (ecam, lock) = (ecam(rsdp_addr), global_lock(facs));
     let hardware = Hardware { fixed, control, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
@@ -324,12 +308,12 @@ fn ecam(rsdp_addr: u64) -> Option<Ecam> {
 /// The Global Lock of the FACS the FADT names, said by name where there is
 /// none or it is none this kernel takes: a FACS that does not decode, and one
 /// whose lock word is not in memory the firmware's map gives the firmware.
-fn global_lock<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>) -> GlobalLock {
+fn global_lock(facs: Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>) -> GlobalLock {
     let refused = |why: core::fmt::Arguments| {
         log!("acpi: a Global Lock this kernel cannot take — {why}: every take is refused");
         GlobalLock::Refused
     };
-    let facs = match toyos_acpi::facs(fadt.phys(), fadt) {
+    let facs = match facs {
         Ok(facs) => facs,
         Err(toyos_acpi::FacsRefused::Absent) => {
             log!("acpi: no Global Lock — the FADT names no FACS: every take is answered taken");
@@ -810,41 +794,21 @@ fn port(hardware: &Hardware, acting: &mut Holder, address: u64, width: Width, wr
 /// Make the call into the firmware the policy passed, on the boot processor,
 /// or refuse it past the rate; returned from once the firmware's handler has.
 /// The first call of each byte is said with what the boot processor read
-/// around it, and after that the sum of them every [`CALLS_SAID`].
+/// around it; every call is counted beside the `out` (`smi_cmd::counted`),
+/// and a refusal is the caller's to say.
 fn call(hardware: &Hardware, calls: &mut Calls, asked: FirmwareCall) -> Result<u64, Unmade> {
-    let now = crate::clock::nanos_since_boot();
+    if !calls.rate.admit(crate::clock::nanos_since_boot()) {
+        return Err(Refused::CommandRate.into());
+    }
     let value = asked.value();
-    let made = calls.rate.admit(now);
-    if made {
-        let written = smi_cmd::write(value).ok_or(Unmade::Stopping)?;
-        calls.made += 1;
-        calls.spent = Duration::from_nanos(calls.spent.nanos() + written.held().nanos());
-        if written.held() > calls.longest.0 {
-            calls.longest = (written.held(), value);
-        }
-        let (word, bit) = (&mut calls.said[usize::from(value / 64)], 1u64 << (value % 64));
-        if *word & bit == 0 {
-            *word |= bit;
-            let port = hardware.fixed.smi_cmd.expect("the policy passed a call to the SMI_CMD the FADT names").port;
-            log!("acpi: firmware call {value:#04x} written to SMI_CMD {port:#x} {written}; the first of that byte");
-        }
-    } else {
-        calls.refused += 1;
+    let written = smi_cmd::write(value).ok_or(Unmade::Stopping)?;
+    let (word, bit) = (&mut calls.said[usize::from(value / 64)], 1u64 << (value % 64));
+    if *word & bit == 0 {
+        *word |= bit;
+        let port = hardware.fixed.smi_cmd.expect("the policy passed a call to the SMI_CMD the FADT names").port;
+        log!("acpi: firmware call {value:#04x} written to SMI_CMD {port:#x} {written}; the first of that byte");
     }
-    if now >= calls.summed_ns.get_or_insert(now).saturating_add(CALLS_SAID.nanos()) {
-        calls.summed_ns = Some(now);
-        log!(
-            "acpi: firmware calls made for the claim's holder: {}, which held the boot processor {} in all and {} at the longest, \
-             for {:#04x}; {} refused past {} a second",
-            calls.made,
-            calls.spent,
-            calls.longest.0,
-            calls.longest.1,
-            calls.refused,
-            firmware::CALLS,
-        );
-    }
-    if made { Ok(0) } else { Err(Refused::CommandRate.into()) }
+    Ok(0)
 }
 
 /// Make the access `request` names for the holder of the claim that lends

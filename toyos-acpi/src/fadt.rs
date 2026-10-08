@@ -225,18 +225,31 @@ pub struct LegacyMode {
     pub acpi_disable: NonZeroU8,
 }
 
-/// `SMI_CMD`, and each value Table 5.9 gives a meaning written to it; a value
-/// is zero where the FADT names none.
+/// `SMI_CMD`, and each value Table 5.9 gives a meaning written to it, as the
+/// FADT holds them. The table writes `SMI_CMD` in six of its rows, the
+/// port's own and these five, and names no other value for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SmiCmd {
     pub port: u16,
+    /// "The value to write to SMI_CMD to disable SMI ownership of the ACPI
+    /// hardware registers. [...] This field is reserved and must be zero on
+    /// systems that do not support Legacy Mode."
     pub acpi_enable: u8,
+    /// "The value to write to SMI_CMD to re-enable SMI ownership of the ACPI
+    /// hardware registers. [...] This field is reserved and must be zero on
+    /// systems that do not support Legacy Mode."
     pub acpi_disable: u8,
-    /// Enters the S4BIOS state.
+    /// "The value to write to SMI_CMD to enter the S4BIOS state. [...] A
+    /// value of zero in S4BIOS_F indicates S4BIOS_REQ is not supported." The
+    /// FACS's flag says whether this names a value, and a zero here does not.
     pub s4bios_req: u8,
-    /// Takes over processor performance state control.
+    /// "If non-zero, this field contains the value OSPM writes to the
+    /// SMI_CMD register to assume processor performance state control
+    /// responsibility."
     pub pstate_cnt: u8,
-    /// Declares support for `_CST` and its change notification.
+    /// "If non-zero, this field contains the value OSPM writes to the
+    /// SMI_CMD register to indicate OS support for the _CST object and C
+    /// States Changed notification."
     pub cst_cnt: u8,
 }
 
@@ -248,9 +261,18 @@ impl SmiCmd {
         Some(LegacyMode { acpi_enable: NonZeroU8::new(self.acpi_enable)?, acpi_disable: NonZeroU8::new(self.acpi_disable)? })
     }
 
-    /// The five values, zero where the FADT names none.
-    pub const fn named(&self) -> [u8; 5] {
-        [self.acpi_enable, self.acpi_disable, self.s4bios_req, self.pstate_cnt, self.cst_cnt]
+    /// The five values, each `None` where the tables name none: `S4BIOS_REQ`
+    /// where `s4bios`, the FACS's `S4BIOS_F`, is clear, whatever the field
+    /// holds, and each other where its field is zero.
+    pub fn named(&self, s4bios: bool) -> [Option<u8>; 5] {
+        let nonzero = |value: u8| (value != 0).then_some(value);
+        [
+            nonzero(self.acpi_enable),
+            nonzero(self.acpi_disable),
+            s4bios.then_some(self.s4bios_req),
+            nonzero(self.pstate_cnt),
+            nonzero(self.cst_cnt),
+        ]
     }
 }
 

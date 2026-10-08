@@ -494,7 +494,7 @@ fn the_lock_word_is_exchanged_only_where_all_four_bytes_are_the_firmwares_own() 
 
 /// What a crafted FADT names for `SMI_CMD`: `ACPI_ENABLE`, `ACPI_DISABLE`,
 /// `S4BIOS_REQ` and `CST_CNT`, and no `PSTATE_CNT`.
-const KEPT: KeptCommands = KeptCommands([0xF0, 0xF1, 0xF2, 0, 0x85]);
+const KEPT: KeptCommands = KeptCommands([Some(0xF0), Some(0xF1), Some(0xF2), None, Some(0x85)]);
 
 /// The kernel's declarations as q35 boots with them, with [`KEPT`] for
 /// `SMI_CMD`'s, and the i8042's row.
@@ -544,8 +544,9 @@ fn a_port_answers_as_its_declaration_says() {
 
 /// `SMI_CMD` is read as a port is. A byte written to it is a call into the
 /// firmware carrying that byte, for every byte but those the FADT gives a
-/// meaning, zero among the callable: a field the FADT leaves zero names no
-/// value.
+/// meaning, zero among the callable where the tables name none with it, and
+/// kept where they do, as a FACS whose `S4BIOS_F` is set over an
+/// `S4BIOS_REQ` of zero does.
 #[test]
 fn a_byte_for_smi_cmd_is_a_firmware_call_unless_the_fadt_names_it() {
     assert_eq!(through(port(standing, 0xB2, Width::Byte, None)), Some((0xB2, Width::Byte)));
@@ -559,10 +560,14 @@ fn a_byte_for_smi_cmd_is_a_firmware_call_unless_the_fadt_names_it() {
         }
     }
     // A FADT that names none keeps none.
-    let unnamed = |_| Standing::Declared(Mediated::Command(KeptCommands([0; 5])));
+    let unnamed = |_| Standing::Declared(Mediated::Command(KeptCommands([None; 5])));
     for value in [0u64, 0xF0, 0xFF] {
         assert!(matches!(port(unnamed, 0xB2, Width::Byte, Some(value)), PortVerdict::FirmwareCall(call) if u64::from(call.value()) == value));
     }
+    // And one that names zero keeps zero.
+    let zero = |_| Standing::Declared(Mediated::Command(KeptCommands([None, None, Some(0), None, None])));
+    assert_eq!(port(zero, 0xB2, Width::Byte, Some(0)), refused_port(Refused::KernelCommand));
+    assert!(matches!(port(zero, 0xB2, Width::Byte, Some(1)), PortVerdict::FirmwareCall(_)));
 }
 
 /// A command is one byte to the one port: a wider write that reaches it,

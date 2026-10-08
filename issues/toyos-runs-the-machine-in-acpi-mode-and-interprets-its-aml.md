@@ -331,21 +331,30 @@ host denies every write AML asks for and passes none to the kernel
   when, where, which byte and how often:
   `issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`.
 - **Eight calls in any second is no measurement**
-  (`toyos_userbound::firmware::CALLS`). Owner: this stage. **Exit**: the
-  slice that evaluates the methods which call brings the T14's count of them
-  and the time each held the boot processor, from the `counters` row's
-  `firmware_calls` and `firmware_nanos` and the kernel's line for the first
-  call of each byte, and the owner rules the number against them.
+  (`toyos_userbound::firmware::CALLS`), and it bounds a count of calls, not
+  the time they hold the machine: the T14's enable held the boot processor
+  2.0 to 2.1 ms on three boots and stopped every CPU, so eight a second is
+  about 16 ms of the whole machine in every second if a call costs what the
+  enable does, and no call's cost has been read. Owner: this stage.
+  **Exit**: the slice that evaluates the methods which call brings the T14's
+  count of them and the time each held the boot processor, from the
+  `counters` row's `firmware_calls` and `firmware_nanos` and the kernel's
+  line for the first call of each byte; it reads what eight a second does to
+  the audio and latency rows on the T14, a timing verdict coming only from
+  there; and the owner rules the number against them.
 - **The `counters` row holds every CPU's SMI count to the commands the
   kernel wrote to `SMI_CMD`** between its first read and its last, and to
   nothing else, where it held the count flat; with no call made the two are
   one judgement. It rests on one reading, that the enable moved every CPU's
   count by one: a call that moves a CPU's count by none or by two reds the
-  row, and is a reading for the owner and no flake. The exit of
-  `issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`
-  still opens its interval after the boot's last write to the port, which
-  the first method that calls makes false of the row; rewording it is the
-  owner's.
+  row, and is a reading for the owner and no flake. That equality is the
+  exit of
+  `issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`,
+  which names the two things it rests on. Before the row is read over a span
+  that holds a call, the slice that evaluates the methods which call takes
+  the row's two reads where no call is in flight, or bounds each CPU's
+  difference by the calls in flight; and reads every CPU's SMI count either
+  side of one real call, which only the enable has been.
 - **No guest's call interrupts a firmware, and no guest writes the enable.**
   q35's chipset keeps the byte, with `SMI_EN` reading 0, and its firmware
   hands the machine over in ACPI mode. So `acpi_mediated_access` reads that
@@ -364,6 +373,14 @@ host denies every write AML asks for and passes none to the kernel
   beside the probe's own line naming three non-zero x2APIC ids: that is the
   window and no defect of the write, and it is answered by the pin, never by
   a second run. None has been read.
+- **`acpi_mediated_access`'s storm is refused only if nine calls fit in one
+  second of the guest's clock.** The probe asks one after another and needs
+  the ninth refused `CommandRate`. A guest whose host gives it less than
+  nine calls' worth of time in a second of its own clock is refused none,
+  and after ten thousand calls reds as `firmware calls in a row were made,
+  and none refused`: a dependence on rate in a guest test, the host's load
+  and no defect of the bound, which `toyos-userbound`'s host test holds on a
+  clock of its own. None has been read.
 
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI

@@ -125,13 +125,13 @@ pub enum Mediated {
 }
 
 /// The bytes a port that commands the firmware takes from the kernel alone:
-/// those the machine's tables give a meaning. Zero is no byte.
+/// those the machine's tables give a meaning, `None` where they name none.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct KeptCommands(pub [u8; 5]);
+pub struct KeptCommands(pub [Option<u8>; 5]);
 
 impl KeptCommands {
     pub fn holds(self, value: u8) -> bool {
-        value != 0 && self.0.contains(&value)
+        self.0.contains(&Some(value))
     }
 }
 
