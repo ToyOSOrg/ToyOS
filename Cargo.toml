@@ -222,11 +222,6 @@ gix = { version = "0.88", default-features = false, features = ["status", "sha1"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }
-# The I219 driver's own words and its PHY probe's exit-code table, so the
-# harness judging netstack's `exit:` record off the T14 and netstack writing it read one
-# declaration. Pure and `no_std`, so it compiles for the host as it does for
-# the guest.
-toyos-i219 = { path = "toyos-i219" }
 # The scheduler's quantum and the windows' hold, so the harness judges a boot
 # against the constants the kernel schedules by.
 kernel = { path = "kernel" }
