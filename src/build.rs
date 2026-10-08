@@ -108,8 +108,6 @@ struct SystemConfig {
     #[serde(default)]
     symlinks: BTreeMap<String, String>,
     #[serde(default)]
-    hosted_rustc: bool,
-    #[serde(default)]
     assets: Vec<String>,
     /// What `/system/bin/supervisor` starts at boot. Program *keys*, never paths — a path
     /// here is a second spelling of a `[programs]` key and is what let a boot
@@ -229,7 +227,6 @@ fn invalidate_stale(
     targets: &[PathBuf],
 ) {
     lock.act_if(
-        buildlock::Scope::Worktree,
         "clean crate targets against changed external deps",
         || {
             let work: Vec<(PathBuf, Stale)> =
@@ -329,7 +326,7 @@ pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
 /// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
-/// carries the linker too. Never the `toyos` rustup name, which is the primary's.
+/// carries the linker too.
 struct GuestEnv {
     /// Owned, so the sysroot is held in use for as long as anything here runs
     /// against it.
@@ -729,22 +726,6 @@ fn build_and_assemble(
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
-    if config.hosted_rustc {
-        assert!(
-            arch == toolchain::HOSTED_ARCH,
-            "hosted-rustc is built to run on {}, and this image is for {}",
-            toolchain::HOSTED_ARCH.name(),
-            arch.name()
-        );
-        assert!(
-            env.sysroot.primary_compiler,
-            "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
-             a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
-             one its programs were built with"
-        );
-        collect_hosted_rustc(root, env.sysroot.dir(), &mut root_files);
-    }
-
     if !config.assets.is_empty() {
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
@@ -759,11 +740,7 @@ fn build_and_assemble(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let mut programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
-    if config.hosted_rustc {
-        // `collect_hosted_rustc` puts it there and no row can.
-        programs.insert("rustc");
-    }
+    let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
     // Targets are inventoried beside the files: `bin/ls -> /system/bin/ghost` reaches a
     // program as surely as a file would, and the files alone walk past it.
     let targets: Vec<String> =
@@ -1102,21 +1079,12 @@ pub struct Shipped {
 }
 
 /// [`Shipped`], read out of the modes' configs the way [`build`] reads them.
-///
-/// **A config that ships the hosted compiler is refused**: its dependencies are
-/// the rust fork's `compiler/` workspace, which no reader of this answer walks.
-pub fn shipped(root: &Path) -> Result<Shipped, String> {
+pub fn shipped(root: &Path) -> Shipped {
     let mut crates = BTreeSet::new();
     let mut programs = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
-        if config.hosted_rustc {
-            return Err(format!(
-                "{} sets hosted-rustc, and nothing reads the licences of the compiler it ships",
-                boot.config.display()
-            ));
-        }
         for c in config_crates(root, &config) {
             if c.built == Built::Member {
                 programs.insert(c.dir.clone());
@@ -1125,7 +1093,7 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
         }
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
-    Ok(Shipped { crates, programs, assets })
+    Shipped { crates, programs, assets }
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -1764,7 +1732,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
     let config = parse_config(&boot.config);
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -1978,7 +1946,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -2008,63 +1976,6 @@ pub fn build_test_parts(
     drop(building);
 
     Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
-}
-
-/// The host binaries the network judges drive, built here rather than inside a
-/// test: a judge's price is its exchange and not a compile.
-///
-/// Each of these keeps its own `Cargo.lock` and is excluded from the
-/// workspace. That is what makes them possible: they exist to be
-/// a *second* implementation, and a second implementation's dependency graph is
-/// not the harness's to resolve.
-pub fn build_host_judges(root: &Path, quiet: bool) {
-    for (dir, _) in HOST_JUDGES {
-        let _building = Building::start(format!("the host's {dir}"));
-        let at = root.join(dir);
-        let mut cmd = Command::new("cargo");
-        cmd.args(["build", "--release"]);
-        if quiet {
-            cmd.arg("--quiet");
-        }
-        let status = cmd
-            .current_dir(&at)
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .env_remove("RUSTC")
-            .env_remove("RUSTFLAGS")
-            .status()
-            .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
-        assert!(status.success(), "{dir} did not build");
-    }
-}
-
-/// One host judge: where its crate is, and the binary that crate builds. Named
-/// rather than indexed, because a row inserted anywhere but the end would
-/// silently repoint every accessor below.
-type Judge = (&'static str, &'static str);
-
-const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
-
-const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
-
-/// Copy to `to` the binary the build leaves for the program
-/// `name`: the bytes a swap sends a running machine in place of the ones its
-/// image carries. Read under the artifact lock, as every image build reads it.
-pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Result<(), String> {
-    let from = root.join(format!("target/{}/{PROFILE}/{name}", arch.userland()));
-    let _artifact = buildlock::artifact(root);
-    fs::copy(&from, to)
-        .map(|_| ())
-        .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
-}
-
-/// The harness's SSH client — the only thing in this tree that speaks the
-/// protocol from the other side of `userland/sshserver`.
-pub fn ssh_client_host(root: &Path) -> PathBuf {
-    host_judge(root, SSH_CLIENT)
-}
-
-fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
-    root.join(dir).join("target/release").join(bin)
 }
 
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
@@ -2182,7 +2093,7 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[PathBuf]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
         invalidate_stale(&mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
@@ -2201,67 +2112,6 @@ pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, q
 }
 
 // --- Internal helpers ---
-
-/// The ToyOS-hosted rustc, and the target libraries it compiles against: this
-/// build's own sysroot's, so the compiler on the image links what the image's
-/// programs link. The hosted compiler itself is the primary's, read under the
-/// lock its rebuild takes.
-fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
-    let _compiler = buildlock::compiler_shared(root, "reading the hosted rustc");
-    let target = toolchain::HOSTED_ARCH.userland();
-    let sysroot = toolchain::rust_dir(root).join(format!("build/{target}/stage2"));
-    assert!(
-        sysroot.exists(),
-        "Hosted rustc sysroot missing: {}",
-        sysroot.display()
-    );
-
-    let rustc = sysroot.join("bin/rustc");
-    assert!(
-        rustc.exists(),
-        "Hosted rustc binary missing: {}",
-        rustc.display()
-    );
-    root_files.push(("bin/rustc".to_string(), fs::read(&rustc).unwrap()));
-
-    if let Ok(entries) = fs::read_dir(sysroot.join("lib")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "so") {
-                let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                let data = fs::read(&path).unwrap();
-                root_files.push((format!("lib/{name}"), data));
-            }
-        }
-    }
-
-    let backends = sysroot.join(format!("lib/rustlib/{target}/codegen-backends"));
-    if backends.exists() {
-        for entry in fs::read_dir(&backends).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "so") {
-                let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                let data = fs::read(&path).unwrap();
-                root_files.push((
-                    format!("lib/rustlib/{target}/codegen-backends/{name}"),
-                    data,
-                ));
-            }
-        }
-    }
-
-    let rlibs = toolchain.join(format!("lib/rustlib/{target}/lib"));
-    for entry in fs::read_dir(&rlibs).unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())) {
-        let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())).path();
-        if path.extension().is_some_and(|e| e == "rlib" || e == "rmeta") {
-            let name = path.file_name().unwrap().to_str().unwrap().to_string();
-            root_files.push((
-                format!("lib/rustlib/{target}/lib/{name}"),
-                fs::read(&path).unwrap(),
-            ));
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2324,7 +2174,7 @@ mod tests {
     #[test]
     fn every_modes_crates_and_the_supervisor_ship() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let shipped = shipped(root).expect("the modes' configs");
+        let shipped = shipped(root);
         for (dir, features) in [
             ("userland/console", Features::Default),
             ("userland/supervisor", Features::Default),
@@ -3001,25 +2851,6 @@ mod tests {
         }
     }
 
-    /// **An image a user boots serves no log on the network.** `logkeeper` answers
-    /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netstack` connector: the test configs that read the
-    /// stream give it one, and these do not.
-    #[test]
-    fn no_shipped_image_serves_the_log_on_the_network() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
-            let parsed = parse_config(&root.join(config));
-            let logkeeper = parsed.programs.get("logkeeper").expect("every config runs logkeeper");
-            assert!(
-                logkeeper.receives.is_empty(),
-                "{config}: `logkeeper` receives {:?}, and a `netstack` connector is what serves this \
-                 machine's log to anyone on its network",
-                logkeeper.receives,
-            );
-        }
-    }
-
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
@@ -3097,7 +2928,6 @@ mod tests {
         "console/system.toml",
         "tests/acpicase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",

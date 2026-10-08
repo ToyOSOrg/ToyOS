@@ -87,7 +87,6 @@ use toyos::{AsHandle, Pipe};
 use toyos_abi::Rights;
 use toyos_logstream::{
     Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
-    SWAP, SWAP_BACK, SWAP_LEAVING,
 };
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
@@ -257,13 +256,6 @@ impl Log {
         let sent = self.conn.send_handles([ring, alive.into()]).map_err(ipc::IpcError::Syscall);
         if let Err(e) = sent.and_then(|()| self.conn.send_bytes(REGISTER, &payload[..len])) {
             panic!("supervisor: logkeeper's origins connection refused {name}'s ring: {e:?}");
-        }
-    }
-
-    /// Tell `logkeeper` a word on a swap of the service its readers are carried by.
-    fn carrier(&self, word: u8) {
-        if let Err(e) = self.conn.send_bytes(SWAP, &[word]) {
-            panic!("supervisor: logkeeper's origins connection refused a swap's word: {e:?}");
         }
     }
 
@@ -1072,7 +1064,7 @@ impl<'a> Supervisor<'a> {
         flight: Option<&Flight>,
     ) -> Option<Flight> {
         let refuse = |service: &str, why: Refusal| {
-            swapped(&self.log, service, Word::Refused, &why.to_string());
+            swapped(service, Word::Refused, &why.to_string());
             let _ = conn.try_send_bytes(toyos_swap::MSG_REFUSED, why.to_string().as_bytes());
             None
         };
@@ -1119,7 +1111,6 @@ impl<'a> Supervisor<'a> {
             return refuse(name, why);
         }
         swapped(
-            &self.log,
             name,
             Word::Accepted,
             &format!(
@@ -1174,7 +1165,6 @@ impl<'a> Supervisor<'a> {
         self.make_home(program);
         let service = &mut self.services[index];
         swapped(
-            &self.log,
             &name,
             Word::Stopping,
             &format!("pid {} ({previous})", service.pid().map_or(0, |p| p)),
@@ -1193,7 +1183,6 @@ impl<'a> Supervisor<'a> {
         match started {
             Ok(pid) => {
                 swapped(
-                    &self.log,
                     &name,
                     Word::Started,
                     &format!(
@@ -1205,7 +1194,7 @@ impl<'a> Supervisor<'a> {
                 Some(Flight { service: index, path, phase: Phase::Probation { until, previous, owed } })
             }
             Err(e) => {
-                swapped(&self.log, &name, Word::Failed, &format!("{path} did not start: {e}"));
+                swapped(&name, Word::Failed, &format!("{path} did not start: {e}"));
                 forget(&path);
                 self.restore(index, &previous, &owed);
                 None
@@ -1232,7 +1221,6 @@ impl<'a> Supervisor<'a> {
         match status {
             Some(Ok(None)) => {
                 swapped(
-                    &self.log,
                     &name,
                     Word::InService,
                     &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
@@ -1248,7 +1236,6 @@ impl<'a> Supervisor<'a> {
                     _ => "is not running".to_string(),
                 };
                 swapped(
-                    &self.log,
                     &name,
                     Word::Failed,
                     &format!("{path} {how} inside {} ms", toyos_swap::PROBATION_MS),
@@ -1386,14 +1373,13 @@ impl<'a> Supervisor<'a> {
         match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("supervisor: a service's state is poisoned").swapping = false;
-                swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
+                swapped(&name, Word::Restored, &format!("{previous} as pid {pid}"));
             }
             Err(e) => {
                 let mut kept = service.kept.lock().expect("supervisor: a service's state is poisoned");
                 kept.swapping = false;
                 kept.acceptors.clear();
                 swapped(
-                    &self.log,
                     &name,
                     Word::Gone,
                     &format!("{previous} did not start either ({e}); its ports are closed"),
@@ -2347,19 +2333,9 @@ fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Sessio
     Some(ns)
 }
 
-/// One of the supervisor's words on a swap: its line in the log, and — for the service
-/// `logkeeper`'s network readers are carried by — the frame `logkeeper` acts on. The
-/// frame and not the line: nothing a program writes is a word `logkeeper` obeys.
-fn swapped(log: &Log, service: &str, word: Word, detail: &str) {
+/// One of the supervisor's words on a swap: its line in the log.
+fn swapped(service: &str, word: Word, detail: &str) {
     say!("{}", toyos_swap::said(service, word, detail));
-    if service == toyos_logstream::CARRIER {
-        match word {
-            Word::Accepted => log.carrier(SWAP_LEAVING),
-            // Each said once the netstack it replaces has been waited for.
-            Word::Started | Word::Failed | Word::Restored | Word::Gone => log.carrier(SWAP_BACK),
-            Word::Refused | Word::Stopping | Word::InService => {}
-        }
-    }
 }
 
 /// What a storage row's process is started with beside its row: its

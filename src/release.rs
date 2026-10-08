@@ -1,8 +1,9 @@
 //! The toolchain a runner builds with, by the build system's own keys, and the
 //! release main publishes of it.
 //!
-//! **A toolchain is four stores, each a cache entry of the key the build system
-//! files it under** ([`LAYERS`]). `toolchain.yml` restores each by the key
+//! **A toolchain is four products of a store, each a cache entry of the key the
+//! build system files it under** ([`LAYERS`]). A runner's store is in its
+//! checkout ([`store`]). `toolchain.yml` restores each by the key
 //! [`toolchain`] wrote, builds what none restored ([`bootstrap`]) and saves only
 //! what it built. GitHub's ref scoping is the provenance: an entry a run on main
 //! saved is restored on every ref, and any other run saves only into its own
@@ -14,7 +15,8 @@
 //! job, that is refused before it reads anything; run on a tree main has moved
 //! past, it puts nothing up.
 //!
-//! A dev host installs none: its build system builds its own from `rust/`.
+//! A dev host installs none: its build system finds its own in the host's store,
+//! or builds it from `rust/` (`src/keystore.rs`).
 
 use std::fs;
 use std::io::Write;
@@ -43,7 +45,7 @@ const GLIBC_FLOOR: (u32, u32) = (2, 39);
 /// What every request the build system makes says it comes from.
 const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
-/// The stores a toolchain is, in the order a build makes them, each under the
+/// The products a toolchain is, in the order a build makes them, each under the
 /// name its cache entry and its job's outputs carry.
 const LAYERS: [(Keyed, &str); 4] = [
     (Keyed::Llvm, "llvm"),
@@ -53,12 +55,12 @@ const LAYERS: [(Keyed, &str); 4] = [
 ];
 
 /// One of [`LAYERS`] of this tree's toolchain: the key the build system files
-/// it under, and the paths it is, relative to the checkout.
+/// it under, and where it is, relative to the checkout.
 struct Layer {
     kind: Keyed,
     name: &'static str,
     key: Key,
-    paths: Vec<PathBuf>,
+    path: PathBuf,
 }
 
 impl Layer {
@@ -110,34 +112,33 @@ fn publisher(workflow: Option<&str>, event: Option<&str>, repo: &str) -> Result<
     }
 }
 
+/// A runner's store: in its checkout, because a cache entry's paths are
+/// relative to the workspace, and the job that restores one in a container has
+/// another home.
+fn store(root: &Path) -> PathBuf {
+    root.join("rust/build")
+}
+
 /// This tree's toolchain as [`LAYERS`], keyed from its sources alone, before
-/// any store is there.
+/// any is in the store.
 fn layers(root: &Path) -> Vec<Layer> {
     let rust_dir = root.join("rust");
     let llvm = crate::llvm::key(&rust_dir);
-    let compiler = crate::compiler::primary_key(&rust_dir);
+    let compiler = crate::compiler::key(&rust_dir);
     let freestanding = crate::sysroot::freestanding_key(root, &compiler, &rust_dir);
     let sysroot = crate::sysroot::key(root, &freestanding);
     LAYERS
         .iter()
         .map(|&(kind, name)| {
-            let (key, paths) = match kind {
-                Keyed::Llvm => (llvm.clone(), vec![crate::llvm::store(&rust_dir).join(&llvm)]),
-                Keyed::Compiler => (
-                    compiler.clone(),
-                    vec![crate::toolchain::stage2(&rust_dir), crate::compiler::primary_record(&rust_dir)],
-                ),
-                Keyed::Freestanding => {
-                    (freestanding.clone(), vec![crate::sysroot::freestanding_dir(&rust_dir).join(&freestanding)])
-                }
-                Keyed::Sysroot => (sysroot.clone(), vec![crate::sysroot::sysroots_dir(&rust_dir).join(&sysroot)]),
+            let key = match kind {
+                Keyed::Llvm => &llvm,
+                Keyed::Compiler => &compiler,
+                Keyed::Freestanding => &freestanding,
+                Keyed::Sysroot => &sysroot,
             };
-            let paths = paths
-                .iter()
-                .map(|path| path.strip_prefix(root).unwrap_or_else(|_| panic!("{} is outside the checkout", path.display())))
-                .map(Path::to_path_buf)
-                .collect();
-            Layer { kind, name, key, paths }
+            let dir = kind.store(&store(root)).join(key);
+            let path = dir.strip_prefix(root).expect("a runner's store is in its checkout").to_path_buf();
+            Layer { kind, name, key: key.clone(), path }
         })
         .collect()
 }
@@ -145,13 +146,12 @@ fn layers(root: &Path) -> Vec<Layer> {
 /// Why `layer` is not whole in `root`, as the build that makes it decides, if
 /// it is not.
 fn defect(root: &Path, layer: &Layer) -> Option<String> {
-    let dir = root.join(&layer.paths[0]);
+    let dir = root.join(&layer.path);
     match layer.kind {
         Keyed::Llvm => crate::llvm::defect(&dir),
-        Keyed::Compiler => match fs::read(root.join(&layer.paths[1])) {
-            Ok(record) if Key::of(&record) == layer.key => crate::toolchain::toolchain_defect(&dir),
-            _ => Some(format!("{} records no compiler {}", layer.paths[1].display(), layer.key)),
-        },
+        Keyed::Compiler => {
+            crate::compiler::unplaced(&dir).or_else(|| crate::toolchain::toolchain_defect(&dir.join("stage2")))
+        }
         Keyed::Freestanding => crate::sysroot::unpublished(&dir),
         Keyed::Sysroot => crate::sysroot::unfinished(&dir),
     }
@@ -185,15 +185,9 @@ pub fn toolchain(root: &Path) -> Result<String, String> {
     Ok(layers.iter().map(|layer| format!("{} {}", layer.name, layer.key)).collect::<Vec<_>>().join(", "))
 }
 
-/// Each layer's entry as `<name>-key` and its paths, one a line, as
-/// `<name>-path`.
+/// Each layer's entry as `<name>-key` and its path as `<name>-path`.
 fn outputs(layers: &[Layer]) -> String {
-    let mut text = String::new();
-    for layer in layers {
-        let paths: Vec<String> = layer.paths.iter().map(|path| path.display().to_string()).collect();
-        text += &format!("{0}-key={1}\n{0}-path<<PATHS\n{2}\nPATHS\n", layer.name, layer.entry(), paths.join("\n"));
-    }
-    text
+    layers.iter().map(|layer| format!("{0}-key={1}\n{0}-path={2}\n", layer.name, layer.entry(), layer.path.display())).collect()
 }
 
 /// `cargo run -- --ci bootstrap`: this tree's toolchain made whole from what its
@@ -204,11 +198,11 @@ fn outputs(layers: &[Layer]) -> String {
 pub fn bootstrap(root: &Path) -> Result<String, String> {
     let file = step_outputs()?;
     let layers = layers(root);
-    let restored: Vec<bool> = layers.iter().map(|layer| root.join(&layer.paths[0]).exists()).collect();
+    let restored: Vec<bool> = layers.iter().map(|layer| root.join(&layer.path).exists()).collect();
     whole(&layers, &restored, |layer| defect(root, layer)).map_err(|why| format!("restored, {why}"))?;
     if !restored[3] {
         let mut lock = crate::buildlock::shared(root, "the toolchain");
-        drop(crate::toolchain::ensure(root, &mut lock, false));
+        drop(crate::sysroot::ensure(root, &store(root), &mut lock));
         whole(&layers, &[true; 4], |layer| defect(root, layer)).map_err(|why| format!("built, {why}"))?;
     }
     tell(&file, &built(&layers, &restored))?;
@@ -247,29 +241,27 @@ fn built(layers: &[Layer], restored: &[bool]) -> String {
         .collect()
 }
 
-/// Install the sysroot its job restored ([`lay_out`]) as rustup's `toyos`, on
-/// a runner.
+/// Install the sysroot its job restored ([`lay_out`]), on a runner.
 ///
 /// Off a runner this says so and does nothing: the build system owns the dev
 /// host's toolchain.
 pub fn install(root: &Path) -> Result<String, String> {
     if !on_runner() {
-        return Ok("not a runner: the build system uses this checkout's own toolchain".into());
+        return Ok("not a runner: the build system uses the host's own toolchain".into());
     }
     let key = lay_out(root)?;
     let stage2 = crate::toolchain::stage2(&root.join("rust"));
-    run(Command::new("rustup").args(["toolchain", "link", "toyos"]).arg(&stage2))?;
     run(Command::new(stage2.join("bin/rustc")).arg("-vV"))?;
-    Ok(format!("installed sysroot {key} as `toyos`"))
+    Ok(format!("installed sysroot {key}"))
 }
 
-/// Lay the one sysroot under `rust/build/sysroots`, which its job's restore
+/// Lay the one sysroot in the runner's [`store`], which its job's restore
 /// step put there, out as this checkout's installed toolchain
 /// (`toolchain::Owner::Installed`): at `stage2`, with the witness it records and
 /// its [`manifest`]. Refused unless that witness is this tree's.
 fn lay_out(root: &Path) -> Result<Key, String> {
     let rust_dir = root.join("rust");
-    let store = crate::sysroot::sysroots_dir(&rust_dir);
+    let store = Keyed::Sysroot.store(&store(root));
     let restored = fs::read_dir(&store)
         .and_then(|entries| entries.map(|entry| entry.map(|entry| entry.path())).collect::<std::io::Result<Vec<_>>>())
         .map_err(|e| format!("{}: {e}", store.display()))?;
@@ -835,13 +827,12 @@ mod tests {
         }
     }
 
-    /// A sysroot store under `root`'s `rust/build/sysroots`, as a job restores
-    /// one, recording `witness`.
+    /// A sysroot in `root`'s store, as a job restores one, recording `witness`.
     fn restored(root: &Path, key: &str, witness: &str) -> PathBuf {
-        let dir = crate::sysroot::sysroots_dir(&root.join("rust")).join(key);
+        let dir = Keyed::Sysroot.store(&store(root)).join(key);
         fs::create_dir_all(dir.join("bin")).unwrap();
         fs::write(dir.join("bin/rustc"), "rustc").unwrap();
-        fs::write(dir.join("SOURCES"), format!("{key}\nfork /a/runner/s/rust\n{witness}\n")).unwrap();
+        fs::write(dir.join("SOURCES"), format!("{key}\n{witness}\n")).unwrap();
         dir
     }
 
@@ -854,7 +845,7 @@ mod tests {
         let tmp = TempDir::new("release-lay-out");
         let root = tmp.join("checkout");
         checkout(&root, "pub struct A;\n");
-        fs::create_dir_all(crate::sysroot::sysroots_dir(&root.join("rust"))).unwrap();
+        fs::create_dir_all(Keyed::Sysroot.store(&store(&root))).unwrap();
         assert!(lay_out(&root).unwrap_err().contains("holds 0 entries"));
         let witness = crate::sysroot::witness(&root);
         let one = restored(&root, "0123456789abcdef", &witness);
@@ -880,24 +871,22 @@ mod tests {
         assert!(lay_out(&root).unwrap_err().contains("named by no key"));
     }
 
-    fn layer(name: &'static str, key: &str, paths: &[&str]) -> Layer {
+    fn layer(name: &'static str, key: &str, path: &str) -> Layer {
         let kind = LAYERS.iter().find(|(_, n)| *n == name).unwrap().0;
-        Layer { kind, name, key: Key::parse(key).unwrap(), paths: paths.iter().map(PathBuf::from).collect() }
+        Layer { kind, name, key: Key::parse(key).unwrap(), path: PathBuf::from(path) }
     }
 
-    /// The job's outputs, as GitHub's multiline syntax reads them: each layer's
-    /// cache entry, and each path of it on a line of its own.
+    /// The job's outputs: each layer's cache entry, and its path.
     #[test]
-    fn a_job_is_told_each_layer_s_entry_and_paths() {
+    fn a_job_is_told_each_layer_s_entry_and_path() {
         let layers = [
-            layer("llvm", "1111111111111111", &["rust/build/llvm/1111111111111111"]),
-            layer("compiler", "2222222222222222", &["rust/build/h/stage2", "rust/build/toyos-compiler"]),
+            layer("llvm", "1111111111111111", "rust/build/llvm/1111111111111111"),
+            layer("compiler", "2222222222222222", "rust/build/compilers/2222222222222222"),
         ];
         assert_eq!(
             outputs(&layers),
-            "llvm-key=toolchain-llvm-1111111111111111\nllvm-path<<PATHS\nrust/build/llvm/1111111111111111\nPATHS\n\
-             compiler-key=toolchain-compiler-2222222222222222\ncompiler-path<<PATHS\nrust/build/h/stage2\n\
-             rust/build/toyos-compiler\nPATHS\n"
+            "llvm-key=toolchain-llvm-1111111111111111\nllvm-path=rust/build/llvm/1111111111111111\n\
+             compiler-key=toolchain-compiler-2222222222222222\ncompiler-path=rust/build/compilers/2222222222222222\n"
         );
     }
 
@@ -907,7 +896,7 @@ mod tests {
     #[test]
     fn a_layer_that_is_not_whole_is_refused() {
         let layers: Vec<Layer> =
-            LAYERS.iter().enumerate().map(|(at, (_, name))| layer(name, &at.to_string().repeat(16), &["p"])).collect();
+            LAYERS.iter().enumerate().map(|(at, (_, name))| layer(name, &at.to_string().repeat(16), "p")).collect();
         let broken = |layer: &Layer| (layer.name == "compiler").then(|| "stage2 carries no clang".to_string());
         let refused = whole(&layers, &[true, true, false, false], broken).unwrap_err();
         assert!(refused.starts_with("compiler 1111111111111111 is not whole") && refused.contains("no clang"), "{refused}");
@@ -916,30 +905,28 @@ mod tests {
         assert_eq!(whole(&layers, &[true; 4], |_| None), Ok(()));
     }
 
-    /// **Each layer is the store the build system makes, where it makes it**:
-    /// the LLVM, the freestanding libraries and the sysroot in their stores by
-    /// key, and the primary's compiler as its `stage2` and its record, each
-    /// relative to the checkout, keyed before any is built.
+    /// **Each layer is the product the build system makes, where a runner's
+    /// store holds it**: the LLVM, the compiler, the freestanding libraries and
+    /// the sysroot, each by its key and relative to the checkout, keyed before
+    /// any is built.
     #[test]
     fn the_layers_are_the_stores_the_build_makes() {
         let scratch = TempDir::new("release-layers");
-        let (primary, _rust_dir, _) = crate::compiler::tests::estate(&scratch);
+        let (primary, _store, _) = crate::compiler::tests::estate(&scratch);
         checkout(&primary, "pub struct A;\n");
         let layers = layers(&primary);
-        let named: Vec<(&str, Vec<String>)> =
-            layers.iter().map(|l| (l.name, l.paths.iter().map(|p| p.display().to_string()).collect())).collect();
+        let named: Vec<(&str, String)> = layers.iter().map(|l| (l.name, l.path.display().to_string())).collect();
         let key = |at: usize| layers[at].key.to_string();
-        let host = crate::toolchain::host_triple();
         assert_eq!(
             named,
             [
-                ("llvm", vec![format!("rust/build/llvm/{}", key(0))]),
-                ("compiler", vec![format!("rust/build/{host}/stage2"), "rust/build/toyos-compiler".to_string()]),
-                ("freestanding", vec![format!("rust/build/freestanding/{}", key(2))]),
-                ("sysroot", vec![format!("rust/build/sysroots/{}", key(3))]),
+                ("llvm", format!("rust/build/llvm/{}", key(0))),
+                ("compiler", format!("rust/build/compilers/{}", key(1))),
+                ("freestanding", format!("rust/build/freestanding/{}", key(2))),
+                ("sysroot", format!("rust/build/sysroots/{}", key(3))),
             ]
         );
-        assert_eq!(layers[1].key, crate::compiler::primary_key(&primary.join("rust")));
+        assert_eq!(layers[1].key, crate::compiler::key(&primary.join("rust")));
     }
 
     /// **A job saves exactly the layers it built**: none where it restored the
@@ -950,7 +937,7 @@ mod tests {
         let layers: Vec<Layer> = LAYERS
             .iter()
             .enumerate()
-            .map(|(at, (_, name))| layer(name, &at.to_string().repeat(16), &["p"]))
+            .map(|(at, (_, name))| layer(name, &at.to_string().repeat(16), "p"))
             .collect();
         let told = |restored: [bool; 4]| built(&layers, &restored);
         assert_eq!(told([true, true, false, true]), "llvm=kept\ncompiler=kept\nfreestanding=kept\nsysroot=kept\n");

@@ -55,21 +55,15 @@ fn map<'a>(
 }
 
 /// `.symtab` and its `.strtab`, read whole — the fallback for a PIE that
-/// exports nothing through `.dynsym`.
+/// exports nothing through `.dynsym`. `None` is an executable with no such
+/// tables, or tables past one kernel allocation: it then exports nothing, and
+/// what a library wanted of it is in the spawn's `unresolved=`.
 pub fn read_symtab(backing: &dyn FileBacking, layout: &Layout) -> Option<(Vec<u8>, Vec<u8>)> {
     let table = layout.section_headers()?;
     let shdrs = super::read_file_range(backing, table.file_offset, table.byte_len());
     let (syms, strs) = SectionTable::new(&shdrs).symbols(SHT_SYMTAB)?;
-
-    let (Some(sym_data), Some(str_data)) = (
-        read_elf_table(backing, syms.offset, syms.size as usize),
-        read_elf_table(backing, strs.offset, strs.size as usize),
-    ) else {
-        log!(
-            "ELF: .symtab {} / .strtab {} exceed one kernel allocation, no symbol map",
-            syms.size, strs.size
-        );
-        return None;
-    };
-    Some((sym_data, str_data))
+    Some((
+        read_elf_table(backing, syms.offset, syms.size as usize)?,
+        read_elf_table(backing, strs.offset, strs.size as usize)?,
+    ))
 }

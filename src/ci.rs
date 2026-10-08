@@ -1516,12 +1516,12 @@ mod tests {
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
-                   12:00:00 FAIL rs::lan_talk: no exit code\nnoise\n\
-                   12:00:07   STALL rs::lan_talk  (7s)\n\
+                   12:00:00 FAIL rs::std_alloc: no exit code\nnoise\n\
+                   12:00:07   STALL rs::std_alloc  (7s)\n\
                    12:00:09 test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
         let said = verdicts(log);
         assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
-        assert!(said.contains("\nFAIL rs::lan_talk: no exit code\n  STALL rs::lan_talk  (7s)\n"), "{said}");
+        assert!(said.contains("\nFAIL rs::std_alloc: no exit code\n  STALL rs::std_alloc  (7s)\n"), "{said}");
         assert!(!said.contains("noise"), "{said}");
         assert_eq!(verdicts(""), "no suite result line");
     }

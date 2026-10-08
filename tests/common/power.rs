@@ -305,6 +305,17 @@ fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// A machine that died took its census as one that stops does: the record its
+/// death sealed carries every line of `kernel/src/census.rs`, written by the
+/// seal itself, since no process's end leaves one in the ring for a tail to
+/// carry.
+fn death_took_the_census(after: &serial::Serial) -> Result<(), String> {
+    for line in ["irq: cpu0 ", "tlb: shootdowns=", "irq: unclaimed vectors", bootlog::PANEL_CENSUS] {
+        after.must_say_after(bootlog::PREVIOUS_PANIC, line)?;
+    }
+    Ok(())
+}
+
 /// The metal half of the load arm: a T14 boot that never stopped writing, ended
 /// by the boot deadline with its controller mid-transfer, and the stick still
 /// there afterwards.
@@ -316,6 +327,7 @@ fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
 /// under this arm's name, so this judge names the bound it demands.
 pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
     after.must_say(bootlog::PREVIOUS_PANIC)?;
+    death_took_the_census(after)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
     // The sweep starts inside the stop, after the supervisor had the file made whole, so
     // its records cross only in the page's tail.
@@ -364,6 +376,7 @@ fn record_cpu<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
 /// is the one channel that carries a copy of it across the reset.
 pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
     after.must_say(bootlog::PREVIOUS_PANIC)?;
+    death_took_the_census(after)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
     // The control: the machine reached the staged wedge, and then never reached
     // the reset it was one statement away from.
@@ -420,6 +433,7 @@ pub fn hard_lockup_chain(
     says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
+    death_took_the_census(after)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
     let stuck = after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
     sp_is_a_kernel_stack(stuck)?;

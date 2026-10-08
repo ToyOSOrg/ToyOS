@@ -1,5 +1,5 @@
-//! Replacing a running service's binary: every word `/system/bin/swap`,
-//! `/system/bin/supervisor` and the host say about it, and every decision the supervisor makes
+//! Replacing a running service's binary: every word `/system/bin/swap` and
+//! `/system/bin/supervisor` say about it, and every decision the supervisor makes
 //! about one. Pure.
 //!
 //! **A swap is asked by `/system/bin/swap` and done by the supervisor, and nothing else
@@ -87,7 +87,7 @@ pub const MSG_REFUSED: u32 = 3;
 /// A SHA-256 digest.
 pub type Digest = [u8; 32];
 
-/// The digest of `bytes`: the one definition the host, `swap` and the supervisor share.
+/// The digest of `bytes`.
 pub fn digest(bytes: &[u8]) -> Digest {
     Sha256::digest(bytes).into()
 }
@@ -300,37 +300,10 @@ impl Word {
     pub fn as_str(self) -> &'static str {
         WORDS.iter().find(|(w, _)| *w == self).map(|(_, s)| *s).expect("every word is spelled")
     }
-
-    /// Whether this word ends a swap: nothing more is said about it after.
-    pub fn is_final(self) -> bool {
-        matches!(self, Self::Refused | Self::InService | Self::Restored | Self::Gone)
-    }
 }
 
 pub fn said(service: &str, word: Word, detail: &str) -> String {
     format!("supervisor: swap {service}: {}: {detail}", word.as_str())
-}
-
-/// The supervisor's line about `service` inside `line` — a console line or a record in
-/// any of the forms the log renders one in — as `(word, detail)`.
-pub fn heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
-    let head = format!("supervisor: swap {service}: ");
-    let (_, rest) = line.split_once(&head)?;
-    let rest = rest.trim_end_matches(['\n', '\r']);
-    WORDS.iter().find_map(|(word, spelled)| {
-        rest.strip_prefix(spelled).and_then(|r| r.strip_prefix(": ")).map(|detail| (*word, detail))
-    })
-}
-
-/// What a swap came to, read off the supervisor's lines about it: the last final word
-/// among `lines`, or `None` while the swap is still going.
-pub fn outcome<'a>(lines: impl IntoIterator<Item = &'a str>, service: &str) -> Option<(Word, String)> {
-    lines
-        .into_iter()
-        .filter_map(|line| heard(line, service))
-        .filter(|(word, _)| word.is_final())
-        .last()
-        .map(|(word, detail)| (word, detail.to_string()))
 }
 
 #[cfg(test)]
@@ -394,44 +367,6 @@ mod tests {
         assert!(!is_installed("/system/bin/netstack"));
         assert!(!is_installed(&staged_path("netstack", 1)));
         assert!(!is_staged(&path));
-    }
-
-    #[test]
-    fn the_supervisors_lines_are_heard_in_every_form_the_log_renders_them() {
-        let line = said("netstack", Word::InService, "/tmp/swap/x/netstack as pid 9");
-        assert_eq!(line, "supervisor: swap netstack: in service: /tmp/swap/x/netstack as pid 9");
-        for rendered in [
-            format!("{line}\n"),
-            format!("[2026-09-23 18:00:01 12.345 cpu1 kernel] @{line}\n"),
-        ] {
-            assert_eq!(
-                heard(&rendered, "netstack"),
-                Some((Word::InService, "/tmp/swap/x/netstack as pid 9")),
-                "{rendered:?}"
-            );
-        }
-        assert_eq!(heard(&line, "sshserver"), None);
-        assert_eq!(heard("supervisor: swap netstack: bored: x", "netstack"), None);
-    }
-
-    #[test]
-    fn the_outcome_is_the_last_final_word() {
-        let lines = [
-            said("netstack", Word::Accepted, "a"),
-            said("netstack", Word::Stopping, "b"),
-            said("netstack", Word::Started, "c"),
-        ];
-        assert_eq!(outcome(lines.iter().map(String::as_str), "netstack"), None);
-        let mut more = lines.to_vec();
-        more.push(said("netstack", Word::Failed, "d"));
-        more.push(said("netstack", Word::Restored, "/system/bin/netstack as pid 4"));
-        assert_eq!(
-            outcome(more.iter().map(String::as_str), "netstack"),
-            Some((Word::Restored, "/system/bin/netstack as pid 4".to_string()))
-        );
-        for word in [Word::Accepted, Word::Stopping, Word::Started, Word::Failed] {
-            assert!(!word.is_final());
-        }
     }
 
     #[test]

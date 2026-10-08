@@ -48,7 +48,7 @@ use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outg
 use toyos_net_udp::{Sender, SocketId, Udp, Verdict};
 use toyos_net_udp::Served as UdpServed;
 use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
-use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
+use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, MulticastAddr, TrafficClass, Ttl};
 use toyos_net_wire::siphash::Key;
 use toyos_net_wire::{Instant, Port};
 
@@ -216,6 +216,10 @@ impl Shard {
 
     pub fn tcp_counters(&self) -> &toyos_net_tcp::Counters {
         self.tcp.counters()
+    }
+
+    pub fn udp_counters(&self) -> &toyos_net_udp::Counters {
+        self.udp.counters()
     }
 
     /// Log lines and address results since the last call.
@@ -436,6 +440,21 @@ impl Shard {
         set
     }
 
+    /// Takes one of the interface's addresses away; [ip] withdraws the gateways no usable prefix
+    /// holds any more.
+    pub fn remove_address(&mut self, now: Instant, addr: Ipv4Addr) -> Result<(), toyos_net_ip::Counter> {
+        let removed = self.ip.remove_address(now, self.iface, addr);
+        self.settle(now);
+        removed
+    }
+
+    /// Joins `group` on the interface: frames to its link address are taken from here on, and
+    /// [ip] reports the membership whenever the link can carry the report. Nothing to settle:
+    /// a join makes no flow eligible and no event.
+    pub fn join(&mut self, now: Instant, group: MulticastAddr) -> Result<(), toyos_net_ip::Counter> {
+        self.ip.join(now, self.iface, group)
+    }
+
     // ---- TCP ----
 
     /// An active open from the source [ip]'s route lookup picks (RFC 9293 MUST-44), to a peer the
@@ -519,6 +538,41 @@ impl Shard {
 
     pub fn recv_from(&mut self, id: SocketId, out: &mut [u8]) -> Result<Option<toyos_net_udp::Received>, toyos_net_udp::Error> {
         self.udp.recv(id, out)
+    }
+
+    /// The port a socket holds.
+    pub fn udp_port(&mut self, id: SocketId) -> Result<Port, toyos_net_udp::Error> {
+        self.udp.binding(id).map(|(_, port)| port)
+    }
+
+    /// The TTL of a socket's datagrams to one host, and of those to a group.
+    pub fn udp_set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), toyos_net_udp::Error> {
+        self.udp.set_ttl(id, unicast, multicast)
+    }
+
+    /// Closes a socket: its port is free at once, and what it had accepted leaves as [udp]'s
+    /// closed sender, in the round from this call.
+    pub fn udp_close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {
+        let closed = self.udp.close(id);
+        self.settle(now);
+        closed
+    }
+
+    /// The DHCP client's socket, on port 68: the one socket that may send from 0.0.0.0 and name
+    /// its source, and the one the acquisition exception delivers to (RFC 2131 §4.1).
+    pub fn acquisition(&mut self) -> Result<SocketId, toyos_net_udp::Error> {
+        let id = self.udp.bind(&self.ip, Ipv4Addr::UNSPECIFIED, Port::new(68), || 0)?;
+        self.udp.set_acquisition(id)?;
+        self.udp.set_broadcast(id, true)?;
+        Ok(id)
+    }
+
+    /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
+    /// assigned address.
+    pub fn send_from(&mut self, now: Instant, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send_from(&mut self.ip, id, source, destination, port, payload);
+        self.settle(now);
+        queued
     }
 }
 

@@ -45,7 +45,7 @@ Open at the implementation pass: hand-rolled pcap parsing versus a host
 dev-dependency; what counter surface smoltcp already exposes against what netd
 must count.
 
-The ssh half is built: `tests/ssh-client-host` drives a guest over
-`BootOptions::ssh_port`'s `hostfwd`, which a frame-level analyser reuses rather
-than building again. What is left is the pcap analyser, the two tiers,
+The ssh half was built and is deleted: `tests/ssh-client-host` drove a guest
+over a `hostfwd`, and `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`
+records the commit that restores it. What is left beside it is the pcap analyser, the two tiers,
 `-netdev socket`, and the idle→packet ceiling.

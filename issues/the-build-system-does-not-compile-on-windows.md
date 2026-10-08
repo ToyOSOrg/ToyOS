@@ -8,23 +8,30 @@ opened: 2026-08-19
 
 `src/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
-## The judge, and it needs no Windows host and no download
+## The judge needs no Windows host, and stops at a dependency's C before it reaches the build system
 
 ```
-__CARGO_TESTS_ONLY_SRC_ROOT=<scratch> CARGO_TARGET_DIR=<scratch-target> \
-  cargo +toyos check -Z build-std=std,panic_abort \
+__CARGO_TESTS_ONLY_SRC_ROOT=<tree>/src/library CARGO_TARGET_DIR=<scratch-target> \
+  RUSTUP_TOOLCHAIN=<sysroot> cargo check -Z build-std=std,panic_abort \
   --target x86_64-pc-windows-msvc --offline -p toyos-build --all-targets
 ```
 
-`<scratch>` is `src/CLAUDE.md`'s std-src-root recipe with one addition: a
-workspace `Cargo.toml` whose members are `library/std`, `library/sysroot`,
-`library/proc_macro`, `library/panic_abort` and `library/test`, and whose
-`[patch.crates-io]` is `library/Cargo.toml`'s four entries with `library/`
-prepended to each path. It works because the fork vendors `library/windows-sys`
-and `library/windows_link`, so a Windows `std` builds from the tree — a plain
-`cargo check --target x86_64-pc-windows-msvc` instead says *"the
-`x86_64-pc-windows-msvc` target may not be installed"* and asks for
-`rustup target add`. It resolves crates.io through the cargo cache.
+`<tree>` and `<sysroot>` are `src/CLAUDE.md`'s std type-check recipe's, with
+no addition: the copied library is its own workspace, with its patches and
+its lockfile, and a manifest written above it does not resolve offline. The
+fork vendors `library/windows-sys` and `library/windows_link`, so a Windows
+`std` builds from the tree — a plain `cargo check --target
+x86_64-pc-windows-msvc` instead says *"the `x86_64-pc-windows-msvc` target may
+not be installed"* and asks for `rustup target add`. It resolves crates.io
+through the cargo cache.
+
+Run that way it builds `core`, `std` and `test` for Windows and exits 101 at
+the 37th crate, before any source of `toyos-build` is checked: `failed to run
+custom build command for ring v0.17.14`, whose build script compiles C for
+the target with the host's `cc` and finds no `assert.h`. The judge reaches
+`src/tether.rs` only with the target's C headers, the C runtime's and the
+Windows SDK's, which no host here has and which are a download; or once
+nothing `toyos-build` depends on compiles C for its target.
 
 ## Compiling is not working, and that is why the cheap half is refused
 
@@ -32,9 +39,8 @@ Each wants a Windows call whose semantics differ in kind from the
 Unix one it replaces, and none can be run by anybody here:
 
 - `std::os::windows::fs::symlink_dir` needs the privilege or developer mode
-  Windows does not grant by default, so `link_host_target` and
-  `provision_toolchain_cargo` would compile and fail at run time — the quieter
-  kind of broken.
+  Windows does not grant by default, so `provision_toolchain_cargo` would
+  compile and fail at run time — the quieter kind of broken.
 - `flock` is advisory and whole-file; `LockFileEx` is mandatory and byte-range.
   `buildlock` is what serialises the shared sysroot across every worktree.
 

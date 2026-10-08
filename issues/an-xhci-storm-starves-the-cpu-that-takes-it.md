@@ -33,6 +33,14 @@ again, and the cycle costs it the interrupt budget it needed for its own timer.
 That is a CPU making no progress while looking busy, and it is the state
 `crate::deadline`'s poll relies on *some* CPU escaping.
 
+**Where the next reading comes from.** The census above was read out of the
+log file, where each process's end had written one. No process's end writes
+one now: the machine's census is taken where the machine ends, as records at
+its stop and in the record its death seals (`kernel/src/census.rs`). A storm
+that ends in the deadline or the lockup detector is read off the black-box
+page; one the machine survives leaves no `irq:` line in the file until the
+stop, and its rate over a stretch of the boot is not read by anything.
+
 **What would fix it**: the interrupter's `IMAN.IE` masked when the poll declines
 the lock and cleared by whoever takes it — so a controller whose driver is busy
 raises one interrupt and not a hundred thousand — or an event-ring drain that

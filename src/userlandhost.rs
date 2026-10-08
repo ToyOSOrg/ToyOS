@@ -187,7 +187,7 @@ pub struct Program {
 /// declares about the hosts.
 pub fn programs(root: &Path) -> Result<Vec<Program>, String> {
     let mut found = Vec::new();
-    for dir in crate::build::shipped(root)?.programs {
+    for dir in crate::build::shipped(root).programs {
         let at = rel(root, &dir);
         let text = std::fs::read_to_string(dir.join("Cargo.toml"))
             .map_err(|e| format!("{at}/Cargo.toml: {e}"))?;
@@ -516,7 +516,7 @@ mod tests {
     fn every_program_the_images_ship_declares_what_it_is_to_a_host() {
         let root = repo_root();
         let programs = programs(&root).expect("every declaration reads");
-        let shipped = crate::build::shipped(&root).expect("the modes' configs").programs;
+        let shipped = crate::build::shipped(&root).programs;
         let dirs: BTreeSet<PathBuf> = programs.iter().map(|p| root.join(&p.dir)).collect();
         assert_eq!(dirs, shipped);
         assert!(programs.iter().any(|p| p.host == Host::App(Vec::new())), "no app: {programs:?}");

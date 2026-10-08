@@ -27,6 +27,9 @@ use crate::metaltimings::Machine;
 
 const CONNECT_SECS: u64 = 10;
 
+/// The port the machine's ssh server listens on, which is the protocol's own.
+const SSH_PORT: u16 = 22;
+
 /// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
 
@@ -151,10 +154,6 @@ pub enum Refusal {
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
     Remote { what: String, status: String, stderr: String },
-    /// The machine could not name the interface, the MAC and an IPv4 address it
-    /// holds on the function the flashed image claims. No address is a cable
-    /// that is out, and a boot flashed onto that bench is red for the bench.
-    Wire { nic: String, why: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
     /// The machine came back and the boot stick did not: the boot before this
@@ -180,18 +179,6 @@ pub enum Refusal {
     /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
     /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
     Wedge { why: &'static str },
-    /// **What the boot said over its own cable is not what a talking boot
-    /// owes**: the log it serves, a ping, the command's answer and `reboot`,
-    /// each finding by name. Judged after the stick's own verdict, which stays
-    /// the fallback for a boot that never reached its network.
-    Talk(Vec<String>),
-    /// This host could not set up its half of the cable: the client, the key,
-    /// or the reader of the log the boot serves.
-    Cable(String),
-    /// **What a swap of a running machine's service came to is not the new
-    /// binary in service**: the supervisor's words, the machine's answer or ssh
-    /// afterwards, each finding by name.
-    Swap(Vec<String>),
     /// The machine did not name itself: its SMBIOS answer is not
     /// [`Machine::QUERY`]'s three lines.
     Machine(String),
@@ -210,8 +197,6 @@ impl Refusal {
                 | Self::Fat32(_)
                 | Self::ReportedAndBootedNothing { .. }
                 | Self::HungWithoutARecord
-                | Self::Talk(_)
-                | Self::Swap(_)
                 | Self::Wedge { .. }
         )
     }
@@ -298,11 +283,6 @@ impl fmt::Display for Refusal {
             Self::Remote { what, status, stderr } => {
                 write!(f, "{what} on the machine {status}: {stderr}")
             }
-            Self::Wire { nic, why } => write!(
-                f,
-                "the machine says nothing usable about PCI function {nic}, which the flashed \
-                 image claims and a boot of it could answer on: {why}"
-            ),
             Self::Silent { what, secs } => write!(
                 f,
                 "the machine did not {what} within {secs} s, which is longer than every watchdog \
@@ -336,17 +316,6 @@ impl fmt::Display for Refusal {
                  pass that read the black box and ended the chain, and `logkeeper` wrote nothing \
                  because nothing ran. This boot measured no test. What the pass said was: \
                  {said}"
-            ),
-            Self::Talk(findings) => write!(
-                f,
-                "the boot did not say over its own cable what a talking boot owes:\n  {}",
-                findings.join("\n  ")
-            ),
-            Self::Cable(why) => write!(f, "this host's half of the cable is not ready: {why}"),
-            Self::Swap(findings) => write!(
-                f,
-                "the swap did not put the new binary in service:\n  {}",
-                findings.join("\n  ")
             ),
             Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
@@ -1050,37 +1019,6 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// What the machine holds on the PCI function the flashed image claims, read
-/// off that function and not off a name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wire {
-    pub iface: String,
-    /// What the interface holds before the flash: that it holds one is the
-    /// cable being in. A boot leases its own, so no judge reads this.
-    pub addr: std::net::Ipv4Addr,
-    /// Lower case, colon separated, as `/sys/class/net/<i>/address` writes it.
-    pub mac: String,
-}
-
-/// `ip -4 -brief addr show <iface>`'s one line, as `Wire` needs it: the brief
-/// form is `<name> <state> <cidr>...`, and an interface with no address has no
-/// third field at all, which is the machine saying the cable is out.
-fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> {
-    let line = text
-        .lines()
-        .find(|l| l.split_whitespace().next() == Some(iface))
-        .ok_or_else(|| format!("`ip -4 -brief addr show {iface}` said {text:?}"))?;
-    let cidr = line
-        .split_whitespace()
-        .nth(2)
-        .ok_or_else(|| format!("{iface} holds no IPv4 address: {line:?}"))?;
-    cidr.split('/')
-        .next()
-        .unwrap_or(cidr)
-        .parse()
-        .map_err(|_| format!("{iface}'s address reads {cidr:?}"))
-}
-
 /// The loop, over one target.
 struct Driver {
     target: Target,
@@ -1129,42 +1067,6 @@ impl Driver {
         }
         let out = command.output().map_err(|e| unstarted(what, &e))?;
         answer(what, out).map(Some)
-    }
-
-    /// What this machine holds on the function the flashed image claims: the
-    /// interface Ubuntu gave it, its MAC and its address. Three reads and not
-    /// one, so a machine that answers oddly is refused with the read that was
-    /// odd; none writes.
-    fn wire(&self, nic: &str) -> Result<Wire, Refusal> {
-        let bad = |why: String| Refusal::Wire { nic: nic.to_string(), why };
-        let at = shell_word(&format!("/sys/bus/pci/devices/{nic}/net"));
-        let listing = self
-            .ssh("listing the claimed function's interfaces", &format!("ls {at}"))
-            .map_err(|e| bad(e.to_string()))?;
-        let names: Vec<&str> = listing.split_whitespace().collect();
-        // Exactly one, refused rather than resolved to the first: a function
-        // this loop cannot name one interface for is one whose address it would
-        // be guessing at.
-        let [iface] = names[..] else {
-            return Err(bad(format!("it answers {names:?} interface(s), and one is needed")));
-        };
-        let mac = self
-            .ssh(
-                "reading the claimed function's MAC",
-                &format!("cat {}", shell_word(&format!("/sys/class/net/{iface}/address"))),
-            )
-            .map_err(|e| bad(e.to_string()))?;
-        let brief = self
-            .ssh(
-                "reading the claimed function's address",
-                &format!("ip -4 -brief addr show {}", shell_word(iface)),
-            )
-            .map_err(|e| bad(e.to_string()))?;
-        Ok(Wire {
-            iface: iface.to_string(),
-            addr: brief_address(iface, &brief).map_err(bad)?,
-            mac: mac.trim().to_ascii_lowercase(),
-        })
     }
 
     /// The loop refuses to run at all until the rule is on the machine.
@@ -1264,11 +1166,8 @@ impl Driver {
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
     /// the machine is watched down before it is watched back up: a probe that
     /// caught dying Ubuntu would read a stick ToyOS had never booted.
-    ///
-    /// `down` runs the moment the machine has gone down.
-    fn ride_the_reboot(&self, secs: u64, down: impl FnOnce()) -> Result<u64, Refusal> {
+    fn ride_the_reboot(&self, secs: u64) -> Result<u64, Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
-        down();
         self.wait(secs, "come back", true)
     }
 
@@ -1300,7 +1199,7 @@ impl Driver {
             secs,
             what,
             answering,
-            |within| port_accepts(host, crate::metaltalk::SSH_PORT, within),
+            |within| port_accepts(host, SSH_PORT, within),
             || self.ssh("probing", "true").is_ok(),
         )
     }
@@ -1446,23 +1345,13 @@ declare_flags!(METAL = {
     INSTALL_SUDOERS = "--install-sudoers", Next;
     READBACK = "--readback", Next;
     FAT32_CHECK = "--fat32-check", None;
-    NIC = "--nic", Next;
     WAIT_SECS = "--wait-secs", Next;
-    TALK = "--talk", Next;
     DRY_RUN = "--dry-run", None;
-    SWAP = "--swap", Next;
-    BINARY = "--binary", Next;
 });
-
-/// The flags a swap of a running machine's service refuses beside it: it
-/// flashes nothing and reboots nothing, so each of these describes a boot it
-/// will not make.
-const NOT_A_SWAP: &[&Flag] = &[&DRY_RUN, &FAT32_CHECK, &NIC, &INSTALL_SUDOERS, &IMAGE];
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
-const ABOUT_A_BOOT: &[&Flag] =
-    &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &NIC, &WAIT_SECS, &TALK];
+const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &WAIT_SECS];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1497,24 +1386,6 @@ pub struct Args {
     /// `toyos-fat32-check`. The outside judge, and the only reader of that
     /// volume in this tree that is not the family of code that wrote it.
     fat32_check: bool,
-    /// The PCI function this boot's image claims, in `/sys/bus/pci/devices`'s
-    /// spelling. **A boot names it or the function is not read at all**: the
-    /// reads cost three `ssh` round trips, and a boot that needs no cable would
-    /// be refused for one that is out.
-    nic: Option<String>,
-    /// The private key the image authorizes, and the ask to talk to the boot
-    /// over its cable: once the machine has gone down, read the log it serves
-    /// at `toyos-t14.local` from its first line, ping it, run one command on it
-    /// and tell it to reboot. **Nothing in the image names this host**: the
-    /// machine answers for its own name, and this host asks for it.
-    talk: Option<PathBuf>,
-    /// **Replace a running service's binary, and flash and reboot nothing.**
-    /// The service's key; [`Args::binary`] is the new binary, `--talk` the key
-    /// the running machine authorizes — asked for it by name at
-    /// `toyos-t14.local`, so no image needs naming — and `--readback` where the
-    /// stream is written.
-    swap: Option<String>,
-    binary: Option<PathBuf>,
 }
 
 impl Args {
@@ -1544,10 +1415,6 @@ impl Args {
             wait_secs: return_secs(),
             readback: value(&READBACK).map(PathBuf::from),
             fat32_check: METAL.present(args, &FAT32_CHECK),
-            nic: value(&NIC).map(str::to_string),
-            talk: value(&TALK).map(PathBuf::from),
-            swap: value(&SWAP).map(str::to_string),
-            binary: value(&BINARY).map(PathBuf::from),
         };
         if let Some(host) = value(&HOST) {
             let (user, machine) = host.split_once('@').ok_or_else(|| {
@@ -1579,173 +1446,8 @@ impl Args {
                 out.about_a_boot.join(" and ")
             )));
         }
-        // The stream is written as it arrives, and a boot that dies before
-        // the stick is read leaves nothing but that file.
-        if out.talk.is_some() && out.readback.is_none() {
-            return Err(Refusal::Usage(
-                "--talk writes the log the boot serves into the readback as it arrives; name \
-                 one with --readback"
-                    .to_string(),
-            ));
-        }
-        match (&out.swap, &out.binary) {
-            (None, None) => {}
-            (None, Some(_)) => {
-                return Err(Refusal::Usage("--binary is the new binary of a --swap".to_string()))
-            }
-            (Some(service), binary) => {
-                let beside: Vec<&str> = line
-                    .seen
-                    .iter()
-                    .map(|seen| seen.flag.name)
-                    .filter(|name| NOT_A_SWAP.iter().any(|flag| flag.name == *name))
-                    .collect();
-                if !beside.is_empty() {
-                    return Err(Refusal::Usage(format!(
-                        "--swap replaces a running service's binary and flashes and reboots \
-                         nothing, so {} describes a boot it will not make",
-                        beside.join(" and ")
-                    )));
-                }
-                if !toyos_swap::is_service_name(service) {
-                    return Err(Refusal::Usage(format!("--swap {service:?} is no service's key")));
-                }
-                if binary.is_none() || out.talk.is_none() {
-                    return Err(Refusal::Usage(
-                        "--swap <service> wants --binary <new binary>, --talk <the key the running \
-                         machine authorizes> and --readback <where the stream is written>"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
         Ok(out)
     }
-}
-
-/// This host's half of the cable: the client and the key, checked before the
-/// flash, and the stream and the conversation, started once the machine has
-/// gone down.
-struct Talking {
-    ssh: crate::metaltalk::Ssh,
-    dir: PathBuf,
-}
-
-/// Where the stream is written as it arrives, beside the stick's files.
-pub const READBACK_STREAM: &str = "stream.log";
-
-impl Talking {
-    /// Everything that can refuse before the machine is touched.
-    fn prepare(key: &Path, dir: &Path) -> Result<Self, Refusal> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let ssh = crate::metaltalk::Ssh::at(root, key.to_path_buf()).map_err(Refusal::Cable)?;
-        Ok(Self { ssh, dir: dir.to_path_buf() })
-    }
-
-    /// Ask for the log the booting machine serves under its name, then talk
-    /// to it, on a thread of its own: the loop is meanwhile watching the
-    /// machine come back, and the conversation is what makes it come back
-    /// early.
-    ///
-    /// **Called once the machine has gone down**, so the name is asked of the
-    /// boot this loop flashed and not of the operating system it replaced.
-    fn start(
-        &self,
-        by: std::time::Duration,
-    ) -> Result<
-        (crate::metaltalk::Stream, std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>>),
-        Refusal,
-    > {
-        self.start_into(READBACK_STREAM, "talk", by)
-    }
-
-    /// [`Talking::start`], writing the stream to `file` and the conversation's
-    /// scratch under `scratch`, both in [`Talking::dir`] — so a swap of an
-    /// already-running machine and a flash's own boot each keep their own
-    /// files in one readback directory.
-    fn start_into(
-        &self,
-        file: &str,
-        scratch: &str,
-        by: std::time::Duration,
-    ) -> Result<
-        (crate::metaltalk::Stream, std::thread::JoinHandle<Result<crate::metaltalk::Conversation, String>>),
-        Refusal,
-    > {
-        let stream = self.connect(file, by)?;
-        let (theirs, ssh, scratch) = (stream.clone(), self.ssh.clone(), self.dir.join(scratch));
-        let talking = std::thread::Builder::new()
-            .name("metal-talk".into())
-            .spawn(move || crate::metaltalk::converse(&theirs, &ssh, None, true, &scratch))
-            .expect("the metal loop's conversation could not be started");
-        Ok((stream, talking))
-    }
-
-    /// The stream itself, asked of the machine's name, for a caller that runs
-    /// its own protocol on it rather than [`Talking::start`]'s ping/command/
-    /// reboot conversation — a swap's own exchange
-    /// ([`crate::metalswap::swap`]).
-    ///
-    /// A swap of the netstack carrying it is followed across by
-    /// [`crate::metalswap::swap`] itself ([`crate::metaltalk::Stream::redial`]).
-    fn connect(&self, file: &str, by: std::time::Duration) -> Result<crate::metaltalk::Stream, Refusal> {
-        let peer = crate::metaltalk::Peer::Named {
-            host: format!("{}.local", crate::lan::HOSTNAME),
-            port: toyos_logstream::PORT,
-        };
-        println!("asking for {peer:?}'s log");
-        let at = self.dir.join(file);
-        crate::metaltalk::Stream::connect(peer, &at, true, by).map_err(Refusal::Cable)
-    }
-}
-
-/// Where a swap writes the stream it connected to, beside whatever else the
-/// readback holds.
-pub const READBACK_SWAP_STREAM: &str = "swap-stream.log";
-
-/// Replace `service`'s binary on the machine that answers for its own name,
-/// and judge it: the machine is asked over ssh, the supervisor's words are read off the
-/// log stream, and ssh must answer again afterwards.
-///
-/// **Nothing is flashed and nothing is rebooted**: the machine is found at
-/// `toyos-t14.local` the way [`Talking::start`] finds it, so this can be
-/// started before that machine has booted or long after — and read on across
-/// a swap of netstack itself ([`crate::metalswap::swap`]).
-fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
-    let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
-        return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
-    };
-    let cable = Talking::prepare(key, dir)?;
-    let by = std::time::Duration::from_secs(args.wait_secs);
-    let stream = cable.connect(READBACK_SWAP_STREAM, by)?;
-    let scratch = dir.join("swap");
-    std::fs::create_dir_all(&scratch)
-        .map_err(|e| Refusal::File { path: scratch.display().to_string(), why: e.to_string() })?;
-    println!("asking whichever machine opens it to run {} as {service}", binary.display());
-    let swapped = crate::metalswap::swap(
-        &stream,
-        &cable.ssh,
-        None,
-        &crate::metalswap::Ask { service, binary, named: None },
-        by,
-        &scratch,
-    );
-    stream.give_up();
-    let swapped = swapped.map_err(|why| Refusal::Swap(vec![why]))?;
-    for (word, detail) in &swapped.words {
-        println!("  supervisor: {}: {detail}", word.as_str());
-    }
-    for line in &swapped.said {
-        print!("  {service}| {line}");
-    }
-    let judged = crate::metalswap::judge(&swapped, crate::metalswap::Expect::InService);
-    for line in judged.map_err(Refusal::Swap)? {
-        println!("swap: {line}");
-    }
-    println!("SWAPPED: {service} runs {} and nothing was rebooted to put it there", binary.display());
-    Ok(())
 }
 
 /// Put the rule on the machine, with the account's password on this one
@@ -1827,9 +1529,6 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         install_sudoers(&args.target, password)?;
         return Ok(None);
     }
-    if let Some(service) = &args.swap {
-        return swap_running(args, service).map(|()| None);
-    }
     let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
 
     let Some(asked) = &args.image else {
@@ -1862,11 +1561,6 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     // image will arm, judged against the only table that has ruled on any of it.
     let armed = arms_are_admissible(asked)?;
     println!("image {}: armed with {armed:?}", image.path.display());
-    // The client and its key before the machine is asked anything.
-    let cable = match (&args.talk, &args.readback) {
-        (Some(key), Some(dir)) => Some(Talking::prepare(key, dir)?),
-        _ => None,
-    };
 
     driver.require_sudo()?;
     let policy =
@@ -1884,17 +1578,6 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
-    // Before the flash: a cable that is out is refused while nothing is
-    // written, and the operating system that is still up is the one reader of
-    // this function's MAC that is not the driver under test.
-    let wire = match &args.nic {
-        Some(nic) => {
-            let wire = driver.wire(nic)?;
-            println!("the claimed function {nic} is {} at {}", wire.iface, wire.addr);
-            Some(wire)
-        }
-        None => None,
-    };
 
     driver.flash(&image)?;
     let entry = driver.boot_entry(&image.esp)?;
@@ -1908,37 +1591,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    // The conversation runs while the loop watches the machine come back; its
-    // `reboot` is what brings it back before the boot's own hold does.
-    let mut talking = None;
-    let ridden = driver.ride_the_reboot(args.wait_secs, || {
-        if let Some(cable) = &cable {
-            talking = Some(cable.start(std::time::Duration::from_secs(args.wait_secs)));
-        }
-    });
-    // **Written before anything else can refuse**: a machine that never came
-    // back, a stick that did not enumerate or a volume the outside judge
-    // complained about each return below, and what the cable heard is then
-    // the only account of the boot there is.
-    let heard = match (talking, &args.readback) {
-        (Some(Ok((stream, handle))), Some(dir)) => {
-            stream.give_up();
-            let heard = handle
-                .join()
-                .unwrap_or_else(|_| Err("the conversation's thread panicked".to_string()));
-            write_talk(dir, &heard)?;
-            Some((heard, stream.lines()))
-        }
-        // A reader that could not be started is a conversation that never
-        // opened, recorded like one, and the stick is still read.
-        (Some(Err(refused)), Some(dir)) => {
-            let heard = Err(refused.to_string());
-            write_talk(dir, &heard)?;
-            Some((heard, Vec::new()))
-        }
-        _ => None,
-    };
-    let back = ridden?;
+    let back = driver.ride_the_reboot(args.wait_secs)?;
     println!("the machine answered ssh again after {back} s");
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
@@ -1965,9 +1618,8 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         }
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
-    let boot = boot_file(back, stick, &machine, wire.as_ref());
-    judge_and_write_readback(&armed, &loader, &log, heard.as_ref(), args.readback.as_deref(), &boot)
-        .map(Some)
+    let boot = boot_file(back, stick, &machine);
+    judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
 }
 
 /// This boot's verdict, **judged before the readback is written, and written
@@ -1977,18 +1629,10 @@ fn judge_and_write_readback(
     armed: &[String],
     loader: &str,
     log: &str,
-    heard: Option<&(Result<crate::metaltalk::Conversation, String>, Vec<String>)>,
     readback: Option<&Path>,
     boot: &str,
 ) -> Result<u64, Refusal> {
-    let verdict = boot_verdict(armed, loader, log).and_then(|ms| {
-        // After the stick's own verdict, which stays the one that names a boot
-        // that never reached its network.
-        if let Some((heard, lines)) = heard {
-            talk_verdict(heard, lines)?;
-        }
-        Ok(ms)
-    });
+    let verdict = boot_verdict(armed, loader, log);
     if let Some(dir) = readback {
         write_readback(dir, loader, log, boot, &verdict_file(verdict.as_ref().err()))?;
         println!("readback written to {}", dir.display());
@@ -2033,43 +1677,6 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
         bootlog::handed_back(loader).map_err(Refusal::Log)?;
     }
     Ok(ms)
-}
-
-/// Where a conversation's facts are written, beside the stick's files.
-pub const READBACK_TALK: &str = "talk.txt";
-
-/// The key a readback carries where no boot opened the stream at all, with the
-/// reason — a human's line; a judge reads the absence of a conversation.
-const TALK_UNOPENED: &str = "talk_unopened";
-
-fn write_talk(
-    dir: &Path,
-    heard: &Result<crate::metaltalk::Conversation, String>,
-) -> Result<(), Refusal> {
-    let text = match heard {
-        Ok(conversation) => conversation.render(),
-        Err(why) => format!("{TALK_UNOPENED} {why:?}\n"),
-    };
-    let at = dir.join(READBACK_TALK);
-    std::fs::write(&at, text)
-        .map_err(|e| Refusal::File { path: at.display().to_string(), why: e.to_string() })
-}
-
-fn talk_verdict(
-    heard: &Result<crate::metaltalk::Conversation, String>,
-    lines: &[String],
-) -> Result<(), Refusal> {
-    let conversation = heard.as_ref().map_err(|why| Refusal::Talk(vec![why.clone()]))?;
-    // Judged as the readback carries it, so this verdict and the harness's are
-    // one reading of one file.
-    let heard = crate::metaltalk::Conversation::parse(&conversation.render())
-        .map_err(|why| Refusal::Talk(vec![why]))?
-        .expect("a rendered conversation names its peer");
-    let said = crate::metaltalk::judge(&heard, lines).map_err(Refusal::Talk)?;
-    for line in said {
-        println!("talk: {line}");
-    }
-    Ok(())
 }
 
 /// What an image armed to stop itself owes instead of `Rebooting.`, and the
@@ -2224,10 +1831,6 @@ pub const VENDOR_KEY: &str = "machine_vendor";
 pub const PRODUCT_KEY: &str = "machine_product";
 pub const BIOS_KEY: &str = "machine_bios";
 
-/// The MAC of the function the image claims, as the operating system before
-/// the flash read it; absent on a boot that named no function.
-pub const WIRE_MAC_KEY: &str = "wire_mac";
-
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
 pub const READBACK_FILES: &[&str] = &[
@@ -2236,8 +1839,6 @@ pub const READBACK_FILES: &[&str] = &[
     READBACK_BOOT,
     READBACK_VERDICT,
     READBACK_VOLUME,
-    READBACK_STREAM,
-    READBACK_TALK,
 ];
 
 /// Empty a readback directory, before this run can leave any of it standing.
@@ -2286,16 +1887,12 @@ fn write_readback(
 
 /// [`READBACK_BOOT`]'s text: what the host measured about the boot, and the
 /// machine it ran on.
-fn boot_file(back: u64, stick: u64, machine: &Machine, wire: Option<&Wire>) -> String {
-    let mut boot = format!(
+fn boot_file(back: u64, stick: u64, machine: &Machine) -> String {
+    format!(
         "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{VENDOR_KEY} {}\n{PRODUCT_KEY} {}\n\
          {BIOS_KEY} {}\n",
         machine.vendor, machine.product, machine.bios
-    );
-    if let Some(wire) = wire {
-        boot.push_str(&format!("{WIRE_MAC_KEY} {}\n", wire.mac));
-    }
-    boot
+    )
 }
 
 /// Whether this boot was a loader pass that reported a record and booted no
@@ -2352,12 +1949,6 @@ pub fn machine(text: &str) -> Result<Machine, String> {
     }
 }
 
-/// The MAC a readback names for the function its image claims, or `None`
-/// where the loop was not asked to read one.
-pub fn wire_mac(text: &str) -> Option<String> {
-    word(text, WIRE_MAC_KEY)
-}
-
 fn word(text: &str, name: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.strip_prefix(name))
@@ -2407,20 +1998,21 @@ mod tests {
         assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
     }
 
-    /// **The harness names the refusal, not only the exit status.** The
-    /// stderr is the T14's `lantalkcase` run's, cargo's own lines included and
-    /// the driver's statement under the printer's stamp, and the refusal it ends
-    /// on is read back whole, every finding with it.
+    /// **The harness names the refusal, not only the exit status.** Cargo's own
+    /// lines come first and the driver's statement under the printer's stamp,
+    /// and the refusal it ends on is read back whole, past its first line.
     #[test]
     fn a_refusal_is_read_back_off_the_drivers_stderr() {
         let stderr = "    Blocking waiting for file lock on package cache\n\
             \x20   Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s\n\
-            \x20    Running `target/debug/toyos-metal --image /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/image.img --readback /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase --fat32-check --talk /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/ssh/id_ed25519`\n\
-            14:02:11 toyos-metal: the boot did not say over its own cable what a talking boot owes:\n\
-            \x20 217 line(s) arrived over the cable and none is this boot's `Boot: complete`\n";
-        let said = Refusal::Talk(vec![
-            "217 line(s) arrived over the cable and none is this boot's `Boot: complete`".into(),
-        ]);
+            \x20    Running `target/debug/toyos-metal --image i --readback r --fat32-check`\n\
+            14:02:11 toyos-metal: reading the disk on the machine exited exit status: 255: the first line\n\
+            \x20 and the second\n";
+        let said = Refusal::Remote {
+            what: "reading the disk".into(),
+            status: "exited exit status: 255".into(),
+            stderr: "the first line\n  and the second".into(),
+        };
         assert_eq!(said_refusal(stderr), Some(said.to_string()));
         assert_eq!(said_refusal(&stderr[..stderr.find(REFUSAL_HEAD).unwrap()]), None, "cargo's lines are no refusal");
     }
@@ -2505,8 +2097,6 @@ mod tests {
             vec!["--fat32-check"],
             vec!["--dry-run"],
             vec!["--wait-secs", "60"],
-            vec!["--nic", "0000:00:1f.6"],
-            vec!["--talk", "/tmp/k"],
         ] {
             let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
@@ -2523,57 +2113,6 @@ mod tests {
         let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
             .map(String::from);
         assert!(Args::parse(&hosted).is_ok());
-    }
-
-    /// **A talking boot's stream is written as it arrives**, so it needs the
-    /// readback it is written into, refused before any machine is asked
-    /// anything.
-    #[test]
-    fn a_talking_boot_needs_its_readback() {
-        let bare = ["--image", "x.img", "--talk", "/tmp/k"].map(String::from);
-        let refusal = Args::parse(&bare).unwrap_err();
-        assert!(refusal.to_string().contains("--readback"), "{refusal}");
-        assert!(!refusal.about_the_boot());
-    }
-
-    /// **A swap flashes nothing and reboots nothing**, so every flag that
-    /// describes a boot is refused beside it — `--image` among them, since the
-    /// machine is found by its name and not by the image it is running — and
-    /// it is refused without the three things it acts with. A `--binary` with no
-    /// swap is no swap.
-    #[test]
-    fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
-        let whole = ["--swap", "netstack", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
-            .map(String::from);
-        let args = Args::parse(&whole).expect("a whole swap");
-        assert_eq!(args.swap.as_deref(), Some("netstack"));
-
-        for flag in [
-            vec!["--fat32-check"],
-            vec!["--dry-run"],
-            vec!["--nic", "0000:00:1f.6"],
-            vec!["--image", "x.img"],
-        ] {
-            let mut words = whole.to_vec();
-            words.extend(flag.iter().map(|w| (*w).to_string()));
-            let said = Args::parse(&words).unwrap_err().to_string();
-            assert!(said.contains(flag[0]) && said.contains("will not make"), "{said}");
-        }
-        for missing in ["--binary", "--talk", "--readback"] {
-            let at = whole.iter().position(|w| w == missing).unwrap();
-            let words: Vec<String> = whole
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != at && *i != at + 1)
-                .map(|(_, w)| w.clone())
-                .collect();
-            assert!(Args::parse(&words).is_err(), "a swap without {missing} was taken");
-        }
-        let lone = ["--binary", "n"].map(String::from);
-        assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
-        let mut bent = whole.to_vec();
-        bent[1] = "../netstack".to_string();
-        assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
 
     /// **There is nothing to fall through to.** A default image was what let the
@@ -2696,17 +2235,10 @@ mod tests {
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
         let t14 = Machine::parse("LENOVO\n20W0003AMZ\nN34ET71W (1.71 )\n").expect("three lines");
-        let boot = boot_file(47, 0, &t14, None);
-        assert_eq!(machine(&boot), Ok(t14.clone()));
+        let boot = boot_file(47, 0, &t14);
+        assert_eq!(machine(&boot), Ok(t14));
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
-        assert_eq!(wire_mac(&boot), None);
-        let wire = Wire {
-            iface: "enp0s31f6".to_string(),
-            addr: "192.168.1.46".parse().unwrap(),
-            mac: "02:00:00:00:00:01".to_string(),
-        };
-        assert_eq!(wire_mac(&boot_file(47, 0, &t14, Some(&wire))), Some(wire.mac));
     }
 
     /// A judge reading the readback later rules on the boot as the loop did.
@@ -2724,8 +2256,7 @@ mod tests {
     }
 
     /// The writer's half: the verdict the loop returns is the one its readback
-    /// carries, for a boot it refused, for one it passed, and for one whose
-    /// conversation it refused.
+    /// carries, for a boot it refused and for one it passed.
     #[test]
     fn the_readback_carries_the_verdict_the_loop_returns() {
         let dir = toyos_tmpdir::TempDir::new("verdict");
@@ -2738,7 +2269,7 @@ mod tests {
 
         let hung = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::HUNG_WITHOUT_A_RECORD);
         assert_eq!(
-            judge_and_write_readback(&armed, &hung, "", None, Some(dir.path()), boot),
+            judge_and_write_readback(&armed, &hung, "", Some(dir.path()), boot),
             Err(Refusal::HungWithoutARecord)
         );
         assert_eq!(written(), Err(Refusal::HungWithoutARecord.to_string().trim_end().to_string()));
@@ -2761,42 +2292,10 @@ mod tests {
             bootlog::STOPPING
         );
         assert_eq!(
-            judge_and_write_readback(&armed, &loader, &log, None, Some(dir.path()), boot),
+            judge_and_write_readback(&armed, &loader, &log, Some(dir.path()), boot),
             Ok(1151)
         );
         assert_eq!(written(), Ok(()));
-
-        let unheard = Refusal::Talk(vec!["unheard".to_string()]);
-        let heard = (Err("unheard".to_string()), Vec::new());
-        assert_eq!(
-            judge_and_write_readback(&armed, &loader, &log, Some(&heard), Some(dir.path()), boot),
-            Err(unheard.clone())
-        );
-        assert_eq!(written(), Err(unheard.to_string().trim_end().to_string()));
-    }
-
-    /// **The address is the one on the function the image claims, and an
-    /// interface with none is refused rather than read as the next one's.**
-    /// `ip -4 -brief` prints the name, the state and then the addresses, and an
-    /// interface whose cable is out prints the first two and stops — which is
-    /// exactly the machine this loop must not go on to flash.
-    #[test]
-    fn an_interface_with_no_address_is_refused_by_name() {
-        let up = "enp0s31f6       UP             192.168.1.46/24 \n";
-        assert_eq!(brief_address("enp0s31f6", up), Ok("192.168.1.46".parse().unwrap()));
-
-        let down = "enp0s31f6       DOWN \n";
-        assert!(brief_address("enp0s31f6", down).unwrap_err().contains("no IPv4 address"));
-
-        // Another interface's line is not this one's answer, however many are
-        // printed.
-        let many = "lo    UNKNOWN   127.0.0.1/8\n\
-                    enp0s31f6   UP   192.168.1.46/24\n\
-                    wlp9s0   UP   192.168.1.244/24\n\
-                    tailscale0   UNKNOWN   192.0.2.58/32\n";
-        assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
-        assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
-        assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
     }
 
     #[test]
@@ -3102,11 +2601,6 @@ mod tests {
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
-        // The machine under the operating system before the boot is not the boot.
-        assert!(
-            !Refusal::Wire { nic: "0000:00:1f.6".to_string(), why: "x".to_string() }
-                .about_the_boot()
-        );
     }
 
     #[test]
