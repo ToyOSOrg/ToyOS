@@ -18,12 +18,13 @@
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
 //! back the same way ([`op::LOCK_TAKE`]), and goes back with the claim.
 
-/// A run of ports a register block occupies; `len` 0 is no block.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Block {
-    pub port: u16,
-    pub len: u16,
+crate::user_safe! {
+    /// A run of ports a register block occupies; `len` 0 is no block.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Block {
+        pub port: u16,
+        pub len: u16,
+    }
 }
 
 impl Block {
@@ -40,39 +41,29 @@ impl Block {
 /// `PWRBTN_EN` in the PM1 event block.
 pub const FIXED_POWER_BUTTON: u16 = 1 << 0;
 
-/// The claim's description.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct AcpiInfo {
-    /// Where the loader found the RSDP: the root of the tables the holder
-    /// reads through [`Access`].
-    pub rsdp: u64,
-    /// The PM1a event block, its status half then its enable half.
-    pub pm1_event: Block,
-    /// The GPE0 block, its status half then its enable half.
-    pub gpe0: Block,
-    /// The embedded controller's command/status and data ports, as the ECDT
-    /// names them; `len` 0 where the machine named none.
-    pub ec_command: Block,
-    pub ec_data: Block,
-    /// The GPE the embedded controller raises, inside [`Self::gpe0`].
-    pub ec_gpe: u16,
-    pub flags: u16,
-    pub reserved: u32,
+crate::user_safe! {
+    /// The claim's description.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct AcpiInfo {
+        /// Where the loader found the RSDP: the root of the tables the holder
+        /// reads through [`Access`].
+        pub rsdp: u64,
+        /// The PM1a event block, its status half then its enable half.
+        pub pm1_event: Block,
+        /// The GPE0 block, its status half then its enable half.
+        pub gpe0: Block,
+        /// The embedded controller's command/status and data ports, as the ECDT
+        /// names them; `len` 0 where the machine named none.
+        pub ec_command: Block,
+        pub ec_data: Block,
+        /// The GPE the embedded controller raises, inside [`Self::gpe0`].
+        pub ec_gpe: u16,
+        pub flags: u16,
+        pub reserved: u32,
+    }
 }
 
-/// Every byte belongs to a field: this crosses the boundary through
-/// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = assert!(core::mem::size_of::<AcpiInfo>() == 8 + 4 * 4 + 2 + 2 + 4);
-
 impl AcpiInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self`, and the const assert above proves
-        // the `repr(C)` layout of `u16`s has no padding, so every byte the
-        // slice exposes is an initialized field.
-        unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>()) }
-    }
-
     pub fn has_ec(&self) -> bool {
         self.ec_command.len != 0
     }
@@ -224,29 +215,27 @@ impl Refused {
 /// for an access that is not to memory.
 pub const UNLISTED: u8 = 0xFF;
 
-/// One access the holder asks the kernel to make, and its answer.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Access {
-    pub address: u64,
-    /// What to write, or what was read.
-    pub value: u64,
-    /// A [`Space`].
-    pub space: u8,
-    /// A [`Width`].
-    pub width: u8,
-    /// 0 to read, 1 to write.
-    pub write: u8,
-    /// Out: 0 where the access was made, else a [`Refused`].
-    pub refused: u8,
-    /// Out, for memory: the UEFI memory type firmware's map gives the first
-    /// byte (`EFI_MEMORY_TYPE`), or [`UNLISTED`].
-    pub memory_type: u8,
-    pub reserved: [u8; 3],
+crate::user_safe! {
+    /// One access the holder asks the kernel to make, and its answer.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Access {
+        pub address: u64,
+        /// What to write, or what was read.
+        pub value: u64,
+        /// A [`Space`].
+        pub space: u8,
+        /// A [`Width`].
+        pub width: u8,
+        /// 0 to read, 1 to write.
+        pub write: u8,
+        /// Out: 0 where the access was made, else a [`Refused`].
+        pub refused: u8,
+        /// Out, for memory: the UEFI memory type firmware's map gives the first
+        /// byte (`EFI_MEMORY_TYPE`), or [`UNLISTED`].
+        pub memory_type: u8,
+        pub reserved: [u8; 3],
+    }
 }
-
-/// Every byte belongs to a field: this crosses the boundary both ways.
-const _: () = assert!(core::mem::size_of::<Access>() == 8 + 8 + 4 + 1 + 3);
 
 impl Access {
     pub const fn read(space: Space, address: u64, width: Width) -> Self {

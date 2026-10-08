@@ -157,9 +157,11 @@ pub fn serve_ipi() {
 }
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
-/// safe from inside `Lock::lock`'s spin.
+/// safe from inside `Lock::lock`'s spin; and, on the boot processor, a write
+/// to `SMI_CMD` asked of it, which a spinner with `IF` clear owes the same way.
 #[inline]
 pub fn poll() {
+    super::smi_cmd::serve_here();
     if !smp::answering() {
         return;
     }

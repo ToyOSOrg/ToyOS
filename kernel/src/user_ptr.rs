@@ -18,57 +18,13 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use toyos_abi::syscall::SyscallError;
+use toyos_abi::UserSafe;
 use toyos_userbound::{Pinned, Pins, Segment};
 
 use crate::UserAddr;
 
 /// Longest string, in bytes, the kernel accepts from userspace; one bound for every string syscall, since each copies or tokenizes rather than streaming.
 pub const MAX_USER_STR: u64 = 64 * 1024;
-
-/// Marker for types safe to interpret from / write to validated user pointers.
-/// # Safety
-/// Must be `#[repr(C)]`, `Copy`, have no padding, and be valid for any bit pattern.
-pub unsafe trait UserSafe: Copy {}
-
-// Every impl below is hand-checked: `#[repr(C)]`, `Copy`, integer fields only, explicit `_pad` for every alignment gap — Rust cannot verify this mechanically. A padding byte would leak kernel stack out through `copy_out` or accept an unwritten value through `copy_in`.
-
-// SAFETY: a primitive integer (and an array of them) is `#[repr(C)]`, has no padding, and every bit pattern is a value.
-unsafe impl UserSafe for u32 {}
-// SAFETY: see `u32`.
-unsafe impl UserSafe for u64 {}
-// SAFETY: see `u32` — an array adds no padding between elements.
-unsafe impl UserSafe for [u32; 2] {}
-// SAFETY: see `u32`.
-unsafe impl UserSafe for [u64; 2] {}
-
-// SAFETY: `#[repr(C)] Copy`, three `u64`s, no padding; `file_type` is a `u64`, not the enum it names, so every bit pattern stays valid.
-unsafe impl UserSafe for crate::object::ops::Stat {}
-
-// SAFETY: `#[repr(C)] Copy`, fourteen `u64`s, no padding; every field is validated where it is used, not here.
-unsafe impl UserSafe for toyos_abi::syscall::SpawnArgs {}
-// SAFETY: `#[repr(C)] Copy`, `RawHandle`, a `flags: u32`, then six `u64`s — no padding.
-unsafe impl UserSafe for toyos_abi::syscall::NamespaceBuild {}
-// SAFETY: `#[repr(C)] Copy`, `u64`, `u64`, `i64` — 24 bytes, no padding.
-unsafe impl UserSafe for toyos_abi::syscall::SchedInfo {}
-// SAFETY: `#[repr(C)] Copy`; the two `u32` pairs keep every `u64` 8-aligned, so there is no padding.
-unsafe impl UserSafe for toyos_abi::syscall::ProcessStats {}
-// SAFETY: `#[repr(C)] Copy`, `[RawHandle; 2]` then six `u32`s — align 4, no padding.
-unsafe impl UserSafe for toyos_abi::FramebufferInfo {}
-// SAFETY: `#[repr(C)] Copy`, `RawHandle`, an explicit `_pad: u32`, `u64` — no padding.
-unsafe impl UserSafe for toyos_abi::syscall::InboxSetup {}
-
-// SAFETY: `#[repr(C)] Copy`, two `u8`s, no padding; `keycode`/`modifiers` are plain `u8`, not enums, so any bit pattern is valid.
-unsafe impl UserSafe for toyos_abi::input::RawKeyEvent {}
-// SAFETY: `#[repr(C)] Copy`, `u8`, `i8`, `u16`, `u16` — 2-aligned, no padding.
-unsafe impl UserSafe for toyos_abi::input::MouseEvent {}
-
-// SAFETY: `#[repr(C)] Copy`, 88 bytes with no padding (checked by a compile-time size assertion); every field is clamped where it is used, not here.
-unsafe impl UserSafe for toyos_abi::log::LogCursor {}
-// SAFETY: `#[repr(transparent)]` over the `LogCursor` above.
-unsafe impl UserSafe for toyos_abi::trace::TraceCursor {}
-
-// SAFETY: `#[repr(C)] Copy`, two `u64`s and eight `u8`s, 24 bytes with no padding (its own size assertion); `space`, `width` and `write` are bytes, not the enums they name, and are decoded where they are used.
-unsafe impl UserSafe for toyos_abi::acpi::Access {}
 
 pub(crate) use toyos_userbound::Access;
 

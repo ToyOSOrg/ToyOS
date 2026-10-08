@@ -303,70 +303,69 @@ const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
-/// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
-///
-/// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
-/// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
-/// duplicates first. That is what makes endowing a device claim work with no
-/// special case: a claim carries no [`Rights::DUP`], so the move is the only
-/// expressible form and the parent provably no longer holds it.
-///
-/// [`Rights::DUP`]: crate::handle::Rights::DUP
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SpawnArgs {
-    /// The program: the file the kernel opens and pages the child from — its
-    /// libraries are found beside it — or, with an `image`, the path the caller
-    /// read that from. **Never `argv[0]`**, which is the child's first argument
-    /// and the name it goes by, and which nothing opens.
-    pub path_ptr: u64,
-    pub path_len: u64,
-    pub argv_ptr: u64,
-    pub argv_len: u64,
-    /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
-    /// child. Stdio and nothing else, in practice.
-    pub slot_map_ptr: u64,
-    pub slot_map_count: u64,
-    pub env_ptr: u64,
-    pub env_len: u64,
-    /// `[EndowEntry]`, moved out of the parent's table.
-    pub endow_ptr: u64,
-    pub endow_count: u64,
-    /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
-    pub labels_ptr: u64,
-    pub labels_len: u64,
-    /// The child's working directory, absolute, or the spawn is refused
-    /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
-    /// must be a directory there or the spawn is `NotFound`; under any other
-    /// name it is a file server's directory, which the caller's client asked
-    /// that server about and the kernel cannot. **Always the caller's
-    /// statement**: the kernel never substitutes the caller's own.
-    pub cwd_ptr: u64,
-    pub cwd_len: u64,
-    /// The program's bytes, in a shared memory object the caller made and
-    /// read the program into: `image` is a handle to it carrying `MAP`, and
-    /// `image_len` how many of its first bytes the program is — or 0, for a
-    /// program the kernel opens at `path` itself. `PermissionDenied` for a
-    /// handle without `MAP`; `InvalidArgument` for a length the object does not
-    /// hold, or an object that is no memory the kernel allocated. The object
-    /// stays the caller's: what the kernel reads of it, and when, is
-    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-    /// nobody, and the libraries are found in `/system/lib` alone.
-    pub image: u64,
-    pub image_len: u64,
-    /// The process the child is placed under, whose end takes it down: a
-    /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
-    /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
-    /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
-    /// for one to no process, since a place is a handle a peer sent;
-    /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-    /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+crate::user_safe! {
+    /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
     ///
-    /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
-    pub place: u64,
+    /// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
+    /// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
+    /// duplicates first. That is what makes endowing a device claim work with no
+    /// special case: a claim carries no [`Rights::DUP`], so the move is the only
+    /// expressible form and the parent provably no longer holds it.
+    ///
+    /// [`Rights::DUP`]: crate::handle::Rights::DUP
+    #[derive(Clone, Copy)]
+    pub struct SpawnArgs {
+        /// The program: the file the kernel opens and pages the child from — its
+        /// libraries are found beside it — or, with an `image`, the path the caller
+        /// read that from. **Never `argv[0]`**, which is the child's first argument
+        /// and the name it goes by, and which nothing opens.
+        pub path_ptr: u64,
+        pub path_len: u64,
+        pub argv_ptr: u64,
+        pub argv_len: u64,
+        /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
+        /// child. Stdio and nothing else, in practice.
+        pub slot_map_ptr: u64,
+        pub slot_map_count: u64,
+        pub env_ptr: u64,
+        pub env_len: u64,
+        /// `[EndowEntry]`, moved out of the parent's table.
+        pub endow_ptr: u64,
+        pub endow_count: u64,
+        /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
+        pub labels_ptr: u64,
+        pub labels_len: u64,
+        /// The child's working directory, absolute, or the spawn is refused
+        /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+        /// must be a directory there or the spawn is `NotFound`; under any other
+        /// name it is a file server's directory, which the caller's client asked
+        /// that server about and the kernel cannot. **Always the caller's
+        /// statement**: the kernel never substitutes the caller's own.
+        pub cwd_ptr: u64,
+        pub cwd_len: u64,
+        /// The program's bytes, in a shared memory object the caller made and
+        /// read the program into: `image` is a handle to it carrying `MAP`, and
+        /// `image_len` how many of its first bytes the program is — or 0, for a
+        /// program the kernel opens at `path` itself. `PermissionDenied` for a
+        /// handle without `MAP`; `InvalidArgument` for a length the object does not
+        /// hold, or an object that is no memory the kernel allocated. The object
+        /// stays the caller's: what the kernel reads of it, and when, is
+        /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
+        /// nobody, and the libraries are found in `/system/lib` alone.
+        pub image: u64,
+        pub image_len: u64,
+        /// The process the child is placed under, whose end takes it down: a
+        /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
+        /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+        /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
+        /// for one to no process, since a place is a handle a peer sent;
+        /// `Gone` for a process being torn down, and `ResourceExhausted` for a
+        /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+        ///
+        /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+        pub place: u64,
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 136);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -1821,32 +1820,32 @@ pub struct NameRef {
     pub len: u32,
 }
 
-/// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
-///
-/// A namespace is immutable once built: there is no insert, no remove and no
-/// replace, so a narrower one is a *new* object built from this one and a
-/// handle to a namespace is a handle to a fixed set.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NamespaceBuild {
-    /// [`HANDLE_INVALID`] for an empty base.
+crate::user_safe! {
+    /// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
     ///
-    /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
-    pub base: RawHandle,
-    /// [`NAMESPACE_KEEP_ALL`], and nothing else.
-    pub flags: u32,
-    /// `[NameRef]` — the names to carry over from `base`.
-    pub keep_ptr: u64,
-    pub keep_n: u64,
-    /// `[NamespaceEntry]` — new bindings.
-    pub add_ptr: u64,
-    pub add_n: u64,
-    /// The blob every `off`/`len` above indexes into.
-    pub names_ptr: u64,
-    pub names_len: u64,
+    /// A namespace is immutable once built: there is no insert, no remove and no
+    /// replace, so a narrower one is a *new* object built from this one and a
+    /// handle to a namespace is a handle to a fixed set.
+    #[derive(Clone, Copy)]
+    pub struct NamespaceBuild {
+        /// [`HANDLE_INVALID`] for an empty base.
+        ///
+        /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
+        pub base: RawHandle,
+        /// [`NAMESPACE_KEEP_ALL`], and nothing else.
+        pub flags: u32,
+        /// `[NameRef]` — the names to carry over from `base`.
+        pub keep_ptr: u64,
+        pub keep_n: u64,
+        /// `[NamespaceEntry]` — new bindings.
+        pub add_ptr: u64,
+        pub add_n: u64,
+        /// The blob every `off`/`len` above indexes into.
+        pub names_ptr: u64,
+        pub names_len: u64,
+    }
 }
 
-const _: () = assert!(core::mem::size_of::<NamespaceBuild>() == 56);
 const _: () = assert!(core::mem::size_of::<NamespaceEntry>() == 16);
 const _: () = assert!(core::mem::size_of::<NameRef>() == 8);
 
@@ -2445,19 +2444,18 @@ pub fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_TLS_ALLOC_BLOCK, module_id, 0, 0, 0))
 }
 
-/// An inbox and where its page of rings is mapped.
-///
-/// **The inbox owns its page and the kernel maps it at setup**, so the mapping
-/// has no lifetime of its own: it ends when the last handle to the inbox closes.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct InboxSetup {
-    pub handle: RawHandle,
-    pub _pad: u32,
-    pub vaddr: u64,
+crate::user_safe! {
+    /// An inbox and where its page of rings is mapped.
+    ///
+    /// **The inbox owns its page and the kernel maps it at setup**, so the mapping
+    /// has no lifetime of its own: it ends when the last handle to the inbox closes.
+    #[derive(Clone, Copy)]
+    pub struct InboxSetup {
+        pub handle: RawHandle,
+        pub _pad: u32,
+        pub vaddr: u64,
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<InboxSetup>() == 16);
 
 /// Create an [`inbox`](crate::inbox) with the given queue depth (a power of
 /// two, at most 256), and map its rings.
@@ -2491,55 +2489,31 @@ pub fn inbox_submit(handle: RawHandle, to_submit: u32, min_complete: u32, timeou
 
 // Module info (for stack unwinding / backtraces)
 
-/// Information about a loaded module (executable or shared library).
-///
-/// Buffer layout returned by `SYS_QUERY_MODULES`:
-///   `[ModuleInfo; count]` followed by packed path strings.
-///   Each `ModuleInfo::path_offset` is relative to the start of the buffer.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ModuleInfo {
-    /// Load base address (bias) of this module.
-    pub base: u64,
-    /// End of the last mapped segment (base + vaddr_max).
-    pub text_end: u64,
-    /// Absolute virtual address of `.eh_frame_hdr` (0 if none).
-    pub eh_frame_hdr: u64,
-    /// Size of `.eh_frame_hdr` in bytes.
-    pub eh_frame_hdr_size: u64,
-    /// Absolute virtual address of the module's program header table: the
-    /// kernel loads no module whose table a `PT_LOAD` does not map.
-    pub phdr: u64,
-    /// Entries in that table, `e_phnum`: a `u64` so the record has no padding.
-    pub phnum: u64,
-    /// Byte offset of the module's path string within the buffer.
-    pub path_offset: u32,
-    /// Length of the path string in bytes.
-    pub path_len: u32,
-}
-
-/// Every byte belongs to a field: this crosses the boundary through
-/// [`ModuleInfo::as_bytes`], so a gap would publish whatever the kernel stack
-/// held. **This is the type where that matters most**, because the buffer it
-/// is written into is a user address. A field of any other width added here
-/// reds here rather than publishing kernel stack bytes to userland.
-const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 8 + 8 + 4 + 4);
-
-impl ModuleInfo {
-    /// The record's own bytes, which is what `SYS_QUERY_MODULES` writes.
+crate::user_safe! {
+    /// Information about a loaded module (executable or shared library).
     ///
-    /// Here rather than at the kernel's copy-out, the shape every ABI struct in
-    /// this crate has: the `unsafe` belongs beside the layout assertion that
-    /// discharges it, not beside the caller that happens to need it.
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and the const assert above proves the
-        // `repr(C)` layout has no padding, so every byte the slice exposes is
-        // an initialized field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
-        }
+    /// Buffer layout returned by `SYS_QUERY_MODULES`:
+    ///   `[ModuleInfo; count]` followed by packed path strings.
+    ///   Each `ModuleInfo::path_offset` is relative to the start of the buffer.
+    #[derive(Clone, Copy)]
+    pub struct ModuleInfo {
+        /// Load base address (bias) of this module.
+        pub base: u64,
+        /// End of the last mapped segment (base + vaddr_max).
+        pub text_end: u64,
+        /// Absolute virtual address of `.eh_frame_hdr` (0 if none).
+        pub eh_frame_hdr: u64,
+        /// Size of `.eh_frame_hdr` in bytes.
+        pub eh_frame_hdr_size: u64,
+        /// Absolute virtual address of the module's program header table: the
+        /// kernel loads no module whose table a `PT_LOAD` does not map.
+        pub phdr: u64,
+        /// Entries in that table, `e_phnum`: a `u64` so the record has no padding.
+        pub phnum: u64,
+        /// Byte offset of the module's path string within the buffer.
+        pub path_offset: u32,
+        /// Length of the path string in bytes.
+        pub path_len: u32,
     }
 }
 
@@ -2580,22 +2554,23 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
     })
 }
 
-/// Scheduler info for the calling process.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SchedInfo {
-    /// Current vruntime of this process (nanoseconds of virtual CPU time).
-    pub vruntime: u64,
-    /// Global min_vruntime frontier (monotonic non-decreasing).
-    pub min_vruntime: u64,
-    /// Signed contract lag, frozen at the most recent runnable-state
-    /// transition. Positive = process was behind the frontier when it last
-    /// woke / blocked (entitled to catch up); negative = process ran ahead
-    /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
-    /// by construction. This is the scheduler's contract, not the live
-    /// `min_vruntime - vruntime` drift that accumulates while running on
-    /// multi-CPU systems — compute that at the call site if you need it.
-    pub lag: i64,
+crate::user_safe! {
+    /// Scheduler info for the calling process.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SchedInfo {
+        /// Current vruntime of this process (nanoseconds of virtual CPU time).
+        pub vruntime: u64,
+        /// Global min_vruntime frontier (monotonic non-decreasing).
+        pub min_vruntime: u64,
+        /// Signed contract lag, frozen at the most recent runnable-state
+        /// transition. Positive = process was behind the frontier when it last
+        /// woke / blocked (entitled to catch up); negative = process ran ahead
+        /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
+        /// by construction. This is the scheduler's contract, not the live
+        /// `min_vruntime - vruntime` drift that accumulates while running on
+        /// multi-CPU systems — compute that at the call site if you need it.
+        pub lag: i64,
+    }
 }
 
 /// Get scheduler info for the calling process.
@@ -2605,31 +2580,32 @@ pub fn sched_info() -> SchedInfo {
     info
 }
 
-/// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct ProcessStats {
-    pub wall_ns: u64,
-    pub cpu_ns: u64,
-    pub syscall_total: u64,
-    pub syscall_total_ns: u64,
-    pub fault_demand_count: u32,
-    pub fault_zero_count: u32,
-    pub fault_ns: u64,
-    pub io_read_ops: u32,
-    /// The process's own pid. Not authority — no syscall takes a pid — but it
-    /// is the name a diagnostic prints, and this is where a holder of a handle
-    /// reads it.
-    pub pid: u32,
-    pub io_read_bytes: u64,
-    pub blocked_io_ns: u64,
-    pub blocked_futex_ns: u64,
-    pub blocked_pipe_ns: u64,
-    pub blocked_ipc_ns: u64,
-    pub blocked_other_ns: u64,
-    pub runqueue_wait_ns: u64,
-    pub peak_memory: u64,
-    pub alloc_count: u64,
+crate::user_safe! {
+    /// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
+    #[derive(Clone, Copy, Default)]
+    pub struct ProcessStats {
+        pub wall_ns: u64,
+        pub cpu_ns: u64,
+        pub syscall_total: u64,
+        pub syscall_total_ns: u64,
+        pub fault_demand_count: u32,
+        pub fault_zero_count: u32,
+        pub fault_ns: u64,
+        pub io_read_ops: u32,
+        /// The process's own pid. Not authority — no syscall takes a pid — but it
+        /// is the name a diagnostic prints, and this is where a holder of a handle
+        /// reads it.
+        pub pid: u32,
+        pub io_read_bytes: u64,
+        pub blocked_io_ns: u64,
+        pub blocked_futex_ns: u64,
+        pub blocked_pipe_ns: u64,
+        pub blocked_ipc_ns: u64,
+        pub blocked_other_ns: u64,
+        pub runqueue_wait_ns: u64,
+        pub peak_memory: u64,
+        pub alloc_count: u64,
+    }
 }
 
 /// Read accounting for the process a `Process` handle names, alive or exited.
@@ -2651,13 +2627,11 @@ mod tests {
 
     /// **The encoder is the wire, so the test decodes the wire.**
     ///
-    /// Not `as_bytes().len() == size_of::<ModuleInfo>()`, which a padded
+    /// Not `bytes(&info).len() == size_of::<ModuleInfo>()`, which a padded
     /// struct passes: every field is read back out of the slice at the offset
-    /// `#[repr(C)]` puts it at. `path_offset` and `path_len` are the two the
-    /// `const _` above is about — a gap before them shifts both, and these are
-    /// the assertions that catch it.
+    /// `#[repr(C)]` puts it at.
     #[test]
-    fn module_info_as_bytes_is_the_fields_and_nothing_between_them() {
+    fn module_info_s_bytes_are_the_fields_and_nothing_between_them() {
         let info = ModuleInfo {
             base: 0x1122_3344_5566_7788,
             text_end: 0x2233_4455_6677_8899,
@@ -2668,7 +2642,7 @@ mod tests {
             path_offset: 0x55,
             path_len: 0x66,
         };
-        let b = info.as_bytes();
+        let b = crate::usersafe::bytes(&info);
         assert_eq!(b.len(), 56);
         assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), info.base);
         assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), info.text_end);
@@ -2703,8 +2677,8 @@ mod tests {
         let lib = record(0x200_0000_0000, 2 * size + 9, 13);
         let mut answer = [0u8; 1 + 2 * 56 + 9 + 13];
         let wire = &mut answer[1..];
-        wire[..56].copy_from_slice(exe.as_bytes());
-        wire[56..112].copy_from_slice(lib.as_bytes());
+        wire[..56].copy_from_slice(crate::usersafe::bytes(&exe));
+        wire[56..112].copy_from_slice(crate::usersafe::bytes(&lib));
         wire[112..121].copy_from_slice(b"/bin/prog");
         wire[121..].copy_from_slice(b"/lib/libx.so\0");
         let got: [(u64, u64, &[u8]); 2] = {
@@ -2725,7 +2699,7 @@ mod tests {
     fn modules_refuses_a_path_past_the_answer() {
         let size = core::mem::size_of::<ModuleInfo>() as u32;
         let mut answer = [0u8; 56 + 4];
-        answer[..56].copy_from_slice(record(0, size, 5).as_bytes());
+        answer[..56].copy_from_slice(crate::usersafe::bytes(&record(0, size, 5)));
         modules(&answer).for_each(drop);
     }
 

@@ -42,7 +42,7 @@ pub(super) fn sys_trace_read(
 /// A read of records on a cursor the caller holds, under `need`.
 ///
 /// A copy-out failure after a successful read costs the caller those records; the cursor round-trips through the caller's own memory.
-fn read_on_cursor<C: crate::user_ptr::UserSafe>(
+fn read_on_cursor<C: toyos_abi::UserSafe>(
     ctx: &SyscallContext,
     syscap: RawHandle,
     need: Rights,
