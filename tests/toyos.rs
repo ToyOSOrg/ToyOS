@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, claims, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
@@ -137,9 +137,6 @@ const RUST_SKIP: &[&str] = &[
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
-    // The same for `tests/lantalkcase`, held until the runner's bound is near
-    // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
-    "lan_talk_hold",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -314,18 +311,6 @@ const MACHINE_TESTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
-    (
-        "lan_dhcp_lease",
-        metal::Metal { arms: LANTALKCASE, judge: |b| lan::on_metal(b[0]) },
-    ),
-    (
-        "lan_message_delivery",
-        metal::Metal { arms: LANTALKCASE, judge: |b| lan::delivered_on_metal(b[0]) },
-    ),
-    (
-        "lan_talk",
-        metal::Metal { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
-    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1008,16 +993,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
         "test_rs_fs_share",
     ],
 )];
-
-/// The cable's boot, netstack in front of the T14's I219, which the host talks to
-/// over that cable: the loop reads the log it serves under its name, pings it,
-/// runs a command on it and tells it to reboot. It names the I219, so the loop
-/// refuses a cable that is out before it flashes.
-const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
-    talk: true,
-    nic: Some(lan::NIC),
-    ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
-}];
 
 /// Every in-kernel self-test that logs its verdict at init and does nothing
 /// else.

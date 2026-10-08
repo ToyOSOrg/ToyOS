@@ -23,6 +23,10 @@ rather than the swap.
 No test stages either: `swap_crash_rolls_back`'s replacement panics before it
 serves anything, so the host's redial is admitted by the restored netd.
 
+The host's `Stream` and `metalswap::swap` are deleted
+(`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`); the
+connections a dying netstack leaves behind are any peer's.
+
 Exit condition: a host reader that learns of an unannounced netd death through
 an event — the replacement netd ending the connections it cannot know, or a
 stop that ends them before netd goes — with a test whose replacement serves and

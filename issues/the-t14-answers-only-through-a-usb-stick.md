@@ -9,10 +9,10 @@ opened: 2026-09-07
 Every boot of the bench is flashed to a stick under Ubuntu and judged by what
 is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
 LAN as the development Mac and its NIC is the onboard Intel I219 at `00:1f.6`,
-`8086:15fc`, which netd claims on the LAN boot (`tests/lantalkcase`), where
-the Mac reads the boot's log, runs a command and hands the machine back over
-the cable. The track is to make that
-cable the answer path.
+`8086:15fc`. The track is to make that cable the answer path. The boot on
+which the Mac read the log, ran a command and handed the machine back over it
+is deleted: the host reaches no T14 that runs ToyOS
+(`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 
 What is left is the harness running userland tests over ssh through a russh
 client, which `issues/the-t14-reboots-through-ubuntu-for-every-test.md`
@@ -31,7 +31,9 @@ Constraints a reader would otherwise pay to re-derive:
   has VT-d, so this is not a bound on the bench — but a `pcidev` refusal there
   is the first thing to check before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
-  and the harness's client is russh too. No host ssh binary, no fork.
+  and the harness's client was russh too, until it was deleted
+  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). No host
+  ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
   T14's MAC is the same under ToyOS and Ubuntu. Wi-Fi is out — the AX210 needs
   a firmware image.

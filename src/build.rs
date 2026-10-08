@@ -2010,63 +2010,6 @@ pub fn build_test_parts(
     Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
 }
 
-/// The host binaries the network judges drive, built here rather than inside a
-/// test: a judge's price is its exchange and not a compile.
-///
-/// Each of these keeps its own `Cargo.lock` and is excluded from the
-/// workspace. That is what makes them possible: they exist to be
-/// a *second* implementation, and a second implementation's dependency graph is
-/// not the harness's to resolve.
-pub fn build_host_judges(root: &Path, quiet: bool) {
-    for (dir, _) in HOST_JUDGES {
-        let _building = Building::start(format!("the host's {dir}"));
-        let at = root.join(dir);
-        let mut cmd = Command::new("cargo");
-        cmd.args(["build", "--release"]);
-        if quiet {
-            cmd.arg("--quiet");
-        }
-        let status = cmd
-            .current_dir(&at)
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .env_remove("RUSTC")
-            .env_remove("RUSTFLAGS")
-            .status()
-            .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
-        assert!(status.success(), "{dir} did not build");
-    }
-}
-
-/// One host judge: where its crate is, and the binary that crate builds. Named
-/// rather than indexed, because a row inserted anywhere but the end would
-/// silently repoint every accessor below.
-type Judge = (&'static str, &'static str);
-
-const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
-
-const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
-
-/// Copy to `to` the binary the build leaves for the program
-/// `name`: the bytes a swap sends a running machine in place of the ones its
-/// image carries. Read under the artifact lock, as every image build reads it.
-pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Result<(), String> {
-    let from = root.join(format!("target/{}/{PROFILE}/{name}", arch.userland()));
-    let _artifact = buildlock::artifact(root);
-    fs::copy(&from, to)
-        .map(|_| ())
-        .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
-}
-
-/// The harness's SSH client — the only thing in this tree that speaks the
-/// protocol from the other side of `userland/sshserver`.
-pub fn ssh_client_host(root: &Path) -> PathBuf {
-    host_judge(root, SSH_CLIENT)
-}
-
-fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
-    root.join(dir).join("target/release").join(bin)
-}
-
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
 /// Also builds any cdylib subcrates and includes their .so files.
 ///
@@ -3003,8 +2946,7 @@ mod tests {
 
     /// **An image a user boots serves no log on the network.** `logkeeper` answers
     /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netstack` connector: the test configs that read the
-    /// stream give it one, and these do not.
+    /// them, once it holds a `netstack` connector.
     #[test]
     fn no_shipped_image_serves_the_log_on_the_network() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -3097,7 +3039,6 @@ mod tests {
         "console/system.toml",
         "tests/acpicase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",

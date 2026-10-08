@@ -19,8 +19,10 @@ metal rows.
   after a reboot). Its registration says which.
 - **One exec channel**, to `test-runner`'s stdin loop, since `sshd` aliases a
   second channel's input (`issues/sshserver-holds-one-channel-and-does-not-say-so.md`).
-  `tests/ssh-client-host`'s `pipe` relays it once it writes output as it
-  arrives (`tests/ssh-client-host/src/main.rs:251-263`).
+  The harness's ssh client relayed it through `pipe`, once that wrote output
+  as it arrived; the client was built and is deleted, and
+  `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the
+  commit that restores it.
 - **A test's window** is what crosses between its markers: the job's output,
   which never reaches `/log` (`userland/sshd/src/main.rs:234-239`), and the
   kernel's records, which a runner the exec starts reads on its own
@@ -42,8 +44,9 @@ metal rows.
 **Next: two sessions in place of six boots.** `shared`, `shared-2`, `ccorpus`,
 `testcases`, `testcases-mkdir` and `testcases-readdir` share a config, a
 parameter line and the shipping kernel. The session image is `tests/testcases`
-with `tests/lantalkcase`'s netd, sshd and streaming `logd`, under the same
-120 s `boot-deadline=`. A session holds 74.8 s of members, priced at
+with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
+deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
+under the same 120 s `boot-deadline=`. A session holds 74.8 s of members, priced at
 `toyos_tco::RUST_MEMBER_MS` a Rust member, `toyos_tco::C_MEMBER_MS` a C case
 and a list at twice its slowest on the T14: the bound less a tenth, less a
 lease as late as 19.1 s
@@ -71,11 +74,10 @@ a session image comes by `update`, a row that boots on its own by
 `issues/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` has
 armed the hard-lockup detector on every boot and shipped `watchdogd`. An image
 names no `boot-deadline=`, `metal::judge_arms` takes `watchdogd`'s row as its
-bound, and `pipe` bounds each window rather than its whole run
-(`tests/ssh-client-host/src/main.rs:64`). A ToyOS the host cannot reach keeps
+bound, and `pipe` bounds each window rather than its whole run. A ToyOS the host cannot reach keeps
 its watchdog fed, so the run says it waits for a hand once nothing has answered
 within the watchdog's bound and a POST allowance. A swap then leaves a boot's
-bound (`issues/a-swap-on-the-t14-lives-inside-a-metal-boots-bound.md`).
+bound (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 
 **Exit**: the host's plan names every reset in a run by what forces it, and a
 host test whose transport goes quiet under a session finds the run stopped,

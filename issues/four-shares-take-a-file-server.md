@@ -47,7 +47,7 @@ detached from a desktop shell and runs in that shell's login session. Its
 one share with each other and with the terminal that started the server: one
 login at its parts has every other's next connection or stream on that server
 refused, and that terminal's. Only where a boot config starts sshserver as a
-service (`tests/lantalkcase`, `tests/metalcase`) does each launch it makes
+service (`tests/metalcase`) does each launch it makes
 open a session of its own.
 
 **Ruled** (owner, 2026-10-07):
