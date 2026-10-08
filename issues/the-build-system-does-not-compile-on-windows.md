@@ -11,16 +11,15 @@ opened: 2026-08-19
 ## The judge, and it needs no Windows host and no download
 
 ```
-__CARGO_TESTS_ONLY_SRC_ROOT=<scratch> CARGO_TARGET_DIR=<scratch-target> \
+__CARGO_TESTS_ONLY_SRC_ROOT=<tree>/src/library CARGO_TARGET_DIR=<scratch-target> \
   RUSTUP_TOOLCHAIN=<sysroot> cargo check -Z build-std=std,panic_abort \
   --target x86_64-pc-windows-msvc --offline -p toyos-build --all-targets
 ```
 
-`<scratch>` is `src/CLAUDE.md`'s std-src-root recipe with one addition: a
-workspace `Cargo.toml` whose members are `library/std`, `library/sysroot`,
-`library/proc_macro`, `library/panic_abort` and `library/test`, and whose
-`[patch.crates-io]` is `library/Cargo.toml`'s four entries with `library/`
-prepended to each path. It works because the fork vendors `library/windows-sys`
+`<tree>` and `<sysroot>` are `src/CLAUDE.md`'s std type-check recipe's, with
+no addition: the copied library is its own workspace, with its patches and
+its lockfile, and a manifest written above it does not resolve offline. It
+works because the fork vendors `library/windows-sys`
 and `library/windows_link`, so a Windows `std` builds from the tree — a plain
 `cargo check --target x86_64-pc-windows-msvc` instead says *"the
 `x86_64-pc-windows-msvc` target may not be installed"* and asks for

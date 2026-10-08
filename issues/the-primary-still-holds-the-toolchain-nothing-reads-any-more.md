@@ -19,8 +19,9 @@ because no code knows whether such a worktree is still building:
   `toyos-compiler`, the record of the in-place compiler, which is a file.
   `toyos-std/` there is still the primary's std build directory.
 - **`toyos-compiler` being a file refuses the primary's first compiler
-  build**: `compiler::build_in_fork` creates `rust/build/toyos-compiler/` and
-  the OS answers `File exists` on that path, naming no cause. It bites the
+  build**: `compiler::place` creates `rust/build/toyos-compiler/`, before it
+  empties anything, and the OS answers `File exists` on that path, naming no
+  cause. It bites the
   first time the primary is the first checkout to name a compiler: a fork
   bump built there, or a host tool update that moves the LLVM's key.
 - **`toyos-build-locks/` in the primary's git directory**: the locks of the
