@@ -17,6 +17,11 @@ pub const SHUTTING_DOWN: &str = "Shutting down.";
 /// `\_S5` names, which is the one its ICH9 powers off on.
 const Q35_S5_SUPPLIED: &str = "power: S5 is PM1a 0x604 with SLP_TYPa=0,";
 
+/// What the kernel logs at the `acpi` claim on a machine its firmware handed
+/// over in ACPI mode (`kernel/src/arch/x86_64/acpi_mode.rs`), as OVMF does
+/// q35: the enable and its wait are the T14's to exercise (`acpi_mode`).
+const HANDED_OVER_IN_ACPI_MODE: &str = "acpi: the firmware handed this machine over in ACPI mode, so nothing is written";
+
 /// Wait for the boot's `last` word on a guest asked to end, then for QEMU to
 /// stop for `reason` and exit; `console` gains everything said on the way.
 ///
@@ -98,8 +103,7 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
     qemu::await_marker(&mut qemu, &mut console, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
     // The kernel's own record, committed before the one just waited for.
-    serial::Serial::named("boot", console.clone())
-        .must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+    serial::Serial::named("boot", console.clone()).must_say(HANDED_OVER_IN_ACPI_MODE)?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     writeln!(qemu.stdin_mut(), "run test_rs_stop_short").expect("write to QEMU stdin");
@@ -618,11 +622,10 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let mut console = boot.text().to_string();
+    // A wait each, as in `machine_shutdown_short_stop`: the server's line and
+    // the kernel's record reach the console by different roads.
     qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
-    let mode = serial::Serial::named("boot", console.clone());
-    // OVMF hands q35 over in ACPI mode, so the mint writes nothing: the
-    // enable and its wait are the T14's to exercise (`acpi_mode`).
-    mode.must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+    qemu::await_marker(&mut qemu, &mut console, HANDED_OVER_IN_ACPI_MODE, "the kernel's record of the mode it was handed over in")?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     stop.power_button();
