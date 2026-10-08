@@ -573,6 +573,26 @@ fn a_connect_closed_before_its_answer_is_answered_closed() {
     assert_eq!((net.far.segments.len(), net.far.resets.len()), (sent, 0));
 }
 
+// A frame and a deadline each end in a pass of their own: an opportunity's pass is over the
+// connects only, so neither test offers one.
+#[test]
+fn a_frame_moves_an_established_stream_with_no_opportunity_after_it() {
+    let (mut net, _, client) = established();
+    let frame = net.far.text(b"at once");
+    net.node.receive(net.now, &frame, draw(&mut net.draws));
+    assert_eq!(client.borrow().inbox, b"at once");
+}
+
+#[test]
+fn a_deadline_moves_an_established_stream_with_no_opportunity_after_it() {
+    let mut net = Net::new();
+    let id = departed(&mut net, 100_000, false);
+    net.events();
+    let cut = net.now.after(Duration::from_secs(100));
+    net.node.fire(cut, draw(&mut net.draws));
+    assert_eq!((net.node.streams(), net.events()), (0, vec![StreamEvent::Cut { id }]));
+}
+
 // ---- the bridge ----
 
 #[test]
