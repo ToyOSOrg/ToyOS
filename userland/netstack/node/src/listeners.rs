@@ -17,14 +17,11 @@
 //! held port would take the first's connections, and a listen carries no word for its program
 //! by which the node could allow that to the first's owner alone.
 //!
-//! **A listener lives until its owner lets go or its address goes**: [`Node::close_listener`],
-//! a wake its pipe refuses, for whatever reason, or a pass that finds the address the listen
-//! named one a listen would now be refused for, [`ListenRefused::NotLocal`]. [tcp] then resets
-//! every connection that still waits, so each peer learns at once, the port is free and the
-//! place is back. The owner reads the end of its wake pipe and the shell reads
-//! [`Node::drain_ended_listeners`]. A listener at a lost address is ended and not kept for the
-//! address to come back because its owner makes no call a refusal could answer: it only waits
-//! for wakes, and none would come.
+//! **A listener lives until its owner lets go**: [`Node::close_listener`], or a wake its pipe
+//! refuses, for whatever reason. [tcp] then resets every connection that still waits, so each
+//! peer learns at once, and the port is free. Nothing the wire does ends one: a listener
+//! whose address the machine loses stands, with its port and its place, and is handed the
+//! next SYN once the address is the machine's again.
 //!
 //! **A stream starts with the options its connection has**, and those are its listener's as
 //! they were when its SYN arrived: [tcp] hands them over then (LS-10), the node reads them
@@ -65,15 +62,6 @@ pub enum ListenRefused {
     InUse,
 }
 
-/// Why the node ended a listener its owner had not closed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListenerEnd {
-    /// The owner's pipe refused a wake.
-    Wake(WriteRefusal),
-    /// The address the listen named is the machine's no more.
-    Address,
-}
-
 /// The answer to an accept that took a connection: its stream, established.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Accepted {
@@ -97,8 +85,7 @@ pub enum AcceptRefused {
 
 struct Listener {
     bound: toyos_net_tcp::ListenerId,
-    /// The address its listen named, and the port it holds.
-    at: Endpoint,
+    port: Port,
     owner: Box<dyn Wake>,
     /// Wakes written that no accept has spent.
     unspent: usize,
@@ -111,7 +98,7 @@ pub(crate) struct Listeners {
     live: BTreeMap<ListenerId, Listener>,
     /// The next listener's id: none is used twice.
     next: u64,
-    ended: VecDeque<(ListenerId, ListenerEnd)>,
+    ended: VecDeque<(ListenerId, WriteRefusal)>,
 }
 
 impl Node {
@@ -123,7 +110,7 @@ impl Node {
             return Err(ListenRefused::Full);
         }
         // A drawn port is one [tcp] finds no listener on at any address.
-        if port.is_some_and(|port| self.listeners.live.values().any(|listener| listener.at.port == port)) {
+        if port.is_some_and(|port| self.listeners.live.values().any(|listener| listener.port == port)) {
             return Err(ListenRefused::InUse);
         }
         let candidate = || {
@@ -138,7 +125,7 @@ impl Node {
         };
         let id = ListenerId(self.listeners.next);
         self.listeners.next = self.listeners.next.saturating_add(1);
-        self.listeners.live.insert(id, Listener { bound, at: Endpoint { addr, port }, owner, unspent: 0, options: Options::default() });
+        self.listeners.live.insert(id, Listener { bound, port, owner, unspent: 0, options: Options::default() });
         Ok((id, port))
     }
 
@@ -194,35 +181,31 @@ impl Node {
         true
     }
 
-    /// Writes every owner the wakes it is owed, and ends a listener whose pipe refuses one or
-    /// whose address went. One lookup in [tcp] a listener: nothing of [tcp]'s is moved or
-    /// offered for sending.
+    /// Writes every owner the wakes it is owed, and ends a listener whose pipe refuses one. One
+    /// lookup in [tcp] a listener: nothing of [tcp]'s is moved or offered for sending.
     pub(crate) fn wake_owners(&mut self, now: Instant) {
         // A listener ended here gives its place back, which another's owner may be owed a wake
         // for.
         while self.wake_each(now) {}
     }
 
-    /// One round over the listeners, up to the first to end; `true` ended one.
+    /// One round over the listeners, up to the first whose pipe refuses a wake; `true` ended it.
     fn wake_each(&mut self, now: Instant) -> bool {
         let room = self.room();
         let stack = &mut self.stack;
         let ended = self.listeners.live.iter_mut().find_map(|(id, listener)| {
-            if !stack.shard().listens_at(listener.at.addr) {
-                return Some((*id, ListenerEnd::Address));
-            }
             let owed = stack.tcp_ready(listener.bound).min(room);
             while listener.unspent < owed {
                 if let Err(refusal) = listener.owner.wake() {
-                    return Some((*id, ListenerEnd::Wake(refusal)));
+                    return Some((*id, refusal));
                 }
                 listener.unspent = listener.unspent.saturating_add(1);
             }
             None
         });
-        let Some((id, end)) = ended else { return false };
+        let Some((id, refusal)) = ended else { return false };
         self.end_listener(now, id);
-        self.listeners.ended.push_back((id, end));
+        self.listeners.ended.push_back((id, refusal));
         true
     }
 
@@ -231,8 +214,9 @@ impl Node {
         self.listeners.live.len()
     }
 
-    /// The listeners the node ended since the last call, and why.
-    pub fn drain_ended_listeners(&mut self) -> impl Iterator<Item = (ListenerId, ListenerEnd)> + '_ {
+    /// The listeners ended since the last call because their owner's pipe refused a wake, and
+    /// what it answered.
+    pub fn drain_ended_listeners(&mut self) -> impl Iterator<Item = (ListenerId, WriteRefusal)> + '_ {
         self.listeners.ended.drain(..)
     }
 }

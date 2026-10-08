@@ -9,6 +9,7 @@
 //! the option then. So the option is set only once the listener is readable, which is the host
 //! saying a connection waits to be accepted.
 
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,10 @@ fn accepted_with_nodelay(before: bool) -> bool {
     let (mut events, start) = (Events::with_capacity(1), Instant::now());
     while events.is_empty() {
         let left = CEILING.checked_sub(start.elapsed()).expect("the connection waits at its listener within the ceiling");
-        poll.poll(&mut events, Some(left)).expect("the host's poller");
+        match poll.poll(&mut events, Some(left)) {
+            Err(interrupted) if interrupted.kind() == ErrorKind::Interrupted => {}
+            polled => polled.expect("the host's poller"),
+        }
     }
     if !before {
         SockRef::from(&listener).set_tcp_nodelay(true).expect("a listener takes the option");

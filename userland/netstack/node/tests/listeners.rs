@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common::{arp, terms, Segment, Wire, A, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerEnd, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
+use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
 
@@ -703,8 +703,8 @@ fn a_wake_the_owners_pipe_refuses_ends_the_listener() {
         let (id, owner) = net.listen(SSH);
         owner.borrow_mut().refusal = Some(refusal);
         net.handshake(P1);
-        let ended: Vec<(ListenerId, ListenerEnd)> = net.node.drain_ended_listeners().collect();
-        assert_eq!(ended, [(id, ListenerEnd::Wake(refusal))]);
+        let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_ended_listeners().collect();
+        assert_eq!(ended, [(id, refusal)]);
         assert!(owner.borrow().dropped && net.last(P1).rst, "{refusal:?}: {:?}", net.heard);
         assert_eq!((net.node.listeners(), net.node.held()), (0, 0), "{refusal:?}");
         net.listen(SSH);
@@ -808,8 +808,8 @@ fn a_listener_ended_for_its_wake_gives_its_place_to_another_in_the_same_pass() {
     let ack = net.iss(P3).wrapping_add(1);
     net.node.receive(net.now, &frame(P3, SSH, ISS + 1, Some(ack), 0, &[]), draw(&mut net.draws));
     assert_eq!(wakes(&owner), 2);
-    let ended: Vec<(ListenerId, ListenerEnd)> = net.node.drain_ended_listeners().collect();
-    assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, ListenerEnd::Wake(WriteRefusal::Gone))], 1, 1));
+    let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_ended_listeners().collect();
+    assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, WriteRefusal::Gone)], 1, 1));
 }
 
 // A datagram socket is something a client makes the node hold, its two queues of sixteen

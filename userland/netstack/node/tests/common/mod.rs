@@ -46,6 +46,7 @@ pub enum Seen {
     /// A datagram from port 68 to port 67, and its payload.
     Dhcp { to: [u8; 6], source: Ipv4Addr, destination: Ipv4Addr, message: Vec<u8> },
     EchoReply { source: Ipv4Addr, destination: Ipv4Addr, id: u16, seq: u16, data: Vec<u8> },
+    Tcp(Segment),
 }
 
 impl Seen {
@@ -53,7 +54,7 @@ impl Seen {
     pub fn dhcp(&self) -> Option<(u8, &[u8])> {
         match self {
             Seen::Dhcp { message, .. } => Some((option(message, 53).expect("a message type")[0], message.as_slice())),
-            Seen::Arp { .. } | Seen::EchoReply { .. } => None,
+            Seen::Arp { .. } | Seen::EchoReply { .. } | Seen::Tcp(_) => None,
         }
     }
 
@@ -61,6 +62,7 @@ impl Seen {
     pub fn source(&self) -> Option<Ipv4Addr> {
         match self {
             Seen::Dhcp { source, .. } | Seen::EchoReply { source, .. } => Some(*source),
+            Seen::Tcp(_) => Some(A),
             Seen::Arp { .. } => None,
         }
     }
@@ -81,8 +83,8 @@ fn v4(bytes: &[u8]) -> Ipv4Addr {
 }
 
 /// The outside reading of a frame the node emitted: Ethernet II from the node's MAC, then ARP, a
-/// DHCP client's datagram or an echo reply, each with the lengths and checksums `etherparse`
-/// computes. Anything else the node has no business sending here.
+/// DHCP client's datagram, an echo reply or a TCP segment, each with the lengths and checksums
+/// `etherparse` computes. Anything else the node has no business sending here.
 pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
     let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
     let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
@@ -114,7 +116,8 @@ pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
                     let Icmpv4Type::EchoReply(echo) = icmp.icmp_type() else { panic!("{:?}", icmp.icmp_type()) };
                     Seen::EchoReply { source, destination, id: echo.id, seq: echo.seq, data: icmp.payload().to_vec() }
                 }
-                other => panic!("neither UDP nor ICMP: {other:?}"),
+                TransportSlice::Tcp(_) => Seen::Tcp(segment(frame).expect("a TCP segment")),
+                other => panic!("neither UDP, ICMP nor TCP: {other:?}"),
             }
         }
         other => panic!("neither ARP nor IPv4: {other:?}"),
@@ -122,7 +125,7 @@ pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
 }
 
 /// A TCP segment the node emitted, as `etherparse` read it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
     /// Where its frame and its datagram went.
     pub to_mac: [u8; 6],
