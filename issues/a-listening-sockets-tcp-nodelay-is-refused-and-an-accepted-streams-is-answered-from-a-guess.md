@@ -11,7 +11,11 @@ connections that begin afterwards. Read on macOS 27 on arm64, by libc's
 `setsockopt` and `getsockopt` over loopback: set before the connection began,
 the accepted socket has the option; set after the connection was established
 and before the accept, it does not. `userland/netstack/node/tests/host.rs`
-asks the same of every host the suite runs on.
+asks the same of every host the suite runs on, and sets the option in the
+second case only once the listener is readable, which is the host saying the
+connection waits to be accepted: a connect returns before the listener's end
+is established, so the answer rests on that event and not on the order
+loopback delivers in. A red there prints the host's name and both answers.
 
 ToyOS as it ships does neither half:
 

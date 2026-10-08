@@ -41,7 +41,7 @@ mod name;
 mod places;
 mod streams;
 
-pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake};
+pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerEnd, ListenerId, Wake};
 pub use streams::{ConnectRefused, FromClient, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 
 use alloc::vec;

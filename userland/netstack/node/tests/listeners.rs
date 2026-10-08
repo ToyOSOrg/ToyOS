@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common::{arp, terms, Segment, Wire, A, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
+use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerEnd, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
 
@@ -703,8 +703,8 @@ fn a_wake_the_owners_pipe_refuses_ends_the_listener() {
         let (id, owner) = net.listen(SSH);
         owner.borrow_mut().refusal = Some(refusal);
         net.handshake(P1);
-        let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_refused_listeners().collect();
-        assert_eq!(ended, [(id, refusal)]);
+        let ended: Vec<(ListenerId, ListenerEnd)> = net.node.drain_ended_listeners().collect();
+        assert_eq!(ended, [(id, ListenerEnd::Wake(refusal))]);
         assert!(owner.borrow().dropped && net.last(P1).rst, "{refusal:?}: {:?}", net.heard);
         assert_eq!((net.node.listeners(), net.node.held()), (0, 0), "{refusal:?}");
         net.listen(SSH);
@@ -735,8 +735,7 @@ fn a_listen_on_a_taken_port_is_refused_and_a_drawn_port_listens() {
 // A listener is at the address its listen named. One the machine does not hold is refused, as
 // a datagram socket's bind is, and nothing listens: RFC 9293 §3.10.7.1, a SYN for a port
 // nothing listens on is answered <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>. One the machine
-// holds listens beside a listener at every address on the same port, and [tcp] hands a SYN to
-// the one that named the address (LS-09).
+// holds listens.
 #[test]
 fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
     let mut net = Net::new();
@@ -749,14 +748,47 @@ fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
     let reset = net.last(P1);
     assert!(reset.rst && (reset.seq, reset.ack) == (0, Some(ISS + 1)), "{reset:?}");
 
-    let (_, any) = net.listen(SSH);
     let named = Owner::default();
-    let (_, port) = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(named.clone())), draw(&mut net.draws)).expect("the machine's address, and a port no listener at it holds");
-    assert_eq!((port.get(), net.node.listeners()), (SSH, 2));
+    let (_, port) = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(named.clone())), draw(&mut net.draws)).expect("the machine's address, and a port no listener holds");
+    assert_eq!((port.get(), net.node.listeners()), (SSH, 1));
     net.handshake(P2);
-    assert_eq!((wakes(&named), wakes(&any)), (1, 0));
-    let again = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(Owner::default())), draw(&mut net.draws));
-    assert_eq!(again.unwrap_err(), ListenRefused::InUse);
+    assert_eq!(wakes(&named), 1);
+}
+
+/// A listener at `first` holds the port, and a listen at `second` on it is refused with nothing
+/// made: the connection that comes next is the first listener's.
+fn a_port_is_one_listeners(first: Ipv4Addr, second: Ipv4Addr) {
+    let mut net = Net::new();
+    let holder = Owner::default();
+    let (id, _) = net.node.listen(first, Port::new(SSH), Box::new(WakeEnd(holder.clone())), draw(&mut net.draws)).expect("a port no listener holds");
+    let refused = Owner::default();
+    let answer = net.node.listen(second, Port::new(SSH), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    assert_eq!(answer.unwrap_err(), ListenRefused::InUse, "{second} beside {first}");
+    assert!(refused.borrow().dropped);
+    assert_eq!((net.node.listeners(), net.node.held()), (1, 1));
+    net.handshake(P1);
+    assert_eq!((wakes(&holder), wakes(&refused)), (1, 0));
+    net.accepts(id, P1);
+}
+
+// [tcp] hands a SYN to the listener that named its address before one at every address
+// (LS-09), so a second listen on a held port that named the machine's address would take every
+// connection of the first from then on. A listen carries no word for its program, so the node
+// cannot tell the first listener's owner from another: the port is one listener's, as a
+// datagram socket's port is one socket's.
+#[test]
+fn a_listen_at_the_machines_address_takes_no_port_held_at_every_address() {
+    a_port_is_one_listeners(ANY, A);
+}
+
+#[test]
+fn a_listen_at_every_address_takes_no_port_held_at_the_machines_address() {
+    a_port_is_one_listeners(A, ANY);
+}
+
+#[test]
+fn a_second_listen_at_the_machines_address_takes_no_port_held_there() {
+    a_port_is_one_listeners(A, A);
 }
 
 // A listener ended for a wake its owner's pipe refused gives its place back in the pass that
@@ -776,8 +808,8 @@ fn a_listener_ended_for_its_wake_gives_its_place_to_another_in_the_same_pass() {
     let ack = net.iss(P3).wrapping_add(1);
     net.node.receive(net.now, &frame(P3, SSH, ISS + 1, Some(ack), 0, &[]), draw(&mut net.draws));
     assert_eq!(wakes(&owner), 2);
-    let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_refused_listeners().collect();
-    assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, WriteRefusal::Gone)], 1, 1));
+    let ended: Vec<(ListenerId, ListenerEnd)> = net.node.drain_ended_listeners().collect();
+    assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, ListenerEnd::Wake(WriteRefusal::Gone))], 1, 1));
 }
 
 // A datagram socket is something a client makes the node hold, its two queues of sixteen

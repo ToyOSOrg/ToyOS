@@ -76,6 +76,12 @@ impl Stack {
         Ok((id, held(self.shard.listener_port(id))))
     }
 
+    /// Whether a listener that named `addr` still listens somewhere: at every address, or at the
+    /// one the lease names, under probe or held.
+    pub(crate) fn tcp_listens_at(&self, addr: Ipv4Addr) -> bool {
+        addr.is_unspecified() || self.address() == Some(addr)
+    }
+
     /// What a connection whose SYN arrives at `id` from here on starts with.
     pub(crate) fn tcp_set_listener_options(&mut self, id: ListenerId, options: Options) {
         held(self.shard.set_listener_options(id, options));

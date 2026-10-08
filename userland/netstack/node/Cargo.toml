@@ -22,6 +22,9 @@ toyos-net-wire = { path = "../../../toyos-net-wire" }
 # The outside reader of every frame the node emits: a published Ethernet, ARP,
 # IPv4, UDP and ICMP parser, used as a black box.
 etherparse = "0.21.0"
-# The host's own TCP as an oracle: sets and reads a socket option std has no call
-# for on a listener, on Linux, macOS and Windows alike, with no `unsafe`.
+# The host's own TCP as an oracle, on Linux, macOS and Windows alike, with no
+# `unsafe`: `socket2` sets and reads a socket option std has no call for on a
+# listener, and `mio` waits until a listener has a connection to accept, which
+# std can learn only by accepting it.
+mio = { version = "1", default-features = false, features = ["os-poll", "net"] }
 socket2 = "0.6"
