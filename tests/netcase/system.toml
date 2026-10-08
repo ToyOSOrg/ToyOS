@@ -26,10 +26,7 @@ service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
-# `netstack` because `netstack_socket_churn` connects through it and reads its
-# counts.
 [programs.test-runner]
-receives = ["netstack"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
