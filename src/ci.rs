@@ -183,22 +183,45 @@ const WAITING: &str = "Blocking waiting for file lock";
 /// The signals that end the driver from outside.
 const INTERRUPTS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-/// The process group [`heard`] is running, for [`interrupted`]; 0 between two.
+/// The process group [`heard`] is running, for [`interrupted`]; 0 between
+/// two, and [`STARTING`] while one is being spawned.
 static GROUP: AtomicI32 = AtomicI32::new(0);
+
+/// [`GROUP`] while a command is being spawned: its group has no name yet.
+const STARTING: i32 = -1;
+
+/// The last interrupt [`interrupted`] took, for [`started`]; 0 for none.
+static PENDING: AtomicI32 = AtomicI32::new(0);
 
 /// The driver's own interrupt, handed to the group it started and then taken:
 /// a group of its own is out of a terminal's reach, and a step left running
-/// has lost the driver that bounded it.
+/// has lost the driver that bounded it. One that arrives while a command is
+/// being spawned is kept for [`started`].
 extern "C" fn interrupted(signal: libc::c_int) {
+    // Written before `GROUP` is read, as `started` writes `GROUP` before it
+    // reads this: whatever thread this runs on, one of the two sees the other.
+    PENDING.store(signal, Ordering::SeqCst);
     let group = GROUP.load(Ordering::SeqCst);
-    // SAFETY: three async-signal-safe calls. The signal is blocked while this
-    // runs, so the one raised ends the driver as this returns.
+    if group == STARTING {
+        return;
+    }
+    // SAFETY: three async-signal-safe calls; the signal raised at its default ends the driver.
     unsafe {
         if group != 0 {
             libc::killpg(group, signal);
         }
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
+    }
+}
+
+/// Name the group a spawn made, 0 for one that failed, and take the interrupt
+/// that arrived while it had no name.
+fn started(group: i32) {
+    GROUP.store(group, Ordering::SeqCst);
+    let signal = PENDING.load(Ordering::SeqCst);
+    if signal != 0 {
+        interrupted(signal);
     }
 }
 
@@ -279,7 +302,7 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
         for signal in INTERRUPTS {
             // SAFETY: `interrupted` makes async-signal-safe calls only.
             unsafe {
-                if libc::signal(signal, interrupted as libc::sighandler_t) == libc::SIG_IGN {
+                if libc::signal(signal, interrupted as *const () as libc::sighandler_t) == libc::SIG_IGN {
                     libc::signal(signal, libc::SIG_IGN);
                 }
             }
@@ -296,9 +319,11 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
-    let group = child.id() as i32;
-    GROUP.store(group, Ordering::SeqCst);
+    GROUP.store(STARTING, Ordering::SeqCst);
+    let spawned = cmd.spawn();
+    let group = spawned.as_ref().map_or(0, |child| child.id() as i32);
+    started(group);
+    let mut child = spawned.map_err(|e| format!("spawn: {e}"))?;
     // The writers it holds: the output ends when the last process holding one does.
     drop(cmd);
     let (tx, chunks) = mpsc::channel();
@@ -1371,7 +1396,7 @@ mod tests {
     #[ignore = "the step of the driver above; never runs on its own"]
     fn a_hung_step() {
         // SAFETY: `quit` makes one async-signal-safe call.
-        assert!(unsafe { libc::signal(libc::SIGQUIT, quit as libc::sighandler_t) } != libc::SIG_ERR);
+        assert!(unsafe { libc::signal(libc::SIGQUIT, quit as *const () as libc::sighandler_t) } != libc::SIG_ERR);
         // libtest's own lines go nowhere, so `LAST` is the last line said; its
         // stderr is the step's, which it holds open.
         let mut spawned = crate::buildlock::tests::rerun("ci::tests::a_hung_steps_child")
@@ -1388,7 +1413,7 @@ mod tests {
     #[ignore = "what the step above spawns; never runs on its own"]
     fn a_hung_steps_child() {
         // SAFETY: as in the step.
-        assert!(unsafe { libc::signal(libc::SIGQUIT, quit as libc::sighandler_t) } != libc::SIG_ERR);
+        assert!(unsafe { libc::signal(libc::SIGQUIT, quit as *const () as libc::sighandler_t) } != libc::SIG_ERR);
         hang();
     }
 

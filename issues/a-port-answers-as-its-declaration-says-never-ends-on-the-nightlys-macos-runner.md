@@ -96,8 +96,12 @@ The measurement that is left can only be made on the runner. `src/ci.rs`'s
 `heard` ends a cargo that has said nothing for 15 minutes: it sends the
 step's process group `SIGQUIT`, then `SIGKILL` to what is left 10 s later,
 and reds the step with the last line said, which here is libtest's line
-naming this test. Where macOS writes a report of a process `SIGQUIT` ended,
-it is under `~/Library/Logs/DiagnosticReports`, and `portability-macos`
+naming this test. macOS writes a report of a process `SIGQUIT` ends under
+`~/Library/Logs/DiagnosticReports`, with the stack of every thread: measured
+on the Mac above with a test binary that spins, started as `heard` starts a
+step, whose report held libtest's main thread waiting for the result and the
+test's own thread inside the test, and whose output ended in the millisecond
+of the signal. `portability-macos`
 uploads that directory as the artifact `macos-crash-reports` when the job
 fails. A report of the `firmware-*` binary with its threads' stacks says
 which it is: a thread inside `firmware::port`, a thread inside libtest or
