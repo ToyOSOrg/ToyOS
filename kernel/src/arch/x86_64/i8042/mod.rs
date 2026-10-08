@@ -970,7 +970,7 @@ pub fn init(rsdp_addr: u64) {
     // Declared before the first access, and for the rest of the boot: a
     // controller this probe has touched is no process's to claim.
     for (run, port) in [(&DATA, 0x60), (&STATUS, 0x64)] {
-        match pio::declare("the i8042", toyos_userbound::Ports::one(port)) {
+        match pio::declare("the i8042", toyos_userbound::Ports::one(port), toyos_userbound::Mediated::Kept) {
             Ok(declared) => run.set(declared),
             Err(why) => {
                 log!("i8042: port {port:#x} not declared ({why:?}) — left unprobed");

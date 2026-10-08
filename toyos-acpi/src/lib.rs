@@ -16,6 +16,7 @@
 
 mod dsdt;
 mod ecdt;
+mod facs;
 mod fadt;
 mod gtdt;
 mod madt;
@@ -26,12 +27,14 @@ use toyos_bootmap::DirectMapEnd;
 
 pub use dsdt::{s5_slp_typ, S5};
 pub use ecdt::{ecdt, Ec, EcRefused, Register, ECDT_NEEDED};
+pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNED, PENDING};
 pub use fadt::{
     century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
     rtc_century,
     Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, CMOS_RAM,
     FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
 };
+use fadt::FADT_DSDT;
 pub use madt::{
     isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,
@@ -282,10 +285,7 @@ pub fn find_table<P: Phys>(
     needed: usize,
 ) -> Result<Table<P>, TableError> {
     let xsdt = xsdt(phys, rsdp_addr)?;
-    // `Table::open` guarantees len >= SDT_HEADER_LEN, so this subtraction is total.
-    let entry_count = (xsdt.len - SDT_HEADER_LEN) / 8;
-
-    for i in 0..entry_count {
+    for i in 0..entries(&xsdt) {
         let Some(at) = xsdt.u64_at(SDT_HEADER_LEN + i * 8) else { break };
         match Table::open(phys, at, signature, needed) {
             // An entry pointing at nothing is one entry skipped, not the end of the walk.
@@ -294,6 +294,73 @@ pub fn find_table<P: Phys>(
         }
     }
     Err(TableError::Absent)
+}
+
+/// How many 8-byte entries an XSDT holds.
+fn entries<P: Phys>(xsdt: &Table<P>) -> usize {
+    // `Table::open` guarantees len >= SDT_HEADER_LEN, so this subtraction is total.
+    (xsdt.len - SDT_HEADER_LEN) / 8
+}
+
+/// A machine's definition blocks in the order they are loaded (ACPI 6.5
+/// §5.2.11.1, §5.2.11.2): the DSDT the FADT names, then every SSDT the XSDT
+/// lists, in the XSDT's order. See [`definition_blocks`].
+pub struct DefinitionBlocks<P> {
+    xsdt: Table<P>,
+    dsdt: bool,
+    next: usize,
+}
+
+/// Every definition block of the machine whose RSDP is at `rsdp_addr`, each
+/// validated or answered as the refusal that says why it is not: the walk
+/// goes on past a refused one, which is its caller's to rule on. The first
+/// item is always the DSDT's. An entry of another signature and a null entry
+/// are passed over; an entry whose header the reader cannot reach is answered
+/// [`TableError::Unmapped`], since nothing says it is no SSDT. The same holds
+/// of the FADT: a DSDT whose FADT was not found among entries of which one
+/// could not be read is refused as that entry, not as [`TableError::Absent`],
+/// which is said only where every entry was read and none is the FADT.
+pub fn definition_blocks<P: Phys>(phys: P, rsdp_addr: u64) -> Result<DefinitionBlocks<P>, TableError> {
+    Ok(DefinitionBlocks { xsdt: xsdt(phys, rsdp_addr)?, dsdt: false, next: 0 })
+}
+
+impl<P: Phys> DefinitionBlocks<P> {
+    /// The first FADT the XSDT lists, long enough to name a DSDT.
+    fn fadt(&self) -> Result<Table<P>, TableError> {
+        let mut unread = None;
+        for i in 0..entries(&self.xsdt) {
+            let Some(at) = self.xsdt.u64_at(SDT_HEADER_LEN + i * 8) else { break };
+            match Table::open(self.xsdt.phys, at, b"FACP", FADT_DSDT + 4) {
+                Err(TableError::Absent) => {}
+                Err(TableError::Unmapped { .. }) if at == 0 => {}
+                Err(unmapped @ TableError::Unmapped { .. }) => {
+                    unread.get_or_insert(unmapped);
+                }
+                found => return found,
+            }
+        }
+        Err(unread.unwrap_or(TableError::Absent))
+    }
+}
+
+impl<P: Phys> Iterator for DefinitionBlocks<P> {
+    type Item = Result<Table<P>, TableError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !core::mem::replace(&mut self.dsdt, true) {
+            return Some(self.fadt().and_then(|fadt| Table::open(self.xsdt.phys, dsdt_address(&fadt), b"DSDT", SDT_HEADER_LEN)));
+        }
+        while self.next < entries(&self.xsdt) {
+            let at = self.xsdt.u64_at(SDT_HEADER_LEN + self.next * 8)?;
+            self.next += 1;
+            match Table::open(self.xsdt.phys, at, b"SSDT", SDT_HEADER_LEN) {
+                Err(TableError::Absent) => continue,
+                Err(TableError::Unmapped { .. }) if at == 0 => continue,
+                block => return Some(block),
+            }
+        }
+        None
+    }
 }
 
 /// PCI Firmware Specification 3.3, Table 4-3: the first allocation structure
