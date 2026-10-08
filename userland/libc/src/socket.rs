@@ -7,7 +7,8 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errno::{EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
+use crate::errno::{EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
+use crate::sockopt::{self, Kept};
 
 // C types matching POSIX
 
@@ -49,12 +50,6 @@ const AF_INET: i32 = 2;
 const AF_UNSPEC: i32 = 0;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
-const IPPROTO_TCP: i32 = 6;
-
-const SOL_SOCKET: i32 = 1;
-const SO_ERROR: i32 = 4;
-const SO_BROADCAST: i32 = 6;
-const TCP_NODELAY: i32 = 1;
 
 // Internal socket table
 
@@ -551,6 +546,13 @@ pub unsafe extern "C" fn close_socket(fd: i32) -> bool {
 
 // setsockopt / getsockopt
 
+fn option_errno(refusal: sockopt::Refusal) -> i32 {
+    match refusal {
+        sockopt::Refusal::Short => EINVAL,
+        sockopt::Refusal::Fault => EFAULT,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn setsockopt(
     fd: i32,
@@ -569,23 +571,21 @@ pub unsafe extern "C" fn setsockopt(
     };
 
     // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
-    if !matches!((level, optname), (IPPROTO_TCP, TCP_NODELAY) | (SOL_SOCKET, SO_BROADCAST)) {
-        return 0;
-    }
-    if optval.is_null() || (optlen as usize) < core::mem::size_of::<i32>() {
-        set_errno(EINVAL);
-        return -1;
-    }
-    let on = (optval as *const i32).read_unaligned() != 0;
-    match (level, optname) {
-        (IPPROTO_TCP, TCP_NODELAY) if entry.netstack_id != 0 => {
+    let Some(option) = sockopt::kept(level, optname) else { return 0 };
+    let on = match sockopt::switch(optval, optlen) {
+        Ok(on) => on,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
+    match option {
+        Kept::NoDelay if entry.netstack_id != 0 => {
             if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, on as u32) {
                 set_errno(net_err_to_errno(e));
                 return -1;
             }
             entry.nodelay = on;
         }
-        (SOL_SOCKET, SO_BROADCAST) => {
+        Kept::NoDelay => {}
+        Kept::Broadcast => {
             // Only a datagram is ever sent to a broadcast address, and netstack
             // holds a datagram socket from its `bind`.
             if let (SocketKind::Udp, true) = (entry.kind, entry.netstack_id != 0) {
@@ -596,7 +596,6 @@ pub unsafe extern "C" fn setsockopt(
             }
             entry.broadcast = on;
         }
-        _ => {}
     }
     0
 }
@@ -618,31 +617,16 @@ pub unsafe extern "C" fn getsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
-    if optval.is_null() || optlen.is_null() {
-        set_errno(EINVAL);
-        return -1;
-    }
-
-    let held = match (level, optname) {
-        (IPPROTO_TCP, TCP_NODELAY) => Some(entry.nodelay as i32),
-        (SOL_SOCKET, SO_BROADCAST) => Some(entry.broadcast as i32),
-        (SOL_SOCKET, SO_ERROR) => Some(0),
-        _ => None,
+    let value = match sockopt::kept(level, optname) {
+        Some(Kept::NoDelay) => entry.nodelay as i32,
+        Some(Kept::Broadcast) => entry.broadcast as i32,
+        // Every other option reads 0, `SO_ERROR` among them.
+        None => 0,
     };
-    if let Some(value) = held {
-        // POSIX: a value longer than the buffer is silently truncated.
-        let len = (*optlen as usize).min(core::mem::size_of::<i32>());
-        ptr::copy_nonoverlapping(value.to_ne_bytes().as_ptr(), optval, len);
-        *optlen = len as SocklenT;
-        return 0;
+    match sockopt::answer(value, optval, optlen) {
+        Ok(()) => 0,
+        Err(refusal) => { set_errno(option_errno(refusal)); -1 }
     }
-
-    // Default: return 0 for unknown options
-    if *optlen >= 4 {
-        *(optval as *mut i32) = 0;
-        *optlen = 4;
-    }
-    0
 }
 
 // getpeername / getsockname
