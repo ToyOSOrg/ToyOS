@@ -123,9 +123,15 @@ byte first. Three things are not checked:
   makes is uncached by the architecture, so a register is still read once;
   or on and not the same, where what the boot processor's say of an address
   is not known of that CPU's read, and every unlisted read on the machine is
-  refused `RangeRegistersDiffer`. Measured: on a QEMU 11.1.1 q35 guest under
-  TCG the boot processor reads `IA32_MTRR_DEF_TYPE` as 0xc06 with 8 variable
-  pairs and the second CPU reads it as 0, off. Firmware is to leave them the
+  refused `RangeRegistersDiffer`. Measured, three readings of the kernel's
+  lines: on the T14's `acpi_tables_loaded` boot the boot processor has 10
+  variable pairs and each of its seven other CPUs has the boot processor's
+  words; on a QEMU 11.1.1 q35 guest under KVM the boot processor reads
+  `IA32_MTRR_DEF_TYPE` as 0xc06 with 8 variable pairs and the second CPU has
+  the boot processor's words; on a QEMU 11.1.1 q35 guest under TCG the boot
+  processor reads the same and the second CPU reads `IA32_MTRR_DEF_TYPE` as
+  0, off. So the on-and-different arm has run on no machine, and only TCG's
+  second CPU is not the same. Firmware is to leave them the
   same (Intel SDM Vol. 3A, "MTRR Considerations in MP Systems"), and a
   kernel that programmed every other CPU's from the boot processor's would
   make them so and the refusal unreachable; this kernel programs no range
@@ -134,13 +140,14 @@ byte first. Three things are not checked:
     kernel. Owner: the owner, whose decision it is. **Exit**: he rules, and
     the kernel either programs them and asserts them as it does a control
     register, or this bullet records that it never will.
-  - **Why that guest's second CPU has them off is unread**: whether its
-    firmware programs only the boot processor's, or the emulation resets
-    them when the CPU is started. Owner: the stage,
+  - **Why the second CPU of the guest under TCG has them off is unread**:
+    whether that guest's firmware programs only the boot processor's, or the
+    emulation resets them when the CPU is started, where under KVM the same
+    QEMU version leaves them the same. Whether the two guests ran the same
+    firmware build is unread too. Owner: the stage,
     `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`.
-    **Exit**: the same line read from a guest under KVM and from the T14's
-    `acpi_tables_loaded` boot, and the firmware's source or the emulator's
-    read for the one that is off.
+    **Exit**: the firmware's source or the emulator's read for that CPU,
+    and this bullet says which of the two it is.
 - **The fixed range registers are not read**, so an unlisted address below
   1 MiB is refused whole, a register there included
   (`firmware::FIXED_RANGE_END`).
