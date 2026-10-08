@@ -127,6 +127,35 @@ int main(void) {
     said("mmap executable", mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
     said("mmap nothing", mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
 
+    /* munmap: a whole mapping, by any length that ends in its last page, or
+       nothing. Of two pages the first alone is refused and the second keeps
+       its byte, as do the second alone, no bytes, and a byte past both. */
+    char *pair = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pair == MAP_FAILED) {
+        printf("could not map two pages\n");
+        return 1;
+    }
+    pair[0] = 'f';
+    pair[4096] = 's';
+    /* Nor does a fixed mapping of the first page replace the second. */
+    said("mmap the first of two pages fixed",
+         mmap(pair, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED ? -1 : 0);
+    printf("pages after it: %c %c\n", pair[0], pair[4096]);
+    said("munmap the first of two pages", munmap(pair, 4096));
+    printf("pages after it: %c %c\n", pair[0], pair[4096]);
+    said("munmap the second of two pages", munmap(pair + 4096, 4096));
+    said("munmap no bytes", munmap(pair, 0));
+    said("munmap a byte past two pages", munmap(pair, 8193));
+    printf("pages after them: %c %c\n", pair[0], pair[4096]);
+    said("munmap two pages by a length into the second", munmap(pair, 4097));
+    said("munmap them again", munmap(pair, 8192));
+    /* A length off a page maps the pages it reaches into, and is unmapped by
+       that length or by those pages'. */
+    char *odd = mmap(NULL, 5000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    said("munmap 5000 bytes by 5000", odd == MAP_FAILED ? -2 : munmap(odd, 5000));
+    odd = mmap(NULL, 5000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    said("munmap 5000 bytes by 8192", odd == MAP_FAILED ? -2 : munmap(odd, 8192));
+
     /* The allocators: null and ENOMEM for a size no block has. Each answer is
        stored, so the compiler cannot fold an unused allocation to non-null. */
     void *volatile got = malloc(SIZE_MAX);
