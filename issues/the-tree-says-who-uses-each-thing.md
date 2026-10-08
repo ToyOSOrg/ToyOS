@@ -182,10 +182,8 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `kernel/TECHNICAL_DEBT.md` are gone. **Exit:** every tracked
    `[package]` outside `rust/` has a `description` line.
 1. **A flat tracker.** Landed in #723.
-2. **Version alignment** in today's workspaces:
-   `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
-3. **One workspace:** `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
-   **Exit:** that file's.
+2. **Version alignment.** Landed in #724, #732 and #738.
+3. **One workspace.** Landed in #746.
 4. **std off repository paths:** `issues/std-names-the-sdk-crates-by-path.md`.
    **Exit:** that file's.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker and libc (with

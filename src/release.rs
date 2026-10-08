@@ -584,11 +584,11 @@ fn manifest(tag: &str) -> String {
 fn notes(root: &Path, repo: &str, tag: &str, manifest: &str) -> Result<String, String> {
     let url = format!("https://github.com/{repo}/releases/download/{tag}/{ASSET}");
     let (major, minor) = GLIBC_FLOOR;
-    let userland = fs::read_to_string(root.join("userland/Cargo.toml")).map_err(|e| e.to_string())?;
-    let rwh = userland
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).map_err(|e| e.to_string())?;
+    let rwh = workspace
         .lines()
         .find(|l| l.starts_with("raw-window-handle = "))
-        .ok_or("userland/Cargo.toml patches no raw-window-handle")?;
+        .ok_or("Cargo.toml patches no raw-window-handle")?;
     let indented: String = manifest.lines().map(|l| format!("    {l}\n")).collect();
     Ok(format!(
         "The `{HOST}` toolchain that cross-compiles for `x86_64-unknown-toyos`.
