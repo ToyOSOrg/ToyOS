@@ -62,8 +62,7 @@ const ACTUATOR_TESTS: &[&str] = &[
     "ring0_timer_in_syscall",
 ];
 
-/// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
-/// no actuator armed in it.
+/// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.
 const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
@@ -756,10 +755,10 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- one image ----
+    // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
-    // at init, logs its verdict and does nothing else, so they cost one flash
-    // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
+    // at init, logs its verdict and does nothing else, so they cost no flash
+    // of their own. **Nothing had to be promoted into `kernel/src/params.rs`**
     // — the metal profile flashes test images (the track's ruling), and the
     // pre-flash gate is what says the machine survives each one.
     (
@@ -1022,34 +1021,36 @@ const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
 }];
 
-/// One boot for every in-kernel self-test that logs its verdict at init and
-/// does nothing else.
+/// Every in-kernel self-test that logs its verdict at init and does nothing
+/// else.
 ///
-/// They cost the machine one flash between them because none of them changes
+/// They cost the machine no flash of their own because none of them changes
 /// what the machine *is*: each stages inputs the hardware cannot produce — a
 /// crafted capability list, a malformed descriptor, a vector nothing claims —
-/// runs a check over them and prints a count.
-const SELFTESTS: &[metal::Arm] = &[metal::once(
-    "selftests",
-    "tests/testcases",
-    &[
-        "pci-cap-selftest",
-        "revoked-backing-selftest",
-        "leak-rollback-selftest",
-        "lapic-spurious-selftest",
-        "unclaimed-vector-selftest",
-        "xhci-xecp-selftest",
-        "xhci-descriptor-selftest",
-        "sysret-ss-probe",
-        "test-input-merge",
-        "sched-operation-nesting",
-        "iommu-firmware-left",
-    ],
-    &[],
-)];
+/// runs a check over them and prints a count. So they arm the boot
+/// [`ACTUATOR_TESTS`] ride, which is the same kernel.
+const SELFTEST_PARAMS: &[&str] = &[
+    "pci-cap-selftest",
+    "revoked-backing-selftest",
+    "leak-rollback-selftest",
+    "lapic-spurious-selftest",
+    "unclaimed-vector-selftest",
+    "xhci-xecp-selftest",
+    "xhci-descriptor-selftest",
+    "sysret-ss-probe",
+    "test-input-merge",
+    "sched-operation-nesting",
+    "iommu-firmware-left",
+];
+
+const SELFTESTS: &[metal::Arm] = &[metal::Arm {
+    features: ACTUATOR_KERNEL,
+    ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &[])
+}];
 
 /// The boots every discovered Rust binary rides on the T14: the shipping
-/// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`.
+/// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`,
+/// armed with [`SELFTEST_PARAMS`].
 fn shared_metal() -> Vec<metal::SharedBoot> {
     let (debug, shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
@@ -1073,8 +1074,8 @@ fn shared_metal() -> Vec<metal::SharedBoot> {
         metal::SharedBoot {
             boot: "shared-debug".to_string(),
             config: "tests/testcases",
-            params: &[],
-            features: toyos_build::build::TEST_KERNEL,
+            params: SELFTEST_PARAMS,
+            features: ACTUATOR_KERNEL,
             members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
             jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
