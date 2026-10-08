@@ -42,9 +42,10 @@
 //! is. One the part already holds it keeps for the link that comes: §10.2.7's
 //! Defer Count has "A defer event occurs when the transmitter cannot
 //! immediately send a packet due to the medium being busy either because:
-//! [...] The link is not up". That sentence is the 82574's, and the PCH's MAC
-//! has none of its own. So the descriptors a link change finds unsent stay the
-//! part's, on both: it is owed their write-back within
+//! [...] The link is not up" of the 82574, and the *Intel Ethernet Connection
+//! I219 Datasheet* (612523) §9.5.4.6 is the I219's own Defer Count, with the
+//! same "or the link is not up". So the descriptors a link change finds unsent
+//! stay the part's, on both: it is owed their write-back within
 //! `STRANDED_DEADLINE_NANOS` of the link being read up over them
 //! ([`I219::begin_pass`]), the ring goes on when they come, and a part that
 //! has not written them back by then is refused by name
@@ -531,9 +532,10 @@ const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 /// How long a part has to write back the descriptors a link change left in its
 /// transmit ring, from the pass that read the link up over them.
 ///
-/// **One bound for both parts**, because both are driven through the one
-/// `TCTL` this driver writes and §10.2.6.1 is the only document of it: the
-/// PCH's MAC publishes no transmit timing of its own (631120 §8.2).
+/// **One bound for both parts**, because their documents give the same
+/// count: §10.2.6.1's `TCTL.CT` below, and on the I219 its Power Management
+/// Control register (612523 §9.5.3.3, PHY address 01, page 769, register 21,
+/// bits 8:1), "Number of retries for a collided packet", default 0x0F.
 ///
 /// **A ceiling on an event, and the slowest §10.2.6.1 lets a full ring leave**:
 /// [`TX_RING`]` - 1` frames of a whole buffer each, on a half-duplex link at
