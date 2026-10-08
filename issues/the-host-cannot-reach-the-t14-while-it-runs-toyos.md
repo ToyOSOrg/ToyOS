@@ -79,6 +79,21 @@ shell starts `swap`, and gives a login over sshserver the same. No test
 performs a swap: `launch_authority` reads the rows that refuse to start it and
 nothing reads one accepted, stopped, started or restored.
 
+Two things about that swap and that login are unread at this head:
+
+- Whether sshserver's port is turned away after a swap of netstack as
+  `logkeeper`'s was. `logkeeper` bound its port again and connects were still
+  refused for about 6 s (the line under "What the restored chain still
+  owes"); what held the bound listener was never named, and sshserver binds
+  again through a swapped netstack the same way.
+- The file that authorizes a login. No test at any tier logs in over
+  sshserver or reaches `authorized_keys`: its host tests call
+  `authorizes(text, key)` and none calls `is_authorized`,
+  `authorized_key_count` or `authorized_keys()`; no guest starts the daemon;
+  and the T14's `metalcase` boot, read at `25766b613`, leaves at `no network on
+  this machine` before the read. The reader that lost its second file is
+  carried by the diff alone.
+
 What reads the card next is not these rows restored. The owner ruled that the
 rows judged from the stick alone — the T14 reaching its router and the
 internet — are built on ToyOS's own network stack ("no smoltcp."), so they
