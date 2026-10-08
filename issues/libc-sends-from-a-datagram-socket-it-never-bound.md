@@ -16,6 +16,13 @@ port at its first send, and a C program that broadcasts, `socket`,
 `setsockopt(SO_BROADCAST)`, `sendto`, does exactly this. std has no such
 socket: `UdpSocket::bind` is its only constructor.
 
+That program does not compile either: `userland/libc/include/netinet/in.h`
+defines no `INADDR_BROADCAST`.
+
 **Exit**: the first `sendto` on an unbound datagram socket binds it to a port
 netstack chooses, handing over a `SO_BROADCAST` already set as `bind` does,
-and a guest C case sends from a socket it never bound.
+`netinet/in.h` defines `INADDR_BROADCAST`, and a guest C case sends from a
+socket it never bound.
+
+**Owner**: libc, in a libc stage of its own under `issues/toyos-has-its-own-network-stack.md`: it touches only `userland/libc` and guest C cases, and lands before the guest tests that follow the move of netd onto the node. The C case the track's broadcast line names for the sequence without
+`bind` waits on this.

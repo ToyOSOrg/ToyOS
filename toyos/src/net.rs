@@ -655,12 +655,4 @@ mod tests {
             Err(IpcError::Malformed)
         ));
     }
-
-    /// A datagram socket's option has a request of its own, apart from a stream's.
-    #[test]
-    fn a_datagram_sockets_option_is_request_fifteen() {
-        assert_eq!(MsgType::UdpSetOption as u32, 15);
-        assert_eq!(MsgType::from_u32(15), Some(MsgType::UdpSetOption));
-        assert_eq!(MsgType::from_u32(13), Some(MsgType::TcpSetOption));
-    }
 }

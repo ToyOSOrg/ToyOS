@@ -123,7 +123,7 @@ fn net_err_to_errno(e: NetError) -> i32 {
         NetError::NotConnected => ENOTCONN,
         NetError::InvalidInput => EINVAL,
         NetError::PermissionDenied => EACCES,
-        _ => EIO,
+        NetError::NetstackNotFound | NetError::ResourceExhausted | NetError::Protocol(_) | NetError::Io => EIO,
     }
 }
 
@@ -568,21 +568,24 @@ pub unsafe extern "C" fn setsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
+    // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
+    if !matches!((level, optname), (IPPROTO_TCP, TCP_NODELAY) | (SOL_SOCKET, SO_BROADCAST)) {
+        return 0;
+    }
+    if optval.is_null() || (optlen as usize) < core::mem::size_of::<i32>() {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let on = (optval as *const i32).read_unaligned() != 0;
     match (level, optname) {
         (IPPROTO_TCP, TCP_NODELAY) if entry.netstack_id != 0 => {
-            let val = if optval.is_null() { 0u32 } else { *(optval as *const i32) as u32 };
-            if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, val) {
+            if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, on as u32) {
                 set_errno(net_err_to_errno(e));
                 return -1;
             }
-            entry.nodelay = val != 0;
+            entry.nodelay = on;
         }
         (SOL_SOCKET, SO_BROADCAST) => {
-            if optval.is_null() || (optlen as usize) < core::mem::size_of::<i32>() {
-                set_errno(EINVAL);
-                return -1;
-            }
-            let on = (optval as *const i32).read_unaligned() != 0;
             // Only a datagram is ever sent to a broadcast address, and netstack
             // holds a datagram socket from its `bind`.
             if let (SocketKind::Udp, true) = (entry.kind, entry.netstack_id != 0) {
@@ -593,7 +596,6 @@ pub unsafe extern "C" fn setsockopt(
             }
             entry.broadcast = on;
         }
-        // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
         _ => {}
     }
     0
@@ -628,12 +630,10 @@ pub unsafe extern "C" fn getsockopt(
         _ => None,
     };
     if let Some(value) = held {
-        if (*optlen as usize) < core::mem::size_of::<i32>() {
-            set_errno(EINVAL);
-            return -1;
-        }
-        (optval as *mut i32).write_unaligned(value);
-        *optlen = 4;
+        // POSIX: a value longer than the buffer is silently truncated.
+        let len = (*optlen as usize).min(core::mem::size_of::<i32>());
+        ptr::copy_nonoverlapping(value.to_ne_bytes().as_ptr(), optval, len);
+        *optlen = len as SocklenT;
         return 0;
     }
 

@@ -22,3 +22,5 @@ Measured in a guest on `tests/netcase`, x86-64, with a host server listening:
 **Exit**: every address libc reads or writes is its octets in memory order,
 and a guest C case connects to an address built with `htonl` and to one built
 with `inet_pton`.
+
+**Owner**: libc, in a libc stage of its own under `issues/toyos-has-its-own-network-stack.md`: it touches only `userland/libc` and guest C cases, and lands before the guest tests that follow the move of netd onto the node.

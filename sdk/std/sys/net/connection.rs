@@ -25,7 +25,7 @@ fn net_err_to_io(e: NetError) -> io::Error {
         NetError::InvalidInput => io::ErrorKind::InvalidInput,
         NetError::NetstackNotFound => io::ErrorKind::NotConnected,
         NetError::PermissionDenied => io::ErrorKind::PermissionDenied,
-        _ => io::ErrorKind::Other,
+        NetError::ResourceExhausted | NetError::Protocol(_) | NetError::Io => io::ErrorKind::Other,
     };
     io::Error::new(kind, "netstack error")
 }
@@ -491,8 +491,9 @@ pub struct UdpSocket {
     rx_fd: OwnedFd,
     local: SocketAddr,
     peer: crate::sync::Mutex<Option<SocketAddr>>,
-    /// What netstack holds for the socket every duplicate names.
-    broadcast: Arc<AtomicBool>,
+    /// What netstack holds for the socket every duplicate names, locked across
+    /// the request that changes it so the two cannot come to differ.
+    broadcast: Arc<crate::sync::Mutex<bool>>,
     read_timeout_ms: AtomicU32,
     write_timeout_ms: AtomicU32,
 }
@@ -518,7 +519,7 @@ impl UdpSocket {
             rx_fd: unsafe { OwnedFd::from_raw_fd(bound.rx.into_raw().0 as i32) },
             local: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), bound.bound_port)),
             peer: crate::sync::Mutex::new(None),
-            broadcast: Arc::new(AtomicBool::new(false)),
+            broadcast: Arc::new(crate::sync::Mutex::new(false)),
             read_timeout_ms: AtomicU32::new(0),
             write_timeout_ms: AtomicU32::new(0),
         })
@@ -605,14 +606,15 @@ impl UdpSocket {
     }
 
     pub fn set_broadcast(&self, broadcast: bool) -> io::Result<()> {
+        let mut held = self.broadcast.lock().unwrap();
         toyos::net::udp_set_option(self.socket_id(), toyos::net::OPT_BROADCAST, broadcast as u32)
             .map_err(net_err_to_io)?;
-        self.broadcast.store(broadcast, Relaxed);
+        *held = broadcast;
         Ok(())
     }
 
     pub fn broadcast(&self) -> io::Result<bool> {
-        Ok(self.broadcast.load(Relaxed))
+        Ok(*self.broadcast.lock().unwrap())
     }
 
     pub fn set_multicast_loop_v4(&self, _: bool) -> io::Result<()> {

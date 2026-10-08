@@ -19,3 +19,5 @@ path.
 **Exit**: a `TCP_NODELAY` set before `connect` reaches netstack with the
 connection or is refused by name, and a guest C case reads it back after
 `connect`.
+
+**Owner**: libc, in a libc stage of its own under `issues/toyos-has-its-own-network-stack.md`: it touches only `userland/libc` and guest C cases, and lands before the guest tests that follow the move of netd onto the node.
