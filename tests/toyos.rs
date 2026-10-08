@@ -283,6 +283,9 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
+    // `console/system.toml`'s image, which runs no job and hands no machine
+    // back: a metal boot of it ends with a hand on the power button.
+    "console_image_boots",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -1049,7 +1052,7 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
 
 /// The boots every discovered Rust binary rides on the T14: the shipping
 /// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`.
-fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
+fn shared_metal() -> Vec<metal::SharedBoot> {
     let (debug, shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
         .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
@@ -1060,11 +1063,7 @@ fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
             params: &[],
             features: &[],
             members: const { metal::members_fitting(toyos_tco::RUST_MEMBER_MS) },
-            jobs: shipping
-                .iter()
-                .filter(|n| keep(n))
-                .map(|n| format!("test_rs_{n}"))
-                .collect(),
+            jobs: shipping.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
         },
@@ -1079,7 +1078,7 @@ fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
             members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
-            jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
+            jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
         },
@@ -1113,18 +1112,12 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// host reading the stick can say which of a hundred and nineteen failed. A
 /// job list of a hundred and nineteen `ccheck`s would leave one name and a
 /// hundred and nineteen records told apart only by position.
-fn c_corpus_metal(
-    c_bins: &[(String, Vec<u8>)],
-    keep: impl Fn(&str) -> bool,
-) -> metal::SharedBoot {
+fn c_corpus_metal(c_bins: &[(String, Vec<u8>)]) -> metal::SharedBoot {
     let mut jobs = Vec::new();
     let mut files = Vec::new();
     let mut links = Vec::new();
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for (case, data) in c_bins {
-        if !keep(case) {
-            continue;
-        }
         // A case with no committed expectation is one nothing could judge, and
         // shipping it would be a job that passes by comparing nothing.
         let Some(expected) = c_expectation(case) else { continue };
@@ -1766,6 +1759,23 @@ fn acpi_mediated_access() -> Result<(), String> {
     said.must_say(HELD_INTO_THE_STOP)?;
     eprintln!("  [acpi] {}", said.must_say_after(HELD_INTO_THE_STOP, GIVEN_BACK_AT_THE_STOP)?.trim());
     Ok(())
+}
+
+/// Boot the image `--console-boot` builds, on the machine shape with a panel
+/// for `/system/bin/console` to claim, and wait for what that image owes at
+/// boot: the console up on its panel, having read the log and the keyboard.
+/// Nothing is typed at its shell, whose only input is the i8042:
+/// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
+fn console_image_boots() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("console"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::Metal, ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
+    serial::Serial::named("the console image's boot", console).must_be_clean()
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -2805,6 +2815,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_mediated_access" => acpi_mediated_access(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "bar_map_again" => bar_map_again(test_config),
+        "console_image_boots" => console_image_boots(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -4744,19 +4755,19 @@ fn build_tasks(
     machine.chain(screen).collect()
 }
 
-/// Whether a run takes `name`: its filter matches it.
-fn kept(filter: Option<&str>, name: &str) -> bool {
-    filter.is_none_or(|f| name.contains(f))
+/// Whether a run takes `name`: it has no filter, or one that matches it.
+fn kept(filters: &[&str], name: &str) -> bool {
+    filters.is_empty() || filters.iter().any(|f| name.contains(f))
 }
 
 /// The machine tests and the screen tests a run boots.
 type Selection = (Vec<&'static str>, Vec<(&'static str, qemu::Profile)>);
 
 /// Every declared test a run [`kept`].
-fn select(filter: Option<&str>) -> Selection {
+fn select(filters: &[&str]) -> Selection {
     (
-        MACHINE_TESTS.iter().filter(|n| kept(filter, n)).copied().collect(),
-        SCREEN_TESTS.iter().filter(|(n, _)| kept(filter, n)).copied().collect(),
+        MACHINE_TESTS.iter().filter(|n| kept(filters, n)).copied().collect(),
+        SCREEN_TESTS.iter().filter(|(n, _)| kept(filters, n)).copied().collect(),
     )
 }
 
@@ -4873,9 +4884,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let filter = parsed.filter;
-    // The one selection every entry point below takes, the metal's included.
-    let keep = |name: &str| kept(filter, name);
+    let filters = parsed.filters.as_slice();
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);
@@ -4914,22 +4923,15 @@ fn main() {
 
     if let Some(mode) = parsed.metal {
         let (c_bins, rust_bins) = build_shared_bins();
-        let selected: Vec<(&str, &'static metal::Metal)> = METAL
-            .iter()
-            .filter(|(name, _)| keep(name))
-            .map(|(name, decl)| (*name, decl))
-            .collect();
-        // The shared boots carry names no registration holds, so an empty
-        // selection is only a dead filter when they are empty too — which
-        // `metal::run` says for itself.
-        if selected.is_empty() && filter.is_some() {
-            eprintln!(
-                "[toyos] no metal registration matches filter {filter:?}; the shared boots' \
-                 members are not filtered by name"
-            );
-        }
-        let mut boots = shared_metal(keep);
-        boots.push(c_corpus_metal(&c_bins, keep));
+        let mut boots = shared_metal();
+        boots.push(c_corpus_metal(&c_bins));
+        let (selected, boots) = match metal::select(filters, &parsed.boots, METAL, &boots) {
+            Ok(selection) => selection,
+            Err(refusal) => {
+                eprintln!("[toyos] {refusal}");
+                run.exit(1);
+            }
+        };
 
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
@@ -4957,10 +4959,12 @@ fn main() {
         return;
     }
 
-    let (machine_to_run, screen_to_run) = select(filter);
+    let (machine_to_run, screen_to_run) = select(filters);
 
-    if screen_to_run.is_empty() && machine_to_run.is_empty() {
-        eprintln!("No test matches filter {filter:?}");
+    // A filter that takes nothing would be dropped in silence beside one that
+    // takes something.
+    if let Some(dead) = filters.iter().find(|f| !declared().any(|name| name.contains(**f))) {
+        eprintln!("No test matches filter {dead:?}");
         run.exit(1);
     }
 

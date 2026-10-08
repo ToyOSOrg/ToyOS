@@ -288,6 +288,20 @@ pub fn ceiling_self_check() -> Result<(), String> {
         ));
     }
 
+    // 6. **The window is the tail, and it says what it cut.** A stalled wait's
+    //    verdict and the one above are both this, over a capture of any length.
+    let long: String = (1..=45).map(|n| format!("line {n}\n")).collect();
+    let cut = window(&long);
+    if cut.lines().next() != Some("(the last 40 of the 45 lines in it)")
+        || cut.lines().nth(1) != Some("line 6")
+        || cut.lines().last() != Some("line 45")
+    {
+        return Err(format!("45 lines were not cut to their last 40 under the count:\n{cut}"));
+    }
+    if window("one\ntwo\n") != "one\ntwo" {
+        return Err(format!("a capture that fits was cut or counted: {:?}", window("one\ntwo\n")));
+    }
+
     eprintln!(
         "  [ceiling] the panic, the stall, the slow test and the healthy run, each named apart \
          from the other three; the panic's verdict carries the kernel's own {} lines, a test \

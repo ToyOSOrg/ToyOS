@@ -399,8 +399,20 @@ pub const DIED_SAYING: &str = "--- what the kernel said as it died ---";
 pub const NEVER_ANNOUNCED: &str =
     "--- the guest never announced this test; the window it was given ---";
 
-/// How many of that window's lines the verdict carries.
+/// How many of a window's lines a verdict carries.
 const WINDOW_LINES: usize = 40;
+
+/// The last [`WINDOW_LINES`] lines of `said`, under the count of what was cut.
+pub fn window(said: &str) -> String {
+    let lines: Vec<&str> = said.lines().collect();
+    let kept = lines.len().min(WINDOW_LINES);
+    let head = if lines.len() > kept {
+        format!("(the last {kept} of the {} lines in it)\n", lines.len())
+    } else {
+        String::new()
+    };
+    format!("{head}{}", lines[lines.len() - kept..].join("\n"))
+}
 
 /// Why a wait ended badly, carrying the guest's own account of it.
 ///
@@ -448,15 +460,7 @@ impl WaitVerdict {
         if started || verdict.0.contains(DIED_SAYING) || before.trim().is_empty() {
             return verdict;
         }
-        let lines: Vec<&str> = before.lines().collect();
-        let kept = lines.len().min(WINDOW_LINES);
-        let head = if lines.len() > kept {
-            format!("(the last {kept} of the {} lines in it)\n", lines.len())
-        } else {
-            String::new()
-        };
-        let tail = lines[lines.len() - kept..].join("\n");
-        Self(format!("{}\n{NEVER_ANNOUNCED}\n{head}{tail}", verdict.0))
+        Self(format!("{}\n{NEVER_ANNOUNCED}\n{}", verdict.0, window(before)))
     }
 }
 
@@ -544,7 +548,7 @@ pub fn ceiling_verdict(
 /// the wait ends when the guest goes quiet or wedges, so a guest with a twelfth
 /// of the machine costs the run wall clock and never a verdict — and when it
 /// does end early the message says so in the words the classifier reads
-/// ([`STALLED`]).
+/// ([`STALLED`]), above the [`window`] of what the guest said during the wait.
 ///
 /// `doing` is what the guest was asked to do, in the caller's own words. The
 /// caller keeps its assertion; what this owns is the difference between "it did
@@ -583,7 +587,13 @@ pub fn await_guest(
         )
         .to_string());
     }
-    Err(format!("{STALLED} waiting for {doing} — {}", live.why()))
+    // Under the sentence, which stays the line a summary quotes: a wait that
+    // ended on nothing has no other account of what the guest did instead.
+    Err(format!(
+        "{STALLED} waiting for {doing} — {}\n--- what the guest said while it was waited on ---\n{}",
+        live.why(),
+        window(since)
+    ))
 }
 
 /// [`await_guest`] for the common case: one marker anywhere in the capture.

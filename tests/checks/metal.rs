@@ -327,6 +327,56 @@ pub fn a_failing_shared_member_fails_its_boot() {
     );
 }
 
+/// **What a run's words take**: no word the whole profile; a name word every
+/// row and member it is part of, chunked as they come; a boot word that boot
+/// as the whole profile chunks it, with every row that rides it; and a word
+/// that takes nothing is refused.
+pub fn words_take_rows_members_and_whole_boots() {
+    static ROWS: [(&str, Metal); 2] = [
+        ("alpha_row", Metal { arms: &[metal::once("own", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
+        ("beta_row", Metal { arms: &[metal::once("shared-2", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
+    ];
+    let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
+        boot: boot.to_string(),
+        config: "tests/testcases",
+        params: &[],
+        features: &[],
+        members: const { std::num::NonZeroUsize::new(2).expect("a chunk holds a member") },
+        jobs: jobs.iter().map(ToString::to_string).collect(),
+        files: Vec::new(),
+        links: Vec::new(),
+    };
+    let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1"])];
+    let taken = |names: &[&str], boots: &[&str]| {
+        metal::select(names, boots, &ROWS, &profile).map(|(rows, shared)| {
+            let rows: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
+            let shared: Vec<String> =
+                shared.iter().map(|boot| format!("{}={}", boot.boot, boot.jobs.join("+"))).collect();
+            (rows.join(","), shared.join(","))
+        })
+    };
+    let took = |rows: &str, shared: &str| Ok::<_, String>((rows.to_string(), shared.to_string()));
+    assert_eq!(
+        taken(&[], &[]),
+        took("alpha_row,beta_row", "shared=test_rs_a1+test_rs_a2,shared-2=test_rs_b1,ccorpus=c1")
+    );
+    assert_eq!(taken(&["b1"], &[]), took("", "shared=test_rs_b1"));
+    assert_eq!(taken(&["alpha", "c1"], &[]), took("alpha_row", "ccorpus=c1"));
+    assert_eq!(taken(&[], &["shared"]), took("", "shared=test_rs_a1+test_rs_a2"));
+    assert_eq!(taken(&[], &["shared-2"]), took("beta_row", "shared-2=test_rs_b1"));
+    assert_eq!(taken(&["alpha"], &["ccorpus", "shared-2"]), took("alpha_row,beta_row", "shared-2=test_rs_b1,ccorpus=c1"));
+    assert_eq!(taken(&[], &["own"]), took("alpha_row", ""));
+    let refused: [(&[&str], &[&str], &str); 3] = [
+        (&["a1", "nope"], &[], "\"nope\" is part of no"),
+        (&["rs_a1"], &[], "\"rs_a1\" is part of no"),
+        (&[], &["shared", "shared-3"], "boot:shared-3 names no boot"),
+    ];
+    for (names, boots, refusal) in refused {
+        let said = taken(names, boots).expect_err("a word that takes nothing was accepted");
+        assert!(said.contains(refusal), "{said}");
+    }
+}
+
 /// **A page the pass after the reset cleared owes no panel**: `foreignrecord`'s
 /// census went with its record, so the boot is green and records its
 /// `complete_ms` alone. The same record cleared by the pass before the handoff
