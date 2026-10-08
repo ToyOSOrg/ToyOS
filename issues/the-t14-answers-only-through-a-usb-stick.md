@@ -9,9 +9,9 @@ opened: 2026-09-07
 Every boot of the bench is flashed to a stick under Ubuntu and judged by what
 is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
 LAN as the development Mac and its NIC is the onboard Intel I219 at `00:1f.6`,
-`8086:15fc`, which netd claims on the two LAN boots (`tests/lanleasecase`,
-`tests/lantalkcase`); on the second the Mac reads the boot's log, runs a
-command and hands the machine back over the cable. The track is to make that
+`8086:15fc`, which netd claims on the LAN boot (`tests/lantalkcase`), where
+the Mac reads the boot's log, runs a command and hands the machine back over
+the cable. The track is to make that
 cable the answer path.
 
 What is left is the harness running userland tests over ssh through a russh

@@ -225,7 +225,7 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
   program are refused a swap.
 - host `sshd_key_auth`: sshd refuses a key not authorized.
 - host `lan_lease_report`: a link that goes down and comes back after a lease neither gives the
-  lease up nor starts the client over. The T14 cannot flap its cable, and its row reads only a
+  lease up nor starts the client over. The T14 cannot flap its cable, and `lan_dhcp_lease` reads only a
   lease from the bench's router. Exit: netd's link-up decision (its main loop and
   `dhcp::restart`) lifted into a function a netd `#[test]` drives with a lease held, red when the
   `!dhcp.leased()` guard goes.
