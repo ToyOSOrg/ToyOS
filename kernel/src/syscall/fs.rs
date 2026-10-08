@@ -83,7 +83,9 @@ pub(super) fn sys_delete(path: &str) -> u64 {
 
 pub(super) fn sys_chdir(path: &str) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    match vfs::lock().cd(&cwd, path) {
+    // The VFS guard ends with this statement: `sys_open` takes VFS under process-data.
+    let resolved = vfs::lock().cd(&cwd, path);
+    match resolved {
         Ok(new_cwd) => {
             process::with_process_data(|d| d.cwd = new_cwd);
             0
