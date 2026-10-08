@@ -136,7 +136,7 @@ pub fn range_type(def_type: u64, pairs: impl IntoIterator<Item = (u64, u64)>, fi
         // above it. A mask with no address bit matches every address.
         let phys_mask = mask & PHYS_MASK;
         let region_first = base & phys_mask;
-        let region_last = region_first | (phys_mask & phys_mask.wrapping_neg()).wrapping_sub(1);
+        let region_last = region_first | phys_mask.isolate_lowest_one().wrapping_sub(1);
         if region_last < first || region_first > last {
             continue;
         }
@@ -198,7 +198,7 @@ mod tests {
     /// A valid pair typing `size` bytes at `base`, a power of two of them, on
     /// a processor of 39 physical address bits.
     fn pair(base: u64, size: u64, encoding: u64) -> (u64, u64) {
-        assert!(size.is_power_of_two() && base % size == 0);
+        assert!(size.is_power_of_two() && base.is_multiple_of(size));
         (base | encoding, !(size - 1) & ((1 << 39) - 1) & PHYS_MASK | PHYSMASK_VALID)
     }
 
