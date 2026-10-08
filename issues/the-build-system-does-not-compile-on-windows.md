@@ -39,9 +39,8 @@ Each wants a Windows call whose semantics differ in kind from the
 Unix one it replaces, and none can be run by anybody here:
 
 - `std::os::windows::fs::symlink_dir` needs the privilege or developer mode
-  Windows does not grant by default, so `link_host_target` and
-  `provision_toolchain_cargo` would compile and fail at run time — the quieter
-  kind of broken.
+  Windows does not grant by default, so `provision_toolchain_cargo` would
+  compile and fail at run time — the quieter kind of broken.
 - `flock` is advisory and whole-file; `LockFileEx` is mandatory and byte-range.
   `buildlock` is what serialises the shared sysroot across every worktree.
 
