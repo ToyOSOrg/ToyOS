@@ -39,4 +39,4 @@ Three consecutive T14 metal runs each reach both judges, `lanleasecase` and
 deleted. A red on a judge in any of the three is filed as its own issue file
 naming that test and its cause before this one closes.
 
-`lan_swap` and its boot `lanswapcase` are deleted; `issues/a-connect-between-two-accepts-is-reset.md` records the commit that restores them, and this exit's `lanswapcase` half waits on that restore.
+`lan_lease_report` and its boot `lanleasecase` are deleted with netstack's lease probe, and nothing restores them: this exit is left its `lanswapcase` half. `lan_swap` and its boot `lanswapcase` are deleted; `issues/a-connect-between-two-accepts-is-reset.md` records the commit that restores them, and this exit's `lanswapcase` half waits on that restore.

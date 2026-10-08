@@ -15,8 +15,6 @@
 //! within `MDIC`'s reach before the reset and what shape the reset then takes —
 //! the MAC and the PHY together — on properties of the part no Intel document
 //! publishes, and `pch` is what the PCH's MAC is given before its rings.
-//! [`lease`] is the one table a lease probe's answer crosses a machine with no
-//! console through.
 //!
 //! # The boundary
 //!
@@ -73,7 +71,6 @@
 #[cfg(test)]
 extern crate std;
 
-pub mod lease;
 mod pch;
 pub mod phy;
 pub mod power;

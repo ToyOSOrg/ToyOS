@@ -10,7 +10,7 @@ use std::vec::Vec;
 use std::{format, vec};
 
 use crate::phy as toyos_phy;
-use crate::phy::{Others, Phy, PhyRefusal};
+use crate::phy::{Others, PhyRefusal};
 use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
 use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
@@ -1547,68 +1547,6 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
     );
 }
 
-/// Every answer the probe can give has one exit code, and every code reads back
-/// as its answer: the table netstack exits through and the harness decodes with is
-/// one declaration, so the two ends cannot disagree about a number.
-#[test]
-fn every_probe_outcome_has_one_exit_code_that_reads_back() {
-    use toyos_phy::Outcome;
-    let oem = toyos_phy::Oem { found: 0, wrote: 0, after: 0 };
-    let up = Ok(Phy { addr: toyos_phy::SPECIFIC, id: 0x0154_00a1, port_general: 0, oem });
-    let link = |speed, full_duplex| Link::Up { speed, full_duplex };
-    let stood = |beside| Err(PhyRefusal::SoftwareFlagStood { beside, after_nanos: 1 });
-    let down = Link::Down;
-    let outcomes: [(Result<Phy, PhyRefusal>, Link, Outcome); 18] = [
-        (up, down, Outcome::BroughtUpNoLink),
-        (up, link(Speed::Mbps10, false), Outcome::LinkAt10Half),
-        (up, link(Speed::Mbps10, true), Outcome::LinkAt10Full),
-        (up, link(Speed::Mbps100, false), Outcome::LinkAt100Half),
-        (up, link(Speed::Mbps100, true), Outcome::LinkAt100Full),
-        (up, link(Speed::Mbps1000, false), Outcome::LinkAt1000Half),
-        (up, link(Speed::Mbps1000, true), Outcome::LinkAt1000Full),
-        (Err(PhyRefusal::Unrouted { reg: regs::EXTCNF_CTRL }), down, Outcome::Unrouted),
-        (stood(Others::Nobody), down, Outcome::SoftwareFlagStood),
-        (stood(Others::Hardware), down, Outcome::SoftwareFlagStoodBesideHardware),
-        (stood(Others::Manageability), down, Outcome::SoftwareFlagStoodBesideManageability),
-        (stood(Others::HardwareAndManageability), down, Outcome::SoftwareFlagStoodBesideBoth),
-        (
-            Err(PhyRefusal::GrantNeverCame { held_by: 0x80, after_nanos: 1 }),
-            down,
-            Outcome::GrantNeverCame,
-        ),
-        (Err(PhyRefusal::MdiUnready { phy: 1, reg: 31, after_nanos: 1 }), down, Outcome::MdiUnready),
-        (Err(PhyRefusal::MdiError { phy: 2, reg: 2 }), down, Outcome::MdiError),
-        (Err(PhyRefusal::Identity { specific: 0, general: 0 }), down, Outcome::Identity),
-        (Err(PhyRefusal::NotThisRegisterMap), down, Outcome::NotThisRegisterMap),
-        (
-            Err(PhyRefusal::MdiWaiting { phy: 1, reg: 2, after_nanos: 3 }),
-            down,
-            Outcome::MdiWaiting,
-        ),
-    ];
-    // The block's base is pinned, not read off the table it is judging.
-    assert_eq!(Outcome::ALL[0].exit_code(), 64, "the block no longer starts at 64");
-    let mut codes = Vec::new();
-    for (phy, link, outcome) in outcomes {
-        assert_eq!(Outcome::of(phy, link), outcome, "{phy:?} {link:?}");
-        let code = outcome.exit_code();
-        assert!((64..128).contains(&code), "{outcome:?} exits {code}");
-        assert_ne!(code, 101, "{outcome:?} exits the code a panicking netstack ends with");
-        assert_eq!(Outcome::from_exit_code(code), Some(outcome));
-        assert!(!codes.contains(&code), "{outcome:?} shares {code} with another outcome");
-        codes.push(code);
-    }
-    assert_eq!(codes.len(), Outcome::ALL.len());
-    assert_eq!(Outcome::from_exit_code(0), None);
-    assert_eq!(Outcome::from_exit_code(Outcome::ALL.len() as i32 + 64), None);
-
-    // A refusal carries no link, whatever the part's `STATUS` was saying: the
-    // agent before this driver may have left one up.
-    for (phy, _, outcome) in outcomes.into_iter().filter(|(phy, ..)| phy.is_err()) {
-        assert_eq!(Outcome::of(phy, link(Speed::Mbps1000, true)), outcome, "{phy:?}");
-    }
-}
-
 /// §4.5.2 arbitrates three bits of `EXTCNF_CTRL` and no more, so who stands
 /// beside another agent's software flag is decided by the other two and by
 /// nothing else in the word.
@@ -1639,20 +1577,16 @@ fn every_reading_of_the_other_two_ownership_bits_names_who_stands_beside_the_fla
     }
 }
 
-/// **The one question a probe boot on a machine with no console can answer.**
 /// Another software agent's flag is the refusal whose cause is another agent,
 /// so each reading of the two bits that can stand beside it is driven on the
-/// part and the exit code it produces is asserted: one code each, all four
-/// distinct.
+/// part, and the refusal names who stood there.
 #[test]
-fn each_agent_standing_beside_the_flag_has_its_own_exit_code() {
-    use toyos_phy::Outcome;
-    let mut codes = Vec::new();
+fn the_refusal_names_each_agent_standing_beside_the_flag() {
     for (seed, hardware, manageability, wanted) in [
-        (70, false, false, Outcome::SoftwareFlagStood),
-        (71, true, false, Outcome::SoftwareFlagStoodBesideHardware),
-        (72, false, true, Outcome::SoftwareFlagStoodBesideManageability),
-        (73, true, true, Outcome::SoftwareFlagStoodBesideBoth),
+        (70, false, false, Others::Nobody),
+        (71, true, false, Others::Hardware),
+        (72, false, true, Others::Manageability),
+        (73, true, true, Others::HardwareAndManageability),
     ] {
         let nic = Nic::i219(seed);
         nic.mdio_flag_held_by_another_agent();
@@ -1666,12 +1600,12 @@ fn each_agent_standing_beside_the_flag_has_its_own_exit_code() {
 
         let phy = driver.brought_up().phy;
         assert!(
-            matches!(phy, Err(PhyRefusal::SoftwareFlagStood { .. })),
+            matches!(phy, Err(PhyRefusal::SoftwareFlagStood { beside, .. }) if beside == wanted),
             "{}",
-            nic.because(&format!("the bring-up answered {phy:?} on a flag another agent holds"))
+            nic.because(&format!("the bring-up answered {phy:?} with {wanted:?} beside the flag"))
         );
-        // The part really did answer the bits this row is about, so the code
-        // below is about that reading and not about a model that lost one.
+        // The part really did answer the bits this row is about, so the
+        // refusal is about that reading and not about a model that lost one.
         assert_eq!(
             nic.peek(regs::EXTCNF_CTRL) & extcnf::OWNERSHIP,
             extcnf::MDIO_SW_OWNERSHIP
@@ -1680,25 +1614,10 @@ fn each_agent_standing_beside_the_flag_has_its_own_exit_code() {
             "{}",
             nic.because("the part did not stand the agents this row names")
         );
-        let outcome = Outcome::of(phy, Link::Down);
-        assert_eq!(
-            outcome,
-            wanted,
-            "{}",
-            nic.because("the exit code does not name which agent stood beside the flag")
-        );
-        let code = outcome.exit_code();
-        assert!(
-            !codes.contains(&code),
-            "{}",
-            nic.because(&format!("{outcome:?} shares exit code {code} with another reading"))
-        );
-        codes.push(code);
     }
-    assert_eq!(codes.len(), 4);
 }
 
-/// §4.5.2's arbitration moves while a driver waits on it, and what a probe
+/// §4.5.2's arbitration moves while a driver waits on it, and what the log
 /// carries off a machine is the interface at the moment the wait ended — so the
 /// refusal names the *last* reading and not the one it started on.
 #[test]
@@ -2122,7 +2041,6 @@ fn an_interconnect_in_transition_is_waited_out_and_never_written_over() {
         nic.because(&format!("it refused with {why:?}"))
     );
     assert!(!nic.written().contains(&regs::MDIC), "{}", nic.because("a command was written"));
-    assert_eq!(phy::Outcome::of(Err(why), Link::Down), phy::Outcome::MdiWaiting);
     // The interface is not kept: §4.5.2's release runs on this path too.
     assert_eq!(nic.peek(regs::EXTCNF_CTRL) & extcnf::MDIO_SW_OWNERSHIP, 0);
 }
@@ -2501,7 +2419,7 @@ fn what_the_wake_and_the_full_reset_write() {
     assert_eq!(wake::phy_smbus_released(0x0013), 0x0012);
 }
 
-// --- the PCH's own bits, host wake-up, the counts, and the lease probe ---
+// --- the PCH's own bits, host wake-up and the counts ---
 
 /// The PCH's MAC is given `pch`'s three registers before its rings, every
 /// other bit of each carried, and the 82574 — whose datasheet this driver is
@@ -2667,99 +2585,6 @@ fn the_driver_and_the_macs_statistics_count_the_same_frames() {
     nic.deliver(&frame(11, 64));
     nic.run();
     assert_eq!(driver.wire().seen, 3);
-}
-
-/// Every verdict the lease probe can exit with reads back to itself, and none
-/// of them is a code a panicking netstack or an ordinary exit ends with.
-#[test]
-fn every_lease_verdict_has_one_exit_code_that_reads_back() {
-    use crate::lease::{Verdict, LEASED};
-    use toyos_phy::Outcome;
-    assert_eq!(Verdict::Leased.exit_code(), LEASED);
-    let mut codes = vec![LEASED];
-    for outcome in Outcome::ALL {
-        let verdict = Verdict::NotLeased(outcome);
-        assert_eq!(Verdict::from_exit_code(verdict.exit_code()), Some(verdict));
-        codes.push(verdict.exit_code());
-    }
-    assert_eq!(Verdict::from_exit_code(LEASED), Some(Verdict::Leased));
-    codes.sort_unstable();
-    codes.dedup();
-    assert_eq!(codes.len(), Outcome::ALL.len() + 1, "two verdicts share a code");
-    for foreign in [0, 1, 101, 139] {
-        assert_eq!(Verdict::from_exit_code(foreign), None, "{foreign}");
-    }
-}
-
-/// The report's lines spell and read back, and a file of them sums up to the
-/// lease, the last counts and the exit — with a torn last line left out.
-#[test]
-fn a_lease_report_reads_back_as_it_was_written() {
-    use crate::lease::{self, Counts, Event, Line};
-    use core::net::Ipv4Addr;
-    let lease = Event::Leased {
-        address: Ipv4Addr::new(192, 168, 1, 46),
-        prefix: 24,
-        server: Ipv4Addr::new(192, 168, 1, 1),
-        router: Some(Ipv4Addr::new(192, 168, 1, 1)),
-    };
-    let counts = Counts {
-        sent: 4,
-        received: 9,
-        wire: Wire { sent: 4, received: 9, seen: 12, missed: 1, crc_errors: 0 },
-    };
-    let events = [
-        Event::BroughtUp("the MAC and the PHY were reset together"),
-        Event::Link(Link::Up { speed: Speed::Mbps10, full_duplex: true }),
-        Event::Link(Link::Down),
-        lease,
-        Event::Leased {
-            address: Ipv4Addr::new(10, 0, 2, 15),
-            prefix: 24,
-            server: Ipv4Addr::new(10, 0, 2, 2),
-            router: None,
-        },
-        Event::Counts(counts),
-        Event::Exit { code: lease::LEASED },
-    ];
-    let mut file = std::string::String::new();
-    for (ms, event) in events.iter().enumerate() {
-        let line = Line { ms: ms as u64 * 100, event: *event };
-        let text = line.to_string();
-        assert_eq!(Line::parse(&text), Some(line), "{text}");
-        file.push_str(&text);
-        file.push('\n');
-    }
-    assert_eq!(
-        Line { ms: 300, event: lease }.to_string(),
-        "300 leased 192.168.1.46/24 from 192.168.1.1 router 192.168.1.1"
-    );
-    let summary = lease::summary(&format!("{file}700 exit 6")).expect("a whole report");
-    assert_eq!(summary.lease, Some((300, lease)), "the first lease is the one recorded");
-    assert_eq!(summary.counts, Some(counts));
-    assert_eq!(summary.exit, Some(lease::LEASED), "the torn line is not the exit");
-    assert!(summary.held, "the file's last word on the lease is a lease");
-
-    // A lease that was lost after it landed is not held at the end, and one
-    // that came back after the loss is.
-    let lost = Line { ms: 800, event: Event::Lost };
-    assert_eq!(lost.to_string(), "800 lost");
-    assert_eq!(Line::parse("800 lost"), Some(lost));
-    let dropped = lease::summary(&format!("{file}{lost}\n")).expect("a whole report");
-    assert!(!dropped.held, "a lease lost inside the window was read as held");
-    assert_eq!(dropped.lease, summary.lease, "the first lease is still the one recorded");
-    let back = Line { ms: 900, event: lease };
-    assert!(lease::summary(&format!("{file}{lost}\n{back}\n")).expect("a whole report").held);
-
-    for bad in [
-        "x link up\n",
-        "5 link up 10\n",
-        "5 leased 192.0.2.4 from 192.0.2.5 router none\n",
-        "5 exit\n",
-        "5 lost now\n",
-    ] {
-        assert!(lease::summary(bad).is_err(), "{bad:?}");
-    }
 }
 
 /// Each part's table, and the one bit asking for a group sets in it. The

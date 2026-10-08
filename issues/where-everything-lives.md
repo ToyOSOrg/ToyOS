@@ -112,11 +112,3 @@ until that lands nothing verifies it.
      `sys-locale` answers on ToyOS.
    - rustls-native-certs reads a CA bundle under `/system/etc`, once something
      needs native roots. **Exit**: the first native-roots consumer runs.
-
-## Not moved
-
-`/log/lease.txt` stays on `/log`. It is not netd's lease: it is the
-`--exit-with-lease` bench report the metal loop reads off the stick's FAT log
-volume, as it reads `/log/metal-*.bin`, and the DATA volume is not readable
-there. It goes with
-`issues/netstacks-lease-probe-answers-a-question-its-lines-already-answer.md`.

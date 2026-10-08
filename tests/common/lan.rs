@@ -3,30 +3,11 @@
 //!
 //! Every line read here is a line of a boot's log — the kernel's records, and
 //! netstack's own lines, which reach the stick under netstack's name through its log
-//! ring — or the one file netstack leaves beside them, the lease probe's
-//! report. The judge reads netstack's lines by that name and no other program's.
+//! ring. The judge reads netstack's lines by that name and no other program's.
 
 use toyos_build::lan::{lease_in, link_up_ms, LINK_UP, MAC, READY};
-use toyos_i219::lease::{self, Event, Verdict};
 
 use super::metal;
-
-/// The boot with netstack's `--exit-with-lease` armed: netstack brings the card up and
-/// serves, leaves [`LEASE_FILE`] on the log volume one durable line at a time,
-/// and ends with the lease's verdict as its exit code, which the kernel's
-/// `exit:` record carries off a machine whose console reaches nobody.
-pub const LEASE_CONFIG: &str = "tests/lanleasecase";
-pub const LEASE_BOOT: &str = "lanleasecase";
-
-/// The file that report is left in, at the root of the log volume — netstack's
-/// `report::PATH` under `/log`.
-pub const LEASE_FILE: &str = "lease.txt";
-
-/// netstack, as the kernel's `exit:` record names it.
-const NETSTACK: &str = "netstack";
-
-/// The one job on that boot: it holds the machine up.
-pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
 /// The boot the host talks to over its own cable: the log it serves, sshserver, and
 /// `reboot` as the way the machine is handed back.
@@ -138,49 +119,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
-}
-
-/// The lease probe's judge: netstack's exit code, decoded through the table the
-/// driver crate owns, and the report it left on the log volume — the lease,
-/// the router, and what the driver and the MAC counted each way. A code that is
-/// no lease is a finding by its name, which the shipping boot's silence cannot
-/// give.
-pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let code = back.exit_code(NETSTACK)?;
-    let text = back
-        .log_volume_file(LEASE_FILE)?
-        .ok_or_else(|| format!("{LEASE_BOOT}'s log volume carries no {LEASE_FILE}"))?;
-    for line in text.lines() {
-        eprintln!("  [lan] {LEASE_FILE}: {line}");
-    }
-    let summary = lease::summary(&text).map_err(|why| format!("{LEASE_FILE}: {why}"))?;
-    if summary.exit != Some(code) {
-        return Err(format!(
-            "netstack exited {code} and its report ends in {:?}: the two records of one exit disagree",
-            summary.exit
-        ));
-    }
-    match Verdict::from_exit_code(code) {
-        Some(Verdict::Leased) => {}
-        Some(other) => return Err(format!("netstack exited {code} on {LEASE_BOOT}: {other}")),
-        None => {
-            return Err(format!("netstack exited {code} on {LEASE_BOOT}, which is no verdict the probe encodes"))
-        }
-    }
-    let Some((ms, Event::Leased { address, prefix, server, router })) = summary.lease else {
-        return Err(format!("netstack exited leased and {LEASE_FILE} records no lease"));
-    };
-    let counts = summary.counts.ok_or_else(|| format!("{LEASE_FILE} carries no counts"))?;
-    eprintln!(
-        "  [lan] leased {address}/{prefix} from {server}, router {router:?}, {ms} ms after netstack \
-         started; the driver counted {} sent and {} received, the MAC {} sent, {} received of \
-         {} seen",
-        counts.sent, counts.received, counts.wire.sent, counts.wire.received, counts.wire.seen
-    );
-    if counts.sent == 0 || counts.received == 0 {
-        return Err(format!("a lease with {counts:?} is no exchange this card carried"));
-    }
-    Ok(())
 }
 
 /// The T14 talked to over its own cable, judged from the Mac's side: the log

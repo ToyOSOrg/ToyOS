@@ -11,7 +11,6 @@ mod dhcp;
 mod i219;
 mod listen;
 mod mdns;
-mod report;
 mod resolve;
 mod virtio_net;
 
@@ -33,37 +32,9 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
 
-/// The probe under which this process brings the card up and serves exactly as
-/// it always does for [`LEASE_WINDOW`], leaves what happened on the log volume
-/// one durable line at a time (`report::PATH`), and then ends with
-/// `toyos_i219::lease::Verdict`'s code: whether a leased address is held when
-/// the window ends, and where none is, what the bring-up and the link said.
-///
-/// **A lease is a frame out and a frame in, answered by a server this machine
-/// does not control**; the lines beside it say what the driver and the MAC
-/// counted each way, and so which half went missing on a boot that got none.
-/// The argument comes from the `[programs.netstack] args` row of a boot config,
-/// and nothing a shipped machine runs carries it.
-const EXIT_WITH_LEASE: &str = "--exit-with-lease";
-
-/// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
-/// process's start.
-///
-/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
-/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
-/// the exit record and the report's last line land before the runner reboots,
-/// with two seconds to spare. Every moment of it after the lease is a moment
-/// the machine answers the host's ping at the leased address.
-const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
-
-fn armed(actuator: &str) -> bool {
-    std::env::args().any(|arg| arg == actuator)
-}
-
 use toyos::endow;
 use toyos::Pipe;
 use toyos_abi::syscall::PciId;
-use toyos_i219::lease::{Event, Verdict};
 use toyos_i219::Part;
 use toyos_inspect::Snapshot;
 use virtio_net::VirtioNet;
@@ -123,18 +94,6 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
-        }
-    }
-
-    /// The Intel driver, for [`EXIT_WITH_LEASE`]: the bring-up it reports
-    /// beside the lease is that driver's.
-    fn intel_driver(&self) -> &i219::Nic {
-        match self {
-            Self::Virtio(_) => Self::undrivable(format_args!(
-                "{EXIT_WITH_LEASE} reports the Intel driver's bring-up beside the lease, which \
-                 this card has not"
-            )),
-            Self::Intel(nic) => nic,
         }
     }
 
@@ -203,14 +162,14 @@ impl Card {
                 snap.put("link.duplex", if full_duplex { "full" } else { "half" });
             }
         }
-        let counts = nic.counts();
-        snap.put("descriptors.sent", counts.sent);
-        snap.put("descriptors.received", counts.received);
-        snap.put("wire.sent", counts.wire.sent);
-        snap.put("wire.received", counts.wire.received);
-        snap.put("wire.seen", counts.wire.seen);
-        snap.put("errors.missed", counts.wire.missed);
-        snap.put("errors.crc", counts.wire.crc_errors);
+        let (counters, wire) = nic.counts();
+        snap.put("descriptors.sent", counters.sent);
+        snap.put("descriptors.received", counters.received);
+        snap.put("wire.sent", wire.sent);
+        snap.put("wire.received", wire.received);
+        snap.put("wire.seen", wire.seen);
+        snap.put("errors.missed", wire.missed);
+        snap.put("errors.crc", wire.crc_errors);
     }
 
     fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
@@ -1684,28 +1643,7 @@ const _: () = assert!(
     "a snapshot is one frame"
 );
 
-/// [`EXIT_WITH_LEASE`]'s last two lines, and the exit they announce. `held` is
-/// whether a leased address is held now, at the end of the window — a lease
-/// that landed and was then lost inside it is not one.
-///
-/// **The card is taken and dropped before the exit**, which runs no destructor:
-/// dropping the driver is what lets the function go.
-fn end_the_lease_probe(report: &report::Report, card: Card, held: bool) -> ! {
-    let nic = card.intel_driver();
-    report.say(Event::Counts(nic.counts()));
-    let verdict = if held {
-        Verdict::Leased
-    } else {
-        Verdict::NotLeased(toyos_i219::phy::Outcome::of(nic.brought_up().phy, nic.link()))
-    };
-    drop(card);
-    let code = verdict.exit_code();
-    report.say(Event::Exit { code });
-    std::process::exit(code)
-}
-
 fn main() {
-    let started = Instant::now();
     // **The order this used to have was load-bearing and is now moot.** The
     // device was claimed before the name was published, because a client that
     // connected while netstack was still in `DmaNic::open` reached a listener owned
@@ -1725,15 +1663,6 @@ fn main() {
     let acceptor = endow::acceptor("netstack")
         .expect("the manifest declares this program serves `netstack`");
     let nic = open(claim);
-    let report = armed(EXIT_WITH_LEASE).then(|| {
-        let report = report::Report::open(started);
-        let intel = nic.intel_driver();
-        for words in i219::brought_up_words(intel.brought_up()) {
-            report.say(Event::BroughtUp(&words));
-        }
-        report.say(Event::Link(intel.link()));
-        report
-    });
     // The link as the card came up with it, which the first change a pass
     // reports is measured against. Virtio reports no link changes at all.
     let mut link_up = match &nic {
@@ -1795,9 +1724,6 @@ fn main() {
         // Before `iface.poll`, because it is what makes the interrupt taken and
         // what gives a driver with a per-pass receive budget that budget back.
         if let Some(link) = device.nic.begin_pass() {
-            if let Some(report) = &report {
-                report.say(Event::Link(link));
-            }
             // Down to up only, and only with no lease held: a speed change is
             // no new network, and a bound lease is kept across a flap rather
             // than given up — `dhcp::restart`'s own header. Before the poll
@@ -1816,21 +1742,6 @@ fn main() {
         // answered before it was applied would be answered on a machine that is
         // on no network.
         let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
-        let held = dhcp.leased();
-        if let (Some(report), Some(change)) = (&report, change.as_ref()) {
-            match change.lease() {
-                Some((address, router, server)) => report.say(Event::Leased {
-                    address: address.address(),
-                    prefix: address.prefix_len(),
-                    server,
-                    router,
-                }),
-                // Only a lease that was held is lost: the client reports the
-                // same on its way to a first one.
-                None if held => report.say(Event::Lost),
-                None => {}
-            }
-        }
         if dhcp.pass(change, &mut iface, &mut daemon.resolver) {
             say!(
                 "netstack: ready, at most {max_piped} piped connections \
@@ -1908,18 +1819,6 @@ fn main() {
         };
         let timeout = match daemon.ownerless_wake_in() {
             Some(left) => timeout.min(left.as_nanos() as u64),
-            None => timeout,
-        };
-        // The probe's window is a wake of its own: an idle machine would
-        // otherwise sleep through the moment it owes its answer.
-        let timeout = match &report {
-            Some(report) => {
-                let left = LEASE_WINDOW.saturating_sub(started.elapsed());
-                if left.is_zero() {
-                    end_the_lease_probe(report, device.nic, dhcp.leased());
-                }
-                timeout.min(left.as_nanos() as u64)
-            }
             None => timeout,
         };
         // A client that connects and then says nothing wakes nothing, so the
