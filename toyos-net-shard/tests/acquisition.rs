@@ -107,7 +107,8 @@ fn the_acquisition_socket_hears_a_datagram_to_an_address_not_yet_held() {
 fn only_the_acquisition_socket_names_its_source() {
     let (mut shard, now) = unaddressed();
     let plain = shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5000)), || 0).unwrap();
-    let refused = shard.send_from(now, plain, Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST, 67, b"discover");
+    // To one host: the limited broadcast is refused a plain socket by its own rule first.
+    let refused = shard.send_from(now, plain, Ipv4Addr::UNSPECIFIED, R, 67, b"discover");
     assert_eq!(refused, Err(Error::Refused(Counter::SourceNotPermitted)));
     assert!(sent(&mut shard, now).is_empty());
 }
