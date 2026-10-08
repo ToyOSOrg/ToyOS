@@ -495,6 +495,21 @@ fn rfc_3927_2_6_2_the_edges_of_the_link_local_prefix_are_no_destination() {
     })));
 }
 
+// RFC 1122 §3.2.1.3: a datagram whose source is a broadcast address is silently discarded, and
+// RFC 3927 §2.6.2 names 169.254.255.255 the link-local prefix's broadcast address for every
+// host, whatever it holds; 169.254.0.0 is that prefix's network address, and no host's either.
+#[test]
+fn rfc_3927_the_edges_of_the_link_local_prefix_are_no_source() {
+    for edge in LINK_LOCAL_EDGES {
+        let mut h = H::fixture_i();
+        assert_eq!(cast_of(&h.datagram(&udp(edge, A, 5000, 5001, b"hi"))), None, "{edge}");
+        assert_eq!(h.count(Counter::IpInvalidSource), 1, "{edge}");
+        assert!(h.out().is_empty(), "{edge}: and nothing answers it");
+    }
+    let mut h = H::fixture_i();
+    assert_eq!(cast_of(&h.datagram(&udp(LINK_LOCAL, A, 5000, 5001, b"hi"))), Some(Cast::Unicast), "a host of the prefix is a source");
+}
+
 // RFC 2132 §3.5: the router option lists "routers on the client's subnet". A router is inside a
 // prefix the interface holds: what RFC 3927 puts on the link is a neighbour, and no router.
 #[test]
