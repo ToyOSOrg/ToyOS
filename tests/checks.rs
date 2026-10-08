@@ -1135,7 +1135,7 @@ mod checks {
     #[test]
     fn the_c_corpus_stages_the_expectation_the_host_compares() {
         let got = "12\n34\n12\n34\n56\n78\n~fred()";
-        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())], |_| true);
+        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())]);
         let staged = boot
             .files
             .iter()
