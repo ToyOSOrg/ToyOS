@@ -8,12 +8,18 @@
 //! [`declare`] what a probe or a firmware table names at boot, each refused
 //! where it shares a port with a run declared before it. `crate::isa` asks
 //! [`holder`] before it opens a row.
+//!
+//! **Every declaration says what its ports answer the `acpi` claim's holder**
+//! ([`Mediated`]), whose AML may name any port: [`standing`] is what
+//! `toyos_userbound::firmware::port` decides an access by, and [`mediated`]
+//! the one other maker of a [`Port`], from that decision's witness.
 
 use alloc::format;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use toyos_userbound::{PortAccess, Ports, Reserved, Undeclared};
+use toyos_userbound::firmware::{PortAt, Standing};
+use toyos_userbound::{Mediated, PortAccess, Ports, Reserved, Undeclared};
 
 use super::ioapic::{self, Gsi, IsaLine, Trigger};
 use crate::log;
@@ -67,14 +73,17 @@ pub const CMOS: Declared = Declared::fixed(0x70, 2);
 /// ECAM: it is the kernel's all the same, and a grant of it would be a way
 /// round every claim. `CONFIG_ADDRESS` is a dword at 0xCF8, so its first port
 /// alone keeps it refused, and 0xCF9 free for a reset register.
-const FIXED: &[(&str, Declared)] = &[
-    ("COM1", COM1),
-    ("the 8259 pair", PIC_PRIMARY),
-    ("the 8259 pair", PIC_SECONDARY),
-    ("the POST port", POST),
-    ("the CMOS RTC", CMOS),
-    ("the PCI configuration mechanism", Declared::fixed(0xCF8, 1)),
-    ("the PCI configuration mechanism", Declared::fixed(0xCFC, 4)),
+const FIXED: &[(&str, Declared, Mediated)] = &[
+    ("COM1", COM1, Mediated::Kept),
+    ("the 8259 pair", PIC_PRIMARY, Mediated::Kept),
+    ("the 8259 pair", PIC_SECONDARY, Mediated::Kept),
+    // A write nothing decodes costs the kernel nothing whoever makes it.
+    ("the POST port", POST, Mediated::Open),
+    // Index and data: a holder's access between the kernel's two would move
+    // the index under it.
+    ("the CMOS RTC", CMOS, Mediated::Kept),
+    ("the PCI configuration mechanism", Declared::fixed(0xCF8, 1), Mediated::Kept),
+    ("the PCI configuration mechanism", Declared::fixed(0xCFC, 4), Mediated::Kept),
 ];
 
 const _: () = {
@@ -95,18 +104,37 @@ static RUNTIME: Lock<Reserved<8>> = Lock::new(Reserved::new());
 /// Declare `ports` to `holder`, refused where another holder has one of them.
 /// Boot's alone: a run declared once a process could hold a grant would be a
 /// port the grant was not checked against.
-pub fn declare(holder: &'static str, ports: Ports) -> Result<Declared, Undeclared> {
+pub fn declare(holder: &'static str, ports: Ports, mediated: Mediated) -> Result<Declared, Undeclared> {
     assert!(!crate::smp::is_ready(), "pio: {holder} declared ports after userland could hold a grant");
-    if let Some(&(first, _)) = FIXED.iter().find(|(_, fixed)| fixed.0.overlaps(ports)) {
+    if let Some(&(first, ..)) = FIXED.iter().find(|(_, fixed, _)| fixed.0.overlaps(ports)) {
         return Err(Undeclared::Clash(first));
     }
-    RUNTIME.lock().declare(holder, ports)?;
+    RUNTIME.lock().declare(holder, ports, mediated)?;
     Ok(Declared(ports))
 }
 
 /// Who holds a port of `ports`, if this kernel declared one.
 pub fn holder(ports: Ports) -> Option<&'static str> {
-    FIXED.iter().find(|(_, fixed)| fixed.0.overlaps(ports)).map(|&(name, _)| name).or_else(|| RUNTIME.lock().holder(ports))
+    FIXED.iter().find(|(_, fixed, _)| fixed.0.overlaps(ports)).map(|&(name, ..)| name).or_else(|| RUNTIME.lock().holder(ports))
+}
+
+/// What `port` is to the holder of `row`'s claim: declared, another row's, or
+/// free. Its own row's ports are free: it holds them already.
+pub fn standing(port: u16, row: usize) -> Standing {
+    let one = Ports::one(port);
+    if let Some(&(.., mediated)) = FIXED.iter().find(|(_, fixed, _)| fixed.0.overlaps(one)) {
+        return Standing::Declared(mediated);
+    }
+    if let Some(mediated) = RUNTIME.lock().mediated(port) {
+        return Standing::Declared(mediated);
+    }
+    let others = (0..crate::isa::MAX_ROWS).filter(|&other| other != row).filter_map(crate::isa::runs);
+    if others.flatten().any(|run| run.overlaps(one)) { Standing::Row } else { Standing::Free }
+}
+
+/// The port an access the mediation policy passed begins at.
+pub fn mediated(passed: &PortAt) -> Port {
+    Port(passed.port())
 }
 
 /// Every row's ports, the kernel's again: the power-off's, and nobody else's.

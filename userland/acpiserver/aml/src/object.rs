@@ -7,9 +7,10 @@
 //! (§19.3.5.8), and so does a return (§19.6.118).
 //!
 //! Every string, buffer and package, every loaded table a method still runs
-//! from, every namespace node and every package element's name not yet
-//! defined is held against its interpreter's [`Meter`] from its making to its
-//! end, so what one interpreter holds live is bounded in sum.
+//! from, every namespace node, every field's, method's, region's, mutex's and
+//! event's record and every package element's name not yet defined is held
+//! against its interpreter's [`Meter`] at its bytes of heap, from its making
+//! to its end, so the heap one interpreter holds live is bounded in sum.
 //!
 //! A reference to a LocalX or ArgX does not hold it: the frame alone does,
 //! and once its method exits the reference names nothing. A reference to a
@@ -21,29 +22,41 @@ use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::mem::{align_of, size_of};
+use core::ops::Deref;
 
 use crate::field::{BufField, Field, Region};
-use crate::name::Path;
+use crate::name::{Path, Seg};
 use crate::namespace::NodeId;
 use crate::{Error, MAX_BYTES, MAX_ELEMENTS, MAX_LIVE};
 
 pub(crate) type Bytes = Rc<Data>;
 pub(crate) type Elems = Rc<List>;
 pub(crate) type Slot = Rc<RefCell<Object>>;
+pub(crate) type Kept<T> = Rc<Held<T>>;
 
-/// What one interpreter holds live, in bytes: a string's, buffer's or
-/// table's length, a package's elements at [`ELEMENT`] bytes each, a
-/// namespace node at the size of one, and an element's name not yet defined
-/// at its own size and its segments'. Whatever a table sizes is counted;
-/// what is not is bounded by a constant for each node and element: a field's
-/// or method's own record, a node's entry among its parent's children, a
-/// shared object's counts, the allocator's overhead.
+/// The heap one interpreter holds live, in the bytes its allocations ask
+/// for: a string, buffer, table or package at its vector's capacity and its
+/// shared record, a fixed record at its size, the namespace's arena at its
+/// capacity and a node's entry among its parent's children at the most a
+/// parent allocates for one (`namespace`), and the value an evaluation is
+/// building for its caller, until the caller has it. What it does not count
+/// is what a load or an evaluation holds while it runs and lets go at its
+/// end: its frames and the mutexes it has acquired, the names it is
+/// reading, the bytes one operator has made and not yet held (`exec`) and
+/// the arena's old slots while it moves.
 pub(crate) struct Meter {
     live: Cell<usize>,
 }
 
 /// The bytes a package element is held at.
-pub(crate) const ELEMENT: usize = core::mem::size_of::<Object>();
+pub(crate) const ELEMENT: usize = size_of::<Object>();
+
+/// The bytes an `Rc<T>` allocates: its two counts, then the value.
+const fn shared<T>() -> usize {
+    let align = if align_of::<T>() > align_of::<usize>() { align_of::<T>() } else { align_of::<usize>() };
+    ((2 * size_of::<usize>()).next_multiple_of(align_of::<T>()) + size_of::<T>()).next_multiple_of(align)
+}
 
 impl Meter {
     pub(crate) fn new() -> Rc<Meter> {
@@ -60,17 +73,36 @@ impl Meter {
         self.live.set(self.live.get().checked_sub(n).expect("the meter gives back only what it took"));
     }
 
+    /// A record of fixed size.
+    pub(crate) fn hold<T>(self: &Rc<Self>, v: T) -> Result<Kept<T>, Error> {
+        self.take(shared::<Held<T>>())?;
+        Ok(Rc::new(Held { v, meter: self.clone() }))
+    }
+
     /// A string's, buffer's or table's bytes, refused past [`MAX_BYTES`].
-    pub(crate) fn bytes(self: &Rc<Self>, v: Vec<u8>) -> Result<Bytes, Error> {
+    pub(crate) fn bytes(self: &Rc<Self>, mut v: Vec<u8>) -> Result<Bytes, Error> {
         bounded(v.len())?;
-        self.take(v.len())?;
+        v.shrink_to_fit();
+        self.take(shared::<Data>() + v.capacity())?;
         Ok(Rc::new(Data { v: RefCell::new(v), meter: self.clone() }))
     }
 
-    /// A package's elements, refused past [`MAX_ELEMENTS`].
-    pub(crate) fn list(self: &Rc<Self>, v: Vec<Object>) -> Result<Elems, Error> {
+    /// A package of `count` elements not yet made, refused past
+    /// [`MAX_ELEMENTS`] and held before it is allocated.
+    pub(crate) fn package(self: &Rc<Self>, count: usize) -> Result<Elems, Error> {
+        counted(count)?;
+        self.take(shared::<List>() + count * ELEMENT)?;
+        let mut v = Vec::new();
+        v.reserve_exact(count);
+        v.resize(count, Object::Uninit);
+        Ok(Rc::new(List { v: RefCell::new(v), meter: self.clone() }))
+    }
+
+    /// A package's elements as the caller passed them, refused past [`MAX_ELEMENTS`].
+    pub(crate) fn list(self: &Rc<Self>, mut v: Vec<Object>) -> Result<Elems, Error> {
         counted(v.len())?;
-        self.take(v.len() * ELEMENT)?;
+        v.shrink_to_fit();
+        self.take(shared::<List>() + v.capacity() * ELEMENT)?;
         Ok(Rc::new(List { v: RefCell::new(v), meter: self.clone() }))
     }
 
@@ -78,6 +110,26 @@ impl Meter {
     pub(crate) fn unresolved(self: &Rc<Self>, path: Path, scope: NodeId) -> Result<Rc<Unresolved>, Error> {
         self.take(Unresolved::held(&path))?;
         Ok(Rc::new(Unresolved { path, scope, meter: self.clone() }))
+    }
+}
+
+/// A record of fixed size, held against a [`Meter`].
+pub(crate) struct Held<T> {
+    v: T,
+    meter: Rc<Meter>,
+}
+
+impl<T> Deref for Held<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.v
+    }
+}
+
+impl<T> Drop for Held<T> {
+    fn drop(&mut self) {
+        self.meter.give(shared::<Self>());
     }
 }
 
@@ -97,18 +149,19 @@ impl Data {
         core::cell::RefMut::map(self.v.borrow_mut(), Vec::as_mut_slice)
     }
 
-    pub(crate) fn replace(&self, n: Vec<u8>) -> Result<(), Error> {
+    pub(crate) fn replace(&self, mut n: Vec<u8>) -> Result<(), Error> {
         bounded(n.len())?;
-        self.meter.take(n.len())?;
+        n.shrink_to_fit();
+        self.meter.take(n.capacity())?;
         let old = self.v.replace(n);
-        self.meter.give(old.len());
+        self.meter.give(old.capacity());
         Ok(())
     }
 }
 
 impl Drop for Data {
     fn drop(&mut self) {
-        self.meter.give(self.v.get_mut().len());
+        self.meter.give(shared::<Self>() + self.v.get_mut().capacity());
     }
 }
 
@@ -130,18 +183,15 @@ impl List {
         Ok(())
     }
 
-    pub(crate) fn replace(&self, n: Vec<Object>) -> Result<(), Error> {
-        counted(n.len())?;
-        self.meter.take(n.len() * ELEMENT)?;
-        let old = self.v.replace(n);
-        self.meter.give(old.len() * ELEMENT);
-        Ok(())
+    /// This package's elements for another's, each held as it was.
+    pub(crate) fn swap(&self, other: &List) {
+        self.v.swap(&other.v);
     }
 }
 
 impl Drop for List {
     fn drop(&mut self) {
-        self.meter.give(self.v.get_mut().len() * ELEMENT);
+        self.meter.give(shared::<Self>() + self.v.get_mut().capacity() * ELEMENT);
     }
 }
 
@@ -156,7 +206,7 @@ pub(crate) struct Unresolved {
 
 impl Unresolved {
     fn held(path: &Path) -> usize {
-        core::mem::size_of::<Unresolved>() + core::mem::size_of_val(path.segs.as_slice())
+        shared::<Unresolved>() + path.segs.capacity() * size_of::<Seg>()
     }
 }
 
@@ -182,8 +232,8 @@ pub(crate) enum Object {
     Str(Bytes),
     Buf(Bytes),
     Pkg(Elems),
-    Field(Rc<Field>),
-    BufField(Rc<BufField>),
+    Field(Kept<Field>),
+    BufField(Kept<BufField>),
     Ref(Ref),
     /// A predefined scope such as `\_SB` (§5.3.1), typeless (§19.6.96).
     Scope,
@@ -192,11 +242,11 @@ pub(crate) enum Object {
     Processor,
     ThermalZone,
     PowerResource,
-    Method(Rc<Method>),
-    Mutex(Rc<Mutex>),
+    Method(Kept<Method>),
+    Mutex(Kept<Mutex>),
     /// An Event's pending signal count (§19.6.147).
-    Event(Rc<Cell<u64>>),
-    Region(Rc<Region>),
+    Event(Kept<Cell<u64>>),
+    Region(Kept<Region>),
     /// A package element whose name is resolved when read (§19.6.101).
     Lazy(Rc<Unresolved>),
 }
@@ -209,7 +259,7 @@ pub(crate) enum Ref {
     /// reference to ArgX"), which its frame alone holds.
     Slot(Weak<RefCell<Object>>),
     Elem(Elems, usize),
-    BufField(Rc<BufField>),
+    BufField(Kept<BufField>),
 }
 
 /// The LocalX or ArgX a reference names, while its method runs.

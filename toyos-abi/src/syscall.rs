@@ -282,19 +282,24 @@ pub const SYS_PORT_BADGE: u64 = 126;
 /// [`Rights::TRACE`]: crate::handle::Rights::TRACE
 pub const SYS_TRACE_READ: u64 = 127;
 
+/// One operation on the `acpi` claim ([`crate::acpi::op`]): an access the
+/// kernel mediates, or the firmware's Global Lock. See [`acpi_access`] and
+/// [`acpi_lock_take`].
+pub const SYS_ACPI: u64 = 128;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 129;
+pub const SYSCALL_PROFILE_BINS: usize = 130;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_TRACE_READ < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -849,6 +854,17 @@ pub mod debug_action {
     /// and re-armed a quantum, [`RING0_FIRE_NEVER`] if none came within
     /// 100 ms, and [`RING0_FIRE_OTHER_SPAN`] if it re-armed something else.
     pub const RING0_TIMER_IN_SYSCALL: u64 = 26;
+    /// Play the firmware's side of the Global Lock (ACPI 6.5 §5.2.10.1) on the
+    /// FACS's lock word: [`FIRMWARE_OWNS`] takes it, as an SMI handler would,
+    /// [`FIRMWARE_ASKS`] sets the pending bit under an owner, as a handler that
+    /// found it taken would, and [`FIRMWARE_FREES`] clears both. Answers the
+    /// word as it was, or `NotSupported` on a machine with no FACS. No guest's
+    /// firmware touches the lock on demand; the take that finds it owned and
+    /// the release that owes a signal are the shipped paths.
+    pub const ACPI_FIRMWARE_LOCK: u64 = 27;
+    pub const FIRMWARE_FREES: u64 = 0;
+    pub const FIRMWARE_OWNS: u64 = 1;
+    pub const FIRMWARE_ASKS: u64 = 2;
     pub const RING0_FIRE_REARMED: u64 = 0;
     pub const RING0_FIRE_NEVER: u64 = 1;
     pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
@@ -990,7 +1006,8 @@ pub fn mark_tty(handle: RawHandle) {
 pub const MAX_THREADS: usize = 4096;
 
 /// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
-/// `stack_base` is the bottom of the user stack (for stack info queries).
+/// `stack_base` is the bottom of the user stack (for stack info queries). An
+/// `entry` outside the user half is `InvalidArgument`.
 ///
 /// # Safety
 /// `entry` must be a valid function pointer and `stack`/`stack_base` must
@@ -1981,7 +1998,8 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
 
 /// Map the region `shm` names into this process. Needs [`Rights::MAP`].
 ///
-/// Idempotent: a second call answers the first call's address.
+/// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
+/// when the region's last handle was closed under the call: nothing is mapped.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
 ///
@@ -2080,6 +2098,40 @@ pub fn trace_read(
         out.len() as u64,
     ))
     .map(|n| n as usize)
+}
+
+/// Have the kernel make one access on the `acpi` claim `claim`, or refuse it
+/// by name. `Ok` is what a read answered, and what a write wrote.
+///
+/// The claim must have been read once, which binds it to the caller: one that
+/// was not is refused [`SyscallError::PermissionDenied`], and an access that
+/// names no space or width [`SyscallError::InvalidArgument`].
+pub fn acpi_access(
+    claim: RawHandle,
+    access: &mut crate::acpi::Access,
+) -> Result<Result<u64, crate::acpi::Refused>, SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::ACCESS, access as *mut crate::acpi::Access as u64, 0))?;
+    Ok(match access.refused {
+        0 => Ok(access.value),
+        word => Err(crate::acpi::Refused::from_raw(word).expect("the kernel answers a refusal this ABI names")),
+    })
+}
+
+/// Try the firmware's Global Lock for the `acpi` claim's holder: `Ok(true)`
+/// where it is now held, `Ok(false)` where the firmware owns it and will raise
+/// `GBL_STS` on letting go. A lock the claim already holds is refused
+/// [`SyscallError::AlreadyExists`], and every take
+/// [`SyscallError::NotSupported`] on a machine whose FADT names a FACS the
+/// kernel exchanges no lock word in; one that names no FACS has no lock, and
+/// a take is answered taken.
+pub fn acpi_lock_take(claim: RawHandle) -> Result<bool, SyscallError> {
+    check(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_TAKE, 0, 0)).map(|word| word == crate::acpi::op::TAKEN)
+}
+
+/// Give the Global Lock back. One the claim does not hold is refused
+/// [`SyscallError::InvalidArgument`].
+pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_RELEASE, 0, 0))
 }
 
 /// Sleep for the given number of nanoseconds.

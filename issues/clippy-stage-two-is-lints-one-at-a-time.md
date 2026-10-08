@@ -124,6 +124,12 @@ before adopting:
   "this device's memory has one owner, enforced by the driver, not by the
   type." Two of three already carry a `# Safety`/`SAFETY:` comment saying so.
 
+## Measured, not decided
+
+| lint | count | what was measured, and what it does not see |
+|---|---:|---|
+| `significant_drop_in_scrutinee` | 6, 1 a defect | Silent in the gate: it reports only a guard marked `#[clippy::has_significant_drop]`, and no kernel guard is. With `sync::LockGuard` alone marked, the kernel under `x86_64-unknown-none` with default features reported 6 sites, and 5 once `sys_chdir` stopped holding the VFS guard into `process_data` — the one defect. The 5 left (`arch/x86_64/idt/mod.rs`'s `for` over `IDT.lock()`, `loader/mod.rs`'s `/system/lib` fallback, `user_ptr::translate_user`, `sys_readdir`, `sys_dlopen`) take no second lock under the guard, and adopting the lint rewrites each. Unmeasured: AArch64, the actuator and instrument shapes, and the guards the measurement did not mark (`SleepGuard`, `block`'s `Locked`, the serial guard). It cannot join `ADOPTED`, which `src/clippy.rs` splices into the host workspace's shapes too, where std's `MutexGuard` is already marked: it would be a per-shape `-W`, as `undocumented_unsafe_blocks` is. **It sees one spelling, not the order**: an `if let Some(x) = L.lock().as_mut()` whose value borrows from the guard is in the tree and in neither report (`file_cache::touch`, `scheduler::remove_vruntime`, `inbox`'s `answer`), and so is any inversion through a named guard, the common shape. |
+
 ## `undocumented_unsafe_blocks`, per area
 
 | area | unsafe blocks | status |

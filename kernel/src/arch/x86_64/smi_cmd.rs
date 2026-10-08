@@ -29,7 +29,7 @@ use core::fmt;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
-use toyos_userbound::{Ports, Undeclared};
+use toyos_userbound::{Mediated, Ports, Undeclared};
 
 use super::pio::{self, Slot, TakenBack};
 use super::{apic, cpu, percpu, IrqGuard};
@@ -81,9 +81,11 @@ impl fmt::Display for Written {
     }
 }
 
-/// Declare the port the FADT names. Boot's.
+/// Declare the port the FADT names. Boot's. The `acpi` claim's holder reads it
+/// and never writes it: a write is a command to the firmware, and [`write`]
+/// makes every one.
 pub fn declare(port: u16) -> Result<(), Undeclared> {
-    PORT.set(pio::declare("SMI_CMD", Ports::one(port))?);
+    PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::ReadOnly)?);
     Ok(())
 }
 

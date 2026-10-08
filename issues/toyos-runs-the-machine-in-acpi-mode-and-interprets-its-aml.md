@@ -10,8 +10,9 @@ The T14's firmware hands the machine over in legacy mode, which interrupts
 every CPU every 2.2 s
 (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 
-Nothing in the tree evaluates the AML in a machine's DSDT or SSDTs. What
-ToyOS takes from them it takes another way: `toyos-acpi/src/dsdt.rs` finds
+The ACPI server loads a machine's DSDT and SSDTs and evaluates `\_S5`, and
+nothing else of their AML yet. What ToyOS takes from them it takes another
+way: `toyos-acpi/src/dsdt.rs` finds
 `\_S5_` by a byte scan, and the loader asks UEFI for the root bridges'
 windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing reads
 `_CST`, which names a CPU's C-states.
@@ -136,7 +137,8 @@ written.
 **Stage: the interpreter** (the orchestrator's placement of "The AML stage
 closes it"). ToyOS's own AML interpreter, written from the specification, run
 by the ACPI server, the battery first: `userland/acpiserver/aml`, pure and
-host-tested, beside the server, which does not link it yet. It owns
+host-tested, beside the server, which loads the tables with it
+(`userland/acpiserver/src/aml.rs`). It owns
 `issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
 **Exit**: a host test loads QEMU 11.1.1's DSDT
 (`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
@@ -180,33 +182,90 @@ otherwise pay to find again:
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
   loaded that way; the interpreter refuses both as unsupported.
 - **A refused evaluation keeps what it stored**, and nothing gives an
-  interpreter's 16 MiB back: after one method has filled it, a name's value
-  still evaluates, `\_S5`'s package among them, and every method that must
-  hold anything new is refused
-  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`).
+  interpreter's 16 MiB back: after one method has filled it, an Integer
+  still evaluates, a field that fits one among them, and every method that
+  must hold anything new is refused; so is a String, Buffer or Package
+  handed to the caller, `\_S5`'s among them, where the bound has no room
+  for the caller's copy while it is built
+  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`;
+  `a_full_interpreter_reads_a_field_that_fits_an_integer`, `userland/acpiserver/aml/tests/heap.rs`).
   Owner: the power-off stage, which decides
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
-- **The interpreter's 16 MiB is its meter's count, not its heap.** The meter
-  counts whatever a table sizes; each namespace node and package element
-  carries a constant beside that which it does not count (`object::Meter`,
-  `userland/acpiserver/aml/src/object.rs`). With the meter full, the heap an
-  interpreter held was 16,776,232 bytes when buffers filled it, 19,549,520
-  when package elements naming objects not yet defined did, and 41,091,744
-  when field units did. A load refused at the bound also leaves the
-  namespace's arena at the capacity it grew to: 24,115,888 bytes held after
-  one table naming 204,000 field units was refused. Owner: the power-off
-  stage, which gives the server its memory. **Exit**: the server states its
-  interpreter's bound in heap bytes, and a host test under a counting
-  allocator holds each of those three fills and that refused load to it.
+- **The interpreter's 16 MiB bounds the heap it holds from one call to the
+  next, not what one call holds while it runs.** The meter counts what an
+  interpreter's allocations ask for (`object::Meter`,
+  `userland/acpiserver/aml/src/object.rs`), and under a counting allocator
+  an interpreter filled until it refuses holds at most `MAX_LIVE`, whatever
+  fills it; a refused load leaves it holding the bytes it held before;
+  ToString, Mid and Concatenate nested in themselves, and fields read
+  through each other, hold one level's bytes past what the meter counts and
+  not a level's each; and the value an evaluation hands its caller is held
+  to the bound while it is built (`userland/acpiserver/aml/tests/heap.rs`).
+  That allocator counts every realloc as one that moves. While a load or an
+  evaluation runs it still holds more, uncounted, and nothing measures the
+  sum. Each part is bounded by the depth or the step bound, by reading and
+  not by a run: its frames, 256 at most; a name read from the table for
+  each, 255 segments at most; 9 bytes for every Mutex acquired and not
+  released, an Acquire two steps at the least; 16 bytes for each of at
+  most 256 devices above a PCI_Config region while its bridges are asked;
+  one operator's string or buffer before the meter holds it, Concatenate's
+  the most at its two operands' copies and their sum; a table's bytes while
+  they are read in; the arena's old slots while a doubling moves it; and
+  the segments and the text of one node's path, as deep as the meter
+  admits a node, for Notify, a reference handed back and the name a
+  refusal carries. A refusal's text is the caller's and outside the meter.
+  The meter also holds a namespace node above its cost, at a whole
+  map leaf of 104 bytes for its entry in its parent and the arena at its
+  doubled capacity: an interpreter filled with field units refuses with
+  11,111,460 bytes of heap held, and one filled with devices of one child
+  with 8,900,612. The real machine's tables have not been loaded since the
+  meter came to count a node's slot, entry and record, a wide field's read
+  came to hold its buffer and the arena's move to cost steps: that reading
+  is owed before the server links the crate, and with it the slots the
+  arena has free after the last table, since a method that defines more
+  names than that moves the arena each time it runs, at a step for every
+  64 bytes of it. Owner: the power-off stage, which gives the server its
+  memory. **Exit**: the server states its interpreter's bound in heap
+  bytes, and a host test under a counting allocator holds the most a load
+  and an evaluation hold while they run to it; and the real machine's
+  tables load under the meter as it stands, the arena's free slots after
+  the last read with them.
+
+What the server's load of the tables, on the T14 and through the kernel's
+mediated access, leaves open:
+
+- **The server waits for no release of the Global Lock** (the orchestrator's
+  ruling, not the owner's). A take that finds the firmware holding the lock
+  leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
+  name and counted in the server's ledger; the access under it is not made,
+  and the table or method that asked is refused. The wait that section
+  describes, for the SCI the firmware raises with `GBL_STS`, is not in the
+  tree: no tier reached it, and the T14's load took the lock 241 times and
+  found the firmware holding it in none. Owner: this stage. **Exit**: a
+  machine's log carries the denial, `the Global Lock: the firmware holds it`,
+  which the `acpi_tables_loaded` row reds on as on every refusal; the wait
+  comes back with the test that reaches its port sequence.
+- **A press during the load waits for it.** The server arms the power button
+  and then loads the tables before it serves an SCI, so a press in that time
+  latches and is served when the load ends: 77 ms on the T14, measured once,
+  and bounded only by what the interpreter lets each table sleep, 10 s.
+  Owner: this stage. **Exit**: the slice that keeps the namespace serves the
+  SCI while a table loads, or the `acpi_tables_loaded` row holds the load's
+  time on the T14 under a bound the owner names.
 
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI
 taken, and its hypothesis is that the controller wants the firmware's
 initialisation run first. The slice that puts `_REG`, the `_STA` and `_INI`
 walk and the query methods in the server on the T14 is the one that issue's
-one-press test waits on.
+one-press test waits on. Its reading of 2026-10-08 found bit 0 of the
+controller's memory at offset 0x05 set under stage 1 and clear under Linux,
+and a dry run of the firmware's `_INI` for the controller clears that bit in
+its two variants that answer all ones, the six that answer zero showing no
+bit, so that slice's first reading on the T14 is the same scout's of that bit, clear
+after the initialisation has run, before the press.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

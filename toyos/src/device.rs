@@ -212,6 +212,24 @@ impl AcpiDev {
     pub fn ack(&self) -> Result<(), SyscallError> {
         syscall::write(self.0.0.0, &toyos_abi::acpi::ACK.to_ne_bytes()).map(|_| ())
     }
+
+    /// Have the kernel make one access outside the claim's own ports, or
+    /// refuse it by name; beside either, the UEFI type firmware's map gives a
+    /// memory address ([`toyos_abi::acpi::Access::memory_type`]).
+    pub fn access(&self, mut access: toyos_abi::acpi::Access) -> Result<(Result<u64, toyos_abi::acpi::Refused>, u8), SyscallError> {
+        let made = syscall::acpi_access(self.as_handle(), &mut access)?;
+        Ok((made, access.memory_type))
+    }
+
+    /// Try the firmware's Global Lock ([`syscall::acpi_lock_take`]): `false`
+    /// where the firmware owns it and will raise `GBL_STS` on letting go.
+    pub fn lock_take(&self) -> Result<bool, SyscallError> {
+        syscall::acpi_lock_take(self.as_handle())
+    }
+
+    pub fn lock_release(&self) -> Result<(), SyscallError> {
+        syscall::acpi_lock_release(self.as_handle())
+    }
 }
 
 impl AsHandle for AcpiDev {

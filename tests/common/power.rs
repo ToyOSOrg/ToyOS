@@ -426,7 +426,7 @@ pub fn hard_lockup_chain(
     // The staged control's own witness, carried by the mechanism rather than by
     // a log line that may not survive: the lock the stuck cpu is inside was
     // taken at the control's own source line, which no other boot can say.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at kernel/src/hardlockup/probe.rs")?;
     // **cpu0's line is what proves the counter rather than a sender.** Nothing
     // sends cpu0 an NMI on this boot — the control's sender is skipped where the
     // cpus have counters — so a sample recorded against cpu0 came from cpu0's
@@ -544,12 +544,55 @@ const ACPI_ARMED: &str = "acpiserver: armed: power button served, embedded contr
 const ACPI_PRESSED: &str =
     "acpiserver: the power button was pressed, on SCI 1 of this boot; asking the supervisor to power off";
 
+/// What `/system/bin/acpiserver` says of each definition block, after
+/// `acpiserver: `: its place, how many there are, which it is, and what
+/// became of it.
+const ACPI_TABLE: &str = "acpiserver: table ";
+
+/// What it says of `\_S5`, ahead of the two values.
+const ACPI_S5: &str = "acpiserver: \\_S5 evaluated: ";
+
+/// The number after `SLP_TYPa=` on a line.
+fn slp_typ_a(line: &str) -> Result<u64, String> {
+    line.split_once("SLP_TYPa=")
+        .and_then(|(_, after)| after.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .ok_or_else(|| format!("no SLP_TYPa on {line:?}"))
+}
+
+/// The server loaded every definition block it found, the DSDT first, each
+/// said on a line in its place; and the `SLP_TYPa` its `\_S5` evaluates to
+/// is the one the kernel's byte scan of the DSDT decoded (`kernel`'s
+/// [`SOFT_OFF_DECODED`] line): the interpreter against the scan, over bytes
+/// one read through the mediated access and the other through the direct
+/// map. Answers how many blocks there were.
+pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Result<usize, String> {
+    let said: Vec<&str> = log.text().lines().filter_map(|line| line.split_once(ACPI_TABLE).map(|(_, said)| said.trim())).collect();
+    let Some(count) = said.first().and_then(|first| first.split_once(" of ")?.1.split_once(' ')?.0.parse::<usize>().ok()) else {
+        return Err(format!("the server said nothing of a first table ({said:?}):\n{}", log.text()));
+    };
+    let expected: Vec<String> =
+        (1..=count).map(|place| format!("{place} of {count} ({}) loaded", if place == 1 { "DSDT" } else { "SSDT" })).collect();
+    if said != expected {
+        return Err(format!("the server's tables are {said:#?}, where {count} loaded ones are {expected:#?}"));
+    }
+    let (evaluated, decoded) = (log.must_say(ACPI_S5)?, kernel.must_say(SOFT_OFF_DECODED)?);
+    if slp_typ_a(evaluated)? != slp_typ_a(decoded)? {
+        return Err(format!("the server's \\_S5 is not the kernel's: {:?} beside {:?}", evaluated.trim(), decoded.trim()));
+    }
+    eprintln!("  [power] {count} table(s) loaded; {} beside {}", evaluated.trim(), decoded.trim());
+    Ok(count)
+}
+
 /// A press of q35's power button stops the machine through ToyOS's own path:
 /// the kernel put the machine in ACPI mode for the server's claim, the press
 /// arrives as the server's first SCI and the only one, since the kernel masks
 /// the level line until the server has served it, and the server has the
 /// supervisor stop the machine, which QEMU reports as the guest's own
-/// power-off.
+/// power-off. The press is sent as soon as the server has armed, which is
+/// before it loads the machine's tables: the press is latched across the
+/// load, whose lines and `\_S5` are read here, on the one firmware's tables a
+/// guest has.
 pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
@@ -572,6 +615,9 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
         return Err(format!("the supervisor's last word after the press is not a power-off:\n{}", after.text()));
     }
     after.must_be_clean()?;
+    let whole = serial::Serial::named("the boot and the press", console);
+    acpi_tables_loaded(&whole, &whole)?;
+    whole.must_say_after(ACPI_S5, ACPI_PRESSED)?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())
 }
