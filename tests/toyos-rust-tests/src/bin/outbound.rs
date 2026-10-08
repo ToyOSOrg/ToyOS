@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use toyos::net::NetError;
+use toyos::net::{MsgType, NetError, NetstackConn, UdpSendToRequest};
 use toyos_inspect::{Value, NET};
 use toyos_logstream::program_line;
 
@@ -33,7 +33,7 @@ mod said;
 #[path = "../served_log.rs"]
 mod served_log;
 
-use said::{Anchor, Connect, Driver, Frames, Line, Link, Lookup, Neighbour, Word};
+use said::{Anchor, Asked, Connect, Driver, Frames, Line, Link, Lookup, Neighbour, Word};
 
 /// The program whose lines these are, as the supervisor names its ring.
 const NETSTACK: &str = "netstack";
@@ -58,6 +58,18 @@ const HTTPS: u16 = 443;
 /// The router's neighbour entry in netstack's `inspect` answer, where its
 /// stack says one.
 const NEIGHBOUR: &str = "net.neighbour.router";
+
+/// The discard service (RFC 863): a datagram to it asks for no answer.
+const DISCARD: u16 = 9;
+
+/// The largest datagram one Ethernet frame carries: 1500 less the IPv4 and
+/// UDP headers.
+const DATAGRAM: usize = 1500 - 20 - 8;
+
+/// The Intel driver's usable transmit descriptors (`toyos-i219`, a ring of 16),
+/// and how many rings' worth the burst is.
+const RING: usize = 15;
+const RINGS: usize = 4;
 
 type Snapshot = BTreeMap<String, Value>;
 
@@ -176,6 +188,37 @@ fn neighbour(snapshot: &Snapshot) -> Neighbour {
         .unwrap_or_else(|| panic!("netstack's snapshot carries {NEIGHBOUR} as a word this job has none for"))
 }
 
+/// A burst of [`RINGS`] × [`RING`] full-size datagrams from one socket to the
+/// router's discard port, a ring's worth of requests put to netstack at once
+/// so its pass finds them together; how many netstack took.
+fn burst(router: [u8; 4]) -> u64 {
+    let socket = toyos::net::udp_bind([0; 4], 0).unwrap_or_else(|e| panic!("a datagram socket for the burst: {e:?}"));
+    let datagram = [0u8; DATAGRAM];
+    let mut taken = 0;
+    for _ in 0..RINGS {
+        let askers: Vec<NetstackConn> = (0..RING)
+            .map(|_| NetstackConn::connect().unwrap_or_else(|e| panic!("a connection to netstack for the burst: {e:?}")))
+            .collect();
+        for _ in 0..RING {
+            assert_eq!(socket.tx.write(&datagram), Ok(DATAGRAM), "a datagram into the socket's pipe");
+        }
+        let request =
+            UdpSendToRequest { socket_id: socket.socket_id.0, addr: router, port: DISCARD, len: DATAGRAM as u16 };
+        let asked: Vec<_> =
+            askers.into_iter().map(|asker| asker.request(MsgType::UdpSendTo, &request)).collect();
+        // A datagram netstack's queue had no place for is refused, and counted
+        // by its absence.
+        taken += asked.into_iter().filter_map(|pending| pending.ok()?.response::<u32>().ok()).count() as u64;
+    }
+    // Unread, as the anchors' close is.
+    let _ = toyos::net::udp_close(socket.socket_id);
+    taken
+}
+
+fn asked(snapshot: &Snapshot, key: &str) -> Asked {
+    Asked(frames(snapshot, key).0)
+}
+
 fn main() {
     let word = netstack_said();
     say(Line::Netstack(word));
@@ -191,6 +234,20 @@ fn main() {
                 }
             });
             say(Line::Gateway(neighbour(&ask())));
+            if let Some(router) = held.get("net.lease.router") {
+                let Value::Text(router) = router else { panic!("netstack's snapshot carries a router that is not text") };
+                let router: std::net::Ipv4Addr =
+                    router.parse().expect("netstack's word for its lease's router reads as an address");
+                let taken = burst(router.octets());
+                let after = ask();
+                say(Line::Ring {
+                    full: asked(&after, "net.transmit.full"),
+                    wake_armed: asked(&after, "net.transmit.wake_armed"),
+                    wake_taken: asked(&after, "net.transmit.wake_taken"),
+                    unsent: asked(&after, "net.descriptors.unsent"),
+                    taken,
+                });
+            }
         }
     }
     say(Line::Done);

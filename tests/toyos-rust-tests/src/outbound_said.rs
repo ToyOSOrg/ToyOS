@@ -179,6 +179,30 @@ impl fmt::Display for Frames {
     }
 }
 
+/// A count netstack's answer carries only on a card that keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Asked(pub Option<u64>);
+
+const NOT_ASKED: &str = "not-asked";
+
+impl Asked {
+    fn read(word: &str) -> Option<Self> {
+        if word == NOT_ASKED {
+            return Some(Self(None));
+        }
+        Frames::read(word).filter(|count| count.0.is_some()).map(|count| Self(count.0))
+    }
+}
+
+impl fmt::Display for Asked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(count) => write!(f, "{count}"),
+            None => f.write_str(NOT_ASKED),
+        }
+    }
+}
+
 /// One line of the job's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Line {
@@ -187,6 +211,11 @@ pub enum Line {
     Lease { held: bool, router: bool, resolver: Resolver },
     Anchor { anchor: Anchor, lookup: Lookup, connect: Connect },
     Gateway(Neighbour),
+    /// The card's transmit ring after a burst at the router: how often a frame
+    /// found it full, how often its wake was armed and taken, the frames a
+    /// link change gave back, and how many of the burst's datagrams netstack
+    /// took.
+    Ring { full: Asked, wake_armed: Asked, wake_taken: Asked, unsent: Asked, taken: u64 },
     /// The job's last line.
     Done,
 }
@@ -210,6 +239,10 @@ impl fmt::Display for Line {
                 write!(f, "anchor name={} lookup={} connect={}", anchor.word(), lookup.word(), connect.word())
             }
             Self::Gateway(neighbour) => write!(f, "gateway neighbour={}", neighbour.word()),
+            Self::Ring { full, wake_armed, wake_taken, unsent, taken } => write!(
+                f,
+                "ring full={full} wake_armed={wake_armed} wake_taken={wake_taken} unsent={unsent} taken={taken}"
+            ),
             Self::Done => f.write_str("done"),
         }
     }
@@ -253,6 +286,13 @@ impl Line {
                 connect: Connect::read(value("connect")?)?,
             },
             "gateway" => Self::Gateway(Neighbour::read(value("neighbour")?)?),
+            "ring" => Self::Ring {
+                full: Asked::read(value("full")?)?,
+                wake_armed: Asked::read(value("wake_armed")?)?,
+                wake_taken: Asked::read(value("wake_taken")?)?,
+                unsent: Asked::read(value("unsent")?)?,
+                taken: Frames::read(value("taken")?)?.0?,
+            },
             "done" => Self::Done,
             _ => return None,
         })

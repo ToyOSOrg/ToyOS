@@ -5,7 +5,7 @@
 
 use super::*;
 
-use outbound::said::{self, Anchor, Connect, Driver, Frames, Line, Link, Lookup, Neighbour, Resolver, Word};
+use outbound::said::{self, Anchor, Asked, Connect, Driver, Frames, Line, Link, Lookup, Neighbour, Resolver, Word};
 
 /// The kernel's record of handing the card to netstack.
 const HANDED: &str =
@@ -100,6 +100,14 @@ pub fn each_verdict_names_its_cause() {
     // The case, the kernel's records, what the job said, and each row's answer.
     let cases: Vec<(&str, &str, Vec<&'static str>, Want, Want)> = vec![
         ("green", HANDED, GREEN.to_vec(), Ok(()), Ok(())),
+        (
+            "green with the ring's line, which no row judges",
+            HANDED,
+            [&GREEN[..GREEN.len() - 1], &["ring full=3 wake_armed=3 wake_taken=2 unsent=not-asked taken=60", "done"]]
+                .concat(),
+            Ok(()),
+            Ok(()),
+        ),
         (
             "green on a stack that says nothing of its neighbours",
             HANDED,
@@ -357,6 +365,9 @@ pub fn no_line_holds_an_address() {
             }
         }
     }
+    for count in [Asked(None), Asked(Some(0)), Asked(Some(u64::MAX))] {
+        lines.push(Line::Ring { full: count, wake_armed: Asked(Some(7)), wake_taken: count, unsent: Asked(None), taken: 60 });
+    }
     for line in lines {
         let text = line.to_string();
         assert_eq!(Line::read(&text), Some(Some(line)), "{text}");
@@ -372,6 +383,8 @@ pub fn no_line_holds_an_address() {
         "outbound: anchor name=192.0.2.9 lookup=addresses connect=connected",
         "outbound: anchor name=dns.google lookup=addresses connect=connected to 192.0.2.9",
         "outbound: gateway neighbour=reachable ",
+        "outbound: ring full=1 wake_armed=1 wake_taken=1 unsent=0 taken=not-asked",
+        "outbound: ring full=192.0.2.1 wake_armed=1 wake_taken=1 unsent=0 taken=60",
         "outbound: gateway 192.0.2.1",
         "outbound: done 192.0.2.1",
         "outbound: ",
