@@ -36,6 +36,8 @@ const UNROUTED_TOO: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 54);
 /// RFC 792: a destination unreachable's codes.
 const HOST_UNREACHABLE: u8 = 1;
 const PORT_UNREACHABLE: u8 = 3;
+/// RFC 1812 §5.2.7.1: communication administratively prohibited.
+const PROHIBITED: u8 = 13;
 const ADDRESS: [u8; 4] = [203, 0, 113, 7];
 /// The address every reply that must not be read carries.
 const FORGED: [u8; 4] = [203, 0, 113, 66];
@@ -520,9 +522,8 @@ fn a_lookup_udp_refuses_every_resolver_of_ends_in_the_call_that_started_it() {
 // indicated protocol module or process port is not active, the destination host may send a
 // destination unreachable message to the source host." RFC 1122 §4.1.3.3: "UDP MUST pass to the
 // application layer all ICMP error messages that it receives from the IP layer." The first
-// resolver answers ARP and has nothing on port 53: its report of the query is counted, the
-// query's port is free, and the second resolver is asked at the millisecond the report arrived
-// and answers in it.
+// resolver answers ARP and has nothing on port 53: its report of the query is counted, and the
+// second resolver is asked at the millisecond the report arrived and answers in it.
 #[test]
 fn a_query_its_resolver_refuses_by_icmp_is_counted_and_the_next_resolver_is_asked_at_once() {
     let mut net = Net::leased(&[REFUSES, ANSWERS], Some(R));
@@ -536,8 +537,24 @@ fn a_query_its_resolver_refuses_by_icmp_is_counted_and_the_next_resolver_is_aske
     assert_eq!((net.refused.len(), net.queried.len()), (1, 1), "one query to each resolver");
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), 1);
     assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 0);
-    let left = net.refused[0].udp.source_port;
-    assert!(!net.port_held(left), "port {left} of the query reported back");
+}
+
+// RFC 8085 §5.2 has an ICMP message "not abort the communication", and RFC 1035 §4.2.1 has no
+// server asked again inside its interval. The lease's one resolver reports every query back: each
+// report is counted, none ends the lookup or hurries its next query, and the lookup runs its
+// rounds and ends timed out, as under a resolver that says nothing.
+#[test]
+fn reports_alone_end_no_lookup_and_ask_no_resolver_twice_inside_a_wait() {
+    let mut net = Net::leased(&[REFUSES], Some(R));
+    let delivered = net.lan.counted(Rule::IcmpErrorDelivered);
+    let id = net.resolve("www.example").unwrap();
+    assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::TimedOut))));
+    let rounds = u64::try_from(ROUNDS).unwrap();
+    assert_eq!(net.ms(), rounds * WAIT_MS);
+    let left: Vec<u64> = net.refused.iter().map(|query| net.ms_of(query.at)).collect();
+    assert_eq!(left, (0..rounds).map(|round| round * WAIT_MS).collect::<Vec<_>>());
+    assert_eq!(net.lan.counted(Rule::IcmpErrorDelivered), delivered + rounds, "the premise: every report reached its query's socket");
+    assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), rounds);
 }
 
 // A report has crossed a trust boundary: anyone can send an ICMP message. RFC 1122 §4.1.3.3 has
@@ -574,20 +591,46 @@ fn a_report_that_is_not_about_the_query_or_is_a_hint_ends_no_wait() {
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
 }
 
+// RFC 8085 §5.2: "applications SHOULD appropriately validate the payload of ICMP messages to
+// ensure these are received in response to transmitted traffic", and such a message "SHOULD NOT
+// abort the communication": what a report quotes, an off-path sender can guess. A port
+// unreachable and a prohibition in the resolver's name that quote the query's own addresses and
+// ports each reach the query's socket, which is the premise, and end nothing: each is counted,
+// the socket is still the query's, and the resolver's answer behind them ends the lookup.
+#[test]
+fn a_forged_report_of_the_querys_own_addresses_and_ports_ends_nothing_and_the_answer_behind_it_is_taken() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    let asked = net.queried[0].clone();
+    for (reported, code) in [(1, PORT_UNREACHABLE), (2, PROHIBITED)] {
+        let delivered = net.lan.counted(Rule::IcmpErrorDelivered);
+        net.lan.deliver(&reports(code, (ANSWERS, MAC_S), &asked.udp));
+        assert_eq!(net.lan.counted(Rule::IcmpErrorDelivered), delivered + 1, "the premise: the report of code {code} reached the query's socket");
+        assert_eq!(net.lan.node.take_resolved(), NONE, "a report of code {code} from the wire ended the lookup");
+        assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), reported);
+        assert!(net.port_held(asked.udp.source_port), "the reported query's socket, after code {code}");
+    }
+    net.pass();
+    assert_eq!(net.queried.len(), 1, "one resolver: a report asked it again inside its wait");
+    net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
+}
+
 // RFC 1034 §5.3.3: an alias with no address is asked again at its end, every query afresh. The
-// resolver answers only after three queries have left, a wait apart, and with an alias alone:
-// the queries for the old name are let go, so the two other answers to them, arriving with the
-// first, find no socket (RFC 1122 §4.1.3.1), and the alias's address ends the lookup.
+// first resolver answers only after six queries have left, three of them to it, and with an alias
+// alone: the queries for the old name are let go, so the two other answers to them, arriving
+// with the first, find no socket (RFC 1122 §4.1.3.1), and the alias's address ends the lookup.
 #[test]
 fn an_alias_answered_late_restarts_the_lookup_and_lets_the_old_names_queries_go() {
-    let mut net = Net::leased(&[ANSWERS], Some(R));
-    net.zone.push(("www.example", 4_500, Says::Alias("cdn.example")));
+    let mut net = Net::leased(&[ANSWERS, SILENT], Some(R));
+    net.zone.push(("www.example", 10_500, Says::Alias("cdn.example")));
     net.zone.push(("cdn.example", 0, Says::Address(ADDRESS)));
     let nobodys = net.lan.counted(Rule::RxNoSocket);
     let id = net.resolve("www.example").unwrap();
     let ended = net.run(id, 40_000);
     assert_eq!(ended, Some(Ok(vec![ADDRESS])), "the resolver heard {:?}", net.queried);
-    assert_eq!(net.ms(), 4_500);
+    assert_eq!(net.ms(), 10_500);
     let names: Vec<&str> = net.queried.iter().map(|query| query.name.as_str()).collect();
     assert_eq!(names, ["www.example", "www.example", "www.example", "cdn.example"]);
     assert_eq!(net.lan.counted(Rule::RxNoSocket), nobodys + 2, "the old name's other two answers");
@@ -831,7 +874,8 @@ fn a_recorded_reply_of_a_public_resolver_answers_the_nodes_query() {
 // answers ARP: [ip] gives up at its third request's end, 3 s in, and reports the two queries it
 // held, the first and the one asked when the first one's wait ended. Each is counted, and the
 // lookup ends there by name, at [ip]'s first word of its resolver, with no third query: RFC 1035
-// §4.2.1 repeats a query after an interval, to a server that may have missed it.
+// §4.2.1 repeats a query after an interval, to a server that may have missed it. This is [ip]'s
+// own knowledge and no datagram's word, so it ends the lookup where an ICMP error does not.
 #[test]
 fn a_query_the_network_reports_unreachable_is_counted_and_ends_a_lookup_with_no_other_resolver() {
     let mut net = Net::leased(&[SILENT], Some(R));

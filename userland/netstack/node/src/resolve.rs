@@ -10,13 +10,16 @@
 //!   query other than the one whose socket it reached.
 //! - **A socket lives as long as its query's answer is read**: it is closed when the lookup lets
 //!   the query go, ends, or is let go itself, and its port is free from then.
-//! - **A query that did not reach its resolver is not waited for**: the lookup is told, and asks
-//!   its next resolver at once or ends (`toyos_dns::Lookup::on_unreached`). One [udp] refuses
-//!   never left: it is counted and holds no socket. One the network reports back is counted and
-//!   its socket closed: [ip] found no next hop for it, or a host or router refused it by ICMP.
-//!   [udp] hands a connected socket only an error that quotes the socket's own addresses and
-//!   ports, and of ICMP's only one that says refused or prohibited, so forging a report takes the
-//!   query's port, and buys the lookup's early end and never an answer.
+//! - **A query the node knows did not reach its resolver is let go**
+//!   (`toyos_dns::Lookup::on_unreached`): the lookup asks its next resolver at once, or ends
+//!   where no query's answer is read any more. The node knows it of a query [udp] refuses in the
+//!   call, which never left, is counted and holds no socket; and of one [ip] reports it found no
+//!   next hop for, which is counted and its socket closed.
+//! - **An ICMP error is a report and not knowledge** (`toyos_dns::Lookup::on_report`): [udp]
+//!   hands a query's socket one that quotes the socket's addresses and ports and says refused or
+//!   prohibited, which takes an off-path sender the query's port to forge and not its id (RFC
+//!   8085 §5.2). It is counted, and the next resolver is asked at once; the query's socket stays
+//!   open and its answer is read, and no number of them ends a lookup.
 //! - **Every lookup's first query can wait in [ip] for one next hop at once**, where no link
 //!   address is known yet: [ip] holds `PENDING_PER_NEIGHBOUR` datagrams for a next hop it is
 //!   resolving and keeps the newest (RFC 4861 §7.2.2), which is no fewer than the lookups held
@@ -37,7 +40,7 @@ use core::net::Ipv4Addr;
 
 use toyos_dns::{Asked, Failure, Lookup, Name, Step, MAX_LOOKUPS, PORT};
 use toyos_net_ip::limits::nud::PENDING_PER_NEIGHBOUR;
-use toyos_net_udp::{Error, SocketId};
+use toyos_net_udp::{Error, SocketError, SocketId};
 use toyos_net_wire::Instant;
 
 use crate::lease::Stack;
@@ -121,8 +124,10 @@ fn close(stack: &mut Stack, now: Instant, socket: SocketId) {
 enum Heard {
     /// A datagram of this length, now in the reply buffer.
     Reply(usize),
-    /// The network's report that the query did not reach its resolver.
+    /// [ip]'s word that the query never left.
     Unreached,
+    /// An ICMP error's word that the query was refused.
+    Reported,
 }
 
 /// The first of `queries` with something at its socket, and what: a reply is now in `reply`.
@@ -131,7 +136,8 @@ fn waiting(queries: &[Query], stack: &mut Stack, reply: &mut [u8]) -> Option<(Qu
         match stack.recv_from(query.socket, reply) {
             Ok(Some(received)) => return Some((*query, Heard::Reply(received.len))),
             Ok(None) => {}
-            Err(Error::Failed(_)) => return Some((*query, Heard::Unreached)),
+            Err(Error::Failed(SocketError::NextHopFailed)) => return Some((*query, Heard::Unreached)),
+            Err(Error::Failed(SocketError::Refused | SocketError::Prohibited)) => return Some((*query, Heard::Reported)),
             Err(Error::NoSuchSocket | Error::Refused(_)) => unreachable!("a query's socket is open while it is listed, and no rule refuses a receive"),
         }
     }
@@ -225,6 +231,10 @@ impl Resolver {
                     Heard::Unreached => {
                         counters.add(Counter::QueryFailed, 1);
                         asking.lookup.on_unreached(query.asked, ms, || id(&mut *draw))
+                    }
+                    Heard::Reported => {
+                        counters.add(Counter::QueryFailed, 1);
+                        asking.lookup.on_report(query.asked, ms, || id(&mut *draw))
                     }
                 };
                 done = act(asking, step, now, stack, counters, &mut *draw);

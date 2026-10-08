@@ -50,5 +50,5 @@ fn s_ip_icd_012_shard_a_resolution_failure_reaches_the_connected_socket() {
     net.advance(Duration::from_millis(2_999));
     assert_eq!(net.nodes[a].shard.recv_from(socket, &mut buf), Ok(None));
     net.advance(Duration::from_millis(1));
-    assert_eq!(net.nodes[a].shard.recv_from(socket, &mut buf), Err(Error::Failed(SocketError::Unreachable)));
+    assert_eq!(net.nodes[a].shard.recv_from(socket, &mut buf), Err(Error::Failed(SocketError::NextHopFailed)));
 }
