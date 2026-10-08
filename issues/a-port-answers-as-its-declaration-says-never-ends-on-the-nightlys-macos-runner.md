@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-10-08
 ---
@@ -43,7 +43,7 @@ workspace's host members`:
   `for port in port..=port + (width.bytes() as u16 - 1)`, and the test's
   arrays are fixed. On x86-64 the same source ends.
 
-## What was measured, and what it leaves
+## What was measured: it does not hang on an Apple-silicon Mac
 
 `a_wide_access_is_held_to_every_port_it_spans`, in the same binary, calls the
 same function and ended on the runner; its accesses that reach port `0xFFFF`
@@ -51,12 +51,12 @@ are refused as `PortSpan` above the loop, so the test that hangs is the only
 one that runs the loop over a range whose inclusive end is `0xFFFF`. Every
 host test is built at `opt-level = 2` (root `Cargo.toml`, `[profile.dev]`).
 That pointed at the code `rustc 1.99.0` makes of that loop for
-`aarch64-apple-darwin`, and the measurement does not bear it out.
+`aarch64-apple-darwin`. Two measurements on an Apple-silicon Mac, macOS
+27.0.1, say otherwise.
 
-On an Apple-silicon Mac, macOS 27.0.1, at `809c33c0c`'s tree: `cargo
-+<toolchain> test --locked -p toyos-userbound --test firmware --no-run`, then
-the binary with `--exact a_port_answers_as_its_declaration_says`, to be ended
-after 60 s:
+The test alone, at `809c33c0c`'s tree, `cargo +<toolchain> test --locked -p
+toyos-userbound --test firmware --no-run` and then the binary with `--exact
+a_port_answers_as_its_declaration_says`:
 
 | toolchain | profile | build | the test |
 |---|---|---|---|
@@ -64,48 +64,67 @@ after 60 s:
 | `rustc 1.99.0 (b940084d7 2026-09-28)`, LLVM 23.1.1 | the tree's | exit 0 | exit 0, `ok`, `finished in 0.00s` |
 | `rustc 1.99.0 (b940084d7 2026-09-28)` | `opt-level = 0` | exit 0 | exit 0, `ok`, `finished in 0.00s` |
 
-So the runner's compiler, on the runner's architecture, makes a test that
-ends. What still differs between that measurement and the job that hung:
+The job's own build, in a worktree at `8a883a142` under `rustc 1.99.0`: the
+step's cargo line as job 113317209042 printed it, `cargo test --workspace
+--exclude toyos-build --exclude ...`, with `--locked` and `--test firmware
+--no-run`, so the same packages are selected and `toyos-userbound` and what
+it depends on get the features and profile the step gives them; exit 0. Then
+the `firmware` binary whole, its 20 tests on libtest's threads, from
+`toyos-userbound/`:
 
-- **The tree.** The job built `8a883a142`; the measurement built `809c33c0c`,
-  where #764 has since added `SleepType`, `sleep_type` and a twenty-first test
-  to the same crate and file. `firmware::port`, `port.rs` and the hanging test
-  are the same bytes in both; what the optimiser makes of a crate can move
-  with what else is in it.
-- **What ran beside it.** The measurement ran the one test; the job ran the
-  binary's 20, libtest's default, a thread each.
-- **The machine.** The job's is a hosted `macos-26-arm64` image, macOS 26.6.2
-  (25G83), in a virtual machine; the measurement's is macOS 27.0.1 on the
-  hardware.
+| libtest's threads | runs | result |
+|---|---|---|
+| the default | 20 | 20 exit 0, none past its 5-minute bound |
+| `RUST_TEST_THREADS=3` | 20 | 20 exit 0, none past its 5-minute bound |
+
+So the job's tree, compiler, invocation and neighbours make a binary that
+ends, 40 runs of 40, on this architecture. What is left is the machine: a
+hosted `macos-26-arm64` image, macOS 26.6.2 (25G83), in a virtual machine.
 
 Nothing the test calls reaches the machine: `firmware::port` and the test's
-`standing` are arithmetic and two matches, in a `#![no_std]` crate that
-forbids `unsafe`, with no system call, clock, entropy, port I/O or thread of
-their own. What does reach it is libtest around the test: the thread it
-starts for each test, the capture of that thread's output, and the channel
-its result comes back on. libtest's line says only that no result had come
-back, not that the test's body was still running, so a thread that never
-started or never returned its result reads the same in the log as a loop that
-never ends.
+`standing` are arithmetic and two matches, with no system call, clock,
+entropy, port I/O or thread of their own. What does reach it is libtest
+around the test: the thread it starts for each test, the capture of that
+thread's output, and the channel its result comes back on. libtest's line
+says only that no result had come back, not that the test's body was still
+running, so a thread that never started or never returned its result reads
+the same in the log as a loop that never ends.
 
-## What the next nightly settles
+## The one instrumented run, and what follows it
 
-`src/ci.rs`'s `heard` now ends a cargo that has said nothing for 15 minutes:
-it sends the step's process group `SIGQUIT`, then `SIGKILL` to what is left
-10 s later, and reds the step with the last line said, which here is libtest's
-line naming this test. macOS writes a report of a process `SIGQUIT` ends,
-every thread's stack in it, under `~/Library/Logs/DiagnosticReports`, and
-`portability-macos` uploads that directory as the artifact
-`macos-crash-reports` when the job fails. The report of the `firmware-*`
-binary says which of the three it is: a thread inside `firmware::port`, a
-thread inside libtest or std, or no test thread at all. Whether a hosted
-runner writes such a report has not been measured; an artifact without one is
-itself the answer to that, and the next instrument is then a debugger
-attached before the signal.
+The measurement that is left can only be made on the runner. `src/ci.rs`'s
+`heard` ends a cargo that has said nothing for 15 minutes: it sends the
+step's process group `SIGQUIT`, then `SIGKILL` to what is left 10 s later,
+and reds the step with the last line said, which here is libtest's line
+naming this test. Where macOS writes a report of a process `SIGQUIT` ended,
+it is under `~/Library/Logs/DiagnosticReports`, and `portability-macos`
+uploads that directory as the artifact `macos-crash-reports` when the job
+fails. A report of the `firmware-*` binary with its threads' stacks says
+which it is: a thread inside `firmware::port`, a thread inside libtest or
+std, or no test thread at all.
 
-Until it is fixed the nightly is red on macOS, in minutes and by name.
+Assigned: the orchestrator. Before #778 lands he dispatches `nightly.yml` on
+its branch and reads `portability-macos`: the job concludes `failure` and not
+`cancelled`; `the workspace's host members` is red about 16 minutes after
+libtest's line, `said nothing for 900s and was ended with its process group
+by SIGQUIT`, the last it said that line; the steps after it run and the
+driver prints its summary; no `Terminate orphan process ... firmware-*` at
+the job's end; and the artifact holds a `firmware-*` report, or the upload
+warns that it found none.
 
-Owner: the `acpi` claim's author (#749), whose test it is.
+That run is the only one this test is kept red for. What follows it is one
+of two things, in the pull request that follows the reading:
 
-**Exit**: `portability-macos` green in a nightly on a `main` that still has
-this test, the cause named in the commit that gets it there.
+- **The report names the cause**: it is fixed at its owner, and this file is
+  deleted with the nightly that shows `portability-macos` green.
+- **There is no report, or it does not name the cause**: the test is deleted
+  from `toyos-userbound/tests/firmware.rs`, and this file stays, recording the
+  commit that restores it and the instrument still owed, a debugger attached
+  on the runner before the signal. `heard`'s `SIGQUIT` leg and the workflow's
+  upload step are then deleted with it if the artifact held no report of any
+  process: they are kept only for what they have been seen to write.
+
+Owner of the test: the `acpi` claim's author (#749).
+
+**Exit**: `portability-macos` green in a nightly on `main` with this test in
+the tree, its cause named in the commit that got it there.
