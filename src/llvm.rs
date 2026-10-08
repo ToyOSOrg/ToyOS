@@ -6,33 +6,32 @@
 //! checkout holding what no commit does and a gitlink staged and not committed),
 //! the committed tree of its `src/bootstrap` (one holding what no commit does is
 //! refused), the bootstrap configuration below, [`RECIPE`], and the tools the
-//! host builds it with ([`host_tools`]). `rust/build/llvm/<key>/` in the primary
-//! is what builds read of bootstrap's install of that LLVM and its clang
+//! host builds it with ([`host_tools`]). `llvm/<key>/` in the store
+//! (`src/keystore.rs`) is what builds read of bootstrap's install of that LLVM and its clang
 //! ([`keep`]), with its LLD in `bin/` beside `llvm-config` and in `src/` the
 //! runtimes' sources the C++ runtime is built from (`src/libcxx.rs`) as its
 //! commit holds them, made by whichever build first needs it ([`resolve`]), and
 //! stored only when it was built from what the key names. Once its [`SOURCE`]
 //! file exists it is read-only, its directories as well as its files.
-//! Every compiler build, the primary's and a worktree's own, names it as the
-//! host's `llvm-config` with `llvm-has-rust-patches`, so bootstrap builds no
-//! LLVM and takes LLD from beside it as `rust-lld`; `clang::provision` copies its
-//! clang. Once a build directory's compiler is built against it, the LLVM that
+//! Every compiler build names it as the host's `llvm-config` with
+//! `llvm-has-rust-patches`, so bootstrap builds no LLVM and takes LLD from
+//! beside it as `rust-lld`; `clang::provision` copies its clang. Once a build directory's compiler is built against it, the LLVM that
 //! directory built itself goes ([`retire_in_tree`]).
 //!
 //! **Nothing of the environment it is asked from reaches it but
 //! [`ENVIRONMENT`]**: the build and every tool its key asks run with the rest
 //! cleared ([`clear`]), the configuration names the C and C++ compilers by path,
-//! and every host library LLVM would otherwise find and link is turned off
-//! ([`NO_HOST_LIBRARIES`]).
+//! every host library LLVM would otherwise find and link is turned off
+//! ([`NO_HOST_LIBRARIES`]), and the revision and repository LLVM, clang and LLD
+//! say they were built from are the commit and the URL the fork's commit names
+//! ([`stamp`]), never what git answers in the checkout that built them.
 //!
 //! Its lock (`buildlock::keyed_*` with [`Keyed::Llvm`]) is taken inside the
-//! worktree or global lock that covers the fork build directory its maker
-//! writes, `build/toyos-llvm/`, which is removed once the LLVM is placed.
+//! worktree lock that covers the fork build directory its maker writes,
+//! `build/toyos-llvm/`, which is removed once the LLVM is placed.
 //!
-//! An LLVM no worktree names any more is removed by `keystore::sweep`, which
-//! every placement runs: each worktree records the key of
-//! the LLVM its compiler links, and a key no registered worktree records, that
-//! nobody is making or using, goes.
+//! An LLVM nothing has used for the store's keep time is removed by
+//! `keystore::sweep`, which every placement runs.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -124,22 +123,36 @@ pub fn host_lines(dir: &Path) -> String {
     format!("llvm-config = \"{}\"\nllvm-has-rust-patches = true", dir.join("bin/llvm-config").display())
 }
 
-/// Every LLVM on this host.
-pub fn store(rust_dir: &Path) -> PathBuf {
-    rust_dir.join("build/llvm")
-}
-
 /// The key of the LLVM `fork` names; refused while its `src/bootstrap` holds
 /// changes no commit does.
 pub fn key(fork: &Path) -> Key {
     let tools = host_tools();
-    key_of(fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools), &tools.identity)
+    key_of(fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools, &stamp(fork)), &tools.identity)
 }
 
+/// What an LLVM, its clang and its LLD say they were built from.
+struct Stamp {
+    /// The commit `fork`'s gitlink records.
+    revision: String,
+    /// The URL `fork`'s committed `.gitmodules` names for it.
+    repository: String,
+}
+
+/// The [`Stamp`] of the LLVM `fork` names. LLVM's CMake otherwise asks git in
+/// the checkout it builds, and writes that checkout's `origin` into every
+/// binary: an input no key reads.
+fn stamp(fork: &Path) -> Stamp {
+    let name = format!("submodule.{LLVM}.url");
+    let url = git_out(fork, &["config", "--blob", "HEAD:.gitmodules", "--get", &name]);
+    Stamp { revision: gitlink(fork, LLVM), repository: url.trim().to_string() }
+}
+
+/// [`key`], with what it reads beside `fork`'s committed `src/bootstrap`:
+/// `config` names the LLVM's commit ([`stamp`]).
 fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> Key {
     refuse_uncommitted_bootstrap(fork);
     let bootstrap = git_out(fork, &["rev-parse", &format!("HEAD:{BOOTSTRAP}")]);
-    Key::of([recipe, config, &gitlink(fork, LLVM), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
+    Key::of([recipe, config, bootstrap.trim(), tools].join("\n\0\n").as_bytes())
 }
 
 /// Give `command` nothing of this process's environment but [`ENVIRONMENT`].
@@ -205,34 +218,20 @@ fn on_path(name: &str) -> PathBuf {
     fs::canonicalize(&found).unwrap_or_else(|e| panic!("resolve {}: {e}", found.display()))
 }
 
-/// The LLVM `fork` names, made if nobody on this host has made it, and held in
-/// use for as long as the returned value lives. `root` records its key.
-pub fn resolve(root: &Path, rust_dir: &Path, fork: &Path) -> Llvm {
-    choose(root, rust_dir, fork, |fork| build_in_fork(root, fork))
+/// The LLVM `fork` names, in `store`: made if nobody on this host has made it,
+/// under the n2 installed under `root`, and held in use for as long as the
+/// returned value lives.
+pub fn resolve(root: &Path, store: &Path, fork: &Path) -> Llvm {
+    choose(store, fork, |fork| build_in_fork(root, fork))
 }
 
 /// [`resolve`] with the build that makes an LLVM passed in, so a test can stand
 /// in for bootstrap: `build` builds in the fork checkout it is given and returns
 /// the build directory, holding `<host>/llvm` and `<host>/lld`.
-fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Llvm {
+fn choose(store: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Llvm {
     let key = key(fork);
-    let dir = store(rust_dir).join(&key);
-    let using = keystore::made(root, Keyed::Llvm, &store(rust_dir), &key, || defect(&dir), || place(fork, &key, &dir, &build));
-    Llvm { dir, _using: using }
-}
-
-/// [`resolve`], recording nothing for `root`: what a sysroot build reads of the
-/// LLVM its compiler links, whose record is that compiler's
-/// (`compiler::choose`).
-pub fn held(root: &Path, rust_dir: &Path, fork: &Path) -> Llvm {
-    held_with(root, rust_dir, fork, |fork| build_in_fork(root, fork))
-}
-
-/// [`held`] with the build passed in, as [`choose`] takes it.
-fn held_with(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Llvm {
-    let key = key(fork);
-    let dir = store(rust_dir).join(&key);
-    let using = crate::buildlock::keyed_made(root, Keyed::Llvm, &key, || defect(&dir), || place(fork, &key, &dir, &build));
+    let dir = Keyed::Llvm.store(store).join(&key);
+    let using = keystore::made(store, Keyed::Llvm, &key, || defect(&dir), || place(fork, &key, &dir, &build));
     Llvm { dir, _using: using }
 }
 
@@ -437,7 +436,7 @@ fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
     let build_dir = fork.join("build/toyos-llvm");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     let config = build_dir.join("bootstrap.toml");
-    fs::write(&config, config_text(&build_dir, &host, host_tools()))
+    fs::write(&config, config_text(&build_dir, &host, host_tools(), &stamp(fork)))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--config", config, "src/llvm-project/llvm", "src/llvm-project/lld"];
@@ -450,9 +449,13 @@ fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
 }
 
 /// Bootstrap's configuration for an LLVM: the options every compiler build's
-/// `[llvm]` names, no host library, and `tools`' compilers, for the host alone.
-fn config_text(build_dir: &Path, host: &str, tools: &HostTools) -> String {
-    let off: Vec<String> = NO_HOST_LIBRARIES.iter().map(|option| format!("{option} = \"OFF\"")).collect();
+/// `[llvm]` names, no host library, `stamp` as the revision and repository
+/// LLVM's CMake would otherwise ask git for, and `tools`' compilers, for the
+/// host alone.
+fn config_text(build_dir: &Path, host: &str, tools: &HostTools, stamp: &Stamp) -> String {
+    let off = NO_HOST_LIBRARIES.iter().map(|option| format!("{option} = \"OFF\""));
+    let stamped = [("LLVM_FORCE_VC_REVISION", &stamp.revision), ("LLVM_FORCE_VC_REPOSITORY", &stamp.repository)];
+    let defines: Vec<String> = off.chain(stamped.map(|(option, value)| format!("{option} = \"{value}\""))).collect();
     format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -464,7 +467,7 @@ target = ["{host}"]
 
 [llvm]
 {llvm}
-build-config = {{ {off} }}
+build-config = {{ {defines} }}
 
 [target.{host}]
 cc = "{cc}"
@@ -472,7 +475,7 @@ cxx = "{cxx}"
 "#,
         build_dir = build_dir.display(),
         llvm = crate::clang::LLVM_CONFIG,
-        off = off.join(", "),
+        defines = defines.join(", "),
         cc = tools.cc.display(),
         cxx = tools.cxx.display(),
     )
@@ -486,7 +489,8 @@ mod tests {
 
     use super::*;
     use crate::buildlock;
-    use crate::compiler::tests::{estate, git, write, LLVM_B};
+    use crate::compiler::tests::{estate, git, write, LLVM_A, LLVM_B, LLVM_URL};
+    use crate::keystore::tests::{last_used, LONG_AGO};
 
     /// A scratch directory whose read-only LLVMs are made writable again before
     /// it goes.
@@ -577,12 +581,17 @@ mod tests {
     /// `estate`, every fork's LLVM checked out at the one commit its gitlink
     /// records.
     fn estate_built(scratch: &Path) -> (PathBuf, PathBuf, [PathBuf; 3]) {
-        let (primary, rust_dir, forks) = estate(scratch);
+        let (primary, store, forks) = estate(scratch);
         for worktree in &forks {
             pin_llvm(&worktree.join("rust"), "A");
         }
-        pin_llvm(&rust_dir, "A");
-        (primary, rust_dir, forks)
+        pin_llvm(&primary.join("rust"), "A");
+        (primary, store, forks)
+    }
+
+    /// What the fixtures' forks name as their LLVM's revision and repository.
+    fn stamped() -> Stamp {
+        Stamp { revision: LLVM_A.to_string(), repository: LLVM_URL.to_string() }
     }
 
     /// What `f` panicked with; `expect` if it returned.
@@ -598,7 +607,7 @@ mod tests {
     #[test]
     fn two_compilers_of_one_llvm_make_it_once() {
         let scratch = Scratch::new("llvm");
-        let (primary, rust_dir, [same, a, b]) = estate_built(&scratch);
+        let (primary, store, [same, a, b]) = estate_built(&scratch);
         let makes = Cell::new(0);
         let once = |fork: &Path| {
             makes.set(makes.get() + 1);
@@ -606,7 +615,7 @@ mod tests {
             fake_build(fork)
         };
 
-        let la = choose(&a, &rust_dir, &a.join("rust"), once);
+        let la = choose(&store, &a.join("rust"), once);
         assert_eq!(makes.get(), 1);
         assert_eq!(defect(&la.dir), None);
         assert_eq!(fs::read_to_string(la.dir.join("bin/lld")).unwrap(), "the lld");
@@ -615,13 +624,13 @@ mod tests {
         assert!(!la.dir.join("build").exists(), "CMake's tree was kept");
         assert!(!a.join("rust/build/toyos-llvm").exists(), "the build directory outlived the placement");
 
-        let before = snapshot(&store(&rust_dir));
-        let lb = choose(&b, &rust_dir, &b.join("rust"), once);
-        let primary_s = choose(&primary, &rust_dir, &rust_dir, once);
-        let same_s = choose(&same, &rust_dir, &same.join("rust"), once);
+        let before = snapshot(&Keyed::Llvm.store(&store));
+        let lb = choose(&store, &b.join("rust"), once);
+        let primary_s = choose(&store, &primary.join("rust"), once);
+        let same_s = choose(&store, &same.join("rust"), once);
         assert_eq!(makes.get(), 1);
         assert!(lb.dir == la.dir && primary_s.dir == la.dir && same_s.dir == la.dir, "one LLVM commit named two LLVMs");
-        assert_eq!(snapshot(&store(&rust_dir)), before, "an LLVM was written after it was whole");
+        assert_eq!(snapshot(&Keyed::Llvm.store(&store)), before, "an LLVM was written after it was whole");
     }
 
     /// **An LLVM keeps what builds read of the install and nothing else**: the
@@ -632,8 +641,8 @@ mod tests {
     #[test]
     fn an_llvm_keeps_what_builds_read_and_nothing_else() {
         let scratch = Scratch::new("llvm-kept");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
+        let dir = choose(&store, &a.join("rust"), fake_build).dir;
         let apple = host_triple().ends_with("apple-darwin");
         let mut files: Vec<String> = snapshot(&dir)
             .into_iter()
@@ -669,8 +678,8 @@ mod tests {
     #[test]
     fn a_placed_llvm_is_read_only() {
         let scratch = Scratch::new("llvm-read-only");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
+        let dir = choose(&store, &a.join("rust"), fake_build).dir;
         let mut entries = vec![dir];
         while let Some(entry) = entries.pop() {
             let meta = fs::symlink_metadata(&entry).unwrap();
@@ -687,13 +696,13 @@ mod tests {
     #[test]
     fn an_llvm_that_is_not_whole_is_made_again() {
         let scratch = Scratch::new("llvm-whole");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let makes = Cell::new(0);
         let counted = |fork: &Path| {
             makes.set(makes.get() + 1);
             fake_build(fork)
         };
-        let dir = choose(&a, &rust_dir, &a.join("rust"), counted).dir;
+        let dir = choose(&store, &a.join("rust"), counted).dir;
         for (lost, made) in [("bin/lld", 2), ("lib", 3), ("src/libcxxabi", 4)] {
             keystore::writable(&dir);
             let lost = dir.join(lost);
@@ -703,7 +712,7 @@ mod tests {
                 fs::remove_file(&lost).unwrap();
             }
             assert!(defect(&dir).is_some_and(|d| d.contains(&lost.display().to_string())), "{:?}", defect(&dir));
-            let again = choose(&a, &rust_dir, &a.join("rust"), counted);
+            let again = choose(&store, &a.join("rust"), counted);
             assert_eq!((makes.get(), defect(&again.dir)), (made, None));
         }
     }
@@ -715,10 +724,10 @@ mod tests {
     #[test]
     fn the_key_moves_with_the_llvm_and_only_with_it() {
         let scratch = Scratch::new("llvm-key");
-        let (_primary, rust_dir, [same, a, _b]) = estate(&scratch);
+        let (primary, _store, [same, a, _b]) = estate(&scratch);
         let fork = same.join("rust");
         let tools = host_tools();
-        let config = config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools);
+        let config = config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools, &stamp(&fork));
         let base = key(&fork);
         assert_eq!(key_of(&fork, RECIPE, &config, &tools.identity), base);
         let elsewhere = if host_triple() == "x86_64-unknown-linux-gnu" {
@@ -726,7 +735,7 @@ mod tests {
         } else {
             "x86_64-unknown-linux-gnu"
         };
-        let elsewhere = config_text(Path::new(KEYED_BUILD_DIR), elsewhere, tools);
+        let elsewhere = config_text(Path::new(KEYED_BUILD_DIR), elsewhere, tools, &stamp(&fork));
         for (what, other) in [
             ("the recipe", key_of(&fork, "another recipe", &config, &tools.identity)),
             ("the [llvm]", key_of(&fork, RECIPE, &config.replace("X86", "RISCV;X86"), &tools.identity)),
@@ -736,7 +745,7 @@ mod tests {
             assert_ne!(other, base, "{what} did not move the key");
         }
 
-        assert_eq!(key(&fork), key(&rust_dir), "one LLVM commit named two keys");
+        assert_eq!(key(&fork), key(&primary.join("rust")), "one LLVM commit named two keys");
         assert_eq!(key(&fork), key(&a.join("rust")), "a compiler/ edit moved the LLVM key");
         write(&fork.join("compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
         git(&fork, &["add", "-A"]);
@@ -771,7 +780,7 @@ mod tests {
         if host_triple().ends_with("apple-darwin") {
             assert!(lines.iter().any(|l| l.ends_with(".sdk") && Path::new(l).is_dir()), "no SDK: {}", tools.identity);
         }
-        let config = config_text(Path::new(KEYED_BUILD_DIR), "h", tools);
+        let config = config_text(Path::new(KEYED_BUILD_DIR), "h", tools, &stamped());
         let named = format!("[target.h]\ncc = \"{}\"\ncxx = \"{}\"\n", tools.cc.display(), tools.cxx.display());
         assert!(config.contains(&named), "{config}");
     }
@@ -782,7 +791,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn two_sdk_versions_are_two_keys() {
         let scratch = Scratch::new("llvm-sdk");
-        let (_primary, _rust_dir, [same, _a, _b]) = estate(&scratch);
+        let (_primary, _store, [same, _a, _b]) = estate(&scratch);
         let fork = same.join("rust");
         let [older, newer] = ["26.0", "27.0"].map(|version| {
             let tools = tools_with(|question| match question {
@@ -790,7 +799,7 @@ mod tests {
                 "--show-sdk-version" => format!("{version}\n"),
                 other => panic!("xcrun was asked {other}"),
             });
-            key_of(&fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools), &tools.identity)
+            key_of(&fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools, &stamp(&fork)), &tools.identity)
         });
         assert_ne!(older, newer, "two SDK versions at one SDK path named one LLVM");
     }
@@ -799,12 +808,12 @@ mod tests {
     /// `build-config` bootstrap passes to CMake after its own options.
     #[test]
     fn the_llvm_config_turns_every_host_library_off() {
-        let config = config_text(Path::new(KEYED_BUILD_DIR), "h", host_tools());
+        let config = config_text(Path::new(KEYED_BUILD_DIR), "h", host_tools(), &stamped());
         let off = "build-config = { LLVM_ENABLE_ZLIB = \"OFF\", LLVM_ENABLE_ZSTD = \"OFF\", \
                    LLVM_ENABLE_LIBXML2 = \"OFF\", CLANG_ENABLE_LIBXML2 = \"OFF\", LLVM_ENABLE_LIBEDIT = \"OFF\", \
                    LLVM_ENABLE_LIBPFM = \"OFF\", LLVM_ENABLE_FFI = \"OFF\", LLVM_ENABLE_CURL = \"OFF\", \
                    LLVM_ENABLE_HTTPLIB = \"OFF\", LLVM_ENABLE_ICU = \"OFF\", LLVM_ENABLE_ICONV = \"OFF\", \
-                   LLVM_ENABLE_Z3_SOLVER = \"OFF\" }\n";
+                   LLVM_ENABLE_Z3_SOLVER = \"OFF\", LLVM_FORCE_VC_REVISION = ";
         assert!(config.contains(&format!("\n{off}")), "{config}");
     }
 
@@ -814,7 +823,7 @@ mod tests {
     #[test]
     fn a_checkout_behind_its_gitlink_is_built_at_the_gitlink() {
         let scratch = Scratch::new("llvm-behind");
-        let (_primary, rust_dir, [same, a, _b]) = estate_built(&scratch);
+        let (_primary, store, [same, a, _b]) = estate_built(&scratch);
         let (fork, at_gitlink) = (a.join("rust"), same.join("rust"));
         for fork in [&fork, &at_gitlink] {
             pin_llvm(fork, "B");
@@ -825,8 +834,8 @@ mod tests {
             check_out_llvm(fork, "B");
             fake_build(fork)
         };
-        let llvm = choose(&a, &rust_dir, &fork, updating);
-        assert_eq!((llvm.dir.clone(), defect(&llvm.dir)), (store(&rust_dir).join(key(&at_gitlink)), None));
+        let llvm = choose(&store, &fork, updating);
+        assert_eq!((llvm.dir.clone(), defect(&llvm.dir)), (Keyed::Llvm.store(&store).join(key(&at_gitlink)), None));
     }
 
     const FORK: &str = "TOYOS_LLVM_TEST_FORK";
@@ -858,7 +867,7 @@ mod tests {
     fn the_caller_s_environment_reaches_neither_the_build_nor_the_key() {
         use std::os::unix::fs::PermissionsExt;
         let scratch = Scratch::new("llvm-environment");
-        let (_primary, _rust_dir, [same, _a, _b]) = estate(&scratch);
+        let (_primary, _store, [same, _a, _b]) = estate(&scratch);
         let fork = same.join("rust");
         write(&fork.join("library/Cargo.lock"), "# lock\n");
         write(&fork.join("x"), "#!/bin/sh\nenv > build/toyos-llvm/environment\n");
@@ -899,7 +908,7 @@ mod tests {
     #[test]
     fn a_staged_llvm_gitlink_is_refused() {
         let scratch = Scratch::new("llvm-staged");
-        let (_primary, _rust_dir, [same, _a, _b]) = estate(&scratch);
+        let (_primary, _store, [same, _a, _b]) = estate(&scratch);
         let fork = same.join("rust");
         git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_B},{LLVM}")]);
         let said = refusal("a staged gitlink named an LLVM", || {
@@ -913,13 +922,13 @@ mod tests {
     #[test]
     fn an_uncommitted_bootstrap_names_no_llvm() {
         let scratch = Scratch::new("llvm-dirty-key");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
-        drop(choose(&a, &rust_dir, &fork, fake_build));
+        drop(choose(&store, &fork, fake_build));
         write(&fork.join("src/bootstrap/src/core/build_steps/llvm.rs"), "cfg.define(\"LLVM_ENABLE_ZLIB\", \"ON\");\n");
         let never = |_: &Path| -> PathBuf { panic!("an LLVM was built from a bootstrap no commit holds") };
         let said = refusal("an uncommitted bootstrap edit resolved to the stored LLVM", || {
-            choose(&a, &rust_dir, &fork, never);
+            choose(&store, &fork, never);
         });
         assert!(said.contains("src/bootstrap holds changes no commit does"), "{said}");
         let said = refusal("an uncommitted bootstrap edit named an LLVM", || {
@@ -936,14 +945,14 @@ mod tests {
     #[test]
     fn what_the_key_does_not_name_is_never_stored() {
         let scratch = Scratch::new("llvm-dirt");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
         let step = fork.join("src/bootstrap/src/core/build_steps/llvm.rs");
         let never = |_: &Path| -> PathBuf { panic!("an LLVM was built from a bootstrap no commit holds") };
 
         write(&step, "cfg.define(\"LLVM_ENABLE_ZLIB\", \"OFF\");\n");
         let said = refusal("an uncommitted bootstrap edit was built", || {
-            choose(&a, &rust_dir, &fork, never);
+            choose(&store, &fork, never);
         });
         assert!(said.contains("src/bootstrap holds changes no commit does"), "{said}");
         git(&fork, &["add", "-A"]);
@@ -954,7 +963,7 @@ mod tests {
             fake_build(fork)
         };
         let said = refusal("an LLVM built while its bootstrap was edited was stored", || {
-            choose(&a, &rust_dir, &fork, dirtying);
+            choose(&store, &fork, dirtying);
         });
         assert!(said.contains("src/bootstrap holds changes no commit does"), "{said}");
         git(&fork, &["checkout", "-q", "--", "src/bootstrap"]);
@@ -965,7 +974,7 @@ mod tests {
         };
         pin_llvm(&fork, "B");
         let said = refusal("an LLVM checkout other than the gitlink's was stored", || {
-            choose(&a, &rust_dir, &fork, lagging);
+            choose(&store, &fork, lagging);
         });
         assert!(said.contains("is checked out at") && said.contains("submodule update src/llvm-project"), "{said}");
         check_out_llvm(&fork, "B");
@@ -976,11 +985,11 @@ mod tests {
             fake_build(fork)
         };
         let said = refusal("an LLVM whose sources moved while it was built was stored", || {
-            choose(&a, &rust_dir, &fork, moving);
+            choose(&store, &fork, moving);
         });
         assert!(said.contains("moved while LLVM"), "{said}");
 
-        let stored: Vec<_> = fs::read_dir(store(&rust_dir)).unwrap().flatten().map(|e| e.file_name()).collect();
+        let stored: Vec<_> = fs::read_dir(Keyed::Llvm.store(&store)).unwrap().flatten().map(|e| e.file_name()).collect();
         assert!(stored.iter().all(|n| n.to_string_lossy().ends_with(".partial")), "stored: {stored:?}");
     }
 
@@ -990,7 +999,7 @@ mod tests {
     #[test]
     fn the_runtimes_sources_are_the_commit_s() {
         let scratch = Scratch::new("llvm-runtimes");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
         let checkout = fork.join(LLVM);
         write(&checkout.join(".git/info/exclude"), "*.pyc\n");
@@ -1000,7 +1009,7 @@ mod tests {
             fake_build(fork)
         };
         let said = refusal("an edit to the runtimes' sources was stored", || {
-            choose(&a, &rust_dir, &fork, editing);
+            choose(&store, &fork, editing);
         });
         assert!(said.contains("holds changes no commit does"), "{said}");
         git(&checkout, &["checkout", "-q", "--", "libcxx"]);
@@ -1009,27 +1018,27 @@ mod tests {
             write(&fork.join(LLVM).join("libcxx/utils/cache.pyc"), "what no commit holds");
             fake_build(fork)
         };
-        let dir = choose(&a, &rust_dir, &fork, ignored).dir;
+        let dir = choose(&store, &fork, ignored).dir;
         assert_eq!(fs::read_to_string(dir.join("src/libcxx/CMakeLists.txt")).unwrap(), "the libcxx of A");
         assert!(checkout.join("libcxx/utils/cache.pyc").is_file());
         assert!(!dir.join("src/libcxx/utils").exists(), "a file the checkout ignores was stored");
     }
 
     const WORKTREE: &str = "TOYOS_LLVM_TEST_WORKTREE";
-    const RUST_DIR: &str = "TOYOS_LLVM_TEST_RUST_DIR";
+    const STORE: &str = "TOYOS_LLVM_TEST_STORE";
     const ROLE: &str = "TOYOS_LLVM_TEST_ROLE";
 
     /// The competing process for the tests below: the LLVM the worktree in
     /// [`WORKTREE`] names, held in use until released — or, as `make`, held
-    /// while it is being made.
+    /// while it is being made; or a sweep of the store stopped halfway.
     #[test]
     #[ignore = "the competing process for the tests below; never runs on its own"]
     fn child_role() {
         let worktree = PathBuf::from(std::env::var(WORKTREE).unwrap_or_else(|_| panic!("child_role ran without {WORKTREE}; it is not a test")));
-        let rust_dir = PathBuf::from(std::env::var(RUST_DIR).unwrap());
+        let store = PathBuf::from(std::env::var(STORE).unwrap());
         match std::env::var(ROLE).unwrap().as_str() {
             "use" => {
-                let _held = choose(&worktree, &rust_dir, &worktree.join("rust"), fake_build);
+                let _held = choose(&store, &worktree.join("rust"), fake_build);
                 buildlock::tests::hold_until_released();
             }
             "make" => {
@@ -1037,14 +1046,23 @@ mod tests {
                     buildlock::tests::hold_until_released();
                     fake_build(fork)
                 };
-                choose(&worktree, &rust_dir, &worktree.join("rust"), held);
+                choose(&store, &worktree.join("rust"), held);
+            }
+            "stop-a-sweep" => {
+                let halfway = |path: &Path| {
+                    keystore::writable(path);
+                    fs::remove_file(path.join("lib/libLLVMCore.a")).unwrap();
+                    panic!("stopped");
+                };
+                let stopped = std::panic::catch_unwind(|| keystore::sweep_by(&store, Keyed::Llvm, halfway));
+                assert!(stopped.is_err(), "the stand-in removal was never asked");
             }
             other => panic!("unknown child role {other}"),
         }
     }
 
-    fn elsewhere(role: &str, worktree: &Path, rust_dir: &Path) -> buildlock::tests::Elsewhere {
-        let env = [(ROLE, std::ffi::OsStr::new(role)), (WORKTREE, worktree.as_os_str()), (RUST_DIR, rust_dir.as_os_str())];
+    fn elsewhere(role: &str, worktree: &Path, store: &Path) -> buildlock::tests::Elsewhere {
+        let env = [(ROLE, std::ffi::OsStr::new(role)), (WORKTREE, worktree.as_os_str()), (STORE, store.as_os_str())];
         buildlock::tests::Elsewhere::hold("llvm::tests::child_role", &env)
     }
 
@@ -1052,37 +1070,40 @@ mod tests {
     #[test]
     fn an_llvm_being_made_elsewhere_is_not_made_again() {
         let scratch = Scratch::new("llvm-made-elsewhere");
-        let (primary, rust_dir, [_same, _a, b]) = estate_built(&scratch);
-        let maker = elsewhere("make", &b, &rust_dir);
+        let (_primary, store, [_same, _a, b]) = estate_built(&scratch);
+        let maker = elsewhere("make", &b, &store);
         let made = key(&b.join("rust"));
-        assert!(buildlock::keyed_idle(&primary, Keyed::Llvm, &made).is_none(), "a sweep could take an LLVM being made");
+        assert!(buildlock::keyed_idle(&store, Keyed::Llvm, &made).is_none(), "a sweep could take an LLVM being made");
         maker.release();
         let never = |_: &Path| -> PathBuf { panic!("an LLVM another process made was made here too") };
-        assert_eq!(defect(&choose(&b, &rust_dir, &b.join("rust"), never).dir), None);
+        assert_eq!(defect(&choose(&store, &b.join("rust"), never).dir), None);
     }
 
-    /// **A sweep takes an LLVM only once no worktree names it and nobody uses
-    /// it**: `a` moves to another LLVM while a process of its own still uses
-    /// the first, and then `b` names the first until it moves too.
+    /// **A sweep takes an LLVM only once nothing has used it for the store's
+    /// keep time and nobody uses it**: `a` moves to another LLVM while a
+    /// process of its own still uses the first, and a use of the first by `b`
+    /// dates it again.
     #[test]
-    fn an_llvm_is_swept_once_nobody_names_or_uses_it() {
+    fn an_llvm_is_swept_once_nothing_used_it_for_the_keep_time() {
         let scratch = Scratch::new("llvm-sweep");
-        let (primary, rust_dir, [_same, a, b]) = estate_built(&scratch);
-        let user = elsewhere("use", &a, &rust_dir);
-        let first = store(&rust_dir).join(key(&a.join("rust")));
+        let (_primary, store, [_same, a, b]) = estate_built(&scratch);
+        let user = elsewhere("use", &a, &store);
+        let unused = key(&a.join("rust"));
+        let first = Keyed::Llvm.store(&store).join(&unused);
+        last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
 
         let fork = a.join("rust");
         pin_llvm(&fork, "B");
-        let second = choose(&a, &rust_dir, &fork, fake_build);
+        let second = choose(&store, &fork, fake_build);
         assert_ne!(second.dir, first);
         assert!(first.is_dir(), "placing an LLVM swept one still in use");
 
-        keystore::record(&b, Keyed::Llvm, &key(&b.join("rust")));
         user.release();
-        let swept = |root: &Path| keystore::sweep(root, Keyed::Llvm, &store(&rust_dir));
-        assert_eq!(swept(&primary), Vec::<PathBuf>::new(), "the sweep took an LLVM a worktree names");
-        keystore::record(&b, Keyed::Llvm, &key(&fork));
-        assert_eq!(swept(&primary), [first], "the sweep kept an LLVM nobody names, or took a named one");
+        elsewhere("use", &b, &store).release();
+        let swept = || keystore::sweep(&store, Keyed::Llvm);
+        assert_eq!(swept(), Vec::<PathBuf>::new(), "the sweep took an LLVM used since");
+        last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
+        assert_eq!(swept(), [first], "the sweep kept an LLVM nothing had used for the keep time");
         assert!(second.dir.is_dir());
     }
 
@@ -1092,43 +1113,40 @@ mod tests {
     #[test]
     fn a_stopped_sweep_leaves_no_llvm_that_passes_for_whole() {
         let scratch = Scratch::new("llvm-sweep-stopped");
-        let (primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
-        keystore::forget(&a, Keyed::Llvm);
-        let halfway = |path: &Path| {
-            keystore::writable(path);
-            fs::remove_file(path.join("lib/libLLVMCore.a")).unwrap();
-            panic!("stopped");
-        };
-        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            keystore::sweep_by(&primary, Keyed::Llvm, &store(&rust_dir), halfway)
-        }));
-        assert!(stopped.is_err(), "the stand-in removal was never asked");
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
+        elsewhere("use", &a, &store).release();
+        let unused = key(&a.join("rust"));
+        let dir = Keyed::Llvm.store(&store).join(&unused);
+        last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
+        // In a process of its own: this one never holds the key's lock.
+        let mut sweep = buildlock::tests::rerun("llvm::tests::child_role");
+        let stopped = sweep.env(ROLE, "stop-a-sweep").env(WORKTREE, &a).env(STORE, &store).output().unwrap();
+        assert!(stopped.status.success(), "{}{}", String::from_utf8_lossy(&stopped.stdout), String::from_utf8_lossy(&stopped.stderr));
         assert!(defect(&dir).is_some(), "a stopped sweep left {} passing for whole", dir.display());
-        assert_eq!(keystore::sweep(&primary, Keyed::Llvm, &store(&rust_dir)), [dir.with_extension("swept")]);
+        let left: Vec<_> = fs::read_dir(Keyed::Llvm.store(&store)).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(keystore::sweep(&store, Keyed::Llvm), [dir.with_extension("swept")], "the stopped sweep left {left:?}");
     }
 
-    /// **An LLVM a worktree resolved stays once nothing uses it**: its record,
-    /// not its use, is what names it.
+    /// **What an LLVM says it was built from is the commit and the URL its
+    /// fork's commit names**: both are in the configuration its key reads and
+    /// its build is given, so git in the checkout that builds it decides
+    /// neither. Another URL is another LLVM, once a commit holds it.
     #[test]
-    fn a_resolved_llvm_is_named_by_its_worktree() {
-        let scratch = Scratch::new("llvm-named");
-        let (primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        elsewhere("use", &a, &rust_dir).release();
-        let dir = store(&rust_dir).join(key(&a.join("rust")));
-        assert_eq!(keystore::sweep(&primary, Keyed::Llvm, &store(&rust_dir)), Vec::<PathBuf>::new());
-        assert_eq!(defect(&dir), None, "the sweep took an LLVM the worktree that resolved it names");
-    }
+    fn an_llvm_is_stamped_with_what_its_fork_s_commit_names() {
+        let scratch = Scratch::new("llvm-stamp");
+        let (_primary, _store, [same, _a, _b]) = estate(&scratch);
+        let fork = same.join("rust");
+        let config = config_text(Path::new(KEYED_BUILD_DIR), "h", host_tools(), &stamp(&fork));
+        let named = format!("LLVM_FORCE_VC_REVISION = \"{LLVM_A}\", LLVM_FORCE_VC_REPOSITORY = \"{LLVM_URL}\" }}\n");
+        assert!(config.contains(&named), "{config}");
 
-    /// **An LLVM held for a sysroot build is not recorded**: the record follows
-    /// the compiler's, so a worktree whose compiler is the primary's names none.
-    #[test]
-    fn a_held_llvm_is_not_recorded() {
-        let scratch = Scratch::new("llvm-held");
-        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        let llvm = held_with(&a, &rust_dir, &a.join("rust"), fake_build);
-        assert_eq!(defect(&llvm.dir), None);
-        assert_eq!(keystore::recorded(&a, Keyed::Llvm), None, "a held LLVM was recorded");
+        let before = key(&fork);
+        let moved = "https://llvm.invalid/another.git";
+        write(&fork.join(".gitmodules"), &format!("[submodule \"{LLVM}\"]\n\tpath = {LLVM}\n\turl = {moved}\n"));
+        assert_eq!(key(&fork), before, "a URL no commit holds moved the key");
+        git(&fork, &["commit", "-qam", "another URL"]);
+        assert_eq!(stamp(&fork).repository, moved);
+        assert_ne!(key(&fork), before, "another URL kept the key");
     }
 
     /// **A build directory whose compiler links the host's LLVM keeps none of

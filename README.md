@@ -252,7 +252,9 @@ cargo run -- --build-only  # build everything, boot nothing
 cargo test                 # boot the OS and run the integration suite
 ```
 
-The first run initializes submodules and bootstraps the custom Rust toolchain.
+The first run initializes submodules and bootstraps the custom Rust toolchain,
+into `~/.cache/toyos` (`TOYOS_STORE` names another place), where every checkout
+on the machine finds it.
 Later runs rebuild only what changed; a `std`-only change is a few seconds.
 
 ## Running it on real hardware
