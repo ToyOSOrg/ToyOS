@@ -35,7 +35,9 @@
 //! firmware's own map and by its MTRRs: the direct map's leaves select the
 //! PAT's write-back entry, under which the range registers decide (Intel SDM
 //! Vol. 3A, Table 12-7), so a register window the firmware reserved is read as
-//! the firmware typed it.
+//! the firmware typed it. A register at an address the firmware's map does
+//! not list is read the same way, only where those registers type it
+//! uncacheable.
 //!
 //! **The firmware's Global Lock is taken and given back here** (ACPI 6.5
 //! §5.2.10.1), by compare-and-exchange on the FACS's lock word; a release the
@@ -658,6 +660,16 @@ fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunc
     })
 }
 
+/// Whether a read of `len` bytes at `at` through the direct map is uncached:
+/// its leaves select the PAT's write-back entry, under which the range
+/// registers decide (Intel SDM Vol. 3A, Table 12-7), so it is where they type
+/// the range uncacheable, read here and not assumed. Below 1 MiB the fixed
+/// range registers decide, which this kernel does not read: not there.
+fn uncached(at: u64, len: u64) -> bool {
+    use super::mtrr::{Effective, MemoryType};
+    at >= 0x10_0000 && matches!(super::mtrr::range_type(at, len), Effective::Known(MemoryType::Uncacheable) | Effective::MtrrsDisabled)
+}
+
 /// One memory access, decided and made; the type firmware's map gives its
 /// first byte goes back with either. The records of what devices decode are
 /// read under their own locks and let go before the access: a window mapped
@@ -674,6 +686,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
                 ecam: hardware.ecam,
                 devices: driven.iter().copied().chain(bars),
                 facs: hardware.lock.facs().map(|facs| facs.span),
+                uncached,
             };
             memory.decide(at, width, write.is_some())
         })

@@ -86,6 +86,24 @@ costs is that the holder reads whatever else a firmware keeps in
 runtime-services data, which nothing here has listed: its variable store's
 working copy and its services' own state are candidates, unread.
 
+**The holder reads a register at an address the firmware's map does not
+list** (the orchestrator's ruling, not the owner's). With its tables readable,
+the T14's load was refused one table of 14 for one byte read at an address
+the map lists nowhere, below 4 GiB, outside the ECAM window, in no page the
+kernel drives and no function's BAR: by its place, the chipset's own register
+space. Such a read passes now where the address is inside the direct map and
+the processor's range registers type it uncacheable, which the kernel reads
+at each such access (`acpi_mode::uncached`) and does not assume; a write
+stays refused. The firmware's map lists every range of RAM, and a range a
+truncated map left out is refused all the same, since no firmware types RAM
+uncacheable. Two things are assumed and not checked. **The fixed range
+registers are not read**, so an unlisted address below 1 MiB is refused
+whole, a register there included. **And a read of a register can have an
+effect in the device** — a status bit cleared, a FIFO advanced — that the
+kernel cannot know: it bounds where the holder reads and not what reading
+does there. On the T14 one such read is measured, at load; what the
+initialisation and query methods read there is unread.
+
 **Exit**: an access is passed only inside a region the machine's loaded tables
 define, checked by something other than the holder; or the owner rules the
 address-only bound is the one ToyOS keeps.

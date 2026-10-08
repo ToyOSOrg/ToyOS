@@ -12,7 +12,8 @@
 //!
 //! **What the firmware's AML addresses outside those blocks the holder reaches
 //! one access at a time, through the kernel** ([`Access`]): firmware-owned
-//! memory and a port both ways, the memory its tables are in to read, a function's configuration space to read. The
+//! memory and a port both ways, the memory its tables are in and a register
+//! at an address firmware lists nowhere to read, a function's configuration space to read. The
 //! kernel decides each
 //! by what the address is and answers a refusal by name ([`Refused`]); nothing
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
@@ -160,8 +161,9 @@ pub enum Refused {
     /// A write to memory a firmware keeps its tables in: ACPI reclaim, and
     /// runtime-services data.
     TableWrite = 2,
-    /// Memory of a type the kernel passes no access to, or that firmware's map
-    /// does not list; [`Access::memory_type`] says which.
+    /// Memory of a type the kernel passes no access to, or a write at an
+    /// address firmware's map does not list; [`Access::memory_type`] says
+    /// which.
     MemoryType = 3,
     /// Past the end of what the kernel maps.
     Unmapped = 4,
@@ -188,6 +190,9 @@ pub enum Refused {
     /// A write to configuration space, by its address or through the ECAM
     /// window: the kernel makes none for the holder.
     ConfigWrite = 14,
+    /// A read at an address firmware's map does not list, which the
+    /// processor's range registers do not type uncacheable: no register.
+    UnlistedCached = 15,
 }
 
 impl Refused {
@@ -207,6 +212,7 @@ impl Refused {
             12 => Self::ConfigUnreachable,
             13 => Self::ConfigSpan,
             14 => Self::ConfigWrite,
+            15 => Self::UnlistedCached,
             _ => return None,
         })
     }

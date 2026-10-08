@@ -43,11 +43,19 @@ fn devices(decoded: &'static [(u64, u64)]) -> Devices {
 
 /// A machine of one map and nothing else: no ECAM window, no FACS.
 fn bare(map: &'static [MemoryMapEntry], decoded: &'static [(u64, u64)]) -> Mem {
-    Memory { map, mapped_end: 4 * GIB, ecam: None, devices: devices(decoded), facs: None }
+    Memory { map, mapped_end: 4 * GIB, ecam: None, devices: devices(decoded), facs: None, uncached: registers }
+}
+
+/// What the range registers type uncacheable on these machines: the hole
+/// under 4 GiB from [`REGISTERS`] up, where a chipset keeps its registers.
+const REGISTERS: u64 = 0xfe00_0000;
+
+fn registers(at: u64, len: u64) -> bool {
+    at >= REGISTERS && at + len <= 4 * GIB
 }
 
 fn q35() -> Mem {
-    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: Some(Q35_ECAM), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS) }
+    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: Some(Q35_ECAM), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS), uncached: registers }
 }
 
 /// A map shaped as a laptop's is, at addresses of this test's own: RAM, a
@@ -68,7 +76,7 @@ const LAPTOP: [MemoryMapEntry; 9] = [
 
 fn laptop() -> Mem {
     let ecam = Ecam { base: 0xc000_0000, segment: 0, first_bus: 0, last_bus: 0xFF };
-    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: Some(ecam), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)) }
+    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: Some(ecam), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)), uncached: registers }
 }
 
 fn passes(memory: &Mem, at: u64, width: Width, write: bool) -> bool {
@@ -157,6 +165,45 @@ fn runtime_services_data_is_read_as_the_tables_memory_is_and_never_written() {
     assert!(passes(&decoding, 0x7495_1000, Width::Byte, false));
 }
 
+/// A chipset's registers at an address the firmware's map lists nowhere, as
+/// one real machine's AML reads them while it loads: read, in each width,
+/// where the kernel maps the address and the range registers type it
+/// uncacheable, and never written. What the kernel drives or a function
+/// decodes there is a device's still, and the ECAM window a configuration
+/// access.
+#[test]
+fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
+    let laptop = laptop();
+    const AT: u64 = 0xfedc_7000;
+    assert_eq!(type_word(&LAPTOP, AT), toyos_abi::acpi::UNLISTED);
+    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+        assert!(passes(&laptop, AT + 0x110, width, false), "{width:?}");
+        assert_eq!(refused(&laptop, AT + 0x110, width, true), Refused::MemoryType, "{width:?}");
+    }
+    // The last byte the range registers type so, and the first they do not.
+    assert!(passes(&laptop, REGISTERS, Width::Byte, false));
+    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Byte, false), Refused::UnlistedCached);
+    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Word, false), Refused::UnlistedCached, "a read that begins outside it");
+    assert!(passes(&laptop, 4 * GIB - 9, Width::QWord, false));
+    // Past what the kernel maps there is nothing to read it through.
+    assert_eq!(refused(&laptop, 4 * GIB - 4, Width::QWord, false), Refused::Unmapped);
+    let low = Memory { mapped_end: AT + 0x110, ..bare(&LAPTOP, &[]) };
+    assert_eq!(refused(&low, AT + 0x110, Width::Byte, false), Refused::Unmapped);
+    assert!(passes(&low, AT + 0x10f, Width::Byte, false));
+    // A page the kernel knows a device decodes in.
+    let decoding = bare(&LAPTOP, &[(AT, AT + 0x20)]);
+    assert_eq!(refused(&decoding, AT + 0x110, Width::Byte, false), Refused::DeviceMemory);
+    assert_eq!(refused(&q35(), 0xfee0_0000, Width::DWord, false), Refused::DeviceMemory, "the local APIC");
+    // Listed memory is decided by its type, whatever the range registers say of it.
+    const TYPED: [MemoryMapEntry; 3] = [e(7, REGISTERS, REGISTERS + 0x1000), e(11, REGISTERS + 0x1000, REGISTERS + 0x2000), e(0, REGISTERS + 0x2000, REGISTERS + 0x3000)];
+    let typed = bare(&TYPED, &[]);
+    assert_eq!(refused(&typed, REGISTERS, Width::Byte, false), Refused::UsableMemory);
+    assert_eq!(refused(&typed, REGISTERS + 0x1000, Width::Byte, false), Refused::MemoryType);
+    assert!(passes(&typed, REGISTERS + 0x2000, Width::Byte, true));
+    // A read across listed memory and a hole is two things.
+    assert_eq!(refused(&typed, REGISTERS + 0x3000 - 1, Width::Word, false), Refused::Straddles);
+}
+
 /// Runtime-services code is the firmware's to execute and nobody's to read
 /// through this claim: refused both ways, with its type.
 #[test]
@@ -175,15 +222,15 @@ fn runtime_services_code_is_refused_both_ways() {
 #[test]
 fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
     let laptop = laptop();
-    for write in [false, true] {
-        // A hole the map does not list.
-        assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, write), Refused::MemoryType);
-    }
+    // A hole the map does not list, which no register is in: its write is
+    // refused by the map, and its read by the range registers.
+    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, true), Refused::MemoryType);
+    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, false), Refused::UnlistedCached);
     assert_eq!(type_word(&LAPTOP, 0x8000_0000), toyos_abi::acpi::UNLISTED);
     // Every type but the four the policy names, as the only range of a map.
     for ty in (0..=0x20u32).chain([0x7000_0000, 0x8000_0000, u32::MAX]) {
         let map = [e(ty, 0x1000, 0x2000)];
-        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None };
+        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers };
         let read = memory.clone().decide(0x1000, Width::Byte, false);
         let write = memory.decide(0x1000, Width::Byte, true);
         let through = |verdict| matches!(verdict, MemoryVerdict::Through(_));

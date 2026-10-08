@@ -23,7 +23,16 @@
 //! all the same; the kernel's own reader reads them there. No memory the
 //! kernel hands out carries the type (`toyos_bootmap::is_usable_type`). What
 //! the holder reads there beside the tables is whatever else that firmware
-//! keeps in it. Runtime-services code is refused both ways. Inside that, every
+//! keeps in it. Runtime-services code is refused both ways.
+//!
+//! **An address the map does not list is read where it is a register and no
+//! memory, and never written.** A chipset keeps registers at addresses its
+//! firmware lists nowhere, and a machine's AML reads them as it loads. Such a
+//! read passes where the kernel maps the address and the processor's range
+//! registers type it uncacheable ([`Memory::uncached`]): that is what makes a
+//! read of a register one read of it, and it is also what no RAM is, so a
+//! range of RAM a truncated map left out is refused by it. The read may have
+//! an effect in the device that nothing here knows of. Inside that, every
 //! page a device the kernel knows of decodes in is refused, whatever firmware
 //! types it and whoever drives the device, and an address in the ECAM window
 //! is a configuration access and is decided as one.
@@ -96,6 +105,9 @@ pub struct Memory<'a, D> {
     pub devices: D,
     /// The FACS, as `(start, end)`.
     pub facs: Option<(u64, u64)>,
+    /// Whether the processor reads `len` bytes at an address uncached,
+    /// whatever maps them: asked only of an address the map does not list.
+    pub uncached: fn(u64, u64) -> bool,
 }
 
 /// A memory access the policy passed.
@@ -179,10 +191,14 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
             Some(ty) if toyos_bootmap::is_usable_type(ty) => return No(Refused::UsableMemory),
             Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
             Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
+            None if !write => {}
             Some(_) | None => return No(Refused::MemoryType),
         }
         if last >= self.mapped_end {
             return No(Refused::Unmapped);
+        }
+        if ty.is_none() && !(self.uncached)(at, width.bytes()) {
+            return No(Refused::UnlistedCached);
         }
         if write && self.facs.is_some_and(|facs| overlaps(at, last, facs)) {
             return No(Refused::FacsWrite);

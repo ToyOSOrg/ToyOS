@@ -87,10 +87,12 @@ fn space_name(space: Space) -> &'static str {
     }
 }
 
+/// What memory of a UEFI type is called: an address firmware's map does not
+/// list has no type, and a name of its own.
 fn type_name(memory_type: u8) -> String {
     match memory_type {
-        UNLISTED => "no type, being unlisted".into(),
-        listed => format!("type {listed}"),
+        UNLISTED => "unlisted firmware memory".into(),
+        listed => format!("memory of type {listed}"),
     }
 }
 
@@ -98,7 +100,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Kernel { space: Space::SystemMemory, refused, memory_type } => {
-                write!(f, "a SystemMemory read the kernel refused {refused:?}, in memory of {}", type_name(*memory_type))
+                write!(f, "a SystemMemory read the kernel refused {refused:?}, in {}", type_name(*memory_type))
             }
             Self::Kernel { space, refused, .. } => write!(f, "a {} read the kernel refused {refused:?}", space_name(*space)),
             Self::Stopping => f.write_str("the machine is stopping, and the kernel reads nothing more for this server"),
@@ -135,7 +137,7 @@ impl Pages {
         if types.is_empty() {
             return "none".into();
         }
-        types.iter().map(|(&ty, pages)| format!("{pages} of {}", type_name(ty))).collect::<Vec<_>>().join(", ")
+        types.iter().map(|(&ty, pages)| format!("{pages} of {}", type_name(ty).trim_start_matches("memory of "))).collect::<Vec<_>>().join(", ")
     }
 }
 
@@ -421,6 +423,15 @@ pub mod tests {
         assert_eq!(host.reads, [3, 1, 1]);
         assert_eq!(host.pages.by_type(), "1 of type 0, 1 of type 10", "two reads of one page are one page");
         assert!(host.refused.is_empty());
+    }
+
+    #[test]
+    fn a_page_the_firmware_lists_nowhere_is_counted_under_a_name_of_its_own() {
+        let mut pages = Pages::default();
+        pages.read(0xfe00_0110, UNLISTED);
+        pages.read(0xfe00_0ff0, UNLISTED);
+        pages.read(NVS, 10);
+        assert_eq!(pages.by_type(), "1 of type 10, 1 of unlisted firmware memory");
     }
 
     #[test]

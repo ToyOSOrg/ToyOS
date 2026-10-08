@@ -397,7 +397,7 @@ mod tests {
         let unlisted = Refusal::Kernel { space: toyos_abi::acpi::Space::SystemMemory, refused: toyos_abi::acpi::Refused::MemoryType, memory_type: toyos_abi::acpi::UNLISTED };
         assert_eq!(
             unread(&TableError::Unmapped { at: 0xdead_0000, len: 36 }, |at| (at == 0xdead_0000).then_some(unlisted)),
-            "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of no type, being unlisted"
+            "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in unlisted firmware memory"
         );
     }
 
