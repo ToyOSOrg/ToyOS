@@ -123,4 +123,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo run -- --build-only
       # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
-      - run: cargo run -- --ci host
+      # The driver ends a cargo that goes silent and names it (src/ci.rs's
+      # `heard`); this is for a step that hangs while it talks, and is the
+      # limit `host` above runs under.
+      - timeout-minutes: 90
+        run: cargo run -- --ci host

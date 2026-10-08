@@ -17,8 +17,11 @@
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 use crate::arch::{Accel, Arch};
 use crate::cicache;
@@ -146,13 +149,9 @@ fn summary(text: &str) {
     }
 }
 
-/// `cargo <args>` in `dir`, its output passed straight through.
+/// `cargo <args>` in `dir`, as [`cargo_logged`] runs it, judged by its exit.
 fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let status = Command::new("cargo")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .map_err(|e| format!("cargo: {e}"))?;
+    let (status, _) = cargo_logged(dir, args)?;
     let line = format!("cargo {}", args.join(" "));
     if status.success() {
         Ok(line)
@@ -161,28 +160,82 @@ fn cargo(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// `cargo <args>` in `dir`, its output passed through and also kept, both
-/// streams in the order they were written: a verdict read off the log needs the
-/// whole of it.
-fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
+/// How long a step's cargo may say nothing: a build prints a line as each
+/// crate starts, libtest one as each test ends, and the guest harness ends a
+/// silent guest long before this. A hang ceiling and no measure of a step.
+const QUIET: Duration = Duration::from_secs(15 * 60);
+
+/// How long the processes of a killed group may take to let go of its output.
+const GONE: Duration = Duration::from_secs(10);
+
+/// `cargo <args>` in `dir`, as [`heard`] runs it, never silent past [`QUIET`].
+fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(ExitStatus, String), String> {
+    let mut cargo = Command::new("cargo");
+    cargo.args(args).current_dir(dir);
+    heard(cargo, QUIET).map_err(|why| format!("cargo {}: {why}", args.join(" ")))
+}
+
+/// Run `cmd`, its output passed through and also kept, both streams in the
+/// order they were written: a verdict read off the log needs the whole of it.
+///
+/// **A command that says nothing for `quiet` is hung, and is killed with all
+/// it spawned**: it leads a process group of its own, because the process that
+/// hangs is a test binary cargo started, and killing cargo alone would leave it
+/// running. The refusal carries the last line said, which under libtest names
+/// the test: `test <name> has been running for over 60 seconds`. The price of
+/// the group is that a terminal's interrupt reaches the driver and not the
+/// command, which then ends at its next write to a pipe nobody reads.
+fn heard(mut cmd: Command, quiet: Duration) -> Result<(ExitStatus, String), String> {
     let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
-    let mut child = Command::new("cargo")
-        .args(args)
-        .current_dir(dir)
-        .stdout(writer.try_clone().map_err(|e| format!("pipe: {e}"))?)
-        .stderr(writer)
-        .spawn()
-        .map_err(|e| format!("cargo: {e}"))?;
+    cmd.stdout(writer.try_clone().map_err(|e| format!("pipe: {e}"))?).stderr(writer).process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    // The writers it holds: the output ends when the last process holding one does.
+    drop(cmd);
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).split(b'\n') {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
     let mut log = String::new();
     let mut err = std::io::stderr();
-    for line in BufReader::new(reader).split(b'\n') {
-        let line = line.map_err(|e| format!("reading cargo: {e}"))?;
-        let line = format!("{}\n", String::from_utf8_lossy(&line));
-        let _ = err.write_all(line.as_bytes());
-        log.push_str(&line);
+    loop {
+        match lines.recv_timeout(quiet) {
+            Ok(line) => {
+                let line = line.map_err(|e| format!("reading its output: {e}"))?;
+                let line = format!("{}\n", String::from_utf8_lossy(&line));
+                let _ = err.write_all(line.as_bytes());
+                log.push_str(&line);
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                // SAFETY: the group the child leads, which no other process can name until it is reaped.
+                let killed = match unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) } {
+                    0 => {
+                        child.wait().map_err(|e| format!("wait: {e}"))?;
+                        "was killed with its process group".to_string()
+                    }
+                    _ => format!("could not be killed: {}", std::io::Error::last_os_error()),
+                };
+                let deadline = Instant::now() + GONE;
+                let left = loop {
+                    match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                        Ok(_) => {}
+                        Err(RecvTimeoutError::Disconnected) => break String::new(),
+                        Err(RecvTimeoutError::Timeout) => {
+                            break format!("; a process outside that group still held its output {GONE:?} later");
+                        }
+                    }
+                };
+                let last = log.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("nothing");
+                return Err(format!("said nothing for {quiet:?} and {killed}{left}; the last it said: {last}"));
+            }
+        }
     }
-    let status = child.wait().map_err(|e| format!("cargo: {e}"))?;
-    Ok((status.success(), log))
+    let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+    Ok((status, log))
 }
 
 // --- The host jobs -------------------------------------------------------------
@@ -507,8 +560,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     if !control.must_red {
         args.push("--nocapture");
     }
-    let (green, log) = cargo_logged(root, &args)?;
-    judge_control(control, green, &log)
+    let (status, log) = cargo_logged(root, &args)?;
+    judge_control(control, status.success(), &log)
 }
 
 /// Every test that runs on the host and boots no guest. The build system's own
@@ -797,9 +850,9 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the suite", || {
             let args: Vec<&str> = suite.iter().map(String::as_str).collect();
-            let (green, log) = cargo_logged(root, &args)?;
+            let (status, log) = cargo_logged(root, &args)?;
             let said = verdicts(&log);
-            if green {
+            if status.success() {
                 Ok(said)
             } else {
                 Err(said)
@@ -1110,6 +1163,62 @@ mod tests {
             .expect("run cargo");
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success() && said.contains("Fresh one v0.1.0"), "{said}");
+    }
+
+    /// What [`a_hung_step`] says last.
+    const LAST: &str = "the hung step's last line";
+
+    /// A step that goes quiet is a red naming the last line it said, and what
+    /// it spawned is killed with it: the step here is this binary, which starts
+    /// a second and then says nothing, as cargo does with a test that hangs.
+    /// The driver is a process of its own, because it reads the end of a pipe,
+    /// which on macOS a process another thread spawns meanwhile can hold open.
+    #[test]
+    fn a_step_that_goes_quiet_is_killed_with_what_it_spawned_and_names_its_last_line() {
+        let out = crate::buildlock::tests::rerun("ci::tests::a_hung_steps_driver")
+            .env(FIXTURE, "hung")
+            .output()
+            .expect("run the driver");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    /// The step and what it spawns read a stdin only this process writes, so
+    /// neither outlives it.
+    #[test]
+    #[ignore = "the driver of the test above; never runs on its own"]
+    fn a_hung_steps_driver() {
+        let (stdin, held) = std::io::pipe().unwrap();
+        let mut hung = crate::buildlock::tests::rerun("ci::tests::a_hung_step");
+        hung.stdin(stdin);
+        let refusal = heard(hung, Duration::from_secs(10)).expect_err("a step that hangs is a red");
+        drop(held);
+        assert!(refusal.ends_with(LAST) && refusal.contains("was killed") && !refusal.contains("outside"), "{refusal}");
+    }
+
+    /// Until the process that holds the other end of stdin is gone.
+    fn hang() {
+        assert!(std::env::var_os(FIXTURE).is_some(), "run without {FIXTURE}");
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
+    }
+
+    #[test]
+    #[ignore = "the step of the driver above; never runs on its own"]
+    fn a_hung_step() {
+        // libtest's own lines go nowhere, so `LAST` is the last line said; its
+        // stderr is the step's, which it holds open.
+        let _spawned = crate::buildlock::tests::rerun("ci::tests::a_hung_steps_child")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn what the step spawns");
+        eprintln!("{LAST}");
+        hang();
+    }
+
+    #[test]
+    #[ignore = "what the step above spawns; never runs on its own"]
+    fn a_hung_steps_child() {
+        hang();
     }
 
     fn repo_root() -> PathBuf {
