@@ -998,6 +998,25 @@ impl Tcp {
         result
     }
 
+    /// [`Self::recv`] for a reader that may take less than it is shown, such as a pipe that is
+    /// nearly full: `take` sees the oldest bytes held, as far as they lie in one piece, and answers
+    /// how many of them it took; no other byte leaves the buffer. With nothing held it is not
+    /// called, and the answer is [`Self::recv`]'s; `Data(0)` is a reader that took nothing.
+    pub fn recv_with(&mut self, now: Instant, id: ConnId, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, Error> {
+        let conn = self.conn(id)?;
+        let result = match &mut conn.state {
+            Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
+            Tcb::Sync(sync) => sync.recv_with(take),
+            Tcb::Ended(Ended { failure: Some(failure), .. }) => Err(Error::Failed(*failure)),
+            Tcb::Ended(Ended { failure: None, rx }) => match rx.as_mut() {
+                Some(rx) if rx.unread() > 0 => Ok(Received::Data(rx.read_with(take))),
+                _ => Ok(Received::End),
+            },
+        };
+        self.settle(id.index, now);
+        result
+    }
+
     pub fn shutdown_write(&mut self, now: Instant, id: ConnId) -> Result<(), Error> {
         let conn = self.conn(id)?;
         let result = match &mut conn.state {
