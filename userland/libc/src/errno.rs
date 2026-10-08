@@ -30,6 +30,7 @@ pub(crate) const EBUSY: i32 = 16;
 pub(crate) const EEXIST: i32 = 17;
 pub(crate) const ENODEV: i32 = 19;
 pub(crate) const EINVAL: i32 = 22;
+pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const EPIPE: i32 = 32;
 pub(crate) const ERANGE: i32 = 34;
 pub(crate) const EDEADLK: i32 = 35;

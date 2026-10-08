@@ -260,6 +260,10 @@ const MACHINE_TESTS: &[&str] = &[
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
     "netstack_socket_churn",
+    // What libc's socket calls ask of netstack, read back from a peer that
+    // answers: the calls are libc's requests on netstack's port, netstack has
+    // no host build, and the T14's peer is the bench's network.
+    "libc_sockets",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -2899,12 +2903,60 @@ fn netstack_socket_churn() -> Result<(), String> {
     Ok(())
 }
 
+/// libc's sockets as a C program uses them, on one boot of `tests/netcase`:
+/// each of its C cases dials a host server that holds what it accepts, or
+/// sends to one that answers each datagram with itself, at the address the
+/// guest's network gives the host. A case's own comparisons are its verdict.
+fn libc_sockets() -> Result<(), String> {
+    const LEASED: &str = "netstack: DHCP: lease ";
+    const HOST: &str = "10.0.2.2";
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
+    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
+    // Each ends with the process: a guest that never dials leaves it waiting.
+    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
+    let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
+    thread::spawn(move || {
+        let mut datagram = [0u8; 64];
+        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
+            echo.send_to(&datagram[..len], from).expect("answer a datagram");
+        }
+    });
+
+    let cases = [("sendto_unbound", answering), ("nodelay_kept", holding), ("addr_order", holding)];
+    let case = compile::repo_root().join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> = cases
+        .iter()
+        .map(|(name, _)| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
+        .collect();
+    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &[], BootOptions::default());
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    for (name, port) in cases {
+        let result = qemu.run_test(&format!("test_c_{name} {HOST} {port}"), Duration::from_secs(120));
+        if qemu::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("  [libc] {name} ended {:?} and said:\n{}", result.exit_code, result.stdout);
+        }
+        if let Some(why) = &result.error {
+            return Err(format!("{name}: {why}\nthe case said:\n{}", result.stdout));
+        }
+        if result.exit_code != Some(0) {
+            return Err(format!("{name} ended {:?}:\n{}", result.exit_code, result.stdout));
+        }
+        if !result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{name}: ok"))) {
+            return Err(format!("{name} never said it was done:\n{}", result.stdout));
+        }
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
+        "libc_sockets" => libc_sockets(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
