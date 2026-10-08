@@ -165,22 +165,137 @@ Owned by the stage "the interpreter" of
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, the
 first ruling's "AML stage".
 
-**A hypothesis, measured by nothing yet**: the controller does not treat a
-press as a power request until an operating system has run the firmware's
-initialisation of it, and stage 1 runs none of it: no `_REG` telling the
-controller's device its operation region is served, no `_STA` and `_INI` walk
-of the namespace, no query method. If so, the slice of the stage that runs
-those in the server is what closes this, though no table defines a `_Q28`.
-It accounts for the presses that changed nothing; it does not account for
-`ff4945d6d`'s one served press, or for which press is the first one served.
+**A hypothesis, which no measurement ties to a lost press**: the controller
+does not treat a press as a power request until an operating system has run
+the firmware's initialisation of it, and stage 1 runs none of it: no `_REG`
+telling the controller's device its operation region is served, no `_STA` and
+`_INI` walk of the namespace, no query method. If so, the slice of the stage
+that runs those in the server is what closes this, though no table defines a
+`_Q28`. It accounts for the presses that changed nothing; it does not account
+for `ff4945d6d`'s one served press, or for which press is the first one
+served.
+
+**Measured on the T14, 2026-10-08: fifteen bytes of the controller's memory
+hold one value under ToyOS and another under Linux. At 0x05 the one bit that
+differs is bit 0, set under ToyOS and clear under Linux, and bit 0 of 0x05 is
+the bit the firmware's own `_INI` for the controller cleared in a dry run,
+in the variants of it where a clear can show. At 0x03, the byte its `_REG`
+wrote, the bit that differs is not the bit `_REG` wrote.** A scout image, one
+commit on `b432ed21c` and never pushed, ran stage 1's server with a press
+logged and not acted on, and read all 256 bytes of the controller's memory
+with the specification's `RD_EC` command three times: as the server armed, at
+12.408 s, and 60 s and 120 s after. It wrote nothing to the controller's
+memory: each read wrote the command and an address to the controller's two
+ports, and the server drained query 0x4f as stage 1 does. Nobody attended the
+boot. Its log carries no press line and no query but 0x4f, counts 0, 55 and
+110 SCIs before the three reads, and reads the controller's status with
+neither buffer flag set before each. The same 256 bytes were read under Linux
+on the same machine three times: the first two minutes after its boot by that
+reading's own uptime line, the others a minute apart by the orchestrator's
+account. The six samples, the table of them and the scout's log are held by
+the orchestrator outside the tree; the counts below were made again from the
+six samples for this record.
+
+- **233 offsets read alike in all six samples; 23 do not.**
+- **Eight of the 23 move by themselves and say nothing**: 0x27, 0x49, 0x78,
+  0x7c, 0x7d, 0x7e and 0xaa change between samples under both systems, and
+  0x7a between Linux's.
+- **Fifteen hold one value in all three ToyOS samples and another in all
+  three Linux samples**: 0x03, 0x05, 0x14, 0x32, the nine from 0x53 to 0x5b,
+  0x74 and 0xcb. Nine differ in one bit (0x03, 0x05, 0x14, 0x58 to 0x5b, 0x74,
+  0xcb) and six in more.
+
+What the firmware's initialisation would write was read earlier, offline: a
+scratch copy of the interpreter at `e7010129f` loaded the T14's tables against
+a host that recorded every write and made none, and evaluated `\_PIC(1)`, the
+`_STA` and `_INI` walk, the controller's `_REG(3, 1)` and each of the 53 query
+methods once. Its logs are held outside the tree too. Eight variants of that
+host left a log of every access, and each claim below names the ones it is
+read from:
+
+- **Four fixed-answer variants**, where a read never sees a write. Three
+  answer every read of the controller with zero: one runs `_REG` before the
+  walk, and one answers a chipset register differently, which changes no
+  access to the controller. The fourth answers every read of the controller
+  with all ones.
+- **Four write-seeing variants**, where a read of memory or of the controller
+  sees an earlier write to the same place, and a write to `SMI_CMD` forgets
+  what was written to the memory page last written. A controller byte nothing
+  has written answers zero in three, which differ as the three above do, and
+  all ones in the fourth.
+
+Every count of it is one branch under one model, and neither zero nor all
+ones is what the machine holds. In all eight the controller's `_INI` wrote
+the controller at 0x05 and 0x3A, and four query methods wrote it at 0x06,
+0x3A and 0x81. `_REG` read and wrote 0x03 in all four fixed-answer variants,
+before the walk and after it, and in the write-seeing variant that ran it
+before the walk; in the three write-seeing variants that ran it after the
+walk it touched the controller not at all. That its order decides whether
+`_REG` writes is the write-seeing variants' finding alone. Against the
+samples:
+
+- **0x05 is among the fifteen, by bit 0**: set in all three ToyOS samples and
+  clear in all three Linux ones. **Bit 0 of 0x05 is the bit the dry run's
+  `_INI` clears.** In the two all-ones variants it read all ones there and
+  wrote the byte back with bit 0 alone cleared. In the six zero variants it
+  read zero and wrote zero, which shows no bit and contradicts none. So the
+  dry run names the bit and the direction, and both are the difference's:
+  stage 1, which runs no `_INI`, reads the bit set, and Linux reads it as a
+  run of that `_INI` leaves it.
+- **0x03 is among the fifteen, by one bit, and it is not the dry run's bit.**
+  Wherever the dry run's `_REG` wrote 0x03 it wrote bit 0 set: one over a
+  zero read in the four zero variants where it wrote, and all ones over all
+  ones in the fixed-answer all-ones variant. Bit 0 reads clear in all six
+  samples; the bit that differs is another. Under the write-seeing variants a
+  clear bit 0 under Linux is what `_REG` after the walk leaves, since there it
+  writes nothing. Under the fixed-answer variants `_REG` sets bit 0 in either
+  order, and a clear bit 0 under Linux is then unaccounted for. Nothing read
+  says in which order Linux ran them or which model the machine follows. What
+  writes the bit that differs is unread.
+- **0x3A does not differ**, and could not have: the bit the six zero
+  variants' `_INI` set there reads set in all six samples, and in the two
+  all-ones variants it wrote all ones over all ones, a set and no clear.
+- **0x06 and 0x81 do not differ**, which says nothing: a query method runs
+  only when its query comes.
+
+What that supports. Something that ran under Linux and did not run under
+ToyOS left the controller's memory different, for the 120 s read at least,
+and at 0x05 the difference is the bit the firmware's own `_INI` clears, in
+the direction it clears it, where stage 1 never runs that `_INI`. That is the
+hypothesis's premise at one bit: the controller under stage 1 is not in the
+state the initialisation leaves it in.
+
+What it does not. The bit at 0x05 is named by two variants, both a host that
+answers all ones, one branch under one model each. Linux also runs the
+vendor's platform driver, which writes the controller, and the samples hold
+no list of what was loaded on that boot: any of the fifteen may be its doing
+and not the firmware's, bit 0 of 0x05 among them. ToyOS was read on one boot,
+and nothing says Linux was read on more, so a difference between boots is not
+told from a difference between systems. One bit marks nothing by itself: nine
+of the fifteen differ by one. And no measurement ties bit 0 of 0x05, the bit
+at 0x03 or any other of the fifteen to a lost press: the scout's boot holds
+no press, the Linux samples say nothing of one, and nothing was written to
+the controller's memory to see what a press then does.
 
 **Its test, before the exit's ten boots**: at the first head whose server
-runs `_REG`, the init walk and the query methods on the T14, the same scout
-is rebuilt on it and the owner, asked on demand, presses once, in window 3
-only: the arm that lost its press above. Served there, the hypothesis
-stands and the exit below is asked for. Lost there with the controller's
-status unmoved, it is refuted, and that goes to the owner, since nothing else
-the stage builds is known to change what the controller does with a press.
+runs `_REG`, the init walk and the query methods on the T14, two readings, in
+this order. First the scout of 2026-10-08 is rebuilt on it and reads the
+controller's memory three times after the initialisation has run, unattended,
+and the record here says two things. One is read from this record alone: bit
+0 of 0x05 reads clear in all three. The other is which of the other fourteen
+offsets now read as under Linux and which as under stage 1, 0x03 among them.
+The tree holds no value of those fourteen, so that is read against the six
+samples the orchestrator holds, or, if they are gone, against a fresh reading
+under Linux on the same machine, three samples of it as here. One that still
+reads as under stage 1 is not the firmware's initialisation's doing. A bit 0
+of 0x05 that reads set is recorded before any press is asked for: that bit is
+then not `_INI`'s to clear on the machine, whatever the dry run wrote.
+Then the scout of 2026-10-07 is rebuilt on it and the owner, asked on demand,
+presses once, in window 3 only: the arm that lost its press above. Served
+there, the hypothesis stands and the exit below is asked for. Lost there with
+the controller's status unmoved, it is refuted, and that goes to the owner,
+since nothing else the stage builds is known to change what the controller
+does with a press.
 One boot decides neither a fix nor this issue's close.
 
 **Exit**: an on-demand check by the owner, which the orchestrator asks him
