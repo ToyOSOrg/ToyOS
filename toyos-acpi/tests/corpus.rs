@@ -12,7 +12,7 @@ use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    definition_blocks, dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line, Century,
     EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
     Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
@@ -396,6 +396,10 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     let _ = hpet_base(m, rsdp_at);
                     let _ = rtc_century(m, rsdp_at);
                     let _ = iapc_boot_arch(m, rsdp_at);
+                    if let Ok(blocks) = definition_blocks(m, rsdp_at) {
+                        // The DSDT, and at most an item an 8-byte entry of the largest XSDT.
+                        assert!(blocks.count() <= 1 + MAX_TABLE_LEN / 8, "{which}[{offset}]={value:#04x}: the block walk is not ending");
+                    }
                     if let Ok(t) = find_table(m, rsdp_at, b"FACP", 36) {
                         let _ = reset_register(&t);
                         let _ = psci(&t);
@@ -433,6 +437,93 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
     );
     assert!(walked[1] > walked[0], "the resealed arm walked no further than the raw one");
     assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
+}
+
+/// A FADT of the ACPI 1.0 length naming its DSDT at `dsdt`.
+fn facp_naming(dsdt: u32) -> Vec<u8> {
+    let mut body = vec![0u8; 116 - 36];
+    body[40 - 36..44 - 36].copy_from_slice(&dsdt.to_le_bytes());
+    sdt(b"FACP", 1, &body)
+}
+
+/// The DSDT first, wherever the XSDT lists the FADT, then the SSDTs in the
+/// XSDT's order and nothing else it lists; a refused block is answered in
+/// its place and the walk goes on past it.
+#[test]
+fn the_definition_blocks_are_the_dsdt_and_then_each_ssdt_in_the_xsdts_order() {
+    const DSDT_AT: u64 = 0x10_0000;
+    let at = |n: u64| TABLE_AT + n * 0x1000;
+    let head = rsdp(XSDT_AT, 2, 36);
+    let fadt = facp_naming(DSDT_AT as u32);
+    let dsdt = sdt(b"DSDT", 2, &[1]);
+    let (first, second, third) = (sdt(b"SSDT", 2, &[1]), sdt(b"SSDT", 2, &[2, 2]), sdt(b"SSDT", 2, &[3, 3, 3]));
+    let mut broken = sdt(b"SSDT", 2, &[4]);
+    broken[9] = broken[9].wrapping_add(1);
+    let mut long = sdt(b"SSDT", 2, &[5]);
+    declare_len(&mut long, 0x2000);
+    let hpet = sdt(b"HPET", 1, &[0u8; 20]);
+    // An SSDT ahead of the FADT, a null entry, a table that is no definition
+    // block, an SSDT that does not sum, an entry no region holds, an SSDT
+    // longer than what holds it, and a DSDT the XSDT lists itself, which is
+    // not where a DSDT is named.
+    let root = xsdt(&[at(1), 0, at(0), at(6), at(2), at(3), 0xdead_0000, at(4), DSDT_AT, at(5)]);
+    let regions: &[(u64, &[u8])] = &[
+        (RSDP_AT, &head),
+        (XSDT_AT, &root),
+        (at(0), &fadt),
+        (at(1), &first),
+        (at(2), &second),
+        (at(3), &broken),
+        (at(4), &long),
+        (at(5), &third),
+        (at(6), &hpet),
+        (DSDT_AT, &dsdt),
+    ];
+    let blocks: Vec<Result<(u64, usize), TableError>> = definition_blocks(Machine { regions }, RSDP_AT)
+        .expect("the XSDT")
+        .map(|block| block.map(|table| (table.base(), table.len())))
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            Ok((DSDT_AT, 37)),
+            Ok((at(1), 37)),
+            Ok((at(2), 38)),
+            Err(TableError::Checksum),
+            Err(TableError::Unmapped { at: 0xdead_0000, len: 36 }),
+            Err(TableError::Unmapped { at: at(4), len: 0x2000 }),
+            Ok((at(5), 39)),
+        ]
+    );
+}
+
+/// The DSDT's item is the first whatever became of it: a machine whose XSDT
+/// lists no FADT, and one whose FADT names no DSDT, each say so there, and
+/// the SSDTs follow all the same.
+#[test]
+fn a_dsdt_that_cannot_be_found_is_the_first_block_refused() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let ssdt = sdt(b"SSDT", 2, &[1]);
+    let walk = |regions: &[(u64, &[u8])]| -> Vec<Result<u64, TableError>> {
+        definition_blocks(Machine { regions }, RSDP_AT).expect("the XSDT").map(|block| block.map(|table| table.base())).collect()
+    };
+
+    let root = xsdt(&[TABLE_AT]);
+    assert_eq!(walk(&[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &ssdt)]), [Err(TableError::Absent), Ok(TABLE_AT)]);
+
+    let fadt = facp_naming(0);
+    let root = xsdt(&[TABLE_AT + 0x1000, TABLE_AT]);
+    assert_eq!(
+        walk(&[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &ssdt), (TABLE_AT + 0x1000, &fadt)]),
+        [Err(TableError::Unmapped { at: 0, len: 36 }), Ok(TABLE_AT)]
+    );
+
+    // The FADT names a table that is there and is no DSDT.
+    let fadt = facp_naming(TABLE_AT as u32);
+    let root = xsdt(&[TABLE_AT + 0x1000]);
+    assert_eq!(walk(&[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &ssdt), (TABLE_AT + 0x1000, &fadt)]), [Err(TableError::Absent)]);
+
+    assert_eq!(definition_blocks(Machine { regions: &[] }, RSDP_AT).err(), Some(TableError::BadRsdp));
 }
 
 /// **Stated as a test, so extending the decoder reds the statement.** The XSDT

@@ -214,9 +214,9 @@ fn every_page_a_window_the_kernel_drives_lies_in_is_refused_inside_any_type() {
 
 #[test]
 fn a_memory_bar_is_refused_where_firmware_types_its_range_as_its_own() {
-    // A 16 KiB BAR, a BAR that answered no size and is recorded as one byte,
-    // and a window cut for a BAR, in memory this map types reserved.
-    const BARS: &[(u64, u64)] = &[(0xfe10_0000, 0xfe10_4000), (0xfe20_0000, 0xfe20_0001), (0xfe60_0000, 0xfe80_0000)];
+    // A 16 KiB BAR, and a BAR that answered no size and is recorded as one
+    // byte, in memory this map types reserved.
+    const BARS: &[(u64, u64)] = &[(0xfe10_0000, 0xfe10_4000), (0xfe20_0000, 0xfe20_0001)];
     // The same 16 KiB BAR in ACPI NVS, and one above everything mapped.
     const NVS: &[MemoryMapEntry] = &[e(10, 0x7400_0000, 0x7480_0000), e(0, 0x40_0000_0000, 0x40_1000_0000)];
     const NVS_BARS: &[(u64, u64)] = &[(0x7410_0000, 0x7410_4000), (0x40_0000_0000, 0x40_0100_0000)];
@@ -231,8 +231,6 @@ fn a_memory_bar_is_refused_where_firmware_types_its_range_as_its_own() {
         assert_eq!(refused(&reserved, 0xfe20_0000, Width::Byte, write), Refused::DeviceMemory);
         assert_eq!(refused(&reserved, 0xfe20_0fff, Width::Byte, write), Refused::DeviceMemory, "the page of a BAR of unknown size");
         assert!(passes(&reserved, 0xfe20_1000, Width::Byte, write));
-        assert_eq!(refused(&reserved, 0xfe7f_fffc, Width::DWord, write), Refused::DeviceMemory, "the last dword of a cut window");
-        assert!(passes(&reserved, 0xfe80_0000, Width::Byte, write));
         assert_eq!(refused(&nvs, 0x7410_0000, Width::QWord, write), Refused::DeviceMemory);
         assert!(passes(&nvs, 0x7410_4000, Width::QWord, write));
         // A device's memory is refused as a device's even where nothing maps it.

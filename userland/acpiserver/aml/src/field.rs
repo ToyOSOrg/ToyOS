@@ -221,8 +221,10 @@ impl Machine<'_> {
             // the low seven bits of the Header Type: a function that is
             // absent answers all ones, and any other layout a byte of
             // something else.
-            if register(self, 0x0E)? & 0x7F != 0x01 {
-                return Err(Error::Rule("a device above a PCI_Config region's is no PCI-to-PCI bridge by its Header Type, and has no bus below it"));
+            let header_type = register(self, 0x0E)?;
+            let refused = |secondary| Error::Bridge { segment, bus, device: b.device, function: b.function, header_type, secondary };
+            if header_type & 0x7F != 0x01 {
+                return Err(refused(None));
             }
             let answered = register(self, 0x19)?;
             // §6.5.4: the region is ready once its bridge has a bus number.
@@ -230,7 +232,7 @@ impl Machine<'_> {
             // above the bus the bridge is on: any other answer would address
             // a device that is not below this bridge.
             if answered <= bus {
-                return Err(Error::Rule("a bridge's Secondary Bus Number is not above its own bus, and names no bus below it"));
+                return Err(refused(Some(answered)));
             }
             bus = answered;
         }

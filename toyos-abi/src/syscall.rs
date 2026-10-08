@@ -2118,7 +2118,10 @@ pub fn acpi_access(
 /// Try the firmware's Global Lock for the `acpi` claim's holder: `Ok(true)`
 /// where it is now held, `Ok(false)` where the firmware owns it and will raise
 /// `GBL_STS` on letting go. A lock the claim already holds is refused
-/// [`SyscallError::AlreadyExists`].
+/// [`SyscallError::AlreadyExists`], and every take
+/// [`SyscallError::NotSupported`] on a machine whose FADT names a FACS the
+/// kernel exchanges no lock word in; one that names no FACS has no lock, and
+/// a take is answered taken.
 pub fn acpi_lock_take(claim: RawHandle) -> Result<bool, SyscallError> {
     check(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_TAKE, 0, 0)).map(|word| word == crate::acpi::op::TAKEN)
 }

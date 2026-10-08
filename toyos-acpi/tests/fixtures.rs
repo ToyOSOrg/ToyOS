@@ -9,7 +9,7 @@ use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    century_of, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
+    century_of, definition_blocks, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
     isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line,
     Century, FixedHardware, IoApicEntry, LegacyMode, Line, MadtEntry, Polarity, PowerButton, Psci, Reset,
     SourceOverride, Table, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
@@ -111,6 +111,24 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
     let fadt = find_table(m, RSDP, b"FACP", FADT_PM1A_CNT_BLK + 4).expect("FADT");
     assert_eq!(fadt.u32_at(FADT_PM1A_CNT_BLK), Some(0x604));
     assert_eq!(dsdt_address(&fadt), 0x7fb7_a000);
+}
+
+/// QEMU publishes one definition block, the DSDT its FADT names, and no SSDT:
+/// the walk answers it whole and ends. The DSDT is that of a later boot of
+/// the same QEMU, the same 8500 bytes its `SOURCE` says this boot named here.
+#[test]
+fn the_definition_blocks_of_qemu_are_its_dsdt_alone() {
+    const DSDT: &[u8] = include_bytes!("../fixtures/qemu-11.1.1/dsdt.bin");
+    let mut regions = REGIONS.to_vec();
+    regions.push((0x7fb7_a000, DSDT));
+    let blocks: Vec<_> = definition_blocks(Machine { regions: &regions }, RSDP).expect("the XSDT").collect();
+    let [Ok(dsdt)] = blocks.as_slice() else { panic!("{} definition blocks, or a refused one", blocks.len()) };
+    assert_eq!((dsdt.base(), dsdt.len()), (0x7fb7_a000, 8500));
+    assert_eq!((0..4).map(|i| dsdt.byte(i).unwrap()).collect::<Vec<_>>(), b"DSDT");
+
+    // The boot these tables are of kept its DSDT where this machine holds nothing.
+    let blocks: Vec<_> = definition_blocks(machine(), RSDP).expect("the XSDT").map(|block| block.err()).collect();
+    assert_eq!(blocks, [Some(TableError::Unmapped { at: 0x7fb7_a000, len: 36 })]);
 }
 
 /// `ACPI: PM1a=0x604 SLP_TYPa=0`, off the DSDT of the boot that logged it

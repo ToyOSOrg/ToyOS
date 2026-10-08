@@ -469,6 +469,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The server's load of the T14's own definition blocks, through the
+        // kernel's mediated access: `acpi_tables_on_metal` says what is read.
+        // The same boot as `acpi_server_events`.
+        "acpi_tables_loaded",
+        metal::Metal {
+            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            judge: |b| acpi_tables_on_metal(b[0]),
+        },
+    ),
+    (
         // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
         // and `SCI_EN` reads clear after it.
         "acpi_server_death",
@@ -1691,7 +1701,7 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
 }
 
 /// What `acpi_mediated` says, an arm a line, once the kernel answered each as
-/// its policy says; then the runner's record of its exit.
+/// its policy says.
 const ACPI_MEDIATED_SAID: [&str; 8] = [
     "acpi: an unbound claim was refused its access and the lock",
     "acpi: RAM was refused both ways as UsableMemory",
@@ -1705,9 +1715,15 @@ const ACPI_MEDIATED_SAID: [&str; 8] = [
 
 /// Boot `tests/acpicase`, whose one job is `test_rs_acpi_mediated`, on the
 /// test kernel, and judge the job and what the kernel said beside it: the
-/// lock found at boot, and given back for the holder that died with it.
+/// lock found at boot, given back for the holder that died with it, and
+/// given back for the probe itself, which asks for the power-off holding it
+/// once every arm has passed. The probe does not come back from that, so its
+/// verdict is its last line and the kernel's; a probe that ends instead is
+/// one whose arm failed.
 fn acpi_mediated_access() -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
+    const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
+    const GIVEN_BACK_AT_THE_STOP: &str = "acpi: the Global Lock given back for a holder that left it taken (the machine is stopping)";
     let case = compile::repo_root().join("tests/acpicase");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
@@ -1722,8 +1738,10 @@ fn acpi_mediated_access() -> Result<(), String> {
         },
     );
     let mut console = format!("{}\n", qemu.boot_log());
-    let end = format!("===TEST_END {JOB} ");
-    await_marker(&mut qemu, &mut console, &end, "the probe to end")?;
+    let ended = format!("===TEST_END {JOB} ");
+    await_guest(&mut qemu, &mut console, "the probe's power-off to give the lock back", |said| {
+        said.contains(GIVEN_BACK_AT_THE_STOP) || said.contains(&ended)
+    })?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
     said.must_say(isa::WITHHELD)?;
@@ -1732,7 +1750,9 @@ fn acpi_mediated_access() -> Result<(), String> {
     for line in ACPI_MEDIATED_SAID {
         eprintln!("  [acpi] {}", said.must_say(line)?.trim());
     }
-    said.must_say(&format!("===TEST_END {JOB} exit=0===")).map(|_| ())
+    said.must_say(HELD_INTO_THE_STOP)?;
+    eprintln!("  [acpi] {}", said.must_say_after(HELD_INTO_THE_STOP, GIVEN_BACK_AT_THE_STOP)?.trim());
+    Ok(())
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -3808,6 +3828,55 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
         eprintln!("  [acpi] {}", first.trim());
     }
     eprintln!("  [acpi] {}", counts.trim());
+    Ok(())
+}
+
+/// How many definition blocks the T14 has: Linux on the same machine says
+/// `14 ACPI AML tables successfully acquired and loaded`.
+const T14_DEFINITION_BLOCKS: usize = 14;
+
+/// The server's load of the T14's tables, every access the kernel's to make
+/// for it: all of the machine's definition blocks, as many as Linux loads
+/// there, each fetched through `SYS_ACPI`, summing to zero as its firmware
+/// sealed it, and loaded; `\_S5` evaluating to the `SLP_TYPa` the kernel's
+/// own scan of the DSDT decoded; and nothing refused, so no bridge answered
+/// what the interpreter refuses, no address was `Unmapped`, and no access
+/// the load makes is one the policy keeps from it. The load's AML read
+/// memory, read configuration space and took the Global Lock, which is the
+/// real lock word exchanged and given back each time. What it prints beside
+/// that is the first measurement of each: the load's time, the reads by
+/// address space, the takes that found the firmware holding the lock, and
+/// the pages of memory by the type the firmware's map gives them.
+fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let (log, kernel) = (back.log(), back.kernel());
+    let lines: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_some_and(|said| said.tag == "acpiserver"))
+        .collect();
+    if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
+        return Err(format!("the server died: {fired}"));
+    }
+    let blocks = power::acpi_tables_loaded(&log, &kernel)?;
+    if blocks != T14_DEFINITION_BLOCKS {
+        return Err(format!("the server found {blocks} definition blocks where Linux loads {T14_DEFINITION_BLOCKS}"));
+    }
+    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
+    if !refused.is_empty() {
+        return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
+    }
+    let took = log.must_say(&format!("acpiserver: {blocks} of {blocks} tables loaded in "))?;
+    let bytes = log.must_say("acpiserver: the tables' bytes took ")?;
+    let aml = log.must_say("acpiserver: the tables' AML read SystemMemory ")?;
+    let memory = number_between(aml, "AML read SystemMemory ", " times, SystemIO ")?;
+    let config = number_between(aml, " and PCI_Config ", ", its memory in pages: ")?;
+    let takes = number_between(aml, "; took the Global Lock ", " times, ")?;
+    if memory == 0 || config == 0 || takes == 0 {
+        return Err(format!("this machine's tables read memory and configuration space and take the Global Lock as they load, and the server's did not: {aml}"));
+    }
+    for line in [took, bytes, aml] {
+        eprintln!("  [acpi] {}", line.trim());
+    }
     Ok(())
 }
 

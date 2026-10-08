@@ -10,8 +10,9 @@ The T14's firmware hands the machine over in legacy mode, which interrupts
 every CPU every 2.2 s
 (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 
-Nothing in the tree evaluates the AML in a machine's DSDT or SSDTs. What
-ToyOS takes from them it takes another way: `toyos-acpi/src/dsdt.rs` finds
+The ACPI server loads a machine's DSDT and SSDTs and evaluates `\_S5`, and
+nothing else of their AML yet. What ToyOS takes from them it takes another
+way: `toyos-acpi/src/dsdt.rs` finds
 `\_S5_` by a byte scan, and the loader asks UEFI for the root bridges'
 windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing reads
 `_CST`, which names a CPU's C-states.
@@ -136,7 +137,8 @@ written.
 **Stage: the interpreter** (the orchestrator's placement of "The AML stage
 closes it"). ToyOS's own AML interpreter, written from the specification, run
 by the ACPI server, the battery first: `userland/acpiserver/aml`, pure and
-host-tested, beside the server, which does not link it yet. It owns
+host-tested, beside the server, which loads the tables with it
+(`userland/acpiserver/src/aml.rs`). It owns
 `issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
 **Exit**: a host test loads QEMU 11.1.1's DSDT
 (`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the

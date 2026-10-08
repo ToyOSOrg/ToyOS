@@ -14,6 +14,11 @@
 //! First a child is handed the claim, takes the lock and exits with it: the
 //! claim binds to one process for that process's life, so the parent claims
 //! only after, and reads the lock word free.
+//!
+//! Last it takes the lock once more and asks for the power-off holding it: a
+//! stop ends no process, so the kernel finds a live holder's lock taken and
+//! gives it back before the power-off owns the hardware, which
+//! `acpi_mediated_access` reads in the kernel's own line.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -146,7 +151,15 @@ fn probe() {
     ports(&holder, &info);
     configuration(&holder, &info);
     lock(&holder, &info);
+
+    assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true), "acpi: the lock, for the power-off to find");
+    println!("{HELD_INTO_THE_STOP}");
+    let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
+    panic!("acpi: the power-off was refused: {refused:?}");
 }
+
+/// What the probe says once every arm above has passed, holding the lock.
+const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
 
 fn memory(holder: &Holder, info: &AcpiInfo) {
     // RAM: the megabyte's first page, which a guest's firmware hands over as memory.

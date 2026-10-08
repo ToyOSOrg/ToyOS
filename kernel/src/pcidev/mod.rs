@@ -403,17 +403,16 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     out
 }
 
-/// Every range a memory BAR of an enumerated function decodes, as
-/// `(start, end)`: where firmware put it and where this module moved it. What
-/// the `acpi` claim's holder is refused (`toyos_userbound::firmware`), whoever
-/// drives the function. `f` runs under [`MACHINE`]; the mediation takes
-/// `paging`'s record of windows inside it, and nothing holding that record's
-/// lock takes this one.
+/// Every range a memory BAR of an enumerated function decoded as firmware
+/// left it, as `(start, end)`. What the `acpi` claim's holder is refused
+/// (`toyos_userbound::firmware`), whoever drives the function. A window this
+/// module cut for a BAR since is not among them: [`publish`] cuts only at
+/// addresses firmware's map does not list, which the mediation refuses by
+/// that. `f` runs under [`MACHINE`]; the mediation takes `paging`'s record of
+/// windows inside it, and nothing holding that record's lock takes this one.
 pub fn with_bar_memory<T>(f: impl FnOnce(&mut dyn Iterator<Item = (u64, u64)>) -> T) -> T {
     let machine = MACHINE.lock();
-    let firmware = machine.decoded.iter().map(|&(_, start, end)| (start, end));
-    let cut = machine.windows.iter().map(|&(_, _, at, span)| (at, at.saturating_add(span)));
-    f(&mut firmware.chain(cut))
+    f(&mut machine.decoded.iter().map(|&(_, start, end)| (start, end)))
 }
 
 /// The PCI segment group every enumerated function is on.

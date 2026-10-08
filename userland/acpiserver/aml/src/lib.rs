@@ -130,6 +130,12 @@ pub enum Error {
     Unsupported(&'static str),
     /// The [`Host`] refused an access.
     Host(String),
+    /// A function between a PCI_Config region's device and its host bridge
+    /// names no bus below it (§6.5.4), by the registers it answered: a
+    /// Header Type that is no PCI-to-PCI bridge's, after which its Secondary
+    /// Bus Number was not asked, or a Secondary Bus Number not above `bus`,
+    /// the bus the function is on.
+    Bridge { segment: u16, bus: u8, device: u8, function: u8, header_type: u8, secondary: Option<u8> },
 }
 
 /// A refusal by the [`Host`], saying why.

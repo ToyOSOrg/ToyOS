@@ -42,7 +42,9 @@
 //! firmware asked for meanwhile is signalled by `GBL_RLS` in `PM1a_CNT`
 //! (§4.8.3.2). A lock its holder left taken goes back with the claim, and
 //! before the power-off, so SMM never waits on a process that is gone. A
-//! machine with no FACS has no lock, and every take is answered taken.
+//! machine whose FADT names no FACS has no lock, and every take is answered
+//! taken; one whose FACS this kernel refuses has a lock nothing here can
+//! take, and every take is refused ([`GlobalLock`]).
 //!
 //! **Nothing is done for the holder once the stop has begun**, as nothing is
 //! written to `SMI_CMD`: an access and a lock exchange are each made under
@@ -99,8 +101,29 @@ struct Hardware {
     rsdp: u64,
     /// The window configuration space is reached through, as the MCFG bounds it.
     ecam: Option<Ecam>,
-    /// None on a machine whose FADT names no FACS this kernel takes a lock in.
-    facs: Option<Facs>,
+    lock: GlobalLock,
+}
+
+/// The firmware's Global Lock, as this machine's FADT has it.
+#[derive(Clone, Copy)]
+enum GlobalLock {
+    /// The FADT names no FACS: the machine has no lock, and a take is
+    /// answered taken.
+    Absent,
+    /// The FADT names a FACS this kernel exchanges no word in: a holder told
+    /// it had the lock would hold one that excludes nothing, so a take is
+    /// refused.
+    Refused,
+    At(Facs),
+}
+
+impl GlobalLock {
+    fn facs(self) -> Option<Facs> {
+        match self {
+            Self::At(facs) => Some(facs),
+            Self::Absent | Self::Refused => None,
+        }
+    }
 }
 
 /// The FACS, as `(start, end)`, and its lock word.
@@ -217,8 +240,8 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, facs) = (ecam(rsdp_addr), facs(&fadt));
-    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, facs };
+    let (ecam, lock) = (ecam(rsdp_addr), global_lock(&fadt));
+    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -237,29 +260,33 @@ fn ecam(rsdp_addr: u64) -> Option<Ecam> {
     Some(Ecam { base, segment, first_bus, last_bus })
 }
 
-/// The FACS whose lock word this kernel exchanges, or none, said by name:
-/// one the FADT does not name, one that does not decode, and one whose lock
-/// word is not in memory the firmware's map gives the firmware.
-fn facs<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>) -> Option<Facs> {
-    let none = |why: core::fmt::Arguments| {
-        log!("acpi: no Global Lock — {why}: every take is answered taken");
-        None
+/// The Global Lock of the FACS the FADT names, said by name where there is
+/// none or it is none this kernel takes: a FACS that does not decode, and one
+/// whose lock word is not in memory the firmware's map gives the firmware.
+fn global_lock<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>) -> GlobalLock {
+    let refused = |why: core::fmt::Arguments| {
+        log!("acpi: a Global Lock this kernel cannot take — {why}: every take is refused");
+        GlobalLock::Refused
     };
     let facs = match toyos_acpi::facs(fadt.phys(), fadt) {
         Ok(facs) => facs,
-        Err(refused) => return none(format_args!("the FADT's FACS is none this kernel reads ({refused:?})")),
+        Err(toyos_acpi::FacsRefused::Absent) => {
+            log!("acpi: no Global Lock — the FADT names no FACS: every take is answered taken");
+            return GlobalLock::Absent;
+        }
+        Err(why) => return refused(format_args!("the FADT's FACS is none this kernel reads ({why:?})")),
     };
     let map = crate::mm::firmware_map();
     let word = match firmware::lock_word(map, crate::mm::direct_map_end().get(), facs.base + toyos_acpi::FACS_GLOBAL_LOCK) {
         Ok(word) => word,
-        Err(why) => return none(format_args!("the lock word of the FADT's FACS at {:#x} is none this kernel exchanges ({why:?})", facs.base)),
+        Err(why) => return refused(format_args!("the lock word of the FADT's FACS at {:#x} is none this kernel exchanges ({why:?})", facs.base)),
     };
     log!(
         "acpi: the Global Lock is the FACS's at {:#x}, in memory the firmware's map types {}",
         word.at(),
         firmware::type_word(map, word.at())
     );
-    Some(Facs { span: (facs.base, facs.base + u64::from(facs.len)), word })
+    GlobalLock::At(Facs { span: (facs.base, facs.base + u64::from(facs.len)), word })
 }
 
 fn run(block: Block) -> Ports {
@@ -473,16 +500,18 @@ fn lock_word(word: LockWordAt) -> &'static AtomicU32 {
 
 /// Try the Global Lock for the claim's holder: `Ok(true)` taken,
 /// `Ok(false)` where the firmware owns it, with the pending bit left set for
-/// the firmware's release to answer with `GBL_STS`.
+/// the firmware's release to answer with `GBL_STS`, and `NotSupported` on a
+/// machine whose lock this kernel cannot take.
 pub fn lock_take() -> Result<bool, SyscallError> {
     let hardware = hardware().expect("a claimed row has its hardware");
     let mut holder = acting()?;
     if holder.locked {
         return Err(SyscallError::AlreadyExists);
     }
-    let taken = match hardware.facs {
-        None => true,
-        Some(facs) => {
+    let taken = match hardware.lock {
+        GlobalLock::Absent => true,
+        GlobalLock::Refused => return Err(SyscallError::NotSupported),
+        GlobalLock::At(facs) => {
             let word = lock_word(facs.word);
             let mut read = word.load(Ordering::Acquire);
             loop {
@@ -516,7 +545,7 @@ fn give_back(hardware: &Hardware, holder: &mut Holder, orphaned: &str) {
     if !core::mem::take(&mut holder.locked) {
         return;
     }
-    let signalled = hardware.facs.is_some_and(|facs| {
+    let signalled = hardware.lock.facs().is_some_and(|facs| {
         let word = lock_word(facs.word);
         let mut read = word.load(Ordering::Acquire);
         let signal = loop {
@@ -546,7 +575,7 @@ fn give_back(hardware: &Hardware, holder: &mut Holder, orphaned: &str) {
 #[cfg(feature = "test-actuators")]
 pub fn debug_firmware_lock(act: u64) -> u64 {
     use toyos_abi::syscall::debug_action::{FIRMWARE_ASKS, FIRMWARE_FREES, FIRMWARE_OWNS};
-    let Some(facs) = hardware().and_then(|hardware| hardware.facs) else { return SyscallError::NotSupported.to_u64() };
+    let Some(facs) = hardware().and_then(|hardware| hardware.lock.facs()) else { return SyscallError::NotSupported.to_u64() };
     let word = lock_word(facs.word);
     let was = match act {
         FIRMWARE_FREES => word.fetch_and(!(toyos_acpi::OWNED | toyos_acpi::PENDING), Ordering::AcqRel),
@@ -644,7 +673,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
                 mapped_end: crate::mm::direct_map_end().get(),
                 ecam: hardware.ecam,
                 devices: driven.iter().copied().chain(bars),
-                facs: hardware.facs.map(|facs| facs.span),
+                facs: hardware.lock.facs().map(|facs| facs.span),
             };
             memory.decide(at, width, write.is_some())
         })

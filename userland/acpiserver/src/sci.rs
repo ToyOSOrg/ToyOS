@@ -5,6 +5,10 @@
 /// PM1 status and enable (ACPI 6.5 Tables 4.13, 4.14): the power button.
 pub const PWRBTN: u16 = 1 << 8;
 
+/// PM1 status and enable (ACPI 6.5 Tables 4.11, 4.12): the firmware let the
+/// Global Lock go, which it was left a request for.
+pub const GBL: u16 = 1 << 5;
+
 /// PM1 status bits a write of one clears (Table 4.13): timer, bus master,
 /// global lock release, power button, sleep button, RTC, PCIe wake and wake.
 pub const PM1_STATUS: u16 = 1 << 0 | 1 << 4 | 1 << 5 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 14 | 1 << 15;
