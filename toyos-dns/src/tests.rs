@@ -1074,6 +1074,96 @@ fn a_reported_query_the_caller_then_knows_reached_nobody_is_let_go() {
     assert_eq!(lookup.on_unreached(q1, 3, undrawn), Step::Done(Err(Failure::Unreachable)), "no query is left to read an answer for");
 }
 
+// --- Whoever reports or fails what ---
+//
+// RFC 1035 §4.2.1's interval is a server's: one that has not answered is not
+// sent a second query inside it, whatever is said of its first and whatever
+// another server answers. And a lookup does not end on another server's
+// failure while a query's answer is read and its wait is not over.
+
+// S1's every query is reported the moment it is sent, and S2 answers each of
+// its own with a failure at once.
+#[test]
+fn reports_and_another_servers_failures_hurry_no_server_that_has_not_answered_and_end_no_lookup_early() {
+    let refused = reply(2, OK | 5, "www.example", &[]);
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let mut sent = vec![(0, S1)];
+    let mut newest = q1;
+    let mut now = 0;
+    let ended = loop {
+        let step = lookup.on_report(newest, now, || 2);
+        assert_eq!(to(&step), (S2, 2), "the other server, at once");
+        sent.push((now, S2));
+        assert_eq!(lookup.on_datagram(asked(&step).0, S2, PORT, &refused, now, || 9), Step::Wait, "S1 has not answered and was asked this millisecond");
+        assert_eq!(lookup.on_report(newest, now, || 9), Step::Wait, "the same report again");
+        assert_eq!(lookup.on_time(now + WAIT_MS - 1, || 9), Step::Wait, "the wait for S1 was cut short");
+        now += WAIT_MS;
+        match lookup.on_time(now, || 1) {
+            Step::Done(result) => break result,
+            step => {
+                assert_eq!(to(&step), (S1, 1));
+                sent.push((now, S1));
+                newest = asked(&step).0;
+            }
+        }
+    };
+    let rounds: Vec<(u64, [u8; 4])> = (0..ROUNDS as u64).flat_map(|round| [(round * WAIT_MS, S1), (round * WAIT_MS, S2)]).collect();
+    assert_eq!(sent, rounds, "each server once a round, the rounds a wait apart");
+    assert_eq!((now, ended), (ROUNDS as u64 * WAIT_MS, Err(Failure::ServerFailed(5))));
+    assert_eq!(waiting(&lookup).len(), ROUNDS, "every query to S1 was read to the end");
+
+    // And S1's answer to its first query, a millisecond before that query's
+    // wait is over, is the lookup's.
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let second = lookup.on_report(q1, 0, || 2);
+    assert_eq!(lookup.on_datagram(asked(&second).0, S2, PORT, &refused, 0, || 9), Step::Wait);
+    assert_eq!(waiting(&lookup), [q1]);
+    let ok = reply(1, OK, "www.example", &[a("www.example", [1, 2, 3, 4])]);
+    assert_eq!(lookup.on_datagram(q1, S1, PORT, &ok, WAIT_MS - 1, || 9), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+}
+
+// The same of a query the caller knows did not leave: S1 is not asked again
+// inside its interval because S2 failed, and with no answer read the lookup
+// ends by S2's word.
+#[test]
+fn a_server_not_reached_is_not_asked_again_at_once_because_another_failed() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let second = lookup.on_unreached(asked(&first).0, 0, || 2);
+    assert_eq!(to(&second), (S2, 2));
+    let refused = reply(2, OK | 5, "www.example", &[]);
+    assert_eq!(lookup.on_datagram(asked(&second).0, S2, PORT, &refused, 0, || 9), Step::Done(Err(Failure::ServerFailed(5))), "S1 was asked this millisecond, and no query is read");
+
+    // With a query to S1 still read, the lookup waits for it instead.
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let second = lookup.on_time(WAIT_MS, || 2);
+    let third = lookup.on_datagram(asked(&second).0, S2, PORT, &refused, WAIT_MS, || 3);
+    assert_eq!(to(&third), (S1, 3), "S1 again, a wait after its first query");
+    let fourth = lookup.on_unreached(asked(&third).0, WAIT_MS, || 2);
+    assert_eq!(to(&fourth), (S2, 2), "S2 answered, and is asked again at once like any server that fails");
+    assert_eq!(lookup.on_datagram(asked(&fourth).0, S2, PORT, &refused, WAIT_MS, || 9), Step::Wait, "S1 was asked this millisecond");
+    assert_eq!(waiting(&lookup), [q1]);
+    assert_eq!(lookup.due(), 2 * WAIT_MS);
+}
+
+// What the caller knows of a server holds for an interval too: S1's query is
+// known not to have left a second after S2 was asked, so when S2's wait ends
+// the lookup waits on, its answer still read, until S1 may be asked.
+#[test]
+fn a_server_known_unreached_is_asked_again_a_wait_after_that_and_the_lookup_waits_for_its_turn() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let second = lookup.on_time(WAIT_MS, || 2);
+    let (q2, ..) = asked(&second);
+    assert_eq!(lookup.on_unreached(asked(&first).0, WAIT_MS + 1_000, || 9), Step::Wait);
+    assert_eq!(lookup.on_time(2 * WAIT_MS, || 9), Step::Wait, "S1 was known unreached a second ago, and S2's answer is still read");
+    assert_eq!(waiting(&lookup), [q2]);
+    assert_eq!(lookup.due(), 2 * WAIT_MS + 1_000, "the wait is until S1 may be asked");
+    assert_eq!(lookup.on_time(2 * WAIT_MS + 999, || 9), Step::Wait);
+    assert_eq!(to(&lookup.on_time(2 * WAIT_MS + 1_000, || 3)), (S1, 3));
+}
+
 #[test]
 fn a_server_that_answered_with_a_failure_is_what_a_lookup_that_then_reached_nobody_reports() {
     let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();

@@ -30,6 +30,9 @@ const SILENT: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 52);
 /// On the link and answering ARP, with nothing on its port 53: it reports every query back.
 const REFUSES: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 54);
 const MAC_F: [u8; 6] = [2, 0, 0, 0, 0, 0x54];
+/// On the link, answering ARP and every query with RCODE 5, refused (RFC 1035 §4.1.1).
+const FAILS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 55);
+const MAC_X: [u8; 6] = [2, 0, 0, 0, 0, 0x55];
 /// Off the link, asked of a lease that names no router.
 const UNROUTED: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 53);
 const UNROUTED_TOO: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 54);
@@ -191,6 +194,8 @@ struct Net {
     queried: Vec<Query>,
     /// Every query that left for [`REFUSES`], in order.
     refused: Vec<Query>,
+    /// Every query that left for [`FAILS`], in order.
+    failed: Vec<Query>,
     ended: Vec<Resolved>,
     /// The last draw [`Self::resolve`] handed out: its ids are 0x8000 and up, and those the node
     /// draws for itself from `lan`'s count are below it.
@@ -219,6 +224,7 @@ impl Net {
             held: Vec::new(),
             queried: Vec::new(),
             refused: Vec::new(),
+            failed: Vec::new(),
             ended: Vec::new(),
             draws: 0x7c00_8000,
         }
@@ -263,6 +269,12 @@ impl Net {
         match seen {
             Seen::Arp { request: true, target, .. } if *target == ANSWERS => self.lan.deliver(&arp(MAC, false, MAC_S, ANSWERS, A)),
             Seen::Arp { request: true, target, .. } if *target == REFUSES => self.lan.deliver(&arp(MAC, false, MAC_F, REFUSES, A)),
+            Seen::Arp { request: true, target, .. } if *target == FAILS => self.lan.deliver(&arp(MAC, false, MAC_X, FAILS, A)),
+            Seen::Udp(udp) if udp.port == 53 && udp.destination == FAILS => {
+                assert_eq!(udp.to, MAC_X, "a query left for a server the wire cannot reach");
+                self.held.push((self.lan.now, lan::udp(MAC, MAC_X, (FAILS, 53), (A, udp.source_port), &reply(&udp.payload, RESPONSE | 5, &[]))));
+                self.failed.push(Query { at, udp: udp.clone(), id: u16::from_be_bytes([udp.payload[0], udp.payload[1]]), name: asked_name(&udp.payload) });
+            }
             Seen::Udp(udp) if udp.port == 53 && udp.destination == REFUSES => {
                 assert_eq!(udp.to, MAC_F, "a query left for a server the wire cannot reach");
                 self.held.push((self.lan.now, reports(PORT_UNREACHABLE, (REFUSES, MAC_F), udp)));
@@ -615,6 +627,32 @@ fn a_forged_report_of_the_querys_own_addresses_and_ports_ends_nothing_and_the_an
     assert_eq!(net.queried.len(), 1, "one resolver: a report asked it again inside its wait");
     net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
+}
+
+// And with a second resolver that answers every query with a failure, which a report of each
+// query to the first would chain into a round of queries with no wait between them: every query
+// that leaves for the answering resolver is reported in its name the moment it is on the wire,
+// until none follows. One has left for each resolver, the lookup has not ended, and the answer
+// the first resolver gives a millisecond before its query's wait is over ends it. RFC 1035
+// §4.2.1: the interval is the resolver's, whoever says what of its query.
+#[test]
+fn forged_reports_and_another_resolvers_failures_end_nothing_and_the_answer_behind_them_is_taken() {
+    let mut net = Net::leased(&[ANSWERS, FAILS], Some(R));
+    net.zone.push(("www.example", WAIT_MS - 1, Says::Address(ADDRESS)));
+    let id = net.resolve("www.example").unwrap();
+    let mut reported = 0;
+    for _ in 0..=2 * ROUNDS {
+        net.pass();
+        let Some(query) = net.queried.get(reported).cloned() else { break };
+        net.lan.deliver(&reports(PORT_UNREACHABLE, (ANSWERS, MAC_S), &query.udp));
+        reported += 1;
+    }
+    assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), u64::try_from(reported).unwrap(), "the premise: every report reached its query's socket");
+    assert_eq!((net.queried.len(), net.failed.len(), net.ms()), (1, 1, 0), "one query to each resolver, the second's at the report of the first");
+    assert_eq!(net.lan.node.take_resolved(), NONE, "reports and another resolver's failure ended the lookup");
+    assert_eq!(net.run(id, 10 * WAIT_MS), Some(Ok(vec![ADDRESS])), "the resolvers heard {:?} and {:?}", net.queried, net.failed);
+    assert_eq!(net.ms(), WAIT_MS - 1);
+    assert_eq!((net.queried.len(), net.failed.len()), (1, 1));
 }
 
 // RFC 1034 §5.3.3: an alias with no address is asked again at its end, every query afresh. The
