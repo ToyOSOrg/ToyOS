@@ -238,9 +238,6 @@ struct Bound {
     /// advertises; 0 bytes is a slot with no BAR this claim may map.
     bar_at: [u64; BARS],
     bar_bytes: [u64; BARS],
-    /// Minted on the first map of that BAR, so a second answers the same
-    /// object rather than a second handle to one window.
-    bars: [Option<Arc<SharedMemObject>>; BARS],
     grants: Vec<Grant>,
     /// The [`RESIDUE`] this claim took over and has placed no grant at: mapped
     /// to nothing and counted against nothing, and where a grant of a range's
@@ -807,7 +804,6 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
                 id,
                 bar_at,
                 bar_bytes,
-                bars: [const { None }; BARS],
                 grants: Vec::new(),
                 residue: Vec::new(),
                 mastering: false,
@@ -1497,26 +1493,25 @@ fn with_bound<T>(
     f(bound)
 }
 
-/// One memory BAR as an object to map; the same object every time.
+/// One memory BAR as an object to map, a fresh one for every ask.
+///
+/// **The claim keeps where the window is and never an object over it**: an
+/// object ends with its last handle, which its holder closes whenever it
+/// likes, and the claim outlives that.
 pub fn bar_object(slot: usize, index: u64) -> Result<Arc<SharedMemObject>, SyscallError> {
     with_bound(slot, |bound| {
         let index = usize::try_from(index).map_err(|_| SyscallError::InvalidArgument)?;
         if index >= BARS || bound.bar_bytes[index] == 0 {
             return Err(SyscallError::InvalidArgument);
         }
-        if let Some(object) = bound.bars[index].as_ref() {
-            return Ok(Arc::clone(object));
-        }
-        let object = SharedMemObject::over(Region {
+        Ok(SharedMemObject::over(Region {
             phys: DirectMap::from_phys(bound.bar_at[index]),
             size: align_2m(bound.bar_bytes[index] as usize) as u64,
             // Registers, and the memory type is not firmware's to decide.
             cache: CachePolicy::Uncacheable,
             // The kernel owns no pages here: this is a device's aperture.
             pages: None,
-        });
-        bound.bars[index] = Some(Arc::clone(&object));
-        Ok(object)
+        }))
     })
 }
 

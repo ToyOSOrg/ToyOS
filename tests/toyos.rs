@@ -2726,9 +2726,10 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     }
 }
 
-/// A claim's memory BAR asked for again once the handle the first answer gave
-/// is closed: the kernel answers, with a handle or a refusal, and the job that
-/// asked ends on its own.
+/// A claim's memory BAR asked for again once the handle an earlier answer gave
+/// is gone — closed, or never installed for want of room: each time the kernel
+/// answers a handle whose mapping reads the function's own register, and the
+/// job that asked ends on its own.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
@@ -2742,11 +2743,15 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
-    let answered = ["bar_map_again: answered with a handle", "bar_map_again: refused: "];
-    let Some(line) = result.stdout.lines().find(|l| answered.iter().any(|a| l.contains(a))) else {
-        return Err(format!("the second request was not answered:\n{}", result.stdout));
-    };
-    eprintln!("  [claims] {}", line.trim());
+    for answered in [
+        "bar_map_again: answered with a handle that maps",
+        "bar_map_again: answered after the refusal with a handle that maps",
+    ] {
+        let Some(line) = result.stdout.lines().find(|l| l.contains(answered)) else {
+            return Err(format!("the job never said `{answered}`:\n{}", result.stdout));
+        };
+        eprintln!("  [claims] {}", line.trim());
+    }
     Ok(())
 }
 
