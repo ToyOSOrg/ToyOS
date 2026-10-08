@@ -8,7 +8,7 @@ opened: 2026-08-19
 
 `src/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
-## The judge, and it needs no Windows host and no download
+## The judge needs no Windows host, and stops at a dependency's C before it reaches the build system
 
 ```
 __CARGO_TESTS_ONLY_SRC_ROOT=<tree>/src/library CARGO_TARGET_DIR=<scratch-target> \
@@ -18,12 +18,20 @@ __CARGO_TESTS_ONLY_SRC_ROOT=<tree>/src/library CARGO_TARGET_DIR=<scratch-target>
 
 `<tree>` and `<sysroot>` are `src/CLAUDE.md`'s std type-check recipe's, with
 no addition: the copied library is its own workspace, with its patches and
-its lockfile, and a manifest written above it does not resolve offline. It
-works because the fork vendors `library/windows-sys`
-and `library/windows_link`, so a Windows `std` builds from the tree — a plain
-`cargo check --target x86_64-pc-windows-msvc` instead says *"the
-`x86_64-pc-windows-msvc` target may not be installed"* and asks for
-`rustup target add`. It resolves crates.io through the cargo cache.
+its lockfile, and a manifest written above it does not resolve offline. The
+fork vendors `library/windows-sys` and `library/windows_link`, so a Windows
+`std` builds from the tree — a plain `cargo check --target
+x86_64-pc-windows-msvc` instead says *"the `x86_64-pc-windows-msvc` target may
+not be installed"* and asks for `rustup target add`. It resolves crates.io
+through the cargo cache.
+
+Run that way it builds `core`, `std` and `test` for Windows and exits 101 at
+the 37th crate, before any source of `toyos-build` is checked: `failed to run
+custom build command for ring v0.17.14`, whose build script compiles C for
+the target with the host's `cc` and finds no `assert.h`. The judge reaches
+`src/tether.rs` only with the target's C headers, the C runtime's and the
+Windows SDK's, which no host here has and which are a download; or once
+nothing `toyos-build` depends on compiles C for its target.
 
 ## Compiling is not working, and that is why the cheap half is refused
 
