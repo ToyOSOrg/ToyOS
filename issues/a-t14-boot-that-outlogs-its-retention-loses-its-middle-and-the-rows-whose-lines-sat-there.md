@@ -19,9 +19,12 @@ counters and the boot writes about forty files.
 ## Measured
 
 The T14 at `9ded9075c`, where `acpi_server_events` rode `testcases` with
-`test_rs_acpi_hold` its last job. The readback carries no record between
-34 s and 47 s on the log's clock, and fifteen lines of this shape, the first
-at 47.238 s:
+`test_rs_acpi_hold` its last job. On the log's clock the readback's last
+record before the hole is at 34.875 s and its first after it at 47.220 s. The
+boot went from part `_0026` to `_0041`; what came back is its first part and
+its fifteen newest, and fifteen deletion lines survive in them, the earlier
+ones having gone with the parts that held them. The first that survives, at
+47.238 s:
 
 ```
 logkeeper: /log holds more than 16 logs, so /log/2026-10-08-140646_0012.log was deleted
@@ -33,8 +36,8 @@ about 42.9 s, inside the hole. The row red:
 serving throughout: cpu0's census reads `userdev=48` at the boot's end, as it
 does on the quiet `testcases-hold` boot of `779330742` the same day, whose
 count line is there at 42.579 s (`28 SCIs; embedded controller queries taken:
-0x4f x14`). The same hole, 36 s to 47 s, is in `testcases`' readback of
-2026-10-07.
+0x4f x14`). `testcases`' readback of 2026-10-07 has the same hole: no record
+in seconds 36 to 47.
 
 So `acpi_server_events` and `acpi_tables_loaded` keep `testcases-hold`, a boot
 whose log is whole.
