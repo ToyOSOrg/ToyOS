@@ -50,6 +50,11 @@ impl Cx<'_> {
     }
 }
 
+/// The network or the broadcast address of 169.254/16: no host's, on any interface.
+pub(crate) const fn link_local_edge(addr: Ipv4Addr) -> bool {
+    matches!(addr.octets(), [169, 254, 0, 0] | [169, 254, 255, 255])
+}
+
 impl Interface {
     pub fn usable(&self) -> impl Iterator<Item = &Address> + '_ {
         self.addresses.iter().filter(|a| a.usable())
@@ -63,10 +68,15 @@ impl Interface {
         self.addresses.iter().any(|a| a.cidr.addr() == addr)
     }
 
-    /// Reachable without a gateway: inside the prefix of a usable address, or in 169.254/16,
-    /// which is this link's whatever address the interface holds (RFC 3927 §2.6.2).
+    /// Inside the prefix of a usable address: reachable without a gateway.
     pub fn on_link(&self, addr: Ipv4Addr) -> bool {
-        self.usable().any(|a| addr.is_link_local() || a.cidr.contains(addr))
+        self.usable().any(|a| a.cidr.contains(addr))
+    }
+
+    /// Reached without a gateway: on the link, or a host of 169.254/16, which is this link's
+    /// whatever address the interface holds (RFC 3927 §2.6.2).
+    pub fn is_neighbour(&self, addr: Ipv4Addr) -> bool {
+        self.on_link(addr) || (addr.is_link_local() && !link_local_edge(addr) && self.usable().next().is_some())
     }
 
     /// A usable address whose prefix holds `toward`, else the first usable one.

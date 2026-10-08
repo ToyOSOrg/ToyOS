@@ -155,7 +155,8 @@ fn s_ip_nbr_012_an_off_link_sender_is_answered_not_cached() {
 
 // RFC 3927 §2.6.2: a host in 169.254/16 is on this link whatever address the interface holds, so
 // its request is a neighbour's: answered, and cached to be verified before it is trusted. Before
-// the interface has an address nothing is on its link.
+// the interface has an address nothing is on its link. §2.5 has that host broadcast its request,
+// as every request here is.
 #[test]
 fn rfc_3927_2_6_2_a_link_local_sender_is_a_neighbour() {
     let asker = ip4(169, 254, 3, 4);
@@ -172,6 +173,21 @@ fn rfc_3927_2_6_2_a_link_local_sender_is_a_neighbour() {
     h.frame(&request(MAC_B, asker, A));
     assert!(h.out().is_empty() && h.state(asker).is_none());
     assert_eq!(h.count(Counter::ArpSenderOffLink), 1);
+}
+
+// 169.254.0.0 and 169.254.255.255 are the network and the broadcast address of that prefix
+// (RFC 3927 §2.6.2 names the second), and no host's on any interface: as a sender, in a request
+// for our address or in a reply to a request of ours, each is refused as our own prefixes' edges
+// are, answered nothing and cached nowhere.
+#[test]
+fn rfc_3927_the_edges_of_the_link_local_prefix_are_no_senders() {
+    for edge in [ip4(169, 254, 0, 0), ip4(169, 254, 255, 255)] {
+        let mut h = H::fixture_i();
+        h.frame(&request(MAC_B, edge, A));
+        h.frame(&eth(MAC_A, MAC_B, 0x0806, &arp_packet(2, MAC_B, edge, MAC_A, A)));
+        assert_eq!(h.count(Counter::ArpInvalidSenderAddress), 2, "{edge}");
+        assert!(h.out().is_empty() && h.state(edge).is_none(), "{edge}");
+    }
 }
 
 #[test]

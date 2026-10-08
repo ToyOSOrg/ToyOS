@@ -93,9 +93,10 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
         let next_hop = if cidr.broadcast() == Some(destination) { NextHop::Broadcast } else { NextHop::Neighbour(destination) };
         return Ok(Route { iface: IfIndex(index), next_hop, source: pick_source(i, destination)? });
     }
-    // On the link with no prefix holding it is 169.254/16: resolved and sent to directly, and
-    // never handed to a router (RFC 3927 §2.6.2, §7).
-    if let Some((index, i)) = candidates().find(|(_, i)| i.on_link(destination)) {
+    // RFC 3927 §2.6.2, §2.7: a host of 169.254/16 is resolved and sent to on the link itself, and
+    // nothing to that prefix is a router's: not its two edges either, which are no host.
+    if destination.is_link_local() {
+        let (index, i) = candidates().find(|(_, i)| i.is_neighbour(destination)).ok_or(Counter::RouteNone)?;
         return Ok(Route { iface: IfIndex(index), next_hop: NextHop::Neighbour(destination), source: pick_source(i, destination)? });
     }
     let (index, i, gateway) = candidates().find_map(|(index, i)| i.active.map(|g| (index, i, g))).ok_or(Counter::RouteNone)?;

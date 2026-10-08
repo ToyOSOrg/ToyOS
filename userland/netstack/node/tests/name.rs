@@ -11,7 +11,7 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{arp, sum, terms, A, MAC, MAC_B, MAC_R, R};
+use common::{arp, sum, terms, A, BROADCAST, MAC_B, MAC_R, R};
 use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
 use toyos_mdns::Host;
 use toyos_net_node::{Counter, Refused};
@@ -219,9 +219,11 @@ fn a_second_query_inside_a_second_waits_for_the_second_to_end() {
 // RFC 3927 §2.6.2: "If the destination address is in the 169.254/16 prefix ... then the sender
 // MUST ARP for the destination address and then send the packet directly to the destination on
 // the same physical link. This MUST be done whether the interface is configured with a
-// Link-Local or a routable IPv4 address." §7: such a packet is never sent to a router. The
-// responder takes a link-local source for one on this link (RFC 6762 §11); the node holds a
-// routable lease and a router, asks the link for the asker itself, and answers it there.
+// Link-Local or a routable IPv4 address." And: "The host MUST NOT send a packet with an IPv4
+// Link-Local destination address to any router for forwarding" (§2.7 too). The responder takes
+// a link-local source for one on this link (RFC 6762 §11); the node holds a routable lease and
+// a router, asks the link for the asker itself, and answers it there. §2.5: the asker's ARP
+// reply, its sender link-local, comes in a frame to the link's broadcast address.
 #[test]
 fn an_answer_to_a_link_local_asker_goes_to_its_own_link_address() {
     let link_local = Ipv4Addr::new(169, 254, 3, 4);
@@ -231,7 +233,7 @@ fn an_answer_to_a_link_local_asker_goes_to_its_own_link_address() {
     let asked: Vec<&Seen> = lan.sent[frames..].iter().map(|(_, seen)| seen).collect();
     assert_eq!(asked, [&Seen::Arp { request: true, sender: A, target: link_local }], "the asker is asked for, and nothing is the router's");
 
-    lan.deliver(&arp(MAC, false, MAC_B, link_local, A));
+    lan.deliver(&arp(BROADCAST, false, MAC_B, link_local, A));
     let on_the_link = Udp { to: MAC_B, source: A, source_port: MDNS, destination: link_local, port: 53_000, ttl: 255, payload: legacy_response(5) };
     assert_eq!(since(&lan, from), [on_the_link]);
 }
