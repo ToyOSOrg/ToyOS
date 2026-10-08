@@ -1771,8 +1771,3 @@ pub fn note_fault(slot: usize) {
 pub(crate) fn add_poll(binding: &Binding, entry: PollEntry) {
     WATCHES[binding.slot].add_poll(entry);
 }
-
-/// Answer every poll on the function a claim holds as gone.
-pub fn cancel_polls(binding: &Binding) {
-    WATCHES[binding.slot].cancel_polls();
-}

@@ -98,15 +98,6 @@ impl Claim {
         }
     }
 
-    /// Answer every poll on the function or row this claim holds as gone.
-    pub(crate) fn cancel_polls(&self) {
-        match &self.what {
-            Claimed::PciFunction(binding) => crate::pcidev::cancel_polls(binding),
-            Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::cancel_polls(row),
-            Claimed::Class(_) | Claimed::Partition(_) => unreachable!("a poll cancelled through a claim on no function or row"),
-        }
-    }
-
     /// The view a partition claim transfers through, or `None` for any other.
     pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
         match &self.what {

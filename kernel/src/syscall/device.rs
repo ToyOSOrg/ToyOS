@@ -126,8 +126,10 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
     let claim = match process::with_process_data(|data| data.handles.get::<DeviceClaim>(handle, Rights::WRITE)) {
         Ok(claim) if claim.class() == device::DeviceType::Acpi => claim,
         Ok(claim) => {
-            return crate::object::HandleError::WrongType { held: claim.class().class_name(), wanted: "an acpi claim" }
-                .refuse()
+            let held = claim.class().class_name();
+            // `refuse` does not return: the claim is let go first.
+            drop(claim);
+            return crate::object::HandleError::WrongType { held, wanted: "an acpi claim" }.refuse();
         }
         Err(e) => return e.refuse(),
     };
@@ -326,7 +328,11 @@ pub(super) fn sys_device_dma_map(
         data.handles.get::<crate::object::shm::SharedMemObject>(region, Rights::MAP)
     }) {
         Ok(memory) => memory,
-        Err(e) => return e.refuse(),
+        Err(e) => {
+            // `refuse` does not return: the claim is let go first.
+            drop(claim);
+            return e.refuse();
+        }
     };
     let len = core::mem::size_of::<toyos_abi::pci::DmaMapping>() as u64;
     let Some(mut window) = ctx.user_bytes_mut(out, len) else {

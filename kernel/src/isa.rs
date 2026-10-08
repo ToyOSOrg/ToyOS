@@ -270,11 +270,6 @@ pub(crate) fn add_poll(row: &Row, entry: PollEntry) {
     WATCHES[row.0].add_poll(entry);
 }
 
-/// Answer every poll on the row a claim holds as gone.
-pub fn cancel_polls(row: &Row) {
-    WATCHES[row.0].cancel_polls();
-}
-
 /// The function a filled row raises `wire` with too, if one does: a second
 /// row on one line would take the other's interrupts.
 pub fn line_holder(wire: pio::Wire) -> Option<&'static str> {

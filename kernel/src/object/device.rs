@@ -153,12 +153,6 @@ impl DeviceClaim {
         }
     }
 
-    /// Answer every poll on this claim's function or row as gone; its release
-    /// has, or will, where the last handle has let it go.
-    pub(crate) fn cancel_polls(&self) {
-        self.reference.with(Claim::cancel_polls);
-    }
-
     /// The view a partition claim transfers through: `None` for a claim on
     /// anything else, and once the last handle has let the partition go.
     ///

@@ -265,7 +265,8 @@ impl WatchRef {
             Self::Static(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
             Self::Irq(watch) => watch.cancel_polls(),
-            Self::Claim(claim) => claim.cancel_polls(),
+            // Its release answers them, and its close ends none (`close_ends_polls`).
+            Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
         }
     }
 }
@@ -319,18 +320,20 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// and the keyboard, which the machine ends on its own and which other handles
 /// share: a console closing is not every console's keyboard going away. `false`
 /// for a process, which only its own end ends: closing one handle to it ends no
-/// other's watch.
+/// other's watch. `false` for a claim on a function or a row: its one handle's
+/// close is its release, which answers every poll on the watch before the slot
+/// or the row can be held again (`pcidev`'s and `isa::Row`'s release).
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
         KObjectRef::Process(_) => false,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => false,
-            device_registry::DeviceType::Mouse
+            device_registry::DeviceType::Keyboard
             | device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Acpi => false,
+            device_registry::DeviceType::Mouse
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
