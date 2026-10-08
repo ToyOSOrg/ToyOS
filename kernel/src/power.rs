@@ -8,6 +8,16 @@
 //! than of whoever asked for one, and what a third caller gets without knowing
 //! it is owed. Resets this kernel does not perform — a TCO or firmware
 //! watchdog, a triple fault, power loss — are outside it and always will be.
+//!
+//! **Nothing an end says is logged after the console's last drain.**
+//! `serial::flush_final` is the log ring's last reader for the console: a
+//! record committed past it reaches the wire only if `klogd`, on another CPU,
+//! beats the register write. What an end says through the ring it says above
+//! the flush (`arch::power::settle`); `arch::power::off` and
+//! `arch::power::reset` log nothing, and a panic in either drains for itself.
+//! The black box's page is another reader and an earlier one: its tail is
+//! sealed before either end is entered (`log::seal_tail`), so what `settle`
+//! says is on the console and in no page.
 
 use crate::drivers::{serial, xhci::stop};
 
@@ -54,11 +64,13 @@ pub fn reset_now() -> ! {
 
 /// Power the machine off. The caller asked [`shutdown_refused`] first.
 pub fn shutdown(stopping: crate::quiesce::Stopping) -> ! {
-    // Last chance: nothing drains the log ring after this point.
+    // Above the flush, because it logs.
+    let settled = crate::arch::power::settle(stopping);
+    // Nothing drains the log ring after this point, and nothing below logs.
     serial::flush_final();
     // A power-off takes VBUS with it on a machine whose ports are not
     // always-on and takes nothing on one whose are, so the devices are handed
     // back here for the same reason as at a reboot.
     stop::before_reset();
-    crate::arch::power::off(stopping)
+    crate::arch::power::off(settled)
 }

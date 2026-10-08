@@ -40,12 +40,20 @@ pub fn reset() -> ! {
     cpu::halt()
 }
 
+/// What [`off`] takes: this machine hands out nothing a power-off takes back.
+pub struct Settled(());
+
+/// Nothing to settle, and so nothing said.
+pub fn settle(_stopping: crate::quiesce::Stopping) -> Settled {
+    Settled(())
+}
+
 /// `SYSTEM_OFF`, once every other CPU the roster holds has turned itself off
 /// with `CPU_OFF` and PSCI answers it off: the caller puts every core in a
 /// known state first, and this is DEN0022 §5.10.3's own way to. The budget
 /// for all of them is [`DEAF_CPU`]'s span from the SGI: a CPU PSCI still
 /// answers on at its end is named, and the machine powers off regardless.
-pub fn off(_stopping: crate::quiesce::Stopping) -> ! {
+pub fn off(_settled: Settled) -> ! {
     cpu::disable_interrupts();
     let Some(psci) = psci::conduit() else { cpu::halt() };
     irqchip::off_all_but_self();

@@ -282,6 +282,10 @@ const MACHINE_TESTS: &[&str] = &[
     // that owes `GBL_RLS` need the FACS's word staged as only an idle firmware
     // allows: neither is done to the T14, which nothing powers on again.
     "acpi_mediated_access",
+    // The same boot on one CPU, where the power-off's CPU is the only one
+    // there is: what it logs reaches the console by the stop's own drain or
+    // not at all, since no other CPU runs `klogd` beside it.
+    "acpi_lock_given_back_on_one_cpu",
     // A power-off on the sleep type of a holder that is gone: the kernel's
     // static across a claim's release, and a machine that answers the write
     // by stopping. No host test reaches either, and the T14 is never asked to
@@ -1738,8 +1742,9 @@ const ACPI_MEDIATED_SAID: [&str; 9] = [
 /// probe's and not on the dead holder's before it, which QEMU's ICH9 answers
 /// by stopping the guest only for the probe's. The probe does not come back
 /// from that, so its verdict is its last line, the kernel's and QEMU's; a
-/// probe that ends instead is one whose arm failed.
-fn acpi_mediated_access() -> Result<(), String> {
+/// probe that ends instead is one whose arm failed. On `cpus` CPUs: the
+/// second one's range registers are read where there is one.
+fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
     const GIVEN_BACK_AT_THE_STOP: &str = "acpi: the Global Lock given back for a holder that left it taken (the machine is stopping)";
@@ -1753,6 +1758,7 @@ fn acpi_mediated_access() -> Result<(), String> {
             // The test kernel, for the Global Lock's actuator too.
             kernel_params: &["i8042-withheld"],
             ready_marker: "acpi: the ACPI row: ",
+            smp: cpus,
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
             qmp: true,
             ..Default::default()
@@ -1765,7 +1771,9 @@ fn acpi_mediated_access() -> Result<(), String> {
     let ended = format!("===TEST_END {JOB} ");
     await_guest(&mut qemu, &mut console, "the probe's power-off to give the lock back", |said| {
         said.contains(GIVEN_BACK_AT_THE_STOP) || said.contains(&ended)
-    })?;
+    })
+    // The probe's whole run: a wait that ends on neither line has no other account of it.
+    .map_err(|why| format!("{why}\nsince its boot the guest said:\n{}", &console[qemu.boot_log().len()..]))?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
     said.must_say(isa::WITHHELD)?;
@@ -1773,7 +1781,8 @@ fn acpi_mediated_access() -> Result<(), String> {
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
     // Whose range registers passed the unlisted read, and how this
     // hypervisor's second CPU holds its own beside them.
-    for line in ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "] {
+    let mtrr = ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "];
+    for line in mtrr.iter().take(cpus as usize) {
         eprintln!("  [acpi] {}", said.must_say(line)?.trim());
     }
     for line in ACPI_MEDIATED_SAID {
@@ -2929,7 +2938,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
-        "acpi_mediated_access" => acpi_mediated_access(),
+        "acpi_mediated_access" => acpi_mediated_access(2),
+        "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "bar_map_again" => bar_map_again(test_config),

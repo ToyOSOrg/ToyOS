@@ -21,7 +21,7 @@ use toyos_userbound::firmware::SleepType;
 use toyos_userbound::{Mediated, Ports};
 
 use super::cpu;
-use super::pio::{self, Declared, Slot};
+use super::pio::{self, Declared, Slot, TakenBack};
 use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::time::{Deadline, Duration, Tripwire};
@@ -133,8 +133,24 @@ const S5_TAKES: Tripwire = Tripwire::absurd(
      this kernel two seconds later never entered it",
 );
 
+/// The hardware taken back for the power-off, with everything [`settle`]
+/// says said: what [`off`] takes, so the log's last drain stands between.
+pub struct Settled(TakenBack);
+
+/// Take the hardware back from whoever was handed it, waiting out a write to
+/// `SMI_CMD` and an act for the `acpi` claim's holder in flight, and give
+/// back a Global Lock that holder was stopped holding.
+pub fn settle(stopping: crate::quiesce::Stopping) -> Settled {
+    let taken = pio::take_back(&stopping);
+    super::smi_cmd::settle(&taken);
+    super::acpi_mode::settle(&taken);
+    Settled(taken)
+}
+
 /// Enter S5. The caller asked [`off_refused`] before it stopped the machine:
 /// no sleep type here is this kernel's defect, and a panic.
+///
+/// **Nothing here logs**: the log's last drain is behind it (`power::shutdown`).
 ///
 /// ACPI 6.5 §16.1.6's order: on a machine in ACPI mode, which is the OS's
 /// to put to sleep, every event is disabled and every status cleared first
@@ -147,11 +163,8 @@ const S5_TAKES: Tripwire = Tripwire::absurd(
 /// the panel shows it, and the black box carries it through the panic's reset,
 /// where a halt would leave a machine that is on, silent, and indistinguishable
 /// from one the power left.
-pub fn off(stopping: crate::quiesce::Stopping) -> ! {
-    let taken = pio::take_back(&stopping);
-    super::smi_cmd::settle(&taken);
-    super::acpi_mode::settle(&taken);
-    // Read once no holder's call is in flight: the one a supply logged last.
+pub fn off(Settled(taken): Settled) -> ! {
+    // Past the settle no holder's call is in flight: the one a supply logged last.
     let slp_typ = sleep_type().expect("power: the machine was stopped for a power-off with no SLP_TYPa: the acpi claim's holder supplies it, and a shutdown without one is refused before the stop");
     let control = PM1A_CNT.get().expect("power: a sleep type was supplied over no PM1a control block").port(0);
     let held = cpu::inw(control);
