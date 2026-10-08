@@ -2276,10 +2276,15 @@ pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags)
     }
 }
 
-/// Unmap a previously mapped region.
+/// Unmap the whole mapping `mmap` returned at `addr`.
+///
+/// `size` names it as the `mmap` that made it did: any length that rounds to
+/// the same 2 MiB span. No mapping starting at `addr` is `NotFound`; a `size`
+/// that rounds to another span — a prefix, more than the mapping, zero — is
+/// `InvalidArgument` and unmaps nothing. A mapping has no part to give back.
 ///
 /// # Safety
-/// `addr` and `size` must describe a region previously returned by `mmap`.
+/// Nothing reaches the mapping at `addr` after this answers `Ok`.
 pub unsafe fn munmap(addr: *mut u8, size: usize) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_MUNMAP, addr as u64, size as u64, 0, 0))
 }

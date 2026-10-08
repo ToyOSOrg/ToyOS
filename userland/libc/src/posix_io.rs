@@ -555,12 +555,18 @@ pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32
     }
 }
 
+/// Unmaps the whole mapping at `addr` or nothing: the kernel refuses a `len`
+/// that names part of one, which POSIX would unmap. `EINVAL` is the one error
+/// POSIX gives `munmap`, so it is every refusal's.
 #[no_mangle]
 pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
-    // SAFETY: caller is responsible for addr/len matching a previous mmap
+    // SAFETY: the caller's, as C's `munmap` leaves it.
     match unsafe { syscall::munmap(addr, len) } {
         Ok(()) => 0,
-        Err(e) => set_errno(e),
+        Err(_) => {
+            crate::errno::set(EINVAL);
+            -1
+        }
     }
 }
 

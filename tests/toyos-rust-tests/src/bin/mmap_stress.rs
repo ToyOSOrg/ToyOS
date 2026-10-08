@@ -1,4 +1,4 @@
-use toyos_abi::syscall::{mmap, munmap, pipe, pipe_map, MmapProt, MmapFlags};
+use toyos_abi::syscall::{mmap, munmap, pipe, pipe_map, MmapProt, MmapFlags, SyscallError};
 use std::collections::HashSet;
 
 fn main() {
@@ -48,6 +48,43 @@ fn main() {
     for (ptr, size) in regions {
         unsafe { munmap(ptr, size) }.expect("munmap failed");
     }
+
+    // A mapping is unmapped whole or not at all. Each wrong size is followed
+    // by a read of both spans before its answer is judged: a kernel that took
+    // the mapping ends this process there.
+    let pair = unsafe {
+        mmap(core::ptr::null_mut(), 2 * page_2m, MmapProt::READ | MmapProt::WRITE,
+             MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)
+    };
+    assert!(!pair.is_null(), "mmap of two spans failed");
+    let second = unsafe { pair.add(page_2m) };
+    unsafe { pair.write(0xC3) };
+    unsafe { second.write(0x3C) };
+    for (what, size) in [
+        ("its first span", page_2m),
+        ("one byte", 1),
+        ("one byte more than its two spans", 2 * page_2m + 1),
+        ("nothing", 0),
+        ("every byte there is", usize::MAX),
+    ] {
+        let answer = unsafe { munmap(pair, size) };
+        assert_eq!(unsafe { pair.read_volatile() }, 0xC3, "unmapping {what} of a two-span mapping changed its first span");
+        assert_eq!(unsafe { second.read_volatile() }, 0x3C, "unmapping {what} of a two-span mapping changed its second span");
+        assert_eq!(answer, Err(SyscallError::InvalidArgument), "unmapping {what} of a two-span mapping");
+    }
+    // Its second span starts no mapping, which is another refusal.
+    let answer = unsafe { munmap(second, page_2m) };
+    assert_eq!(unsafe { second.read_volatile() }, 0x3C, "unmapping a mapping's second span took it");
+    assert_eq!(answer, Err(SyscallError::NotFound), "unmapping a mapping's second span");
+    // Any length that rounds to the mapping's span names it, as it did to `mmap`.
+    unsafe { munmap(pair, page_2m + 1) }.expect("a two-span mapping unmapped by a length inside its second span");
+    assert_eq!(unsafe { munmap(pair, 2 * page_2m) }, Err(SyscallError::NotFound), "the mapping was unmapped twice");
+    let small = unsafe {
+        mmap(core::ptr::null_mut(), 4096, MmapProt::READ | MmapProt::WRITE,
+             MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)
+    };
+    assert!(!small.is_null(), "mmap of 4096 bytes failed");
+    unsafe { munmap(small, 4096) }.expect("4096 bytes mapped, 4096 unmapped");
 
     // A FIXED mapping is placed at exactly the address asked for, so a request
     // the 2 MiB page granularity cannot express is refused rather than rounded:

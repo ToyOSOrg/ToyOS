@@ -175,26 +175,39 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     }
 }
 
-/// Frees an anonymous mapping and shoots down every sibling thread's
-/// translation for its range.
-pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
+/// Frees the anonymous mapping that starts at `addr`, whole, and shoots down
+/// every sibling thread's translation for its range. `size` names it as the
+/// `mmap` that made it did: one that does not round to the mapping's recorded
+/// span is `InvalidArgument` and unmaps nothing, a mapping being one region
+/// with no part to take away.
+pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
+    let Some(span) = crate::vma::window().span(size) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
     let pt = process::current_address_space();
     let taken = process::with_process_data(|data| {
-        let idx = data.mmap_regions.iter().position(|r| r.addr.raw() == addr)?;
+        let Some(idx) = data.mmap_regions.iter().position(|r| r.addr.raw() == addr) else {
+            return Err(SyscallError::NotFound);
+        };
+        if data.mmap_regions[idx].size as u64 != span.bytes() {
+            return Err(SyscallError::InvalidArgument);
+        }
         let region = data.mmap_regions.swap_remove(idx);
         data.free_count += 1;
         pt.lock()
             .free_and_unmap(region.addr)
             .expect("an mmap region is registered in the address space it was placed in");
-        Some(crate::mm::Unmapped::new(region))
+        Ok(crate::mm::Unmapped::new(region))
     });
-    let Some(unmapped) = taken else {
-        return SyscallError::NotFound.to_u64();
-    };
     // Dropped here, outside the closure: the drop shoots down and waits, and a
     // sibling can be spinning on the process-data lock.
-    drop(unmapped);
-    0
+    match taken {
+        Ok(unmapped) => {
+            drop(unmapped);
+            0
+        }
+        Err(e) => e.to_u64(),
+    }
 }
 
 /// The first `len` bytes of the shared memory object `handle` names, as a
