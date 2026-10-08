@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-10-08
 ---
@@ -55,3 +55,26 @@ Owner: the `acpi` claim's author (#749).
 **Exit**: `acpi_mediated_access` green in the nightly's `tcg / suite`, with the
 give-back's line on the wire before `SLP_EN` by construction and not by
 `klogd` winning; and a stall of this test carrying what the guest said.
+
+## What landed, and what is still owed
+
+Everything above is `main` before #767 and is kept as it was written. #767
+split the architecture's power-off in two: `arch::power::settle` says the
+give-back's line, `power::shutdown` drains the console after it, and
+`arch::power::off` takes the value only `settle` makes and logs nothing. The
+exit's second and third clauses are met by that pull request: the order is
+`kernel/src/power.rs`'s `shutdown`, and the test's stall appends what the
+guest said since its boot.
+
+The reading above has since been run. On one CPU no other CPU runs `klogd`
+beside the power-off, and the line never arrived with the split reverted,
+three boots of three, each capture ending at `Shutting down.`; with it the
+line arrived, three of three. `acpi_lock_given_back_on_one_cpu`
+(`tests/toyos.rs`) is that boot.
+
+Its first clause is not met: no nightly has run `tcg / suite` on a `main`
+that carries #767.
+
+Assigned: the orchestrator, at #767's landing. He reads `acpi_mediated_access`
+in the first nightly `tcg / suite` on a `main` that carries it, and deletes
+this file on a green; a stall there prints the guest's words, and goes here.
