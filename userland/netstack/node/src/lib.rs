@@ -6,7 +6,7 @@
 //!
 //! The node carries out what the client asks and tells it what became of its address. What the
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
-//! its types keep.
+//! its types keep. A client's TCP connection and its two pipes are `streams`'.
 //!
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
@@ -30,6 +30,9 @@
 extern crate alloc;
 
 mod lease;
+mod streams;
+
+pub use streams::{FromClient, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -61,6 +64,7 @@ pub struct Node {
     events: Vec<Event>,
     /// Room for the largest message the client accepts.
     datagram: Vec<u8>,
+    streams: streams::Streams,
 }
 
 impl Node {
@@ -76,6 +80,7 @@ impl Node {
             counters: Counters::default(),
             events: Vec::new(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
+            streams: streams::Streams::default(),
         })
     }
 
@@ -108,6 +113,7 @@ impl Node {
     pub fn receive(&mut self, now: Instant, frame: &[u8], mut draw: impl FnMut() -> u32) {
         self.stack.receive(now, frame);
         self.settle(now, &mut draw);
+        self.bridge(now);
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
@@ -130,7 +136,7 @@ impl Node {
     // ---- the clock ----
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).min()
+        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(self.streams.next_deadline()).min()
     }
 
     /// Every deadline at or before `now`; the frames they make due wait for [`Self::transmit`].
@@ -140,6 +146,7 @@ impl Node {
         let out = self.client.timer(now, &mut draw);
         self.carry_out(now, out, None, &mut draw);
         self.settle(now, &mut draw);
+        self.bridge(now);
     }
 
     /// Hands the client what the shard reported and what reached its socket, and carries out
