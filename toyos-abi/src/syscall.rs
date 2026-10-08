@@ -1981,7 +1981,8 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
 
 /// Map the region `shm` names into this process. Needs [`Rights::MAP`].
 ///
-/// Idempotent: a second call answers the first call's address.
+/// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
+/// when the region's last handle was closed under the call: nothing is mapped.
 ///
 /// [`Rights::MAP`]: crate::handle::Rights::MAP
 ///
