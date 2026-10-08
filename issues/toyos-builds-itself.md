@@ -130,7 +130,7 @@ measures it.
 **What M3 adds: a rustc that carries that LLVM**, after all of M2's.
 - Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`.
 - Link: `issues/a-rust-std-binary-cannot-link-the-cxx-runtime.md`.
-- Test: `issues/a-worktree-cannot-build-a-hosted-rustc-of-its-own.md`.
+- Test: `issues/nothing-builds-the-toyos-hosted-rustc.md`.
 
 M3's exit then waits on a linker in the guest
 (`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`).
