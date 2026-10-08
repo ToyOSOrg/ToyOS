@@ -28,24 +28,35 @@ no part to take away, and `SYS_MUNMAP` takes only the length the mapping's
 `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`'s
 stage 4.
 
+`mmap` with `MAP_FIXED` has the same gap. POSIX replaces whatever pages
+`[addr, addr + len)` overlaps, of any mappings, and leaves the rest of each
+mapped. libc's places a fixed mapping over free pages, or over one whole
+mapping at its start and by its page count, which it replaces; over some of a
+mapping's pages it answers `MAP_FAILED` with `ENOMEM` and replaces nothing,
+the kernel's `FIXED` arm taking only the length the mapping was asked for.
+
 ## Evidence
 
 `tests/testcases/tinycc/206_libc_refusals.c` maps two pages and reads the
 answer, `errno` and both pages for the first page alone, the second alone,
 no bytes and a byte past both; its `.expect` holds `-1, EINVAL` for each and
-both pages' bytes after them. The lengths that name a mapping are
+both pages' bytes after them. Before those it maps the first page fixed, and
+the `.expect` holds `mmap the first of two pages fixed: -1, ENOMEM` and both
+pages' bytes after it. The lengths that name a mapping are
 `memreq::whole_pages`, host-tested in `tests/libc-arch/src/memory_refusals.rs`.
 No program in the tree trims a mapping: read, across `userland/` and the C
 corpus, and not across what a user builds against this libc.
 
 ## Exit condition
 
-`206_libc_refusals` reads 0 for the first of two pages, the second page still
-holds its byte, and a touch of the first faults; or the owner rules the
-refusal final and this file becomes `kind: rejected`.
+`206_libc_refusals` reads 0 for `munmap` of the first of two pages, the second
+page still holds its byte, and a touch of the first faults; and its
+`mmap the first of two pages fixed` line reads 0, with the second page's byte
+kept after it. Or the owner rules the refusals final and this file becomes
+`kind: rejected`.
 
 ## Owner
 
-The orchestrator, who holds the 2 MiB track and ruled the refusal: the first
-exit needs a region that splits, which that track's stage 4 is where it would
-be built.
+The orchestrator, who holds the 2 MiB track and ruled the refusal in its
+stage 4. The first exit needs a region that splits, and no stage of that
+track builds one.

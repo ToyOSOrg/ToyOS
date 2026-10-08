@@ -149,6 +149,12 @@ int main(void) {
     printf("pages after them: %c %c\n", pair[0], pair[4096]);
     said("munmap two pages by a length into the second", munmap(pair, 4097));
     said("munmap them again", munmap(pair, 8192));
+    /* A length off a page maps the pages it reaches into, and is unmapped by
+       that length or by those pages'. */
+    char *odd = mmap(NULL, 5000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    said("munmap 5000 bytes by 5000", odd == MAP_FAILED ? -2 : munmap(odd, 5000));
+    odd = mmap(NULL, 5000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    said("munmap 5000 bytes by 8192", odd == MAP_FAILED ? -2 : munmap(odd, 8192));
 
     /* The allocators: null and ENOMEM for a size no block has. Each answer is
        stored, so the compiler cannot fold an unused allocation to non-null. */

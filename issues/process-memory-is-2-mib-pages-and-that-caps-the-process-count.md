@@ -80,8 +80,8 @@ live split of a user leaf.
    orchestrator's ruling, and that is in: `SYS_MUNMAP` and a `FIXED` `mmap`
    over a mapping take only the length the mapping's `mmap` was asked for,
    compared as given, so this stage's rounding moves nothing either accepts.
-   What the stage still owes of it: a region that splits is where
-   `issues/libc-munmap-refuses-part-of-a-mapping.md` would be answered. Exit:
+   What the refusal costs a C program is
+   `issues/libc-munmap-refuses-part-of-a-mapping.md`. Exit:
    `mmap` of more than the watermark allows refused at `mmap`, and a guest
    that touches one page of a large mapping holds one frame.
 5. **File-backed faults at 4 KiB.** ROOT's read-only text is shared
