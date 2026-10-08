@@ -118,6 +118,50 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
     }
 }
 
+/// One operation on the `acpi` claim (`toyos_abi::acpi::op`), for the process
+/// the claim's first read bound: a handle moved on to another answers
+/// `PermissionDenied`, as its ports answer nothing there.
+pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64) -> u64 {
+    use toyos_abi::acpi::op as ops;
+    let claim = match process::with_process_data(|data| data.handles.get::<DeviceClaim>(handle, Rights::WRITE)) {
+        Ok(claim) if claim.class() == device::DeviceType::Acpi => claim,
+        Ok(claim) => {
+            return crate::object::HandleError::WrongType { held: claim.class().class_name(), wanted: "an acpi claim" }
+                .refuse()
+        }
+        Err(e) => return e.refuse(),
+    };
+    // Copied in before the row is borrowed and out after it is given back:
+    // no user copy is made under the claim's lock.
+    let mut request = match op {
+        ops::ACCESS => match ctx.copy_in::<toyos_abi::acpi::Access>(UserAddr::new(at)) {
+            Ok(request) => Some(request),
+            Err(e) => return e.to_u64(),
+        },
+        _ => None,
+    };
+    let pid = process::current_process();
+    // The holder's check and the act are one borrow of the row, as a read's are.
+    let done = claim.isa(|row| {
+        if !crate::isa::held_by(row, pid) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        match (op, request.as_mut()) {
+            (ops::ACCESS, Some(request)) => crate::arch::acpi_mode::access(row, request).map(|()| 0),
+            (ops::LOCK_TAKE, _) => {
+                crate::arch::acpi_mode::lock_take(row).map(|taken| if taken { ops::TAKEN } else { ops::PENDING })
+            }
+            (ops::LOCK_RELEASE, _) => crate::arch::acpi_mode::lock_release(row).map(|()| 0),
+            _ => Err(SyscallError::InvalidArgument),
+        }
+    });
+    let done = done.unwrap_or(Err(SyscallError::Gone)).and_then(|word| match &request {
+        Some(request) => ctx.copy_out(UserAddr::new(at), request).map(|()| word),
+        None => Ok(word),
+    });
+    done.unwrap_or_else(|e| e.to_u64())
+}
+
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI

@@ -1,6 +1,7 @@
 //! A process's threads are bounded at `MAX_THREADS`, exited ones not yet
 //! joined among them: past it a spawn is refused by name, and a join is room
-//! for one.
+//! for one. An entry outside the user half is refused by name whatever room
+//! there is.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -80,6 +81,17 @@ fn spawn(stacks: &mut Stacks, ran: &AtomicU32) -> Result<u64, SyscallError> {
 fn main() {
     let ran = AtomicU32::new(0);
     let mut stacks = Stacks { chunk: 0, used: 0 };
+
+    // Canonical under neither 48-bit nor 57-bit addressing; the first address
+    // past the user half; the first of the kernel half.
+    let (base, top) = stacks.next();
+    for entry in [0x0100_0000_0000_0000, 0x0000_8000_0000_0000, 0xFFFF_8000_0000_0000] {
+        assert_eq!(
+            SyscallError::from_u64(unsafe { syscall::thread_spawn(entry, top, 0, base) }),
+            Some(SyscallError::InvalidArgument),
+            "a thread entry of {entry:#x} was not refused",
+        );
+    }
 
     let mut first = None;
     let mut spawned = 0usize;

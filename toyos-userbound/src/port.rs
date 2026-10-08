@@ -108,11 +108,24 @@ impl IoBitmap {
     }
 }
 
+/// What a declared run answers the `acpi` claim's holder, whose AML may name
+/// any port ([`crate::firmware::port`]). Every declaration says, so none
+/// passes by default.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mediated {
+    /// Refused both ways.
+    Kept,
+    /// Read for the holder, never written.
+    ReadOnly,
+    /// Read and written for the holder.
+    Open,
+}
+
 /// The ports no grant reaches, each run named by what holds it: the one
 /// declaration of every port the kernel drives, read by whatever decides a
 /// grant.
 pub struct Reserved<const N: usize> {
-    runs: [Option<(&'static str, Ports)>; N],
+    runs: [Option<(&'static str, Ports, Mediated)>; N],
 }
 
 /// Why a run was not declared.
@@ -136,18 +149,23 @@ impl<const N: usize> Reserved<N> {
     }
 
     /// Reserve `ports` for `holder`, refused where another holder has one of them.
-    pub fn declare(&mut self, holder: &'static str, ports: Ports) -> Result<(), Undeclared> {
+    pub fn declare(&mut self, holder: &'static str, ports: Ports, mediated: Mediated) -> Result<(), Undeclared> {
         if let Some(first) = self.holder(ports) {
             return Err(Undeclared::Clash(first));
         }
         let slot = self.runs.iter_mut().find(|slot| slot.is_none()).ok_or(Undeclared::Full)?;
-        *slot = Some((holder, ports));
+        *slot = Some((holder, ports, mediated));
         Ok(())
     }
 
     /// Who holds a port of `ports`, if anyone does.
     pub fn holder(&self, ports: Ports) -> Option<&'static str> {
-        self.runs.iter().flatten().find(|(_, held)| held.overlaps(ports)).map(|&(name, _)| name)
+        self.runs.iter().flatten().find(|(_, held, _)| held.overlaps(ports)).map(|&(name, ..)| name)
+    }
+
+    /// What the run holding `port` answers a mediated access, if one does.
+    pub fn mediated(&self, port: u16) -> Option<Mediated> {
+        self.runs.iter().flatten().find(|(_, held, _)| held.overlaps(Ports::one(port))).map(|&(.., mediated)| mediated)
     }
 }
 
@@ -313,8 +331,11 @@ mod tests {
     #[test]
     fn a_declared_run_refuses_every_run_that_shares_a_port_with_it() {
         let mut reserved = Reserved::<4>::new();
-        reserved.declare("the PM1a control block", run(0x1804, 2)).expect("the first run");
-        reserved.declare("SMI_CMD", Ports::one(0xB2)).expect("a disjoint run");
+        reserved.declare("the PM1a control block", run(0x1804, 2), Mediated::ReadOnly).expect("the first run");
+        reserved.declare("SMI_CMD", Ports::one(0xB2), Mediated::Kept).expect("a disjoint run");
+        assert_eq!(reserved.mediated(0x1805), Some(Mediated::ReadOnly));
+        assert_eq!(reserved.mediated(0xB2), Some(Mediated::Kept));
+        assert_eq!(reserved.mediated(0x1806), None);
         // Either end of the block, a run that covers it, and a run beside it.
         assert_eq!(reserved.holder(Ports::one(0x1804)), Some("the PM1a control block"));
         assert_eq!(reserved.holder(Ports::one(0x1805)), Some("the PM1a control block"));
@@ -323,14 +344,14 @@ mod tests {
         assert_eq!(reserved.holder(Ports::one(0x1806)), None);
         assert_eq!(reserved.holder(run(0xB0, 3)), Some("SMI_CMD"));
         // A second holder of a declared port is refused naming the first.
-        assert_eq!(reserved.declare("the GPE0 block", run(0x1805, 1)), Err(Undeclared::Clash("the PM1a control block")));
+        assert_eq!(reserved.declare("the GPE0 block", run(0x1805, 1), Mediated::Open), Err(Undeclared::Clash("the PM1a control block")));
         assert_eq!(reserved.holder(run(0x1806, 0x10)), None, "a refused declaration reserved nothing");
     }
 
     #[test]
     fn a_full_declaration_refuses_one_more_run() {
         let mut reserved = Reserved::<1>::new();
-        reserved.declare("COM1", run(0x3F8, 8)).expect("the one slot");
-        assert_eq!(reserved.declare("the RTC", run(0x70, 2)), Err(Undeclared::Full));
+        reserved.declare("COM1", run(0x3F8, 8), Mediated::Kept).expect("the one slot");
+        assert_eq!(reserved.declare("the RTC", run(0x70, 2), Mediated::Kept), Err(Undeclared::Full));
     }
 }

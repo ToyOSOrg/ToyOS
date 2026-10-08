@@ -13,3 +13,21 @@ pub fn claim() -> Result<(crate::isa::Row, AcpiInfo), ClaimError> {
 pub fn release() {
     unreachable!("AArch64 has no ACPI row")
 }
+
+/// Never called, as [`release`]: the three are reached only with a claim.
+pub fn access(_row: &crate::isa::Row, _request: &mut toyos_abi::acpi::Access) -> Result<(), toyos_abi::syscall::SyscallError> {
+    unreachable!("AArch64 has no ACPI row")
+}
+
+pub fn lock_take(_row: &crate::isa::Row) -> Result<bool, toyos_abi::syscall::SyscallError> {
+    unreachable!("AArch64 has no ACPI row")
+}
+
+pub fn lock_release(_row: &crate::isa::Row) -> Result<(), toyos_abi::syscall::SyscallError> {
+    unreachable!("AArch64 has no ACPI row")
+}
+
+#[cfg(feature = "test-actuators")]
+pub fn debug_firmware_lock(_act: u64) -> u64 {
+    toyos_abi::syscall::SyscallError::NotSupported.to_u64()
+}
