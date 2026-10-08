@@ -161,8 +161,9 @@ const RUST_SKIP: &[&str] = &[
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/acpicase.
     "acpi_release",
-    // It holds the boot open to near the runner's bound, and asserts nothing:
-    // the `acpi_server_events` metal row runs it.
+    // It waits for the ACPI server's count of its embedded controller's
+    // queries, and no guest's machine has that controller: the
+    // `acpi_server_events` metal row runs it.
     "acpi_hold",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
@@ -461,7 +462,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // is held and what is read beside Linux's.
         "counters",
         metal::Metal {
-            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
+            arms: TESTCASES,
             judge: |b| counters_on_metal(b[0]),
         },
     ),
@@ -472,7 +473,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES,
             judge: |b| acpi_events_on_metal(b[0]),
         },
     ),
@@ -482,7 +483,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The same boot as `acpi_server_events`.
         "acpi_tables_loaded",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES,
             judge: |b| acpi_tables_on_metal(b[0]),
         },
     ),
@@ -884,7 +885,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "crash_report_reads_no_kernel_memory",
         metal::Metal {
-            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_fault_gates"])],
+            arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_fault_gates")?;
                 faults::crash_report_reads_no_kernel_memory(&b[0].kernel())
@@ -917,6 +918,11 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
         claims::RECLAIM,
+        "test_rs_counters_metal",
+        "test_rs_fault_gates",
+        // Last: the count it waits for comes thirty seconds after the server
+        // arms, and a job after it would wait that out behind it.
+        "test_rs_acpi_hold",
     ],
 )];
 

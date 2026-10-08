@@ -213,6 +213,46 @@ pub fn a_boot_with_a_failure_of_its_own_adds_no_row() {
     );
 }
 
+static HOLED: Metal =
+    Metal { arms: &[metal::once("holed", "tests/jobcase", &[], &[])], judge: span };
+
+/// **A boot that deleted parts of its own log is refused by name, and no row
+/// is judged on what is left**: `span` asserts no line, so it would pass over
+/// the hole. The same boot having rotated and deleted nothing is read.
+pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
+    const OPENED: &str = "[2026-09-29 18:22:39  1.170 logkeeper] logkeeper: this boot's kernel log is \
+                          /log/2026-09-29-182239.log (2026-09-29 18:22:39 UTC)\n";
+    const CONTINUED: &str = "[2026-09-29 18:23:14 36.901 logkeeper] logkeeper: /log/2026-09-29-182239_0017.log \
+                             reached 1048816 bytes and this boot continues in /log/2026-09-29-182239_0018.log\n";
+    let retired = |file: &str| {
+        format!(
+            "[2026-09-29 18:23:14 36.899 logkeeper] logkeeper: /log holds more than 16 logs, so /log/{file} \
+             was deleted\n"
+        )
+    };
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    let holed = format!(
+        "{BOOTED}{OPENED}{}{}{CONTINUED}",
+        retired("2026-09-29-182239_0002.log"),
+        retired("2026-09-29-182239_0003.log")
+    );
+    plant(&dir, "holed", PANEL, &holed, None);
+    plant(&dir, "passing", PANEL, &format!("{BOOTED}{OPENED}{CONTINUED}"), None);
+    let readbacks = read(&dir, &["holed", "passing"]);
+    assert_eq!(
+        readbacks["holed"].as_ref().err().map(String::as_str),
+        Some("holed's own log lost parts 2 to 3 to retention; no row is judged on it")
+    );
+
+    let tests = [("holed", &HOLED), ("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "a boot with a hole in its log judged green");
+    let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+    assert!(record.measured.contains_key("span.passing.us"), "{:?}", record.measured);
+    assert!(!record.measured.keys().any(|name| name.contains("holed")), "{:?}", record.measured);
+}
+
 /// Two boots under one name are judged on the first reading and recorded off
 /// neither.
 pub fn a_name_two_boots_measured_is_refused() {

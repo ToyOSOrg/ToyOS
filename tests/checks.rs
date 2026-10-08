@@ -877,6 +877,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_boot_that_lost_parts_of_its_log_judges_no_row() {
+        metal_checks::a_boot_that_lost_parts_of_its_log_judges_no_row();
+    }
+
+    #[test]
     fn metal_name_two_boots_measured_is_refused() {
         metal_checks::a_name_two_boots_measured_is_refused();
     }

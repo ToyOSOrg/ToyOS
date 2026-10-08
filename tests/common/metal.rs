@@ -814,6 +814,13 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         .map_err(|why| format!("toyos-metal refused {label}: {why}"))?;
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
     let log = read(toyos_build::metal::READBACK_KERNEL)?;
+    // Before any row: a judge that reads a line reports a deleted one missing,
+    // and a judge that asserts an absence passes over it.
+    if let Some((first, last)) = bootlog::lost_parts(&log) {
+        return Err(format!(
+            "{label}'s own log lost parts {first} to {last} to retention; no row is judged on it"
+        ));
+    }
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
     Readback::new(label, loader, log, &boot)
 }
@@ -999,8 +1006,11 @@ pub fn judge_readbacks(
         };
         let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
         eprintln!(
-            "  {label}: Boot: complete {ms} ms, back in {} s, the stick enumerated {} s after that",
-            back.back_secs, back.stick_secs
+            "  {label}: Boot: complete {ms} ms, a log of {} bytes, back in {} s, the stick enumerated {} s \
+             after that",
+            back.log.len(),
+            back.back_secs,
+            back.stick_secs
         );
         let panel = back.panel();
         if let Some(panel) = panel {

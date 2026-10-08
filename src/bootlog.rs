@@ -293,6 +293,59 @@ pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     (loader, logkeeper)
 }
 
+/// What `logkeeper` says as it opens a boot's file, before that file's path, in
+/// `userland/logkeeper/src/main.rs`.
+pub const LOG_OPENED: &str = "logkeeper: this boot's kernel log is ";
+
+/// What `logkeeper` says either side of the path of a file retention deleted,
+/// in `userland/logkeeper/src/store.rs`'s `sweep`.
+pub const LOG_RETIRED: [&str; 2] = [" logs, so ", " was deleted"];
+
+/// One of `logkeeper`'s paths as its boot's stem and its part, as
+/// `userland/logkeeper/src/store.rs` names a part: the first is the bare stem.
+fn stem_and_part(path: &str) -> Option<(&str, u32)> {
+    let name = path.rsplit('/').next()?;
+    let bare = name.strip_suffix(".log").filter(|_| is_logkeeper_file(name))?;
+    match bare.split_once('_') {
+        Some((stem, part)) => Some((stem, part.parse().ok()?)),
+        None => Some((bare, 1)),
+    }
+}
+
+/// The parts of its own log the boot `log` ends in deleted to retention, first
+/// and last, or `None` for a log that is whole.
+///
+/// **Read off `logkeeper`'s own lines, and off their paths**: a program's line
+/// can carry the same words, and a boot deletes earlier boots' files without
+/// losing a line of its own. Retention takes a boot's continuations oldest
+/// first, and the lines naming the oldest go with the parts that held them, so
+/// the hole opens at the boot's first continuation and the newest line, which
+/// is written into the newest part, closes it.
+pub fn lost_parts(log: &str) -> Option<(u32, u32)> {
+    let mut own: Option<(&str, u32)> = None;
+    let mut last: Option<u32> = None;
+    for said in log.lines().filter_map(toyos_logstream::program_line) {
+        if said.tag != toyos_logstream::LOGKEEPER {
+            continue;
+        }
+        if let Some(opened) = said.text.strip_prefix(LOG_OPENED) {
+            own = opened.split_whitespace().next().and_then(stem_and_part);
+            last = None;
+        }
+        let retired = said
+            .text
+            .strip_suffix(LOG_RETIRED[1])
+            .and_then(|head| head.split_once(LOG_RETIRED[0]))
+            .and_then(|(_, path)| stem_and_part(path));
+        if let (Some((stem, part)), Some((mine, _))) = (retired, own) {
+            if stem == mine {
+                last = last.max(Some(part));
+            }
+        }
+    }
+    Some((own?.1 + 1, last?))
+}
+
 /// The kernel's boot-phase record for the end of boot, in
 /// `kernel/src/log/mod.rs`'s `boot_phase!`.
 pub const COMPLETE: &str = "Boot: complete (";
@@ -679,6 +732,71 @@ mod tests {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
             assert!(source.contains(&needle), "{} does not write {needle:?}", at.display());
+        }
+    }
+
+    /// A boot's own middle, deleted to retention: `logkeeper`'s lines naming
+    /// this boot's stem, and nobody else's words and no other boot's files.
+    #[test]
+    fn a_boot_that_deleted_parts_of_its_own_log_is_told_from_one_that_is_whole() {
+        let opened = |stem: &str| {
+            format!("[2026-10-08 14:06:46 12.841 logkeeper] {LOG_OPENED}/log/{stem}.log (2026-10-08 14:06:46 UTC)\n")
+        };
+        let retired = |tag: &str, file: &str| {
+            format!(
+                "[2026-10-08 14:07:21 47.238 {tag}] logkeeper: /log holds more than 16{}/log/{file}{}\n",
+                LOG_RETIRED[0], LOG_RETIRED[1]
+            )
+        };
+        let continued = "[2026-10-08 14:07:21 47.242 logkeeper] logkeeper: /log/2026-10-08-140646_0026.log reached \
+                         1067282 bytes and this boot continues in /log/2026-10-08-140646_0027.log\n";
+        let own = opened("2026-10-08-140646");
+        // What came back of a boot that wrote forty-one parts: the lines naming
+        // parts 2 to 11 went with those parts.
+        let holed = format!(
+            "{own}{}{continued}{}",
+            retired("logkeeper", "2026-10-08-140646_0012.log"),
+            retired("logkeeper", "2026-10-08-140646_0026.log")
+        );
+        assert_eq!(lost_parts(&holed), Some((2, 26)));
+        assert_eq!(lost_parts(&format!("{own}{}", retired("logkeeper", "2026-10-08-140646_0002.log"))), Some((2, 2)));
+
+        // A boot that rotated and deleted nothing.
+        assert_eq!(lost_parts(&format!("{own}{continued}")), None);
+        assert_eq!(lost_parts(""), None);
+        // An earlier boot's files, whole or a continuation, are not this boot's lines.
+        let earlier = format!(
+            "{own}{}{}",
+            retired("logkeeper", "2026-10-07-091500.log"),
+            retired("logkeeper", "2026-10-07-091500_0003.log")
+        );
+        assert_eq!(lost_parts(&earlier), None);
+        // The same words from another program, from the kernel, and about a
+        // file that is not one of logkeeper's.
+        let quoted = format!(
+            "{own}{}[2026-10-08 14:07:21 47.238 cpu2 kernel] tmpfs: read through a backing whose file was deleted\n{}",
+            retired("test-runner pid=31", "2026-10-08-140646_0012.log"),
+            retired("logkeeper", "loader.log")
+        );
+        assert_eq!(lost_parts(&quoted), None);
+        // The boot the log ends in: an earlier boot's hole on the same volume
+        // is that boot's.
+        assert_eq!(lost_parts(&format!("{holed}{}", opened("2026-10-08-141929"))), None);
+    }
+
+    /// Nothing links this crate to `logkeeper` either: both lines are held to
+    /// its source.
+    #[test]
+    fn logkeeper_writes_the_lines_the_host_reads() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/logkeeper/src");
+        for (file, needle) in [
+            ("main.rs", format!("say!(\"{LOG_OPENED}{{}} ({{dated}})\", v.path())")),
+            ("store.rs", format!("{{MAX_LOG_FILES}}{}{{path}}{}\"", LOG_RETIRED[0], LOG_RETIRED[1])),
+            ("store.rs", "1 => format!(\"{DIR}/{stem}.log\")".to_string()),
+            ("store.rs", "n => format!(\"{DIR}/{stem}_{n:04}.log\")".to_string()),
+        ] {
+            let source = std::fs::read_to_string(root.join(file)).expect("a logkeeper module");
+            assert!(source.contains(&needle), "userland/logkeeper/src/{file} does not write {needle:?}");
         }
     }
 
