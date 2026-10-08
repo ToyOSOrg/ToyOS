@@ -315,8 +315,9 @@ mediated access, leaves open:
   firmware's bytes chose. The holder cannot cause the write, set `SLP_EN` or
   reach a bit outside 12:10 (`toyos_userbound::firmware::SleepType`), and
   supplies one value under a claim. What it supplied outlives it, so a
-  machine whose server died still powers off: the slice's choice, which the
-  owner may overrule for a value withdrawn with its claim. Owner: this
+  machine whose server died still powers off: the owner's "Keep it"
+  (2026-10-08), asked whether the supplied value survives the server dying
+  or is withdrawn with its claim. Owner: this
   stage. **Exit**: it stays while "one path" stands, which leaves the kernel
   no second reading; it goes when the owner rules one in, and a guest test
   then supplies a sleep type that is not the machine's and reads it refused.
