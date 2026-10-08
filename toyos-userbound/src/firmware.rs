@@ -30,7 +30,10 @@
 //! nowhere, and a machine's AML reads them as it loads. Such a read passes at
 //! or above [`FIXED_RANGE_END`] where the kernel maps the address and the
 //! processor's range registers type it uncacheable ([`Memory::uncached`]):
-//! that is what makes a read of a register one read of it. It is not what
+//! that is what makes a read of a register one read of it, on a machine
+//! whose CPUs all read it under those registers; where some CPU's are on
+//! and are not those ([`Memory::registers_differ`]) no such read passes.
+//! It is not what
 //! keeps RAM out, since the range registers are not the effective type
 //! everywhere: the allocator hands out only memory the map lists as usable
 //! ([`toyos_bootmap::is_usable_type`]), so memory the map does not list holds
@@ -123,6 +126,9 @@ pub struct Memory<'a, D> {
     /// whatever maps them: asked only of an address the map does not list, at
     /// or above [`FIXED_RANGE_END`].
     pub uncached: fn(u64, u64) -> bool,
+    /// Some CPU's range registers are on and are not the ones `uncached`
+    /// answers from: what it answers is not known of a read that CPU makes.
+    pub registers_differ: bool,
 }
 
 /// A memory access the policy passed.
@@ -221,6 +227,9 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         }
         if last >= self.mapped_end {
             return No(Refused::Unmapped);
+        }
+        if ty.is_none() && self.registers_differ {
+            return No(Refused::RangeRegistersDiffer);
         }
         if ty.is_none() && (at < FIXED_RANGE_END || !(self.uncached)(at, width.bytes())) {
             return No(Refused::UnlistedCached);

@@ -1747,6 +1747,11 @@ fn acpi_mediated_access() -> Result<(), String> {
     said.must_say(isa::WITHHELD)?;
     said.must_say("acpi: the Global Lock is the FACS's at ")?;
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
+    // Whose range registers passed the unlisted read, and how this
+    // hypervisor's second CPU holds its own beside them.
+    for line in ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "] {
+        eprintln!("  [acpi] {}", said.must_say(line)?.trim());
+    }
     for line in ACPI_MEDIATED_SAID {
         eprintln!("  [acpi] {}", said.must_say(line)?.trim());
     }
@@ -3843,7 +3848,10 @@ const T14_DEFINITION_BLOCKS: usize = 14;
 /// what the interpreter refuses, no address was `Unmapped`, and no access
 /// the load makes is one the policy keeps from it. The load's AML read
 /// memory, read configuration space and took the Global Lock, which is the
-/// real lock word exchanged and given back each time. What it prints beside
+/// real lock word exchanged and given back each time. Every other CPU of the
+/// machine said how its range registers stand beside the boot processor's,
+/// which typed the load's unlisted read a register's, and none holds registers
+/// that are on and not those. What it prints beside
 /// that is the first measurement of each: the load's time, the reads by
 /// address space, the takes that found the firmware holding the lock, and
 /// the pages of memory by the type the firmware's map gives them.
@@ -3861,6 +3869,15 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if blocks != T14_DEFINITION_BLOCKS {
         return Err(format!("the server found {blocks} definition blocks where Linux loads {T14_DEFINITION_BLOCKS}"));
     }
+    let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
+    let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
+    if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {
+        return Err(format!(
+            "{others} other CPUs came up, and their range registers beside the boot processor's are {compared:#?}"
+        ));
+    }
+    let off = compared.iter().filter(|l| l.contains("range registers are off")).count();
+    eprintln!("  [acpi] {others} other CPUs' range registers compared with the boot processor's: {off} off, none on and different");
     let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));

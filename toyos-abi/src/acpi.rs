@@ -193,6 +193,11 @@ pub enum Refused {
     /// A read at an address firmware's map does not list, which the
     /// processor's range registers do not type uncacheable: no register.
     UnlistedCached = 15,
+    /// A read at an address firmware's map does not list, on a machine where
+    /// some CPU's range registers are on and are not the boot processor's:
+    /// what types the address a register is not what every CPU reads it
+    /// under.
+    RangeRegistersDiffer = 16,
 }
 
 impl Refused {
@@ -213,6 +218,7 @@ impl Refused {
             13 => Self::ConfigSpan,
             14 => Self::ConfigWrite,
             15 => Self::UnlistedCached,
+            16 => Self::RangeRegistersDiffer,
             _ => return None,
         })
     }

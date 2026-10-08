@@ -9,6 +9,10 @@
 //!
 //! A range has one type or it has none ([`Unknown`]): picking one where the
 //! registers give two would be inventing an answer firmware never gave.
+//!
+//! The registers are each CPU's own. [`beside`] says how one CPU's stand
+//! beside the boot processor's, where firmware wrote what it typed the
+//! machine's memory.
 
 #![forbid(unsafe_code)]
 
@@ -153,6 +157,35 @@ pub fn range_type(def_type: u64, pairs: impl IntoIterator<Item = (u64, u64)>, fi
     Effective::Known(covering.unwrap_or(default))
 }
 
+/// How a CPU's range registers stand beside the boot processor's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Beside {
+    /// Word for word the boot processor's: this CPU reads every range as the
+    /// type [`range_type`] gives it under those.
+    Same,
+    /// Not the boot processor's, and off: this CPU reads every range
+    /// uncached, whatever firmware typed it.
+    Off,
+    /// Not the boot processor's, and on: nothing the boot processor's say of
+    /// a range is known of a read this CPU makes there.
+    Different,
+}
+
+/// One CPU's registers, `other`, beside the boot processor's: each the
+/// default-type word and every variable register's `(PHYSBASE, PHYSMASK)`.
+/// The words whole, a register whose valid bit is clear included: two
+/// snapshots that type every range alike and are not the same words are
+/// [`Beside::Different`], which refuses and never passes.
+pub fn beside(boot: (u64, &[(u64, u64)]), other: (u64, &[(u64, u64)])) -> Beside {
+    if other == boot {
+        Beside::Same
+    } else if other.0 & DEF_TYPE_ENABLE == 0 {
+        Beside::Off
+    } else {
+        Beside::Different
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MemoryType::{Uncacheable as UC, WriteBack as WB, WriteCombining as WC, WriteProtected as WP, WriteThrough as WT};
@@ -265,5 +298,49 @@ mod tests {
         let top = [(PHYS_MASK, PHYS_MASK | PHYSMASK_VALID)];
         assert_eq!(known(ON | 6, &top, PHYS_MASK, PHYS_MASK | 0xFFF), Effective::Known(UC));
         assert_eq!(known(ON | 6, &top, (PHYS_MASK | 0xFFF) + 1, u64::MAX), Effective::Known(WB));
+    }
+
+    /// Firmware's registers on a machine of write-back RAM and an uncacheable
+    /// hole under 4 GiB.
+    const BOOT: (u64, [(u64, u64); 2]) = (ON | 6, [(0xC000_0000, 0x7F_C000_0800), (0, 0)]);
+
+    #[test]
+    fn registers_that_are_word_for_word_the_boot_processors_are_the_same() {
+        assert_eq!(beside((BOOT.0, &BOOT.1), (BOOT.0, &BOOT.1)), Beside::Same);
+        // Off on both, the same words: the same, and typing nothing.
+        assert_eq!(beside((6, &BOOT.1), (6, &BOOT.1)), Beside::Same);
+        assert_eq!(beside((ON, &[]), (ON, &[])), Beside::Same);
+    }
+
+    #[test]
+    fn registers_that_are_off_and_not_the_boot_processors_are_off() {
+        // As a CPU comes out of reset: every word zero.
+        assert_eq!(beside((BOOT.0, &BOOT.1), (0, &[(0, 0); 2])), Beside::Off);
+        // The enable bit alone clear, every other word the boot processor's.
+        assert_eq!(beside((BOOT.0, &BOOT.1), (6, &BOOT.1)), Beside::Off);
+        // Off on both and not the same words.
+        assert_eq!(beside((6, &BOOT.1), (0, &BOOT.1)), Beside::Off);
+    }
+
+    #[test]
+    fn registers_that_are_on_and_not_the_boot_processors_are_different() {
+        let boot = (BOOT.0, &BOOT.1[..]);
+        // Another default type; the fixed registers' enable bit; a pair's
+        // base, its type, its mask and its valid bit; a pair more, and one fewer.
+        let others: [(u64, &[(u64, u64)]); 8] = [
+            (ON, &BOOT.1),
+            (ON | 6 | 1 << 10, &BOOT.1),
+            (ON | 6, &[(0x8000_0000, 0x7F_C000_0800), (0, 0)]),
+            (ON | 6, &[(0xC000_0006, 0x7F_C000_0800), (0, 0)]),
+            (ON | 6, &[(0xC000_0000, 0x7F_8000_0800), (0, 0)]),
+            (ON | 6, &[(0xC000_0000, 0x7F_C000_0000), (0, 0)]),
+            (ON | 6, &[(0xC000_0000, 0x7F_C000_0800), (0, 0), (0, 0)]),
+            (ON | 6, &[(0xC000_0000, 0x7F_C000_0800)]),
+        ];
+        for other in others {
+            assert_eq!(beside(boot, other), Beside::Different, "{other:x?}");
+        }
+        // On where the boot processor's are off.
+        assert_eq!(beside((6, &BOOT.1), boot), Beside::Different);
     }
 }

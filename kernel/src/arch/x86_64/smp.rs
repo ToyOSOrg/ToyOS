@@ -292,6 +292,8 @@ extern "C" fn ap_entry() -> ! {
     syscall::init();
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
+    // Before the echo, so every CPU the roster counts has said its line.
+    crate::arch::mtrr::compare(percpu::cpu_id());
 
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     ROSTER.echo(percpu::ap_token());

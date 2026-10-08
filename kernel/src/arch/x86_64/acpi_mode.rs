@@ -37,7 +37,9 @@
 //! Vol. 3A, Table 12-7), so a register window the firmware reserved is read as
 //! the firmware typed it. A register at an address the firmware's map does
 //! not list is read the same way, only where the boot processor's registers,
-//! read once at boot, type it uncacheable.
+//! read once at boot, type it uncacheable, and only on a machine none of
+//! whose CPUs holds registers that are on and not those (`mtrr::compare`):
+//! the read is made on whichever CPU the call runs on.
 //!
 //! **The firmware's Global Lock is taken and given back here** (ACPI 6.5
 //! §5.2.10.1), by compare-and-exchange on the FACS's lock word; a release the
@@ -104,9 +106,6 @@ struct Hardware {
     /// The window configuration space is reached through, as the MCFG bounds it.
     ecam: Option<Ecam>,
     lock: GlobalLock,
-    /// The boot processor's range registers as firmware handed them over
-    /// (`mtrr::registers`): what types an unlisted address a register's.
-    range_registers: (u64, alloc::vec::Vec<(u64, u64)>),
 }
 
 /// The firmware's Global Lock, as this machine's FADT has it.
@@ -248,7 +247,7 @@ pub fn init(rsdp_addr: u64) {
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
     let (ecam, lock) = (ecam(rsdp_addr), global_lock(&fadt));
-    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock, range_registers: super::mtrr::registers() };
+    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -669,10 +668,11 @@ fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunc
 /// its leaves select the PAT's write-back entry, under which the range
 /// registers decide (Intel SDM Vol. 3A, Table 12-7). The boot processor's
 /// decide it, as read at boot, so the answer is one whichever CPU asks: a
-/// CPU whose own are off answers nothing of what firmware typed the range.
+/// CPU whose own are off answers nothing of what firmware typed the range,
+/// and reads it uncached all the same.
 fn uncached(at: u64, len: u64) -> bool {
-    let (def_type, pairs) = &hardware().expect("a claimed row has its hardware").range_registers;
-    kernel::mtrr::range_type(*def_type, pairs.iter().copied(), at, at + (len - 1)).typed_uncacheable()
+    let (def_type, pairs) = super::mtrr::boot();
+    kernel::mtrr::range_type(def_type, pairs.iter().copied(), at, at + (len - 1)).typed_uncacheable()
 }
 
 /// One memory access, decided and made; the type firmware's map gives its
@@ -692,6 +692,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
                 devices: driven.iter().copied().chain(bars),
                 facs: hardware.lock.facs().map(|facs| facs.span),
                 uncached,
+                registers_differ: super::mtrr::any_differs(),
             };
             memory.decide(at, width, write.is_some())
         })

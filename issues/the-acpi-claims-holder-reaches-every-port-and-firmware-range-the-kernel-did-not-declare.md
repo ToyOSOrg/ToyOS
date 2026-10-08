@@ -94,8 +94,10 @@ kernel drives and no function's BAR: by its place, the chipset's own register
 space. Such a read passes now where the address is inside the direct map and
 the boot processor's range registers, as the kernel read them at boot, type
 it uncacheable (`acpi_mode::uncached`, decided by `kernel::mtrr`); a write
-stays refused, and range registers that are off type nothing, so there every
-such read is refused.
+stays refused, range registers that are off type nothing, so there every
+such read is refused, and on a machine where any CPU's range registers are
+on and are not the boot processor's every such read is refused
+`RangeRegistersDiffer`.
 
 What keeps kernel and process memory out of that read is not the range
 registers. The allocator hands out only memory the firmware's map lists as
@@ -112,17 +114,33 @@ byte first. Three things are not checked:
   is read there as a register would be. Nothing reads that bit. What such a
   read reaches is RAM the map left out, which the allocator never handed
   out.
-- **Every other CPU's range registers are taken to be the boot
-  processor's**, as firmware is to leave them (Intel SDM Vol. 3A, "MTRR
-  Considerations in MP Systems"), and nothing compares them. They are not on
-  a QEMU 11.1.1 q35 guest under TCG: there the second CPU read
-  `IA32_MTRR_DEF_TYPE` as 0, its range registers off, where the boot
-  processor's type the same address uncacheable. A read the kernel makes on
-  such a CPU is uncached all the same; one made on a CPU whose own registers
-  typed the range write-back would be a cached read of a register. Why that
-  guest's second CPU has them off is unread. **Exit**: the kernel reads each
-  CPU's range registers as it comes up and says where they are not the boot
-  processor's.
+- **A CPU whose range registers are off reads a register uncached, and one
+  whose are on and differ stops the read; nothing makes them the boot
+  processor's.** The read is made on whichever CPU the call runs on. Each
+  CPU reads its own range registers as it comes up and the kernel says how
+  they stand beside the boot processor's (`arch::mtrr::compare`, decided by
+  `kernel::mtrr::beside`): the same words; off, where every read that CPU
+  makes is uncached by the architecture, so a register is still read once;
+  or on and not the same, where what the boot processor's say of an address
+  is not known of that CPU's read, and every unlisted read on the machine is
+  refused `RangeRegistersDiffer`. Measured: on a QEMU 11.1.1 q35 guest under
+  TCG the boot processor reads `IA32_MTRR_DEF_TYPE` as 0xc06 with 8 variable
+  pairs and the second CPU reads it as 0, off. Firmware is to leave them the
+  same (Intel SDM Vol. 3A, "MTRR Considerations in MP Systems"), and a
+  kernel that programmed every other CPU's from the boot processor's would
+  make them so and the refusal unreachable; this kernel programs no range
+  register. Two things are open:
+  - **Who owns the other CPUs' range registers**, firmware as now or the
+    kernel. Owner: the owner, whose decision it is. **Exit**: he rules, and
+    the kernel either programs them and asserts them as it does a control
+    register, or this bullet records that it never will.
+  - **Why that guest's second CPU has them off is unread**: whether its
+    firmware programs only the boot processor's, or the emulation resets
+    them when the CPU is started. Owner: the stage,
+    `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`.
+    **Exit**: the same line read from a guest under KVM and from the T14's
+    `acpi_tables_loaded` boot, and the firmware's source or the emulator's
+    read for the one that is off.
 - **The fixed range registers are not read**, so an unlisted address below
   1 MiB is refused whole, a register there included
   (`firmware::FIXED_RANGE_END`).
