@@ -2,8 +2,8 @@
 //! against this repository.
 //!
 //! Cargo's own build lock cannot do this job. `src/build.rs`'s `invalidate_stale`
-//! runs the `clean` that `cargo clean`s a crate's `target/`, and cargo's lock
-//! lives inside it at `target/<profile>/.cargo-lock` — the clean deletes the
+//! runs the `clean` that removes what a moved sysroot left stale of a `target/`,
+//! and cargo's lock lives inside it at `target/<profile>/.cargo-lock` — the clean deletes the
 //! file the other process's lock is on. So these files live outside every
 //! directory the build system removes: a lock on an inode that can be unlinked
 //! and recreated under a waiter is not a lock.
@@ -15,7 +15,7 @@
 //! - **shared** — "I am building against the state as it stands". Any number
 //!   at once.
 //! - **exclusive** — "I am replacing it": the rust bootstrap, this worktree's
-//!   std build, the `cargo clean`s, the making or moving of its fork checkout.
+//!   std build, the cleans of stale targets, the making or moving of its fork checkout.
 //!   One at a time, and never while a build holds the shared mode.
 //!
 //! And two [`Scope`]s: a crate target directory is shared by the builds in one

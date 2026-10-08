@@ -15,13 +15,9 @@ publish = false
 # them — a transliteration is exactly the divergence risk a model checker is
 # meant to remove.
 #
-# A separate package, so `loom` and its transitive host crates stay out of
-# `kernel/Cargo.lock`: this is a member of the host workspace (root
-# `Cargo.toml`) and resolves in `/Cargo.lock`, `kernel/` is excluded from that
-# workspace and resolves against `kernel/Cargo.lock`, and nothing the kernel
-# builds depends on this package. Cargo runs it from the repository root: run
-# below `kernel/`, `kernel/.cargo/config.toml` cross-compiles it to a bare
-# target.
+# A separate package, so `loom` and its transitive host crates are no
+# dependency of the kernel package, and nothing the kernel builds depends on
+# this one.
 
 [features]
 default = ["loom"]

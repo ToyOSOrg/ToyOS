@@ -12,5 +12,5 @@ attack, RUSTSEC-2023-0071) in its private-key operations. sshd's host key is
 Ed25519, so those operations never run here, but RSA is code with no use:
 only client keys could still be RSA, and a modern client offers Ed25519.
 
-**Exit**: the feature is off, `rsa` is gone from `userland/Cargo.lock`, and a
+**Exit**: the feature is off, `rsa` is gone from `Cargo.lock`, and a
 test shows an RSA client key refused by name.

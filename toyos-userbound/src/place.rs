@@ -17,7 +17,7 @@
 //! What a region already registered says about itself is the kernel's own
 //! ledger and is not re-checked: a wrap there is a kernel bug and traps.
 
-use crate::span::{align_2m_checked, PAGE_2M, USER_TOP};
+use crate::span::{align_2m_checked, PAGE_2M, PLACED_TOP};
 
 /// The part of the user half anonymous ranges are placed in, and the guard
 /// left above each. Built in a `const`, so a window that breaks
@@ -44,15 +44,15 @@ impl PageSpan {
 }
 
 impl Window {
-    /// Every bound 2 MiB-aligned, inside the user half, with room for at least
-    /// the guard: the kernel's own layout, so a window that breaks any of them
+    /// Every bound 2 MiB-aligned, at or below [`PLACED_TOP`], with room for at
+    /// least the guard: the kernel's own layout, so a window that breaks any of them
     /// is a kernel bug.
     pub const fn new(floor: u64, ceiling: u64, guard: u64) -> Self {
         assert!(
             floor.is_multiple_of(PAGE_2M) && ceiling.is_multiple_of(PAGE_2M) && guard.is_multiple_of(PAGE_2M),
             "a placement window's bounds and guard are whole 2 MiB pages"
         );
-        assert!(ceiling <= USER_TOP, "a placement window is inside the user half");
+        assert!(ceiling <= PLACED_TOP, "a placement window stops below the last page of the user half");
         assert!(floor < ceiling && ceiling - floor >= guard, "a placement window holds its guard");
         Self { floor, ceiling, guard }
     }
@@ -108,6 +108,7 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span::USER_TOP;
 
     /// The kernel's own window, by value: `vma::WINDOW`.
     const FLOOR: u64 = 0x0002_0000_0000;
@@ -131,6 +132,9 @@ mod tests {
             assert_eq!(WINDOW.span(size), None, "{size:#x}");
         }
     }
+
+    /// The highest window there is compiles; the test below is one page past it.
+    const _: Window = Window::new(FLOOR, PLACED_TOP, PAGE_2M);
 
     #[test]
     fn a_zero_length_is_refused() {
@@ -210,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "inside the user half")]
-    fn a_window_past_the_user_half_is_a_kernel_bug() {
-        let _ = Window::new(FLOOR, USER_TOP + PAGE_2M, PAGE_2M);
+    #[should_panic(expected = "below the last page of the user half")]
+    fn a_window_reaching_the_last_page_of_the_user_half_is_a_kernel_bug() {
+        let _ = Window::new(FLOOR, USER_TOP, PAGE_2M);
     }
 
     /// `find_gap` no longer pre-filters by the ceiling; `gap` is the one

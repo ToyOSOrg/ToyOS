@@ -140,6 +140,8 @@ pub fn platform_devices(rsdp_addr: u64) {
 
 /// Every other CPU, running.
 pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {
+    // Before the first of them starts: each compares its own to these.
+    super::mtrr::init();
     super::smp::boot_aps(&platform.madt, args.boot_pml4_addr);
 }
 

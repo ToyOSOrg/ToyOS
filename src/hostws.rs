@@ -1,20 +1,16 @@
-//! Who is in the host workspace, and the gate that keeps the answer honest.
+//! Who is in the workspace, which of its members a host tests, and the gates
+//! that keep both answers honest.
 //!
-//! Every crate in this repository that is tested on the host is a member of the
-//! workspace root `Cargo.toml` declares, and CI runs the lot with one
-//! `cargo test --workspace --exclude toyos-build`. That is the whole point of
-//! the arrangement. Before it, the set of host-tested crates was a list in the
-//! workflow *and* a set of standalone workspace roots, and the two drifted
-//! three times: four pure crates until 2026-08-08, `toyos-keymap` and
-//! `bcachefs` until 2026-08-14, and `toyos-abi` and `toyos-manifest` — 23 tests
-//! between them — which reached no workflow at all (the tracker entry closed
-//! by the commit that added this file).
+//! Every crate in this repository is a member of the workspace the root
+//! `Cargo.toml` declares, or is excluded from it there with the reason it keeps
+//! its own resolution. The `[workspace]` table is the one list, this module is
+//! its only reader, and the gates below walk the tree and red on a `Cargo.toml`
+//! that joined neither `members` nor `exclude`.
 //!
-//! A third copy of the list would restore the defect, so there is exactly one:
-//! the `[workspace]` table. This module is its only reader, and the gates below
-//! walk the tree and red on a `Cargo.toml` that joined neither `members` nor
-//! `exclude`. **A new host crate that forgets to join is
-//! a red, not a silent gap.**
+//! The host suite is every member but the ones built for a guest
+//! ([`guest_built`]): `cargo run -- --ci host` runs them in one `cargo
+//! test`, so **a new host crate that forgets to join is a red, not a silent
+//! gap.**
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -32,7 +28,7 @@ fn workspace_table(root: &Path) -> toml::value::Table {
     doc.get("workspace")
         .and_then(|w| w.as_table())
         .unwrap_or_else(|| {
-            panic!("{} declares no [workspace]; the host suite is that table", path.display())
+            panic!("{} declares no [workspace]", path.display())
         })
         .clone()
 }
@@ -87,11 +83,37 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Whether `crate_dir` is a member of the host workspace.
-pub fn is_member(root: &Path, crate_dir: &Path) -> bool {
-    let relative = rel(root, crate_dir);
-    let relative = if relative.is_empty() { ".".to_string() } else { relative };
-    members(root).contains(&relative)
+/// Whether the member at `member` is built for a guest: the kernel, whose
+/// library alone a host tests, and the SDK, each from a step of its own; the
+/// loader; and every program under `userland/`, which `src/userlandhost.rs`
+/// surveys.
+fn guest_built(member: &str) -> bool {
+    [crate::ci::KERNEL, crate::ci::SDK, "bootloader"].contains(&member) || member.starts_with("userland/")
+}
+
+/// The members a host tests: all but the [`guest_built`].
+pub fn host_members(root: &Path) -> BTreeSet<String> {
+    members(root).into_iter().filter(|m| !guest_built(m)).collect()
+}
+
+/// The package names of the [`guest_built`] members, which a `cargo` run over
+/// the workspace on a host excludes.
+pub fn guest_packages(root: &Path) -> Vec<String> {
+    let guests = members(root).into_iter().filter(|m| guest_built(m));
+    guests
+        .map(|member| {
+            let path = root.join(&member).join("Cargo.toml");
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let doc: toml::Value =
+                text.parse().unwrap_or_else(|e| panic!("{} is not TOML: {e}", path.display()));
+            doc.get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or_else(|| panic!("{} names no package", path.display()))
+                .to_string()
+        })
+        .collect()
 }
 
 /// Every directory under `root` holding a `Cargo.toml`, as paths relative to
@@ -152,33 +174,6 @@ fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<
 #[cfg(test)]
 fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String> {
     found.difference(members).cloned().collect()
-}
-
-/// Every member of every workspace in this repository, as paths relative to the
-/// root.
-///
-/// The host workspace's own, plus those of the workspaces it excludes: a
-/// workspace excluded from this one is still a workspace, and its members still
-/// have no target directory of their own.
-#[cfg(test)]
-fn every_workspace_member(root: &Path) -> BTreeSet<String> {
-    let mut all: BTreeSet<String> = members(root).into_iter().filter(|m| m != ".").collect();
-    for dir in excluded(root) {
-        let Ok(text) = std::fs::read_to_string(root.join(&dir).join("Cargo.toml")) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Value>() else { continue };
-        let nested = doc
-            .get("workspace")
-            .and_then(|w| w.get("members"))
-            .and_then(|m| m.as_array())
-            .map(|a| a.as_slice())
-            .unwrap_or_default();
-        for member in nested.iter().filter_map(|m| m.as_str()) {
-            all.insert(format!("{dir}/{}", member.trim_end_matches('/')));
-        }
-    }
-    all
 }
 
 /// Every `<member>/target` `text` names.
@@ -271,11 +266,6 @@ mod tests {
     /// **The gate.** A crate added to this repository joins the host workspace
     /// or is excluded from it with a reason, and there is no third option.
     ///
-    /// This is the drift the module header recounts, and it had already
-    /// recurred twice before it was recorded: a host-testable
-    /// crate arrives, nobody adds it to the workflow's loop, and its tests run
-    /// nowhere while reading as though they run everywhere. There is one list
-    /// now and the tree is held against it.
     #[test]
     fn every_crate_in_the_tree_joined_the_workspace_or_was_excluded_by_name() {
         let root = repo_root();
@@ -284,10 +274,8 @@ mod tests {
             missing.is_empty(),
             "these directories hold a `Cargo.toml` and the [workspace] table in \
              Cargo.toml accounts for none of them:\n  {}\n\
-             Add each to `members` (so `cargo test --workspace` runs its tests) or to \
-             `exclude` with the reason it keeps its own resolution. A host crate that \
-             joins neither is tested by nothing, which is how `toyos-abi` and \
-             `toyos-manifest` went 23 tests unrun.",
+             Add each to `members` or to `exclude` with the reason it keeps its own \
+             resolution. A host crate that joins neither is tested by nothing.",
             missing.join("\n  "),
         );
     }
@@ -327,11 +315,6 @@ mod tests {
             found.contains("toyos-xhci/sim"),
             "the walk did not descend past the first level, so a nested member could \
              go missing without this gate noticing: {found:?}"
-        );
-        assert!(
-            found.contains("kernel/loom") && !found.contains("kernel"),
-            "the walk did not descend into an excluded package, so a crate nested in one \
-             could lose its `members` line without this gate noticing: {found:?}"
         );
         // With nothing declared a member, every one of them is a complaint —
         // the gate above is silent because the table accounts for the tree, not
@@ -397,14 +380,12 @@ mod tests {
     /// into its workspace root's target directory, so such a path is one that
     /// cannot exist.
     ///
-    /// Every workspace in the tree, not just this one.
-    ///
     /// The files scanned are the ones that *act* on a path: the workflows, this
     /// build system, and every `build.rs` in the tree. Prose is left alone.
     #[test]
     fn nothing_that_runs_names_a_target_directory_a_member_does_not_have() {
         let root = repo_root();
-        let members = every_workspace_member(&root);
+        let members = members(&root);
         let mut files: Vec<PathBuf> = Vec::new();
         for dir in [".github/workflows", "src"] {
             let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
@@ -448,11 +429,8 @@ mod tests {
             dead_member_target_paths(&members, "let abi = root.join(\"../../toyos-abi/target/x\");"),
             ["toyos-abi/target"],
         );
-        // `kernel/` and `userland/` are workspace *roots*, so naming one of
-        // their target directories is correct and must not be reported.
-        assert!(dead_member_target_paths(&members, "kernel/target/x86_64-unknown-none").is_empty());
+        // A directory that holds members and is none.
         assert!(dead_member_target_paths(&members, "userland/target").is_empty());
-        // A member of the userland workspace, which is the real find above.
         let with_userland: BTreeSet<String> =
             members.union(&["userland/sshserver".to_string()].into()).cloned().collect();
         assert_eq!(

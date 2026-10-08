@@ -36,7 +36,7 @@ Owner: the orchestrator.
 **Exit**: no heap growth allocates or zeroes a 2 MiB page inside the kernel
 heap's lock; the kernel allocates through ToyOS's allocator, and `dlmalloc`,
 `libc`, `windows-sys` and `windows-link` are gone from `kernel/Cargo.toml` and
-`kernel/Cargo.lock`, with `build::tests::the_kernel_resolves_no_libc_for_either_target`
+from the kernel's graph in `Cargo.lock`, with `build::tests::the_kernel_resolves_no_libc_for_either_target`
 (`src/build.rs`) deleted in the same pull request; ToyOS's std allocates
 through the std front, measured against `dlmalloc` before it is swapped in;
 and the ruled bar holds, read by the benchmarks' portable Rust runner, which

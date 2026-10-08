@@ -16,5 +16,5 @@ assets/*.sf2
 .mcp.json
 .DS_Store
 phosphor-icons
-.cargo/config.toml
 .build-locks/
+.cargo/local.toml
