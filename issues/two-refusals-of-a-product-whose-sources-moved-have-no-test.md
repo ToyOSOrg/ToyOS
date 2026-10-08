@@ -15,7 +15,9 @@ passes every test. A sysroot or freestanding libraries built while
 `toyos-abi` or the fork's `library/` was edited would then be served to every
 checkout naming the key of the sources before the edit.
 
-Owner: the keyed stores (`src/keystore.rs`).
+Owner: the step of `issues/the-forks-pin-is-a-file-and-a-worktree-checks-no-fork-out.md`
+that rewrites the std build ("A pinned build reads an export"), which the
+orchestrator briefs.
 
 **Exit**: `build` and `build_freestanding` take the std build they run as
 `compiler::choose` takes its compiler build, and a test each, whose stand-in

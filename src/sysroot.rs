@@ -881,16 +881,17 @@ fn prepare_std_build(build_dir: &Path, host: &str, identity: &str, targets: &[&s
     }
 }
 
-/// Empty the std build directory `build_dir` of all but what bootstrap
-/// downloaded unless `identity` ([`Compiler::identity`]) is the compiler its
-/// `compiled-by` records as having compiled the rest, then record `identity`
-/// there.
+/// Empty bootstrap's build directory `build_dir` of all but what bootstrap
+/// downloaded unless `identity` is what its `compiled-by` records as having
+/// built the rest, then record `identity` there: for a std build the compiler
+/// ([`Compiler::identity`]), for a compiler build its build and its LLVM
+/// (`compiler::place`).
 ///
 /// Cargo keys what it reuses on `rustc -vV`, which every ToyOS compiler prints
 /// alike, so another compiler's rlibs stay fresh and the next crate that does
 /// recompile is refused against them (`E0463 can't find crate`). The removal
 /// comes before the record, so an interrupted switch removes again.
-fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
+pub(crate) fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
     forget_another_compiler_by(build_dir, host, identity, keystore::remove);
 }
 

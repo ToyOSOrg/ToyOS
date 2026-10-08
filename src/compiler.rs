@@ -8,10 +8,11 @@
 //! it links, which names `src/bootstrap`, and the build itself
 //! ([`build_text`]). A compiler nobody on the host has built is built by
 //! bootstrap in the fork checkout that first names it, under that checkout's
-//! `build/toyos-compiler/`, and placed at `compilers/<key>/` in the store
-//! (`src/keystore.rs`). Nothing writes that directory after its [`SOURCE`] file
-//! exists. A sysroot is named by its directory, never by a toolchain name, so
-//! no rustup toolchain is linked.
+//! `build/toyos-compiler/`, which starts from nothing unless the build and the
+//! LLVM that filled it are this one's ([`place`]), and placed at
+//! `compilers/<key>/` in the store (`src/keystore.rs`). Nothing writes that
+//! directory after its [`SOURCE`] file exists. A sysroot is named by its
+//! directory, never by a toolchain name, so no rustup toolchain is linked.
 //!
 //! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), and
 //! linked through its `llvm-config`. The key names that LLVM's key, so another
@@ -20,7 +21,8 @@
 //!
 //! Locks, in the one order every acquirer takes them: the key's
 //! (`buildlock::keyed_*` with [`Keyed::Compiler`]), with this worktree's build
-//! lock put down, held shared for as long as a sysroot is being made from it;
+//! lock put down once the key is read under it ([`resolve`]), held shared for
+//! as long as a sysroot is being made from it;
 //! then, to build, this worktree's exclusively, because its fork build
 //! directory is written; then the LLVM key's, held shared while it is linked.
 //!
@@ -32,17 +34,33 @@ use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::keystore::{self, Key};
-use crate::sysroot::{clone_tree, tree_identity, Links};
+use crate::sysroot::{clone_tree, forget_another_compiler, tree_identity, Links};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is neither them nor
 /// [`config_text`]: the build below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, no LLVM tool copied, rustc without debuginfo, no link to the checkout's sources; 7";
 
-/// What a compiler's key is the identity of, in its fork checkout: `library`
-/// for the host's std its `stage2` carries, which every guest crate's build
-/// scripts and proc macros link.
-const KEYED: [&str; 5] = ["compiler", "library", "src/tools", "src/stage0", "Cargo.lock"];
+/// What a compiler's key is the identity of, in its fork checkout, beside the
+/// `src/bootstrap` its LLVM's key names: what bootstrap compiles, which is
+/// `library` too, for the host's std its `stage2` carries and every guest
+/// crate's build scripts and proc macros link; the workspace it compiles them
+/// in, with its profiles and patches; the version it gives rustc and the
+/// channel file it reads beside it; and what runs bootstrap, with the crate
+/// bootstrap itself is built with.
+const KEYED: [&str; 11] = [
+    "compiler",
+    "library",
+    "src/tools",
+    "src/stage0",
+    "Cargo.lock",
+    "Cargo.toml",
+    "src/version",
+    "src/ci/channel",
+    "src/build_helper",
+    "x",
+    "x.py",
+];
 
 /// What a compiler build is beyond its sources, as every key reads it:
 /// [`RECIPE`], the configuration bootstrap is given ([`config_text`]) with no
@@ -126,14 +144,16 @@ pub(crate) fn unplaced(dir: &Path) -> Option<String> {
 /// nobody on the host has built it, and held in use for as long as the
 /// returned value lives.
 pub fn resolve(root: &Path, store: &Path, fork: &Path, lock: &mut Held) -> Compiler {
-    lock.without_shared(|| choose(root, store, fork, |fork| build_in_fork(root, store, fork)))
+    // Under the shared lock: a bootstrap of this worktree, which holds it
+    // exclusively, rewrites the fork's lockfiles for as long as it runs.
+    let key = key(fork);
+    lock.without_shared(|| choose(root, store, fork, key, |fork| build_in_fork(root, store, fork)))
 }
 
-/// [`resolve`] with the build that makes a compiler's `stage2` passed in, so a
-/// test can stand in for bootstrap: `build` compiles the fork checkout it is
-/// given and returns the `stage2` it left there.
-fn choose(root: &Path, store: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Compiler {
-    let key = key(fork);
+/// [`resolve`] of the compiler `key` names, with the build that makes its
+/// `stage2` passed in, so a test can stand in for bootstrap: `build` compiles
+/// the fork checkout it is given and returns the `stage2` it left there.
+fn choose(root: &Path, store: &Path, fork: &Path, key: Key, build: impl Fn(&Path) -> PathBuf) -> Compiler {
     let dir = Keyed::Compiler.store(store).join(&key);
     let using = keystore::made(store, Keyed::Compiler, &key, || unplaced(&dir), || place(root, fork, &key, &dir, &build));
     Compiler { stage2: dir.join("stage2"), key, _using: using }
@@ -145,8 +165,13 @@ fn place(root: &Path, fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path)
     let what = format!("building compiler {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
     eprintln!("Building compiler {key} in {}: nobody on this host has", fork.display());
+    let build_dir = fork.join(BUILD_DIR);
+    fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
+    // Bootstrap and cargo reuse what the directory holds whatever configuration
+    // and LLVM built it; only a source that moved do they see.
+    forget_another_compiler(&build_dir, &host_triple(), &format!("{}\n{}", build_text(), crate::llvm::key(fork)));
     let stage2 = build(fork);
-    crate::llvm::retire_in_tree(&fork.join(BUILD_DIR));
+    crate::llvm::retire_in_tree(&build_dir);
     let partial = dir.with_extension("partial");
     keystore::remove(&partial);
     clone_tree(&stage2, &partial.join("stage2"));
@@ -173,7 +198,6 @@ fn build_in_fork(root: &Path, store: &Path, fork: &Path) -> PathBuf {
     let llvm = crate::llvm::resolve(root, store, fork);
     let host = host_triple();
     let build_dir = fork.join(BUILD_DIR);
-    fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
@@ -350,16 +374,16 @@ pub(crate) mod tests {
             fake_build(fork)
         };
 
-        let mine = choose(&same, &store, &same.join("rust"), fake);
-        let primarys = choose(&primary, &store, &primary.join("rust"), fake);
+        let mine = chosen(&same, &store, &same.join("rust"), fake);
+        let primarys = chosen(&primary, &store, &primary.join("rust"), fake);
         assert_eq!((primarys.stage2.clone(), builds.get()), (mine.stage2.clone(), 1), "one compiler/ named two compilers");
         for link in CHECKOUT_LINKS {
             assert!(same.join("rust").join(BUILD_DIR).join("stage2").join(link).is_dir(), "the stand-in build made no {link}");
             assert!(fs::symlink_metadata(mine.stage2.join(link)).is_err(), "a stored compiler links the checkout that built it at {link}");
         }
 
-        let ca = choose(&a, &store, &a.join("rust"), fake);
-        let cb = choose(&b, &store, &b.join("rust"), fake);
+        let ca = chosen(&a, &store, &a.join("rust"), fake);
+        let cb = chosen(&b, &store, &b.join("rust"), fake);
         assert_eq!(builds.get(), 3);
         assert_ne!(ca.stage2, cb.stage2, "two compilers were given one directory");
         assert!(ca.stage2.starts_with(&compilers) && cb.stage2.starts_with(&compilers));
@@ -369,7 +393,7 @@ pub(crate) mod tests {
         assert_ne!(ca.identity(), mine.identity());
 
         // Found again, not rebuilt; and still both there.
-        let again = choose(&a, &store, &a.join("rust"), fake);
+        let again = chosen(&a, &store, &a.join("rust"), fake);
         assert_eq!((again.stage2, builds.get()), (ca.stage2.clone(), 3));
         assert!(ca.stage2.join("bin/rustc").is_file() && cb.stage2.join("bin/rustc").is_file());
 
@@ -377,11 +401,11 @@ pub(crate) mod tests {
         // committing it is not another one.
         let pinned = git(&a.join("rust"), &["rev-parse", "HEAD"]);
         write(&a.join("rust/compiler/rustc_target/src/new_target.rs"), "pub fn t() {}\n");
-        let ca2 = choose(&a, &store, &a.join("rust"), fake);
+        let ca2 = chosen(&a, &store, &a.join("rust"), fake);
         assert_ne!(ca2.stage2, ca.stage2, "an untracked target spec kept the old compiler");
         git(&a.join("rust"), &["add", "-A"]);
         git(&a.join("rust"), &["commit", "-qm", "the target, committed"]);
-        let committed = choose(&a, &store, &a.join("rust"), fake);
+        let committed = chosen(&a, &store, &a.join("rust"), fake);
         assert_eq!((committed.stage2, builds.get()), (ca2.stage2.clone(), 4), "a commit rebuilt the compiler");
         git(&a.join("rust"), &["checkout", "-q", &pinned]);
 
@@ -409,22 +433,58 @@ pub(crate) mod tests {
         chosen_elsewhere(&a, &store).release();
         last_used(&store, Keyed::Compiler, &replaced, LONG_AGO);
         write(&spec, "pub fn v() {}\n");
-        let ca3 = choose(&a, &store, &a.join("rust"), fake);
+        let ca3 = chosen(&a, &store, &a.join("rust"), fake);
         assert!(!compilers.join(&replaced).exists(), "placing a compiler left one nothing had used for the keep time");
         assert!(ca3.stage2.is_dir() && cb.stage2.is_dir());
     }
 
     /// **A fork build directory whose compiler links the host's LLVM keeps
-    /// none of its own**: placing the compiler removes it.
+    /// none of its own**: placing the compiler removes it, from a directory
+    /// this build and this LLVM filled too.
     #[test]
     fn a_compiler_s_build_directory_keeps_no_llvm_of_its_own() {
         let scratch = TempDir::new("compiler-in-tree-llvm");
         let (_primary, store, [_same, a, _b]) = estate(&scratch);
         let fork = a.join("rust");
+        drop(chosen(&a, &store, &fork, fake_build));
         let own = fork.join(BUILD_DIR).join(host_triple()).join("llvm");
         write(&own.join("bin/llvm-config"), "the build directory's own");
-        drop(choose(&a, &store, &fork, fake_build));
+        write(&fork.join("compiler/rustc_target/src/lib.rs"), "pub fn targets() { edited() }\n");
+        let seen = Cell::new(false);
+        let fake = |fork: &Path| {
+            seen.set(own.is_dir());
+            fake_build(fork)
+        };
+        drop(chosen(&a, &store, &fork, fake));
+        assert!(seen.get(), "the LLVM went before the build, with the directory: this test shows nothing");
         assert!(!own.exists(), "a compiler built against the store left the LLVM its build directory built");
+    }
+
+    /// **A build directory is built in again only by the build and the LLVM
+    /// that filled it**: a source edit keeps what the last build left there,
+    /// and a compiler linking another LLVM starts from nothing.
+    #[test]
+    fn a_build_directory_another_llvm_filled_starts_from_nothing() {
+        let scratch = TempDir::new("compiler-build-dir");
+        let (_primary, store, [_same, a, _b]) = estate(&scratch);
+        let fork = a.join("rust");
+        let left = fork.join(BUILD_DIR).join(host_triple()).join("stage1-rustc/left-by-the-last-build");
+        let found = Cell::new(false);
+        let fake = |fork: &Path| {
+            found.set(left.is_file());
+            write(&left, "what bootstrap would reuse");
+            fake_build(fork)
+        };
+        drop(chosen(&a, &store, &fork, fake));
+
+        write(&fork.join("compiler/rustc_target/src/lib.rs"), "pub fn targets() { edited() }\n");
+        drop(chosen(&a, &store, &fork, fake));
+        assert!(found.get(), "a source edit emptied the build directory, so no compiler build is incremental");
+
+        git(&fork, &["update-index", "--add", "--cacheinfo", &format!("160000,{LLVM_B},{LLVM}")]);
+        git(&fork, &["commit", "-qm", "another LLVM"]);
+        drop(chosen(&a, &store, &fork, fake));
+        assert!(!found.get(), "a compiler linking another LLVM was built over what the last one left");
     }
 
     const WORKTREE: &str = "TOYOS_COMPILER_TEST_WORKTREE";
@@ -438,7 +498,7 @@ pub(crate) mod tests {
         let worktree = std::env::var(WORKTREE).unwrap_or_else(|_| panic!("child_role ran without {WORKTREE}; it is not a test"));
         let worktree = PathBuf::from(worktree);
         let store = PathBuf::from(std::env::var(STORE).unwrap());
-        let _chosen = choose(&worktree, &store, &worktree.join("rust"), fake_build);
+        let _chosen = chosen(&worktree, &store, &worktree.join("rust"), fake_build);
         buildlock::tests::hold_until_released();
     }
 
@@ -447,6 +507,11 @@ pub(crate) mod tests {
     fn chosen_elsewhere(worktree: &Path, store: &Path) -> buildlock::tests::Elsewhere {
         let env = [(WORKTREE, worktree.as_os_str()), (STORE, store.as_os_str())];
         buildlock::tests::Elsewhere::hold("compiler::tests::child_role", &env)
+    }
+
+    /// [`choose`] of the compiler `fork` names.
+    fn chosen(root: &Path, store: &Path, fork: &Path, build: impl Fn(&Path) -> PathBuf) -> Compiler {
+        choose(root, store, fork, key(fork), build)
     }
 
     /// Bootstrap's stand-in: a `stage2` that says which target spec it knows.
@@ -480,7 +545,7 @@ pub(crate) mod tests {
             stage2
         };
         let said = refusal("a compiler whose sources moved while it was built was stored", || {
-            choose(&a, &store, &fork, moving);
+            chosen(&a, &store, &fork, moving);
         });
         assert!(said.contains("moved while compiler"), "{said}");
         let stored: Vec<_> = fs::read_dir(Keyed::Compiler.store(&store)).unwrap().flatten().map(|e| e.file_name()).collect();
@@ -520,7 +585,7 @@ pub(crate) mod tests {
 
         write(&llvm.join("llvm/lib/IR/Core.cpp"), "int core_edited;\n");
         let said = refusal("an uncommitted LLVM edit named a compiler", || {
-            choose(&same, &store, &fork, fake);
+            chosen(&same, &store, &fork, fake);
         });
         assert!(said.contains("holds changes no commit does"), "{said}");
         git(&llvm, &["commit", "-qam", "the edit"]);
@@ -528,15 +593,17 @@ pub(crate) mod tests {
 
         write(&llvm.join("llvm/lib/IR/Untracked.cpp"), "int untracked;\n");
         let said = refusal("an untracked file in LLVM named a compiler", || {
-            choose(&same, &store, &fork, fake);
+            chosen(&same, &store, &fork, fake);
         });
         assert!(said.contains("holds changes no commit does"), "{said}");
         assert_eq!(builds.get(), 0, "an LLVM checkout no commit holds built a compiler");
     }
 
     /// Every source a compiler is built from moves its key: the library its
-    /// host std is built from, the tools, the stage-0 pin and the lockfile by
-    /// content, committed or not, and LLVM by the commit its gitlink records.
+    /// host std is built from, the tools, the stage-0 pin, the lockfile, the
+    /// workspace's manifest, the version, the channel, bootstrap's helper crate
+    /// and what runs bootstrap by content, committed or not, and LLVM by the
+    /// commit its gitlink records.
     #[test]
     fn every_source_of_a_compiler_moves_its_key() {
         let scratch = TempDir::new("compiler-key");
@@ -547,6 +614,12 @@ pub(crate) mod tests {
             ("src/tools/lld-wrapper/src/main.rs", "fn main() {}\n"),
             ("src/stage0", "compiler_version=nightly\n"),
             ("Cargo.lock", "# relocked\n"),
+            ("Cargo.toml", "[profile.release]\nopt-level = 3\n"),
+            ("src/version", "1.0.0\n"),
+            ("src/ci/channel", "beta\n"),
+            ("src/build_helper/src/lib.rs", "pub fn helper() {}\n"),
+            ("x", "#!/bin/sh\n"),
+            ("x.py", "# edited\n"),
         ];
         for (file, text) in sources {
             let before = key(&fork);
