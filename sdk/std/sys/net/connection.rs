@@ -24,6 +24,7 @@ fn net_err_to_io(e: NetError) -> io::Error {
         NetError::NotConnected => io::ErrorKind::NotConnected,
         NetError::InvalidInput => io::ErrorKind::InvalidInput,
         NetError::NetstackNotFound => io::ErrorKind::NotConnected,
+        NetError::PermissionDenied => io::ErrorKind::PermissionDenied,
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, "netstack error")
@@ -490,6 +491,8 @@ pub struct UdpSocket {
     rx_fd: OwnedFd,
     local: SocketAddr,
     peer: crate::sync::Mutex<Option<SocketAddr>>,
+    /// What netstack holds for the socket every duplicate names.
+    broadcast: Arc<AtomicBool>,
     read_timeout_ms: AtomicU32,
     write_timeout_ms: AtomicU32,
 }
@@ -515,6 +518,7 @@ impl UdpSocket {
             rx_fd: unsafe { OwnedFd::from_raw_fd(bound.rx.into_raw().0 as i32) },
             local: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), bound.bound_port)),
             peer: crate::sync::Mutex::new(None),
+            broadcast: Arc::new(AtomicBool::new(false)),
             read_timeout_ms: AtomicU32::new(0),
             write_timeout_ms: AtomicU32::new(0),
         })
@@ -574,6 +578,7 @@ impl UdpSocket {
             rx_fd: unsafe { OwnedFd::from_raw_fd(new_rx_fd.0 as i32) },
             local: self.local,
             peer: crate::sync::Mutex::new(*self.peer.lock().unwrap()),
+            broadcast: Arc::clone(&self.broadcast),
             read_timeout_ms: AtomicU32::new(self.read_timeout_ms.load(Relaxed)),
             write_timeout_ms: AtomicU32::new(self.write_timeout_ms.load(Relaxed)),
         })
@@ -599,12 +604,15 @@ impl UdpSocket {
         Ok(if ms == 0 { None } else { Some(Duration::from_millis(ms as u64)) })
     }
 
-    pub fn set_broadcast(&self, _broadcast: bool) -> io::Result<()> {
+    pub fn set_broadcast(&self, broadcast: bool) -> io::Result<()> {
+        toyos::net::udp_set_option(self.socket_id(), toyos::net::OPT_BROADCAST, broadcast as u32)
+            .map_err(net_err_to_io)?;
+        self.broadcast.store(broadcast, Relaxed);
         Ok(())
     }
 
     pub fn broadcast(&self) -> io::Result<bool> {
-        Ok(false)
+        Ok(self.broadcast.load(Relaxed))
     }
 
     pub fn set_multicast_loop_v4(&self, _: bool) -> io::Result<()> {

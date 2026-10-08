@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall;
-use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_NODELAY};
+use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errno::{EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
+use crate::errno::{EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
 
 // C types matching POSIX
 
@@ -53,6 +53,7 @@ const IPPROTO_TCP: i32 = 6;
 
 const SOL_SOCKET: i32 = 1;
 const SO_ERROR: i32 = 4;
+const SO_BROADCAST: i32 = 6;
 const TCP_NODELAY: i32 = 1;
 
 // Internal socket table
@@ -76,6 +77,11 @@ struct SocketEntry {
     rx_fd: i32,         // read end of rx pipe (netstack→client)
     tx_fd: i32,         // write end of tx pipe (client→netstack)
     notify_fd: i32,     // read end of listener notify pipe
+    // What netstack holds for the socket, which `getsockopt` answers from. A
+    // datagram socket netstack does not hold yet keeps `broadcast` for `bind`
+    // to hand over.
+    nodelay: bool,
+    broadcast: bool,
 }
 
 const MAX_SOCKETS: usize = 128;
@@ -116,6 +122,7 @@ fn net_err_to_errno(e: NetError) -> i32 {
         NetError::AddrInUse => EADDRINUSE,
         NetError::NotConnected => ENOTCONN,
         NetError::InvalidInput => EINVAL,
+        NetError::PermissionDenied => EACCES,
         _ => EIO,
     }
 }
@@ -174,6 +181,8 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
         rx_fd: 0,
         tx_fd: 0,
         notify_fd: 0,
+        nodelay: false,
+        broadcast: false,
     };
     let fd = alloc_socket(entry);
     if fd < 0 {
@@ -253,6 +262,14 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
                 Ok(b) => b,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
+            if entry.broadcast {
+                if let Err(e) = toyos::net::udp_set_option(bound.socket_id, OPT_BROADCAST, 1) {
+                    // `bound`'s pipe ends close where it drops.
+                    let _ = toyos::net::udp_close(bound.socket_id);
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
+            }
             entry.netstack_id = bound.socket_id.0;
             entry.local_port = bound.bound_port;
             entry.bound = true;
@@ -310,6 +327,8 @@ pub unsafe extern "C" fn accept(
         rx_fd: accepted.rx.into_raw().0 as i32,
         tx_fd: accepted.tx.into_raw().0 as i32,
         notify_fd: 0,
+        nodelay: false,
+        broadcast: false,
     };
     let new_fd = alloc_socket(new_entry);
     if new_fd < 0 {
@@ -538,26 +557,45 @@ pub unsafe extern "C" fn setsockopt(
     level: i32,
     optname: i32,
     optval: *const u8,
-    _optlen: SocklenT,
+    optlen: SocklenT,
 ) -> i32 {
     let slot = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
-    let entry = match slot.as_ref() {
+    let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
     };
 
-    // TCP_NODELAY is the only option we actually send to netstack
-    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netstack_id != 0 {
-        let val = if optval.is_null() { 0u32 } else { *(optval as *const i32) as u32 };
-        if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, val) {
-            set_errno(net_err_to_errno(e));
-            return -1;
+    match (level, optname) {
+        (IPPROTO_TCP, TCP_NODELAY) if entry.netstack_id != 0 => {
+            let val = if optval.is_null() { 0u32 } else { *(optval as *const i32) as u32 };
+            if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, val) {
+                set_errno(net_err_to_errno(e));
+                return -1;
+            }
+            entry.nodelay = val != 0;
         }
+        (SOL_SOCKET, SO_BROADCAST) => {
+            if optval.is_null() || (optlen as usize) < core::mem::size_of::<i32>() {
+                set_errno(EINVAL);
+                return -1;
+            }
+            let on = (optval as *const i32).read_unaligned() != 0;
+            // Only a datagram is ever sent to a broadcast address, and netstack
+            // holds a datagram socket from its `bind`.
+            if let (SocketKind::Udp, true) = (entry.kind, entry.netstack_id != 0) {
+                if let Err(e) = toyos::net::udp_set_option(UdpSocketId(entry.netstack_id), OPT_BROADCAST, on as u32) {
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
+            }
+            entry.broadcast = on;
+        }
+        // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
+        _ => {}
     }
-    // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
     0
 }
 
@@ -583,22 +621,18 @@ pub unsafe extern "C" fn getsockopt(
         return -1;
     }
 
-    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netstack_id != 0 {
-        match toyos::net::tcp_get_option(TcpSocketId(entry.netstack_id), OPT_NODELAY) {
-            Ok(val) => {
-                *(optval as *mut i32) = val as i32;
-                *optlen = 4;
-                return 0;
-            }
-            Err(e) => {
-                set_errno(net_err_to_errno(e));
-                return -1;
-            }
+    let held = match (level, optname) {
+        (IPPROTO_TCP, TCP_NODELAY) => Some(entry.nodelay as i32),
+        (SOL_SOCKET, SO_BROADCAST) => Some(entry.broadcast as i32),
+        (SOL_SOCKET, SO_ERROR) => Some(0),
+        _ => None,
+    };
+    if let Some(value) = held {
+        if (*optlen as usize) < core::mem::size_of::<i32>() {
+            set_errno(EINVAL);
+            return -1;
         }
-    }
-
-    if level == SOL_SOCKET && optname == SO_ERROR {
-        *(optval as *mut i32) = 0;
+        (optval as *mut i32).write_unaligned(value);
         *optlen = 4;
         return 0;
     }

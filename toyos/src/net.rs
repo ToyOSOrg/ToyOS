@@ -19,7 +19,7 @@ pub enum MsgType {
     UdpClose = 11,
     DnsLookup = 12,
     TcpSetOption = 13,
-    TcpGetOption = 14,
+    UdpSetOption = 15,
     TcpConnectPiped = 20,
     TcpBindPiped = 21,
     TcpAcceptPiped = 22,
@@ -36,7 +36,7 @@ impl MsgType {
             11 => Some(Self::UdpClose),
             12 => Some(Self::DnsLookup),
             13 => Some(Self::TcpSetOption),
-            14 => Some(Self::TcpGetOption),
+            15 => Some(Self::UdpSetOption),
             20 => Some(Self::TcpConnectPiped),
             21 => Some(Self::TcpBindPiped),
             22 => Some(Self::TcpAcceptPiped),
@@ -74,9 +74,16 @@ pub const ERR_INVALID_INPUT: u32 = 6;
 /// so a capacity refusal on that code is indistinguishable from an ordinary
 /// failed connection — including to a test trying to find where the cap is.
 pub const ERR_RESOURCE_EXHAUSTED: u32 = 7;
+/// The socket was not given the permission the request needs: a datagram to a
+/// broadcast address from a socket whose [`OPT_BROADCAST`] is off. The request
+/// was well formed, which is what keeps this apart from [`ERR_INVALID_INPUT`].
+pub const ERR_PERMISSION_DENIED: u32 = 8;
 pub const ERR_OTHER: u32 = 255;
 
+/// A stream's Nagle algorithm off: [`tcp_set_option`].
 pub const OPT_NODELAY: u32 = 1;
+/// A datagram socket may send to a broadcast address: [`udp_set_option`].
+pub const OPT_BROADCAST: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetError {
@@ -90,6 +97,8 @@ pub enum NetError {
     /// netstack is at its own limit. Retryable against the same peer, unlike
     /// [`NetError::ConnectionRefused`] — see [`ERR_RESOURCE_EXHAUSTED`].
     ResourceExhausted,
+    /// See [`ERR_PERMISSION_DENIED`].
+    PermissionDenied,
     Protocol(u32),
     Io,
 }
@@ -104,6 +113,7 @@ impl NetError {
             ERR_NOT_CONNECTED => NetError::NotConnected,
             ERR_INVALID_INPUT => NetError::InvalidInput,
             ERR_RESOURCE_EXHAUSTED => NetError::ResourceExhausted,
+            ERR_PERMISSION_DENIED => NetError::PermissionDenied,
             ERR_OTHER => NetError::Io,
             // An older client meets a newer netstack here rather than at a panic:
             // an unknown code is still an error, and still says which one.
@@ -212,13 +222,11 @@ ipc_payload! {
         pub len: u16,
     }
 
+    /// [`MsgType::TcpSetOption`] and [`MsgType::UdpSetOption`]: the request's
+    /// type says which kind of socket `socket_id` names.
     pub struct SocketOptionRequest {
         pub socket_id: u32,
         pub option: u32,
-        pub value: u32,
-    }
-
-    pub struct SocketOptionResponse {
         pub value: u32,
     }
 
@@ -488,13 +496,6 @@ pub fn tcp_set_option(socket_id: TcpSocketId, option: u32, value: u32) -> Result
         .status()
 }
 
-pub fn tcp_get_option(socket_id: TcpSocketId, option: u32) -> Result<u32, NetError> {
-    let resp: SocketOptionResponse = NetstackConn::connect()?
-        .request(MsgType::TcpGetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value: 0 })?
-        .response()?;
-    Ok(resp.value)
-}
-
 // UDP client functions
 
 pub fn udp_bind(addr: [u8; 4], port: u16) -> Result<UdpBound, NetError> {
@@ -532,6 +533,12 @@ pub fn udp_recv_from(socket_id: UdpSocketId, max_len: u32) -> Result<UdpRecvResp
 pub fn udp_close(socket_id: UdpSocketId) -> Result<(), NetError> {
     NetstackConn::connect()?
         .request(MsgType::UdpClose, &SocketCloseRequest { socket_id: socket_id.0 })?
+        .status()
+}
+
+pub fn udp_set_option(socket_id: UdpSocketId, option: u32, value: u32) -> Result<(), NetError> {
+    NetstackConn::connect()?
+        .request(MsgType::UdpSetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value })?
         .status()
 }
 
@@ -628,7 +635,32 @@ mod tests {
             NetError::from_error_code(ERR_CONNECTION_REFUSED),
             NetError::ConnectionRefused
         );
+        assert_eq!(NetError::from_error_code(ERR_PERMISSION_DENIED), NetError::PermissionDenied);
+        assert_eq!(NetError::from_error_code(ERR_INVALID_INPUT), NetError::InvalidInput);
         assert_eq!(NetError::from_error_code(ERR_OTHER), NetError::Io);
         assert_eq!(NetError::from_error_code(4242), NetError::Protocol(4242));
+    }
+
+    /// The option request as netstack decodes it: three words in the order
+    /// socket, option, value, and nothing shorter.
+    #[test]
+    fn an_option_request_is_three_words_on_the_wire() {
+        let wire = [0x44, 0x33, 0x22, 0x11, 2, 0, 0, 0, 1, 0, 0, 0];
+        let request: SocketOptionRequest = crate::ipc::decode_payload(&wire).unwrap();
+        assert_eq!(request.socket_id, 0x1122_3344);
+        assert_eq!(request.option, OPT_BROADCAST);
+        assert_eq!(request.value, 1);
+        assert!(matches!(
+            crate::ipc::decode_payload::<SocketOptionRequest>(&wire[..11]),
+            Err(IpcError::Malformed)
+        ));
+    }
+
+    /// A datagram socket's option has a request of its own, apart from a stream's.
+    #[test]
+    fn a_datagram_sockets_option_is_request_fifteen() {
+        assert_eq!(MsgType::UdpSetOption as u32, 15);
+        assert_eq!(MsgType::from_u32(15), Some(MsgType::UdpSetOption));
+        assert_eq!(MsgType::from_u32(13), Some(MsgType::TcpSetOption));
     }
 }
