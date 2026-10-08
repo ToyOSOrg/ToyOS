@@ -20,7 +20,7 @@ Stage 5 lands in slices, the orchestrator's cut under the owner's words "i want 
 
 What the node does not yet meet:
 
-- Nothing a third party wrote has answered it: its DHCP server is the tests' own, from RFC 2131's layout. Exit: slirp's OFFER and ACK, captured from a QEMU boot, replay into the node and it holds the lease those bytes name.
+- Of what a third party wrote, only slirp's recorded OFFER and ACK have reached it (`userland/netstack/node/tests/slirp.rs`); every other frame it has answered is the tests' own, from the RFCs' layouts. Exit: netd runs on it against slirp in a guest and a router on the T14.
 - It counts a DHCP message [udp] refused as `node.dhcp-unsent`, whatever the rule; the `dhcp.renew-unroutable` scenario owed above is not written. Exit: that scenario names the counter, or the node counts the renewal apart.
 - `node.address-refused` has no test: `toyos-dhcp` accepts no address or prefix [ip] refuses, by the same `toyos-net-wire` checks in both, so the refusal cannot be reached from the wire. Exit: the client hands [ip] a type that carries the check, and the counter goes.
 

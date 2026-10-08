@@ -80,14 +80,14 @@ fn v4(bytes: &[u8]) -> Ipv4Addr {
 /// The outside reading of a frame the node emitted: Ethernet II from the node's MAC, then ARP, a
 /// DHCP client's datagram or an echo reply, each with the lengths and checksums `etherparse`
 /// computes. Anything else the node has no business sending here.
-pub fn outside(frame: &[u8]) -> Seen {
+pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
     let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
     let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
-    assert_eq!(ethernet.source(), MAC, "from the node's MAC");
+    assert_eq!(ethernet.source(), mac, "from the node's MAC");
     let to = ethernet.destination();
     match (&packet.net, &packet.transport) {
         (Some(NetSlice::Arp(arp)), None) => {
-            assert_eq!(arp.sender_hw_addr(), MAC);
+            assert_eq!(arp.sender_hw_addr(), mac);
             let request = arp.operation() == ArpOperation::REQUEST;
             assert!(request || arp.operation() == ArpOperation::REPLY, "{:?}", arp.operation());
             Seen::Arp { to, request, sender: v4(arp.sender_protocol_addr()), target: v4(arp.target_protocol_addr()) }
@@ -135,6 +135,12 @@ pub fn option(message: &[u8], code: u8) -> Option<&[u8]> {
             [_] => panic!("an option without a length"),
         }
     }
+}
+
+/// Hex, whitespace ignored.
+pub fn hex(text: &str) -> Vec<u8> {
+    let digits: Vec<u8> = text.bytes().filter(u8::is_ascii_hexdigit).collect();
+    digits.chunks(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()).collect()
 }
 
 /// The transaction id of a DHCP message (RFC 2131 §2).
@@ -235,6 +241,7 @@ pub fn echo_request(destination: Ipv4Addr, id: u16, seq: u16, data: &[u8]) -> Ve
 
 pub struct Wire {
     pub node: Node,
+    mac: [u8; 6],
     pub now: Instant,
     /// Every frame the node emitted, in order.
     pub sent: Vec<Seen>,
@@ -250,19 +257,23 @@ fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
 }
 
 impl Wire {
-    /// The node an hour into the clock, its link down.
+    /// The node at the fixtures' MAC.
     pub fn new() -> Self {
+        Self::at(MAC)
+    }
+
+    /// The node an hour into the clock, its link down.
+    pub fn at(mac: [u8; 6]) -> Self {
         let secrets = Secrets {
             ip: [1; 16],
             resets: [2; 16],
             tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
         };
         let now = Instant::from_millis(3_600_000);
-        let mac = IndividualMac::new(MacAddr(MAC)).unwrap();
-        let config = Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets };
+        let config = Config { mac: IndividualMac::new(MacAddr(mac)).unwrap(), receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut draws = 0x5a00_0000;
         let node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
-        Self { node, now, sent: Vec::new(), draws }
+        Self { node, mac, now, sent: Vec::new(), draws }
     }
 
     /// Offers the node all the credit it wants until it sends nothing more, the router answering
@@ -270,8 +281,8 @@ impl Wire {
     pub fn pump(&mut self) {
         loop {
             let from = self.sent.len();
-            let sent = &mut self.sent;
-            self.node.transmit(self.now, usize::MAX, |frame| sent.push(outside(frame)));
+            let (sent, mac) = (&mut self.sent, self.mac);
+            self.node.transmit(self.now, usize::MAX, |frame| sent.push(outside(frame, mac)));
             if self.sent.len() == from {
                 return;
             }
@@ -280,6 +291,11 @@ impl Wire {
                 self.node.receive(self.now, &arp(MAC, false, MAC_R, R, A), draw(&mut self.draws));
             }
         }
+    }
+
+    /// The next draw is `next`: the transaction id of the exchange the next call starts.
+    pub fn seed(&mut self, next: u32) {
+        self.draws = next.wrapping_sub(1);
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
