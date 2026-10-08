@@ -137,6 +137,54 @@ fn a_renewal_without_a_router_takes_the_route_and_keeps_the_address() {
 }
 
 #[test]
+fn a_renewed_prefix_reaches_ip_before_its_router() {
+    let mut wire = Wire::leased(&terms(600, Some(R)));
+    let id = renewing(&mut wire);
+    // A router only the wider prefix holds.
+    let (wider, beyond) = (Ipv4Addr::new(255, 255, 254, 0), Ipv4Addr::new(192, 0, 3, 254));
+    let terms = [(54, R.octets().to_vec()), (51, 600u32.to_be_bytes().to_vec()), (1, wider.octets().to_vec()), (3, beyond.octets().to_vec()), (6, DNS.octets().to_vec())];
+    wire.deliver(&from_server(MAC, A, &message_of(ACK, id, &terms)));
+    let lease = wire.node.lease().expect("still held");
+    assert_eq!((lease.prefix_len, lease.router), (23, Some(beyond)));
+    let shard = wire.node.shard();
+    assert_eq!(shard.ip().prefix_len(shard.iface(), A), Some(23));
+    assert_eq!(wire.gateways(), [beyond]);
+    assert_eq!(wire.node.counters().get(Counter::RouterRefused), 0);
+}
+
+#[test]
+fn a_lease_that_runs_out_under_the_probe_leaves_no_address() {
+    let mut wire = Wire::acknowledged(&terms(1, Some(R)));
+    // The clock is late: detection ends past the lease's one second.
+    wire.fire(after(2));
+    assert!(wire.run_until(Duration::from_secs(10), |wire| wire.dhcp().len() == 3), "the client starts over");
+    wire.last(DISCOVER);
+    assert_eq!(wire.sent.iter().filter(|frame| frame.is_probe(A)).count(), 3, "detection ran to its end");
+    assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
+    assert!(!wire.answers_arp_for(A));
+}
+
+#[test]
+fn a_second_conflict_takes_a_held_lease_and_declines_it() {
+    let mut wire = Wire::leased(&terms(HOUR, Some(R)));
+    wire.fire(after(100));
+    let conflict = arp(BROADCAST, false, MAC_B, A, A);
+
+    let from = wire.sent.len();
+    wire.deliver(&conflict);
+    assert_eq!(wire.sent[from..].iter().filter(|frame| frame.is_announcement(A)).count(), 1, "defended once: {:?}", &wire.sent[from..]);
+    assert_eq!((wire.node.lease().map(|lease| lease.address), wire.gateways()), (Some(A), vec![R]));
+
+    // Inside [ip]'s defend interval (RFC 5227 §2.4 (b)).
+    wire.fire(after(105));
+    wire.deliver(&conflict);
+    assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
+    let decline = wire.last(DECLINE);
+    assert_eq!((option(decline, 50), option(decline, 54)), (Some(&A.octets()[..]), Some(&R.octets()[..])));
+    assert!(!wire.answers_arp_for(A));
+}
+
+#[test]
 fn a_router_ip_refuses_is_no_router() {
     let edge = Ipv4Addr::new(192, 0, 2, 255);
     let wire = Wire::leased(&terms(HOUR, Some(edge)));

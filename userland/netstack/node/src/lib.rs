@@ -170,7 +170,7 @@ impl Node {
     fn carry_out(&mut self, now: Instant, out: Output, verified: Option<Verified>, draw: &mut impl FnMut() -> u32) {
         use toyos_dhcp::Config::{Configured, Deconfigured, Extended, Reconfigured};
         let installed = match (out.config, verified) {
-            (Some(Configured(lease)), Some(verified)) => Some(self.stack.hold(now, verified, lease)),
+            (Some(Configured(lease)), Some(verified)) => Some(Ok(self.stack.hold(now, verified, lease))),
             (Some(Configured(lease)), None) => unreachable!("the client configured {} unverified", lease.address),
             (Some(Extended(lease) | Reconfigured(lease)), _) => Some(self.stack.renew(now, lease)),
             // Verified, and the client has no use for it: its lease ran out under the probe.
@@ -195,6 +195,7 @@ impl Node {
                     transmit = self.client.not_verified(now, &mut *draw).transmit;
                 }
             }
+            // Only of a link reported up twice: one that drops under a probe is `NotVerified` first.
             Some(AddressRequest::Cancel(_)) => self.stack.release(now),
             None => {}
         }

@@ -179,40 +179,40 @@ impl Stack {
         Ok(())
     }
 
-    /// The verified address's lease is in use from here. Returns whether [ip] refused its router.
-    /// Refused, the state is `Unaddressed`.
-    pub(crate) fn hold(&mut self, now: Instant, verified: Verified, lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
+    /// The verified address's lease is in use from here: [ip] holds the address at the prefix
+    /// `probe` gave it, and the router is written with the lease. Returns whether [ip] refused the
+    /// router.
+    pub(crate) fn hold(&mut self, now: Instant, verified: Verified, mut lease: Lease) -> bool {
         if lease.address != verified.0 {
             unreachable!("the client configured {}, having probed {}", lease.address, verified.0);
         }
-        let installed = self.install(now, lease);
-        if installed.is_err() {
-            self.release(now);
-        }
-        installed
+        let refused = self.route(now, &mut lease);
+        self.state = State::Held(lease);
+        refused
     }
 
     /// The held address acknowledged again, with new times or a new prefix, router or resolvers.
-    /// Returns whether [ip] refused its router. Refused, the lease stays as it was held.
-    pub(crate) fn renew(&mut self, now: Instant, lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
+    /// Returns whether [ip] refused its router. A prefix [ip] refuses changes nothing: the lease
+    /// stays as it was held.
+    pub(crate) fn renew(&mut self, now: Instant, mut lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
         if !matches!(&self.state, State::Held(held) if held.address == lease.address) {
             unreachable!("the client renewed {}, which is not held", lease.address);
         }
-        self.install(now, lease)
+        self.shard.add_address(now, lease.address, lease.prefix_len)?;
+        let refused = self.route(now, &mut lease);
+        self.state = State::Held(lease);
+        Ok(refused)
     }
 
-    /// Writes `lease`, whose address [ip] holds, as the held one: its prefix, then its router,
-    /// which [ip] takes only on a usable prefix. A router [ip] refuses is no router: the lease is
-    /// held without one. A prefix [ip] refuses changes nothing.
-    fn install(&mut self, now: Instant, mut lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
-        self.shard.add_address(now, lease.address, lease.prefix_len)?;
+    /// Writes `lease`'s router, which [ip] takes only on a usable prefix. One [ip] refuses is no
+    /// router: the lease is left without one, and so is [ip]. Returns whether it was refused.
+    fn route(&mut self, now: Instant, lease: &mut Lease) -> bool {
         let refused = self.shard.set_gateways(now, lease.router.as_slice()).is_err();
         if refused {
             // [ip] kept the list it had.
             agreed(self.shard.set_gateways(now, &[]));
             lease.router = None;
         }
-        self.state = State::Held(lease);
-        Ok(refused)
+        refused
     }
 }

@@ -22,6 +22,7 @@ What the node does not yet meet:
 
 - Of what a third party wrote, only slirp's recorded OFFER and ACK have reached it (`userland/netstack/node/tests/slirp.rs`); every other frame it has answered is the tests' own, from the RFCs' layouts. Exit: netd runs on it against slirp in a guest and a router on the T14.
 - It counts a DHCP message [udp] refused as `node.dhcp-unsent`, whatever the rule; the `dhcp.renew-unroutable` scenario owed above is not written. Exit: that scenario names the counter, or the node counts the renewal apart.
+- With the link down the DHCP client keeps its timers: every 4 to 64 s the node has a deadline, builds a DISCOVER that [udp] refuses, and counts it in `dhcp.tx.discover` and `node.dhcp-unsent`, from `Node::new` on. Exit: `toyos-dhcp`'s client is told the link went down and waits for it, and the node's first DISCOVER is the one that leaves.
 - `node.address-refused` has no test: `toyos-dhcp` accepts no address or prefix [ip] refuses, by the same `toyos-net-wire` checks in both, so the refusal cannot be reached from the wire. Exit: the client hands [ip] a type that carries the check, and the counter goes.
 
 The listener defects are this track's: `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept.
