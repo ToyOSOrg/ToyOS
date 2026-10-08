@@ -37,7 +37,6 @@ mod ledger;
 mod sci;
 mod tables;
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -51,7 +50,7 @@ use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
 use host::{Answer, Kernel, Stopping, Take};
-use sci::{Event, Served, Unserved, GBL, PM1_STATUS, PWRBTN};
+use sci::{Event, Served, Unserved, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -97,23 +96,13 @@ fn main() {
         empty: 0,
     };
     server.arm();
-    let waited = {
-        let claim = Claim { dev: &server.dev, info: server.info, scis: Cell::new(0) };
-        aml::load(&claim, server.info.rsdp);
-        claim.scis.get()
-    };
-    server.scis += waited;
+    aml::load(&Claim(&server.dev), server.info.rsdp);
     server.serve();
 }
 
 /// The claim as the tables' fetch and their AML ask it for what lies outside
 /// its own ports.
-struct Claim<'a> {
-    dev: &'a AcpiDev,
-    info: AcpiInfo,
-    /// SCIs taken while a take of the Global Lock waited for the firmware.
-    scis: Cell<u64>,
-}
+struct Claim<'a>(&'a AcpiDev);
 
 impl Claim<'_> {
     /// The kernel's answer; a stopping machine's is the caller's to carry,
@@ -126,74 +115,22 @@ impl Claim<'_> {
             Err(other) => panic!("acpiserver: the kernel answered {asked} {other:?}"),
         }
     }
-
-    /// Take the SCI's record where there is one, and have the line unmasked.
-    fn unmask(&self) {
-        match self.dev.irq() {
-            Ok(record) => self.scis.set(self.scis.get() + u64::from(record.count)),
-            Err(SyscallError::WouldBlock) => {}
-            Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
-        }
-        self.dev.ack().expect("acpiserver: the claim's acknowledgement");
-    }
 }
 
 impl Kernel for Claim<'_> {
     fn access(&self, access: Access) -> Result<Answer, Stopping> {
-        Self::answered("a mediated access", self.dev.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
+        Self::answered("a mediated access", self.0.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
     }
 
     fn lock_take(&self) -> Result<Take, Stopping> {
-        match self.dev.lock_take() {
+        match self.0.lock_take() {
             Err(SyscallError::NotSupported) => Ok(Take::Unusable),
             answer => Self::answered("a take of the Global Lock", answer).map(|taken| if taken { Take::Taken } else { Take::Pending }),
         }
     }
 
     fn lock_release(&self) -> Result<(), Stopping> {
-        Self::answered("the Global Lock's release", self.dev.lock_release())
-    }
-
-    /// The firmware says it let the lock go by raising the SCI with
-    /// `GBL_STS` (ACPI 6.5 §5.2.10.1). While this waits, that is the only
-    /// event enabled: every other one stays latched in its status bit and
-    /// raises the line again once its enable is back, so the SCI this takes
-    /// is the firmware's word or nothing.
-    fn released(&self, within: Duration) -> Option<Duration> {
-        let began = Instant::now();
-        let pm1 = self.info.pm1_event;
-        let pm1_enabled = in16(pm1.enable());
-        let gpe_enabled: Vec<(u16, u8)> = bytes(self.info.gpe0).map(|(_, enable)| (enable, in8(enable))).collect();
-        for &(enable, _) in &gpe_enabled {
-            out8(enable, 0);
-        }
-        out16(pm1.enable(), GBL);
-        let poller = Poller::new(1);
-        let mut watching = false;
-        let signalled = loop {
-            if in16(pm1.port) & GBL != 0 {
-                out16(pm1.port, GBL);
-                break true;
-            }
-            let left = within.saturating_sub(began.elapsed());
-            if left.is_zero() {
-                break false;
-            }
-            self.unmask();
-            if !watching {
-                poller.watch(self.dev, READABLE, 0);
-                watching = true;
-            }
-            poller.wait(1, left.as_nanos() as u64, |_| watching = false);
-        };
-        // The line as the serving loop expects it: unmasked, and no record
-        // of an SCI this wait has already answered.
-        self.unmask();
-        out16(pm1.enable(), pm1_enabled);
-        for (enable, was) in gpe_enabled {
-            out8(enable, was);
-        }
-        signalled.then(|| began.elapsed())
+        Self::answered("the Global Lock's release", self.0.lock_release())
     }
 }
 

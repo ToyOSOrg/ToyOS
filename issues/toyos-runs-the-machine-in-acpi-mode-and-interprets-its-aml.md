@@ -203,6 +203,28 @@ otherwise pay to find again:
   interpreter's bound in heap bytes, and a host test under a counting
   allocator holds each of those three fills and that refused load to it.
 
+What the server's load of the tables, on the T14 and through the kernel's
+mediated access, leaves open:
+
+- **The server waits for no release of the Global Lock** (the orchestrator's
+  ruling, not the owner's). A take that finds the firmware holding the lock
+  leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
+  name and counted in the server's ledger; the access under it is not made,
+  and the table or method that asked is refused. The wait that section
+  describes, for the SCI the firmware raises with `GBL_STS`, is not in the
+  tree: no tier reached it, and the T14's load took the lock 241 times and
+  found the firmware holding it in none. Owner: this stage. **Exit**: a
+  machine's log carries the denial, `the Global Lock: the firmware holds it`,
+  which the `acpi_tables_loaded` row reds on as on every refusal; the wait
+  comes back with the test that reaches its port sequence.
+- **A press during the load waits for it.** The server arms the power button
+  and then loads the tables before it serves an SCI, so a press in that time
+  latches and is served when the load ends: 77 ms on the T14, measured once,
+  and bounded only by what the interpreter lets each table sleep, 10 s.
+  Owner: this stage. **Exit**: the slice that keeps the namespace serves the
+  SCI while a table loads, or the `acpi_tables_loaded` row holds the load's
+  time on the T14 under a bound the owner names.
+
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI
 taken, and its hypothesis is that the controller wants the firmware's

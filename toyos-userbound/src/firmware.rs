@@ -25,17 +25,25 @@
 //! the holder reads there beside the tables is whatever else that firmware
 //! keeps in it. Runtime-services code is refused both ways.
 //!
-//! **An address the map does not list is read where it is a register and no
-//! memory, and never written.** A chipset keeps registers at addresses its
-//! firmware lists nowhere, and a machine's AML reads them as it loads. Such a
-//! read passes where the kernel maps the address and the processor's range
-//! registers type it uncacheable ([`Memory::uncached`]): that is what makes a
-//! read of a register one read of it, and it is also what no RAM is, so a
-//! range of RAM a truncated map left out is refused by it. The read may have
-//! an effect in the device that nothing here knows of. Inside that, every
-//! page a device the kernel knows of decodes in is refused, whatever firmware
-//! types it and whoever drives the device, and an address in the ECAM window
-//! is a configuration access and is decided as one.
+//! **An address the map does not list is read where it is a register, and
+//! never written.** A chipset keeps registers at addresses its firmware lists
+//! nowhere, and a machine's AML reads them as it loads. Such a read passes at
+//! or above [`FIXED_RANGE_END`] where the kernel maps the address and the
+//! processor's range registers type it uncacheable ([`Memory::uncached`]):
+//! that is what makes a read of a register one read of it. It is not what
+//! keeps RAM out, since the range registers are not the effective type
+//! everywhere: the allocator hands out only memory the map lists as usable
+//! ([`toyos_bootmap::is_usable_type`]), so memory the map does not list holds
+//! nothing ToyOS put there. The read may have an effect in the device that
+//! nothing here knows of. Inside that, every page a device the kernel knows
+//! of decodes in is refused, whatever firmware types it and whoever drives
+//! the device, and an address in the ECAM window is a configuration access
+//! and is decided as one.
+//!
+//! **What the allocator hands out is refused wherever the map lists it.** A
+//! map's ranges may overlap, and the allocator takes every usable one: an
+//! access is refused where any usable range holds a byte of it, whatever
+//! another range types the same byte.
 //!
 //! **A port is the kernel's to answer where the kernel declared it**
 //! ([`crate::port::Mediated`]), another claim's where a row names it, and
@@ -60,6 +68,12 @@ const EFI_ACPI_NVS: u32 = 10;
 /// addressed to (Intel SDM Vol. 3A §11.4.1 and §11.11.1): the kernel's whether
 /// or not it maps them.
 const LOCAL_APIC: (u64, u64) = (0xFEE0_0000, 0xFEF0_0000);
+
+/// One past what the processor's fixed range registers type (Intel SDM
+/// Vol. 3A, "Fixed Range MTRRs"). Below it they decide whether a read is
+/// cached and the kernel reads none of them, so no address the map does not
+/// list is a register's there.
+pub const FIXED_RANGE_END: u64 = 0x10_0000;
 
 /// Bytes of configuration space a function has.
 const CONFIG_BYTES: u16 = 0x1000;
@@ -106,7 +120,8 @@ pub struct Memory<'a, D> {
     /// The FACS, as `(start, end)`.
     pub facs: Option<(u64, u64)>,
     /// Whether the processor reads `len` bytes at an address uncached,
-    /// whatever maps them: asked only of an address the map does not list.
+    /// whatever maps them: asked only of an address the map does not list, at
+    /// or above [`FIXED_RANGE_END`].
     pub uncached: fn(u64, u64) -> bool,
 }
 
@@ -164,6 +179,14 @@ pub fn type_word(map: &[MemoryMapEntry], at: u64) -> u8 {
     type_of(map, at).and_then(|ty| u8::try_from(ty).ok()).filter(|&ty| ty != UNLISTED).unwrap_or(UNLISTED)
 }
 
+/// The type of a range of `map` the allocator hands out that holds a byte of
+/// `first..=last`, whichever range [`type_of`] finds first there.
+fn usable(map: &[MemoryMapEntry], first: u64, last: u64) -> Option<u32> {
+    map.iter()
+        .find(|entry| toyos_bootmap::is_usable_type(entry.uefi_type) && overlaps(first, last, (entry.start, entry.end)))
+        .map(|entry| entry.uefi_type)
+}
+
 impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
     pub fn decide(self, at: u64, width: Width, write: bool) -> MemoryVerdict {
         use MemoryVerdict::Refused as No;
@@ -187,8 +210,10 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         if type_of(self.map, last) != ty {
             return No(Refused::Straddles);
         }
+        if usable(self.map, at, last).is_some() {
+            return No(Refused::UsableMemory);
+        }
         match ty {
-            Some(ty) if toyos_bootmap::is_usable_type(ty) => return No(Refused::UsableMemory),
             Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
             Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
             None if !write => {}
@@ -197,7 +222,7 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         if last >= self.mapped_end {
             return No(Refused::Unmapped);
         }
-        if ty.is_none() && !(self.uncached)(at, width.bytes()) {
+        if ty.is_none() && (at < FIXED_RANGE_END || !(self.uncached)(at, width.bytes())) {
             return No(Refused::UnlistedCached);
         }
         if write && self.facs.is_some_and(|facs| overlaps(at, last, facs)) {
@@ -247,6 +272,9 @@ pub fn lock_word(map: &[MemoryMapEntry], mapped_end: u64, at: u64) -> Result<Loc
     }
     // No overflow: `at` is on a dword boundary.
     let last = at + 3;
+    if let Some(handed_out) = usable(map, at, last) {
+        return Err(NoLockWord::Type(Some(handed_out)));
+    }
     for byte in at..=last {
         match type_of(map, byte) {
             Some(EFI_RESERVED | EFI_ACPI_NVS) => {}

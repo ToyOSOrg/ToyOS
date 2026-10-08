@@ -94,15 +94,32 @@ kernel drives and no function's BAR: by its place, the chipset's own register
 space. Such a read passes now where the address is inside the direct map and
 the processor's range registers type it uncacheable, which the kernel reads
 at each such access (`acpi_mode::uncached`) and does not assume; a write
-stays refused. The firmware's map lists every range of RAM, and a range a
-truncated map left out is refused all the same, since no firmware types RAM
-uncacheable. Two things are assumed and not checked. **The fixed range
-registers are not read**, so an unlisted address below 1 MiB is refused
-whole, a register there included. **And a read of a register can have an
-effect in the device** — a status bit cleared, a FIFO advanced — that the
-kernel cannot know: it bounds where the holder reads and not what reading
-does there. On the T14 one such read is measured, at load; what the
-initialisation and query methods read there is unread.
+stays refused, and range registers that are off type nothing, so there every
+such read is refused.
+
+What keeps kernel and process memory out of that read is not the range
+registers. The allocator hands out only memory the firmware's map lists as
+usable (`toyos_bootmap::is_usable_type`), so memory the map does not list
+holds nothing ToyOS put there, whatever it is; and an access is refused where
+any usable range of the map holds a byte of it, whichever range lists that
+byte first. Three things are not checked:
+
+- **The range registers are not the effective type everywhere.** A processor
+  that types RAM from 4 GiB to its top of memory write-back by a
+  configuration bit outside the range registers (AMD's `SYSCFG` and `TOM2`)
+  answers the registers' default type for that RAM, which is uncacheable on
+  such firmware: an unlisted range of RAM above 4 GiB inside the direct map
+  is read there as a register would be. Nothing reads that bit. What such a
+  read reaches is RAM the map left out, which the allocator never handed
+  out.
+- **The fixed range registers are not read**, so an unlisted address below
+  1 MiB is refused whole, a register there included
+  (`firmware::FIXED_RANGE_END`).
+- **A read of a register can have an effect in the device** — a status bit
+  cleared, a FIFO advanced — that the kernel cannot know: it bounds where
+  the holder reads and not what reading does there. On the T14 one such read
+  is measured, at load, in one page; what the initialisation and query
+  methods read there is unread.
 
 **Exit**: an access is passed only inside a region the machine's loaded tables
 define, checked by something other than the holder; or the owner rules the

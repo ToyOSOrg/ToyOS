@@ -662,12 +662,9 @@ fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunc
 
 /// Whether a read of `len` bytes at `at` through the direct map is uncached:
 /// its leaves select the PAT's write-back entry, under which the range
-/// registers decide (Intel SDM Vol. 3A, Table 12-7), so it is where they type
-/// the range uncacheable, read here and not assumed. Below 1 MiB the fixed
-/// range registers decide, which this kernel does not read: not there.
+/// registers decide (Intel SDM Vol. 3A, Table 12-7), read here and not assumed.
 fn uncached(at: u64, len: u64) -> bool {
-    use super::mtrr::{Effective, MemoryType};
-    at >= 0x10_0000 && matches!(super::mtrr::range_type(at, len), Effective::Known(MemoryType::Uncacheable) | Effective::MtrrsDisabled)
+    super::mtrr::range_type(at, len).typed_uncacheable()
 }
 
 /// One memory access, decided and made; the type firmware's map gives its

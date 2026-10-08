@@ -4,7 +4,7 @@
 
 use toyos_abi::acpi::{Refused, Width};
 use toyos_abi::boot::MemoryMapEntry;
-use toyos_userbound::firmware::{config, lock_word, port, type_word, Ecam, Function, Memory, MemoryVerdict, NoLockWord, Standing};
+use toyos_userbound::firmware::{config, lock_word, port, type_word, Ecam, Function, Memory, MemoryVerdict, NoLockWord, Standing, FIXED_RANGE_END};
 use toyos_userbound::Mediated;
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
@@ -174,7 +174,7 @@ fn runtime_services_data_is_read_as_the_tables_memory_is_and_never_written() {
 #[test]
 fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
     let laptop = laptop();
-    const AT: u64 = 0xfedc_7000;
+    const AT: u64 = REGISTERS + 0x12_3000;
     assert_eq!(type_word(&LAPTOP, AT), toyos_abi::acpi::UNLISTED);
     for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
         assert!(passes(&laptop, AT + 0x110, width, false), "{width:?}");
@@ -202,6 +202,62 @@ fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
     assert!(passes(&typed, REGISTERS + 0x2000, Width::Byte, true));
     // A read across listed memory and a hole is two things.
     assert_eq!(refused(&typed, REGISTERS + 0x3000 - 1, Width::Word, false), Refused::Straddles);
+}
+
+/// Below 1 MiB the fixed range registers decide what is cached, and the
+/// kernel reads none of them: an unlisted address there is refused whatever
+/// the cache check answers, to the last byte below the bound.
+#[test]
+fn an_unlisted_address_below_1_mib_is_refused_whatever_the_range_registers_answer() {
+    // RAM, and a hole from the legacy video memory up that the map never lists.
+    const HOLE: &[MemoryMapEntry] = &[e(7, 0x0, 0xa_0000)];
+    let memory = Memory { uncached: |_, _| true, ..bare(HOLE, &[]) };
+    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+        for at in [0xa_0000, 0xc_0000, FIXED_RANGE_END - 8, FIXED_RANGE_END - width.bytes()] {
+            assert_eq!(refused(&memory, at, width, false), Refused::UnlistedCached, "{at:#x} {width:?}");
+            assert_eq!(refused(&memory, at, width, true), Refused::MemoryType, "{at:#x} {width:?}");
+        }
+        assert!(passes(&memory, FIXED_RANGE_END, width, false), "{width:?} at the bound");
+    }
+    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Byte, false), Refused::UnlistedCached);
+    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Word, false), Refused::UnlistedCached, "a read that begins below the bound");
+    // Listed memory below the bound is decided by its type, as anywhere.
+    assert!(passes(&laptop(), 0x9f000, Width::DWord, false));
+}
+
+/// A map that lists a range twice, or two ranges over one another: the
+/// allocator takes every usable range, so a byte any usable range holds is
+/// RAM, whichever range lists it first.
+#[test]
+fn memory_any_usable_range_holds_is_refused_whatever_lists_it_first() {
+    for firmware in [0, 6, 9, 10] {
+        for handed_out in [1, 2, 3, 4, 7] {
+            // The same range under both types, the firmware's first.
+            let twice = [e(firmware, 0x1000, 0x3000), e(handed_out, 0x1000, 0x3000)];
+            // A usable range over the firmware range's second page and beyond.
+            let over = [e(firmware, 0x1000, 0x3000), e(handed_out, 0x2000, 0x4000)];
+            for write in [false, true] {
+                let twice = Memory { map: &twice, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers };
+                let over = Memory { map: &over, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers };
+                let why = MemoryVerdict::Refused(Refused::UsableMemory);
+                assert_eq!(twice.clone().decide(0x1000, Width::Byte, write), why, "type {firmware} listed before {handed_out}");
+                assert_eq!(twice.decide(0x2ff8, Width::QWord, write), why);
+                assert_eq!(over.clone().decide(0x2000, Width::Byte, write), why, "type {firmware} under {handed_out}");
+                assert_eq!(over.clone().decide(0x1ffc, Width::QWord, write), why, "an access whose last bytes a usable range holds");
+                assert_eq!(over.clone().decide(0x2fff, Width::Byte, write), why);
+                // The page no usable range holds is the firmware's still.
+                let alone = over.decide(0x1ff8, Width::QWord, write);
+                match (firmware, write) {
+                    (6 | 9, true) => assert_eq!(alone, MemoryVerdict::Refused(Refused::TableWrite)),
+                    _ => assert!(matches!(alone, MemoryVerdict::Through(_)), "type {firmware} write={write}: {alone:?}"),
+                }
+            }
+        }
+    }
+    // The lock word is exchanged in no byte a usable range holds either.
+    assert_eq!(lock_word(&[e(10, 0x1000, 0x2000), e(4, 0x1000, 0x2000)], 4 * GIB, 0x1010), Err(NoLockWord::Type(Some(4))));
+    assert_eq!(lock_word(&[e(10, 0x1000, 0x2000), e(7, 0x1013, 0x2000)], 4 * GIB, 0x1010), Err(NoLockWord::Type(Some(7))));
+    assert!(lock_word(&[e(10, 0x1000, 0x2000), e(7, 0x1014, 0x2000)], 4 * GIB, 0x1010).is_ok());
 }
 
 /// Runtime-services code is the firmware's to execute and nobody's to read

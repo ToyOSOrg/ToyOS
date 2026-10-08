@@ -29,7 +29,6 @@ use toyos_acpi::TableError;
 use toyos_aml::{Error, Host, Interpreter, Value};
 
 use crate::host::{Firmware, Kernel, Refusal, OWN};
-use crate::ledger::Ledger;
 use crate::tables::Tables;
 
 /// An embedded-controller query, taken off the controller, run once the
@@ -37,7 +36,10 @@ use crate::tables::Tables;
 /// controller.
 pub fn query(_q: u8) {}
 
-/// What became of the machine's definition blocks.
+/// What became of the machine's definition blocks: the load's verdict, which
+/// its lines say and nothing in the server acts on yet. Whoever evaluates a
+/// method after the load asks `blocks` whether there is a namespace, and the
+/// power-off through the server writes `s5`.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Loaded {
     /// Each block in the order it was loaded, the DSDT first; `Err` is the
@@ -116,7 +118,6 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
     for (place, block) in blocks.iter().enumerate() {
         let name = if place == 0 { "DSDT" } else { "SSDT" };
         let place = place + 1;
-        host.begin();
         let done = match block {
             Ok(table) => interpreter.load(&mut host, table).map_err(|why| {
                 println!("{OWN}table {place} was refused {why:x?}");
@@ -170,24 +171,18 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
         host.notifies
     );
 
-    let mut evaluations = Ledger::default();
     if loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) {
-        host.begin();
         match s5(&mut interpreter, &mut host) {
             Ok((a, b)) => {
                 println!("acpiserver: \\_S5 evaluated: SLP_TYPa={a} SLP_TYPb={b}");
                 loaded.s5 = Some((a, b));
             }
             Err(_) if host.stopping => println!("{STOPPING}"),
-            Err(kind) => {
-                if evaluations.see(&format!("\\_S5: {kind}")) {
-                    println!("acpiserver: \\_S5 refused: {kind}");
-                }
-            }
+            Err(kind) => println!("acpiserver: \\_S5 refused: {kind}"),
         }
     }
-    if !(host.refused.is_empty() && evaluations.is_empty()) {
-        println!("acpiserver: refused so far, of accesses: {}; of evaluations: {}", host.refused.counts(), evaluations.counts());
+    if !host.refused.is_empty() {
+        println!("acpiserver: refused so far, of accesses: {}", host.refused.counts());
     }
     loaded
 }
@@ -210,11 +205,9 @@ fn s5(interpreter: &mut Interpreter, host: &mut dyn Host) -> Result<(u64, u64), 
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::host::tests::Scripted;
-    use crate::host::Take;
+    use crate::host::{Take, HELD};
 
     /// QEMU's own tables where its guest held them
     /// (`toyos-acpi/fixtures/qemu-11.1.1/SOURCE`), as ACPI reclaim memory.
@@ -402,9 +395,10 @@ mod tests {
     }
 
     /// A Lock field's access takes the Global Lock through the kernel and
-    /// gives it back; one the firmware keeps is the load's refusal, by name.
+    /// gives it back; one the firmware holds is the load's refusal, by name,
+    /// and the field is not read without it.
     #[test]
-    fn a_lock_field_read_at_load_takes_the_lock_and_a_kept_lock_refuses_the_table() {
+    fn a_lock_field_read_at_load_takes_the_lock_and_a_held_lock_refuses_the_table() {
         const NVS: u64 = 0x7700_0000;
         // OperationRegion (REGN, SystemMemory, 0x77000000, 4); Field (REGN,
         // ByteAcc, Lock, Preserve) { FLDA, 8 }; Name (COPY, 0); Store (FLDA, COPY).
@@ -431,21 +425,17 @@ mod tests {
             kernel.memory.push((NVS, 10, vec![0x42; 4]));
             kernel
         };
+        let field = toyos_abi::acpi::Access::read(toyos_abi::acpi::Space::SystemMemory, NVS, toyos_abi::acpi::Width::Byte);
 
         let kernel = with_nvs();
-        kernel.takes.borrow_mut().extend([Take::Pending, Take::Taken]);
-        kernel.releases.borrow_mut().push_back(Some(Duration::from_millis(3)));
         assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((5, 0)) });
         assert!(!kernel.held.get(), "the load ended holding the Global Lock");
-        assert_eq!(kernel.waits.borrow().len(), 1);
-        let field = toyos_abi::acpi::Access::read(toyos_abi::acpi::Space::SystemMemory, NVS, toyos_abi::acpi::Width::Byte);
         assert_eq!(kernel.asked.borrow().last(), Some(&field));
 
         let kernel = with_nvs();
-        kernel.takes.borrow_mut().extend([Take::Pending; 2]);
+        kernel.takes.borrow_mut().push_back(Take::Pending);
         let loaded = load(&kernel, CRAFTED_RSDP);
-        let kept = "denied by this server: the Global Lock: the firmware kept it for the 10s one evaluation waits";
-        assert_eq!(loaded, Loaded { blocks: vec![Err(kept.into())], s5: None });
+        assert_eq!(loaded, Loaded { blocks: vec![Err(format!("denied by this server: {HELD}"))], s5: None });
         assert_ne!(kernel.asked.borrow().last(), Some(&field), "the field was read without the lock");
     }
 }
