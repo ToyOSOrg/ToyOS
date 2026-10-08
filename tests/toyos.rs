@@ -2509,7 +2509,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // Driven by `metal-panic-probe`, which is the same kernel the owner
             // flashes: a gate that staged this with SYS_DEBUG would certify a
             // path his image does not contain.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/panelcase");
             let options = BootOptions {
                 profile,
                 smp: 8,

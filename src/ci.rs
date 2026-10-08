@@ -72,6 +72,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
         eprintln!("Error: {refusal}\n{USAGE}");
         std::process::exit(2);
     });
+    forget_own_package();
     let steps = match &job {
         Job::Host => host(root),
         Job::Seal => seal(root),
@@ -91,6 +92,22 @@ pub fn dispatch(root: &Path, args: &[String]) {
             eprintln!("  {}", s.line());
         }
         std::process::exit(1);
+    }
+}
+
+/// Take what `cargo run` told the driver about its own package out of what
+/// every step inherits, before any thread.
+///
+/// Cargo judges a build script's `rerun-if-env-changed` by its own
+/// environment, and ring's names these: left in, a step's cargo finds ring
+/// stale against the build the job's cargo made without them, and builds it,
+/// its dependents and this crate a second time.
+fn forget_own_package() {
+    for (name, _) in std::env::vars_os() {
+        let own = name.to_str().is_some_and(|n| n.starts_with("CARGO_PKG_") || n.starts_with("CARGO_MANIFEST_"));
+        if own {
+            std::env::remove_var(name);
+        }
     }
 }
 
@@ -1071,6 +1088,49 @@ mod tests {
         let build = String::from_utf8(cargo(&["build", "-v", "--offline"]).stderr).unwrap();
         let rustc = build.lines().find(|l| l.contains("--crate-name one")).unwrap_or_else(|| panic!("{build}"));
         assert!(!rustc.contains("-C incremental"), "{rustc}");
+    }
+
+    /// A build script naming what `cargo run` hands the driver is fresh for a
+    /// step's cargo once the job's cargo, which ran without them, has built
+    /// it. The driver is a process of its own, as above.
+    #[test]
+    fn a_steps_cargo_finds_fresh_what_the_jobs_cargo_built() {
+        const NAMED: [&str; 2] = ["CARGO_PKG_NAME", "CARGO_MANIFEST_DIR"];
+        let fixture = toyos_tmpdir::TempDir::new("ci-own-package");
+        std::fs::create_dir(fixture.join("src")).unwrap();
+        let manifest = "[package]\nname = \"one\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+        std::fs::write(fixture.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(fixture.join("src/lib.rs"), "").unwrap();
+        let script = NAMED.map(|name| format!("    println!(\"cargo:rerun-if-env-changed={name}\");\n")).concat();
+        std::fs::write(fixture.join("build.rs"), format!("fn main() {{\n{script}}}\n")).unwrap();
+        let mut jobs = Command::new("cargo");
+        jobs.args(["build", "--offline"]).current_dir(&fixture);
+        for name in NAMED {
+            jobs.env_remove(name);
+        }
+        let out = jobs.output().expect("run cargo");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = crate::buildlock::tests::rerun("ci::tests::a_steps_cargo")
+            .env(FIXTURE, fixture.path())
+            .output()
+            .expect("run the driver");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "the driver of the test above; never runs on its own"]
+    fn a_steps_cargo() {
+        let fixture = PathBuf::from(std::env::var_os(FIXTURE).unwrap_or_else(|| panic!("run without {FIXTURE}")));
+        assert!(std::env::var_os("CARGO_PKG_NAME").is_some(), "cargo names no package to this process");
+        forget_own_package();
+        let out = Command::new("cargo")
+            .args(["build", "-v", "--offline"])
+            .current_dir(&fixture)
+            .output()
+            .expect("run cargo");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("Fresh one v0.1.0"), "{said}");
     }
 
     fn repo_root() -> PathBuf {
