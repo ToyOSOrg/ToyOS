@@ -103,7 +103,7 @@ mod tests {
         "ToyOS Bootloader 1.0\n\
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
-         | log: this boot's newest records follow, newest first (16)\n\
+         | log: this boot's newest records follow, newest first\n\
          | log-tail: [ 3.960 cpu0 kernel] Rebooting.\n\
          | log-tail: [ 3.955 cpu0 kernel] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
          | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\

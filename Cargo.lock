@@ -3039,7 +3039,6 @@ dependencies = [
  "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
- "toyos-elide",
  "toyos-fat32",
  "toyos-gicv3",
  "toyos-gpt",
