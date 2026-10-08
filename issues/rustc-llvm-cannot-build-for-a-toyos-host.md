@@ -20,7 +20,7 @@ run, builds it for `x86_64-unknown-toyos` wrongly three ways:
 
 The C++ runtime and the C library are ToyOS arms at existing dispatch sites,
 written as upstream would take them. The paths are no arm, and rustc does not
-change for them: ToyOS's build hands the hosted rustc's build a host LLVM whose
+change for them: ToyOS's build is to hand a hosted rustc's build a host LLVM whose
 paths hold the host triple where the ToyOS host's LLVM's hold
 `x86_64-unknown-toyos`, as bootstrap's own build directory lays the two out.
 

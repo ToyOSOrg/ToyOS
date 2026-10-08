@@ -72,6 +72,7 @@ mod hw;
 mod iommu;
 mod preempt;
 mod counters;
+mod census;
 mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;

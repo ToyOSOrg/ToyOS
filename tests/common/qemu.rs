@@ -2344,11 +2344,6 @@ fn publish_line(
     let Ok(line) = String::from_utf8(raw) else { return false };
     full_log.push_str(&line);
     full_log.push('\n');
-    // Here rather than in a caller's capture, because no caller holds every
-    // line: `boot_log` ends at the ready marker and a `TestResult` begins at
-    // `===TEST_START===`. The census is cumulative, so what the suite's summary
-    // wants is the last one of the boot, whichever of those windows it fell in.
-    super::irqcensus::observe(seq, &line);
     if VERBOSE.load(Ordering::Relaxed) {
         // The boot's own number, because `--nocapture` on a wide run is several
         // guests talking into one terminal and an unattributed line is worse

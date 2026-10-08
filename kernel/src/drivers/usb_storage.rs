@@ -55,16 +55,6 @@ struct UsbBlockDevice {
     losses: u64,
 }
 
-impl UsbBlockDevice {
-    /// Every result must pass through here so budget refusals reach the census the slow-vs-failed policy reads.
-    fn noted(&self, done: BlockResult) -> BlockResult {
-        if done == Err(BlockError::BudgetExpired) {
-            block::census::budget_expired(self.id);
-        }
-        done
-    }
-}
-
 impl BlockDevice for UsbBlockDevice {
     fn device_id(&self) -> DeviceId {
         self.id
@@ -81,7 +71,7 @@ impl BlockDevice for UsbBlockDevice {
             log!("usb-storage: read of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
         }
-        self.noted(done)
+        done
     }
 
     fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
@@ -91,18 +81,16 @@ impl BlockDevice for UsbBlockDevice {
             log!("usb-storage: write of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
         }
-        self.noted(done)
+        done
     }
 
     fn flush(&mut self) -> BlockResult {
         let _op = block::begin_operation();
-        let began = crate::clock::now();
         let done = xhci::storage_flush(self.index, &mut self.losses);
-        block::census::flush_took(self.id, (crate::clock::now() - began).nanos());
         if done.is_err() {
             log!("usb-storage: cache flush {} on disk {}", gave_up(done), self.index);
         }
-        self.noted(done)
+        done
     }
 
     fn losses(&self) -> u64 {

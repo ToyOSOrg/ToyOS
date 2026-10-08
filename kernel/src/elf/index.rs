@@ -72,10 +72,7 @@ pub fn parse_rela_entries(
             .chain(RelaTable::new(jmprel_data, crate::arch::ELF_MACHINE).iter())
     };
     let counts = RelaCounts::of(entries());
-    let reserve = counts
-        .for_executable(WIDEST, MAX_HEAP_ALLOC)
-        .inspect_err(|_| log!("ELF: {:?} refused", counts))
-        .map_err(Refused::Counts)?;
+    let reserve = counts.for_executable(WIDEST, MAX_HEAP_ALLOC).map_err(Refused::Counts)?;
     let mut out = ParsedRelaEntries {
         relative: Vec::with_capacity(reserve.relative),
         glob_dat: Vec::with_capacity(reserve.bind),

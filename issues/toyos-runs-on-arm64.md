@@ -216,8 +216,10 @@ Each stage names its exit; "measured" means a number from a run.
 
 1. **`aarch64-unknown-toyos` in the rust fork.** A target spec:
    `aarch64-unknown-none-elf`, PIC, frame pointers. Std pal `_start` and TLS
-   for variant I. **Exit**: `cargo +toyos build --target aarch64-unknown-toyos`
-   builds `std` plus a hello-world and the whole Rust userland.
+   for variant I. **Exit**: `RUSTUP_TOOLCHAIN=<sysroot> cargo build --target
+   aarch64-unknown-toyos`, with `<sysroot>` as `src/CLAUDE.md`'s std
+   type-check recipe names it, builds `std` plus a hello-world and the whole
+   Rust userland.
 
 2. **The UEFI loader on AArch64** (`aarch64-unknown-uefi`, tier 2 upstream,
    no fork work needed). Entry is `extern "C"` rather than `sysv64`.
