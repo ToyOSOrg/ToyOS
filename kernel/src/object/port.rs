@@ -139,13 +139,15 @@ impl Connector {
     }
 
     /// One lock acquisition for the check and the insert; see [`PortQueue`].
-    pub fn push(&self, connection: PendingConnection) -> Result<(), PushError> {
+    /// A refusal hands the connection back: its caller holds a handle table's
+    /// lock, and the pipe ends are not dropped under one.
+    pub fn push(&self, connection: PendingConnection) -> Result<(), (PendingConnection, PushError)> {
         let mut queue = self.shared.queue.lock();
         if queue.closed {
-            return Err(PushError::Closed);
+            return Err((connection, PushError::Closed));
         }
         if queue.pending.len() >= MAX_PENDING_CONNECTIONS {
-            return Err(PushError::QueueFull);
+            return Err((connection, PushError::QueueFull));
         }
         queue.pending.push_back(connection);
         Ok(())

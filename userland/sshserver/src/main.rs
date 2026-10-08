@@ -784,9 +784,7 @@ fn main() {
 }
 
 /// Which keys a file authorizes, and what becomes of a program's input. Host
-/// tests — `cargo test --target "$(rustc -vV | sed -n 's/^host: //p')"` from
-/// this directory; `userland/.cargo/config.toml` cross-compiles to ToyOS
-/// otherwise. Real keys, and `ssh-key`'s own parser, so what is under test is
+/// tests, which `cargo test -p sshserver` runs. Real keys, and `ssh-key`'s own parser, so what is under test is
 /// the decision and not a re-encoding of it.
 #[cfg(test)]
 mod tests {

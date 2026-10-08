@@ -1,14 +1,14 @@
-# The host workspace: every crate in this repository that is tested on the host
-# rather than inside a guest, resolved once.
+# The one workspace: every crate in this repository but the ones `exclude`
+# names, resolved once into the one `Cargo.lock`, built with the one
+# `[profile.toyos]` and patched by the one `[patch]` table below. A guest
+# build names its package with `-p` and its triple with `--target`, whose
+# flags are `.cargo/config.toml`'s; features unify only across the packages one
+# `cargo` builds, so a member's features never reach the kernel's or the
+# loader's build.
 #
-# Each of these used to be its own workspace root with its own lockfile, and
-# `host-tests.yml` named them in a shell loop. That made the set of host-tested
-# crates a list in two places, and the two drifted three times — four pure
-# crates until 2026-08-08, `toyos-keymap` and `bcachefs` until 2026-08-14, and
-# `toyos-abi` and `toyos-manifest`, which reached no workflow at all. Membership
-# here is now the only list: `cargo test --workspace --exclude toyos-build` runs
-# every one of them, and `src/hostws.rs` reds on a `Cargo.toml` in this tree
-# that is neither a member nor excluded below with a reason.
+# `src/hostws.rs` reds on a `Cargo.toml` in this tree that is neither a member
+# nor excluded below with a reason, and says which members a host tests:
+# `cargo run -- --ci host` runs every one of those.
 #
 # `default-members` is the root package alone, so a bare `cargo test` at the
 # root is still the QEMU harness and a bare `cargo run` is still the dev loop.
@@ -16,6 +16,8 @@
 [workspace]
 members = [
     "bcachefs",
+    "bootloader",
+    "kernel",
     "kernel/dma",
     "kernel/gicv3",
     "kernel/loom",
@@ -23,6 +25,7 @@ members = [
     "kernel/ps2",
     "kernel/sim",
     "tests/libc-arch",
+    "toyos",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
@@ -66,6 +69,46 @@ members = [
     "toyos-wallclock",
     "toyos-xhci",
     "toyos-xhci/sim",
+    "userland/acpiserver",
+    "userland/acpiserver/aml",
+    "userland/calc",
+    "userland/compositor",
+    "userland/compositor/desktop",
+    "userland/console",
+    "userland/diskserver",
+    "userland/doom",
+    "userland/editor",
+    "userland/filepicker",
+    "userland/filepicker-api",
+    "userland/files",
+    "userland/fileserver",
+    "userland/host",
+    "userland/inspect",
+    "userland/kernelprobe",
+    "userland/logkeeper",
+    "userland/logkeeper-api",
+    "userland/metalprobe",
+    "userland/netstack",
+    "userland/netstack/mdns",
+    "userland/paint",
+    "userland/pkg",
+    "userland/proctest",
+    "userland/shell",
+    "userland/snake",
+    "userland/soundserver",
+    "userland/soundserver/mixer",
+    "userland/sprite",
+    "userland/sshserver",
+    "userland/supervisor",
+    "userland/swap",
+    "userland/symbolize",
+    "userland/terminal",
+    "userland/test-runner",
+    "userland/toybox",
+    "userland/toyos-font",
+    "userland/toyos-window",
+    "userland/trace",
+    "userland/update",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and
@@ -73,27 +116,18 @@ default-members = ["."]
 # a directory with a `Cargo.toml` under it is a red, so a stale excuse cannot
 # outlive what it excused.
 exclude = [
-    # Cross-compiled by a `.cargo/config.toml` below them, to targets no host
-    # test can run. Cargo refuses to merge an inherited `build.target` away, so
-    # these cannot be members at any price. The kernel's library is tested on the
-    # host from its own manifest all the same, and `kernel/loom` and `kernel/sim`
-    # are members: `members` names them, which outranks this list.
-    "bootloader",
-    "kernel",
-    "userland",
     # The Rust compiler/std fork: its own workspaces, its own lockfiles, and a
     # submodule this repository does not resolve for.
     "rust",
-    # The userland SDK. It compiles against the ToyOS sysroot and is a path
-    # dependency of `rust/library/std`, so it keeps its own resolution and
-    # cannot be a member. It is host-tested all the same — its `lib.rs` is
-    # `cfg_attr(not(test), no_std)` and `cargo run -- --ci host` runs
-    # `cargo test` in it against the host triple.
-    "toyos",
+    # The C library, built into a sysroot with `--release` and its own
+    # `panic = "abort"` profile, which cargo ignores in a member; its lock is one
+    # of the sysroot key's inputs (`src/sysroot.rs`).
+    "userland/libc",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
-    # its own directory but `tls-multi-crate/dep`, its parent's dependency. Named,
-    # and not `tests/` whole, so the gate finds a host test under `tests/` that
-    # joined neither list.
+    # its own directory but `tls-multi-crate/dep`, its parent's dependency: the
+    # first patches memmap2 and `tls-cranelift` target-lexicon, and a `[patch]`
+    # is the whole workspace's. Named, and not `tests/` whole, so the gate finds
+    # a host test under `tests/` that joined neither list.
     "tests/toyos-rust-tests",
     "tests/toyos-rust-tests/tls-cranelift",
     "tests/toyos-rust-tests/tls-dlopen-lib",
@@ -101,7 +135,8 @@ exclude = [
     "tests/toyos-rust-tests/tls-multi-crate",
     "tests/toyos-rust-tests/tls-multi-crate/dep",
     # A host judge: a second implementation, whose dependency graph is not the
-    # harness's to resolve (`src/build.rs`, `build_host_judges`).
+    # harness's to resolve (`src/build.rs`, `build_host_judges`). It takes
+    # upstream tokio, where the `[patch]` below names the fork.
     "tests/ssh-client-host",
 ]
 
@@ -201,22 +236,56 @@ toyos-xhci = { path = "toyos-xhci" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
+# ToyOS's own crates: the forks below depend on these by version so they can be
+# consumed as git dependencies (a path escaping the fork's own repo cannot
+# resolve once cargo checks it out alone). These redirects keep local builds
+# on the working tree.
+toyos-abi = { path = "toyos-abi" }
+toyos = { path = "toyos" }
+toyos-window = { path = "userland/toyos-window" }
+getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
+getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
+getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
+mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos" }
+tokio = { git = "https://github.com/ToyOSOrg/tokio", branch = "toyos" }
+russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
+russh-cryptovec = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
+socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos" }
+raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
+cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
+softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
+winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
+
+# The one profile every guest binary is built with.
+# Optimised, because an unoptimised guest mismeasures everything under TCG;
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
+#
+# `incremental` stays at the dev default (on), which switches rustc's MIR
+# inliner off for every guest crate — LLVM inlines regardless, and a
+# non-incremental kernel edit loop measures 4-10x the wall clock. A codegen
+# backend with no inliner of its own (cranelift) reopens that trade.
+[profile.toyos]
+inherits = "dev"
+opt-level = 2
+debug = true
+# DWARF stays out of the image: symbols name a frame, and `debug = true` is kept
+# for the codegen it decides.
+strip = "debuginfo"
+debug-assertions = true
+overflow-checks = true
 
 [profile.release]
 opt-level = 2
 
 # The test harness is a compute-bound host program, not a debug build of the
 # thing under test: it decodes a 2.07 M-pixel screendump per poll and formats a
-# 300 MB disk image per boot. Nothing here is cross-compiled — the kernel,
-# bootloader and userland are separate cargo invocations with their own
-# profiles, and are excluded from this workspace. `debug` stays on (the dev
+# 300 MB disk image per boot. No guest is built with this: the kernel, the
+# loader and userland take `[profile.toyos]`. `debug` stays on (the dev
 # default), so LLDB still works on it.
 #
-# It reaches every member now rather than the harness alone, and that is a gain
-# rather than a side effect: the host suite's warm wall clock went from 111 s
-# over sixteen invocations to 34 s over one, measured on the dev host, and
-# almost all of the difference is the members' tests no longer running at
-# `opt-level = 0`. Nothing fail-fast is traded for it — `opt-level` does not
+# It reaches every member's host tests rather than the harness alone. Nothing
+# fail-fast is traded for it — `opt-level` does not
 # touch `debug-assertions`, which cargo still passes as `on` (checked with
 # `cargo build -p toyos-fat32 -v`), and rustc derives `overflow-checks` from
 # that.

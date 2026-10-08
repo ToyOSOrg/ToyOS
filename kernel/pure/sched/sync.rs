@@ -3,9 +3,9 @@
 //! atomics for the `kernel-loom` package.
 //!
 //! A feature and a second package rather than the usual `--cfg loom`, because
-//! a `[target.'cfg(loom)'.dependencies]` entry lands in every lockfile that
-//! resolves the kernel — including `kernel/Cargo.lock`, which would gain loom
-//! and its 30 transitive host crates. The kernel declares `loom` purely so `cfg`
+//! a `[target.'cfg(loom)'.dependencies]` entry is the kernel package's own
+//! dependency: loom and its transitive host crates would be edges of the
+//! kernel in the lock. The kernel declares `loom` purely so `cfg`
 //! checking knows the name, and never enables it.
 
 #[cfg(not(feature = "loom"))]

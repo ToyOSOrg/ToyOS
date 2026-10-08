@@ -7,7 +7,7 @@ opened: 2026-09-26
 # The toolkit forks resolve an x86-only toyos-window, so calc, snake and doom do not build for AArch64
 
 `softbuffer`'s and `winit`'s toyos forks (the `…-sdk-0.2` branches
-`userland/Cargo.toml` patches in) name `toyos-window = "0.2"`, and cargo
+the root `Cargo.toml` patches in) name `toyos-window = "0.2"`, and cargo
 resolves that to the published `toyos-window 0.2.0`, not to the path crate:
 the `[patch]` redirect only applies to a compatible version. That release's
 `framebuffer.rs` calls `core::arch::x86_64::_mm_sfence` unconditionally, so it
