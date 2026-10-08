@@ -38,5 +38,8 @@ while the parent still holds the handle.
 
 **Owner**: `kernel::object::shm`'s handle-driven mapping teardown, with
 `issues/the-compositor-keeps-a-committed-regions-mapping-for-as-long-as-the-client-does.md`,
-whose exit ends a mapping at its process's last handle and so reaches this
-one only where the process still held a handle when it ended.
+whose exit ends a mapping at the close of its process's last handle and so
+reaches this one wherever the process closed that handle, before it ended or
+in its teardown. It does not reach a process that mapped the region and moved
+its handle on by `SYS_HANDLE_SEND` (`sys_handle_send`,
+`kernel/src/syscall/ipc.rs`), which is no close.
