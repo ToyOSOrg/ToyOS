@@ -28,6 +28,9 @@ the client hides this and does not fix it.
 QEMU and T14 rows both, with `lan_swap_hold`, the T14 row's judge and the
 metal harness's swapping boots, which that row was the one user of, and
 `29733dba3` then deleted the swap file and `--hand-back` only they used.
+`toyos-metal --swap`, the host's stream and its ssh client went after them;
+`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the commit
+that restores those.
 
 **Exit**: a listener that queues a connect arriving between two accepts, and
 `lan_swap` restored and green.

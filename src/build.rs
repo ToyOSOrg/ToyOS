@@ -2010,63 +2010,6 @@ pub fn build_test_parts(
     Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
 }
 
-/// The host binaries the network judges drive, built here rather than inside a
-/// test: a judge's price is its exchange and not a compile.
-///
-/// Each of these keeps its own `Cargo.lock` and is excluded from the
-/// workspace. That is what makes them possible: they exist to be
-/// a *second* implementation, and a second implementation's dependency graph is
-/// not the harness's to resolve.
-pub fn build_host_judges(root: &Path, quiet: bool) {
-    for (dir, _) in HOST_JUDGES {
-        let _building = Building::start(format!("the host's {dir}"));
-        let at = root.join(dir);
-        let mut cmd = Command::new("cargo");
-        cmd.args(["build", "--release"]);
-        if quiet {
-            cmd.arg("--quiet");
-        }
-        let status = cmd
-            .current_dir(&at)
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .env_remove("RUSTC")
-            .env_remove("RUSTFLAGS")
-            .status()
-            .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
-        assert!(status.success(), "{dir} did not build");
-    }
-}
-
-/// One host judge: where its crate is, and the binary that crate builds. Named
-/// rather than indexed, because a row inserted anywhere but the end would
-/// silently repoint every accessor below.
-type Judge = (&'static str, &'static str);
-
-const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
-
-const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
-
-/// Copy to `to` the binary the build leaves for the program
-/// `name`: the bytes a swap sends a running machine in place of the ones its
-/// image carries. Read under the artifact lock, as every image build reads it.
-pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Result<(), String> {
-    let from = root.join(format!("target/{}/{PROFILE}/{name}", arch.userland()));
-    let _artifact = buildlock::artifact(root);
-    fs::copy(&from, to)
-        .map(|_| ())
-        .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
-}
-
-/// The harness's SSH client — the only thing in this tree that speaks the
-/// protocol from the other side of `userland/sshserver`.
-pub fn ssh_client_host(root: &Path) -> PathBuf {
-    host_judge(root, SSH_CLIENT)
-}
-
-fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
-    root.join(dir).join("target/release").join(bin)
-}
-
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
 /// Also builds any cdylib subcrates and includes their .so files.
 ///
@@ -3001,25 +2944,6 @@ mod tests {
         }
     }
 
-    /// **An image a user boots serves no log on the network.** `logkeeper` answers
-    /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netstack` connector: the test configs that read the
-    /// stream give it one, and these do not.
-    #[test]
-    fn no_shipped_image_serves_the_log_on_the_network() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
-            let parsed = parse_config(&root.join(config));
-            let logkeeper = parsed.programs.get("logkeeper").expect("every config runs logkeeper");
-            assert!(
-                logkeeper.receives.is_empty(),
-                "{config}: `logkeeper` receives {:?}, and a `netstack` connector is what serves this \
-                 machine's log to anyone on its network",
-                logkeeper.receives,
-            );
-        }
-    }
-
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
@@ -3097,8 +3021,6 @@ mod tests {
         "console/system.toml",
         "tests/acpicase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/lanleasecase/system.toml",
-        "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",
@@ -3283,128 +3205,6 @@ mod tests {
         )
         .unwrap();
         assert!(one_claimant_per_device(&bad).is_err());
-    }
-
-    /// netstack's actuator that only its Intel driver answers, spelled here and
-    /// held to netstack's own declaration by
-    /// [`netstack_declares_the_flag_this_gate_spells`].
-    const EXIT_WITH_LEASE: &str = "--exit-with-lease";
-
-    /// netstack's main module, which is where both halves of this gate's spelling
-    /// live: nothing links the two crates, so the build system reads the source.
-    fn netstack_source() -> (std::path::PathBuf, String) {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netstack/src/main.rs");
-        let text = std::fs::read_to_string(&at).expect("netstack's main module");
-        (at, text)
-    }
-
-    /// Nothing links the two crates: netstack is a userland binary and this is the
-    /// build system, so the flags both ends spell are held to netstack's own
-    /// declarations by reading its source.
-    #[test]
-    fn netstack_declares_the_flag_this_gate_spells() {
-        let (at, source) = netstack_source();
-        assert!(
-            crate::bootlog::declares(&source, &format!("\"{EXIT_WITH_LEASE}\"")),
-            "{} declares no constant equal to \"{EXIT_WITH_LEASE}\"",
-            at.display()
-        );
-    }
-
-    /// The four hex digits after `key` on this line.
-    fn hex_after(line: &str, key: &str) -> Option<String> {
-        let at = line.find(key)? + key.len();
-        let digits: String = line[at..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-        (digits.len() == 4).then_some(digits)
-    }
-
-    /// The device entries netstack opens with the driver that has §10.2.4.4's `ICS`,
-    /// read out of netstack's own `CARDS` rather than guessed from a vendor id: each
-    /// row spells an id and the constructor that takes it on one line.
-    ///
-    /// **The scan reaches that one spelling and no other**, so every
-    /// `Card::intel` row it saw has to have yielded an id — a table written
-    /// another way reds here instead of narrowing this gate to nothing.
-    fn netstack_intel_cards(source: &str) -> Vec<String> {
-        let mut cards = Vec::new();
-        let mut rows = 0;
-        for line in source.lines() {
-            if !line.contains("Card::intel") {
-                continue;
-            }
-            rows += 1;
-            if let (Some(vendor), Some(device)) =
-                (hex_after(line, "vendor: 0x"), hex_after(line, "device: 0x"))
-            {
-                cards.push(format!("pci:{vendor}:{device}"));
-            }
-        }
-        assert_eq!(
-            cards.len(),
-            rows,
-            "netstack names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
-             table is spelled in a way this gate does not reach",
-            cards.len()
-        );
-        cards
-    }
-
-    /// netstack's Intel-only actuators — `--exit-with-lease` reports the Intel
-    /// driver's bring-up beside the lease — and virtio's driver has none, so a
-    /// boot config that arms one on a card netstack opens with any other driver is
-    /// a boot that panics instead of answering the question it was built for.
-    fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
-        cfg: &SystemConfig,
-        cards: &[String],
-    ) -> Result<(), String> {
-        for (name, prog) in &cfg.programs {
-            if !prog.args.iter().any(|arg| arg == EXIT_WITH_LEASE) {
-                continue;
-            }
-            if !prog.devices.iter().any(|d| cards.contains(d)) {
-                return Err(format!(
-                    "`{name}` is armed with `{EXIT_WITH_LEASE}` and claims {:?}, none of which \
-                     is one of the {cards:?} netstack opens with that driver",
-                    prog.devices
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn every_armed_intel_actuator_claims_a_card_the_driver_opens() {
-        let (_, source) = netstack_source();
-        let cards = netstack_intel_cards(&source);
-        assert!(!cards.is_empty(), "netstack's `CARDS` names no card its Intel driver opens");
-        let mut armed = 0;
-        for cfg in ALL_CONFIGS {
-            let config = load(cfg);
-            armed += config
-                .programs
-                .values()
-                .filter(|p| p.args.iter().any(|arg| arg == EXIT_WITH_LEASE))
-                .count();
-            an_armed_intel_actuator_claims_a_card_the_driver_opens(&config, &cards)
-                .unwrap_or_else(|e| panic!("{cfg}: {e}"));
-        }
-        // A walk that reached no armed program passes on having found nothing,
-        // which is the one way this gate can rot while every config still loads.
-        assert!(armed > 0, "no shipped boot config arms `{EXIT_WITH_LEASE}` at all");
-        let armed_on = |device: &str, args: &str| {
-            let cfg: SystemConfig = toml::from_str(&format!(
-                "[programs.netstack]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
-            ))
-            .unwrap();
-            an_armed_intel_actuator_claims_a_card_the_driver_opens(&cfg, &cards)
-        };
-        // The card netstack drives with the other driver, and an Intel function it
-        // drives with none: a vendor id is not what gives a part an `ICS` or a
-        // PHY behind `MDIC`.
-        let flag = format!("\"{EXIT_WITH_LEASE}\"");
-        assert!(armed_on("pci:1af4:1041", &flag).is_err());
-        assert!(armed_on("pci:8086:1502", &flag).is_err());
-        assert!(armed_on(&cards[0], &flag).is_ok());
     }
 
     /// A device name the ABI does not know renders fine and leaves the supervisor with a

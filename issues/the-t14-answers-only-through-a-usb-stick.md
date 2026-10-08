@@ -9,10 +9,10 @@ opened: 2026-09-07
 Every boot of the bench is flashed to a stick under Ubuntu and judged by what
 is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
 LAN as the development Mac and its NIC is the onboard Intel I219 at `00:1f.6`,
-`8086:15fc`, which netd claims on the two LAN boots (`tests/lanleasecase`,
-`tests/lantalkcase`); on the second the Mac reads the boot's log, runs a
-command and hands the machine back over the cable. The track is to make that
-cable the answer path.
+`8086:15fc`. The track is to make that cable the answer path. The boot on
+which the Mac read the log, ran a command and handed the machine back over it
+is deleted: the host reaches no T14 that runs ToyOS
+(`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 
 What is left is the harness running userland tests over ssh through a russh
 client, which `issues/the-t14-reboots-through-ubuntu-for-every-test.md`
@@ -31,7 +31,9 @@ Constraints a reader would otherwise pay to re-derive:
   has VT-d, so this is not a bound on the bench — but a `pcidev` refusal there
   is the first thing to check before suspecting the driver.
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
-  and the harness's client is russh too. No host ssh binary, no fork.
+  and the harness's client was russh too, until it was deleted
+  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). No host
+  ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
   T14's MAC is the same under ToyOS and Ubuntu. Wi-Fi is out — the AX210 needs
   a firmware image.
@@ -42,10 +44,12 @@ Constraints a reader would otherwise pay to re-derive:
   hand-over, so a function still holding its last holder's queue addresses can
   act on none of them. `release` asks for a reset where the function advertises
   one; the I219 does, so on the T14 both hold.
-- **The machine serves its own log, and the Mac finds it by name.** `logd`
-  serves the boot from its first line on TCP `41337` (`toyos-logstream`'s
-  `PORT`), and netd answers multicast DNS for `toyos-t14.local` once it holds a
-  lease (`toyos-mdns`), so nothing in the image names the Mac and nothing on the
-  Mac listens. A boot that dies before netd leases still needs the stick.
+- **The machine served its own log, and the Mac found it by name.** `logd`
+  served the boot from its first line on a TCP port, and netd answers multicast
+  DNS for `toyos-t14.local` once it holds a lease (`toyos-mdns`), so nothing in
+  the image named the Mac and nothing on the Mac listened. The serving half and
+  the Mac's reader are deleted
+  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`); a boot
+  that dies before netd leases needed the stick either way.
 - The metal loop is `toyos-metal` (`src/metal.rs`), and the T14 is run by the
   orchestrator alone.

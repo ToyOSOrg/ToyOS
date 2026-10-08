@@ -27,8 +27,8 @@ test-runner, so a daemon's line can come after the marker. Two tests read one fr
   ```
 
 #639 has each `iommu_virtio_platform` arm wait on the guest for the daemon's lines it reads
-(`d773a4306`). `lan_dhcp_lease` has left the guest suite: its T14 row
-judges the whole readback, which ends at the boot's last word.
+(`d773a4306`). `lan_dhcp_lease` has left the guest suite, and its T14 row is
+deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 
 Owner: the orchestrator.
 

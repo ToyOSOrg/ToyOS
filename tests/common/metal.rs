@@ -57,18 +57,6 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// The PCI function this boot's image claims: the loop refuses, before the
-    /// flash, a machine holding no address on it, and a judge holds the MAC the
-    /// boot's driver read to the one the operating system before the flash
-    /// read off it. **`None` on every boot that does not ask**: a boot that
-    /// needs no cable would be refused for one that is out.
-    pub nic: Option<&'static str>,
-    /// **The boot is talked to over its own cable.** Its image authorizes a
-    /// key minted beside it, and the loop — told `--talk` — reads the log the
-    /// machine serves under its name, pings the address the name answers with,
-    /// runs a command there and tells it to reboot. `false` on every boot whose
-    /// judge reads the stick alone.
-    pub talk: bool,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -82,7 +70,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
+    Arm { boot, config, params, jobs, features: &[] }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -230,8 +218,6 @@ pub struct Metal {
 /// What one boot left on the stick, and what the host clock saw of it.
 pub struct Readback {
     pub label: String,
-    /// The directory the loop wrote this boot's files into.
-    home: PathBuf,
     loader: String,
     /// The kernel's own records of every `logkeeper` file this boot wrote.
     kernel: String,
@@ -243,10 +229,6 @@ pub struct Readback {
     pub back_secs: u64,
     /// How long after that the boot stick's own partition was there again.
     pub stick_secs: u64,
-    /// The MAC of the function this boot's image claims, as the operating
-    /// system before the flash read it, and `None` on every boot that named no
-    /// function.
-    pub wire_mac: Option<String>,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// What this boot's judges measured, for the machine's record to judge.
@@ -256,7 +238,7 @@ pub struct Readback {
 impl Readback {
     /// One boot's readback out of the three files the loop wrote for it:
     /// `loader.log`, the `logkeeper` files as one text, and the boot file.
-    pub fn new(label: &str, home: PathBuf, loader: String, log: String, boot: &str) -> Result<Self, String> {
+    pub fn new(label: &str, loader: String, log: String, boot: &str) -> Result<Self, String> {
         let kernel = bootlog::kernel_records(&log);
         let back_secs = toyos_build::metal::back_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
@@ -264,55 +246,16 @@ impl Readback {
             .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
         Ok(Readback {
             label: label.to_string(),
-            home,
             boot_ms: bootlog::boot_millis(&kernel),
             loader,
             kernel,
             log,
             back_secs,
             stick_secs,
-            wire_mac: toyos_build::metal::wire_mac(boot),
             machine: toyos_build::metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             numbers: RefCell::new(BTreeMap::new()),
         })
-    }
-
-    /// What the loop heard over the boot's own cable, and the log the machine
-    /// served it — or why a boot that was to be talked to has neither.
-    ///
-    /// **Absent is a finding here, never an empty answer**: the loop writes
-    /// the conversation before anything can refuse, so a talking boot's
-    /// readback without one is a loop that was not told `--talk`.
-    pub fn talk(&self) -> Result<(toyos_build::metaltalk::Heard, Vec<String>), String> {
-        let at = self.home.join(toyos_build::metal::READBACK_TALK);
-        let text = std::fs::read_to_string(&at).map_err(|e| {
-            format!("{}: {e} — this boot's loop was not told --talk", at.display())
-        })?;
-        let heard = toyos_build::metaltalk::Conversation::parse(&text)?.ok_or_else(|| {
-            format!("{}'s loop heard nothing over the cable:\n{text}", self.label)
-        })?;
-        let at = self.home.join(toyos_build::metal::READBACK_STREAM);
-        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
-    }
-
-    /// One file off the log volume that is neither the loader's nor `logkeeper`'s,
-    /// read out of the partition's own bytes; `None` where the volume has no
-    /// such file.
-    ///
-    /// **The loop copies two kinds of file off the mount and this is neither**,
-    /// so it comes out of `metal::READBACK_VOLUME` — which the loop keeps on
-    /// every boot that came back, because the outside judge runs on every one.
-    pub fn log_volume_file(&self, name: &str) -> Result<Option<String>, String> {
-        let at = self.home.join(toyos_build::metal::READBACK_VOLUME);
-        let volume = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        let found = super::volumes::read_files(&volume, &[name])?.pop().flatten();
-        found
-            .map(|bytes| {
-                String::from_utf8(bytes).map_err(|e| format!("{}'s {name}: {e}", self.label))
-            })
-            .transpose()
     }
 
     /// Every `logkeeper` file this boot wrote, as one text, less every program's
@@ -588,10 +531,6 @@ struct Batch {
     jobs: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
-    /// [`Arm::nic`], carried to the invocation that drives this boot.
-    nic: Option<&'static str>,
-    /// [`Arm::talk`], carried to the image and to the invocation.
-    talk: bool,
 }
 
 impl Batch {
@@ -631,8 +570,6 @@ fn batches(
                 jobs: boot.jobs.clone(),
                 files: boot.files.clone(),
                 links: boot.links.clone(),
-                nic: None,
-                talk: false,
             },
         );
         if was.is_some() {
@@ -649,29 +586,21 @@ fn batches(
                 jobs: Vec::new(),
                 files: Vec::new(),
                 links: Vec::new(),
-                nic: arm.nic,
-                talk: arm.talk,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
-                || batch.nic != arm.nic
-                || batch.talk != arm.talk
             {
                 return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
-                     rides it as ({}, {:?}, {:?}, {:?}, talk={}); one boot is one image",
+                    "{name} rides the boot {:?} as ({}, {:?}, {:?}) and another row rides it as \
+                     ({}, {:?}, {:?}); one boot is one image",
                     arm.boot,
                     arm.config,
                     arm.params,
                     arm.features,
-                    arm.nic,
-                    arm.talk,
                     batch.config,
                     batch.params,
-                    batch.features,
-                    batch.nic,
-                    batch.talk
+                    batch.features
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
@@ -814,13 +743,6 @@ fn build(
     );
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    // **A talking boot carries the key the loop will offer**,
-    // minted beside the image so the loop finds it there. Nothing about this
-    // host is in it: the loop finds the machine by its name.
-    if batch.talk {
-        let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
-        extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
-    }
     let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
@@ -835,13 +757,8 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-/// Where a talking boot's key lives, beside its image.
-fn talk_home(home: &Path) -> PathBuf {
-    home.join("ssh")
-}
-
-fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<String> {
-    let mut words = vec![
+fn invocation(image: &Path, home: &Path) -> Vec<String> {
+    vec![
         "run".to_string(),
         "--bin".to_string(),
         "toyos-metal".to_string(),
@@ -855,16 +772,7 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ];
-    if let Some(nic) = nic {
-        words.push("--nic".to_string());
-        words.push(nic.to_string());
-    }
-    if talk {
-        words.push("--talk".to_string());
-        words.push(talk_home(home).join("id_ed25519").display().to_string());
-    }
-    words
+    ]
 }
 
 /// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
@@ -907,7 +815,7 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
     let log = read(toyos_build::metal::READBACK_KERNEL)?;
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
-    Readback::new(label, home, loader, log, &boot)
+    Readback::new(label, loader, log, &boot)
 }
 
 /// The machine every boot that came back names, or why there is not one.
@@ -989,11 +897,6 @@ pub fn run(
 
     let mut images: BTreeMap<&str, PathBuf> = BTreeMap::new();
     if !judging {
-        // The key a talking boot authorizes is minted by the harness's own ssh
-        // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk) {
-            toyos_build::build::build_host_judges(&root, quiet);
-        }
         for (label, batch) in &batches {
             match build(&root, dir, label, batch, rust_bins, quiet) {
                 Ok(image) => {
@@ -1021,7 +924,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
+                invocation(image, &at(dir, label)).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -1046,7 +949,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if !offline {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
+            let words = invocation(image, &at(dir, label));
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             if let Err(why) = drive(&root, &words) {
                 refused.insert(label, why);
