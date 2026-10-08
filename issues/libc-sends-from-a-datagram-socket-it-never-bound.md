@@ -13,9 +13,9 @@ that was never bound: it writes the datagram to the entry's `tx_fd`, which is
 0 and names whatever handle 0 is in the process, and only then would ask
 netstack to send from socket id 0. Measured in a guest on `tests/netcase`,
 x86-64, from a job of test-runner's: that write is refused, `sendto` answers
--1 with `errno` 5 (`EIO`), and the process goes on; in a process whose handle
-0 takes a write the datagram's bytes go to it. POSIX binds an unbound datagram socket to an ephemeral
-port at its first send, and a C program that broadcasts, `socket`,
+-1 with `errno` 5 (`EIO`), and the process goes on. What a process whose handle 0
+takes a write sees is unmeasured. POSIX binds an unbound datagram socket to an
+ephemeral port at its first send, and a C program that broadcasts, `socket`,
 `setsockopt(SO_BROADCAST)`, `sendto`, does exactly this. std has no such
 socket: `UdpSocket::bind` is its only constructor.
 
