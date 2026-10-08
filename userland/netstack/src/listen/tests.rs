@@ -312,3 +312,38 @@ fn an_accept_refused_for_room_is_woken_again_when_room_returns() {
     assert!(net.wakes(true), "an owner refused for room was never woken again");
     assert_eq!(net.accept(true, true), Accept::Take(()));
 }
+
+/// **A connection netstack aborts keeps its socket until the reset has left.**
+/// A socket taken out of the set on the pass that aborted it sends nothing,
+/// and its peer holds a connection nobody will ever answer.
+#[test]
+fn an_aborted_connection_is_spent_once_its_reset_has_left() {
+    let mut net = Net::new();
+    let isn = net.syn(5001);
+    net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
+    net.pass();
+    assert!(!crate::spent(net.socket()), "an established connection was spent");
+    net.socket().abort();
+    assert!(!crate::spent(net.socket()), "an aborted connection was spent with its reset still owed");
+    net.pass();
+    let last = net.sent.last().expect("an abort is said on the wire");
+    assert_eq!((last.control, last.to), (TcpControl::Rst, 5001));
+    assert!(crate::spent(net.socket()), "a connection whose reset has left was kept");
+}
+
+/// A connection both ends have closed is spent while it only waits out
+/// `TimeWait`, and not while its own FIN is unanswered.
+#[test]
+fn a_connection_closed_by_both_ends_is_spent() {
+    let mut net = Net::new();
+    let isn = net.syn(5001);
+    net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
+    net.pass();
+    net.socket().close();
+    net.pass();
+    assert!(!crate::spent(net.socket()), "a connection was spent with its FIN unanswered");
+    net.send(5001, TcpControl::Fin, PEER_ISN + 1, Some(isn + 2));
+    net.pass();
+    assert_eq!(net.socket().state(), tcp::State::TimeWait, "the premise: the peer's FIN answered ours");
+    assert!(crate::spent(net.socket()), "a connection both ends closed was kept");
+}

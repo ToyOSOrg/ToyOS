@@ -331,7 +331,13 @@ struct PendingUdpRecv {
 }
 
 /// A piped TCP connection: data flows through kernel pipes instead of IPC messages.
+///
+/// **The socket and its id live exactly as long as this does.** What ends a
+/// connection is what the kernel says of the client's pipe ends and what the
+/// peer says on the wire; a close request only asks for that end early, and a
+/// client that dies sends none.
 struct PipedConnection {
+    socket_id: u32,
     handle: SocketHandle,
     rx_write: Option<Pipe>,
     tx_read: Option<Pipe>,
@@ -419,8 +425,15 @@ fn send_room(socket: &tcp::Socket) -> bool {
     socket.can_send() && socket.send_capacity() > socket.send_queue()
 }
 
-fn piped_connection(handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
+/// Whether `socket` has said its last to its peer: it is closed, and the reset
+/// an abort owes has left. `TimeWait` only waits.
+fn spent(socket: &tcp::Socket) -> bool {
+    !socket.is_open() && !(socket.state() == tcp::State::Closed && socket.remote_endpoint().is_some())
+}
+
+fn piped_connection(socket_id: u32, handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
     PipedConnection {
+        socket_id,
         handle,
         rx_write: Some(pipes.to_client),
         tx_read: Some(pipes.from_client),
@@ -1246,7 +1259,7 @@ impl Netstack {
         let stream_id = self.alloc_id();
         self.sockets.insert(stream_id, SocketKind::TcpStream(old_handle));
 
-        self.piped_connections.push(piped_connection(old_handle, pipes));
+        self.piped_connections.push(piped_connection(stream_id, old_handle, pipes));
 
         // Create replacement listener
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1379,14 +1392,15 @@ impl Netstack {
                 }
             }
 
-            // Fully clean up when both sides are done
-            if conn.is_fully_closed() && !socket.is_open() {
+            if conn.is_fully_closed() && spent(socket) {
                 closed.push(i);
             }
         }
 
         for &i in closed.iter().rev() {
-            self.piped_connections.swap_remove(i);
+            let conn = self.piped_connections.swap_remove(i);
+            socket_set.remove(conn.handle);
+            self.sockets.remove(&conn.socket_id);
         }
     }
 
@@ -1474,7 +1488,7 @@ impl Netstack {
                 };
                 pc.client.result(&resp);
                 let pc = self.pending_piped_connects.swap_remove(i);
-                self.piped_connections.push(piped_connection(pc.handle, pc.pipes));
+                self.piped_connections.push(piped_connection(pc.socket_id, pc.handle, pc.pipes));
                 continue;
             }
             if socket.state() == tcp::State::Closed {
