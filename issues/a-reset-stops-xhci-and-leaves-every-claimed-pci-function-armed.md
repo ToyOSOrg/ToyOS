@@ -33,9 +33,9 @@ caches, waits for the log to be durable, seals `DONE` and calls
 `pcidev::release` (`kernel/src/pcidev/mod.rs:782`) calls `tear_down` (`:796`),
 which disables bus mastering (`:797`), masks the function's MSI-X entry
 (`:798`), empties its IOMMU domain (`:799`) and only then resets the function
-(`:809`). The one caller of `pcidev::release` in the kernel
-(`rg -n 'pcidev::release' kernel/src`, one hit) is `kernel/src/device.rs:75`,
-inside `Claim`'s `Drop` — a dying process's handle table.
+(`:809`). `release` is private to `pcidev` and its one caller is
+`pcidev::Binding`'s `Drop`; a binding is held by a `device::Claim` and dropped
+with it — a dying process's handle table.
 
 **So on every one of the five paths, a function whose holder is alive is left
 as its holder last wrote it when the register is written.** No process is
