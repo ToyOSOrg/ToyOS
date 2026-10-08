@@ -33,7 +33,7 @@ use crate::object::{
     Object, Ref, Slot, Unresolved, Width,
 };
 use crate::stream::{starts_name, Cursor};
-use crate::{Error, Host, Usage, MAX_DEPTH, MAX_NESTING, MAX_STEPS, REVISION, WINDOWS, WORK_PER_STEP};
+use crate::{Error, Host, Usage, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
 
 pub(crate) struct Machine<'a> {
     pub(crate) ns: &'a mut Namespace,
@@ -43,8 +43,6 @@ pub(crate) struct Machine<'a> {
     steps: u64,
     depth: u32,
     waited_us: u64,
-    /// The most this load or evaluation may ask to wait.
-    wait_us: u64,
     /// Every Mutex acquire not yet released, in order.
     held: Vec<Kept<Mutex>>,
     /// The SyncLevel of each held Mutex and running Serialized method, in
@@ -118,8 +116,8 @@ fn tick(steps: &mut u64) -> Result<(), Error> {
 }
 
 impl<'a> Machine<'a> {
-    pub(crate) fn new(ns: &'a mut Namespace, host: &'a mut dyn Host, w: Width, meter: Rc<Meter>, wait_us: u64) -> Self {
-        Machine { ns, host, w, meter, steps: 0, depth: 0, waited_us: 0, wait_us, held: Vec::new(), levels: Vec::new(), global: 0 }
+    pub(crate) fn new(ns: &'a mut Namespace, host: &'a mut dyn Host, w: Width, meter: Rc<Meter>) -> Self {
+        Machine { ns, host, w, meter, steps: 0, depth: 0, waited_us: 0, held: Vec::new(), levels: Vec::new(), global: 0 }
     }
 
     /// Steps for `bytes` of work done in one: a step a [`WORK_PER_STEP`].
@@ -280,7 +278,7 @@ impl<'a> Machine<'a> {
 
     fn wait(&mut self, us: u64) -> Result<(), Error> {
         self.waited_us = self.waited_us.saturating_add(us);
-        if self.waited_us > self.wait_us {
+        if self.waited_us > MAX_WAIT_US {
             return Err(Error::Bound("more time asleep than one evaluation may spend"));
         }
         Ok(())

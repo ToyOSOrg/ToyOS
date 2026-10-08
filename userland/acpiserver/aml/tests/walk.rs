@@ -1,12 +1,13 @@
 //! The namespace read from the root down (§5.3): every object once, after
 //! the object it is in, siblings in the order their tables declared them,
 //! whatever a table's names sort as, however deep it nests, and whatever a
-//! refused load or a method's exit took out of the arena before.
+//! refused load or a method's exit took out of the arena before; and what a
+//! walk takes of the interpreter's bound, to the byte.
 
 mod common;
 
 use common::*;
-use toyos_aml::{Error, Interpreter, Kind, Value};
+use toyos_aml::{Error, Interpreter, Kind, Value, MAX_LIVE};
 
 /// What §5.3.1 and §5.7 predefine, in the order `Interpreter::new` makes them.
 const PREDEFINED: [(&str, Kind); 9] = [
@@ -227,6 +228,59 @@ fn a_namespace_nested_deep_is_walked_whole() {
         }
     }
     assert_eq!(depths, (1..=TABLES * LEVELS).collect::<Vec<_>>());
+}
+
+/// Leaves the interpreter `room` bytes of its bound, by the buffers `\SET_`
+/// stores in `\PKG0`: one an element while that is far off, then the last
+/// element's, resized to the byte. `fill` is the next element and the last
+/// one's bytes.
+fn leave(i: &mut Interpreter, m: &mut Machine, fill: &mut (u64, usize), room: usize) {
+    const LAST: u64 = 63;
+    let mut set = |at: u64, bytes: usize| {
+        assert_eq!(i.evaluate(&mut *m, "\\SET_", &[Value::Integer(at), Value::Integer(bytes as u64)]), Ok(Value::Uninitialized));
+        MAX_LIVE - i.usage().live
+    };
+    let mut free = set(LAST, fill.1);
+    while free > room + 4096 {
+        assert!(fill.0 < LAST, "{free} bytes free with every element stored");
+        free = set(fill.0, ((free - room) / 2).min(1 << 20));
+        fill.0 += 1;
+    }
+    fill.1 = fill.1 + free - room;
+    assert_eq!(set(LAST, fill.1), room, "bytes of the bound left");
+}
+
+/// A walk takes two links a node and its deepest path from the bound, and
+/// not a byte less: an interpreter with room for both is walked, and one
+/// with a byte less, which is room for the links, refuses and holds
+/// afterwards what it held before.
+#[test]
+fn a_walk_takes_its_links_and_its_deepest_path_from_the_bound() {
+    const TABLES: usize = 120;
+    const LEVELS: usize = 100;
+    let mut m = Machine::default();
+    let mut i = Interpreter::new();
+    let set = method("SET_", 2, &store(&buffer(&arg(1), &[]), &index(&name("PKG0"), &arg(0), &[0x00])));
+    i.load_bytes(&mut m, &dsdt(&cat(&[&def_name("PKG0", &var_package(&int(64), &[])), &set, &deeper(0, LEVELS)]))).unwrap();
+    for t in 1..TABLES {
+        i.load_bytes(&mut m, &table(b"SSDT", 2, &deeper(t * LEVELS, LEVELS))).unwrap();
+    }
+    // The root is no entry, and has its links as every node has.
+    let nodes = i.walk().unwrap().count() + 1;
+    let (links, path) = (8 * nodes, 5 * TABLES * LEVELS);
+    let mut fill = (0, 8192);
+
+    leave(&mut i, &mut m, &mut fill, links + path);
+    let held = i.usage().live;
+    assert_eq!(i.walk().map(|w| w.count()), Ok(nodes - 1));
+    assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+    assert_eq!(i.usage().live, held, "bytes held after a walk, and before it");
+
+    leave(&mut i, &mut m, &mut fill, links + path - 1);
+    let held = i.usage().live;
+    assert_eq!(i.walk().map(|w| w.count()), Err(Error::Bound("more held live than one interpreter holds")));
+    assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+    assert_eq!(i.usage().live, held, "bytes held after a walk refused for its path, and before it");
 }
 
 /// A parent of thousands, declared against the order their names sort in.

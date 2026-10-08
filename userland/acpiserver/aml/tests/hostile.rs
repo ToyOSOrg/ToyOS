@@ -532,22 +532,16 @@ fn stall(us: u64) -> Vec<u8> {
     cat(&[&[0x5B, 0x21], &int(us)])
 }
 
-/// The limit is the most an evaluation may ask, to the microsecond: the
-/// caller's where it names one, and ten seconds where it does not, for a
+/// Ten seconds is the most an evaluation may ask, to the microsecond, and a
 /// load too. What crosses it is not asked of the host.
 #[test]
-fn the_wait_limit_is_exact_and_the_callers_to_name() {
+fn the_wait_limit_is_exact_and_a_loads_too() {
     let (mut i, mut m) = loaded(&cat(&[
         &method("TEN0", 0, &cat(&[&sleep(9_999), &stall(250), &stall(250), &stall(250), &stall(250), &ret(&int(1))])),
         &method("TEN1", 0, &cat(&[&sleep(10_000), &stall(1), &ret(&int(1))])),
-        &method("TWEN", 0, &cat(&[&sleep(20_000), &ret(&int(2))])),
-        &method("TWE1", 0, &cat(&[&sleep(20_000), &stall(1), &ret(&int(2))])),
-        &method("NONE", 0, &cat(&[&sleep(0), &stall(0), &ret(&int(3))])),
-        &method("ONE0", 0, &cat(&[&stall(1), &ret(&int(3))])),
     ]));
     let asleep = Error::Bound("more time asleep than one evaluation may spend");
     let over = Err(asleep.clone());
-    assert_eq!(toyos_aml::MAX_WAIT_US, 10_000_000);
 
     assert_eq!(i.evaluate(&mut m, "\\TEN0", &[]), Ok(Value::Integer(1)));
     assert_eq!(i.usage().waited_us, 10_000_000);
@@ -555,14 +549,6 @@ fn the_wait_limit_is_exact_and_the_callers_to_name() {
     assert_eq!(i.evaluate(&mut m, "\\TEN1", &[]), over);
     assert_eq!(i.usage().waited_us, 10_000_001);
     assert_eq!(m.log, vec![Event::Sleep(10_000)]);
-    assert_eq!(i.evaluate(&mut m, "\\TWEN", &[]), over);
-
-    assert_eq!(i.evaluate_within(&mut m, "\\TWEN", &[], 20_000_000), Ok(Value::Integer(2)));
-    assert_eq!(i.usage().waited_us, 20_000_000);
-    assert_eq!(i.evaluate_within(&mut m, "\\TWE1", &[], 20_000_000), over);
-    assert_eq!(i.evaluate_within(&mut m, "\\TEN0", &[], 9_999_999), over);
-    assert_eq!(i.evaluate_within(&mut m, "\\NONE", &[], 0), Ok(Value::Integer(3)));
-    assert_eq!(i.evaluate_within(&mut m, "\\ONE0", &[], 0), over);
 
     let mut m = Machine::default();
     assert_eq!(Interpreter::new().load_bytes(&mut m, &dsdt(&cat(&[&sleep(10_000), &def_name("A", &int(1))]))), Ok(()));
@@ -624,6 +610,11 @@ fn usage_is_each_calls_own_and_a_refusals_too() {
     let after = i.usage();
     assert_eq!((after.waited_us, after.live), (7_000, loaded.live));
     assert!(after.steps >= 3 && after.steps < 256, "{after:?}");
+
+    // A load refused before anything ran took nothing, whatever the call
+    // before it took.
+    assert_eq!(i.load_bytes(&mut m, &dsdt(&[])), Err(Error::Table("a second DSDT")));
+    assert_eq!(i.usage(), toyos_aml::Usage { steps: 0, waited_us: 0, live: loaded.live });
 }
 
 /// BLOCKER 9 (c): a reference to an object a method created names nothing

@@ -80,10 +80,8 @@ pub const MAX_LIVE: usize = 16 << 20;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;
-/// The time a load, and an evaluation whose caller names no other limit, may
-/// ask to Sleep, Stall and Wait, together, in µs: time asked for, whatever
-/// the host then spends.
-pub const MAX_WAIT_US: u64 = 10_000_000;
+/// The time one evaluation may ask to Sleep, Stall and Wait, together, in µs.
+pub(crate) const MAX_WAIT_US: u64 = 10_000_000;
 /// What the Revision opcode answers (§19.6.119): this interpreter's revision.
 pub(crate) const REVISION: u64 = 1;
 
@@ -354,7 +352,7 @@ impl Interpreter {
         let table = self.meter.bytes(bytes)?;
         let (root, made) = (self.ns.root(), self.ns.mark());
         let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
-        let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone(), MAX_WAIT_US);
+        let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
         let bytes = table.borrow();
         let mut c = stream::Cursor::new(&bytes, toyos_acpi::SDT_HEADER_LEN, bytes.len());
         let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
@@ -371,28 +369,20 @@ impl Interpreter {
     }
 
     /// Evaluates the object at an absolute path, written `\_SB.PCI0._STA`: a
-    /// method is invoked with `args`, anything else is its value. It may ask
-    /// to wait [`MAX_WAIT_US`].
+    /// method is invoked with `args`, anything else is its value.
     pub fn evaluate(&mut self, host: &mut dyn Host, path: &str, args: &[Value]) -> Result<Value, Error> {
-        self.evaluate_within(host, path, args, MAX_WAIT_US)
-    }
-
-    /// [`Interpreter::evaluate`], asking to Sleep, Stall and Wait `wait_us`
-    /// at most, which the caller names for a method it knows to ask more
-    /// than [`MAX_WAIT_US`].
-    pub fn evaluate_within(&mut self, host: &mut dyn Host, path: &str, args: &[Value], wait_us: u64) -> Result<Value, Error> {
         self.last = Usage::default();
-        let r = self.evaluate_in(host, path, args, wait_us);
+        let r = self.evaluate_in(host, path, args);
         self.last.live = self.meter.live();
         r
     }
 
-    fn evaluate_in(&mut self, host: &mut dyn Host, path: &str, args: &[Value], wait_us: u64) -> Result<Value, Error> {
+    fn evaluate_in(&mut self, host: &mut dyn Host, path: &str, args: &[Value]) -> Result<Value, Error> {
         let w = self.width.ok_or(Error::Table("nothing is loaded"))?;
         let id = self.named(path)?;
         let args = args.iter().map(|a| self.object_of(a, w, 0)).collect::<Result<Vec<_>, _>>()?;
         let meter = self.meter.clone();
-        let mut m = Machine::new(&mut self.ns, host, w, meter.clone(), wait_us);
+        let mut m = Machine::new(&mut self.ns, host, w, meter.clone());
         let mut handed = 0;
         let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, &meter, &mut handed, o, 0));
         // The value is the caller's from here, and no longer this interpreter's.
