@@ -15,16 +15,23 @@
 //! saying so. What a full pipe refuses stays in [tcp], whose window closes on the peer; what
 //! [tcp] has no room for stays in the pipe, which blocks the client.
 //!
-//! **A client that is gone leaves [`OWNERLESS_LIFE`] to its unsent bytes.** Its writer gone and
-//! nobody reading, the bytes its pipe still holds are sent as [tcp] makes room, and the
-//! connection is reset if they have not all been taken by then, counted from the client's
-//! leaving and not from the peer's last word (RFC 9293 §3.8.6.1 lets a connection its peer
-//! holds shut be reclaimed).
+//! **A client that is gone leaves its unsent bytes [`OWNERLESS_LIFE`] without progress.** The
+//! node knows a client is gone by its pipes alone: its reader left (the kernel said so, a write
+//! was refused for it, or the client closed) and it writes no more. The bytes its pipe still
+//! holds are sent as [tcp] makes room, and the connection is reset once the pipe has given up no
+//! byte for [`OWNERLESS_LIFE`]. A peer that takes a byte now and then would so hold a dead
+//! client's connection for as long as it liked (RFC 9293 §3.8.6.1 lets one be reclaimed), so a
+//! peer restarts that clock for at most [`OWNERLESS_PER_PEER`] connections; one past them has
+//! [`OWNERLESS_LIFE`] from its client's leaving whatever it gives up. A client that still holds
+//! its reading end is never timed here: what it cannot send is [tcp]'s to give up on.
 //!
-//! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here.
+//! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here. A
+//! transmit opportunity can only fail a connect, whose next hop it found to answer nobody, and
+//! ends in a pass over the connects.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use core::net::Ipv4Addr;
 use core::time::Duration;
 
 use toyos_net_shard::ConnectError;
@@ -34,21 +41,34 @@ use toyos_net_wire::{Instant, Port};
 use crate::lease::Stack;
 use crate::Node;
 
-/// How long a departed client's unsent bytes have: R2, the time RFC 9293 §3.8.3 gives a
+/// How long a departed client's pipe may give up no byte: R2, the time RFC 9293 §3.8.3 gives a
 /// segment's retransmission before the connection is closed, at the 100 seconds it asks for at
 /// least.
 const OWNERLESS_LIFE: Duration = Duration::from_secs(100);
 
+/// How many departed clients' connections one peer address keeps alive by taking their bytes.
+/// An estimate: no measurement sets it.
+const OWNERLESS_PER_PEER: usize = 16;
+
 /// The most one read of a client's pipe takes.
 const CHUNK: usize = 4096;
 
-/// Why a pipe end took or gave nothing.
+/// Why the write end of a pipe took nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PipeRefusal {
-    /// Full, to a write; empty with a writer left, to a read.
-    WouldBlock,
-    /// Nobody holds the other end.
+pub enum WriteRefusal {
+    Full,
+    /// Nobody holds the read end.
     Gone,
+    /// Anything else: the handle is not the pipe end its client said it was.
+    Broken,
+}
+
+/// Why the read end of a pipe gave nothing. A pipe with no writer left is no refusal: it gives
+/// what it holds and then the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadRefusal {
+    /// Nothing to read, and a writer is left.
+    Empty,
     /// Anything else: the handle is not the pipe end its client said it was.
     Broken,
 }
@@ -56,14 +76,14 @@ pub enum PipeRefusal {
 /// The write end of the pipe a client reads its stream from. Dropped, the client reads the end.
 pub trait ToClient {
     /// Takes a prefix of `bytes` and answers its length.
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, PipeRefusal>;
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal>;
 }
 
 /// The read end of the pipe a client writes its stream to. Dropped, the client's writes fail.
 pub trait FromClient {
     /// Fills a prefix of `out` and answers its length. 0 is the end: the pipe is empty and no
     /// writer is left.
-    fn read(&mut self, out: &mut [u8]) -> Result<usize, PipeRefusal>;
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal>;
 }
 
 /// The two ends a client's connect hands over.
@@ -92,7 +112,8 @@ pub enum StreamEvent {
     TimedOut { id: StreamId },
     /// The answer to a connect: its stream was closed first.
     Closed { id: StreamId },
-    /// A line for the log: reset at [`OWNERLESS_LIFE`], its client gone and its bytes unsent.
+    /// A line for the log: reset with its client gone and its bytes unsent, [`OWNERLESS_LIFE`]
+    /// after its pipe last gave one up.
     Cut { id: StreamId },
 }
 
@@ -111,6 +132,8 @@ pub struct Watch {
 
 struct Stream {
     conn: ConnId,
+    /// The peer's address: what [`OWNERLESS_PER_PEER`] counts by.
+    remote: Ipv4Addr,
     to_client: Option<Box<dyn ToClient>>,
     from_client: Option<Box<dyn FromClient>>,
     /// The connect is not answered yet, and no byte moves.
@@ -120,29 +143,36 @@ struct Stream {
     /// The client writes no more: its writer is gone, it shut its sending half down or it
     /// closed. An empty pipe is then the end.
     done_writing: bool,
+    /// The client reads no more: the kernel said its reader is gone, a write was refused for
+    /// that, or it closed. Not set by the node letting the end go at the peer's FIN, behind
+    /// which a client may be alive.
+    reader_left: bool,
+    /// One of the [`OWNERLESS_PER_PEER`] whose peer restarts the cut's clock.
+    extended: bool,
     /// The to-client pipe refused bytes [tcp] holds.
     held: bool,
     /// [tcp] had room for the client's bytes when the last pass ended.
     room: bool,
-    nodelay: bool,
+    /// The options last written to [tcp].
+    options: Options,
 }
 
 impl Stream {
     /// One pass. `false` lets the stream go: its pipe ends drop with it, and its connection is
-    /// [tcp]'s alone or gone.
-    fn pass(&mut self, id: StreamId, now: Instant, stack: &mut Stack, events: &mut VecDeque<StreamEvent>) -> bool {
+    /// [tcp]'s alone or gone. `extended` is how many connections each peer address keeps alive.
+    fn pass(&mut self, id: StreamId, now: Instant, stack: &mut Stack, events: &mut VecDeque<StreamEvent>, extended: &mut BTreeMap<Ipv4Addr, usize>) -> bool {
         let conn = self.conn;
         if self.connecting {
-            let status = stack.status(conn);
+            let status = stack.tcp_status(conn);
             let event = match (status.state, status.failure) {
                 (_, Some(failure)) => StreamEvent::Failed { id, failure },
                 (State::SynSent | State::SynReceived, None) if self.deadline.is_some_and(|at| at <= now) => StreamEvent::TimedOut { id },
                 (State::SynSent | State::SynReceived, None) => return true,
-                (_, None) => StreamEvent::Connected { id, local: stack.local_port(conn) },
+                (_, None) => StreamEvent::Connected { id, local: stack.tcp_local_port(conn) },
             };
             events.push_back(event);
             if !matches!(event, StreamEvent::Connected { .. }) {
-                stack.abort(now, conn);
+                stack.tcp_abort(now, conn);
                 return false;
             }
             self.connecting = false;
@@ -152,7 +182,7 @@ impl Stream {
         self.held = false;
         while let Some(pipe) = self.to_client.as_mut() {
             let mut refused = None;
-            let received = stack.stream_recv(now, conn, |bytes| match pipe.write(bytes) {
+            let received = stack.tcp_recv(now, conn, |bytes| match pipe.write(bytes) {
                 Ok(taken) => taken,
                 Err(refusal) => {
                     refused = Some(refusal);
@@ -161,13 +191,16 @@ impl Stream {
             });
             match (received, refused) {
                 (Ok(Received::Data(taken)), None) if taken > 0 => {}
-                (Ok(Received::Data(_)), None | Some(PipeRefusal::WouldBlock)) => {
+                (Ok(Received::Data(_)), None | Some(WriteRefusal::Full)) => {
                     self.held = true;
                     break;
                 }
-                (Ok(Received::Data(_)), Some(PipeRefusal::Gone)) => self.to_client = None,
-                (Ok(Received::Data(_)), Some(PipeRefusal::Broken)) => {
-                    stack.abort(now, conn);
+                (Ok(Received::Data(_)), Some(WriteRefusal::Gone)) => {
+                    self.reader_left = true;
+                    self.to_client = None;
+                }
+                (Ok(Received::Data(_)), Some(WriteRefusal::Broken)) => {
+                    stack.tcp_abort(now, conn);
                     return false;
                 }
                 // The peer's FIN after its last byte, or the connection's failure: the client
@@ -178,10 +211,11 @@ impl Stream {
             }
         }
 
+        let mut gave_up = false;
         while let Some(pipe) = self.from_client.as_mut() {
             // Never more than [tcp] has room for, and so never a read of no bytes, whose answer
             // would be the end's.
-            let room = stack.status(conn).writable.min(CHUNK);
+            let room = stack.tcp_status(conn).writable.min(CHUNK);
             if room == 0 {
                 break;
             }
@@ -189,23 +223,24 @@ impl Stream {
             let Some(space) = chunk.get_mut(..room) else { unreachable!("room is at most a chunk") };
             let read = match pipe.read(space) {
                 Ok(read) => read,
-                Err(PipeRefusal::WouldBlock) if self.done_writing => 0,
-                Err(PipeRefusal::WouldBlock) => break,
-                Err(PipeRefusal::Gone | PipeRefusal::Broken) => {
-                    stack.abort(now, conn);
+                Err(ReadRefusal::Empty) if self.done_writing => 0,
+                Err(ReadRefusal::Empty) => break,
+                Err(ReadRefusal::Broken) => {
+                    stack.tcp_abort(now, conn);
                     return false;
                 }
             };
             if read == 0 {
-                stack.shutdown_write(now, conn);
+                stack.tcp_shutdown_write(now, conn);
                 self.from_client = None;
                 break;
             }
             let Some(bytes) = space.get(..read) else { unreachable!("a pipe read {read} bytes into room for {room}") };
-            stack.stream_send(now, conn, bytes);
+            stack.tcp_send(now, conn, bytes);
+            gave_up = true;
         }
 
-        let status = stack.status(conn);
+        let status = stack.tcp_status(conn);
         // A connection that is over takes no more of the client's bytes: its writes fail rather
         // than fill a pipe nobody drains.
         if matches!(status.state, State::Closed | State::TimeWait) {
@@ -213,13 +248,22 @@ impl Stream {
         }
         self.room = status.writable > 0;
         if self.to_client.is_none() && self.from_client.is_none() {
-            stack.close(now, conn);
+            stack.tcp_close(now, conn);
             return false;
         }
-        if self.to_client.is_none() && self.done_writing {
-            let at = *self.deadline.get_or_insert(now.after(OWNERLESS_LIFE));
-            if at <= now {
-                stack.abort(now, conn);
+        if self.reader_left && self.done_writing {
+            let left_now = self.deadline.is_none();
+            if left_now {
+                let peers = extended.entry(self.remote).or_insert(0);
+                if *peers < OWNERLESS_PER_PEER {
+                    *peers = peers.saturating_add(1);
+                    self.extended = true;
+                }
+            }
+            if left_now || (self.extended && gave_up) {
+                self.deadline = Some(now.after(OWNERLESS_LIFE));
+            } else if self.deadline.is_some_and(|at| at <= now) {
+                stack.tcp_abort(now, conn);
                 events.push_back(StreamEvent::Cut { id });
                 return false;
             }
@@ -246,19 +290,22 @@ impl Node {
     /// An active open to `remote`, answered by a [`StreamEvent`] once the handshake ends or
     /// `timeout` passes. Refused, nothing was sent and the pipe ends are dropped.
     pub fn connect(&mut self, now: Instant, remote: Endpoint, timeout: Option<Duration>, pipes: Pipes) -> Result<StreamId, ConnectError> {
-        let conn = self.stack.connect(now, remote)?;
+        let conn = self.stack.tcp_connect(now, remote)?;
         let id = StreamId(self.streams.next);
         self.streams.next = self.streams.next.saturating_add(1);
         let stream = Stream {
             conn,
+            remote: remote.addr,
             to_client: Some(pipes.to_client),
             from_client: Some(pipes.from_client),
             connecting: true,
             deadline: timeout.map(|within| now.after(within)),
             done_writing: false,
+            reader_left: false,
+            extended: false,
             held: false,
             room: false,
-            nodelay: false,
+            options: Options::default(),
         };
         self.streams.live.insert(id, stream);
         Ok(id)
@@ -266,9 +313,19 @@ impl Node {
 
     /// One pass over every stream: netstack calls it when a pipe it watches is ready.
     pub fn bridge(&mut self, now: Instant) {
+        self.pass(now, false);
+    }
+
+    /// A pass over every stream, or over those whose connect is not answered.
+    pub(crate) fn pass(&mut self, now: Instant, connects: bool) {
         let Streams { live, events, .. } = &mut self.streams;
         let stack = &mut self.stack;
-        live.retain(|id, stream| stream.pass(*id, now, stack, events));
+        let mut extended = BTreeMap::new();
+        for stream in live.values().filter(|stream| stream.extended) {
+            let peers = extended.entry(stream.remote).or_insert(0usize);
+            *peers = peers.saturating_add(1);
+        }
+        live.retain(|id, stream| (connects && !stream.connecting) || stream.pass(*id, now, stack, events, &mut extended));
     }
 
     /// The client lets go of the stream: nobody reads it, and what its pipe still holds is sent
@@ -276,12 +333,13 @@ impl Node {
     pub fn close(&mut self, now: Instant, id: StreamId) {
         let Some(stream) = self.streams.live.get_mut(&id) else { return };
         if stream.connecting {
-            self.stack.abort(now, stream.conn);
+            self.stack.tcp_abort(now, stream.conn);
             self.streams.live.remove(&id);
             self.streams.events.push_back(StreamEvent::Closed { id });
             return;
         }
         stream.to_client = None;
+        stream.reader_left = true;
         stream.done_writing = true;
         self.bridge(now);
     }
@@ -298,13 +356,13 @@ impl Node {
     /// Nagle's algorithm off or on (RFC 9293 §3.7.4). `false` is an id that names no stream.
     pub fn set_nodelay(&mut self, now: Instant, id: StreamId, nodelay: bool) -> bool {
         let Some(stream) = self.streams.live.get_mut(&id) else { return false };
-        stream.nodelay = nodelay;
-        self.stack.set_options(now, stream.conn, Options { nodelay, ..Options::default() });
+        stream.options.nodelay = nodelay;
+        self.stack.tcp_set_options(now, stream.conn, stream.options);
         true
     }
 
     pub fn nodelay(&self, id: StreamId) -> Option<bool> {
-        self.streams.live.get(&id).map(|stream| stream.nodelay)
+        self.streams.live.get(&id).map(|stream| stream.options.nodelay)
     }
 
     /// The kernel said nobody holds the other end of one of an established stream's pipes: the
@@ -312,7 +370,10 @@ impl Node {
     pub fn pipe_gone(&mut self, now: Instant, id: StreamId, end: PipeEnd) {
         let Some(stream) = self.streams.live.get_mut(&id).filter(|stream| !stream.connecting) else { return };
         match end {
-            PipeEnd::ToClient => stream.to_client = None,
+            PipeEnd::ToClient => {
+                stream.reader_left = true;
+                stream.to_client = None;
+            }
             PipeEnd::FromClient => stream.done_writing = true,
         }
         self.bridge(now);
@@ -327,7 +388,7 @@ impl Node {
             PipeEnd::FromClient => stream.from_client.is_some(),
         };
         if held {
-            self.stack.abort(now, stream.conn);
+            self.stack.tcp_abort(now, stream.conn);
             self.streams.live.remove(&id);
         }
     }
