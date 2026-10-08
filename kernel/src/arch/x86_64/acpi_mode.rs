@@ -36,8 +36,8 @@
 //! PAT's write-back entry, under which the range registers decide (Intel SDM
 //! Vol. 3A, Table 12-7), so a register window the firmware reserved is read as
 //! the firmware typed it. A register at an address the firmware's map does
-//! not list is read the same way, only where those registers type it
-//! uncacheable.
+//! not list is read the same way, only where the boot processor's registers,
+//! read once at boot, type it uncacheable.
 //!
 //! **The firmware's Global Lock is taken and given back here** (ACPI 6.5
 //! §5.2.10.1), by compare-and-exchange on the FACS's lock word; a release the
