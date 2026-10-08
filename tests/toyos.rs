@@ -132,6 +132,9 @@ const RUST_SKIP: &[&str] = &[
     // launches ask DATA's server while this job's share holds all it may: the
     // `fs_share` metal row runs it on tests/proctreecase.
     "fs_share",
+    // It needs a NIC in front of netstack and a host server behind it:
+    // `netstack_socket_churn` runs it on `tests/netcase`.
+    "netstack_socket_churn",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -249,6 +252,10 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // netstack's own state behind a real stack and a peer that ends its
+    // connections: netstack is one binary that owns its NIC, with no host
+    // build, and the T14's peer is the bench's network.
+    "netstack_socket_churn",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -2704,11 +2711,41 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// netstack's stream count returns once connections that ended without their
+/// client's close request are let go. The host server here ends each
+/// connection it accepts at once; the guest's comparison is the verdict.
+fn netstack_socket_churn() -> Result<(), String> {
+    const JOB: &str = "netstack_socket_churn";
+    const LEASED: &str = "netstack: DHCP: lease ";
+    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
+    let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
+    // Ends with the process: a guest that never dials leaves it in `accept`.
+    thread::spawn(move || server.incoming().for_each(drop));
+
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/netcase");
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let result = qemu.run_test(&format!("test_rs_netstack_socket_churn {port}"), Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netstack_socket_churn: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "netstack_socket_churn" => netstack_socket_churn(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
