@@ -552,10 +552,6 @@ const ACPI_TABLE: &str = "acpiserver: table ";
 /// What it says once the kernel has kept `\_S5`'s `SLP_TYPa`, ahead of it.
 const ACPI_S5_HANDED: &str = "acpiserver: \\_S5 handed to the kernel: ";
 
-/// What it says, at error severity, of a machine whose `\_S5` the kernel was
-/// not handed, and again of a press it drops there.
-pub const ACPI_NO_POWER_OFF: &str = "this machine has no power-off";
-
 /// The number after `SLP_TYPa=` on a line.
 fn slp_typ_a(line: &str) -> Result<u64, String> {
     line.split_once("SLP_TYPa=")

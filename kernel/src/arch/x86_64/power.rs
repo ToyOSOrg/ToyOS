@@ -4,7 +4,7 @@
 //!
 //! **This kernel reads no AML, so it knows no sleep type of its own.** `\_S5`
 //! is the firmware's AML to evaluate, and the claim's holder does
-//! (`acpi_mode::s5`); until one has, [`supplied`] is false and a shutdown is
+//! (`acpi_mode::s5`); until one has, [`off_refused`] says so and a shutdown is
 //! refused before anything is stopped. A holder supplies it once, and what
 //! it supplied outlives it, until the next claim's holder supplies its own:
 //! it is a fact of the machine's tables and not of the process that read
@@ -148,11 +148,12 @@ const S5_TAKES: Tripwire = Tripwire::absurd(
 /// where a halt would leave a machine that is on, silent, and indistinguishable
 /// from one the power left.
 pub fn off(stopping: crate::quiesce::Stopping) -> ! {
-    let slp_typ = sleep_type().expect("power: the machine was stopped for a power-off with no SLP_TYPa: the acpi claim's holder supplies it, and a shutdown without one is refused before the stop");
-    let control = PM1A_CNT.get().expect("power: a sleep type was supplied over no PM1a control block").port(0);
     let taken = pio::take_back(&stopping);
     super::smi_cmd::settle(&taken);
     super::acpi_mode::settle(&taken);
+    // Read once no holder's call is in flight: the one a supply logged last.
+    let slp_typ = sleep_type().expect("power: the machine was stopped for a power-off with no SLP_TYPa: the acpi claim's holder supplies it, and a shutdown without one is refused before the stop");
+    let control = PM1A_CNT.get().expect("power: a sleep type was supplied over no PM1a control block").port(0);
     let held = cpu::inw(control);
     if held & SCI_EN != 0 {
         super::acpi_mode::quiet(&taken);

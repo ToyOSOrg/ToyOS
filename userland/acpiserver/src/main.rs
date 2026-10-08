@@ -256,7 +256,7 @@ impl Server {
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
         let refused = power::stop(Stop::Shutdown);
         match sci::unstopped(refused, self.power_off) {
-            Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_POWER_OFF.trim_start_matches("acpiserver: ")),
+            Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
             Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
         }
     }

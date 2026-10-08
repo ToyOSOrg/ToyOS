@@ -275,6 +275,11 @@ const MACHINE_TESTS: &[&str] = &[
     // that owes `GBL_RLS` need the FACS's word staged as only an idle firmware
     // allows: neither is done to the T14, which nothing powers on again.
     "acpi_mediated_access",
+    // A power-off on the sleep type of a holder that is gone: the kernel's
+    // static across a claim's release, and a machine that answers the write
+    // by stopping. No host test reaches either, and the T14 is never asked to
+    // power off.
+    "acpi_supply_outlives_holder",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
@@ -1732,7 +1737,6 @@ fn acpi_mediated_access() -> Result<(), String> {
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
     const GIVEN_BACK_AT_THE_STOP: &str = "acpi: the Global Lock given back for a holder that left it taken (the machine is stopping)";
     const NO_S5: &str = "shutdown: no ACPI server supplied S5 — refused";
-    const S5_SUPPLIED: &str = "power: S5 is PM1a ";
     let case = compile::repo_root().join("tests/acpicase");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
@@ -1773,7 +1777,7 @@ fn acpi_mediated_access() -> Result<(), String> {
     eprintln!("  [acpi] {}", said.must_say(NO_S5)?.trim());
     // One line a claim, the dead holder's and then the probe's: no refused
     // word was kept, and no second one under either claim.
-    let supplied: Vec<&str> = said.text().lines().filter_map(|line| Some(line.split_once(S5_SUPPLIED)?.1.trim())).collect();
+    let supplied = s5_supplied(&said);
     if supplied != ["0x604 with SLP_TYPa=5, as the acpi claim's holder supplied it", "0x604 with SLP_TYPa=0, as the acpi claim's holder supplied it"] {
         return Err(format!("the kernel kept {supplied:#?}, where the keeper supplied 5 and the probe 0, once each:\n{}", said.text()));
     }
@@ -1785,6 +1789,63 @@ fn acpi_mediated_access() -> Result<(), String> {
         return Err(format!("QEMU stopped this guest for {stopped:?}, not for the power-off on the probe's sleep type:\n{}", said.text()));
     }
     eprintln!("  [acpi] QEMU stopped the guest for guest-shutdown, on the probe's sleep type and not the keeper's");
+    Ok(())
+}
+
+/// The head of the kernel's line for a sleep type it kept.
+const S5_SUPPLIED: &str = "power: S5 is PM1a ";
+
+/// What the kernel said after [`S5_SUPPLIED`], a line a sleep type it kept.
+fn s5_supplied(said: &serial::Serial) -> Vec<&str> {
+    said.text().lines().filter_map(|line| Some(line.split_once(S5_SUPPLIED)?.1.trim())).collect()
+}
+
+/// Boot `tests/acpicase` on the shipping kernel with `acpi_mediated`'s
+/// `outlived` arm staged: a holder supplies q35's own sleep type and exits,
+/// its claim and one more that supplied nothing are released, and the probe,
+/// holding no claim, asks for the power-off. The kernel kept one sleep type,
+/// and QEMU's ICH9 stops the guest on it: what a holder supplied stands once
+/// the holder is gone. A probe that ends instead was refused its power-off.
+fn acpi_supply_outlives_holder() -> Result<(), String> {
+    const JOB: &str = "test_rs_acpi_mediated";
+    const ASKED: &str = "acpi: asking for the power-off with no claim held, on what a holder that is gone supplied";
+    let case = compile::repo_root().join("tests/acpicase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            ready_marker: "acpi: the ACPI row: ",
+            extra_root_files: vec![
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
+                // The arm's name is the file's: `acpi_mediated` asks whether it is there.
+                ("share/acpi_mediated_outlived".to_string(), b"outlived\n".to_vec()),
+            ],
+            qmp: true,
+            ..Default::default()
+        },
+    );
+    // Opened before the probe asks: QMP delivers no event emitted before its
+    // client connected.
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    let mut console = format!("{}\n", qemu.boot_log());
+    let ended = format!("===TEST_END {JOB} ");
+    await_guest(&mut qemu, &mut console, "the power-off on a sleep type its holder left behind", |said| {
+        said.contains(power::SHUTTING_DOWN) || said.contains(&ended)
+    })?;
+    let said = serial::Serial::named("the supplier's boot", console);
+    said.must_be_clean()?;
+    let supplied = s5_supplied(&said);
+    if supplied != ["0x604 with SLP_TYPa=0, as the acpi claim's holder supplied it"] {
+        return Err(format!("the kernel kept {supplied:#?}, where one holder supplied 0, once:\n{}", said.text()));
+    }
+    said.must_say(ASKED)?;
+    eprintln!("  [acpi] {}", said.must_say_after(ASKED, power::SHUTTING_DOWN)?.trim());
+    let stopped = stop.reason();
+    if stopped.as_deref() != Some("guest-shutdown") {
+        return Err(format!("QEMU stopped this guest for {stopped:?}, not for the power-off on the sleep type a dead holder supplied:\n{}", said.text()));
+    }
+    eprintln!("  [acpi] QEMU stopped the guest for guest-shutdown, with no claim held, on the sleep type a holder that is gone supplied");
     Ok(())
 }
 
@@ -2823,6 +2884,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
         "acpi_mediated_access" => acpi_mediated_access(),
+        "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "bar_map_again" => bar_map_again(test_config),
         other => Err(format!("unknown machine test {other}")),
@@ -3910,9 +3972,8 @@ const T14_S5_SUPPLIED: &str = "power: S5 is PM1a 0x1804 with SLP_TYPa=7,";
 /// there, each fetched through `SYS_ACPI`, summing to zero as its firmware
 /// sealed it, and loaded; `\_S5`'s `SLP_TYPa` handed to the kernel, which
 /// says it powers this machine off with that value on its own PM1a block,
-/// both as [`T14_S5_SUPPLIED`] holds them, and never does on this row; no
-/// word of the server's that this machine has no power-off; and nothing
-/// refused, so no bridge answered
+/// both as [`T14_S5_SUPPLIED`] holds them, and never does on this row; and
+/// nothing refused, so no bridge answered
 /// what the interpreter refuses, no address was `Unmapped`, and no access
 /// the load makes is one the policy keeps from it. The load's AML read
 /// memory, read configuration space and took the Global Lock, which is the
@@ -3934,9 +3995,6 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the server died: {fired}"));
     }
     let blocks = power::acpi_tables_loaded(&log, &kernel, T14_S5_SUPPLIED)?;
-    if let Some(none) = lines.iter().find(|l| l.contains(power::ACPI_NO_POWER_OFF)) {
-        return Err(format!("the server handed the kernel no sleep type: {none}"));
-    }
     if blocks != T14_DEFINITION_BLOCKS {
         return Err(format!("the server found {blocks} definition blocks where Linux loads {T14_DEFINITION_BLOCKS}"));
     }

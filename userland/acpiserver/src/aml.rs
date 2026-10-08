@@ -16,10 +16,11 @@
 //!
 //! Then `\_S5` is evaluated (ACPI 6.5 §7.4.2, "\_Sx (System States)") and
 //! its `SLP_TYPa` handed to the kernel, which powers the machine off with it
-//! and has no other source of it. **A machine whose `\_S5` was not handed
-//! over has no power-off**, whatever kept it — tables unread, a DSDT refused,
+//! and has no other source of it. **A server that handed none over leaves
+//! the kernel what an earlier holder of the claim supplied, and no power-off
+//! where none did**, whatever kept it — tables unread, a DSDT refused,
 //! an `\_S5` that is no package of two integers, a value the register does
-//! not hold — and that is said once, loudly ([`NO_POWER_OFF`]); the server
+//! not hold — and that is said once, loudly ([`NO_S5_HANDED`]); the server
 //! goes on serving. Nothing is evaluated after it yet, so the namespace is
 //! not kept: no embedded-controller query is served.
 //!
@@ -92,8 +93,8 @@ const STOPPING: &str = "acpiserver: the machine is stopping, so the tables' load
 
 /// What is said, at error severity, of a machine whose `\_S5` the kernel was
 /// not handed.
-pub const NO_POWER_OFF: &str =
-    "acpiserver: this machine has no power-off: no \\_S5 was handed to the kernel, which refuses a shutdown without one";
+pub const NO_S5_HANDED: &str =
+    "acpiserver: no \\_S5 was handed to the kernel, which powers off only on one an ACPI server supplied and refuses a shutdown without one";
 
 /// Load the machine's definition blocks from the RSDP at `rsdp`, and
 /// evaluate `\_S5`.
@@ -114,7 +115,7 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
                 tables.last_refused().map_or(String::new(), |refusal| format!("; the last read refused was {refusal}"))
             );
             println!("{OWN}that was {why:x?}");
-            toyos::error!("{NO_POWER_OFF}");
+            toyos::error!("{NO_S5_HANDED}");
             return loaded;
         }
     };
@@ -207,7 +208,7 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
         }
     }
     if !loaded.handed {
-        toyos::error!("{NO_POWER_OFF}");
+        toyos::error!("{NO_S5_HANDED}");
     }
     if !host.refused.is_empty() {
         println!("acpiserver: refused so far, of accesses: {}", host.refused.counts());
