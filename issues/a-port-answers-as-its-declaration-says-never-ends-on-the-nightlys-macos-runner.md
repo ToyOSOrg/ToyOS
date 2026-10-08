@@ -116,8 +116,8 @@ driver prints its summary; no `Terminate orphan process ... firmware-*` at
 the job's end; and the artifact holds a `firmware-*` report, or the upload
 warns that it found none.
 
-That run is the only one this test is kept red for. What follows it is one
-of two things, in the pull request that follows the reading:
+The reading is made before #778 lands and what it selects is part of #778,
+so `main` never carries this test red on macOS under the bound:
 
 - **The report names the cause**: it is fixed at its owner, and this file is
   deleted with the nightly that shows `portability-macos` green.

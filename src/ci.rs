@@ -175,11 +175,6 @@ const QUIET: Duration = Duration::from_secs(10);
 /// How long the processes of a signalled group may take to let go of its output.
 const GONE: Duration = Duration::from_secs(10);
 
-/// How cargo's line begins while it waits on a lock another cargo holds: it
-/// says so once and nothing more until it has the lock, and that is a wait on
-/// a named event, as long as the holder's work is.
-const WAITING: &str = "Blocking waiting for file lock";
-
 /// The signals that end the driver from outside.
 const INTERRUPTS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
@@ -198,8 +193,8 @@ static PENDING: AtomicI32 = AtomicI32::new(0);
 /// has lost the driver that bounded it. One that arrives while a command is
 /// being spawned is kept for [`started`].
 extern "C" fn interrupted(signal: libc::c_int) {
-    // Written before `GROUP` is read, as `started` writes `GROUP` before it
-    // reads this: whatever thread this runs on, one of the two sees the other.
+    // Written before `GROUP` is read, as `heard` reads this after every write
+    // of `GROUP`: whatever thread this runs on, one of the two sees the other.
     PENDING.store(signal, Ordering::SeqCst);
     let group = GROUP.load(Ordering::SeqCst);
     if group == STARTING {
@@ -215,8 +210,8 @@ extern "C" fn interrupted(signal: libc::c_int) {
     }
 }
 
-/// Name the group a spawn made, 0 for one that failed, and take the interrupt
-/// that arrived while it had no name.
+/// Say which group the driver runs now, 0 for none, and take the interrupt
+/// the handler took before it could read that.
 fn started(group: i32) {
     GROUP.store(group, Ordering::SeqCst);
     let signal = PENDING.load(Ordering::SeqCst);
@@ -264,9 +259,12 @@ impl Said {
         String::from_utf8_lossy(&self.log).into_owned()
     }
 
-    /// The last line with anything on it, finished or not.
+    /// The last line with anything on it, finished or not, to the length a
+    /// refusal can carry: a command may say megabytes without ending a line.
     fn last(&self) -> String {
-        self.text().lines().rfind(|line| !line.trim().is_empty()).unwrap_or("nothing").trim().to_string()
+        let text = self.text();
+        let last = text.lines().rfind(|line| !line.trim().is_empty()).unwrap_or("nothing");
+        last.trim().chars().take(200).collect()
     }
 }
 
@@ -320,6 +318,11 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
         });
     }
     GROUP.store(STARTING, Ordering::SeqCst);
+    // An interrupt taken between two steps, its handler not yet at its raise:
+    // nothing is spawned for it to miss.
+    if PENDING.load(Ordering::SeqCst) != 0 {
+        started(0);
+    }
     let spawned = cmd.spawn();
     let group = spawned.as_ref().map_or(0, |child| child.id() as i32);
     started(group);
@@ -343,7 +346,6 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
         match said.more(QUIET) {
             Some(true) => {}
             Some(false) => break None,
-            None if said.last().starts_with(WAITING) => {}
             None => break Some(said.last()),
         }
     };
@@ -363,8 +365,9 @@ fn heard(mut cmd: Command) -> Result<(ExitStatus, String), String> {
         let left = if gone { "" } else { "; a process outside that group still held its output after it" };
         format!("said nothing for {QUIET:?} and was ended with its process group by {by}{left}; the last it said: {last}")
     });
-    // Before the child is reaped and its pid is anybody's.
-    GROUP.store(0, Ordering::SeqCst);
+    // Before the child is reaped and its pid is anybody's: a handler that
+    // read the group before this is seen here, and the driver ends unreaped.
+    started(0);
     let status = child.wait().map_err(|e| format!("wait: {e}"))?;
     match ended {
         Some(refusal) => Err(refusal),
