@@ -398,8 +398,14 @@ impl Net {
     }
 
     /// What the peers answer a frame the node emitted with. Two at one address give an ARP
-    /// request the same answer, which is one frame.
+    /// request the same answer, which is one frame. A segment to an address no peer is at is
+    /// the node's mistake, and no peer would hear it.
     fn hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+        if let (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(_))) = (&packet.net, &packet.transport) {
+            let to = ip.header().destination_addr();
+            assert!(self.far.addr == to || self.parked.iter().any(|far| far.addr == to), "a segment to {to}, where no peer is");
+        }
         let mut answers = self.far.hears(frame);
         for far in &mut self.parked {
             for answer in far.hears(frame) {
