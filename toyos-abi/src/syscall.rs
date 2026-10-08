@@ -990,7 +990,8 @@ pub fn mark_tty(handle: RawHandle) {
 pub const MAX_THREADS: usize = 4096;
 
 /// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
-/// `stack_base` is the bottom of the user stack (for stack info queries).
+/// `stack_base` is the bottom of the user stack (for stack info queries). An
+/// `entry` outside the user half is `InvalidArgument`.
 ///
 /// # Safety
 /// `entry` must be a valid function pointer and `stack`/`stack_base` must

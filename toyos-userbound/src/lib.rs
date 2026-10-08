@@ -38,6 +38,6 @@ pub use place::{PageSpan, Window};
 pub use port::{port_access, IoBitmap, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
-    align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,
-    PAGE_4K, USER_TOP,
+    align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, Entry,
+    PAGE_2M, PAGE_4K, USER_TOP,
 };
