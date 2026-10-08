@@ -479,6 +479,27 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The ACPI server on the machine its stage is for: the row the kernel
+        // filled from the T14's own tables, the server armed on it, and the
+        // embedded controller's events taken and counted, on a boot held open
+        // past the server's count interval.
+        "acpi_server_events",
+        metal::Metal {
+            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            judge: |b| acpi_events_on_metal(b[0]),
+        },
+    ),
+    (
+        // The server's load of the T14's own definition blocks, through the
+        // kernel's mediated access: `acpi_tables_on_metal` says what is read.
+        // The same boot as `acpi_server_events`.
+        "acpi_tables_loaded",
+        metal::Metal {
+            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            judge: |b| acpi_tables_on_metal(b[0]),
+        },
+    ),
+    (
         // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
         // and `SCI_EN` reads clear after it.
         "acpi_server_death",
@@ -883,30 +904,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- last in this table, so last in `testcases`' job list ----
-    //
-    // A batch's list is its rows' jobs in table order, and `acpi_hold` sleeps
-    // to a tenth short of the runner's bound: whatever ran after it would
-    // have that tenth and no more.
-    (
-        // The ACPI server on the machine its stage is for: the row the kernel
-        // filled from the T14's own tables, the server armed on it, and the
-        // embedded controller's events taken and counted, on a boot held open
-        // past the server's count interval.
-        "acpi_server_events",
-        metal::Metal { arms: TESTCASES_HELD, judge: |b| acpi_events_on_metal(b[0]) },
-    ),
-    (
-        // The server's load of the T14's own definition blocks, through the
-        // kernel's mediated access: `acpi_tables_on_metal` says what is read.
-        "acpi_tables_loaded",
-        metal::Metal { arms: TESTCASES_HELD, judge: |b| acpi_tables_on_metal(b[0]) },
-    ),
 ];
-
-/// `testcases` with the job that holds it open for the ACPI server's count.
-const TESTCASES_HELD: &[metal::Arm] =
-    &[metal::once("testcases", "tests/testcases", &[], &["test_rs_acpi_hold"])];
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.
