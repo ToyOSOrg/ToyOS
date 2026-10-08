@@ -220,18 +220,27 @@ otherwise pay to find again:
   map leaf of 104 bytes for its entry in its parent and the arena at its
   doubled capacity: an interpreter filled with field units refuses with
   11,111,460 bytes of heap held, and one filled with devices of one child
-  with 8,900,612. The real machine's tables have not been loaded since the
-  meter came to count a node's slot, entry and record, a wide field's read
-  came to hold its buffer and the arena's move to cost steps: that reading
-  is owed before the server links the crate, and with it the slots the
-  arena has free after the last table, since a method that defines more
-  names than that moves the arena each time it runs, at a step for every
-  64 bytes of it. Owner: the power-off stage, which gives the server its
-  memory. **Exit**: the server states its interpreter's bound in heap
-  bytes, and a host test under a counting allocator holds the most a load
-  and an evaluation hold while they run to it; and the real machine's
-  tables load under the meter as it stands, the arena's free slots after
-  the last read with them.
+  with 8,900,612. The real machine's tables, loaded outside the tree under
+  the meter as it stands, with the one word of memory answered and every
+  function answering as Linux reads it: all 14 load in 39,419 steps, 32,946 of them the
+  DSDT's, and leave the meter at 2,412,886 bytes over 1,819,038 of heap by
+  a counting allocator, in 6,891 nodes. Nothing reads the arena's
+  capacity: by its doubling it is 8,192 slots, 1,301 of them free, and a
+  method that defines more names than are free moves the arena each time
+  it runs, at a step for every 64 bytes of it. Owner: the power-off stage,
+  which gives the server its memory. **Exit**: the server states its
+  interpreter's bound in heap bytes, and a host test under a counting
+  allocator holds the most a load and an evaluation hold while they run to
+  it; and the arena's capacity after the real machine's last table is
+  read, not derived.
+- **The T14's tables are not in name order, and its initialisation does
+  not hang on the order.** The interpreter's walk of the namespace
+  (`Interpreter::walk`, `userland/acpiserver/aml/src/lib.rs`) reads
+  siblings as their tables declared them. Of the 267 objects of the T14's
+  tables that hold others, 217 declare them against the order their names
+  sort in; and the embedded controller's device is below the PCI root
+  bridge, the two whose `_INI` a dry run found writing anything, so a
+  parent is initialised before its child whichever order siblings take.
 
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:

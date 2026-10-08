@@ -17,6 +17,10 @@
 //! and a parent whose last child it took no map. The arena therefore moves
 //! as often as a method that grows it runs, and a move pays the [`Toll`] for
 //! the bytes it copies.
+//!
+//! The arena's order is the order its nodes were declared in, and a [`Walk`]
+//! reads sibling order from it alone: a parent's map keeps its children by
+//! name.
 
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
@@ -239,5 +243,105 @@ impl Namespace {
         }
         segs.reverse();
         Ok(crate::name::text(&Path { root: true, up: 0, segs }))
+    }
+}
+
+/// Every object below the root, each after its parent and siblings in the
+/// order they were declared, an Alias left out: its source is met at its own
+/// place, and an Alias of an ancestor would otherwise never end.
+///
+/// It is held against the meter while it lasts, at eight bytes a node and
+/// five a level of the deepest: both are as many as the tables chose.
+pub(crate) struct Walk<'a> {
+    ns: &'a Namespace,
+    /// A node's first child and its next sibling, by index; 0, the root's,
+    /// is none.
+    first: Vec<u32>,
+    next: Vec<u32>,
+    at: u32,
+    depth: u32,
+    path: String,
+    held: usize,
+}
+
+/// The bytes of a path `depth` names long, `\AAAA.BBBB`.
+const fn path_len(depth: usize) -> usize {
+    5 * depth
+}
+
+impl Namespace {
+    pub(crate) fn walk(&self) -> Result<Walk<'_>, Error> {
+        let count = self.nodes.len();
+        let links = 2 * count * core::mem::size_of::<u32>();
+        self.meter.take(links)?;
+        let mut walk = Walk { ns: self, first: Vec::new(), next: Vec::new(), at: 0, depth: 1, path: String::new(), held: links };
+        for links in [&mut walk.first, &mut walk.next] {
+            links.reserve_exact(count);
+            links.resize(count, 0);
+        }
+        // A parent is older than its child, so its depth is known first:
+        // `next` holds each node's depth until the links are made.
+        let mut deepest = 0;
+        for (i, n) in self.nodes.iter().enumerate() {
+            if let Some(p) = n.parent {
+                walk.next[i] = walk.next[p as usize] + 1;
+                deepest = deepest.max(walk.next[i]);
+            }
+        }
+        let path = path_len(deepest as usize);
+        self.meter.take(path)?;
+        walk.held += path;
+        walk.path.reserve_exact(path);
+        // Newest first, each node goes to the front of its parent's list,
+        // which leaves the oldest there.
+        for (i, n) in self.nodes.iter().enumerate().rev() {
+            walk.next[i] = 0;
+            if let (Some(p), None) = (n.parent, n.alias) {
+                walk.next[i] = walk.first[p as usize];
+                walk.first[p as usize] = i as u32;
+            }
+        }
+        walk.at = walk.first[0];
+        Ok(walk)
+    }
+}
+
+impl Drop for Walk<'_> {
+    fn drop(&mut self) {
+        self.ns.meter.give(self.held);
+    }
+}
+
+impl Walk<'_> {
+    /// The next object's depth, a child of the root's being 1, its name and
+    /// the object.
+    pub(crate) fn step(&mut self) -> Option<(u32, Seg, &Object)> {
+        let i = self.at as usize;
+        if i == 0 {
+            return None;
+        }
+        let (n, depth) = (&self.ns.nodes[i], self.depth);
+        self.path.truncate(path_len(depth as usize - 1));
+        self.path.push(if depth == 1 { '\\' } else { '.' });
+        self.path.extend(n.seg.0.iter().map(|&c| char::from(c)));
+        if self.first[i] != 0 {
+            self.at = self.first[i];
+            self.depth += 1;
+        } else {
+            // The next sibling of this node or of the nearest ancestor that
+            // has one: each node is climbed from once in a whole walk.
+            let mut up = i;
+            while up != 0 && self.next[up] == 0 {
+                up = self.ns.nodes[up].parent.map_or(0, |p| p as usize);
+                self.depth -= 1;
+            }
+            self.at = self.next[up];
+        }
+        Some((depth, n.seg, &n.object))
+    }
+
+    /// The absolute path of the object last stepped to.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
     }
 }
