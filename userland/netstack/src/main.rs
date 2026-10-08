@@ -336,11 +336,17 @@ struct PendingUdpRecv {
 /// connection is what the kernel says of the client's pipe ends and what the
 /// peer says on the wire; a close request only asks for that end early, and a
 /// client that dies sends none.
+///
+/// **Only a connection with a pipe end left waits on its peer without
+/// bound.** One with neither is [`ownerless`], and the wire has
+/// [`OWNERLESS_LIFE`] to finish it.
 struct PipedConnection {
     socket_id: u32,
     handle: SocketHandle,
     rx_write: Option<Pipe>,
     tx_read: Option<Pipe>,
+    /// When a pass first found both pipe ends gone.
+    ownerless: Option<Instant>,
     /// The client's receive pipe refused bytes the socket still holds, so the
     /// pipe is watched for room.
     held: bool,
@@ -431,12 +437,52 @@ fn spent(socket: &tcp::Socket) -> bool {
     !socket.is_open() && !(socket.state() == tcp::State::Closed && socket.remote_endpoint().is_some())
 }
 
+/// How long the wire has to finish a connection whose client's pipe ends are
+/// both gone, before netstack resets it: R2, the time RFC 9293 §3.8.3 gives a
+/// segment's retransmission before the connection is closed, at the 100
+/// seconds it asks for at least.
+///
+/// **From the client's leaving and not from the peer's last word**, so a peer
+/// that keeps answering holds a slot no longer than one that says nothing:
+/// RFC 9293 §3.8.6.1 lets a system reclaim a connection its peer holds open.
+const OWNERLESS_LIFE: Duration = Duration::from_secs(100);
+
+/// What a pass makes of a connection whose client's pipe ends are both gone.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownerless {
+    /// The wire still owes something, and has time left.
+    Waits,
+    /// Reset at [`OWNERLESS_LIFE`] with the wire unfinished, and kept for the
+    /// one poll that sends the reset.
+    Cut,
+    /// The wire is finished.
+    Over,
+    /// Let go with a reset that never left: no next hop took it.
+    Unsaid,
+}
+
+/// The pass's answer for `socket`, whose client's pipe ends have both been
+/// gone for `gone`.
+fn ownerless(socket: &mut tcp::Socket, gone: Duration) -> Ownerless {
+    if spent(socket) {
+        Ownerless::Over
+    } else if gone < OWNERLESS_LIFE {
+        Ownerless::Waits
+    } else if socket.is_open() {
+        socket.abort();
+        Ownerless::Cut
+    } else {
+        Ownerless::Unsaid
+    }
+}
+
 fn piped_connection(socket_id: u32, handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
     PipedConnection {
         socket_id,
         handle,
         rx_write: Some(pipes.to_client),
         tx_read: Some(pipes.from_client),
+        ownerless: None,
         held: false,
     }
 }
@@ -1392,8 +1438,20 @@ impl Netstack {
                 }
             }
 
-            if conn.is_fully_closed() && spent(socket) {
-                closed.push(i);
+            if conn.is_fully_closed() {
+                let gone = conn.ownerless.get_or_insert_with(Instant::now).elapsed();
+                match ownerless(socket, gone) {
+                    Ownerless::Waits => {}
+                    Ownerless::Cut => say!(
+                        "netstack: resetting a connection — its client left {}s ago and its peer has not finished it",
+                        gone.as_secs()
+                    ),
+                    Ownerless::Over => closed.push(i),
+                    Ownerless::Unsaid => {
+                        say!("netstack: letting a connection go with its reset unsent — no next hop took it");
+                        closed.push(i);
+                    }
+                }
             }
         }
 
@@ -1402,6 +1460,16 @@ impl Netstack {
             socket_set.remove(conn.handle);
             self.sockets.remove(&conn.socket_id);
         }
+    }
+
+    /// How long until the first connection with no client left reaches
+    /// [`OWNERLESS_LIFE`], which nothing on the wire wakes a pass for.
+    fn ownerless_wake_in(&self) -> Option<Duration> {
+        self.piped_connections
+            .iter()
+            .filter_map(|c| c.ownerless)
+            .map(|since| OWNERLESS_LIFE.saturating_sub(since.elapsed()))
+            .min()
     }
 
     /// Tell each piped listener's owner about a connection it can accept, and
@@ -1769,6 +1837,10 @@ fn main() {
         // A lookup waiting on its answer is woken when its wait is over, to
         // ask the next server.
         let timeout = match daemon.resolver.wake_in(Instant::now()) {
+            Some(left) => timeout.min(left.as_nanos() as u64),
+            None => timeout,
+        };
+        let timeout = match daemon.ownerless_wake_in() {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
         };

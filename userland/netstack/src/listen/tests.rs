@@ -3,7 +3,9 @@
 //! is what the port answers the next peer.
 
 use super::*;
+use crate::{Ownerless, OWNERLESS_LIFE};
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{self, ChecksumCapabilities, Device, DeviceCapabilities, Medium};
@@ -84,6 +86,10 @@ struct Net {
     listener: SocketHandle,
     listening: Listening,
     sent: Vec<Sent>,
+    /// The clock every poll reads.
+    now: Instant,
+    /// Whether the far end answers ARP.
+    arp: bool,
 }
 
 impl Net {
@@ -95,7 +101,16 @@ impl Net {
         socket.listen(PORT).expect("a fresh socket listens");
         let mut sockets = SocketSet::new(Vec::new());
         let listener = sockets.add(socket);
-        Self { iface, wire, sockets, listener, listening: Listening::new(PORT), sent: Vec::new() }
+        Self {
+            iface,
+            wire,
+            sockets,
+            listener,
+            listening: Listening::new(PORT),
+            sent: Vec::new(),
+            now: Instant::from_millis(0),
+            arp: true,
+        }
     }
 
     fn socket(&mut self) -> &mut tcp::Socket<'static> {
@@ -103,10 +118,10 @@ impl Net {
     }
 
     /// One pass of netstack's loop: everything the wire holds, in one batch, and
-    /// the far end's ARP answered.
+    /// the far end's ARP answered while it answers any.
     fn pass(&mut self) {
         loop {
-            while self.iface.poll(Instant::from_millis(0), &mut self.wire, &mut self.sockets) != PollResult::None {}
+            while self.iface.poll(self.now, &mut self.wire, &mut self.sockets) != PollResult::None {}
             if self.wire.outbound.is_empty() {
                 return;
             }
@@ -122,6 +137,9 @@ impl Net {
             EthernetProtocol::Arp => {
                 let arp = ArpRepr::parse(&ArpPacket::new_checked(eth.payload()).unwrap()).unwrap();
                 let ArpRepr::EthernetIpv4 { operation: ArpOperation::Request, .. } = arp else { return };
+                if !self.arp {
+                    return;
+                }
                 let reply = ArpRepr::EthernetIpv4 {
                     operation: ArpOperation::Reply,
                     source_hardware_addr: PEER_MAC,
@@ -346,4 +364,79 @@ fn a_connection_closed_by_both_ends_is_spent() {
     net.pass();
     assert_eq!(net.socket().state(), tcp::State::TimeWait, "the premise: the peer's FIN answered ours");
     assert!(crate::spent(net.socket()), "a connection both ends closed was kept");
+    assert_eq!(crate::ownerless(net.socket(), Duration::ZERO), Ownerless::Over);
+}
+
+/// The handshake from `from` finished: a connection a client would hold.
+fn established(net: &mut Net, from: u16) -> u32 {
+    let isn = net.syn(from);
+    net.send(from, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
+    net.pass();
+    assert_eq!(net.socket().state(), tcp::State::Established);
+    isn
+}
+
+/// A second at a time from the client's leaving to [`OWNERLESS_LIFE`], the peer
+/// doing `each_second`: the connection waits for all of it, and what it is at
+/// the end is the answer.
+fn at_the_ceiling(net: &mut Net, mut each_second: impl FnMut(&mut Net)) -> Ownerless {
+    for second in 0..OWNERLESS_LIFE.as_secs() {
+        each_second(net);
+        net.pass();
+        let gone = Duration::from_secs(second);
+        assert_eq!(crate::ownerless(net.socket(), gone), Ownerless::Waits, "after {second}s in {}", net.socket().state());
+        net.now += smoltcp::time::Duration::from_secs(1);
+    }
+    net.pass();
+    crate::ownerless(net.socket(), OWNERLESS_LIFE)
+}
+
+/// The reset [`Ownerless::Cut`] owes leaves at the next poll, and the
+/// connection is over.
+fn the_cut_is_said(net: &mut Net) {
+    net.pass();
+    let last = net.sent.last().expect("a cut connection's reset");
+    assert_eq!((last.control, last.to), (TcpControl::Rst, 5001));
+    assert_eq!(crate::ownerless(net.socket(), OWNERLESS_LIFE), Ownerless::Over);
+}
+
+/// **A connection netstack aborted is let go though its reset never leaves.**
+/// The neighbour entry the handshake made has run out and the next hop answers
+/// no ARP, so the reset is held back for as long as that lasts.
+#[test]
+fn an_aborted_connection_whose_next_hop_answers_no_arp_is_let_go_at_the_ceiling() {
+    let mut net = Net::new();
+    established(&mut net, 5001);
+    net.now += smoltcp::time::Duration::from_secs(61);
+    net.arp = false;
+    net.socket().abort();
+    let said = net.sent.len();
+    assert_eq!(at_the_ceiling(&mut net, |_| {}), Ownerless::Unsaid, "the slot of a connection with no client never comes back");
+    assert_eq!(net.sent.len(), said, "the premise: no segment leaves without a next hop");
+}
+
+/// **A peer that goes silent after the handshake holds a connection with no
+/// client no longer than the ceiling.** Its FIN is never acknowledged, and
+/// smoltcp retransmits it for as long as the socket lives.
+#[test]
+fn a_peer_gone_silent_is_reset_at_the_ceiling() {
+    let mut net = Net::new();
+    established(&mut net, 5001);
+    net.socket().close();
+    assert_eq!(at_the_ceiling(&mut net, |_| {}), Ownerless::Cut, "the slot of a connection with no client never comes back");
+    assert_eq!(net.socket().state(), tcp::State::Closed);
+    the_cut_is_said(&mut net);
+}
+
+/// **Nor does a peer that keeps answering.** It acknowledges the FIN, never
+/// sends its own, and says so again every second: `FinWait2` has no timer, and
+/// a socket timeout counted from the peer's last word would never run out.
+#[test]
+fn a_peer_that_answers_and_never_closes_is_reset_at_the_ceiling() {
+    let mut net = Net::new();
+    let isn = established(&mut net, 5001);
+    net.socket().close();
+    let answer = |net: &mut Net| net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 2));
+    assert_eq!(at_the_ceiling(&mut net, answer), Ownerless::Cut, "the slot of a connection with no client never comes back");
+    the_cut_is_said(&mut net);
 }
