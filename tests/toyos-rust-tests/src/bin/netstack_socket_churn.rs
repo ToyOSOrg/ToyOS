@@ -1,6 +1,7 @@
 //! Piped TCP connections that end with no close request from their client, as
 //! a client that died leaves them: once netstack has let each connection go,
-//! its stream count is what it was before the first.
+//! its stream count is what it was before the first, and so is its count of
+//! sockets no table entry names.
 //!
 //! argv[1] is the port of the harness's host server, which ends every
 //! connection it accepts at once. Each round reads the peer's end of stream,
@@ -34,6 +35,7 @@ fn main() {
         .and_then(|p| p.parse().ok())
         .expect("usage: netstack_socket_churn <host port>");
     let (streams, live) = (count("net.sockets.tcp"), count("net.piped.live"));
+    let untabled = count("net.sockets.untabled");
     for round in 1..=ROUNDS {
         let conn = toyos::net::tcp_connect(HOST, port, 0)
             .unwrap_or_else(|e| panic!("connection {round} to the host server: {e:?}"));
@@ -56,5 +58,10 @@ fn main() {
          them and holds {left} after"
     );
     assert_eq!(left, streams, "netstack keeps a stream for a connection it let go");
+    assert_eq!(
+        count("net.sockets.untabled"),
+        untabled,
+        "netstack keeps the socket of a connection whose table entry it let go"
+    );
     println!("netstack_socket_churn: ok");
 }
