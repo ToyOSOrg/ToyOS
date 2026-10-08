@@ -7,7 +7,7 @@ use toyos_build::bootlog;
 use super::serial::Serial;
 
 /// The T14's I219, as the kernel's hand-over record spells its id.
-const I219: &str = "8086:15fc";
+pub const I219: &str = "8086:15fc";
 
 /// The job that claims the T14's I219, gives it back and claims it again.
 pub const RECLAIM: &str = "test_rs_pci_reclaim";

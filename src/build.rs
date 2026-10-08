@@ -3026,6 +3026,7 @@ mod tests {
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
+        "tests/outboundcase/system.toml",
         "tests/panelcase/system.toml",
         "tests/proctreecase/system.toml",
         "tests/testcases/system.toml",
