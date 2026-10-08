@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use toyos_acpi::{Reset, Table, TableError, S5, SDT_HEADER_LEN, SDT_REVISION};
 
-use toyos_userbound::Ports;
+use toyos_userbound::{Mediated, Ports};
 
 use super::cpu;
 use super::pio::{self, Declared, Slot};
@@ -48,7 +48,7 @@ pub fn init_reset(rsdp_addr: u64) {
         }
     };
     match toyos_acpi::reset_register(&fadt) {
-        Reset::Port { port, value } => match pio::declare("the reset register", Ports::one(port)) {
+        Reset::Port { port, value } => match pio::declare("the reset register", Ports::one(port), Mediated::Kept) {
             Ok(declared) => {
                 RESET_VALUE.store(value, Ordering::Relaxed);
                 RESET.set(declared);
@@ -79,7 +79,7 @@ pub fn init_off(rsdp_addr: u64) {
     };
     let pm1a = block.port;
     let run = Ports::new(pm1a, block.len).expect("pm1a_control bounded the block by the port space");
-    match pio::declare("the PM1a control block", run) {
+    match pio::declare("the PM1a control block", run, Mediated::ReadOnly) {
         Ok(declared) => PM1A_CNT.set(declared),
         Err(why) => {
             log!("ACPI: PM1a control block {pm1a:#x} not declared ({why:?}) — no soft-off");
@@ -171,6 +171,7 @@ pub fn off(stopping: crate::quiesce::Stopping) -> ! {
     let control = control.port(0);
     let taken = pio::take_back(&stopping);
     super::smi_cmd::settle(&taken);
+    super::acpi_mode::settle(&taken);
     let held = cpu::inw(control);
     if held & SCI_EN != 0 {
         super::acpi_mode::quiet(&taken);

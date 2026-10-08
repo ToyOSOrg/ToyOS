@@ -16,6 +16,12 @@ lock on the first unmapped window: it spins, and the kernel panics
 "DEADLOCK at …" (`Lock::lock`, `kernel/src/sync.rs`). Nothing in the tree
 refuses that order: no lock-order check covers these locks.
 
+The global VFS lock (`vfs::lock()`) is a fourth nothing orders. `ops::open`
+takes it under `process_data`, and `sys_chdir` took `process_data` under it
+until its guard was made to end before the store; that no holder of the VFS
+guard takes `process_data` is held by reading alone. A checked lock level
+ranks it with the three.
+
 **Exit:** the order is refused by something that fails (a type or a
 checked lock level), or every caller is shown to hold none of the three and
 the invariant is one line in `user_ptr.rs`'s header.

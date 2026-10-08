@@ -536,12 +536,22 @@ impl<'a> Iterator for CapabilityIter<'a> {
     }
 }
 
+/// The window [`enumerate`] walked.
+static ECAM: crate::sync::Lock<Option<Mmio>> = crate::sync::Lock::new(None);
+
+/// The configuration space of the function at this address, whether or not
+/// one answers there: an absent function reads all ones.
+pub fn function_window(bus: u8, dev: u8, func: u8) -> Option<Mmio> {
+    (*ECAM.lock()).map(|ecam| PciDevice::new(&ecam, bus, dev, func).mmio)
+}
+
 /// The most functions [`enumerate`] will hand back; the rest are logged, not enumerated.
 const MAX_DEVICES: usize = 256;
 
 /// Every PCIe function ECAM decodes, in bus/device/function order; drivers must select all matches, not the first.
 pub fn enumerate(ecam: &crate::mm::Mmio) -> Vec<PciDevice> {
     log!("PCI: Enumerating devices...");
+    *ECAM.lock() = Some(*ecam);
 
     let mut found: Vec<PciDevice> = Vec::new();
     'scan: for bus in 0..=255u16 {

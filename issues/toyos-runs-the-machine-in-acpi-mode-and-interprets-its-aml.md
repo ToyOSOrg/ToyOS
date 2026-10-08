@@ -10,8 +10,9 @@ The T14's firmware hands the machine over in legacy mode, which interrupts
 every CPU every 2.2 s
 (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 
-Nothing in the tree evaluates the AML in a machine's DSDT or SSDTs. What
-ToyOS takes from them it takes another way: `toyos-acpi/src/dsdt.rs` finds
+The ACPI server loads a machine's DSDT and SSDTs and evaluates `\_S5`, and
+nothing else of their AML yet. What ToyOS takes from them it takes another
+way: `toyos-acpi/src/dsdt.rs` finds
 `\_S5_` by a byte scan, and the loader asks UEFI for the root bridges'
 windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing reads
 `_CST`, which names a CPU's C-states.
@@ -136,7 +137,8 @@ written.
 **Stage: the interpreter** (the orchestrator's placement of "The AML stage
 closes it"). ToyOS's own AML interpreter, written from the specification, run
 by the ACPI server, the battery first: `userland/acpiserver/aml`, pure and
-host-tested, beside the server, which does not link it yet. It owns
+host-tested, beside the server, which loads the tables with it
+(`userland/acpiserver/src/aml.rs`). It owns
 `issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
 **Exit**: a host test loads QEMU 11.1.1's DSDT
 (`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
@@ -230,6 +232,28 @@ otherwise pay to find again:
   and an evaluation hold while they run to it; and the real machine's
   tables load under the meter as it stands, the arena's free slots after
   the last read with them.
+
+What the server's load of the tables, on the T14 and through the kernel's
+mediated access, leaves open:
+
+- **The server waits for no release of the Global Lock** (the orchestrator's
+  ruling, not the owner's). A take that finds the firmware holding the lock
+  leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
+  name and counted in the server's ledger; the access under it is not made,
+  and the table or method that asked is refused. The wait that section
+  describes, for the SCI the firmware raises with `GBL_STS`, is not in the
+  tree: no tier reached it, and the T14's load took the lock 241 times and
+  found the firmware holding it in none. Owner: this stage. **Exit**: a
+  machine's log carries the denial, `the Global Lock: the firmware holds it`,
+  which the `acpi_tables_loaded` row reds on as on every refusal; the wait
+  comes back with the test that reaches its port sequence.
+- **A press during the load waits for it.** The server arms the power button
+  and then loads the tables before it serves an SCI, so a press in that time
+  latches and is served when the load ends: 77 ms on the T14, measured once,
+  and bounded only by what the interpreter lets each table sleep, 10 s.
+  Owner: this stage. **Exit**: the slice that keeps the namespace serves the
+  SCI while a table loads, or the `acpi_tables_loaded` row holds the load's
+  time on the T14 under a bound the owner names.
 
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI

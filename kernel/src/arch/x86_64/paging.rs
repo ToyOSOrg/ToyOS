@@ -862,11 +862,31 @@ pub fn load_kernel_flush() {
     unsafe { kernel_root().load_flush() };
 }
 
+/// Every window [`map_mmio`] mapped, as `(start, end)`: what this kernel
+/// drives a device through, and so what it refuses the `acpi` claim's holder
+/// (`arch::acpi_mode`), who is refused every page one lies in. Its only writer
+/// is the only maker of such a window. One entry a distinct window and none
+/// removed: a boot's drivers map theirs once, and past boot only `pcidev`
+/// maps, a BAR where firmware put it and at each address it tries it at, and
+/// one it has placed it does not try again.
+static DRIVEN: Lock<Vec<(u64, u64)>> = Lock::new(Vec::new());
+
+/// Run `f` over every window this kernel mapped to drive a device.
+pub fn with_driven_windows<T>(f: impl FnOnce(&[(u64, u64)]) -> T) -> T {
+    f(&DRIVEN.lock())
+}
+
 /// Free function (not a method): the lock and the shootdown are separate
 /// statements. Not optional — `map_2m` may change memory type under a
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
+    {
+        let mut driven = DRIVEN.lock();
+        if !driven.contains(&(phys, phys + size)) {
+            driven.push((phys, phys + size));
+        }
+    }
     crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio);
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.

@@ -16,3 +16,10 @@ description = "Every decision the kernel makes about the user/kernel boundary, p
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The `acpi` claim's access and refusal words, and firmware's memory map
+# entry: one declaration each, read by the policy and by the kernel.
+toyos-abi = { path = "../toyos-abi" }
+# Which memory types the kernel hands out as RAM.
+toyos-bootmap = { path = "../toyos-bootmap" }

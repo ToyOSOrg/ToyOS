@@ -39,15 +39,25 @@ impl<T> Held<T> {
         Self(Lock::new(Some(value)))
     }
 
+    /// What is held, for a release that is more than a drop; `None` after the first.
+    pub(crate) fn take(&self) -> Option<T> {
+        self.0.lock().take()
+    }
+
     /// Drops what is held, outside the lock; `T`'s destructor must not re-enter it.
     pub(crate) fn release(&self) {
-        let taken = self.0.lock().take();
-        drop(taken);
+        drop(self.take());
     }
 
     /// `f` over what is held, under the lock, or `None` after the release.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
         self.0.lock().as_ref().map(f)
+    }
+
+    /// [`with`](Self::with) for an `f` that changes what is held: the change and the release
+    /// are one lock's, so nothing is added to what a release already took.
+    pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.0.lock().as_mut().map(f)
     }
 }
 
