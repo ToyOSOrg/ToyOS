@@ -83,6 +83,7 @@ of real traffic with no error, leak or stall.
 ## Standing
 
 The bench tests that prove each exit run in the T14 suite on every change to
-the path, not once. The bench itself stays honest: the boot stick's first
+the path, not once. Today none does: no T14 row reads the wired card
+(`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). The bench itself stays honest: the boot stick's first
 command still sometimes goes unanswered on the USB2 half of its receptacle
 (runs 84, 103, 104, 105), and everything above rests on the record it carries.

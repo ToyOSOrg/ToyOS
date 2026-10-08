@@ -39,26 +39,6 @@ use core::fmt::{self, Display, Write};
 pub use toyos_abi::log::Severity;
 use toyos_abi::log::{Head, KERNEL, LOADER, UNTIMED};
 
-/// The TCP port `logkeeper` serves this boot's log on, from its first line, on a
-/// boot whose manifest gives `logkeeper` a `netstack` connector. **No shipping image
-/// does**: the port answers whoever connects, with no authentication, so it is
-/// the test estates' and the metal bench's alone.
-pub const PORT: u16 = 41337;
-
-/// The service every connection on [`PORT`] is carried by. A swap of it ends
-/// each one with no FIN and no reset, which no reader could tell from a boot
-/// with nothing to say — so `logkeeper` turns new readers away from the supervisor's
-/// [`SWAP`] frame accepting that swap until the process it listened through is
-/// gone, and says so ([`CARRIER_LEAVING`]) before the swap may go.
-pub const CARRIER: &str = "netstack";
-
-/// `logkeeper`'s line once it turns new readers away for a swap of [`CARRIER`]. A
-/// reader whose own connection that swap will end holds the swap's go until
-/// this has reached it: a reader that asks again after it is turned away until
-/// the next [`CARRIER`] serves, and never admitted by the one being stopped.
-pub const CARRIER_LEAVING: &str =
-    "logkeeper: netstack is being replaced, and readers are turned away until the next one serves";
-
 /// The name of the port a reader on this machine asks `logkeeper` for the log on;
 /// the answer is the read end of a pipe the log is written into. The same port
 /// answers `inspect`, so a reader says which it wants ([`READ`]).
@@ -97,13 +77,6 @@ pub const REGISTER: u32 = 1;
 /// of the boot that pipe starts with, so a reader can tell the boot so far from
 /// what arrives after it.
 pub const SERVED: u32 = 2;
-
-/// The supervisor → `logkeeper`: a word on a swap of [`CARRIER`], one byte of payload —
-/// [`SWAP_LEAVING`] once the supervisor has accepted it, [`SWAP_BACK`] once the process
-/// it replaced is gone and another serves or none will.
-pub const SWAP: u32 = 4;
-pub const SWAP_LEAVING: u8 = b'L';
-pub const SWAP_BACK: u8 = b'B';
 
 /// The supervisor → `logkeeper`: the machine is about to be stopped. `logkeeper` reads every ring
 /// and the kernel's records, writes them, makes the volume durable, and
@@ -676,12 +649,6 @@ mod tests {
                 text,
             }
         )
-    }
-
-    #[test]
-    fn the_carriers_line_names_the_carrier() {
-        assert!(CARRIER_LEAVING.starts_with("logkeeper: "));
-        assert!(CARRIER_LEAVING.contains(&format!(" {CARRIER} ")));
     }
 
     #[test]

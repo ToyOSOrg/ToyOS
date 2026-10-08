@@ -3,9 +3,11 @@
 //! addresses out of. Every judge reads the kernel's own records.
 
 use toyos_build::bootlog;
-use toyos_build::lan::I219;
 
 use super::serial::Serial;
+
+/// The T14's I219, as the kernel's hand-over record spells its id.
+const I219: &str = "8086:15fc";
 
 /// The job that claims the T14's I219, gives it back and claims it again.
 pub const RECLAIM: &str = "test_rs_pci_reclaim";

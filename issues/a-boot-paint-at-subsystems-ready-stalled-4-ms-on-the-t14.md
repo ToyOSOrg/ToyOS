@@ -8,7 +8,7 @@ opened: 2026-10-04
 
 One T14 boot of `lantalkcase`, at `43cbe73d4` (pull request #710's head, run
 on 2026-10-04), wrote `panel: paints=10 px=8513536 us=25527 max_us=8194`. The
-machine's record for that boot is `boot.lantalkcase.panel_max_us = 3919`
+machine's record for that boot was `boot.lantalkcase.panel_max_us = 3919`
 (`tests/metal/lenovo-20w0003amz.toml`), and the judge's ceiling 7838, so the
 judge exited 1. The same kernel's four other boots of that run read `max_us`
 3921, 3802, 3878 and 3870, and the negative control's four 3837, 3883, 3927
@@ -31,7 +31,9 @@ the claim. What stalled a paint for 4.3 ms is not known — a single boot, with
 no instrument inside the paint.
 
 Owner: the orchestrator, who holds the T14 record. Exit: the stall's cause is
-named from a measurement — the review's alternating `lantalkcase` boots of
-`e81d26db8` and `43cbe73d4`, three each, comparing `max_us` and the gap from
-`subsystems ready` to the next record, is the first — and removed, and three
-`lantalkcase` boots then read `panel_max_us` inside the record's ceiling.
+named from a measurement — the review's alternating boots of `e81d26db8` and
+`43cbe73d4`, three each, comparing `max_us` and the gap from `subsystems
+ready` to the next record, is the first — and removed, and three boots of one
+image then read `panel_max_us` inside the record's ceiling. `lantalkcase` is
+deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`), so
+the boots are of an image the profile still runs.

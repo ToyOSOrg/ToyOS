@@ -13,18 +13,12 @@ public carries them unless whoever pastes it masks them by hand:
 
 - the USB stick's serial number: `kernel/src/drivers/xhci/wait/msc.rs:1407`,
   on every bind, and `:1415`, when a disk comes back;
-- the network card's MAC: `userland/netstack/src/main.rs:1605`, and
-  `src/metal.rs:2281`, where the host loop writes the one it read before the
-  flash into the readback's `boot.txt`;
+- the network card's MAC: `userland/netstack/src/main.rs:1605`;
 - the resolvers the lease named, which on the bench are the provider's public
   ones: `userland/netstack/src/dhcp.rs:149`.
 
 `src/sourcegate.rs` reads tracked files only. A pull request's body, a comment
 and a commit message are read by nothing before they are public.
-
-The harness's judge prints neither: `tests/common/lan.rs:99` holds the MAC
-record against the readback's without quoting either, and `:116` counts the
-resolvers. The records it reads still carry all three.
 
 ## The question
 
@@ -33,6 +27,5 @@ whoever pastes a log masks them?
 
 ## Exit condition
 
-The owner's answer. If the system is not to print them, the three records and
-the readback's key change, and the judges that read them with them. If the
-paster masks, this file is deleted.
+The owner's answer. If the system is not to print them, the three records
+change. If the paster masks, this file is deleted.

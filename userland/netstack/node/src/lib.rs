@@ -8,6 +8,9 @@
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
 //! its types keep. A client's TCP connection and its two pipes are `streams`'.
 //!
+//! A client's datagram sockets are `datagram`'s and the machine's `<host>.local` name is `name`'s:
+//! both read the lease and write none of it.
+//!
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
 //! either refuses is counted where it was refused and, where it is a log line, comes out of
@@ -29,7 +32,9 @@
 
 extern crate alloc;
 
+mod datagram;
 mod lease;
+mod name;
 mod streams;
 
 pub use streams::{FromClient, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
@@ -41,12 +46,14 @@ use toyos_dhcp::{AddressRequest, Client, HostName, Lease, Output};
 use toyos_net_shard::{Config, Shard};
 use toyos_net_wire::Instant;
 
+pub use datagram::{Datagram, DatagramId, Refused};
 use lease::{Report, Stack, Verified};
 
 toyos_net_wire::counters! {
     DhcpUnsent = "node.dhcp-unsent";
     AddressRefused = "node.address-refused";
     RouterRefused = "node.router-refused";
+    NameUnsent = "node.name-unsent";
 }
 
 /// A line for the log.
@@ -60,6 +67,8 @@ pub enum Event {
 pub struct Node {
     stack: Stack,
     client: Client,
+    /// The responder for the machine's name, once [`Self::answer_as`] started it.
+    name: Option<name::Name>,
     counters: Counters,
     events: Vec<Event>,
     /// Room for the largest message the client accepts.
@@ -77,6 +86,7 @@ impl Node {
         Ok(Self {
             stack,
             client,
+            name: None,
             counters: Counters::default(),
             events: Vec::new(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
@@ -138,7 +148,8 @@ impl Node {
     // ---- the clock ----
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(self.streams.next_deadline()).min()
+        let name = self.name.as_ref().and_then(name::Name::next_deadline);
+        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(name).chain(self.streams.next_deadline()).min()
     }
 
     /// Every deadline at or before `now`; the frames they make due wait for [`Self::transmit`].
@@ -152,7 +163,8 @@ impl Node {
     }
 
     /// Hands the client what the shard reported and what reached its socket, and carries out
-    /// what it answers, until neither has more.
+    /// what it answers, until neither has more; then the name is served, against the lease as
+    /// that left it.
     fn settle(&mut self, now: Instant, draw: &mut impl FnMut() -> u32) {
         loop {
             let (out, verified) = if let Some(report) = self.stack.report() {
@@ -168,10 +180,11 @@ impl Node {
             } else if let Some((payload, from)) = self.stack.recv(&mut self.datagram) {
                 (self.client.receive(now, payload, from, &mut *draw), None)
             } else {
-                return;
+                break;
             };
             self.carry_out(now, out, verified, draw);
         }
+        self.serve_name(now);
     }
 
     /// What one call of the client's asked for: the lease first, so a message leaves from the

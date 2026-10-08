@@ -52,8 +52,7 @@
 //!
 //! One `SysCap` duplicate carrying `Rights::LOG | Rights::WAIT`, which its
 //! manifest row asks for by the name `logread`; the origins acceptor and the
-//! writable console the supervisor endows it; and what its row adds — on a test estate a
-//! `netstack` connector to serve the network, and the `log` acceptor, where this
+//! writable console the supervisor endows it; and what its row adds — the `log` acceptor, where this
 //! machine's readers ask for the log and `inspect` asks where it is going
 //! ([`inspect`]'s module, which grants nothing). It claims no device and can
 //! name no process. Writing files is ambient — a known residual of the
@@ -92,7 +91,7 @@ use toyos::{Console, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
     ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, RESUME,
-    SERVICE, SWAP, SWAP_BACK, SWAP_LEAVING,
+    SERVICE,
 };
 use toyos_wallclock::Civil;
 
@@ -331,14 +330,6 @@ impl Log {
                         Some(stall) if stall.origin == name => stall.held.push((registration.pid, ring, alive)),
                         _ => self.take(registration.tag, registration.pid, ring, alive),
                     }
-                }
-                RxStep::Frame { msg_type: SWAP, payload_len } => {
-                    let word = match self.supervisor_rx.payload(payload_len) {
-                        [SWAP_LEAVING] => serve::Carrier::Leaving,
-                        [SWAP_BACK] => serve::Carrier::Back,
-                        other => panic!("logkeeper: the supervisor sent a swap word {other:?}"),
-                    };
-                    self.hub.carrier(word);
                 }
                 // **The flush runs before the next frame is read**: the supervisor sends
                 // RESUME when the stop it flushed for was refused, which can be

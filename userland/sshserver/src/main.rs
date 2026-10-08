@@ -38,16 +38,10 @@ fn host_key_path() -> String {
     format!("{}/host_ed25519", state())
 }
 
-/// The two files that name who may log in; a key in either authorizes.
-///
-/// **The second is why a freshly flashed machine can be reached at all.** A
-/// bench boot mints an identity into a `/state` that may be a tmpfs and starts
-/// with nothing in it, so a key that has to be *installed* before the first
-/// login is a key nobody can install. Neither file is protected from anything
-/// else on the machine — see
-/// `issues/sshserver-authorized-keys-unprotected.md`.
-fn authorized_keys() -> [String; 2] {
-    [format!("{}/authorized_keys", state()), "/system/etc/ssh_authorized_keys".to_string()]
+/// The file that names who may log in. It is protected from nothing else on
+/// the machine — see `issues/sshserver-authorized-keys-unprotected.md`.
+fn authorized_keys() -> String {
+    format!("{}/authorized_keys", state())
 }
 
 /// How long a program may take none of the input a client is sending before
@@ -117,54 +111,39 @@ fn authorizes(text: &str, offered: &PublicKey) -> bool {
         .any(|entry| entry.public_key().key_data() == offered.key_data())
 }
 
-/// Read fresh on every attempt, so a key added to a file takes effect without a
+/// Read fresh on every attempt, so a key added to the file takes effect without a
 /// restart — there is nothing here to send a reload signal to. An unreadable
 /// file names nobody, so every failure answers "not authorized".
 fn is_authorized(key: &PublicKey) -> bool {
-    authorized_keys()
-        .iter()
-        .any(|path| fs::read_to_string(path).is_ok_and(|text| authorizes(&text, key)))
+    fs::read_to_string(authorized_keys()).is_ok_and(|text| authorizes(&text, key))
 }
 
-/// What the files name, said once at startup so a key that will never work is
+/// What the file names, said once at startup so a key that will never work is
 /// visible before somebody tries it. `Err` means nobody can authenticate.
 fn authorized_key_count() -> Result<usize, String> {
-    let mut total = 0;
-    for path in authorized_keys() {
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) => {
-                println!("sshserver: cannot read {path} ({e})");
-                continue;
-            }
-        };
-        let (mut usable, mut restricted, mut unreadable) = (0, 0, 0);
-        for entry in AuthorizedKeys::new(&text) {
-            match entry {
-                Ok(entry) if entry.config_opts().is_empty() => usable += 1,
-                Ok(_) => restricted += 1,
-                Err(_) => unreadable += 1,
-            }
+    let path = authorized_keys();
+    let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {path} ({e})"))?;
+    let (mut usable, mut restricted, mut unreadable) = (0, 0, 0);
+    for entry in AuthorizedKeys::new(&text) {
+        match entry {
+            Ok(entry) if entry.config_opts().is_empty() => usable += 1,
+            Ok(_) => restricted += 1,
+            Err(_) => unreadable += 1,
         }
-        if restricted > 0 {
-            println!(
-                "sshserver: {restricted} entr(ies) in {path} carry options, which are not \
-                 implemented — those keys authorize nothing"
-            );
-        }
-        if unreadable > 0 {
-            println!("sshserver: {unreadable} line(s) in {path} are not public keys, ignored");
-        }
-        println!("sshserver: {usable} key(s) authorized by {path}");
-        total += usable;
     }
-    if total == 0 {
-        return Err(format!(
-            "no file names a usable key ({}); put a public key in one of them and start again",
-            authorized_keys().join(" or ")
-        ));
+    if restricted > 0 {
+        println!(
+            "sshserver: {restricted} entr(ies) in {path} carry options, which are not \
+             implemented — those keys authorize nothing"
+        );
     }
-    Ok(total)
+    if unreadable > 0 {
+        println!("sshserver: {unreadable} line(s) in {path} are not public keys, ignored");
+    }
+    if usable == 0 {
+        return Err(format!("{path} names no usable key; put a public key in it and start again"));
+    }
+    Ok(usable)
 }
 
 struct SshServer;

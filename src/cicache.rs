@@ -666,7 +666,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         fs::create_dir_all(tmp.join(DRIVER)).unwrap();
         open(&tmp, RUNNER, SystemTime::now()).expect("the driver's own target");
         start(&tmp, RUNNER).expect("the driver's own target");
-        for target in ["tests/ssh-client-host/target", "target/debug"] {
+        for target in ["tests/toyos-rust-tests/target", "target/debug"] {
             fs::create_dir_all(tmp.join(target)).unwrap();
             let refusals = [open(&tmp, RUNNER, SystemTime::now()).err(), start(&tmp, RUNNER).err()];
             assert!(refusals.iter().all(|r| r.as_ref().is_some_and(|r| r.contains(target))), "{refusals:?}");
@@ -685,9 +685,9 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let tmp = TempDir::new("cicache-seal");
         let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/deps/x", "x");
-        write(&tmp, "tests/ssh-client-host/target/y", "y");
+        write(&tmp, "tests/toyos-rust-tests/target/y", "y");
         seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
-        for file in ["target/debug/deps/x", "target/debug", "tests/ssh-client-host/target/y"] {
+        for file in ["target/debug/deps/x", "target/debug", "tests/toyos-rust-tests/target/y"] {
             assert_eq!(modified(&tmp.join(file)).unwrap(), built(), "{file}");
         }
         fs::remove_file(tmp.join(MANIFEST)).unwrap();
@@ -718,12 +718,12 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let tmp = TempDir::new("cicache-image");
             let cold = cold_repo(&tmp, &runner_in(&image).unwrap());
             write(&tmp, "target/debug/x", "x");
-            write(&tmp, "tests/ssh-client-host/target/y", "y");
+            write(&tmp, "tests/toyos-rust-tests/target/y", "y");
             seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
             let mut other = image.clone();
             other.insert(name, "another");
             let said = open(&tmp, &runner_in(&other).unwrap(), SystemTime::now()).unwrap();
-            assert!(!tmp.join("target/debug").exists() && !tmp.join("tests/ssh-client-host/target").exists(), "{name}: {said}");
+            assert!(!tmp.join("target/debug").exists() && !tmp.join("tests/toyos-rust-tests/target").exists(), "{name}: {said}");
             other.remove(name);
             let refusal = runner_in(&other).expect_err("a runner without a variable");
             assert!(refusal.contains(name), "{refusal}");
