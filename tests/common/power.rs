@@ -12,12 +12,9 @@ use super::serial;
 pub const SHUTTING_DOWN: &str = "Shutting down.";
 
 /// What the kernel logs once the `acpi` claim's holder has supplied the
-/// power-off's sleep type, ahead of the PM1a control block's port and the
-/// `SLP_TYPa` (`kernel/src/arch/x86_64/power.rs`).
-const S5_SUPPLIED: &str = "power: S5 is PM1a ";
-
-/// That line on q35, whole to the value: QEMU's PM1a control block, and the
-/// `SLP_TYPa` its DSDT's `\_S5` names, which is the one its ICH9 powers off on.
+/// power-off's sleep type (`kernel/src/arch/x86_64/power.rs`), whole to the
+/// value, on q35: QEMU's PM1a control block, and the `SLP_TYPa` its DSDT's
+/// `\_S5` names, which is the one its ICH9 powers off on.
 const Q35_S5_SUPPLIED: &str = "power: S5 is PM1a 0x604 with SLP_TYPa=0,";
 
 /// Wait for the boot's `last` word on a guest asked to end, then for QEMU to
@@ -555,6 +552,10 @@ const ACPI_TABLE: &str = "acpiserver: table ";
 /// What it says once the kernel has kept `\_S5`'s `SLP_TYPa`, ahead of it.
 const ACPI_S5_HANDED: &str = "acpiserver: \\_S5 handed to the kernel: ";
 
+/// What it says, at error severity, of a machine whose `\_S5` the kernel was
+/// not handed, and again of a press it drops there.
+pub const ACPI_NO_POWER_OFF: &str = "this machine has no power-off";
+
 /// The number after `SLP_TYPa=` on a line.
 fn slp_typ_a(line: &str) -> Result<u64, String> {
     line.split_once("SLP_TYPa=")
@@ -564,10 +565,12 @@ fn slp_typ_a(line: &str) -> Result<u64, String> {
 }
 
 /// The server loaded every definition block it found, the DSDT first, each
-/// said on a line in its place; and the `SLP_TYPa` its `\_S5` evaluates to
-/// is the one it handed the kernel and the kernel says it powers off with
-/// (`kernel`'s [`S5_SUPPLIED`] line). Answers how many blocks there were.
-pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Result<usize, String> {
+/// said on a line in its place; and the `SLP_TYPa` its `\_S5` evaluates to,
+/// which it handed the kernel, and the PM1a control block the kernel says it
+/// powers off on with it, are the ones `supplied` holds for this machine: the
+/// kernel's line whole to the value, read some way that is not this server's
+/// evaluation. Answers how many blocks there were.
+pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial, supplied: &str) -> Result<usize, String> {
     let said: Vec<&str> = log.text().lines().filter_map(|line| line.split_once(ACPI_TABLE).map(|(_, said)| said.trim())).collect();
     let Some(count) = said.first().and_then(|first| first.split_once(" of ")?.1.split_once(' ')?.0.parse::<usize>().ok()) else {
         return Err(format!("the server said nothing of a first table ({said:?}):\n{}", log.text()));
@@ -577,11 +580,11 @@ pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Resu
     if said != expected {
         return Err(format!("the server's tables are {said:#?}, where {count} loaded ones are {expected:#?}"));
     }
-    let (handed, supplied) = (log.must_say(ACPI_S5_HANDED)?, kernel.must_say(S5_SUPPLIED)?);
+    let (handed, kept) = (log.must_say(ACPI_S5_HANDED)?, kernel.must_say(supplied)?);
     if slp_typ_a(handed)? != slp_typ_a(supplied)? {
-        return Err(format!("the server's \\_S5 is not what the kernel powers off with: {:?} beside {:?}", handed.trim(), supplied.trim()));
+        return Err(format!("the server's \\_S5 is not this machine's: {:?} beside {supplied:?}", handed.trim()));
     }
-    eprintln!("  [power] {count} table(s) loaded; {} beside {}", handed.trim(), supplied.trim());
+    eprintln!("  [power] {count} table(s) loaded; {} beside {}", handed.trim(), kept.trim());
     Ok(count)
 }
 
@@ -618,8 +621,7 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     }
     after.must_be_clean()?;
     let whole = serial::Serial::named("the boot and the press", console);
-    acpi_tables_loaded(&whole, &whole)?;
-    whole.must_say(Q35_S5_SUPPLIED)?;
+    acpi_tables_loaded(&whole, &whole, Q35_S5_SUPPLIED)?;
     whole.must_say_after(ACPI_S5_HANDED, ACPI_PRESSED)?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())

@@ -2139,7 +2139,8 @@ pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
 
 /// Supply the `SLP_TYPa` of the machine's `\_S5` for the kernel's power-off
 /// ([`crate::acpi::op::S5`]). One wider than the register's three bits is
-/// refused [`SyscallError::InvalidArgument`], and nothing is kept of it.
+/// refused [`SyscallError::InvalidArgument`] and a second under one claim
+/// [`SyscallError::AlreadyExists`], and nothing is kept of either.
 pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
 }

@@ -50,8 +50,8 @@
 //! taken; one whose FACS this kernel refuses has a lock nothing here can
 //! take, and every take is refused ([`GlobalLock`]).
 //!
-//! **The power-off's sleep type is the holder's to supply** ([`s5`]): `\_S5`
-//! is AML, and this kernel reads none.
+//! **The power-off's sleep type is the holder's to supply** ([`s5`]), once
+//! under a claim: `\_S5` is AML, and this kernel reads none.
 //!
 //! **Nothing is done for the holder once the stop has begun**, as nothing is
 //! written to `SMI_CMD`: an access, a lock exchange and a sleep type taken are each made under
@@ -146,12 +146,14 @@ struct Holder {
     claimed: bool,
     /// The holder took the Global Lock and has not given it back.
     locked: bool,
+    /// The holder supplied the power-off's sleep type: it supplies no second.
+    supplied: bool,
 }
 
 /// Held across everything this kernel does for the claim's holder, from the
 /// decision to the last instruction of the act: each mediated access, and
 /// each change of the lock word.
-static HOLDER: Lock<Holder> = Lock::new(Holder { claimed: false, locked: false });
+static HOLDER: Lock<Holder> = Lock::new(Holder { claimed: false, locked: false, supplied: false });
 
 /// The right to act for the claim's holder, held across the act; none once
 /// the claim is gone or the stop has begun. A claim that exists is the one
@@ -413,6 +415,7 @@ pub fn release(row: usize) {
     {
         let mut holder = HOLDER.lock();
         holder.claimed = false;
+        holder.supplied = false;
         give_back(hardware, &mut holder, "its claim is gone");
     }
     if ENABLED.load(Ordering::Relaxed) {
@@ -549,10 +552,15 @@ pub fn lock_release() -> Result<(), SyscallError> {
 
 /// Take the `SLP_TYPa` of the machine's `\_S5` from the claim's holder, for
 /// the power-off (`power::supply`): `InvalidArgument` is a word wider than
-/// the register's field, of which nothing is kept.
+/// the register's field, and `AlreadyExists` a second one under this claim;
+/// nothing is kept of either.
 pub fn s5(word: u64) -> Result<(), SyscallError> {
     let slp_typ = firmware::sleep_type(word).ok_or(SyscallError::InvalidArgument)?;
-    let _acting = acting()?;
+    let mut holder = acting()?;
+    if holder.supplied {
+        return Err(SyscallError::AlreadyExists);
+    }
+    holder.supplied = true;
     super::power::supply(slp_typ);
     Ok(())
 }

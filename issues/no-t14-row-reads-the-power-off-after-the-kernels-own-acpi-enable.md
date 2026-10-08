@@ -58,11 +58,12 @@ and the job's claim: `tests/acpicase` still runs its job list unprompted.
 Owned by the stage "the interpreter" of
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose
 deletion of the ECDT stopgap is what lets a machine with no embedded
-controller be put in ACPI mode by the kernel. The orchestrator's placement,
-not the owner's; moved there from the power-off's slice, which found the
-refusal.
+controller be put in ACPI mode by the kernel. Moving it there is the
+placement of the power-off's slice, which found the refusal; it passed that
+slice's review and is not the owner's.
 
-**Exit** (the orchestrator's placement, not the owner's): once the ECDT
+**Exit** (the orchestrator's placement, not the owner's; that it waits on the
+stopgap's deletion and on a job that waits to be asked is that slice's): once the ECDT
 stopgap is deleted, a QEMU guest test whose harness clears `SCI_EN` through
 the monitor before the claim is minted, on a boot whose job waits to be
 asked, so that the kernel writes `ACPI_ENABLE` itself, ends in ToyOS's

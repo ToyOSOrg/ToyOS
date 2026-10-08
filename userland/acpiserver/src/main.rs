@@ -52,7 +52,7 @@ use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
 use host::{Answer, Kernel, Stopping, Take};
-use sci::{Event, Served, Unserved, PM1_STATUS, PWRBTN};
+use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -254,11 +254,10 @@ impl Server {
     /// power-off, which the load said and this says again.
     fn press(&mut self) {
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
-        match power::stop(Stop::Shutdown) {
-            power::Refused::Kernel(SyscallError::NotSupported) if !self.power_off => {
-                toyos::error!("acpiserver: the press is dropped: {}", aml::NO_POWER_OFF.trim_start_matches("acpiserver: "));
-            }
-            refused => panic!("acpiserver: the power-off was refused: {refused:?}"),
+        let refused = power::stop(Stop::Shutdown);
+        match sci::unstopped(refused, self.power_off) {
+            Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_POWER_OFF.trim_start_matches("acpiserver: ")),
+            Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
         }
     }
 

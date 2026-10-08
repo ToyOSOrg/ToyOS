@@ -254,22 +254,50 @@ mediated access, leaves open:
   kernel has `\_S5`'s sleep type only once the load has handed it over, and
   until then refuses `SYS_SHUTDOWN` by name, stopping nothing
   (`kernel/src/arch/x86_64/power.rs`); the asker is told and may ask again.
-  Owner: this stage. **Exit**: the slice that keeps the namespace serves the
-  SCI while a table loads, or the `acpi_tables_loaded` row holds the load's
-  time on the T14 under a bound the owner names; that bound is the refusal's
-  too.
+  Owner: this stage. **Exit**, of the press's wait: the slice that keeps the
+  namespace serves the SCI while a table loads. The refusal has no exit and
+  stays: `\_S5` is evaluated in a namespace the load has built, so no
+  power-off is made before the load ends, and what bounds the refusal is the
+  load's time. That time is held on the T14 once the `acpi_tables_loaded` row
+  reads it under a bound the owner names.
 - **A machine with no holder of the `acpi` claim has no power-off.** The
   kernel reads no AML, so a machine whose claim it refuses, one in legacy
-  mode with no ECDT or with a control-method power button, and a boot whose
-  config starts no server, has nobody to evaluate `\_S5`: `SYS_SHUTDOWN` is
-  refused there, where the kernel's own scan of the DSDT powered such a
-  machine off before. So is a machine whose DSDT the server refuses, which
-  the server says at error severity and goes on serving (the owner's "Go on,
-  say it loudly"). Neither the T14 nor q35 is one: the T14 has an ECDT and a
-  fixed button, and OVMF hands q35 over in ACPI mode. Owner: this stage.
-  **Exit**: the ECDT stopgap is deleted, so a machine is claimed for what its
-  DSDT names; what a machine with a control-method button does for a
-  power-off is ruled with that button's device.
+  mode with no ECDT or with a control-method power button, has nobody to
+  evaluate `\_S5`: `SYS_SHUTDOWN` is refused there, where the kernel's own
+  scan of the DSDT powered such a machine off before. Neither the T14 nor q35
+  is one: the T14 has an ECDT and a fixed button, and OVMF hands q35 over in
+  ACPI mode. Owner: this stage. **Exit**: the ECDT stopgap is deleted, so a
+  machine is claimed for what its DSDT names; what a machine with a
+  control-method button does for a power-off is ruled with that button's
+  device.
+
+  Two more machines have no power-off, and that is the ruled state and no
+  weakness with an exit. A boot whose config starts no server: "Power-off
+  always goes through the ACPI server" is the owner's "Yes, one path". A
+  machine whose DSDT the server refuses: the owner's "Go on, say it loudly"
+  (2026-10-07) was given for a refused table, and the option it chose, as
+  the orchestrator's record of the session holds it, logs a refused SSDT and
+  carries on, and after a refused DSDT still serves the button and offers no
+  power-off. That the server says the same, once and at error severity, of a
+  machine whose tables it could not read at all or whose `\_S5` is no
+  package of two integers or names a value the register does not hold, and
+  that a press on any of them is said and dropped, is the slice's design and
+  not his ruling.
+- **The claim's holder chooses the sleep type a power-off enters.** The
+  kernel writes to `PM1a_CNT` the `SLP_TYPa` the holder supplied
+  (`acpi_mode::s5`), and has nothing of its own to hold it against. So a
+  holder that is wrong or hostile decides which of the field's eight values a
+  power-off asked by a holder of `POWER` writes: S1, S3 or S4 where the
+  chipset maps them, or a value it maps to nothing, which is the kernel's
+  `S5 did not take` panic two seconds after the write. Before, only the
+  firmware's bytes chose. The holder cannot cause the write, set `SLP_EN` or
+  reach a bit outside 12:10 (`toyos_userbound::firmware::SleepType`), and
+  supplies one value under a claim. What it supplied outlives it, so a
+  machine whose server died still powers off: the slice's choice, which the
+  owner may overrule for a value withdrawn with its claim. Owner: this
+  stage. **Exit**: it stays while "one path" stands, which leaves the kernel
+  no second reading; it goes when the owner rules one in, and a guest test
+  then supplies a sleep type that is not the machine's and reads it refused.
 
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI

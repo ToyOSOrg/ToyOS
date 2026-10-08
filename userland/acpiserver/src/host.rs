@@ -67,8 +67,9 @@ pub trait Kernel {
     fn access(&self, access: Access) -> Result<Answer, Stopping>;
     fn lock_take(&self) -> Result<Take, Stopping>;
     fn lock_release(&self) -> Result<(), Stopping>;
-    /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off: `false` where
-    /// it is wider than the register's field, and the kernel kept nothing.
+    /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
+    /// once under a claim: `false` where it is wider than the register's
+    /// field, and the kernel kept nothing.
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
 }
 
@@ -368,7 +369,7 @@ pub mod tests {
             if slp_typ_a > 7 {
                 return Ok(false);
             }
-            self.handed.set(Some(slp_typ_a));
+            assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
             Ok(true)
         }
     }

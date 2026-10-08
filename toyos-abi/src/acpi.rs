@@ -91,7 +91,8 @@ pub mod op {
     pub const LOCK_RELEASE: u64 = 2;
     /// Supply the `SLP_TYPa` the machine's `\_S5` evaluates to (ACPI 6.5
     /// §7.4.2), in the call's third word: what the kernel writes to PM1a
-    /// control to power the machine off, kept for the machine's life.
+    /// control to power the machine off. Once under a claim, and kept until
+    /// the next claim's holder supplies its own.
     pub const S5: u64 = 3;
 
     pub const TAKEN: u64 = 0;

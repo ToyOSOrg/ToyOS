@@ -11,19 +11,24 @@
 //! machine whose firmware is not using it can take. Each address is found as
 //! a holder finds it, from the RSDP the claim's description names.
 //!
-//! First a child is handed the claim, takes the lock and exits with it: the
-//! claim binds to one process for that process's life, so the parent claims
-//! only after, and reads the lock word free.
+//! The power-off is the kernel's with the sleep type a holder supplies, once
+//! under its claim. On this boot nothing has, so first a shutdown is refused
+//! and the machine goes on.
 //!
-//! Then the power-off, which is the kernel's with the sleep type a holder
-//! supplies: on this boot nothing has, so a shutdown is refused and the
-//! machine goes on; a word the register's field does not hold is refused and
-//! changes nothing; and this guest's own is kept.
+//! Then a child is handed the claim, supplies a sleep type this guest does
+//! not power off on, is refused a second, takes the lock and exits with it:
+//! the claim binds to one process for that process's life, so the parent
+//! claims only after, and reads the lock word free.
+//!
+//! The parent, the next holder, is refused a word the register's field does
+//! not hold, supplies this guest's own over the child's, and is refused a
+//! second in its turn.
 //!
 //! Last it takes the lock once more and asks for the power-off holding it: a
 //! stop ends no process, so the kernel finds a live holder's lock taken and
 //! gives it back before the power-off owns the hardware, which
-//! `acpi_mediated_access` reads in the kernel's own line.
+//! `acpi_mediated_access` reads in the kernel's own line; and the guest
+//! powers off, which it does on the parent's sleep type and not the child's.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -115,6 +120,13 @@ fn bind(claim: &Device) -> AcpiInfo {
 
 fn probe() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
+
+    // No server ran on this boot, and nothing has held the claim.
+    assert_eq!(
+        toyos::power::stop(toyos::power::Stop::Shutdown),
+        toyos::power::Refused::Kernel(SyscallError::NotSupported),
+        "acpi: a power-off with no sleep type supplied"
+    );
 
     // A holder that dies with the lock: the kernel gives it back with the claim.
     let kept = Command::new(SELF_PATH)
@@ -392,18 +404,21 @@ fn lock(holder: &Holder, info: &AcpiInfo) {
 /// off on it.
 const Q35_SLP_TYP_A: u64 = 0;
 
+/// A sleep type the register holds and QEMU's ICH9 does nothing on: a
+/// power-off that entered it would still be running.
+const NO_SLEEP_OF_Q35S: u64 = 5;
+
 fn sleep_type(holder: &Holder) {
-    let stop = || toyos::power::stop(toyos::power::Stop::Shutdown);
-    let unsupplied = toyos::power::Refused::Kernel(SyscallError::NotSupported);
-    // No server ran on this boot, and the unbound claim's word above was not kept.
-    assert_eq!(stop(), unsupplied, "acpi: a power-off with no sleep type supplied");
     // `SLP_TYPx` is three bits (Table 4.16): bit 3 would land on `SLP_EN`.
     for wide in [8u64, 0x100, 1 << 32 | 5, u64::MAX] {
         assert_eq!(syscall::acpi_s5(holder.handle(), wide), Err(SyscallError::InvalidArgument), "acpi: {wide:#x} as a sleep type");
     }
-    assert_eq!(stop(), unsupplied, "acpi: a refused sleep type was kept");
+    // The keeper's went with its claim, so this holder supplies its own.
     assert_eq!(syscall::acpi_s5(holder.handle(), Q35_SLP_TYP_A), Ok(()));
-    println!("acpi: the power-off was refused NotSupported until a sleep type was supplied, and a sleep type wider than three bits InvalidArgument");
+    for second in [NO_SLEEP_OF_Q35S, Q35_SLP_TYP_A] {
+        assert_eq!(syscall::acpi_s5(holder.handle(), second), Err(SyscallError::AlreadyExists), "acpi: a second sleep type under one claim");
+    }
+    println!("acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists");
 }
 
 /// What the keeper says once it holds the lock.
@@ -412,6 +427,8 @@ const KEPT: &str = "keeper: holding the Global Lock, and leaving with it";
 fn keeper() {
     let claim: Device = Endowments::get().take(CLAIM_LABEL).expect("acpi: the keeper is endowed the claim");
     bind(&claim);
+    assert_eq!(syscall::acpi_s5(claim.as_handle(), NO_SLEEP_OF_Q35S), Ok(()), "keeper: a sleep type");
+    assert_eq!(syscall::acpi_s5(claim.as_handle(), Q35_SLP_TYP_A), Err(SyscallError::AlreadyExists), "keeper: a second sleep type");
     assert_eq!(syscall::acpi_lock_take(claim.as_handle()), Ok(true), "keeper: the lock");
     println!("{KEPT}");
 }
