@@ -61,11 +61,12 @@ impl Entry {
     }
 }
 
-/// One past the highest address an image may claim: the user half less its
-/// last page. An instruction that ends at [`USER_TOP`] leaves that address, no
-/// canonical one, as where a syscall or an interrupt taken after it returns
-/// to, so nothing executable is placed where one could end there.
-const IMAGE_TOP: u64 = USER_TOP - PAGE_2M;
+/// One past the highest address the kernel places anything at, an image or a
+/// [`Window`](crate::Window)'s range: the user half less its last page. An
+/// instruction that ends at [`USER_TOP`] leaves that address, no canonical
+/// one, as where a syscall or an interrupt taken after it returns to, so
+/// nothing executable is placed where one could end there.
+pub(crate) const PLACED_TOP: u64 = USER_TOP - PAGE_2M;
 
 /// Whether `[ptr, ptr + len)` is entirely in the user half.
 ///
@@ -81,13 +82,13 @@ pub fn in_user_half(ptr: u64, len: u64) -> bool {
 
 /// The load base an `ET_DYN` image rebases to `vm_base` (`vm_base - vaddr_min`),
 /// or `None` when it cannot: a `vaddr_min` above `vm_base` underflows the
-/// subtraction, and a `span` reaching from `vm_base` past [`IMAGE_TOP`] does not
+/// subtraction, and a `span` reaching from `vm_base` past [`PLACED_TOP`] does not
 /// fit. The ELF spec leaves an `ET_DYN` `p_vaddr` unconstrained, so the kernel
 /// that picks `vm_base` is the only place that can refuse one.
 pub fn rebase_base(vm_base: u64, vaddr_min: u64, span: u64) -> Option<u64> {
     let base = vm_base.checked_sub(vaddr_min)?;
     let end = vm_base.checked_add(span)?;
-    (end <= IMAGE_TOP).then_some(base)
+    (end <= PLACED_TOP).then_some(base)
 }
 
 /// Whether the kernel may read or write a `size`-byte value of alignment
@@ -227,8 +228,8 @@ mod tests {
 
     #[test]
     fn an_image_that_reaches_the_last_page_of_the_user_half_is_refused() {
-        assert_eq!(rebase_base(USER_VM_BASE, 0, IMAGE_TOP - USER_VM_BASE), Some(USER_VM_BASE));
-        assert_eq!(rebase_base(USER_VM_BASE, 0, IMAGE_TOP - USER_VM_BASE + 1), None);
+        assert_eq!(rebase_base(USER_VM_BASE, 0, PLACED_TOP - USER_VM_BASE), Some(USER_VM_BASE));
+        assert_eq!(rebase_base(USER_VM_BASE, 0, PLACED_TOP - USER_VM_BASE + 1), None);
         assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE), None);
         assert_eq!(rebase_base(USER_VM_BASE, 0, u64::MAX), None);
         assert_eq!(rebase_base(u64::MAX, 0, 1), None);

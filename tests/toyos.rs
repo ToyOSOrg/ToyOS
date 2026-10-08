@@ -68,9 +68,6 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
-    // It asks for a thread at an entry no CPU can return to: `thread_entry_noncanonical`
-    // runs it on a boot of its own, since a kernel that takes the entry takes the machine.
-    "spawn_noncanonical_entry",
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
@@ -248,9 +245,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
-    // The return to a thread's entry is the CPU's own instruction: no host test
-    // executes it, and the T14's rows share their boot with what it would take down.
-    "thread_entry_noncanonical",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -2717,21 +2711,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
-        "thread_entry_noncanonical" => {
-            let name = "spawn_noncanonical_entry";
-            let tests = compile::repo_root().join("tests/toyos-rust-tests");
-            let bin = (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, name));
-            let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[bin], BootOptions::default());
-            let result = qemu.run_test(&format!("test_rs_{name}"), Duration::from_secs(60));
-            match (result.exit_code, &result.error) {
-                (Some(0), None) => Ok(()),
-                (code, error) => Err(format!(
-                    "exit {code:?}: {}\n{}",
-                    error.as_ref().map_or(String::new(), ToString::to_string),
-                    result.stdout
-                )),
-            }
-        }
         "acpi_power_button" => power::acpi_power_button(test_config),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         other => Err(format!("unknown machine test {other}")),
