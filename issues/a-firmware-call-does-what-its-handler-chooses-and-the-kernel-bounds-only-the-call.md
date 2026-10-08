@@ -70,10 +70,13 @@ guest's call runs a handler:
   asker on another CPU that ran meanwhile, at 5 s from the take; and
   `smi_cmd: the firmware held the boot processor ..ns in its handler` from
   the boot processor itself once the write retires, which is the one that
-  speaks where the asker was the boot processor or the interrupt stopped the
-  asker too. So a handler that returns after 5 s still ends the machine: the
-  kernel gives up no CPU for that long, as it gives up none to a TLB
-  shootdown.
+  speaks where the asker was the boot processor. Where the interrupt stopped
+  an asker on another CPU too, either may speak: the asker resumes with the
+  clock past the span and the round not yet published, and may panic first
+  with "has not returned" of a handler that has. Either message names the
+  firmware and the byte. So a handler that returns after 5 s still ends the
+  machine: the kernel gives up no CPU for that long, as it gives up none to
+  a TLB shootdown.
 - **The hard-lockup bound, on an image that names a boot deadline**
   (`kernel/src/hardlockup/mod.rs`; half the deadline). Its sample is an NMI,
   delivered to the boot processor when the handler returns and before the
@@ -119,4 +122,9 @@ beside `issues/the-acpi-servers-holder-drives-the-embedded-controller-unfiltered
 to the port, checked by something other than the holder, or the owner rules
 the bound above is the one ToyOS keeps; and the rate is held against the
 calls a T14 row reads the machine's own AML making, with the time each held
-the boot processor.
+the boot processor; and the span is ruled. The slice that passes the first
+write its AML asks for to the kernel reads on the T14 the time each call its
+AML makes holds cpu0, and the owner rules, against those readings, whether a
+handler that returns after `DEAF_CPU` ends the machine. Where the interrupt
+stops every CPU the kernel such a handler returns to is whole, so the panic
+there is this kernel's choice. That slice does not land without the ruling.

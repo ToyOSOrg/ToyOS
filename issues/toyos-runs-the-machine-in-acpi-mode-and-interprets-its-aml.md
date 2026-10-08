@@ -105,8 +105,9 @@ fixed event that needs no AML, and takes the EC's events. **Exit**: QEMU's
 cleanly, through ToyOS's own power-off path (`SYS_SHUTDOWN`), with the press
 and that stop in the boot's log. On the T14, `counters` reads
 `MSR_SMI_COUNT`, through the general counters and not by a check of its own,
-flat on every CPU over the interval the firmware issue's exit defines, and the
-machine still in ACPI mode; `acpi_server_events` reads each EC query number
+and holds the count to what ToyOS asked for over the interval the firmware
+issue's exit defines, every CPU's delta equal to the boot processor's
+`firmware_calls` delta, and the machine still in ACPI mode; `acpi_server_events` reads each EC query number
 once with its count; and `acpi_server_death` kills the server and reads
 `SCI_EN` clear in `PM1_CNT` afterwards, the kernel having written
 `ACPI_DISABLE` to `SMI_CMD`.
