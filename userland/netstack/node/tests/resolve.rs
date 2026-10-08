@@ -684,6 +684,11 @@ fn a_query_the_network_reports_unreachable_is_counted_and_waited_out() {
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::TimedOut))));
     assert_eq!(net.ms(), rounds * WAIT_MS);
     assert!(net.queried.is_empty(), "the premise: no query reached the wire: {:?}", net.queried);
+    // The first two queries wait in [ip] until the neighbour fails, at three of its requests;
+    // the third leaves after that and is refused at once, because [ip] holds a failed neighbour
+    // down for longer than the second it would take to be asked again.
+    let refused_at_once = net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbFailedRefused);
+    assert_eq!(refused_at_once, 1, "the premise: [ip] refused one query on a failed neighbour");
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), rounds);
     assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 0);
 }
@@ -715,7 +720,10 @@ fn naming(resolver: Ipv4Addr) -> Vec<(u8, Vec<u8>)> {
 #[test]
 fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
     let (mut net, id, renewal) = renewing_under_a_lookup();
+    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let before = expiry(&net);
     net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(ANSWERS))));
+    assert_ne!(expiry(&net), before, "the premise: the renewal was taken, and the lease runs from it");
     assert_eq!(net.lan.node.take_resolved(), NONE);
     let asked = net.queried[0].clone();
     net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
