@@ -125,6 +125,28 @@ impl Card {
         snap.put("errors.crc", wire.crc_errors);
     }
 
+    /// How many frames the card takes now. [`Self::tx`] is for a caller this
+    /// answered: a card with no room is not offered a frame.
+    pub fn tx_room(&self) -> usize {
+        match self {
+            Self::Virtio(nic) => nic.tx_room(),
+            Self::Intel(nic) => nic.tx_room(),
+        }
+    }
+
+    /// Have the claim read ready when room returns, and answer the room there
+    /// is once that is so: a caller answered 0 has nothing to do before the
+    /// claim wakes it.
+    ///
+    /// virtio is asked nothing: its every finished transmit interrupts
+    /// (`VirtioNet::tx_room`).
+    pub fn wake_on_room(&self) -> usize {
+        match self {
+            Self::Virtio(nic) => nic.tx_room(),
+            Self::Intel(nic) => nic.wake_on_room(),
+        }
+    }
+
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         match self {
             Self::Virtio(nic) => nic.tx(len, fill),
@@ -133,7 +155,7 @@ impl Card {
     }
 
     /// Say what the driver counted, once a pass and after every frame the pass
-    /// sent: a line per dropped frame is itself more frames to send.
+    /// sent: a line per refused descriptor is itself more frames to send.
     pub fn report(&self) {
         match self {
             Self::Virtio(nic) => nic.report(),

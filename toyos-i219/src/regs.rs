@@ -381,6 +381,15 @@ pub mod cause {
     /// when every cause has.
     pub const INT_ASSERTED: u32 = 1 << 31;
 
+    /// A transmit descriptor written back, under both of §10.2.4.1's names for
+    /// it: `TXDW`, and the `TXQ0` §10.2.4.9's `IVAR` gives a vector, which is
+    /// the only one of the two a part in MSI-X mode raises anything for.
+    /// §7.2.4.2: the write-back is of a descriptor that carried `RS`, which
+    /// every one this driver publishes does, and with `IDE` clear no timer
+    /// holds the cause back. **Not in [`ENABLED`]**: it is unmasked while a
+    /// caller waits on a full transmit ring, and never otherwise.
+    pub const TX_DONE: u32 = TXDW | TXQ0;
+
     /// What §4.6.5 tells a driver to unmask: "Suggested bits include RXT, RXO,
     /// RXDMT and LSC. There is no reason to enable the transmit interrupts."
     pub const ENABLED: u32 = RXT0 | RXO | RXDMT0 | LSC;

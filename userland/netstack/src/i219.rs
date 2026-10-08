@@ -141,10 +141,6 @@ pub struct Nic {
     claim: Rc<PciDev>,
     /// netstack's view of the same grant: the frame payloads, and nothing else.
     frames: Window,
-    /// Where a dropped frame is written. Ordinary memory outside the grant, so
-    /// no device can reach it: smoltcp's token has to be given somewhere to put
-    /// its bytes even when there is no descriptor to send them on.
-    dropped: RefCell<Vec<u8>>,
     mac: [u8; 6],
     part: toyos_i219::Part,
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
@@ -257,7 +253,6 @@ impl Nic {
             driver: RefCell::new(driver),
             claim: dev,
             frames,
-            dropped: RefCell::new(vec![0; toyos_i219::TX_BUF_BYTES]),
             mac,
             part,
             reported: Latch::default(),
@@ -321,21 +316,27 @@ impl Nic {
         self.driver.borrow_mut().rx_done(frame);
     }
 
+    /// How many frames the transmit ring takes now.
+    pub fn tx_room(&self) -> usize {
+        self.driver.borrow_mut().tx_room()
+    }
+
+    /// Have the part interrupt when a transmit descriptor comes back, and
+    /// answer the room there is once it has been told to.
+    pub fn wake_on_room(&self) -> usize {
+        self.driver.borrow_mut().wake_on_room()
+    }
+
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the
     /// device.
     ///
-    /// Non-blocking. A frame the driver has no slot for is written into the
-    /// scratch buffer and dropped — **a server never blocks**, smoltcp's token
-    /// cannot say no, and a dropped frame's recovery is the peer's retransmit.
+    /// Non-blocking, and for a caller [`Self::tx_room`] answered: a frame the
+    /// driver has no slot for is a caller that did not ask, or one that offered
+    /// more than a buffer holds.
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
-        let slot = self.driver.borrow_mut().tx_reserve(len);
-        let Some(slot) = slot else {
-            let mut scratch = self.dropped.borrow_mut();
-            if scratch.len() < len {
-                scratch.resize(len, 0);
-            }
-            return fill(&mut scratch[..len]);
-        };
+        let slot = self.driver.borrow_mut().tx_reserve(len).unwrap_or_else(|| {
+            panic!("netstack: a {len}-byte frame was offered to a transmit ring that refuses it")
+        });
         let window = self.frames.sub(slot.at, len);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device is not reading it, because this descriptor is out
@@ -346,10 +347,10 @@ impl Nic {
         result
     }
 
-    /// Say what this driver has refused, dropped or been told about, and what
-    /// the link is doing — when either has moved. Once a pass, never per frame:
-    /// a burst of drops is one line, where a line per drop is more frames for a
-    /// served log to send through the ring that is already full.
+    /// Say what this driver has refused or been told about, and what the link
+    /// is doing — when either has moved. Once a pass, never per frame: a burst
+    /// of refusals is one line, where a line each is more frames for a served
+    /// log to send.
     ///
     /// Keyed on the anomalies and never on the spurious count: that one moves
     /// on its own.
@@ -379,16 +380,13 @@ impl Nic {
             crate::say!(
                 "netstack: I219: refused {} over-length, {} errored, {} split and {} empty \
                  descriptor(s); {} overrun(s), {} descriptor-starvation report(s), \
-                 {} frame(s) too long for a transmit buffer, {} frame(s) dropped with no \
-                 transmit descriptor free, {} spurious interrupt(s)",
+                 {} spurious interrupt(s)",
                 counters.over_length,
                 counters.errored,
                 counters.split,
                 counters.empty,
                 counters.overruns,
                 counters.starved,
-                counters.too_long,
-                counters.tx_dropped,
                 counters.spurious,
             );
         }

@@ -31,6 +31,13 @@
 //! interrupt record. On the host they are `stub.rs`, which is the datasheet
 //! written down.
 //!
+//! # A frame is offered only to a ring with room for it
+//!
+//! [`I219::tx_room`] is asked before there is a frame, and a caller answered
+//! none sleeps on its claim once [`I219::wake_on_room`] has unmasked the one
+//! cause that says a descriptor came back. Nothing here drops a frame for want
+//! of a descriptor, and nothing waits on the part.
+//!
 //! # The device is not trusted
 //!
 //! Every number in a written-back descriptor is the device's, and this driver
@@ -166,8 +173,9 @@ pub trait Interrupts {
 /// multiple of 128", so the count is a multiple of eight.
 pub const RX_RING: usize = 256;
 /// How many transmit descriptors the ring holds. A frame is handed to the
-/// device the moment it is filled and reclaimed on the next send, so what this
-/// bounds is how many may be in flight at once.
+/// device the moment it is filled and reclaimed when room is next asked for,
+/// so what this bounds is how many may be in flight at once: one fewer than
+/// this, [`I219::tx_room`]'s most.
 pub const TX_RING: usize = 16;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
@@ -401,10 +409,6 @@ pub struct Counters {
     pub starved: u32,
     /// Frames the caller offered that no transmit buffer holds.
     pub too_long: u32,
-    /// Frames dropped for want of a free transmit descriptor. A count and not
-    /// a wait: a server never blocks, and a dropped frame's recovery is the
-    /// peer's retransmit.
-    pub tx_dropped: u32,
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
@@ -713,6 +717,9 @@ pub struct I219<R: Registers, C, D, I> {
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
+    /// Whether [`cause::TX_DONE`] is unmasked: a caller found the ring full
+    /// and no pass has begun since.
+    tx_wake: bool,
     counters: Counters,
     /// What [`Self::wire`] has read out of the statistics registers so far.
     wire: Wire,
@@ -844,6 +851,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             rx_budget: RX_BUDGET,
             tx_next: 0,
             tx_clean: 0,
+            tx_wake: false,
             counters: Counters::default(),
             wire: Wire::default(),
         };
@@ -1026,6 +1034,15 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             Err(why) => return Err(why),
         };
 
+        // §10.2.4.6: the transmit cause is masked again, because it was wanted
+        // for one wake and left unmasked it is a message for every frame sent.
+        // Before the room this pass's sends ask for: a ring still full arms it
+        // again in [`Self::wake_on_room`].
+        if self.tx_wake {
+            self.regs.write(regs::IMC, cause::TX_DONE);
+            self.tx_wake = false;
+        }
+
         // Once, and written back. §10.2.4.1's case 3 says a read with no
         // interrupt asserted has no side effect at all, so a driver that
         // treated the read as the acknowledgement would see the same causes
@@ -1169,25 +1186,51 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.regs.write(regs::RDT, tail as u32);
     }
 
-    /// Take a transmit descriptor and its buffer, or `None` where every one is
-    /// in flight or the frame does not fit one.
+    /// How many frames the transmit ring takes now, every descriptor the part
+    /// has written back taken first.
     ///
-    /// Non-blocking by construction. A caller with no slot drops the frame:
-    /// spinning on the ring here would park its whole event loop on a device.
+    /// §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
+    /// descriptor would wrap the tail onto the head and read as empty — one
+    /// descriptor is never handed out, and a full ring is [`TX_RING`]` - 1` in
+    /// flight.
+    pub fn tx_room(&mut self) -> usize {
+        self.reclaim_tx();
+        (self.tx_clean + TX_RING - 1 - self.tx_next) % TX_RING
+    }
+
+    /// Ask for a message when the part next writes a transmit descriptor
+    /// back, and answer the room there is now that it has been asked.
+    ///
+    /// §10.2.4.5: a write of [`cause::TX_DONE`] to `IMS` unmasks it, and it
+    /// stays unmasked until the next [`Self::begin_pass`].
+    ///
+    /// **Unmasked first and counted after**, so no write-back is lost between
+    /// the two: one that landed before the mask was written raised nothing and
+    /// is in the count, and one that lands after it is a message. A caller
+    /// answered 0 waits on its claim.
+    pub fn wake_on_room(&mut self) -> usize {
+        if !self.tx_wake {
+            self.regs.write(regs::IMS, cause::TX_DONE);
+            self.tx_wake = true;
+        }
+        self.tx_room()
+    }
+
+    /// Take a transmit descriptor and its buffer, or `None` where the ring has
+    /// no room ([`Self::tx_room`]) or the frame does not fit a buffer.
+    ///
+    /// Non-blocking by construction: a caller asks for room before it has a
+    /// frame, and waits on [`Self::wake_on_room`] where there is none.
     pub fn tx_reserve(&mut self, len: usize) -> Option<TxSlot> {
         // §7.2.10.1: one legacy descriptor carries one buffer, and this
         // driver's is `TX_BUF_BYTES`. A longer frame is refused rather than
-        // truncated into one, and counted apart from a full ring because it is
-        // a caller that offered more than it was told it could.
+        // truncated into one, and counted because it is a caller that offered
+        // more than it was told it could.
         if len > TX_BUF_BYTES {
             self.counters.too_long = self.counters.too_long.saturating_add(1);
             return None;
         }
-        self.reclaim_tx();
-        // §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
-        // descriptor would wrap the tail onto the head and read as empty.
-        if (self.tx_next + 1) % TX_RING == self.tx_clean {
-            self.counters.tx_dropped = self.counters.tx_dropped.saturating_add(1);
+        if self.tx_room() == 0 {
             return None;
         }
         let index = self.tx_next;
@@ -1232,7 +1275,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Take back every transmit descriptor the part has finished with, so
     /// [`Counters::sent`] says what has left and not only what was handed
     /// over — for a caller about to report it, since the ring is otherwise
-    /// reclaimed only when the next frame needs a slot.
+    /// reclaimed only when room is asked for.
     pub fn reclaim(&mut self) {
         self.reclaim_tx();
     }

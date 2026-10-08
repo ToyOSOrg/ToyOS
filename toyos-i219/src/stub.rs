@@ -2321,6 +2321,12 @@ impl Nic {
         core::mem::take(&mut self.0.borrow_mut().sent)
     }
 
+    /// Messages the claim holds that no pass has taken: what a caller asleep
+    /// on its claim would be woken by.
+    pub fn pending(&self) -> u32 {
+        self.0.borrow().messages
+    }
+
     /// Stop the device acting on a tail register write, so it acts only when
     /// [`Self::run`] says so.
     pub fn hold(&self) {

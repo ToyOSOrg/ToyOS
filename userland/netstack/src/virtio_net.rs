@@ -17,7 +17,7 @@
 //! Virtio 1.2 throughout: §4.1.4 for the PCI capability layout, §2.7 for the
 //! split virtqueue, §5.1 for the network device.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
@@ -352,14 +352,7 @@ pub struct VirtioNet {
     tx: RefCell<Rings>,
     /// Transmit heads nothing is in flight on.
     tx_free: RefCell<Vec<u16>>,
-    /// Frames dropped for want of one. A count and not a wait: a server never
-    /// blocks, and a dropped frame's recovery is the peer's retransmit.
-    tx_dropped: Cell<u32>,
-    /// Where a dropped frame is written. Ordinary memory outside the grant, so
-    /// no device can reach it: smoltcp's token has to be given somewhere to put
-    /// its bytes even when there is no head to send them on.
-    dropped: RefCell<Vec<u8>>,
-    reported: Latch<(u32, u32)>,
+    reported: Latch<u32>,
     mac: [u8; 6],
 }
 
@@ -525,8 +518,6 @@ impl VirtioNet {
             rx: RefCell::new(rx),
             tx: RefCell::new(tx),
             tx_free: RefCell::new((0..TX_QUEUE_SIZE).rev().collect()),
-            tx_dropped: Cell::new(0),
-            dropped: RefCell::new(vec![0; TX_BUF_SIZE]),
             reported: Latch::default(),
             mac,
         };
@@ -542,18 +533,16 @@ impl VirtioNet {
         self.mac
     }
 
-    /// Say what this driver has refused or dropped, when either count has
-    /// moved. Once a pass, never per frame: a burst of drops is one line.
+    /// Say what this driver has refused, when the count has moved. Once a
+    /// pass, never per element: a burst of refusals is one line.
     pub fn report(&self) {
         let refused = self.rx.borrow().refused + self.tx.borrow().refused;
-        let dropped = self.tx_dropped.get();
-        if self.reported.moved((refused, dropped)).is_none() {
+        if self.reported.moved(refused).is_none() {
             return;
         }
         crate::say!(
             "netstack: this NIC has refused {refused} used-ring element(s) — the device named a \
-             descriptor this driver never published or claimed more bytes than it was given — \
-             and dropped {dropped} frame(s) with no transmit descriptor free"
+             descriptor this driver never published or claimed more bytes than it was given"
         );
     }
 
@@ -627,6 +616,18 @@ impl VirtioNet {
         unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
     }
 
+    /// How many frames the transmit queue takes now, every head the device
+    /// has finished with taken back first.
+    ///
+    /// **Room returning is an interrupt already**: this driver negotiates no
+    /// `VIRTIO_F_EVENT_IDX` and leaves the transmit queue's `avail.flags` 0,
+    /// and §2.7.7 has the device notify for every buffer it uses on such a
+    /// queue. A caller answered 0 sleeps on the claim.
+    pub fn tx_room(&self) -> usize {
+        self.reclaim_tx();
+        self.tx_free.borrow().len()
+    }
+
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the device.
     ///
     /// **The buffer is the head's own and the two are taken together**, so
@@ -634,20 +635,18 @@ impl VirtioNet {
     /// `tx_free` only here and comes back only in [`Self::reclaim_tx`], which
     /// the device's used ring is what drives.
     ///
-    /// Non-blocking. A frame with no head free is written into the scratch
-    /// buffer and dropped — **a server never blocks**, smoltcp's token cannot
-    /// say no, and a dropped frame's recovery is the peer's retransmit;
-    /// spinning on the used ring here would park netstack on a device.
+    /// Non-blocking, and for a caller [`Self::tx_room`] answered: a frame
+    /// offered with no head free is a caller that did not ask.
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
             "netstack: a {len}-byte frame does not fit this NIC's transmit buffer"
         );
-        self.reclaim_tx();
-        let Some(head) = self.tx_free.borrow_mut().pop() else {
-            self.tx_dropped.set(self.tx_dropped.get().saturating_add(1));
-            return fill(&mut self.dropped.borrow_mut()[..len]);
-        };
+        let head = self
+            .tx_free
+            .borrow_mut()
+            .pop()
+            .expect("netstack: a frame was offered to a transmit queue that had said it has no room");
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
         self.dma.sub(at, NET_HDR_SIZE).zero();

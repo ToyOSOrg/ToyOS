@@ -64,11 +64,24 @@ struct DmaNic {
     nic: Card,
 }
 
+impl DmaNic {
+    /// Whether the card takes a frame now. Where it does not, its claim reads
+    /// ready when it will.
+    fn room(&self) -> bool {
+        self.nic.tx_room() > 0 || self.nic.wake_on_room() > 0
+    }
+}
+
 impl Device for DmaNic {
     type RxToken<'a> = DmaRxToken<'a>;
     type TxToken<'a> = DmaTxToken<'a>;
 
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        // A frame is taken off the receive ring only with room to answer it:
+        // smoltcp takes a transmit token with every frame it receives.
+        if !self.room() {
+            return None;
+        }
         let token = match &self.nic {
             Card::Virtio(nic) => {
                 nic.poll_rx().map(|(index, len)| DmaRxToken::Virtio { nic, index, len })
@@ -79,7 +92,7 @@ impl Device for DmaNic {
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
-        Some(DmaTxToken { nic: &self.nic })
+        self.room().then_some(DmaTxToken { nic: &self.nic })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -1494,8 +1507,16 @@ fn main() {
         // delayed ACK — and zero when it has a frame to send now. A piped
         // connection needs nothing else: its peer's bytes wake the NIC, and its
         // client's bytes and room wake the watches below.
-        let smoltcp_due =
-            iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
+        //
+        // **None of them while the card has no room.** Each is a frame to send
+        // or to take, the card refuses both, and smoltcp's "now" would be a
+        // pass every time round until it stops; the card's claim begins the
+        // pass that can.
+        let smoltcp_due = if device.room() {
+            iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000))
+        } else {
+            u64::MAX
+        };
 
         // A pending UDP receive or connect has no wake of its own.
         let has_pending_async = !daemon.pending_udp_recvs.is_empty()
