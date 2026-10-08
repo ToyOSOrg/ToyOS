@@ -6,8 +6,8 @@
 //! [`Phys::readable`] is where a range is fetched, whole or not at all, and
 //! [`Phys::byte`] reads what was fetched: the decoder asks for every range
 //! before it reads one, which is the trait's contract. A range the kernel
-//! refuses is not readable, and why is kept for whoever logs the table
-//! ([`Tables::refused`]). Address zero is no table's.
+//! refuses is not readable, and why is kept by its address for whoever logs
+//! the table ([`Tables::refused`]). Address zero is no table's.
 
 use std::cell::{Cell, RefCell};
 
@@ -15,6 +15,7 @@ use toyos_abi::acpi::{Space, Width};
 use toyos_acpi::Phys;
 
 use crate::host::{self, Kernel, Pages, Refusal};
+use crate::ledger::Ledger;
 
 pub struct Tables<'k, K> {
     kernel: &'k K,
@@ -22,8 +23,8 @@ pub struct Tables<'k, K> {
     held: RefCell<Vec<(u64, Vec<u8>)>>,
     pub reads: Cell<u64>,
     pub pages: RefCell<Pages>,
-    /// Why the last range that was not readable was not, until it is taken.
-    pub refused: Cell<Option<Refusal>>,
+    /// Each range that was not readable, by where it begins, and why.
+    refused: RefCell<Vec<(u64, Refusal)>>,
     /// The kernel answered that the machine is stopping.
     pub stopping: Cell<bool>,
 }
@@ -35,9 +36,29 @@ impl<'k, K: Kernel> Tables<'k, K> {
             held: RefCell::new(Vec::new()),
             reads: Cell::new(0),
             pages: RefCell::new(Pages::default()),
-            refused: Cell::new(None),
+            refused: RefCell::new(Vec::new()),
             stopping: Cell::new(false),
         }
+    }
+
+    /// Why the range that begins at `phys` was not readable, the last time
+    /// it was asked for.
+    pub fn refused(&self, phys: u64) -> Option<Refusal> {
+        self.refused.borrow().iter().rev().find(|(at, _)| *at == phys).map(|&(_, why)| why)
+    }
+
+    /// Every refusal of a range, counted by what it says.
+    pub fn refusals(&self) -> Ledger {
+        let mut ledger = Ledger::default();
+        for (_, why) in self.refused.borrow().iter() {
+            ledger.see(&why.to_string());
+        }
+        ledger
+    }
+
+    /// Why the last range that was not readable was not.
+    pub fn last_refused(&self) -> Option<Refusal> {
+        self.refused.borrow().last().map(|&(_, why)| why)
     }
 
     /// `len` bytes at `phys`, in qwords and then in bytes, so no read reaches
@@ -72,7 +93,7 @@ impl<K: Kernel> Phys for &Tables<'_, K> {
             }
             Err(refusal) => {
                 self.stopping.set(self.stopping.get() || refusal == Refusal::Stopping);
-                self.refused.set(Some(refusal));
+                self.refused.borrow_mut().push((phys, refusal));
                 false
             }
         }
@@ -94,9 +115,10 @@ mod tests {
     use crate::host::tests::Scripted;
 
     const AT: u64 = 0x7fb0_0000;
+    const KEPT: u64 = 0x7000_0000;
 
     fn machine() -> Scripted {
-        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], ..Default::default() }
+        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], kept: vec![(KEPT, KEPT + 0x1000, 6)], ..Default::default() }
     }
 
     #[test]
@@ -120,7 +142,7 @@ mod tests {
         assert!(tables.readable(AT + 4, 20));
         assert_eq!(kernel.asked.borrow().len(), 5 + 2 + 4);
         assert_eq!(tables.byte(AT + 23), 23);
-        assert_eq!(tables.refused.take(), None);
+        assert_eq!(tables.last_refused(), None);
     }
 
     #[test]
@@ -129,9 +151,16 @@ mod tests {
         let tables = &Tables::new(&kernel);
         // The last byte is past what the firmware holds here.
         assert!(!tables.readable(AT + 32, 10));
-        assert_eq!(tables.refused.take(), Some(Refusal::Kernel { space: Space::SystemMemory, refused: Refused::UsableMemory, memory_type: 7 }));
-        assert_eq!(tables.refused.take(), None, "a refusal is taken once");
+        let ram = Refusal::Kernel { space: Space::SystemMemory, refused: Refused::UsableMemory, memory_type: 7 };
+        assert_eq!(tables.refused(AT + 32), Some(ram));
         assert!(tables.readable(AT + 32, 9));
+        // Memory of a type the kernel passes no read of, refused under that
+        // name and type, each range by its own address.
+        assert!(!tables.readable(KEPT + 8, 36));
+        let kept = Refusal::Kernel { space: Space::SystemMemory, refused: Refused::MemoryType, memory_type: 6 };
+        assert_eq!((tables.refused(KEPT + 8), tables.refused(AT + 32), tables.refused(AT)), (Some(kept), Some(ram), None));
+        assert_eq!(tables.last_refused(), Some(kept));
+        assert_eq!(tables.refusals().counts(), format!("{kept} x1; {ram} x1"));
         assert!(!tables.stopping.get());
 
         // Address zero and a range that wraps are no table's, and the kernel is not asked.
@@ -148,6 +177,6 @@ mod tests {
         let tables = &Tables::new(&kernel);
         assert!(!tables.readable(AT, 36));
         assert!(tables.stopping.get());
-        assert_eq!(tables.refused.take(), Some(Refusal::Stopping));
+        assert_eq!(tables.refused(AT), Some(Refusal::Stopping));
     }
 }

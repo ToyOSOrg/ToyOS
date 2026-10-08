@@ -526,6 +526,42 @@ fn a_dsdt_that_cannot_be_found_is_the_first_block_refused() {
     assert_eq!(definition_blocks(Machine { regions: &[] }, RSDP_AT).err(), Some(TableError::BadRsdp));
 }
 
+/// A machine whose reader reaches its RSDP, its XSDT and one table that is
+/// no definition block, and none of the memory its FADT, DSDT and SSDTs are
+/// in. The DSDT is refused as the first entry that could not be read, which
+/// may be the FADT: `Absent` there would say the firmware names no DSDT,
+/// where what happened is that its tables' memory was not read. Each other
+/// unread entry follows in its place, and the table that was read and is no
+/// SSDT is passed over.
+#[test]
+fn a_dsdt_whose_fadt_could_not_be_read_is_refused_as_unread_and_not_as_absent() {
+    let at = |n: u64| TABLE_AT + n * 0x1000;
+    let head = rsdp(XSDT_AT, 2, 36);
+    let hpet = sdt(b"HPET", 1, &[0u8; 20]);
+    let root = xsdt(&[at(0), at(1), at(2), 0, at(3)]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (at(2), &hpet)];
+    let blocks: Vec<Option<TableError>> =
+        definition_blocks(Machine { regions }, RSDP_AT).expect("the XSDT").map(|block| block.err()).collect();
+    let unread = |n| Some(TableError::Unmapped { at: at(n), len: 36 });
+    assert_eq!(blocks, [unread(0), unread(0), unread(1), unread(3)]);
+
+    // Every entry read, and none a FADT: that is `Absent`.
+    let root = xsdt(&[at(2), 0]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (at(2), &hpet)];
+    let blocks: Vec<Option<TableError>> =
+        definition_blocks(Machine { regions }, RSDP_AT).expect("the XSDT").map(|block| block.err()).collect();
+    assert_eq!(blocks, [Some(TableError::Absent)]);
+
+    // A FADT that is read wins over an entry before it that was not.
+    let fadt = facp_naming(at(4) as u32);
+    let dsdt = sdt(b"DSDT", 2, &[1]);
+    let root = xsdt(&[at(0), at(1)]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (at(1), &fadt), (at(4), &dsdt)];
+    let blocks: Vec<Result<u64, TableError>> =
+        definition_blocks(Machine { regions }, RSDP_AT).expect("the XSDT").map(|block| block.map(|table| table.base())).collect();
+    assert_eq!(blocks, [Ok(at(4)), Err(TableError::Unmapped { at: at(0), len: 36 })]);
+}
+
 /// **Stated as a test, so extending the decoder reds the statement.** The XSDT
 /// walk deliberately returns the first signature match's verdict rather than
 /// trying a second table of the same name.

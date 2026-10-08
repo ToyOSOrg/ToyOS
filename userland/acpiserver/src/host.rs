@@ -303,11 +303,14 @@ pub mod tests {
     use super::*;
 
     /// A kernel that answers reads from bytes at addresses, each range with a
-    /// memory type, refuses every other address as the real one refuses RAM,
+    /// memory type, refuses `kept` ranges as the real one refuses memory of a
+    /// type it passes no read of and every other address as it refuses RAM,
     /// and answers the Global Lock from a script.
     #[derive(Default)]
     pub struct Scripted {
         pub memory: Vec<(u64, u8, Vec<u8>)>,
+        /// `(start, end, memory type)`.
+        pub kept: Vec<(u64, u64, u8)>,
         pub ports: Vec<(u64, u64)>,
         pub config: Vec<(u64, u64)>,
         pub asked: RefCell<Vec<Access>>,
@@ -352,7 +355,10 @@ pub mod tests {
                             let value = bytes[from..from + width as usize].iter().rev().fold(0u64, |value, &byte| value << 8 | u64::from(byte));
                             Answer { made: Ok(value), memory_type: *memory_type }
                         }
-                        None => Answer { made: Err(Refused::UsableMemory), memory_type: 7 },
+                        None => match self.kept.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
+                            Some(&(.., memory_type)) => Answer { made: Err(Refused::MemoryType), memory_type },
+                            None => Answer { made: Err(Refused::UsableMemory), memory_type: 7 },
+                        },
                     }
                 }
                 Space::SystemIo => Answer { made: listed(&self.ports).ok_or(Refused::KernelPort), memory_type: UNLISTED },

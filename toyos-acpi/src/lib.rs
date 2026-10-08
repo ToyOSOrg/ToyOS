@@ -277,32 +277,29 @@ fn xsdt<P: Phys>(phys: P, rsdp_addr: u64) -> Result<Table<P>, TableError> {
 }
 
 /// The first table in the XSDT with this signature, validated for `needed` bytes.
+// A second match with the same signature never replaces an invalid first.
 pub fn find_table<P: Phys>(
     phys: P,
     rsdp_addr: u64,
     signature: &[u8; 4],
     needed: usize,
 ) -> Result<Table<P>, TableError> {
-    find_in(&xsdt(phys, rsdp_addr)?, signature, needed)
-}
-
-/// How many 8-byte entries an XSDT holds.
-fn entries<P: Phys>(xsdt: &Table<P>) -> usize {
-    // `Table::open` guarantees len >= SDT_HEADER_LEN, so this subtraction is total.
-    (xsdt.len - SDT_HEADER_LEN) / 8
-}
-
-// A second match with the same signature never replaces an invalid first.
-fn find_in<P: Phys>(xsdt: &Table<P>, signature: &[u8; 4], needed: usize) -> Result<Table<P>, TableError> {
-    for i in 0..entries(xsdt) {
+    let xsdt = xsdt(phys, rsdp_addr)?;
+    for i in 0..entries(&xsdt) {
         let Some(at) = xsdt.u64_at(SDT_HEADER_LEN + i * 8) else { break };
-        match Table::open(xsdt.phys, at, signature, needed) {
+        match Table::open(phys, at, signature, needed) {
             // An entry pointing at nothing is one entry skipped, not the end of the walk.
             Err(TableError::Absent | TableError::Unmapped { .. }) => continue,
             other => return other,
         }
     }
     Err(TableError::Absent)
+}
+
+/// How many 8-byte entries an XSDT holds.
+fn entries<P: Phys>(xsdt: &Table<P>) -> usize {
+    // `Table::open` guarantees len >= SDT_HEADER_LEN, so this subtraction is total.
+    (xsdt.len - SDT_HEADER_LEN) / 8
 }
 
 /// A machine's definition blocks in the order they are loaded (ACPI 6.5
@@ -317,11 +314,33 @@ pub struct DefinitionBlocks<P> {
 /// Every definition block of the machine whose RSDP is at `rsdp_addr`, each
 /// validated or answered as the refusal that says why it is not: the walk
 /// goes on past a refused one, which is its caller's to rule on. The first
-/// item is always the DSDT's. After it, an entry of another signature and a
-/// null entry are passed over; an entry whose header the reader cannot reach
-/// is answered [`TableError::Unmapped`], since nothing says it is no SSDT.
+/// item is always the DSDT's. An entry of another signature and a null entry
+/// are passed over; an entry whose header the reader cannot reach is answered
+/// [`TableError::Unmapped`], since nothing says it is no SSDT. The same holds
+/// of the FADT: a DSDT whose FADT was not found among entries of which one
+/// could not be read is refused as that entry, not as [`TableError::Absent`],
+/// which is said only where every entry was read and none is the FADT.
 pub fn definition_blocks<P: Phys>(phys: P, rsdp_addr: u64) -> Result<DefinitionBlocks<P>, TableError> {
     Ok(DefinitionBlocks { xsdt: xsdt(phys, rsdp_addr)?, dsdt: false, next: 0 })
+}
+
+impl<P: Phys> DefinitionBlocks<P> {
+    /// The first FADT the XSDT lists, long enough to name a DSDT.
+    fn fadt(&self) -> Result<Table<P>, TableError> {
+        let mut unread = None;
+        for i in 0..entries(&self.xsdt) {
+            let Some(at) = self.xsdt.u64_at(SDT_HEADER_LEN + i * 8) else { break };
+            match Table::open(self.xsdt.phys, at, b"FACP", FADT_DSDT + 4) {
+                Err(TableError::Absent) => {}
+                Err(TableError::Unmapped { .. }) if at == 0 => {}
+                Err(unmapped @ TableError::Unmapped { .. }) => {
+                    unread.get_or_insert(unmapped);
+                }
+                found => return found,
+            }
+        }
+        Err(unread.unwrap_or(TableError::Absent))
+    }
 }
 
 impl<P: Phys> Iterator for DefinitionBlocks<P> {
@@ -329,9 +348,7 @@ impl<P: Phys> Iterator for DefinitionBlocks<P> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if !core::mem::replace(&mut self.dsdt, true) {
-            return Some(find_in(&self.xsdt, b"FACP", FADT_DSDT + 4).and_then(|fadt| {
-                Table::open(self.xsdt.phys, dsdt_address(&fadt), b"DSDT", SDT_HEADER_LEN)
-            }));
+            return Some(self.fadt().and_then(|fadt| Table::open(self.xsdt.phys, dsdt_address(&fadt), b"DSDT", SDT_HEADER_LEN)));
         }
         while self.next < entries(&self.xsdt) {
             let at = self.xsdt.u64_at(SDT_HEADER_LEN + self.next * 8)?;

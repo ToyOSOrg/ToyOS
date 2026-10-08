@@ -10,6 +10,10 @@
 //! A machine that is stopping ends the load in one line, and that is no
 //! refusal.
 //!
+//! Every read of a table's bytes the kernel refused is counted by the
+//! kernel's name for it and the memory type, in one line, whether or not the
+//! load reached that table.
+//!
 //! Then `\_S5` is evaluated (ACPI 6.5, "\_Sx (System States)") and said, for
 //! whoever holds it against the kernel's own decode of the same package, its
 //! `ACPI: PM1a=` line. Nothing is evaluated after it yet, so the namespace is
@@ -61,15 +65,16 @@ fn kind(why: &Error) -> String {
 /// The refusal the interpreter makes of a bridge's own registers.
 const BRIDGE: &str = "a bridge above a PCI_Config region answered no bus below it";
 
-/// What a table refused before any of it ran is called.
-fn unread(why: &TableError, refused: Option<Refusal>) -> String {
+/// What a table refused before any of it ran is called; `refused` is why the
+/// kernel read none of the range a [`TableError::Unmapped`] names.
+fn unread(why: &TableError, refused: impl Fn(u64) -> Option<Refusal>) -> String {
     match why {
         TableError::BadRsdp => "the RSDP does not check".into(),
         TableError::NoXsdt => "the RSDP names no XSDT".into(),
         TableError::Absent => "nothing names it, or what is named is another table".into(),
         TableError::Length { .. } => "it declares a length no table has".into(),
         TableError::Checksum => "its bytes do not sum to zero".into(),
-        TableError::Unmapped { .. } => match refused {
+        TableError::Unmapped { at, .. } => match refused(*at) {
             Some(refusal) => format!("its bytes could not be read: {refusal}"),
             None => "its bytes are at no address a table has".into(),
         },
@@ -85,14 +90,17 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
     let mut loaded = Loaded::default();
     let tables = Tables::new(kernel);
     let blocks: Vec<_> = match toyos_acpi::definition_blocks(&tables, rsdp) {
-        // Each block's refusal by the kernel is taken as the walk reaches it.
-        Ok(blocks) => blocks.map(|block| (block, tables.refused.take())).collect(),
+        Ok(blocks) => blocks.collect(),
         Err(_) if tables.stopping.get() => {
             println!("{STOPPING}");
             return loaded;
         }
         Err(why) => {
-            println!("acpiserver: no namespace: the XSDT was not read ({}), so no table is; the power button is served, and nothing of this machine's AML", unread(&why, tables.refused.take()));
+            println!(
+                "acpiserver: no namespace: the XSDT was not read ({}{}), so no table is; the power button is served, and nothing of this machine's AML",
+                unread(&why, |at| tables.refused(at)),
+                tables.last_refused().map_or(String::new(), |refusal| format!("; the last read refused was {refusal}"))
+            );
             println!("{OWN}that was {why:x?}");
             return loaded;
         }
@@ -105,7 +113,7 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
     let mut host = Firmware::new(kernel);
     let mut interpreter = Interpreter::new();
     let count = blocks.len();
-    for (place, (block, refused)) in blocks.iter().enumerate() {
+    for (place, block) in blocks.iter().enumerate() {
         let name = if place == 0 { "DSDT" } else { "SSDT" };
         let place = place + 1;
         host.begin();
@@ -116,7 +124,7 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
             }),
             Err(why) => {
                 println!("{OWN}table {place} was not read: {why:x?}");
-                Err(unread(why, *refused))
+                Err(unread(why, |at| tables.refused(at)))
             }
         };
         if host.stopping {
@@ -147,6 +155,10 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
         tables.reads.get(),
         tables.pages.borrow().by_type()
     );
+    let refusals = tables.refusals();
+    if !refusals.is_empty() {
+        println!("acpiserver: reads of the tables' bytes the kernel refused: {}", refusals.counts());
+    }
     println!(
         "acpiserver: the tables' AML read SystemMemory {} times, SystemIO {} and PCI_Config {}, its memory in pages: {}; took the Global Lock {} times, {} of them from the firmware; and ran Notify {} times",
         host.reads[0],
@@ -331,6 +343,23 @@ mod tests {
         assert_eq!(load(&kernel, RSDP), Loaded { blocks: vec![Err(ram.into())], s5: None });
     }
 
+    /// The shape the first load on the real machine had: its RSDP and XSDT
+    /// in memory the kernel reads, and its FADT, DSDT and SSDTs in memory of
+    /// a type the kernel passes no read of. The DSDT's line says that, by
+    /// the kernel's name for the refusal and the type, and not that nothing
+    /// names a DSDT.
+    #[test]
+    fn tables_in_memory_of_a_type_the_kernel_keeps_are_refused_by_that_name_and_type() {
+        let dsdt = sealed(b"DSDT", &s5_package(5, 0));
+        let ssdt = sealed(b"SSDT", &name(b"CCCC", 4));
+        let mut kernel = crafted(&dsdt, &[&ssdt, &ssdt]);
+        // What the XSDT lists moves into kept memory: the RSDP and the XSDT stay.
+        let listed = kernel.memory.split_off(2);
+        kernel.kept = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 6)).collect();
+        let kept = "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of type 6";
+        assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Err(kept.into())], s5: None });
+    }
+
     #[test]
     fn an_s5_that_is_no_package_of_two_integers_is_refused_by_kind() {
         let absent = sealed(b"DSDT", &name(b"AAAA", 1));
@@ -367,7 +396,7 @@ mod tests {
         assert_eq!(kind(&Error::Host("a write to SystemIO".into())), "denied by this server: a write to SystemIO");
         let unlisted = Refusal::Kernel { space: toyos_abi::acpi::Space::SystemMemory, refused: toyos_abi::acpi::Refused::MemoryType, memory_type: toyos_abi::acpi::UNLISTED };
         assert_eq!(
-            unread(&TableError::Unmapped { at: 0xdead_0000, len: 36 }, Some(unlisted)),
+            unread(&TableError::Unmapped { at: 0xdead_0000, len: 36 }, |at| (at == 0xdead_0000).then_some(unlisted)),
             "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of no type, being unlisted"
         );
     }
