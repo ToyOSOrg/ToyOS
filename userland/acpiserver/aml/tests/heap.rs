@@ -226,13 +226,16 @@ fn a_parent_whose_last_child_is_unwound_holds_no_map() {
     for t in [&devices, &methods] {
         i.load_bytes(&mut Sink, t).expect("the table loads");
     }
-    let held = HELD.get() - before;
+    let held = heap() - before;
     for m in ["\\M0", "\\M1"] {
         assert_eq!(i.evaluate(&mut Sink, m, &[]), Ok(Value::Uninitialized));
     }
     let kept = HELD.get() - before;
+    let maps = PEAK.get() - before - held;
     let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
     Filled::of(before, refused).within_the_bound();
+    // The names were made: 20,000 parents each held a map while one ran.
+    assert!(maps >= 1 << 20, "{maps} bytes held by an evaluation while it ran");
     assert_eq!(kept, held, "bytes held after the two evaluations, and before them");
 }
 
@@ -306,6 +309,8 @@ fn a_nest_of_to_strings_holds_one_copy() {
     let length = (0..32).fold(int(1), |inner, _| lequal(&cat(&[&[0x9C], &name("BUF"), &inner, &[0x00]]), &string("")));
     let (held, r) = most(&cat(&[&mebibyte(), &method("NEST", 0, &length)]), "\\NEST");
     assert_eq!(r, Ok(Value::Uninitialized));
+    // A copy was made: the nest is over the buffer, and not over nothing.
+    assert!(held >= 1 << 20, "{held} bytes held past what was held before");
     assert!(held <= LEVEL, "{held} bytes held past what was held before");
 }
 
@@ -318,14 +323,17 @@ fn a_nest_of_mids_holds_one_copy() {
     let nest = (0..32).fold(mid(&[0x00]), |inner, _| mid(&index(&inner, &int(0), &[0x00])));
     let (held, r) = most(&cat(&[&mebibyte(), &method("NEST", 0, &nest)]), "\\NEST");
     assert_eq!(r, Ok(Value::Uninitialized));
+    assert!(held >= 1 << 20, "{held} bytes held past what was held before");
     assert!(held <= LEVEL, "{held} bytes held past what was held before");
 }
 
 /// Concatenate copies what leads after it has named the type of what
 /// follows. Naming a package element resolves it, here to a PCI_Config
 /// field, whose access asks the device's `_ADR`, which is the method that
-/// concatenates: 16 deep, over `LEAD` of half a mebibyte.
-fn joined_through_a_field(lead: &[u8]) -> (isize, Result<Value, Error>) {
+/// concatenates: 16 deep, over `LEAD` of half a mebibyte. `CNT` counts the
+/// invocations that concatenate, each inside the one before it: the most
+/// held is of a nest only if it reads 16.
+fn joined_through_a_field(lead: &[u8]) -> isize {
     let join = op2(0x73, &name("LEAD"), &index(&name("PKG"), &int(0), &[0x00]), &[0x00]);
     let deeper = if_(&lless(&name("CNT"), &int(16)), &cat(&[&increment(&name("CNT")), &join]));
     let bridge = cat(&[
@@ -337,13 +345,19 @@ fn joined_through_a_field(lead: &[u8]) -> (isize, Result<Value, Error>) {
         &op_region("CFG", 0x02, &int(0), &int(0x10)),
         &field("CFG", 0x01, &[unit("FLD", 8)]),
     ]);
-    most(&device("PCI0", &bridge), "\\PCI0._ADR")
+    let (mut i, _) = start(&device("PCI0", &bridge));
+    let held = heap();
+    let r = i.evaluate(&mut Sink, "\\PCI0._ADR", &[]);
+    let most = PEAK.get() - held;
+    assert_eq!(r, Ok(Value::Integer(0)));
+    assert_eq!(i.evaluate(&mut Sink, "\\PCI0.CNT", &[]), Ok(Value::Integer(16)), "the depth the nest reached");
+    assert!(most >= 1 << 19, "{most} bytes held past what was held before");
+    most
 }
 
 #[test]
 fn a_nest_of_concatenates_holds_one_buffers_copy() {
-    let (held, r) = joined_through_a_field(&def_name("LEAD", &buffer(&int(0x8_0000), &[])));
-    assert_eq!(r, Ok(Value::Integer(0)));
+    let held = joined_through_a_field(&def_name("LEAD", &buffer(&int(0x8_0000), &[])));
     assert!(held <= LEVEL, "{held} bytes held past what was held before");
 }
 
@@ -352,8 +366,7 @@ fn a_nest_of_concatenates_holds_one_buffers_copy() {
 #[test]
 fn a_nest_of_concatenates_holds_one_strings_copy() {
     let decimal = op1(0x97, &buffer(&int(0x4_0000), &[]), &[0x00]);
-    let (held, r) = joined_through_a_field(&cat(&[&def_name("LEAD", &string("")), &store(&decimal, &name("LEAD"))]));
-    assert_eq!(r, Ok(Value::Integer(0)));
+    let held = joined_through_a_field(&cat(&[&def_name("LEAD", &string("")), &store(&decimal, &name("LEAD"))]));
     assert!(held <= LEVEL, "{held} bytes held past what was held before");
 }
 
