@@ -8,8 +8,9 @@ opened: 2026-09-08
 
 `pcidev::bring_up` arms a claimed function on MSI where it publishes no MSI-X.
 The T14's I219 is one: `claim_reuses_its_remapping_entry` arms it through
-`arm_claimed_msi` and releases it through `tear_down`'s MSI arm, and
-`lan_message_delivery` counts its messages. Nothing reaches:
+`arm_claimed_msi` and releases it through `tear_down`'s MSI arm. No T14 row
+reads a message it raised
+(`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Nothing reaches:
 
 - `bring_up`'s refusal after the MSI is armed — `place_bars` refusing a
   function armed on MSI — where `PciDevice::disable_msi` runs and the slot's

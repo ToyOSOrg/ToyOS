@@ -32,7 +32,8 @@ PR #539 does not land. Its pieces:
   `tests/bench*case`, `--bench-image` with `build::bench_image`,
   `src/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
   bench `invocation`, `--metal-via-ubuntu`, toybox `date`, `Ssh::probe` and
-  `Ssh::fetch` with `ssh-client-host`'s `probe` and `fetch`,
+  `Ssh::fetch` with the ssh client's `probe` and `fetch` (the client is
+  deleted, `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
   `build::AUTHORIZED_ON_ROOT`, and `src/bootlog.rs`' `LOADER_PREVIOUS_LOG`,
   `MOUNTED_FROM_MEMORY` and `BOOT_PARAMETER`;
 - deleted: `update --boot-next <esp>` with `slots::Next::Esp`, `Guid::parse`,
@@ -333,12 +334,10 @@ Each stage lands on its own, in this order.
      `issues/a-reset-stops-xhci-and-leaves-every-claimed-pci-function-armed.md`,
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
      `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
-     `issues/most-t14-leases-land-one-dhcp-retry-late.md`,
-     `issues/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`,
-     `issues/the-t14-redial-re-asks-mdns-after-every-refusal.md`,
-     `issues/a-first-dial-turned-away-before-a-line-is-waited-on-to-its-callers-bound.md`
-     and
-     `issues/a-netstack-that-dies-while-serving-leaves-the-hosts-stream-silent.md`.
+     `issues/most-t14-leases-land-one-dhcp-retry-late.md` and
+     `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`,
+     which deleted the host's reader, its ssh client and the machine's end of
+     the stream, and records what they still owe.
    - #539's issues `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
      `the-bench-reads-no-quiescent-log-volume`,
      `the-bench-runs-with-no-bound-on-its-own-boot`,

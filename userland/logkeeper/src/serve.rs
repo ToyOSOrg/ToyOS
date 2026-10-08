@@ -1,5 +1,4 @@
-//! This boot's log, served to whoever asks for it: over TCP on
-//! [`toyos_logstream::PORT`] through netstack, and on this machine through the
+//! This boot's log, served to a reader on this machine that asks for it on the
 //! [`toyos_logstream::SERVICE`] port, whose answer is the read end of a pipe.
 //!
 //! **Every reader gets the boot from its first line**, however late it
@@ -8,49 +7,32 @@
 //! thread with an offset into it. So the same text reaches `/log` and every
 //! reader, in the same order, and nothing a reader does can reach the file.
 //!
-//! A reader that takes none for [`STALLED`] while bytes are owed to it — a
-//! zero window, a peer that vanished — is let go, and that is a line in the
-//! log. The network's readers and this machine's are counted apart, so no
-//! number of network peers can take the console's slot.
+//! A reader that takes none for [`STALLED`] while bytes are owed to it is let
+//! go, and that is a line in the log.
 //!
 //! **A reader that is caught up waits on the replay growing**, and nothing
 //! else wakes it: there is no poll and no timer.
-//!
-//! **A swap of netstack ([`toyos_logstream::CARRIER`]) ends every network reader's
-//! connection without a word**, and a connection the netstack being stopped
-//! accepts ends the same way, so from the supervisor's frame accepting one until its
-//! frame that the old netstack is gone — started, failed, restored or gone — this
-//! program holds no listener ([`Carrier`]). It closes the listener before it says so
-//! ([`CARRIER_LEAVING`]), and netstack has answered the close by then: a reader
-//! that asks after reading that line is refused by the old netstack or answered by
-//! the next, and never admitted by the one being stopped.
 
 use std::io::Write;
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use toyos::ipc::{Connection, TrySendError};
-use toyos::poller::{Poller, READABLE, WRITABLE};
+use toyos::poller::{Poller, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
-use toyos_abi::RawHandle;
 use toyos::say;
-use toyos_logstream::{Next, ProgramLine, Replay, Severity, Tag, CARRIER_LEAVING, LOGKEEPER, PORT, SERVED};
+use toyos_logstream::{Next, ProgramLine, Replay, Severity, Tag, LOGKEEPER, SERVED};
 
 /// The most bytes one reader is handed per wake: bounds how long the replay's
 /// lock is held for a copy, not how far a reader may fall behind.
 const CHUNK: usize = 64 * 1024;
 
-/// Readers on the network at once. Each is a thread, and anybody on the network
-/// may be one, so the count is bounded and a reader past it is refused by name.
-const MAX_NETWORK_READERS: usize = 8;
-
-/// Readers on this machine at once: only a program holding the
-/// [`SERVICE`](toyos_logstream::SERVICE) connector is one, and the network's
-/// count cannot reach this one.
-const MAX_LOCAL_READERS: usize = 2;
+/// Readers at once. Each is a thread, so the count is bounded and a reader
+/// past it is refused by name: only a program holding the
+/// [`SERVICE`](toyos_logstream::SERVICE) connector is one.
+const MAX_READERS: usize = 2;
 
 /// How long a reader may take no byte at all of what it is owed before its
 /// slot is let go: a wait on its sink taking bytes, bounded by this.
@@ -59,192 +41,40 @@ const STALLED: Duration = Duration::from_secs(10);
 /// The replay, and the wake a caught-up reader waits on.
 pub struct Hub {
     shared: Arc<Shared>,
-    /// The network server's control pipe, where this program serves the
-    /// network: one byte per [`Carrier`] word.
-    carrier: Option<Pipe>,
-}
-
-/// The supervisor's word on a swap of netstack, as the network server acts on it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Carrier {
-    /// The supervisor accepted the swap: the netstack the listener is registered with is
-    /// about to be stopped.
-    Leaving,
-    /// The supervisor has stopped it and started or restored another, or has none.
-    Back,
-}
-
-impl Carrier {
-    const LEAVING: u8 = b'L';
-    const BACK: u8 = b'B';
 }
 
 struct Shared {
     replay: Mutex<Replay>,
     grew: Condvar,
-    network: AtomicUsize,
-    local: AtomicUsize,
-    /// The network server bound [`PORT`]: this program's namespace holds netstack.
-    serving: AtomicBool,
+    readers: AtomicUsize,
     /// The wall clock the boot started at, for a line a reader is owed.
     boot_secs: Option<u64>,
 }
 
 impl Hub {
-    /// Start serving the network, where the manifest gave this program netstack.
-    /// A reader on this machine is handed over by the `log` port's thread
-    /// ([`Hub::read`]).
+    /// A reader is handed over by the `log` port's thread ([`Hub::read`]).
     pub fn start(cap: usize, boot_secs: Option<u64>) -> Self {
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new(cap)),
             grew: Condvar::new(),
-            network: AtomicUsize::new(0),
-            local: AtomicUsize::new(0),
-            serving: AtomicBool::new(false),
+            readers: AtomicUsize::new(0),
             boot_secs,
         });
-        // A row with no namespace has no netstack, and no thread to learn so on:
-        // its exit would be a kernel record at a time nothing orders, after a
-        // shutdown's last word included. One with a namespace learns it at
-        // its first bind, at boot.
-        let mut carrier = None;
-        if toyos::endow::namespace().is_some() {
-            let network = Arc::clone(&shared);
-            let (told, tell) = toyos::pipe_pair().expect("logkeeper: no pipe for the network server");
-            carrier = Some(tell);
-            std::thread::Builder::new()
-                .name("log-serve-net".into())
-                .spawn(move || serve_network(&network, &told))
-                .expect("logkeeper: the network server's thread could not be started");
-        }
-        Self { shared, carrier }
+        Self { shared }
     }
 
-    /// Whether this boot's log is served on the network at all: the network
-    /// server found netstack and bound its port.
-    pub fn network(&self) -> bool {
-        self.shared.serving.load(Ordering::Relaxed)
-    }
-
-    /// A reader on this machine that asked for the log: it gets the read end
+    /// A reader that asked for the log: it gets the read end
     /// of a pipe of its own, which the log is written into.
     pub fn read(&self, conn: &Connection) {
         let end = self.shared.replay.lock().expect("logkeeper: the replay is poisoned").end();
         let Some(pipe) = hand_over(conn, end) else { return };
-        admit(&self.shared, format!("local reader {}", conn.as_handle().0), Announce::No, PipeSink::new(pipe));
+        admit(&self.shared, format!("reader {}", conn.as_handle().0), PipeSink::new(pipe));
     }
 
     /// The lines the file has just taken, for every reader.
     pub fn append(&self, lines: &[u8]) {
         self.shared.replay.lock().expect("logkeeper: the replay is poisoned").append(lines);
         self.shared.grew.notify_all();
-    }
-
-    /// The supervisor's word on a swap of netstack, for the network server.
-    pub fn carrier(&self, word: Carrier) {
-        let Some(tell) = &self.carrier else { return };
-        let byte = match word {
-            Carrier::Leaving => Carrier::LEAVING,
-            Carrier::Back => Carrier::BACK,
-        };
-        match tell.write(&[byte]) {
-            Ok(1) => {}
-            // The server ended with no netstack left to serve through, which it
-            // said: nothing is listening to be told.
-            Err(SyscallError::Gone) => {}
-            other => panic!("logkeeper: the network server's pipe refused a word: {other:?}"),
-        }
-    }
-}
-
-/// Accept readers on [`PORT`] for the life of the process.
-///
-/// A machine whose manifest gives this program no netstack serves nothing on the
-/// network, and says nothing about it: the row is the decision. A namespace
-/// without netstack in it ends this thread at once.
-///
-/// **A listener is a registration netstack holds, and a failed accept is netstack no
-/// longer holding it** — netstack was swapped or is gone. Asked again, the same
-/// listener answers the same error at once and for ever, so it is dropped and
-/// bound anew: through the same port, which the supervisor keeps open across a swap.
-///
-/// `told` carries the supervisor's words on a swap of netstack ([`Hub::carrier`]): the
-/// listener is closed on [`Carrier::Leaving`] and bound again on
-/// [`Carrier::Back`]. Each wait is on either being ready, and a completion a
-/// closed listener left behind is answered by a non-blocking accept.
-fn serve_network(shared: &Arc<Shared>, told: &Pipe) {
-    const TOLD: u64 = 0;
-    const READY: u64 = 1;
-    let Some(first) = bind_port() else { return };
-    shared.serving.store(true, Ordering::Relaxed);
-    let mut listener = Some(first);
-    let poller = Poller::new(2);
-    loop {
-        poller.watch(told, READABLE, TOLD);
-        if let Some(listener) = &listener {
-            poller.watch_raw(RawHandle(listener.as_raw_fd() as u32), READABLE, READY);
-        }
-        let (mut words, mut ready) = (false, false);
-        poller.wait(1, u64::MAX, |token| match token {
-            TOLD => words = true,
-            READY => ready = true,
-            other => unreachable!("logkeeper: the network server watches no token {other}"),
-        });
-        if words {
-            let mut said = [0u8; 16];
-            let n = match told.read_nonblock(&mut said) {
-                Ok(n) => n,
-                Err(SyscallError::WouldBlock) => 0,
-                Err(e) => panic!("logkeeper: the network server's pipe refused a read: {e:?}"),
-            };
-            for &word in &said[..n] {
-                match word {
-                    // Closed before the line, and netstack has answered the close
-                    // when `drop` returns: the line is the proof.
-                    Carrier::LEAVING => {
-                        drop(listener.take());
-                        say!("{CARRIER_LEAVING}");
-                    }
-                    Carrier::BACK if listener.is_none() => {
-                        let Some(again) = bind_port() else { return };
-                        listener = Some(again);
-                    }
-                    Carrier::BACK => {}
-                    other => unreachable!("logkeeper: the network server was told {other}"),
-                }
-            }
-        }
-        let Some(open) = listener.as_ref().filter(|_| ready) else { continue };
-        match open.accept() {
-            Ok((stream, peer)) => {
-                stream
-                    .set_write_timeout(Some(STALLED))
-                    .expect("logkeeper: a reader's stream that cannot bound its own write");
-                admit(shared, format!("{peer}"), Announce::Yes, stream)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                say!("logkeeper: the log's listener on port {PORT} failed ({e}); binding it again");
-                let Some(again) = bind_port() else { return };
-                listener = Some(again);
-            }
-        }
-    }
-}
-
-/// The listener on [`PORT`], or `None` once this machine has none to offer.
-fn bind_port() -> Option<std::net::TcpListener> {
-    match std::net::TcpListener::bind(("0.0.0.0", PORT)) {
-        Ok(listener) => {
-            listener.set_nonblocking(true).expect("logkeeper: a listener that cannot be asked without waiting");
-            say!("logkeeper: serving this boot's log on port {PORT}");
-            Some(listener)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => None,
-        Err(e) => {
-            say!("logkeeper: cannot serve this boot's log on port {PORT}: {e}");
-            None
-        }
     }
 }
 
@@ -254,7 +84,7 @@ fn hand_over(conn: &Connection, end: u64) -> Option<Pipe> {
     let (read, write) = match toyos::pipe_pair() {
         Ok(ends) => ends,
         Err(e) => {
-            say!("logkeeper: no pipe for a local reader: {e:?}");
+            say!("logkeeper: no pipe for a reader: {e:?}");
             return None;
         }
     };
@@ -262,20 +92,10 @@ fn hand_over(conn: &Connection, end: u64) -> Option<Pipe> {
     match sent.and_then(|()| conn.try_send(SERVED, &end)) {
         Ok(()) => Some(write),
         Err(e) => {
-            say!("logkeeper: a local reader went before it was answered: {e:?}");
+            say!("logkeeper: a reader went before it was answered: {e:?}");
             None
         }
     }
-}
-
-/// Whether a reader's coming and going is a line in the log, and which count it
-/// is held against: a peer on the network is somebody the machine's owner may
-/// want named, and a reader on this machine is the console, which would draw
-/// the line about itself beside its own prompt.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Announce {
-    Yes,
-    No,
 }
 
 /// Why a reader's thread ended.
@@ -287,34 +107,22 @@ enum Left {
 }
 
 /// A reader thread, where its count allows one.
-fn admit(shared: &Arc<Shared>, who: String, announce: Announce, sink: impl Write + Send + 'static) {
-    let (count, max, place) = match announce {
-        Announce::Yes => (&shared.network, MAX_NETWORK_READERS, "on the network"),
-        Announce::No => (&shared.local, MAX_LOCAL_READERS, "on this machine"),
-    };
-    if count.fetch_add(1, Ordering::SeqCst) >= max {
+fn admit(shared: &Arc<Shared>, who: String, sink: impl Write + Send + 'static) {
+    let count = &shared.readers;
+    if count.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
         count.fetch_sub(1, Ordering::SeqCst);
-        say!("logkeeper: refusing {who}: {max} readers {place} are already served");
+        say!("logkeeper: refusing {who}: {MAX_READERS} readers on this machine are already served");
         return;
-    }
-    if announce == Announce::Yes {
-        say!("logkeeper: serving this boot's log to {who}");
     }
     let theirs = Arc::clone(shared);
     let spawned = std::thread::Builder::new().name("log-reader".into()).spawn(move || {
         let (sent, left) = feed(&theirs, sink);
-        match announce {
-            Announce::Yes => theirs.network.fetch_sub(1, Ordering::SeqCst),
-            Announce::No => theirs.local.fetch_sub(1, Ordering::SeqCst),
-        };
+        theirs.readers.fetch_sub(1, Ordering::SeqCst);
         match left {
             Left::Stalled => say!(
                 "logkeeper: letting {who} go after {sent} bytes: it took none of what it is owed for {} s",
                 STALLED.as_secs()
             ),
-            Left::Gone if announce == Announce::Yes => {
-                say!("logkeeper: {who} stopped reading after {sent} bytes")
-            }
             Left::Gone => {}
         }
     });

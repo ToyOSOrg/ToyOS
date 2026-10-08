@@ -12,20 +12,18 @@ at. `toyos-metal` narrates a run with `println!` and `print!` instead, and
 stdout passes through no printer:
 
 ```
-rg -n '(^|[^e])print(ln)?!' src/metal.rs src/metalswap.rs src/metaltalk.rs src/bin/toyos-metal.rs
+rg -n '(^|[^e])print(ln)?!' src/metal.rs src/bin/toyos-metal.rs
 ```
 
 Its progress is among them — `  run: <command>`, `machine <vendor> <product>,
 BIOS <version>`, `the machine answered ssh again after N s`, `the boot stick
-enumerated N s after the machine answered`, `  swap: …`, `  talk: …`,
-`  stream: …`, `readback written to <dir>` — so a flash, a boot and a readback
+enumerated N s after the machine answered`, `readback written to <dir>` — so a flash, a boot and a readback
 are the one stretch of a run whose lines cannot be laid beside the suite's or
 beside `/log` by time. The harness's own `[metal]` lines around them are
 stamped.
 
-Not all of them are speech. `print!("{loader}{log}")`, `  <service>| <line>`
-and `  stream| <line>` relay what the machine wrote, which carries the
-machine's own stamps, and `PASS: the machine booted ToyOS in N ms` is the
+Not all of them are speech. `print!("{loader}{log}")` relays what the machine
+wrote, which carries the machine's own stamps, and `PASS: the machine booted ToyOS in N ms` is the
 loop's verdict.
 
 Owner: the orchestrator, which alone runs the loop against the machine and so

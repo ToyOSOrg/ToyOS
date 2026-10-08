@@ -44,8 +44,9 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    all it does kept: a `restart` row that ends is started again on the ports
    it kept; a row without one has its acceptors closed, so a client's next
    connect is `Gone`; a swap's expected end leaves them open for the binary
-   after it. `src/metalswap.rs`'s `judge` reads the third, on the T14 through
-   `toyos-metal --swap`; no test reads the first two.
+   after it. No test reads any of the three: `src/metalswap.rs`'s `judge`
+   read the third, on the T14 through `toyos-metal --swap`, and is deleted
+   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
 2. **An end says how**. An end reads as an exit, a kill or a fault kind
    alike on every architecture, and a bare code reads the last two as failures.
    No end reads as a quit's reason. *Exit*: exited 137, killed, and each fault

@@ -225,12 +225,13 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
   program are refused a swap.
 - host `sshd_key_auth`: sshd refuses a key not authorized.
 - host `lan_lease_report`: a link that goes down and comes back after a lease neither gives the
-  lease up nor starts the client over. The T14 cannot flap its cable, and `lan_dhcp_lease` reads only a
-  lease from the bench's router. Exit: netd's link-up decision (its main loop and
+  lease up nor starts the client over. The T14 cannot flap its cable, and no T14 row reads a lease
+  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Exit: netd's link-up decision (its main loop and
   `dhcp::restart`) lifted into a function a netd `#[test]` drives with a lease held, red when the
   `!dhcp.leased()` guard goes.
-- metal `sshd_exec`, the arms `lan_talk`'s one command does not reach, each a step of that row's
-  exchange (`src/metaltalk.rs`) red when its arm in `userland/sshd/src/main.rs` is reverted:
+- metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
+  exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
+  are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:
   - a program that is not there ends 127, `cannot run /system/bin/<name>` on stderr and nothing
     on stdout;
   - an unquotable line ends 127 before anything runs; `command::split`'s own tests already hold

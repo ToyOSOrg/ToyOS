@@ -16,8 +16,6 @@ mod checks {
     mod claims_checks;
     #[path = "clock.rs"]
     mod clock_checks;
-    #[path = "lan.rs"]
-    mod lan_checks;
     #[path = "metal.rs"]
     mod metal_checks;
     #[path = "qemu.rs"]
@@ -867,11 +865,6 @@ mod checks {
     }
 
     #[test]
-    fn metal_lease_judged_is_this_boots_own() {
-        lan_checks::the_lease_judged_is_this_boots_own();
-    }
-
-    #[test]
     fn metal_stop_owes_its_record_and_leaves_no_operation_open() {
         metal_checks::the_stop_owes_its_record_and_leaves_no_operation_open();
     }
@@ -958,7 +951,7 @@ mod checks {
     /// One boot's readback, out of a `loader.log` and a `logkeeper` text.
     fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
         let boot = "back_secs 50\nstick_secs 0\n";
-        metal::Readback::new(label, std::path::PathBuf::new(), loader.into(), log.into(), boot)
+        metal::Readback::new(label, loader.into(), log.into(), boot)
             .expect("a boot file naming both numbers")
     }
 
