@@ -29,16 +29,20 @@ A process's end now writes one record, its `exit:`, carrying what `syscalls:`
 and `memory:` said; a spawn writes one, its `spawn:`; and the machine's census
 is taken once, where the machine ends (`kernel/src/census.rs`).
 
-`testcases` on the T14 at `f2b337afd`, the first head with two records a
-process: 8,730,435 bytes, no part deleted, 22,091 `spawn:` and 22,081 `exit: …
-pid=` records, 390 bytes a child against 1,989.
+`testcases` on the T14 at `c6269f885`: `kernel.log` is 7,562,577 bytes and
+whole, with no `was deleted` line. It holds 22,178 `spawn:` records of 163
+bytes and 22,168 `exit: … pid=` records of 173, 336 bytes a process against
+1,989, and no `irq: cpu`, thread-exit, `dynamic:`, `dlopen:` or suppression
+line. The stop's fifteen records came back on the black-box page, none
+dropped, the census among them.
 
-**The margin is a factor, not a bound.** 8.73 MB is 52% of the sixteen
-megabytes kept, 98.7% of it still that one job's `spawn:` and `exit:` records,
-and the phase spawns a child per CPU for twenty seconds: about 1.9 times the
+**The margin is a factor, not a bound.** 7.56 MB is 45% of the sixteen
+megabytes kept, 98.5% of it still that one job's `spawn:` and `exit:` records,
+and the phase spawns a child per CPU for twenty seconds: about 2.2 times the
 children, a sixteen-CPU machine or a faster one, outlogs the retention again.
 **The harness is as silent about a hole as it was**: nothing reds a readback
-whose own boot deleted a part of its log.
+whose own boot deleted a part of its log. How many parts this boot wrote was
+not read.
 
 ## Measured
 
