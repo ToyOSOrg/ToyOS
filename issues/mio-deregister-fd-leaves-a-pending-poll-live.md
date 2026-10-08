@@ -7,7 +7,7 @@ opened: 2026-08-16
 # mio's ToyOS selector deregisters a token but not the kernel's poll on it
 
 `mio/src/sys/toyos/selector.rs` in the mio fork (currently pinned at `e8068c2`,
-`userland/Cargo.lock`) keeps its own registration list rather than asking the
+`Cargo.lock`) keeps its own registration list rather than asking the
 kernel to track interest:
 
 ```rust

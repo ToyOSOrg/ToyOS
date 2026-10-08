@@ -426,7 +426,7 @@ pub fn hard_lockup_chain(
     // The staged control's own witness, carried by the mechanism rather than by
     // a log line that may not survive: the lock the stuck cpu is inside was
     // taken at the control's own source line, which no other boot can say.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at kernel/src/hardlockup/probe.rs")?;
     // **cpu0's line is what proves the counter rather than a sender.** Nothing
     // sends cpu0 an NMI on this boot — the control's sender is skipped where the
     // cpus have counters — so a sample recorded against cpu0 came from cpu0's

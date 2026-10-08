@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # The AArch64 kernel builds with dead code allowed, blanket
 
-`kernel/.cargo/config.toml` gives `aarch64-unknown-none-softfloat`
+`.cargo/config.toml` gives `aarch64-unknown-none-softfloat`
 `-Adead_code -Aunfulfilled_lint_expectations`: until the syscall gate, the
 interrupt controller and the scheduler have a way in, every item only they
 reach is unreachable on AArch64. The allowance covers the whole kernel, so a

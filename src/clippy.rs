@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::ci::{KERNEL_HOST_TARGET, KERNEL_MANIFEST};
+use crate::ci::KERNEL;
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
 /// (`issues/clippy-stage-two-is-lints-one-at-a-time.md`).
@@ -22,14 +22,13 @@ const ADOPTED: &[&str] = &[
     "clippy::unnecessary_semicolon",
 ];
 
-/// One `cargo clippy`. `dir` is relative to the repository root and empty for
-/// the root itself — `.cargo/config.toml` is found from the working directory,
-/// so the kernel and bootloader run from their own; a `$ADOPTED` token splices
+/// One `cargo clippy`, run at the repository root. A `$ADOPTED` token splices
 /// [`ADOPTED`] there, a `$CONTROLS` token [`control_features`], a
-/// `$KERNEL_CONTROLS` token those of them whose package is `kernel`, and a
-/// `$MANIFEST` token the manifest the run names.
+/// `$KERNEL_CONTROLS` token those of them whose package is `kernel`, a `$GUESTS`
+/// token an `--exclude` of each package no host builds
+/// ([`crate::hostws::guest_packages`]), and a `$MANIFEST` token the manifest
+/// the run names.
 struct Shape {
-    dir: &'static str,
     before: &'static [&'static str],
     after: &'static [&'static str],
 }
@@ -55,7 +54,7 @@ fn control_features() -> Vec<String> {
     controls.chain(UNCONTROLLED.iter().map(|f| (*f).to_string())).collect()
 }
 
-/// `--all-targets` on the host workspace only: on the bootloader and kernel a
+/// `--all-targets` on the workspace's host members only: on the bootloader and kernel a
 /// test target links `std`, whose `panic_impl` collides with theirs. The second
 /// kernel shape is the feature set every guest boots, whose `cfg`s the default
 /// set never sees; the third is the one `--kernel-param` builds, `boot-actuators`
@@ -65,27 +64,21 @@ fn control_features() -> Vec<String> {
 /// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
 /// kernel does. `kernel-loom` has one because `victim-retires-mid-probe`'s
 /// test arm excludes `no-preempt-guard`, which `$CONTROLS` turns on beside it.
-/// The kernel's library, no member of the host workspace, is linted on the host
-/// from its own manifest: its tests as `--ci host` runs them, and again with
-/// `$KERNEL_CONTROLS`.
+/// The kernel's library is linted on the host apart from them: its tests as
+/// `--ci host` runs them, and again with `$KERNEL_CONTROLS`.
 const SHAPES: &[Shape] = &[
     Shape {
-        dir: "",
-        before: &["--workspace", "--all-targets", "--keep-going"],
+        before: &["--workspace", "$GUESTS", "--all-targets", "--keep-going"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "",
-        before: &["--workspace", "--all-targets", "--keep-going", "--features", "$CONTROLS"],
+        before: &["--workspace", "$GUESTS", "--all-targets", "--keep-going", "--features", "$CONTROLS"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "",
         before: &[
-            "--manifest-path",
-            KERNEL_MANIFEST,
-            "--target-dir",
-            KERNEL_HOST_TARGET,
+            "-p",
+            KERNEL,
             "--lib",
             "--tests",
             "--features",
@@ -94,12 +87,9 @@ const SHAPES: &[Shape] = &[
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "",
         before: &[
-            "--manifest-path",
-            KERNEL_MANIFEST,
-            "--target-dir",
-            KERNEL_HOST_TARGET,
+            "-p",
+            KERNEL,
             "--lib",
             "--tests",
             "--features",
@@ -110,72 +100,58 @@ const SHAPES: &[Shape] = &[
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel()],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel()],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", "boot-actuators,test-actuators"],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel(), "--features", "boot-actuators,test-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", "boot-actuators"],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel(), "--features", "boot-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", INSTRUMENTS],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel(), "--features", INSTRUMENTS],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-notail,heap-lockspin"],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel(), "--features", "heap-band-notail,heap-lockspin"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-nohead"],
+        before: &["-p", KERNEL, "--target", Arch::X86_64.kernel(), "--features", "heap-band-nohead"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::Aarch64.kernel()],
+        before: &["-p", KERNEL, "--target", Arch::Aarch64.kernel()],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::Aarch64.kernel(), "--features", "boot-actuators,test-actuators"],
+        before: &["-p", KERNEL, "--target", Arch::Aarch64.kernel(), "--features", "boot-actuators,test-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::Aarch64.kernel(), "--features", "boot-actuators"],
+        before: &["-p", KERNEL, "--target", Arch::Aarch64.kernel(), "--features", "boot-actuators"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "kernel",
-        before: &["--target", Arch::Aarch64.kernel(), "--features", AARCH64_INSTRUMENTS],
+        before: &["-p", KERNEL, "--target", Arch::Aarch64.kernel(), "--features", AARCH64_INSTRUMENTS],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "bootloader",
-        before: &["--target", Arch::X86_64.loader()],
+        before: &["-p", "bootloader", "--target", Arch::X86_64.loader()],
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
     Shape {
-        dir: "bootloader",
-        before: &["--target", Arch::Aarch64.loader()],
+        before: &["-p", "bootloader", "--target", Arch::Aarch64.loader()],
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
     Shape {
-        dir: "",
         before: &["-p", "toyos-xhci", "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
-        dir: "",
         before: &[
             "-p",
             "kernel-loom",
@@ -190,7 +166,6 @@ const SHAPES: &[Shape] = &[
     // linted under two sets of lints is checked again by each, every run, and
     // so is every crate depending on it.
     Shape {
-        dir: "",
         before: &["-p", "toyos-abi", "--all-targets", "--keep-going", "--target-dir", "target/clippy-abi"],
         after: &["-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
@@ -199,7 +174,6 @@ const SHAPES: &[Shape] = &[
 /// Run once per crate nested under a userland program that the survey gates,
 /// against the host as `--ci host` tests it.
 const NESTED: Shape = Shape {
-    dir: "",
     before: &["--manifest-path", "$MANIFEST", "--all-targets"],
     after: &["$ADOPTED", "-D", "warnings"],
 };
@@ -233,19 +207,23 @@ impl Shape {
 
     /// The arguments to `cargo clippy`, every token spliced in — what actually
     /// runs.
-    fn args(&self, manifest: Option<&str>) -> Vec<String> {
-        let kernel = format!("{}/", crate::ci::KERNEL);
+    fn args(&self, root: &Path, manifest: Option<&str>) -> Vec<String> {
+        let kernel = format!("{KERNEL}/");
         let mut args: Vec<String> = self
             .before
             .iter()
-            .map(|s| match *s {
-                "$MANIFEST" => manifest.expect("a `$MANIFEST` shape runs with a manifest").to_string(),
-                "$CONTROLS" => control_features().join(","),
+            .flat_map(|s| match *s {
+                "$MANIFEST" => vec![manifest.expect("a `$MANIFEST` shape runs with a manifest").to_string()],
+                "$CONTROLS" => vec![control_features().join(",")],
                 "$KERNEL_CONTROLS" => {
                     let ours = control_features().into_iter().filter(|f| f.starts_with(&kernel));
-                    ours.collect::<Vec<_>>().join(",")
+                    vec![ours.collect::<Vec<_>>().join(",")]
                 }
-                arg => arg.to_string(),
+                "$GUESTS" => {
+                    let guests = crate::hostws::guest_packages(root);
+                    guests.into_iter().flat_map(|guest| ["--exclude".to_string(), guest]).collect()
+                }
+                arg => vec![arg.to_string()],
             })
             .collect();
         args.push("--".to_string());
@@ -270,18 +248,17 @@ pub fn run(root: &Path) -> Result<(Vec<String>, usize), String> {
     let mut failed = Vec::new();
     for (shape, manifest) in &runs {
         let manifest = manifest.as_deref();
-        let scope = if shape.dir.is_empty() { "workspace root" } else { shape.dir };
-        eprintln!("=== clippy: {scope} — {}", shape.line(manifest));
+        eprintln!("=== clippy: {}", shape.line(manifest));
         let status = Command::new("cargo")
             .arg("clippy")
-            .args(shape.args(manifest))
+            .args(shape.args(root, manifest))
             // The loader will not compile without the key it embeds; a
             // throwaway one, since nothing linted here is signed.
             .env(crate::signing::KEY_ENV, crate::signing::key().public_hex())
             .env(crate::signing::FLOOR_ENV, crate::signing::key().floor_scope().word())
-            .current_dir(root.join(shape.dir))
+            .current_dir(root)
             .status()
-            .unwrap_or_else(|e| panic!("running cargo clippy in {scope}: {e}"));
+            .unwrap_or_else(|e| panic!("running {}: {e}", shape.line(manifest)));
         if !status.success() {
             failed.push(shape.line(manifest));
         }
@@ -313,11 +290,12 @@ mod tests {
     /// `$ADOPTED` is spliced where the token sits and nowhere else.
     #[test]
     fn the_adopted_set_expands_into_the_shapes_that_name_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = &SHAPES[0];
-        assert!(workspace.args(None).windows(2).any(|w| w == ["-W", "clippy::redundant_clone"]));
+        assert!(workspace.args(root, None).windows(2).any(|w| w == ["-W", "clippy::redundant_clone"]));
         let abi = SHAPES.last().unwrap();
-        assert!(!abi.args(None).iter().any(|a| a == "clippy::redundant_clone"));
-        assert!(abi.args(None).iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
-        assert!(!abi.args(None).iter().any(|a| a == "$ADOPTED"));
+        assert!(!abi.args(root, None).iter().any(|a| a == "clippy::redundant_clone"));
+        assert!(abi.args(root, None).iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
+        assert!(!abi.args(root, None).iter().any(|a| a == "$ADOPTED"));
     }
 }

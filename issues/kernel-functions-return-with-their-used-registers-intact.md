@@ -7,7 +7,7 @@ opened: 2026-09-29
 # Kernel functions return with their used registers intact
 
 The kernel is built with no option that zeroes call-used registers on return
-(`kernel/.cargo/config.toml`), so every function leaves its scratch values in
+(`.cargo/config.toml`), so every function leaves its scratch values in
 the registers its caller and the next gadget see. Linux at
 `Ubuntu-6.8.0-142.142`, under the T14's `CONFIG_ZERO_CALL_USED_REGS=y`,
 builds with `-fzero-call-used-regs=used-gpr` (`Makefile:891-894`). LLVM acts
