@@ -1,0 +1,20 @@
+# The boot `screen_fatal_halt_composited` reads the panel of: a compositor
+# holding the scanout when the kernel dies, on `Profile::Metal`'s machine.
+#
+# Not tests/metalcase: that image's sshserver is most of what it compiles, and
+# no guest speaks SSH.
+
+assets = ["assets"]
+
+[boot]
+start = ["logkeeper", "compositor"]
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.compositor]
+service = true
+serves = ["compositor"]
+devices = ["framebuffer", "keyboard", "mouse"]
