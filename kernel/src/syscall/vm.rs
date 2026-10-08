@@ -321,9 +321,11 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
 
     let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);
     let data_arc = process::process_data();
+    // References no module defines: a count in this load's one record, as a spawn's are.
+    let mut unresolved;
     let init_info = {
         let data = data_arc.lock();
-        crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
+        unresolved = crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
         // Every TLS value is resolved here, before the point of no return: a
         // reference that leaves its module's segment refuses the whole load,
@@ -332,17 +334,21 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             libs: &data.elf.loaded_libs,
             modules: &data.elf.tls_modules,
         };
-        let refused = if data.elf.tls.total_memsz() > 0 {
-            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info).err()
+        let initial_exec = if data.elf.tls.total_memsz() > 0 {
+            crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls, &tls_info)
         } else {
-            None
+            Ok(0)
         };
-        let refused = refused.or_else(|| {
-            lib_tls.and_then(|_| crate::elf::apply_dtpoff_relocs(&lib, &tls_info).err())
+        let general_dynamic = initial_exec.and_then(|left| match lib_tls {
+            Some(_) => crate::elf::apply_dtpoff_relocs(&lib, &tls_info).map(|more| left + more),
+            None => Ok(left),
         });
-        if let Some(refused) = refused {
-            log!("dlopen: {}: {}", resolved, refused.as_str());
-            return SyscallError::InvalidArgument.to_u64();
+        match general_dynamic {
+            Ok(left) => unresolved += left,
+            Err(refused) => {
+                log!("dlopen: {}: {}", resolved, refused.as_str());
+                return SyscallError::InvalidArgument.to_u64();
+            }
         }
 
         // init_info layout: [init_array address, init_array count].
@@ -392,7 +398,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             libs: &data.elf.loaded_libs,
             modules: &data.elf.tls_modules,
         };
-        crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
+        unresolved += crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
         data.elf.tls_modules.push(crate::elf::TlsModule {
             template: lib.tls_template,
             memsz: lib_tls.memsz() as usize,
@@ -401,6 +407,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             is_static: false,
         });
     }
+    log!("dlopen: {} pid={} unresolved={}", resolved, process::current_process(), unresolved);
     data.elf.lib_paths.push(resolved);
     data.elf.loaded_libs.push(lib);
     idx as u64

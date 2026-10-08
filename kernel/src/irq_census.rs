@@ -126,14 +126,12 @@ pub fn taken_here() -> u64 {
     sum_bar_nmi(&percpu::irq_counts_here())
 }
 
-/// Logs one `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.
-/// A `mask-windows` kernel follows each with that CPU's `windows:` line.
+/// One `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.
+/// The machine's reading, so the machine's to take: `crate::census`'s, and the blocked-task dump's, never one process's end.
 /// Allocates nothing, takes no lock, touches no device.
-pub fn log_census() {
+pub fn census(say: &mut impl FnMut(fmt::Arguments<'_>)) {
     for cpu in 0..crate::smp::cpu_count() {
         let Some(counts) = read(cpu) else { continue };
-        crate::log!("irq: cpu{cpu}{}", Fields(&counts));
-        #[cfg(feature = "mask-windows")]
-        crate::windows::log_cpu(cpu);
+        say(format_args!("irq: cpu{cpu}{}", Fields(&counts)));
     }
 }

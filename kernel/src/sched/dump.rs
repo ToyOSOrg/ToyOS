@@ -561,7 +561,7 @@ fn walk_threads(deadline: u64, mut f: impl FnMut(crate::process::ThreadCensus<'_
 fn summary(cpus: usize, silent: u32, c: Census) {
     let answered = cpus - silent as usize;
     // Needs nothing from the CPU it describes: the counters are `PerCpu`'s own, read by a sibling.
-    crate::irq_census::log_census();
+    crate::irq_census::census(&mut |line| log!("{line}"));
     // Each count is written before the word it counts, so the gate parses by word, not position.
     if !c.read {
         log!("== census: the process table is held; no thread census this dump");

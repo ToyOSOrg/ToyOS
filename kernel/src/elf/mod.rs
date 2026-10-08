@@ -375,10 +375,8 @@ pub fn load_shared_lib(
     let rw_offset = rw_lo as usize & !(PAGE_2M as usize - 1);
     let rw_size = rw_end_aligned - rw_offset;
 
-    let t0 = crate::clock::nanos_since_boot();
     let alloc =
         PageAlloc::new(load_size).ok_or("dlopen: allocation failed")?;
-    let t1 = crate::clock::nanos_since_boot();
     // Every offset below is bounded against what the PMM actually returned, not `load_size`.
     let image = alloc.window();
 
@@ -387,7 +385,6 @@ pub fn load_shared_lib(
     unsafe {
         image.zero();
     }
-    let t2 = crate::clock::nanos_since_boot();
 
     let module = ModuleImage { image, extent };
     // In bounds only because `Layout` guarantees `filesz <= memsz`; the checked
@@ -397,7 +394,6 @@ pub fn load_shared_lib(
         read_backing_into(backing, seg.file_offset(), dst)
             .map_err(|_| "a segment could not be read off the device")?;
     }
-    let t3 = crate::clock::nanos_since_boot();
 
     let dyn_info = match layout.dynamic() {
         Some(dynamic) => {
@@ -480,30 +476,16 @@ pub fn load_shared_lib(
     // Every entry is parsed here, and a refusal drops the image this pass has
     // written into: nothing but this function has seen it.
     let base_phys = image.phys();
-    let mut reloc_count = 0u64;
     for raw in table_entries(&rela).chain(table_entries(&jmprel)) {
         let Some(r) = rela::parse(raw, &rules, symbols).map_err(|e| e.as_str())? else { continue };
         if let toyos_elf::Op::Relative(target) = r.op() {
             // SAFETY: `module.slice(r.offset(), 8)?` bounds-checks the write
             // independently of the parse; `image` is still exclusively owned.
             unsafe { module.slice(r.offset(), 8)?.write::<u64>(0, base_phys + target.get()) };
-            reloc_count += 1;
         }
     }
 
     let tls_template = layout.tls().map(|tls| module.at(tls.template()));
-
-    let t4 = crate::clock::nanos_since_boot();
-    log!(
-        "dlopen: base={:#x} {}MB alloc={}ms zero={}ms copy={}ms reloc={}ms ({} relocs)",
-        base_phys,
-        load_size / (1024 * 1024),
-        (t1 - t0) / 1_000_000,
-        (t2 - t1) / 1_000_000,
-        (t3 - t2) / 1_000_000,
-        (t4 - t3) / 1_000_000,
-        reloc_count
-    );
 
     Ok((
         LoadedLib {
