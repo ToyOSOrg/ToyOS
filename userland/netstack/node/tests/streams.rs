@@ -1,6 +1,6 @@
-//! Streams on the node, against a peer the test scripts at 192.0.2.2:80 and pipe ends it fakes.
-//! No scenario ids: the specifications' TCP scenarios are `toyos-net-tcp`'s; these are what the
-//! node does between [tcp] and a client's two pipes.
+//! Streams on the node, against peers the test scripts, at 192.0.2.2:80 unless a test puts one
+//! elsewhere, and pipe ends it fakes. No scenario ids: the specifications' TCP scenarios are
+//! `toyos-net-tcp`'s; these are what the node does between [tcp] and a client's two pipes.
 //!
 //! What is not ours: every segment the node emits is read by `etherparse` as it leaves
 //! ([`Far::hears`]), its IPv4 and TCP checksums and lengths that crate's sums, and every segment
@@ -24,6 +24,9 @@ use toyos_net_tcp::{Counter, Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
 
 const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+/// A second peer's address, and its MAC.
+const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
+const MAC_C: [u8; 6] = [2, 0, 0, 0, 0, 0x0c];
 const PORT: u16 = 80;
 /// The peer's initial sequence number.
 const ISS: u32 = 5000;
@@ -151,12 +154,18 @@ enum Manner {
 }
 
 struct Far {
+    addr: Ipv4Addr,
+    mac: [u8; 6],
     manner: Manner,
     /// Nobody answers an ARP request for the peer's address.
     absent: bool,
+    /// The test turned to another peer ([`Net::turn_to`]): of the node's segments this one hears
+    /// its own connection's and no other, a SYN least of all.
+    parked: bool,
     /// The window the peer's segments offer.
     offers: u16,
-    /// The node's port, from its last SYN: segments from another are heard and not answered.
+    /// The node's port, from its last SYN to this address: segments from another are heard and
+    /// not answered.
     port: u16,
     /// The peer's next sequence number.
     snd_nxt: u32,
@@ -179,12 +188,33 @@ fn v4(bytes: &[u8]) -> Ipv4Addr {
 
 impl Far {
     fn new() -> Self {
-        Self { manner: Manner::Answers, absent: false, offers: 65_535, port: 0, snd_nxt: ISS, rcv_nxt: 0, acked: 0, window: 0, received: Vec::new(), fin: false, resets: Vec::new(), segments: Vec::new() }
+        Self::at(B, MAC_B)
+    }
+
+    /// A peer at `addr`, whose frames come from `mac`.
+    fn at(addr: Ipv4Addr, mac: [u8; 6]) -> Self {
+        Self {
+            addr,
+            mac,
+            manner: Manner::Answers,
+            absent: false,
+            parked: false,
+            offers: 65_535,
+            port: 0,
+            snd_nxt: ISS,
+            rcv_nxt: 0,
+            acked: 0,
+            window: 0,
+            received: Vec::new(),
+            fin: false,
+            resets: Vec::new(),
+            segments: Vec::new(),
+        }
     }
 
     /// A segment from the peer in its frame, built by `etherparse`: PSH with text.
     fn frame(&self, seq: u32, ack: Option<u32>, syn: bool, fin: bool, rst: bool, text: &[u8]) -> Vec<u8> {
-        let mut step = PacketBuilder::ethernet2(MAC_B, MAC).ipv4(B.octets(), A.octets(), 64).tcp(PORT, self.port, seq, self.offers);
+        let mut step = PacketBuilder::ethernet2(self.mac, MAC).ipv4(self.addr.octets(), A.octets(), 64).tcp(PORT, self.port, seq, self.offers);
         if syn {
             step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460)]).unwrap();
         }
@@ -224,6 +254,11 @@ impl Far {
         self.frame(self.snd_nxt, Some(self.rcv_nxt), false, false, true, &[])
     }
 
+    /// An acknowledgment that says nothing new but the window the peer offers.
+    fn update(&self) -> Vec<u8> {
+        self.frame(self.snd_nxt, Some(self.rcv_nxt), false, false, false, &[])
+    }
+
     /// The peer offers a window of `bytes` from its next segment on.
     fn offer(&mut self, bytes: u16) {
         self.offers = bytes;
@@ -235,9 +270,10 @@ impl Far {
     }
 
     /// The outside reading of a frame the node emitted, and the frames it is answered with.
-    /// Ethernet II from the node's MAC; then ARP, whose requests for the peer and the router are
-    /// answered; a datagram of the DHCP client's, which `lease.rs` reads; or a TCP segment to the
-    /// peer, with the lengths and checksums `etherparse` computes.
+    /// Ethernet II from the node's MAC; then ARP, whose requests for this peer and the router
+    /// are answered; a datagram of the DHCP client's, which `lease.rs` reads; or a TCP segment
+    /// to port 80, with the lengths and checksums `etherparse` computes, heard if it is to this
+    /// peer's address.
     fn hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
         let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
         let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
@@ -246,7 +282,7 @@ impl Far {
             (Some(NetSlice::Arp(asked)), None) => {
                 let asks = asked.operation() == ArpOperation::REQUEST && v4(asked.sender_protocol_addr()) == A;
                 match v4(asked.target_protocol_addr()) {
-                    target if asks && target == B && !self.absent => vec![arp(MAC, false, MAC_B, B, A)],
+                    target if asks && target == self.addr && !self.absent => vec![arp(MAC, false, self.mac, self.addr, A)],
                     target if asks && target == R => vec![arp(MAC, false, MAC_R, R, A)],
                     _ => Vec::new(),
                 }
@@ -254,12 +290,15 @@ impl Far {
             (Some(NetSlice::Ipv4(_)), Some(TransportSlice::Udp(_))) => Vec::new(),
             (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(tcp))) => {
                 let header = ip.header();
-                assert_eq!(ethernet.destination(), MAC_B, "to the peer's MAC");
                 assert_eq!(header.header_checksum(), header.to_header().calc_header_checksum(), "the IPv4 header checksum");
                 assert_eq!(usize::from(header.total_len()), 20 + tcp.slice().len(), "IPv4's length is the segment's");
-                assert_eq!((header.source_addr(), header.destination_addr()), (A, B));
+                assert_eq!(header.source_addr(), A);
                 assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
                 assert_eq!(tcp.destination_port(), PORT);
+                if header.destination_addr() != self.addr || (self.parked && tcp.source_port() != self.port) {
+                    return Vec::new();
+                }
+                assert_eq!(ethernet.destination(), self.mac, "to the peer's MAC");
                 let segment = Segment {
                     seq: tcp.sequence_number(),
                     ack: tcp.ack().then(|| tcp.acknowledgment_number()),
@@ -332,6 +371,8 @@ struct Net {
     now: Instant,
     draws: u32,
     far: Far,
+    /// The peers the test turned from, each with its connection.
+    parked: Vec<Far>,
 }
 
 fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
@@ -345,7 +386,35 @@ impl Net {
     /// The node holding its lease of 192.0.2.1/24 for an hour.
     fn new() -> Self {
         let Wire { node, now, .. } = Wire::leased(&terms(3_600, Some(R)));
-        Self { node, now, draws: 0x7c00_0000, far: Far::new() }
+        Self { node, now, draws: 0x7c00_0000, far: Far::new(), parked: Vec::new() }
+    }
+
+    /// Leaves the present peer with the connection it has and makes `next` the peer the test
+    /// talks to and connects to.
+    fn turn_to(&mut self, next: Far) {
+        let mut far = std::mem::replace(&mut self.far, next);
+        far.parked = true;
+        self.parked.push(far);
+    }
+
+    /// What the peers answer a frame the node emitted with. Two at one address give an ARP
+    /// request the same answer, which is one frame. A segment to an address no peer is at is
+    /// the node's mistake, and no peer would hear it.
+    fn hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+        if let (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(_))) = (&packet.net, &packet.transport) {
+            let to = ip.header().destination_addr();
+            assert!(self.far.addr == to || self.parked.iter().any(|far| far.addr == to), "a segment to {to}, where no peer is");
+        }
+        let mut answers = self.far.hears(frame);
+        for far in &mut self.parked {
+            for answer in far.hears(frame) {
+                if !answers.contains(&answer) {
+                    answers.push(answer);
+                }
+            }
+        }
+        answers
     }
 
     /// Offers the node all the credit it wants and delivers what each frame is answered with,
@@ -365,7 +434,7 @@ impl Net {
         let mut frames = Vec::new();
         self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()));
         for frame in &frames {
-            for answer in self.far.hears(frame) {
+            for answer in self.hears(frame) {
                 self.node.receive(self.now, &answer, draw(&mut self.draws));
             }
         }
@@ -406,8 +475,9 @@ impl Net {
         panic!("100,000 deadlines without the clock passing {limit:?}");
     }
 
-    /// [`Self::run_until`] with a [`Manner::Slow`] peer that reads 1,460 bytes a second: each
-    /// second it offers that window again.
+    /// [`Self::run_until`] with every [`Manner::Slow`] peer reading 1,460 bytes a second: each
+    /// second one whose connection has had neither the node's FIN nor its reset offers that
+    /// window again.
     fn run_slowly_until(&mut self, limit: Duration, done: impl Fn(&Net) -> bool) -> bool {
         let end = self.now.after(limit);
         let mut reads = self.now.after(Duration::from_secs(1));
@@ -422,9 +492,16 @@ impl Net {
             self.fire(at);
             if self.now >= reads {
                 reads = self.now.after(Duration::from_secs(1));
-                self.far.offer(1_460);
-                let update = self.far.frame(self.far.snd_nxt, Some(self.far.rcv_nxt), false, false, false, &[]);
-                self.deliver(&update);
+                let mut updates = Vec::new();
+                for far in self.parked.iter_mut().chain([&mut self.far]) {
+                    if far.manner == Manner::Slow && !far.fin && far.resets.is_empty() {
+                        far.offer(1_460);
+                        updates.push(far.update());
+                    }
+                }
+                for update in &updates {
+                    self.deliver(update);
+                }
             }
         }
         panic!("100,000 deadlines without the clock passing {limit:?}");
@@ -432,7 +509,8 @@ impl Net {
 
     fn connect(&mut self, timeout: Option<Duration>) -> (StreamId, Client) {
         let (client, pipes) = client();
-        let id = self.node.connect(self.now, peer(), timeout, pipes).expect("a route to the peer");
+        let remote = Endpoint { addr: self.far.addr, ..peer() };
+        let id = self.node.connect(self.now, remote, timeout, pipes).expect("a route to the peer");
         self.pump();
         (id, client)
     }
@@ -924,7 +1002,7 @@ fn departed(net: &mut Net, len: usize, slow: bool) -> StreamId {
     if slow {
         net.far.manner = Manner::Slow;
         net.far.offer(1_460);
-        let update = net.far.frame(net.far.snd_nxt, Some(net.far.rcv_nxt), false, false, false, &[]);
+        let update = net.far.update();
         net.deliver(&update);
     } else {
         net.far.manner = Manner::Deaf;
@@ -953,23 +1031,123 @@ fn a_departed_clients_tail_arrives_whole_while_its_peer_takes_it() {
     assert_eq!((net.node.streams(), net.events(), net.far.resets.len()), (0, vec![], 0));
 }
 
-// Sixteen connections of departed clients are a peer's to keep alive; the seventeenth has its
-// 100 seconds from the leaving, whatever the peer takes of it.
+// Once the peer's FIN is read through and the client writes no more, nothing of the stream
+// reaches the client again and nothing tells the node whether it lives: its unsent bytes have
+// the 100 seconds of a departed client's. The peer offers no window and answers every probe
+// (RFC 9293 §3.8.6.1), which keeps [tcp] from giving the connection up, so the cut is the node's.
+#[test]
+fn a_client_done_writing_after_the_peers_fin_has_100_seconds_without_progress() {
+    let (mut net, id, client) = established();
+    net.far.manner = Manner::Slow;
+    net.far.offer(0);
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!((dropped(&client), net.node.streams()), ((true, false), 1), "the client reads the end");
+
+    client.borrow_mut().outbox.extend(text(100_000));
+    net.bridge();
+    assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER);
+    let left = net.now;
+    client.borrow_mut().writer_gone = true;
+    net.node.pipe_gone(left, id, PipeEnd::FromClient);
+    net.pump();
+    assert_eq!((net.node.streams(), net.events()), (1, vec![]));
+
+    assert!(net.run_until(Duration::from_secs(200), |net| net.node.streams() == 0), "the stream is let go");
+    assert_eq!(net.now, left.after(Duration::from_secs(100)), "from the moment its client wrote no more");
+    assert_eq!(net.events(), [StreamEvent::Cut { id }]);
+    assert_eq!((dropped(&client), net.far.resets.len()), ((true, true), 1));
+    assert_eq!((client.borrow().outbox.len(), net.far.received.len()), (100_000 - SEND_BUFFER, 0), "no byte was given up, and none taken");
+    // The peer's script acknowledges every segment that carries text, taken or not.
+    let probes = net.far.texts();
+    assert!(probes.len() > 2, "the peer answered probes: {probes:?}");
+}
+
+// Sixteen connections of departed clients are a peer's to keep alive, all at once; the
+// seventeenth has its 100 seconds from the leaving, whatever the peer takes of it.
 #[test]
 fn a_peer_keeps_sixteen_departed_clients_connections_alive_and_no_more() {
     let mut net = Net::new();
+    let sent = text(250_000);
     for _ in 0..16 {
-        departed(&mut net, 100_000, false);
+        departed(&mut net, sent.len(), true);
+        net.turn_to(Far::new());
     }
-    let id = departed(&mut net, 250_000, true);
+    let id = departed(&mut net, sent.len(), true);
     let left = net.now;
     assert_eq!(net.node.streams(), 17);
     net.events();
 
-    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.node.streams() == 0), "every stream is let go");
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.node.streams() < 17), "a stream is let go");
     assert_eq!(net.now, left.after(Duration::from_secs(100)), "the peer took {} bytes of the seventeenth", net.far.received.len());
-    assert!(net.events().contains(&StreamEvent::Cut { id }));
+    assert_eq!((net.node.streams(), net.events(), net.far.resets.len()), (16, vec![StreamEvent::Cut { id }], 1));
     assert!(net.far.received.len() > 1_460, "and it did take some");
+
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.parked.iter().all(|far| far.fin)), "the sixteen FINs arrive");
+    for (nth, far) in net.parked.iter().enumerate() {
+        assert!(far.received == sent, "connection {nth}: the peer's stream is the client's, byte for byte");
+        assert!(far.resets.is_empty(), "connection {nth}");
+    }
+    assert_eq!((net.node.streams(), net.events()), (0, vec![]));
+}
+
+// The seventeenth becomes one of the sixteen when one of them is done: from then its peer keeps
+// it alive too, past the 100 seconds it had from its client's leaving.
+#[test]
+fn a_departed_clients_connection_past_the_sixteen_is_one_of_them_once_one_is_done() {
+    let mut net = Net::new();
+    for _ in 0..16 {
+        departed(&mut net, 100_000, true);
+        net.turn_to(Far::new());
+    }
+    let sent = text(250_000);
+    departed(&mut net, sent.len(), true);
+    let left = net.now;
+    assert_eq!(net.node.streams(), 17);
+    net.events();
+
+    // The sixteen peers read all there is, at once.
+    let mut updates = Vec::new();
+    for far in &mut net.parked {
+        far.manner = Manner::Answers;
+        far.offer(65_535);
+        updates.push(far.update());
+    }
+    for update in &updates {
+        net.deliver(update);
+    }
+    let done = |net: &Net| net.node.streams() == 1 && net.parked.iter().all(|far| far.fin && far.received.len() == 100_000);
+    assert!(net.run_until(Duration::from_secs(10), done), "the sixteen are done: {} streams are left", net.node.streams());
+    assert!(net.now < left.after(Duration::from_secs(100)), "before the seventeenth's 100 seconds: {:?} after {left:?}", net.now);
+
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.far.fin), "the FIN arrives: {} bytes did", net.far.received.len());
+    assert!(net.now > left.after(Duration::from_secs(100)), "{:?} after {left:?}", net.now);
+    assert!(net.far.received == sent, "the peer's stream is the client's, byte for byte");
+    assert_eq!((net.node.streams(), net.events(), net.far.resets.len()), (0, vec![], 0));
+}
+
+// The sixteen are an address's: with sixteen held at one address, a peer at another keeps its
+// own departed client's connection alive.
+#[test]
+fn a_peer_at_another_address_keeps_its_own_sixteen() {
+    let mut net = Net::new();
+    for _ in 0..16 {
+        departed(&mut net, 100_000, false);
+    }
+    net.turn_to(Far::at(C, MAC_C));
+    let sent = text(250_000);
+    departed(&mut net, sent.len(), true);
+    let left = net.now;
+    assert_eq!(net.node.streams(), 17);
+    net.events();
+
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.far.fin), "the FIN arrives: {} bytes did", net.far.received.len());
+    assert!(net.now > left.after(Duration::from_secs(100)), "{:?} after {left:?}", net.now);
+    assert!(net.far.received == sent, "the peer's stream is the client's, byte for byte");
+    // The sixteen at the first address gave up nothing and were cut.
+    let cuts = net.events();
+    assert!(cuts.len() == 16 && cuts.iter().all(|event| matches!(event, StreamEvent::Cut { .. })), "{cuts:?}");
+    assert_eq!((net.node.streams(), net.far.resets.len()), (0, 0));
 }
 
 // ---- pipes that refuse the node ----

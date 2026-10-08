@@ -62,8 +62,7 @@ const ACTUATOR_TESTS: &[&str] = &[
     "ring0_timer_in_syscall",
 ];
 
-/// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
-/// no actuator armed in it.
+/// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`.
 const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
@@ -135,7 +134,7 @@ const RUST_SKIP: &[&str] = &[
     // It needs a NIC in front of netstack and a host server behind it:
     // `netstack_socket_churn` runs it on `tests/netcase`.
     "netstack_socket_churn",
-    // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
+    // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
     // The same for `tests/lantalkcase`, held until the runner's bound is near
@@ -322,12 +321,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "lan_message_delivery",
         metal::Metal { arms: LANTALKCASE, judge: |b| lan::delivered_on_metal(b[0]) },
-    ),
-    (
-        // The first byte: a lease from the bench's own router, read off the
-        // stick.
-        "lan_lease_report",
-        metal::Metal { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
     ),
     (
         "lan_talk",
@@ -647,26 +640,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- one image: tests/jobcase ----
-    (
-        // Two boots the suite already flashes: the device boot writes and
-        // fsyncs megabytes before its reset, and `jobcase` is the same reset
-        // with nothing moved across the bus. Neither costs the machine a
-        // minute it was not already spending.
-        "usb_reset_hands_devices_back",
-        metal::Metal {
-            arms: USB_RESET_BOOTS,
-            judge: power::usb_reset_on_metal,
-        },
-    ),
-    (
-        // Already precisely this boot: `args = ["reboot"]`. On the T14 the
-        // chain is what every metal boot does — the loader points `BootNext` at
-        // itself before each handoff, so the pass that reads the page appends
-        // its report to the same `loader.log` the driver hands back.
-        "blackbox_done_chain",
-        metal::Metal { arms: JOBCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
-    ),
+    // ---- tests/jobcase, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
         // profile that deliberately leaves the machine unable to end its own
@@ -731,20 +705,6 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    (
-        // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
-        // S5 power-off the QEMU stop reason exists to catch — the driver
-        // established it before this judge ran. What is left is the kernel's own
-        // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
-        "machine_reboot",
-        metal::Metal {
-            arms: JOBCASE,
-            judge: |b| {
-                power::reset_register_decoded(&b[0].kernel())?;
-                bootlog::handed_back(b[0].after_the_reset()?.text()).map_err(|why| why.to_string())
-            },
-        },
-    ),
     // ---- one image: tests/proctreecase ----
     (
         // A parent's end takes its children down. The guest carries every
@@ -776,15 +736,50 @@ const METAL: &[(&str, metal::Metal)] = &[
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
-    // ---- one image: tests/metalcase ----
+    // ---- one image: tests/metalcase, which runs no job ----
+    //
+    // The rows after the first read what any boot that hands the machine back
+    // writes, so they ride this one.
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
-    // ---- one image ----
+    (
+        // Two boots the suite already flashes: the device boot writes and
+        // fsyncs megabytes before its reset, and `metalcase` is the same reset
+        // with no job behind it.
+        "usb_reset_hands_devices_back",
+        metal::Metal {
+            arms: USB_RESET_BOOTS,
+            judge: power::usb_reset_on_metal,
+        },
+    ),
+    (
+        // On the T14 the chain is what every metal boot does — the loader
+        // points `BootNext` at itself before each handoff, so the pass that
+        // reads the page appends its report to the same `loader.log` the
+        // driver hands back.
+        "blackbox_done_chain",
+        metal::Metal { arms: METALCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
+    ),
+    (
+        // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
+        // S5 power-off the QEMU stop reason exists to catch — the driver
+        // established it before this judge ran. What is left is the kernel's own
+        // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
+        "machine_reboot",
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| {
+                power::reset_register_decoded(&b[0].kernel())?;
+                bootlog::handed_back(b[0].after_the_reset()?.text()).map_err(|why| why.to_string())
+            },
+        },
+    ),
+    // ---- the `SYS_DEBUG` members' boot, armed ----
     // The cheapest cluster there is: every one of these arms a check that runs
-    // at init, logs its verdict and does nothing else, so they cost one flash
-    // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
+    // at init, logs its verdict and does nothing else, so they cost no flash
+    // of their own. **Nothing had to be promoted into `kernel/src/params.rs`**
     // — the metal profile flashes test images (the track's ruling), and the
     // pre-flash gate is what says the machine survives each one.
     (
@@ -957,8 +952,6 @@ const BOUNDS: &[metal::Arm] = &[metal::once(
     &["test_rs_abuse_mmap_regions", "test_rs_abuse_thread_table", "test_rs_abuse_dlopen_ledger"],
 )];
 
-const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
-
 /// The shipping kernel with the windows' instrument and nothing else, so what
 /// it reads is that kernel under the herd. Three exits, a report each:
 /// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
@@ -986,7 +979,7 @@ const LOGSTALLCASE: &[metal::Arm] =
     &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundserver_log_stall"])];
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
-/// with megabytes behind it, and `jobcase` for one with nothing.
+/// with megabytes behind it, and `metalcase` for one with no job behind it.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -994,7 +987,7 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
         &[],
         devices::JOBS,
     ),
-    metal::once("jobcase", "tests/jobcase", &[], &[]),
+    metal::once("metalcase", "tests/metalcase", &[], &[]),
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
@@ -1016,52 +1009,46 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
     ],
 )];
 
-/// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
-/// is the lease's verdict, read out of the kernel's own `exit:` record, and its
-/// report is on the log volume. It names the I219, so the loop refuses a cable
-/// that is out before it flashes, as [`LANTALKCASE`] does.
-const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
-    nic: Some(lan::NIC),
-    ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
-}];
-
 /// The cable's boot, netstack in front of the T14's I219, which the host talks to
 /// over that cable: the loop reads the log it serves under its name, pings it,
-/// runs a command on it and tells it to reboot.
+/// runs a command on it and tells it to reboot. It names the I219, so the loop
+/// refuses a cable that is out before it flashes.
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
     nic: Some(lan::NIC),
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
 }];
 
-/// One boot for every in-kernel self-test that logs its verdict at init and
-/// does nothing else.
+/// Every in-kernel self-test that logs its verdict at init and does nothing
+/// else.
 ///
-/// They cost the machine one flash between them because none of them changes
+/// They cost the machine no flash of their own because none of them changes
 /// what the machine *is*: each stages inputs the hardware cannot produce — a
 /// crafted capability list, a malformed descriptor, a vector nothing claims —
-/// runs a check over them and prints a count.
-const SELFTESTS: &[metal::Arm] = &[metal::once(
-    "selftests",
-    "tests/testcases",
-    &[
-        "pci-cap-selftest",
-        "revoked-backing-selftest",
-        "leak-rollback-selftest",
-        "lapic-spurious-selftest",
-        "unclaimed-vector-selftest",
-        "xhci-xecp-selftest",
-        "xhci-descriptor-selftest",
-        "sysret-ss-probe",
-        "test-input-merge",
-        "sched-operation-nesting",
-        "iommu-firmware-left",
-    ],
-    &[],
-)];
+/// runs a check over them and prints a count. So they arm the boot
+/// [`ACTUATOR_TESTS`] ride, which is the same kernel.
+const SELFTEST_PARAMS: &[&str] = &[
+    "pci-cap-selftest",
+    "revoked-backing-selftest",
+    "leak-rollback-selftest",
+    "lapic-spurious-selftest",
+    "unclaimed-vector-selftest",
+    "xhci-xecp-selftest",
+    "xhci-descriptor-selftest",
+    "sysret-ss-probe",
+    "test-input-merge",
+    "sched-operation-nesting",
+    "iommu-firmware-left",
+];
+
+const SELFTESTS: &[metal::Arm] = &[metal::Arm {
+    features: ACTUATOR_KERNEL,
+    ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &[])
+}];
 
 /// The boots every discovered Rust binary rides on the T14: the shipping
-/// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`.
+/// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`,
+/// armed with [`SELFTEST_PARAMS`].
 fn shared_metal() -> Vec<metal::SharedBoot> {
     let (debug, shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
@@ -1085,8 +1072,8 @@ fn shared_metal() -> Vec<metal::SharedBoot> {
         metal::SharedBoot {
             boot: "shared-debug".to_string(),
             config: "tests/testcases",
-            params: &[],
-            features: toyos_build::build::TEST_KERNEL,
+            params: SELFTEST_PARAMS,
+            features: ACTUATOR_KERNEL,
             members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
             jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
@@ -4954,7 +4941,7 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
     fn judge(_: &[&metal::Readback]) -> Result<(), String> {
         Ok(())
     }
-    const RUNS: metal::Metal = metal::Metal { arms: JOBCASE, judge };
+    const RUNS: metal::Metal = metal::Metal { arms: METALCASE, judge };
     const NONE: metal::Metal = metal::Metal { arms: &[], judge };
     const NO_CONFIG: metal::Metal = metal::Metal {
         arms: &[metal::once("nowhere", "tests/no-such-config", &[], &[])],

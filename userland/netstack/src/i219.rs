@@ -212,7 +212,7 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
 
 /// What a bring-up says about itself: a sentence each for what it asked the
 /// I219's PHY before its reset and what that reset did, and one for the rest.
-pub fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
+fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
     let mut words = Vec::new();
     match brought_up.woke {
         Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
@@ -282,22 +282,17 @@ impl Nic {
         self.driver.borrow().accept_multicast(group);
     }
 
-    /// What the bring-up found.
-    pub fn brought_up(&self) -> toyos_i219::BringUp {
-        self.driver.borrow().brought_up()
-    }
-
     pub fn link(&self) -> toyos_i219::Link {
         self.driver.borrow().link()
     }
 
     /// What the driver and the MAC have counted so far, the transmit ring
     /// reclaimed first so a frame that has left is counted as sent.
-    pub fn counts(&self) -> toyos_i219::lease::Counts {
+    pub fn counts(&self) -> (toyos_i219::Counters, toyos_i219::Wire) {
         let mut driver = self.driver.borrow_mut();
         driver.reclaim();
         let wire = driver.wire();
-        toyos_i219::lease::Counts::of(driver.counters(), wire)
+        (driver.counters(), wire)
     }
 
     /// Take the interrupt, acknowledge its causes and refresh the link — and
