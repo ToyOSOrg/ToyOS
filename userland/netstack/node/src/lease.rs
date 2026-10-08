@@ -142,6 +142,12 @@ impl Stack {
         Ok((id, self.shard.udp_port(id)?))
     }
 
+    /// Connects a socket to one peer: from here [udp] delivers it that peer's datagrams for the
+    /// address the socket then sends from, and no other.
+    pub(crate) fn connect(&mut self, now: Instant, id: SocketId, peer: Ipv4Addr, port: u16) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_connect(now, id, peer, port)
+    }
+
     /// Queues a datagram; accepted means queued, not sent.
     pub(crate) fn send_to(&mut self, now: Instant, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
         self.shard.send_to(now, id, destination, port, payload)

@@ -6,6 +6,23 @@
 //! this table.
 //!
 //! `kernel::proclife` decides lifecycle transitions; this file only performs them.
+//!
+//! **What a process writes into the log is two records**: one where its spawn
+//! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N code=N
+//! cpu=Nms …`, the verdict first and then what that process itself consumed.
+//! Each is written every time and charged to the process it names: nothing
+//! here is rate-limited, and a thread's end writes nothing. A reading of the
+//! whole machine is `crate::census`'s, taken once, where the machine ends, by
+//! its stop or by its death, and no process's start or end repeats one: the
+//! log's volume is then a function of what ran, never of how many CPUs
+//! watched it.
+//!
+//! Two records written where a process ends are another owner's and are
+//! charged to it, not to the process: a device function whose ports the
+//! process held says they went back (`crate::isa::process_ends`, the pair of
+//! the record its claim wrote when it bound them), and a fault that ends a
+//! process writes the fault's report ([`dump_crash_diagnostics`]), which is
+//! several records because it is a crash and not an end.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -1031,12 +1048,43 @@ pub fn spawn_thread(
 }
 
 
-/// Frees an exiting process's resources (mappings, handles, ELF state). Returns (syscall_total, syscall_total_ns) for the main thread, for the accounting snapshot.
+/// What a process's exit record says it consumed beside its CPU time: its memory, and its main thread's syscalls.
+struct Consumed {
+    peak_memory: u64,
+    alloc_count: u64,
+    free_count: u64,
+    syscall_total: u64,
+    syscall_total_ns: u64,
+    syscall_counts: [u32; toyos_abi::syscall::SYSCALL_PROFILE_BINS],
+}
+
+impl core::fmt::Display for Consumed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "peak={}MB allocs={} frees={} syscalls={} syscall_wall={}ms",
+            self.peak_memory / (1024 * 1024),
+            self.alloc_count,
+            self.free_count,
+            self.syscall_total,
+            self.syscall_total_ns / 1_000_000,
+        )?;
+        for (number, &count) in self.syscall_counts.iter().enumerate() {
+            if count > 0 {
+                write!(f, " {number}={count}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Frees an exiting process's resources (mappings, handles, ELF state), and answers what it consumed.
+/// Says nothing of the machine: a reading of every CPU is `crate::census`'s, never one process's end.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
     thread_data_arc: &Arc<Lock<ThreadData>>,
     pid: Pid,
-) -> (u64, u64) {
+) -> Consumed {
     // Never hold ThreadData + ProcessData at once.
     let (syscall_total, syscall_total_ns, syscall_counts) = {
         let mut tdata = thread_data_arc.lock();
@@ -1046,36 +1094,11 @@ fn teardown_resources(
         stats
     };
 
+    // Before the teardown below: a report spans its process up to here, and the next one this teardown.
+    #[cfg(feature = "mask-windows")]
+    crate::windows::report();
+
     let mut data = process_data_arc.lock();
-
-    if syscall_total > 0 {
-        use alloc::string::String;
-        use core::fmt::Write;
-        let mut profile = String::new();
-        for (i, &count) in syscall_counts.iter().enumerate() {
-            if count > 0 {
-                let _ = write!(profile, " {}={}", i, count);
-            }
-        }
-        let wall_ms = syscall_total_ns / 1_000_000;
-        log!("syscalls: pid={pid} total={} syscall_wall={wall_ms}ms{profile}", syscall_total);
-        // Printed here, not at shutdown: process exit is the one recurring moment a running guest reaches (the harness kills QEMU).
-        if syscall_counts[toyos_abi::syscall::SYS_FSYNC as usize] > 0 {
-            crate::block::census::print_if_moved();
-        }
-    }
-
-    if data.peak_memory > 0 || data.alloc_count > 0 {
-        log!("memory: pid={pid} peak={}MB allocs={} frees={}",
-            data.peak_memory / (1024 * 1024), data.alloc_count, data.free_count);
-    }
-
-    // Machine-wide, cumulative counters, printed here (not at shutdown) because process exit is the one recurring moment every boot reaches.
-    crate::irq_census::log_census();
-    // After the irq lines: the tlb conservation check reads deliveries first, issues second.
-    crate::arch::tlb::log_census();
-    crate::arch::trap::log_unclaimed();
-
     ops::close_all(&mut data.handles);
     // Every thread has left, and none returns to Ring 3 to use them.
     crate::isa::process_ends(pid);
@@ -1086,18 +1109,26 @@ fn teardown_resources(
     data.demand_pages.clear();
     data.elf.reloc_index = None;
 
-    (syscall_total, syscall_total_ns)
+    Consumed {
+        peak_memory: data.peak_memory,
+        alloc_count: data.alloc_count,
+        free_count: data.free_count,
+        syscall_total,
+        syscall_total_ns,
+        syscall_counts,
+    }
 }
 
-/// Table-side teardown bookkeeping: drop the image record and total the CPU time of every thread still in the table.
+/// Table-side teardown bookkeeping: drop the image record, total the CPU time of every thread still in the table, and write the one record of the process's end.
 /// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources.
-fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32) -> u64 {
+fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32, consumed: &Consumed) -> u64 {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
     proc.image = None;
     let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
-    log!("exit: {name} pid={process_pid} code={code} cpu={}ms", cpu_ns / 1_000_000);
+    // The verdict first: a record past `MAX_RECORD_MESSAGE` loses its end.
+    log!("exit: {name} pid={process_pid} code={code} cpu={}ms {consumed}", cpu_ns / 1_000_000);
     cpu_ns
 }
 
@@ -1164,12 +1195,12 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
         Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
     };
-    let (syscall_total, syscall_total_ns) = teardown_resources(process_data, &main_thread_data, pid);
+    let consumed = teardown_resources(process_data, &main_thread_data, pid);
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
-        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code)
+        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code, &consumed)
     };
-    let stats = stats_from(&process_data.lock(), pid, cpu_ns, syscall_total, syscall_total_ns);
+    let stats = stats_from(&process_data.lock(), pid, cpu_ns, consumed.syscall_total, consumed.syscall_total_ns);
     let ready = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
@@ -1261,7 +1292,7 @@ pub fn thread_exit(code: i32) -> ! {
         proclife::ThreadExit::Sibling { post } => post,
     };
 
-    release_thread(process_pid, tid, code);
+    release_thread(tid);
     leave(Some(code));
     // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
     if let Some(handle) = crate::sched::driver::current_handle() {
@@ -1278,7 +1309,7 @@ pub fn thread_exit(code: i32) -> ! {
 }
 
 /// A child thread's own mappings, released before it leaves; returns rather than diverging for [`leave`]'s reason.
-fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
+fn release_thread(tid: Tid) {
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
 
@@ -1294,12 +1325,6 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     };
     // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock.
     drop(released);
-
-    let guard = PROCESS_TABLE.lock();
-    let proc = guard.as_ref().unwrap().get(process_pid).expect("release_thread: a thread's process is not in the table");
-    let cpu_ms = proc.threads.get(tid).and_then(|t| t.sched()).map_or(0, scheduler::task_cpu_ns) / 1_000_000;
-    let name = proc.name_str();
-    crate::log_limited!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
 }
 
 /// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.

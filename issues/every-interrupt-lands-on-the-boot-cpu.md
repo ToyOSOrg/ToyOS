@@ -41,22 +41,36 @@ the machine's, and every device shares it.
    where `irq_ring` and `drain_irqs` go.
 4. The instrument before the change: measure interrupt distribution and the
    boot CPU's share under the loaded suites, so the improvement is a number
-   against a number. **Done — see below.**
+   against a number. **The baseline below was taken; the suite's half of the
+   instrument is gone, see "What reads the census today".**
 
-## Instrument, and the baseline (2026-08-22)
+## What reads the census today
 
 `kernel/src/irq_census.rs` counts every delivery per CPU per source in
 `PerCpu`, one `add qword ptr gs:[<off>], 1` for the source; a CPU's total is
-their sum. `irq: cpuN timer=… kick=… …` is printed per CPU beside the
-process-exit census, on `SYS_SHUTDOWN` and on the blocked-task dump;
-`common::irqcensus` aggregates every guest's newest line into the suite's own
-summary, so a CI shard's log carries the number without `--nocapture`.
-`irq_census_conservation` gates the present-state fact.
+their sum. `irq: cpuN timer=… kick=… …` is printed per CPU once a boot, where
+the machine stops, and on the blocked-task dump. `irq_census_conservation`
+gates the present-state fact on the T14, off the stop's census on the
+black-box page, and prints cpu0's share of that boot.
 
-A guest that boots and runs no program reaches no process exit and prints no
-census, which is why the reporting counts are short of the boots. Both columns
-are one run: an interrupt count is a function of timing, so the totals move
-between runs and the *distribution* is what to compare.
+The QEMU suite reads no census: the harness kills its guests, so none reaches
+the stop. The summary that aggregated every guest's census over a run read the
+lines each process exit printed, and went with them when a process's end
+stopped taking a reading of the whole machine.
+
+**So this track has no instrument for the loaded suites today**, which is a
+present weakness of it: the distribution under load, the number step 4 was
+for, can be taken on no run. What is left is one boot's census on the T14.
+The change that lands a placement policy brings a reading a killed guest can
+give, and takes its own baseline with it before it changes anything.
+
+## The baseline (2026-08-22)
+
+Taken with that summary. A guest that boots and runs no program reached no
+process exit and printed no census, which is why the reporting counts are short
+of the boots. Both columns are one run: an interrupt count is a function of
+timing, so the totals move between runs and the *distribution* is what to
+compare.
 
 | | dev host, TCG, 12-wide | hosted CI, KVM, twelve shards (run 32585458505) |
 |---|---|---|
