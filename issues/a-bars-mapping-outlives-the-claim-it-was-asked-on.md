@@ -12,7 +12,9 @@ register window, carrying `MAP`, `DUP` and `TRANSFER` like any other
 to the claim: `pcidev::tear_down` (`kernel/src/pcidev/mod.rs`) stops the
 function, resets it and takes its grants back, and touches no mapping of its
 BARs. A window belongs to its BAR for the boot (`Machine::windows`), so the
-next claim on the function is given the same address.
+next claim on the function is given the same address. The claim holds no
+reference to an object `pcidev::bar_object` made for it, so the exit below
+needs the claim to learn what it handed out.
 
 So a process that asked for a BAR, kept that handle — or sent it on — and let
 the claim go still reads and writes the registers of a function its next

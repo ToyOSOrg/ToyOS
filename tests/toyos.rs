@@ -2726,10 +2726,11 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     }
 }
 
-/// A claim's memory BAR asked for again once the handle an earlier answer gave
-/// is gone — closed, or never installed for want of room: each time the kernel
-/// answers a handle whose mapping reads the function's own register, and the
-/// job that asked ends on its own.
+/// A claim's memory BAR asked for again — while an earlier answer is held, and
+/// once its handle is gone, closed or never installed for want of room: each
+/// time the kernel answers a handle whose mapping reads the function's own
+/// register, two held at once map apart, and the job that asked ends on its
+/// own.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
@@ -2744,6 +2745,7 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     for answered in [
+        "bar_map_again: two answers held at once map apart, and the later outlives the earlier",
         "bar_map_again: answered with a handle that maps",
         "bar_map_again: answered after the refusal with a handle that maps",
     ] {

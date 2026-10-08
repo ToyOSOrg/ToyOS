@@ -2,7 +2,7 @@
 //!
 //! Objects are plain `Arc<T>`: no custom refcounting, no `Weak`, no `dyn` hierarchy.
 //!
-//! An object ends with its last handle and is never handed out again: a holder that outlives the handles it answers with keeps what an object is made over (`device::Screen`, a claim's BAR windows) and makes a fresh object for each.
+//! An object ends with its last handle and is never handed out again: a holder that answers more than once keeps what an object is made over (`device::Screen`, a claim's BAR windows) and makes a fresh object for each answer.
 //!
 //! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
 

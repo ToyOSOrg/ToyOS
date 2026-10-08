@@ -1,7 +1,8 @@
-//! One memory BAR of a claimed function, asked for again on the same live
-//! claim after the handle an earlier answer gave is gone: the answer is a
-//! handle to an object of its own, and the function's registers are behind its
-//! mapping. Twice — after a close, and after an ask a full handle table
+//! One memory BAR of a claimed function, asked for more than once on the same
+//! live claim: every answer is a handle to an object of its own, and the
+//! function's registers are behind its mapping. Three times — while an earlier
+//! answer is still held, where the two are two mappings and the later one
+//! outlives the earlier; after a close; and after an ask a full handle table
 //! refused, which is an object whose only handle went before its holder ever
 //! had it.
 //!
@@ -9,6 +10,7 @@
 //! holds.
 
 use toyos::endow::Endowments;
+use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, PciDev};
 use toyos_abi::handle::RawHandle;
@@ -21,19 +23,23 @@ const NIC: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
 /// own, never zero for a NIC, and that no read changes.
 const DEVICE_FEATURE: usize = 4;
 
-/// What the function answers through a fresh ask of `bar`, with the handle
-/// and the mapping let go again before this returns.
-fn ask(nic: &PciDev, bar: u32, bytes: u64) -> u32 {
-    let window = nic.map_bar(bar, bytes).expect("bar_map_again: the BAR, asked for and mapped");
-    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, the dword is
-    // inside the sixteen a memory BAR has at least, and a device register is
-    // read by a volatile load.
+/// What the function answers through `window`, a live mapping of its BAR.
+fn read(window: &SharedMemory) -> u32 {
+    // SAFETY: `map_bar` answered a live mapping of the BAR, the dword is inside
+    // the sixteen bytes a memory BAR has at least, and a device register is read
+    // by a volatile load.
     let answered = unsafe { window.as_ptr().add(DEVICE_FEATURE).cast::<u32>().read_volatile() };
     assert!(
         answered != 0 && answered != u32::MAX,
         "bar_map_again: the mapping answers {answered:#010x}, which is no device's register"
     );
     answered
+}
+
+/// What the function answers through a fresh ask of `bar`, with the handle
+/// and the mapping let go again before this returns.
+fn ask(nic: &PciDev, bar: u32, bytes: u64) -> u32 {
+    read(&nic.map_bar(bar, bytes).expect("bar_map_again: the BAR, asked for and mapped"))
 }
 
 fn main() {
@@ -50,7 +56,22 @@ fn main() {
     let bytes = info.bar_bytes[bar];
     let bar = bar as u32;
 
-    let first = ask(&nic, bar, bytes);
+    // Two answers held at once are two mappings, and letting the earlier one
+    // go takes nothing from the later.
+    let earlier = nic.map_bar(bar, bytes).expect("bar_map_again: the BAR, asked for and mapped");
+    let later = nic.map_bar(bar, bytes).expect("bar_map_again: the BAR, asked for while held");
+    assert_ne!(
+        earlier.as_ptr(),
+        later.as_ptr(),
+        "bar_map_again: two answers held at once are one mapping"
+    );
+    let first = read(&earlier);
+    assert_eq!(read(&later), first, "bar_map_again: the two mappings are two windows");
+    drop(earlier);
+    assert_eq!(read(&later), first, "bar_map_again: the later mapping changed with the earlier's end");
+    drop(later);
+    println!("bar_map_again: two answers held at once map apart, and the later outlives the earlier");
+
     println!("bar_map_again: BAR {bar} asked for and its handle closed; asking again");
     let again = ask(&nic, bar, bytes);
     assert_eq!(again, first, "bar_map_again: the second ask's mapping is another window");
