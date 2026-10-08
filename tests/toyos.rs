@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, claims, compile, devices, faults, isa, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, metal, outbound, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
@@ -103,6 +103,10 @@ const RUST_SKIP: &[&str] = &[
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
     "pci_reclaim",
+    // It asks netstack on the T14's I219 for the bench's router and two public
+    // services, which no guest has: the `outbound_router` and
+    // `outbound_internet` metal rows judge what it says.
+    "outbound",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -889,7 +893,25 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/outboundcase, netstack on the machine's own card ----
+    (
+        // The card handed over, its link, the lease, the router's link address
+        // and the resolver on the link, red by the first that failed.
+        "outbound_router",
+        metal::Metal { arms: OUTBOUND, judge: |b| outbound::router(&b[0].kernel(), &b[0].log()) },
+    ),
+    (
+        // One of two public services connected on port 443, judged only over
+        // a green router row.
+        "outbound_internet",
+        metal::Metal { arms: OUTBOUND, judge: |b| outbound::internet(&b[0].kernel(), &b[0].log()) },
+    ),
 ];
+
+/// netstack on the T14's I219 and the job that says what it reached: the one
+/// boot that drives the card, and both rows read it.
+const OUTBOUND: &[metal::Arm] =
+    &[metal::once("outbound", "tests/outboundcase", &[], &["test_rs_outbound"])];
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.
