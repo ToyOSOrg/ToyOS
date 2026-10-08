@@ -46,7 +46,6 @@ fn prescan_relocs(lib: &LoadedLib) -> Option<CachedRelocs> {
     let kept = [RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32,
         RelocKind::DtpMod64, RelocKind::DtpOff64];
     if counts.max_of(&kept).checked_mul(widest).is_none_or(|b| b > MAX_HEAP_ALLOC) {
-        log!("dlopen: prescan {:?} will not fit one allocation, not caching", counts);
         return None;
     }
     // Capacities are reserved exactly from `counts`; growing them could allocate past the bound just checked.

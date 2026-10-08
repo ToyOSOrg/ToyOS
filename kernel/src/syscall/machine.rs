@@ -93,7 +93,7 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     let (stopped, stopping) = crate::quiesce::stop();
     crate::log::console::drain_for_the_stop();
     // From here on nothing carries a record to a file: the seal below takes
-    // every one written after this stamp.
+    // every one stamped after this one, the newest the stop found.
     let stop_began = crate::log::read::newest_committed();
     // The machine's census, which no process's start or end takes.
     crate::census::log();

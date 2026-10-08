@@ -61,15 +61,15 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
 const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 
 /// Seal the stop's own records onto the black box, the one channel a boot's
-/// tail has once the stop has begun: every record stamped at `from` or after,
-/// newest first.
+/// tail has once the stop has begun: every record stamped after `after`,
+/// which is the newest one the stop found, newest first.
 ///
-/// **Bounded by the page and by nothing else.** The records may spend what a
-/// report may ([`toyos_blackbox::REPORT_BYTES`]), which leaves the reset's own
-/// account its reserve; the oldest that do not fit are counted and the count
-/// is said last, in the words a death's tail says it
-/// ([`toyos_blackbox::DROPPED_OPENS_WITH`]). How many records a stop writes is
-/// the machine's to decide, by its CPUs and its disks.
+/// **Bounded by the page and by nothing else.** The head and the records may
+/// spend what a report may ([`toyos_blackbox::REPORT_BYTES`]), which leaves
+/// the reset's own account its reserve; [`toyos_blackbox::Whole`] keeps the
+/// newest that fit, counts the rest and says the count last, in the words a
+/// death's tail says it ([`toyos_blackbox::DROPPED_OPENS_WITH`]). How many
+/// records a stop writes is the machine's to decide, by its CPUs and its disks.
 ///
 /// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
 /// reached `/log`.** `/system/bin/supervisor` has `logkeeper` flush before it asks for the
@@ -79,45 +79,23 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 ///
 /// Called from the quiesce path under [`crate::blackbox::record_done`], where
 /// the page already carries this boot's seal and every lock is still ordinary.
-pub fn seal_tail(from: LogStamp) {
-    use core::fmt::Write as _;
-    /// How long a line is, without writing it.
-    struct Length(usize);
-    impl core::fmt::Write for Length {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            self.0 += s.len();
-            Ok(())
-        }
-    }
-    struct Tail<'a> {
-        out: &'a mut dyn core::fmt::Write,
-        left: usize,
-        dropped: u64,
-    }
+pub fn seal_tail(after: LogStamp) {
+    struct Tail<'a>(toyos_blackbox::Whole<'static, &'a mut dyn core::fmt::Write>);
     impl read::RecordSink for Tail<'_> {
         fn put(&mut self, record: &LogRecord) -> bool {
-            let mut line = Length(0);
-            let _ = writeln!(line, "log-tail: {record}");
-            // Once one is dropped every older one is: a tail with a hole in it reads as whole.
-            if self.dropped > 0 || line.0 > self.left {
-                self.dropped += 1;
-                return true;
-            }
-            self.left -= line.0;
             // No prefix of its own: the loader that prints this page puts one
             // on every line it reads back.
-            let _ = writeln!(self.out, "log-tail: {record}");
+            self.0.put(format_args!("log-tail: {record}"));
             true
         }
     }
+    let from = LogStamp::since_zero(after.nanos().saturating_add(1));
     crate::blackbox::append(|out| {
         let _ = writeln!(out, "{TAIL_HEAD}");
-        let left = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1 - toyos_blackbox::DROPPED_LINE_BYTES;
-        let mut tail = Tail { out, left, dropped: 0 };
+        let room = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1;
+        let mut tail = Tail(toyos_blackbox::Whole::within(out, room, toyos_blackbox::DROPPED_OPENS_WITH));
         read::snapshot_committed(from, read::newest_committed(), &mut tail);
-        if tail.dropped > 0 {
-            let _ = writeln!(tail.out, "{}{}", toyos_blackbox::DROPPED_OPENS_WITH, tail.dropped);
-        }
+        tail.0.close();
     });
 }
 

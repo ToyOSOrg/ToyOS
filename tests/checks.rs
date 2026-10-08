@@ -967,7 +967,7 @@ mod checks {
                 "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
                  Black box: the last boot read DONE, so it handed the machine back on purpose and \
                  this chain ends here\n\
-                 | log: this boot's newest records follow, newest first (16)\n{tail}\
+                 | log: this boot's newest records follow, newest first\n{tail}\
                  Loader log: the last boot is accounted for, so this pass resets the machine\n",
                 bootlog::SEPARATOR
             )

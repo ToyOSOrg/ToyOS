@@ -2774,6 +2774,17 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     if sealed.contains(MARKER) { "carries" } else { "lacks" },
                 ));
             }
+            // The death's own census, which the seal writes as lines of its
+            // own. Anchored at the line's start: the ring's tail under it can
+            // carry a blocked-task dump's `irq: cpu0`, behind a record's stamp.
+            for owed in ["irq: cpu0 ", "tlb: shootdowns="] {
+                if !sealed.lines().any(|line| line.starts_with(owed)) {
+                    return Err(format!(
+                        "the panic's sealed record has no line that begins {owed:?}, so this \
+                         death took no census of the machine\n{sealed}"
+                    ));
+                }
+            }
             drop(qemu);
             eprintln!(
                 "  [panic] the fatal report is on the panel and sealed in the black box ({} bytes)",

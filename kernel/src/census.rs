@@ -30,16 +30,22 @@ pub fn log() {
 }
 
 /// A death's: the same lines as text, for the record it seals.
+///
+/// Within [`toyos_blackbox::CENSUS_BYTES`], because the record is one page and
+/// the lines grow with `MAX_CPUS`: a line that does not fit is dropped whole
+/// with every one after it, and the count is said under the ones kept
+/// ([`toyos_blackbox::Whole`]).
 pub struct Sealed;
 
 impl fmt::Display for Sealed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut wrote = Ok(());
-        each(|line| {
-            if wrote.is_ok() {
-                wrote = writeln!(f, "{line}");
-            }
-        });
-        wrote
+        let mut lines = toyos_blackbox::Whole::within(
+            f,
+            toyos_blackbox::CENSUS_BYTES,
+            toyos_blackbox::CENSUS_DROPPED_OPENS_WITH,
+        );
+        each(|line| lines.put(line));
+        lines.close();
+        Ok(())
     }
 }

@@ -16,6 +16,13 @@
 //! its stop or by its death, and no process's start or end repeats one: the
 //! log's volume is then a function of what ran, never of how many CPUs
 //! watched it.
+//!
+//! Two records written where a process ends are another owner's and are
+//! charged to it, not to the process: a device function whose ports the
+//! process held says they went back (`crate::isa::process_ends`, the pair of
+//! the record its claim wrote when it bound them), and a fault that ends a
+//! process writes the fault's report ([`dump_crash_diagnostics`]), which is
+//! several records because it is a crash and not an end.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
