@@ -118,7 +118,7 @@ mod tests {
     const KEPT: u64 = 0x7000_0000;
 
     fn machine() -> Scripted {
-        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], kept: vec![(KEPT, KEPT + 0x1000, 6)], ..Default::default() }
+        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], kept: vec![(KEPT, KEPT + 0x1000, 5)], ..Default::default() }
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         // Memory of a type the kernel passes no read of, refused under that
         // name and type, each range by its own address.
         assert!(!tables.readable(KEPT + 8, 36));
-        let kept = Refusal::Kernel { space: Space::SystemMemory, refused: Refused::MemoryType, memory_type: 6 };
+        let kept = Refusal::Kernel { space: Space::SystemMemory, refused: Refused::MemoryType, memory_type: 5 };
         assert_eq!((tables.refused(KEPT + 8), tables.refused(AT + 32), tables.refused(AT)), (Some(kept), Some(ram), None));
         assert_eq!(tables.last_refused(), Some(kept));
         assert_eq!(tables.refusals().counts(), format!("{kept} x1; {ram} x1"));

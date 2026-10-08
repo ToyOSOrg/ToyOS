@@ -13,7 +13,17 @@
 //! as RAM is refused whole, ACPI NVS and reserved memory pass both ways, ACPI
 //! reclaim memory, where the tables are, is read and never written, and every
 //! other type, and an address the map does not list, is refused with its
-//! type, for whoever reads the holder's log to rule on. Inside that, every
+//! type, for whoever reads the holder's log to rule on.
+//!
+//! **Runtime-services data is read and never written, as the tables'
+//! memory is, because on some machines it is.** UEFI 2.10 §2.3.4 has "ACPI
+//! Tables loaded at boot time ... contained in memory of type
+//! EfiACPIReclaimMemory (recommended) or EfiACPIMemoryNVS", and a firmware
+//! that keeps every table its XSDT lists in `EfiRuntimeServicesData` exists
+//! all the same; the kernel's own reader reads them there. No memory the
+//! kernel hands out carries the type (`toyos_bootmap::is_usable_type`). What
+//! the holder reads there beside the tables is whatever else that firmware
+//! keeps in it. Runtime-services code is refused both ways. Inside that, every
 //! page a device the kernel knows of decodes in is refused, whatever firmware
 //! types it and whoever drives the device, and an address in the ECAM window
 //! is a configuration access and is decided as one.
@@ -30,8 +40,10 @@ use toyos_abi::boot::MemoryMapEntry;
 use crate::port::{Mediated, IO_PORTS};
 use crate::span::PAGE_4K;
 
-/// `EfiReservedMemoryType`, `EfiACPIReclaimMemory` and `EfiACPIMemoryNVS`.
+/// `EfiReservedMemoryType`, `EfiRuntimeServicesData`, `EfiACPIReclaimMemory`
+/// and `EfiACPIMemoryNVS`.
 const EFI_RESERVED: u32 = 0;
+const EFI_RUNTIME_DATA: u32 = 6;
 const EFI_ACPI_RECLAIM: u32 = 9;
 const EFI_ACPI_NVS: u32 = 10;
 
@@ -165,8 +177,8 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         }
         match ty {
             Some(ty) if toyos_bootmap::is_usable_type(ty) => return No(Refused::UsableMemory),
-            Some(EFI_ACPI_RECLAIM) if write => return No(Refused::TableWrite),
-            Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM) => {}
+            Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
+            Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
             Some(_) | None => return No(Refused::MemoryType),
         }
         if last >= self.mapped_end {

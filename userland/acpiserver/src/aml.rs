@@ -345,7 +345,7 @@ mod tests {
 
     /// The shape the first load on the real machine had: its RSDP and XSDT
     /// in memory the kernel reads, and its FADT, DSDT and SSDTs in memory of
-    /// a type the kernel passes no read of. The DSDT's line says that, by
+    /// a type the kernel passed no read of then, here one it still does not. The DSDT's line says that, by
     /// the kernel's name for the refusal and the type, and not that nothing
     /// names a DSDT.
     #[test]
@@ -355,8 +355,8 @@ mod tests {
         let mut kernel = crafted(&dsdt, &[&ssdt, &ssdt]);
         // What the XSDT lists moves into kept memory: the RSDP and the XSDT stay.
         let listed = kernel.memory.split_off(2);
-        kernel.kept = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 6)).collect();
-        let kept = "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of type 6";
+        kernel.kept = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 5)).collect();
+        let kept = "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of type 5";
         assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Err(kept.into())], s5: None });
     }
 

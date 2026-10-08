@@ -12,7 +12,7 @@
 //!
 //! **What the firmware's AML addresses outside those blocks the holder reaches
 //! one access at a time, through the kernel** ([`Access`]): firmware-owned
-//! memory and a port both ways, a function's configuration space to read. The
+//! memory and a port both ways, the memory its tables are in to read, a function's configuration space to read. The
 //! kernel decides each
 //! by what the address is and answers a refusal by name ([`Refused`]); nothing
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
@@ -157,7 +157,8 @@ pub const fn pci_address(segment: u16, bus: u8, device: u8, function: u8, offset
 pub enum Refused {
     /// Memory the kernel hands out as RAM: its own, and every process's.
     UsableMemory = 1,
-    /// A write to ACPI reclaim memory, where the tables are.
+    /// A write to memory a firmware keeps its tables in: ACPI reclaim, and
+    /// runtime-services data.
     TableWrite = 2,
     /// Memory of a type the kernel passes no access to, or that firmware's map
     /// does not list; [`Access::memory_type`] says which.

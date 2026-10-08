@@ -135,17 +135,52 @@ fn the_tables_memory_is_read_and_never_written() {
     assert_eq!(refused(&laptop, 0x7480_0000 - 2, Width::DWord, false), Refused::Straddles);
 }
 
+/// A firmware that keeps the tables its XSDT lists in runtime-services data,
+/// as one real machine's does: read to its last byte, never written, and a
+/// read that leaves it for the RAM beside it is refused.
+#[test]
+fn runtime_services_data_is_read_as_the_tables_memory_is_and_never_written() {
+    let laptop = laptop();
+    let data = LAPTOP.iter().find(|entry| entry.uefi_type == 6).expect("a runtime-services data range");
+    for width in [Width::Byte, Width::QWord] {
+        assert!(passes(&laptop, data.start, width, false));
+        assert!(passes(&laptop, data.end - width.bytes(), width, false));
+        assert_eq!(refused(&laptop, data.start, width, true), Refused::TableWrite);
+        assert_eq!(refused(&laptop, data.end - width.bytes(), width, true), Refused::TableWrite);
+    }
+    assert_eq!(refused(&laptop, data.start - 1, Width::Word, false), Refused::Straddles);
+    assert_eq!(refused(&laptop, data.start - 1, Width::Byte, false), Refused::UsableMemory);
+    assert_eq!(type_word(&LAPTOP, data.start), 6);
+    // A device's page inside it is still a device's.
+    let decoding = bare(&LAPTOP, &[(0x7495_0000, 0x7495_0100)]);
+    assert_eq!(refused(&decoding, 0x7495_0800, Width::Byte, false), Refused::DeviceMemory);
+    assert!(passes(&decoding, 0x7495_1000, Width::Byte, false));
+}
+
+/// Runtime-services code is the firmware's to execute and nobody's to read
+/// through this claim: refused both ways, with its type.
+#[test]
+fn runtime_services_code_is_refused_both_ways() {
+    const CODE: [MemoryMapEntry; 2] = [e(6, 0x7490_1000, 0x74a0_0000), e(5, 0x74a0_0000, 0x74b0_0000)];
+    let memory = bare(&CODE, &[]);
+    for write in [false, true] {
+        assert_eq!(refused(&memory, 0x74a0_0000, Width::Byte, write), Refused::MemoryType);
+        assert_eq!(refused(&memory, 0x74b0_0000 - 8, Width::QWord, write), Refused::MemoryType);
+    }
+    assert_eq!(type_word(&CODE, 0x74a0_0000), 5);
+    // Data beside code: a read across the two is two types.
+    assert_eq!(refused(&memory, 0x74a0_0000 - 4, Width::QWord, false), Refused::Straddles);
+}
+
 #[test]
 fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
     let laptop = laptop();
     for write in [false, true] {
-        // Runtime services data, and a hole the map does not list.
-        assert_eq!(refused(&laptop, 0x7490_1000, Width::Byte, write), Refused::MemoryType);
+        // A hole the map does not list.
         assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, write), Refused::MemoryType);
     }
-    assert_eq!(type_word(&LAPTOP, 0x7490_1000), 6);
     assert_eq!(type_word(&LAPTOP, 0x8000_0000), toyos_abi::acpi::UNLISTED);
-    // Every type but the three the policy names, as the only range of a map.
+    // Every type but the four the policy names, as the only range of a map.
     for ty in (0..=0x20u32).chain([0x7000_0000, 0x8000_0000, u32::MAX]) {
         let map = [e(ty, 0x1000, 0x2000)];
         let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None };
@@ -154,7 +189,7 @@ fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
         let through = |verdict| matches!(verdict, MemoryVerdict::Through(_));
         match ty {
             0 | 10 => assert!(through(read) && through(write), "type {ty}"),
-            9 => assert!(through(read) && write == MemoryVerdict::Refused(Refused::TableWrite)),
+            6 | 9 => assert!(through(read) && write == MemoryVerdict::Refused(Refused::TableWrite), "type {ty}"),
             1 | 2 | 3 | 4 | 7 => assert!(read == write && read == MemoryVerdict::Refused(Refused::UsableMemory), "type {ty}"),
             _ => assert!(read == write && read == MemoryVerdict::Refused(Refused::MemoryType), "type {ty}"),
         }

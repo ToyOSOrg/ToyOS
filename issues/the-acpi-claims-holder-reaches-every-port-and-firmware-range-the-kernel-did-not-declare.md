@@ -73,6 +73,19 @@ and a kernel-driven window answered `MemoryType` or `Unmapped` before the
 kernel's record refused them, and the record is what refuses them on a machine
 whose firmware lists such a range as reserved.
 
+**The holder reads runtime-services data whole** (the orchestrator's ruling,
+not the owner's). The T14's firmware keeps the FADT and every definition
+block its XSDT lists in `EfiRuntimeServicesData`, read on that machine: the
+server's first load there was refused `MemoryType` in type 6 for all 30 such
+entries, where UEFI 2.10 §2.3.4 has tables in ACPI reclaim or NVS memory. A
+read there passes now, as in the other three firmware types; a write stays
+refused `TableWrite` until a machine's AML is measured making one, and
+`EfiRuntimeServicesCode` stays refused both ways. No memory the kernel hands
+out has the type, so no kernel or process memory is reached by it. What it
+costs is that the holder reads whatever else a firmware keeps in
+runtime-services data, which nothing here has listed: its variable store's
+working copy and its services' own state are candidates, unread.
+
 **Exit**: an access is passed only inside a region the machine's loaded tables
 define, checked by something other than the holder; or the owner rules the
 address-only bound is the one ToyOS keeps.
