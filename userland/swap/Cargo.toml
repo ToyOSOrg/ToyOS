@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos = { path = "../../toyos" }
-# The words the supervisor and the host say about a swap, and the digest it is held to.
+# The words the supervisor says about a swap, and the digest it is held to.
 toyos-swap = { path = "../../toyos-swap" }
 
 [package.metadata.toyos.host]

@@ -102,8 +102,7 @@ impl Published {
         }
     }
 
-    /// `stream` is whether this boot's log is served on the network at all.
-    fn snapshot(&self, stream: bool) -> Vec<u8> {
+    fn snapshot(&self) -> Vec<u8> {
         let mut snap = Snapshot::new(toyos_inspect::LOG);
         snap.put("volume.state", State::word(self.state.load(Ordering::Relaxed)));
         let file = self.file.lock().expect("the loop does not panic holding this").clone();
@@ -113,7 +112,6 @@ impl Published {
             snap.put("volume.bytes", self.bytes.load(Ordering::Relaxed));
         }
         snap.put("records.lost", self.lost.load(Ordering::Relaxed));
-        snap.put("stream", if stream { "on" } else { "off" });
         snap.encode().unwrap_or_else(|why| panic!("logkeeper: its snapshot: {why}"))
     }
 }
@@ -170,7 +168,7 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
             match p.rx.pump(&p.conn) {
                 RxStep::Idle => true,
                 RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, payload_len: 0 } => {
-                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot(hub.network()));
+                    let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
                     false
                 }
                 RxStep::Frame { msg_type: READ, payload_len: 0 } => {
