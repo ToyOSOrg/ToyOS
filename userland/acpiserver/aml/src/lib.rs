@@ -266,8 +266,12 @@ impl Interpreter {
         let w = self.width.ok_or(Error::Table("nothing is loaded"))?;
         let id = self.named(path)?;
         let args = args.iter().map(|a| self.object_of(a, w, 0)).collect::<Result<Vec<_>, _>>()?;
-        let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
-        let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, o, 0));
+        let meter = self.meter.clone();
+        let mut m = Machine::new(&mut self.ns, host, w, meter.clone());
+        let mut handed = 0;
+        let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, &meter, &mut handed, o, 0));
+        // The value is the caller's from here, and no longer this interpreter's.
+        meter.give(handed);
         m.finish(r)
     }
 
@@ -296,24 +300,51 @@ impl Interpreter {
     }
 }
 
-fn value_of(m: &mut Machine<'_>, o: Object, depth: usize) -> Result<Value, Error> {
+/// `n` bytes of the value an evaluation is building for its caller, held
+/// against the meter until it is handed over, and added to `handed`.
+fn hand(meter: &Meter, handed: &mut usize, n: usize) -> Result<(), Error> {
+    meter.take(n)?;
+    *handed += n;
+    Ok(())
+}
+
+/// An object as the caller receives it. A package element that names an
+/// object is resolved here, to a copy as large as its table chose, once for
+/// every element that names it: the value's bytes are held against the meter
+/// while it is built, and a package's elements while they are walked.
+fn value_of(m: &mut Machine<'_>, meter: &Meter, handed: &mut usize, o: Object, depth: usize) -> Result<Value, Error> {
     if depth > MAX_NESTING {
         return Err(Error::Bound("a package nests deeper than this interpreter copies"));
     }
     Ok(match m.resolve_lazy(o)? {
         Object::Uninit => Value::Uninitialized,
         Object::Int(x) => Value::Integer(x),
-        Object::Str(s) => Value::String(s.borrow().clone()),
-        Object::Buf(b) => Value::Buffer(b.borrow().clone()),
+        Object::Str(s) => {
+            hand(meter, handed, s.borrow().len())?;
+            Value::String(s.borrow().clone())
+        }
+        Object::Buf(b) => {
+            hand(meter, handed, b.borrow().len())?;
+            Value::Buffer(b.borrow().clone())
+        }
         Object::Pkg(p) => {
+            let count = p.borrow().len();
+            let walked = count * object::ELEMENT;
+            hand(meter, handed, walked + count * core::mem::size_of::<Value>())?;
             let elems: Vec<Object> = p.borrow().clone();
-            let mut out = Vec::with_capacity(elems.len());
+            let mut out = Vec::with_capacity(count);
             for e in elems {
-                out.push(value_of(m, e, depth + 1)?);
+                out.push(value_of(m, meter, handed, e, depth + 1)?);
             }
+            meter.give(walked);
+            *handed -= walked;
             Value::Package(out)
         }
-        Object::Ref(Ref::Node(id)) => Value::Reference(m.path_of(id, None)?),
+        Object::Ref(Ref::Node(id)) => {
+            let path = m.path_of(id, None)?;
+            hand(meter, handed, path.capacity())?;
+            Value::Reference(path)
+        }
         _ => return Err(Error::Unsupported("a reference to an unnamed object, handed to the caller")),
     })
 }

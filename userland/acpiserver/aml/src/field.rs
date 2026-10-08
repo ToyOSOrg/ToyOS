@@ -9,9 +9,11 @@
 //! field; a BankField writes its bank value to the bank field first.
 //!
 //! An access runs other fields' accesses and, for a PCI_Config region,
-//! firmware's methods, each of which may access a field again: the bytes a
-//! read gathers and a store writes from are held against the meter before
-//! the first unit is accessed.
+//! firmware's methods, each of which may access a field again: the buffer a
+//! read gathers and the bytes a store writes from are held against the meter
+//! before the first unit is accessed. A field that fits an Integer is read,
+//! and an Integer stored, without the heap: an interpreter that is full
+//! still does both.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -298,34 +300,46 @@ impl Machine<'_> {
         self.enter()?;
         let r = self.locked(f.lock, |m| m.read_units(f));
         self.leave();
-        let out = r?;
-        // §19.6.47: an Integer when it fits one, else a Buffer.
-        if f.len > u64::from(self.w.bits) {
-            return Ok(Object::Buf(out));
-        }
-        let v = self.w.int_of_bytes(&out.borrow())?;
-        Ok(Object::Int(v))
+        r
     }
 
-    /// A field's value (§19.6.47): an Integer when it fits one, else a Buffer.
+    /// Whether a field's value is a Buffer (§19.6.47): an Integer when it
+    /// fits one, else a Buffer.
+    fn wide(&self, bits: u64) -> bool {
+        bits > u64::from(self.w.bits)
+    }
+
     fn value(&mut self, b: Vec<u8>, bits: u64) -> Result<Object, Error> {
-        if bits <= u64::from(self.w.bits) { Ok(Object::Int(self.w.int_of_bytes(&b)?)) } else { self.new_buf(b) }
+        if self.wide(bits) { self.new_buf(b) } else { Ok(Object::Int(self.w.int_of_bytes(&b)?)) }
     }
 
-    fn read_units(&mut self, f: &Field) -> Result<Bytes, Error> {
-        let out = self.bytes(vec![0u8; bytes_for(f.len)?])?;
+    /// A field's value, gathered unit by unit: an Integer in a word, a
+    /// Buffer in bytes held before the first unit is read.
+    fn read_units(&mut self, f: &Field) -> Result<Object, Error> {
+        let n = bytes_for(f.len)?;
+        let buf = if self.wide(f.len) {
+            Some(self.bytes(vec![0u8; n])?)
+        } else {
+            self.charge(n)?;
+            None
+        };
+        let mut int = 0u64;
         let w = self.unit(f)?;
         let span = 8 * w;
         for u in f.bit / span..=(f.bit + f.len - 1) / span {
             self.step()?;
             let v = self.unit_read(f, u * w, w)?;
             let (lo, hi) = (u * span, (u + 1) * span);
-            let mut bits = out.bits();
+            let mut bits = buf.as_ref().map(|b| b.bits());
             for b in f.bit.max(lo)..(f.bit + f.len).min(hi) {
-                set_bit(&mut bits, b - f.bit, v >> (b - lo) & 1 == 1);
+                let on = v >> (b - lo) & 1;
+                match &mut bits {
+                    Some(bits) => set_bit(bits, b - f.bit, on == 1),
+                    None => int |= on << (b - f.bit),
+                }
             }
         }
-        Ok(out)
+        Ok(buf.map_or(Object::Int(int), Object::Buf))
     }
 
     /// A store to a field unit (Table 19.7): an Integer overwrites the whole

@@ -1,9 +1,10 @@
 //! The interpreter's bound is heap bytes: under an allocator that counts
 //! what this thread holds, an interpreter filled until it refuses holds at
 //! most [`MAX_LIVE`], whatever a table fills it with, a load refused leaves
-//! it holding what it held before, and a nest of operators or of fields
-//! holds one level's bytes past what the meter counts, never a level's
-//! each.
+//! it holding what it held before, a nest of operators or of fields holds
+//! one level's bytes past what the meter counts, never a level's each, and
+//! the value an evaluation hands its caller is held to the bound while it
+//! is built.
 
 mod common;
 
@@ -388,4 +389,45 @@ fn fields_read_through_each_other_are_held_while_they_are_read() {
     let read = Filled::of(before, r.err());
     assert!(read.peak <= BOUND + LEVEL, "{} bytes held on the way", read.peak);
     assert_eq!(read.refused, Some(Error::Bound(FULL)));
+}
+
+/// A package element that names an object is copied for the caller each
+/// time it is read: 63 naming one buffer of a mebibyte are 63 MiB of value
+/// within the step bound. The value is held against the bound while it is
+/// built, so the evaluation is refused there, and only buffers held one
+/// beside another reach it.
+#[test]
+fn a_returned_value_of_buffers_is_held_while_it_is_built() {
+    let body = cat(&[&def_name("PKG", &package(&vec![name("BUF"); 63])), &mebibyte()]);
+    let (mut i, before) = start(&body);
+    let r = i.evaluate(&mut Sink, "\\PKG", &[]);
+    let built = Filled::of(before, r.err());
+    assert!(built.peak <= BOUND, "{} bytes held on the way", built.peak);
+    assert_eq!(built.refused, Some(Error::Bound(FULL)));
+}
+
+/// The same of 40 elements naming one package of 65,000: its elements cost
+/// the caller more than they cost the interpreter.
+#[test]
+fn a_returned_value_of_packages_is_held_while_it_is_built() {
+    let body = cat(&[&def_name("PKG", &package(&vec![name("WIDE"); 40])), &def_name("WIDE", &var_package(&int(65_000), &[]))]);
+    let (mut i, before) = start(&body);
+    let r = i.evaluate(&mut Sink, "\\PKG", &[]);
+    let built = Filled::of(before, r.err());
+    assert!(built.peak <= BOUND, "{} bytes held on the way", built.peak);
+    assert_eq!(built.refused, Some(Error::Bound(FULL)));
+}
+
+/// Filled with references until 48 bytes more do not fit: a field that fits
+/// an Integer is still read, gathered without the heap, where a wider one's
+/// buffer is refused.
+#[test]
+fn a_full_interpreter_reads_a_field_that_fits_an_integer() {
+    let (fill, fills) = fillers(16, &index(&name("BUF"), &int(0), &[0x00]));
+    let fields = cat(&[&region(), &field("MEM", 0x01, &[unit("NARW", 64), unit("WIDE", 72)])]);
+    let (mut i, _) = start(&cat(&[&def_name("BUF", &buffer(&int(1), &[])), &fields, &fill]));
+    let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
+    assert_eq!(refused, Some(Error::Bound(FULL)));
+    assert_eq!(i.evaluate(&mut Sink, "\\NARW", &[]), Ok(Value::Integer(0)));
+    assert_eq!(i.evaluate(&mut Sink, "\\WIDE", &[]), Err(Error::Bound(FULL)));
 }

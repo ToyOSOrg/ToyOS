@@ -1417,8 +1417,10 @@ impl<'a> Machine<'a> {
         match self.arg(f, c)? {
             Object::Ref(r) => self.deref(&r),
             Object::Str(s) => {
-                let p = self.path_of_text(&s)?;
-                let id = self.resolve(f, &p)?;
+                let id = {
+                    let p = self.path_of_text(&s)?;
+                    self.resolve(f, &p)?
+                };
                 self.node_value(id)
             }
             _ => Err(Error::Type("DerefOf of an object that is not a reference or a name (§19.6.30)")),
