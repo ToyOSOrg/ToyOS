@@ -33,11 +33,15 @@ its spin ceiling panics the kernel and unrelated VFS work stalls behind it. This
 is a distinct inversion from the one recorded in
 `issues/a-user-copy-demand-pages-under-whatever-its-caller-holds.md`.
 
+**Traced, not executed.** No model compiles these two syscalls, and staging the
+window needs an actuator the kernel does not have: one that holds `sys_chdir`
+in its `Ok` arm until a sibling releases it.
+
 **Exit**: `SYS_CHDIR` and `SYS_OPEN` can run concurrently in one process with no
 lock-order inversion — `chdir` does not hold the VFS guard while it takes
 process-data (the guard is dropped before the `Ok` arm takes the second lock).
 A test that stages chdir past a successful lookup with its guard still alive,
 then drives open to VFS acquisition under process-data, completes both without
-deadlock. **Traced, not executed.** No model compiles these two syscalls, and staging the
-window needs an actuator the kernel does not have: one that holds `sys_chdir`
-in its `Ok` arm until a sibling releases it.
+deadlock.
+
+**Owner**: `sys_chdir`, `kernel/src/syscall/fs.rs`.

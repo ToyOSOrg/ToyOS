@@ -30,9 +30,13 @@ in `issues/deferred-release-outlives-its-syscall.md`: there memory is reclaimed
 safely but late; here a mapping is created *after* the one teardown, so the
 pages are freed while still mapped.
 
+**Traced, not executed.** No model compiles the object layer, and staging the
+window needs an actuator the kernel does not have: one that holds `sys_shm_map`
+between its clone and `map_into` until a sibling releases it.
+
 **Exit**: a `SYS_SHM_MAP` that races the last close of its handle either maps
 nothing or is torn down with the object; no shm object's pages are present in
 any page table after its zero-handle teardown has run, and the kernel does not
-panic. **Traced, not executed.** No model compiles the object layer, and staging the
-window needs an actuator the kernel does not have: one that holds `sys_shm_map`
-between its clone and `map_into` until a sibling releases it.
+panic.
+
+**Owner**: the shared-memory object, `kernel/src/object/shm.rs`.
