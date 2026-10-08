@@ -5914,6 +5914,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-net-node"
+version = "0.1.0"
+dependencies = [
+ "etherparse",
+ "toyos-dhcp",
+ "toyos-net-ip",
+ "toyos-net-shard",
+ "toyos-net-tcp",
+ "toyos-net-udp",
+ "toyos-net-wire",
+]
+
+[[package]]
 name = "toyos-net-shard"
 version = "0.1.0"
 dependencies = [
