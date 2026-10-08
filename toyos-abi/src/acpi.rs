@@ -18,6 +18,11 @@
 //! by what the address is and answers a refusal by name ([`Refused`]); nothing
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
 //! back the same way ([`op::LOCK_TAKE`]), and goes back with the claim.
+//!
+//! **The power-off is the kernel's, with the sleep type the holder supplies**
+//! ([`op::S5`]): what `\_S5` evaluates to is in the firmware's AML, and
+//! until a holder has supplied it [`crate::syscall::SYS_SHUTDOWN`] is refused
+//! [`crate::syscall::SyscallError::NotSupported`].
 
 crate::user_safe! {
     /// A run of ports a register block occupies; `len` 0 is no block.
@@ -84,6 +89,11 @@ pub mod op {
     /// Give the Global Lock back, signalling the firmware where it asked
     /// meanwhile.
     pub const LOCK_RELEASE: u64 = 2;
+    /// Supply the `SLP_TYPa` the machine's `\_S5` evaluates to (ACPI 6.5
+    /// §7.4.2), in the call's third word: what the kernel writes to PM1a
+    /// control to power the machine off. Once under a claim, and kept until
+    /// the next claim's holder supplies its own.
+    pub const S5: u64 = 3;
 
     pub const TAKEN: u64 = 0;
     pub const PENDING: u64 = 1;

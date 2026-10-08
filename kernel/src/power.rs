@@ -26,6 +26,11 @@ pub fn can_reboot() -> bool {
     crate::arch::power::can_reset()
 }
 
+/// Why this machine has no power-off this kernel performs, where it has none.
+pub fn shutdown_refused() -> Option<&'static str> {
+    crate::arch::power::off_refused()
+}
+
 /// Return the machine to firmware.
 pub fn reboot() -> ! {
     serial::flush_final();
@@ -57,7 +62,7 @@ pub fn reset_now() -> ! {
     crate::arch::power::reset()
 }
 
-/// Power the machine off, or halt on one that offers no power-off.
+/// Power the machine off. The caller asked [`shutdown_refused`] first.
 pub fn shutdown(stopping: crate::quiesce::Stopping) -> ! {
     // Above the flush, because it logs.
     let settled = crate::arch::power::settle(stopping);

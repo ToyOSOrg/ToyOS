@@ -781,8 +781,8 @@ mod checks {
     /// architecture.
     #[test]
     fn a_run_selects_by_filter() -> Result<(), String> {
-        let taken = |filter: Option<&str>| -> BTreeSet<String> {
-            let (machine, screen) = select(filter);
+        let taken = |filters: &[&str]| -> BTreeSet<String> {
+            let (machine, screen) = select(filters);
             machine
                 .iter()
                 .map(|n| n.to_string())
@@ -791,12 +791,13 @@ mod checks {
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
         let every: BTreeSet<String> = declared().map(String::from).collect();
-        let cases = [
-            (None, every),
-            (Some("virt_el2"), names(&["virt_el2_drop"])),
-            (Some("el2_drop"), names(&["virt_el2_drop"])),
-            (Some("nested_nmi"), names(&["nested_nmi_is_loud"])),
-            (Some("no_such_test"), BTreeSet::new()),
+        let cases: [(&[&str], _); 6] = [
+            (&[], every),
+            (&["virt_el2"], names(&["virt_el2_drop"])),
+            (&["el2_drop"], names(&["virt_el2_drop"])),
+            (&["nested_nmi"], names(&["nested_nmi_is_loud"])),
+            (&["el2_drop", "nested_nmi"], names(&["virt_el2_drop", "nested_nmi_is_loud"])),
+            (&["no_such_test"], BTreeSet::new()),
         ];
         for (filter, want) in cases {
             let got = taken(filter);
@@ -908,6 +909,11 @@ mod checks {
     #[test]
     fn metal_failing_shared_member_fails_its_boot() {
         metal_checks::a_failing_shared_member_fails_its_boot();
+    }
+
+    #[test]
+    fn metal_words_take_rows_members_and_whole_boots() {
+        metal_checks::words_take_rows_members_and_whole_boots();
     }
 
     #[test]
@@ -1129,7 +1135,7 @@ mod checks {
     #[test]
     fn the_c_corpus_stages_the_expectation_the_host_compares() {
         let got = "12\n34\n12\n34\n56\n78\n~fred()";
-        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())], |_| true);
+        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())]);
         let staged = boot
             .files
             .iter()

@@ -9,14 +9,15 @@
 # records and every program's output — so nothing is lost with the checkpoint,
 # and puts a prompt underneath.
 #
-# Deliberately three programs. Every extra one is something that can fail
+# Deliberately few programs. Every extra one is something that can fail
 # between the kernel and a prompt, on the machine where a failure costs a
-# reflash — and there is no daemon here that a shell needs.
+# reflash — and the one daemon here that a shell needs is the one its
+# `shutdown` needs.
 
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "console"]
+start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver"]
 
 # `/system/bin/console` owns the screen and provides the surface its shell and the
 # shell's children inherit. No compositor here, so nothing receives one.
@@ -30,6 +31,15 @@ start = ["logkeeper", "diskserver", "fileserver", "console"]
 service = true
 syscap = ["logread"]
 serves = ["log"]
+
+# The machine's ACPI fixed hardware, as `system.toml` serves it: `shutdown`
+# powers this machine off with the sleep type this program reads out of the
+# firmware's tables and hands the kernel, which refuses a power-off without
+# one.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 [programs.console]
 provides = ["surface"]

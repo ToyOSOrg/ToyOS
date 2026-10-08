@@ -17,7 +17,7 @@ const FADT_RESET_VALUE: usize = 128;
 const FADT_ARM_BOOT_ARCH: usize = 129;
 const FADT_MINOR_VERSION: usize = 131;
 pub(crate) const FADT_X_FIRMWARE_CTRL: usize = 132;
-pub const FADT_X_DSDT: usize = 140;
+const FADT_X_DSDT: usize = 140;
 
 /// `ARM_BOOT_ARCH`'s two flags.
 const PSCI_COMPLIANT: u16 = 1 << 0;
