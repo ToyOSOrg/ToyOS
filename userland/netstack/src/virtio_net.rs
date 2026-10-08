@@ -339,7 +339,6 @@ fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
 pub struct VirtioNet {
     dev: PciDev,
     rx_doorbell: Doorbell,
-    tx_doorbell: Doorbell,
     /// Held for their mappings' lives: every window above and below points into
     /// one of these two.
     _bar: SharedMemory,
@@ -349,9 +348,7 @@ pub struct VirtioNet {
     /// what the unit translates for this function and for nothing else.
     dma_device_addr: u64,
     rx: RefCell<Rings>,
-    tx: RefCell<Rings>,
-    /// Transmit heads nothing is in flight on.
-    tx_free: RefCell<Vec<u16>>,
+    tx: RefCell<TxQueue>,
     reported: Latch<u32>,
     mac: [u8; 6],
 }
@@ -454,15 +451,7 @@ impl VirtioNet {
             dma.sub(OFF_RX_USED, USED_RING_OFF + RX_QUEUE_SIZE as usize * USED_ELEM_BYTES),
             RX_QUEUE_SIZE,
         );
-        let mut tx = Rings::new(
-            dma.sub(OFF_TX_RINGS, TX_QUEUE_SIZE as usize * DESC_BYTES),
-            dma.sub(OFF_TX_RINGS + tx_avail_off(), AVAIL_RING_OFF + TX_QUEUE_SIZE as usize * 2),
-            dma.sub(
-                OFF_TX_RINGS + tx_used_off(),
-                USED_RING_OFF + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES,
-            ),
-            TX_QUEUE_SIZE,
-        );
+        let mut tx = tx_rings(dma);
 
         setup_queue(common, RX_QUEUE, &mut rx, dma_device_addr, OFF_RX_DESC, OFF_RX_AVAIL, OFF_RX_USED)?;
         setup_queue(
@@ -510,14 +499,12 @@ impl VirtioNet {
         let nic = Self {
             dev,
             rx_doorbell,
-            tx_doorbell,
             _bar: mapped,
             _grant: grant,
             dma,
             dma_device_addr,
             rx: RefCell::new(rx),
-            tx: RefCell::new(tx),
-            tx_free: RefCell::new((0..TX_QUEUE_SIZE).rev().collect()),
+            tx: RefCell::new(TxQueue::new(tx, dma, dma_device_addr, tx_doorbell)),
             reported: Latch::default(),
             mac,
         };
@@ -536,7 +523,7 @@ impl VirtioNet {
     /// Say what this driver has refused, when the count has moved. Once a
     /// pass, never per element: a burst of refusals is one line.
     pub fn report(&self) {
-        let refused = self.rx.borrow().refused + self.tx.borrow().refused;
+        let refused = self.rx.borrow().refused + self.tx.borrow().rings.refused;
         if self.reported.moved(refused).is_none() {
             return;
         }
@@ -616,67 +603,101 @@ impl VirtioNet {
         unsafe { std::slice::from_raw_parts(window.as_ptr() as *const u8, len) }
     }
 
-    /// How many frames the transmit queue takes now, every head the device
-    /// has finished with taken back first.
+    /// How many frames the transmit queue takes now ([`TxQueue::room`]). A
+    /// caller answered 0 sleeps on the claim.
+    pub fn tx_room(&self) -> usize {
+        self.tx.borrow_mut().room()
+    }
+
+    /// Fill a transmit buffer with a `len`-byte frame and hand it to the
+    /// device ([`TxQueue::send`]).
+    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+        self.tx.borrow_mut().send(len, fill)
+    }
+
+    /// The claim, for the poller: readable means an interrupt has landed.
+    pub fn claim(&self) -> &PciDev {
+        &self.dev
+    }
+}
+
+/// The transmit queue's three rings, where the grant's layout puts them.
+fn tx_rings(dma: Window) -> Rings {
+    Rings::new(
+        dma.sub(OFF_TX_RINGS, TX_QUEUE_SIZE as usize * DESC_BYTES),
+        dma.sub(OFF_TX_RINGS + tx_avail_off(), AVAIL_RING_OFF + TX_QUEUE_SIZE as usize * 2),
+        dma.sub(OFF_TX_RINGS + tx_used_off(), USED_RING_OFF + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES),
+        TX_QUEUE_SIZE,
+    )
+}
+
+/// The transmit queue: its rings, the heads nothing is in flight on, and the
+/// buffer each head owns. Everything in it is memory, so the host drives it
+/// with a plain allocation for the grant.
+struct TxQueue {
+    rings: Rings,
+    /// Transmit heads nothing is in flight on.
+    free: Vec<u16>,
+    /// The grant, and where the device reaches its first byte.
+    dma: Window,
+    dma_device_addr: u64,
+    doorbell: Doorbell,
+}
+
+impl TxQueue {
+    fn new(rings: Rings, dma: Window, dma_device_addr: u64, doorbell: Doorbell) -> Self {
+        Self { rings, free: (0..TX_QUEUE_SIZE).rev().collect(), dma, dma_device_addr, doorbell }
+    }
+
+    /// How many frames the queue takes now, every head the device has
+    /// finished with taken back first.
     ///
     /// **Room returning is an interrupt already**: this driver negotiates no
     /// `VIRTIO_F_EVENT_IDX` and leaves the transmit queue's `avail.flags` 0,
     /// and §2.7.7 has the device notify for every buffer it uses on such a
-    /// queue. A caller answered 0 sleeps on the claim.
-    pub fn tx_room(&self) -> usize {
-        self.reclaim_tx();
-        self.tx_free.borrow().len()
+    /// queue.
+    fn room(&mut self) -> usize {
+        while let Some((head, _)) = self.rings.poll_used() {
+            self.free.push(head);
+        }
+        self.free.len()
     }
 
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the device.
     ///
     /// **The buffer is the head's own and the two are taken together**, so
     /// nothing is written into a buffer the device is reading: a head leaves
-    /// `tx_free` only here and comes back only in [`Self::reclaim_tx`], which
-    /// the device's used ring is what drives.
+    /// `free` only here and comes back only in [`Self::room`], which the
+    /// device's used ring is what drives.
     ///
-    /// Non-blocking, and for a caller [`Self::tx_room`] answered: a frame
+    /// Non-blocking, and for a caller [`Self::room`] answered: a frame
     /// offered with no head free is a caller that did not ask.
-    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+    fn send<R>(&mut self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
             "netstack: a {len}-byte frame does not fit this NIC's transmit buffer"
         );
         let head = self
-            .tx_free
-            .borrow_mut()
+            .free
             .pop()
             .expect("netstack: a frame was offered to a transmit queue that had said it has no room");
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
         self.dma.sub(at, NET_HDR_SIZE).zero();
         let window = self.dma.sub(at + NET_HDR_SIZE, len);
-        // SAFETY: the window is inside the grant, which lives as long as
-        // `self`; the device is not reading it, because this head is out of
-        // `tx_free` and its descriptor is published only after `fill` returns.
+        // SAFETY: the window is inside the grant, which lives as long as the
+        // driver that holds this queue; the device is not reading it, because
+        // this head is out of `free` and its descriptor is published only
+        // after `fill` returns.
         let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
-        self.tx.borrow_mut().submit(
+        self.rings.submit(
             head,
             self.dma_device_addr + at as u64,
             (NET_HDR_SIZE + len) as u32,
             false,
-            self.tx_doorbell,
+            self.doorbell,
         );
         result
-    }
-
-    /// Take back every transmit head the device has finished with.
-    fn reclaim_tx(&self) {
-        loop {
-            let done = self.tx.borrow_mut().poll_used();
-            let Some((head, _)) = done else { return };
-            self.tx_free.borrow_mut().push(head);
-        }
-    }
-
-    /// The claim, for the poller: readable means an interrupt has landed.
-    pub fn claim(&self) -> &PciDev {
-        &self.dev
     }
 }
 
@@ -798,6 +819,85 @@ mod tests {
         // needs, and nothing here reads or writes through it.
         let window = unsafe { Window::new(backing.as_mut_ptr(), backing.len()) };
         Rings::new(window.sub(0, 0x400), window.sub(0x400, 0x400), window.sub(0x800, 0x400), size)
+    }
+
+    /// A transmit queue over a plain allocation the size of the grant, and
+    /// the doorbell a write to which nothing hears.
+    fn queue() -> TxQueue {
+        let grant = vec![0u8; GRANT_BYTES as usize].leak();
+        let bell = vec![0u8; 2].leak();
+        // SAFETY: `leak` gives both allocations the `'static` lifetime the
+        // windows need, and nothing but this queue and the test reaches them.
+        let (dma, bell) = unsafe {
+            (Window::new(grant.as_mut_ptr(), grant.len()), Window::new(bell.as_mut_ptr(), bell.len()))
+        };
+        TxQueue::new(tx_rings(dma), dma, 0x4000_0000, Doorbell { window: bell, queue: TX_QUEUE })
+    }
+
+    /// The device, finishing with the `count` oldest chains it was given and
+    /// answering their heads (§2.7.8).
+    fn device_uses(queue: &TxQueue, count: u16) -> Vec<u16> {
+        let rings = &queue.rings;
+        let used_idx: u16 = rings.used.read(USED_IDX_OFF);
+        (0..count)
+            .map(|nth| {
+                let at = used_idx.wrapping_add(nth);
+                let head: u16 = rings.avail.read(AVAIL_RING_OFF + (at % rings.size) as usize * 2);
+                let element = USED_RING_OFF + (at % rings.size) as usize * USED_ELEM_BYTES;
+                rings.used.write(element, head as u32);
+                rings.used.write(element + 4, 0u32);
+                rings.used.write(USED_IDX_OFF, at.wrapping_add(1));
+                head
+            })
+            .collect()
+    }
+
+    /// The queue says how many frames it takes before one is offered: every
+    /// head in flight is no room, and room returns by exactly the heads the
+    /// device has finished with. Nothing is dropped on the way: each frame
+    /// published is in its own buffer behind a zeroed header.
+    #[test]
+    fn a_full_transmit_queue_has_no_room_until_the_device_gives_heads_back() {
+        let mut queue = queue();
+        let mut published = 0u8;
+        while queue.room() > 0 {
+            assert!(published < TX_QUEUE_SIZE as u8 * 2, "the transmit queue never filled");
+            queue.send(60, |frame| frame.fill(published + 1));
+            published += 1;
+        }
+        assert_eq!(published as u16, TX_QUEUE_SIZE);
+        let avail_idx: u16 = queue.rings.avail.read(AVAIL_IDX_OFF);
+        assert_eq!(avail_idx, TX_QUEUE_SIZE);
+        for nth in 0..TX_QUEUE_SIZE {
+            let head: u16 = queue.rings.avail.read(AVAIL_RING_OFF + nth as usize * 2);
+            let chain: Desc = queue.rings.desc.read(head as usize * DESC_BYTES);
+            assert_eq!(chain.len as usize, NET_HDR_SIZE + 60);
+            let buffer = queue.dma.sub((chain.addr - queue.dma_device_addr) as usize, chain.len as usize);
+            let bytes: Vec<u8> = (0..chain.len as usize).map(|at| buffer.read::<u8>(at)).collect();
+            assert_eq!(bytes[..NET_HDR_SIZE], [0; NET_HDR_SIZE]);
+            assert_eq!(bytes[NET_HDR_SIZE..], [nth as u8 + 1; 60]);
+        }
+
+        let back = device_uses(&queue, 3);
+        assert_eq!(queue.room(), 3);
+        // The next frame goes out on a head the device gave back, and on no
+        // head still in flight.
+        queue.send(60, |frame| frame.fill(0xEE));
+        let reused: u16 = queue.rings.avail.read(AVAIL_RING_OFF + (TX_QUEUE_SIZE % queue.rings.size) as usize * 2);
+        assert!(back.contains(&reused));
+        assert_eq!(queue.room(), 2);
+    }
+
+    /// A frame offered to a queue that said it had no room is netstack's own
+    /// bug, and dies by name instead of being written somewhere and dropped.
+    #[test]
+    #[should_panic(expected = "had said it has no room")]
+    fn a_frame_offered_to_a_full_transmit_queue_is_not_taken() {
+        let mut queue = queue();
+        while queue.room() > 0 {
+            queue.send(60, |frame| frame.fill(1));
+        }
+        queue.send(60, |frame| frame.fill(2));
     }
 
     #[test]

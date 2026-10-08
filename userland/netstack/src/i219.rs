@@ -292,8 +292,18 @@ impl Nic {
 
     /// Take the interrupt, acknowledge its causes and refresh the link — and
     /// answer the link where this pass found it changed.
-    pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, SyscallError> {
+    ///
+    /// A pass that reset the function to take its transmit ring back says so,
+    /// with what the bring-up found the second time.
+    pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, toyos_i219::PassRefused<SyscallError>> {
         let pass = self.driver.borrow_mut().begin_pass()?;
+        if pass.rearmed {
+            crate::say!(
+                "netstack: I219: the link changed over unsent frames, and the function was reset \
+                 to take its transmit ring back"
+            );
+            say_brought_up(self.driver.borrow().brought_up());
+        }
         Ok(pass.link_changed.then(|| self.link()))
     }
 
@@ -330,9 +340,9 @@ impl Nic {
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the
     /// device.
     ///
-    /// Non-blocking, and for a caller [`Self::tx_room`] answered: a frame the
-    /// driver has no slot for is a caller that did not ask, or one that offered
-    /// more than a buffer holds.
+    /// Non-blocking, and for a caller [`Self::tx_room`] answered in this
+    /// pass: a frame the driver has no slot for is a caller that did not ask,
+    /// or one that offered more than a buffer holds.
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         let slot = self.driver.borrow_mut().tx_reserve(len).unwrap_or_else(|| {
             panic!("netstack: a {len}-byte frame was offered to a transmit ring that refuses it")
@@ -380,13 +390,14 @@ impl Nic {
             crate::say!(
                 "netstack: I219: refused {} over-length, {} errored, {} split and {} empty \
                  descriptor(s); {} overrun(s), {} descriptor-starvation report(s), \
-                 {} spurious interrupt(s)",
+                 {} frame(s) given back unsent at a link change, {} spurious interrupt(s)",
                 counters.over_length,
                 counters.errored,
                 counters.split,
                 counters.empty,
                 counters.overruns,
                 counters.starved,
+                counters.unsent,
                 counters.spurious,
             );
         }

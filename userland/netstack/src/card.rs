@@ -63,14 +63,16 @@ impl Card {
     /// silently never arrives, so this dies where it can be read — once, for
     /// whichever driver is running.
     ///
+    /// So does an Intel part that did not come back from the reset a link
+    /// change over unsent frames costs it: nothing drives it from there.
+    ///
     /// Answers the link where the pass found it changed; virtio reports none.
     pub fn begin_pass(&self) -> Option<toyos_i219::Link> {
         let answered = match self {
-            Self::Virtio(nic) => nic.take_interrupt().map(|_| None),
+            Self::Virtio(nic) => nic.take_interrupt().map(|_| None).map_err(toyos_i219::PassRefused::Claim),
             Self::Intel(nic) => nic.begin_pass(),
         };
-        answered
-            .unwrap_or_else(|why| panic!("netstack: this NIC's claim refused an interrupt read: {why:?}"))
+        answered.unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
     }
 
     /// What `inspect` reads about the card: which driver, its address, its
@@ -118,6 +120,10 @@ impl Card {
         let (counters, wire) = nic.counts();
         snap.put("descriptors.sent", counters.sent);
         snap.put("descriptors.received", counters.received);
+        snap.put("descriptors.unsent", counters.unsent);
+        snap.put("transmit.full", counters.tx_full);
+        snap.put("transmit.wake_armed", counters.tx_wake_armed);
+        snap.put("transmit.wake_taken", counters.tx_wake_taken);
         snap.put("wire.sent", wire.sent);
         snap.put("wire.received", wire.received);
         snap.put("wire.seen", wire.seen);

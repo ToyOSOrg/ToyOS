@@ -38,6 +38,15 @@
 //! cause that says a descriptor came back. Nothing here drops a frame for want
 //! of a descriptor, and nothing waits on the part.
 //!
+//! **A link that is down has no room, and a link that changed gives the ring
+//! back.** No Intel document says what either part does with a descriptor it
+//! holds when its link goes away, so nothing here depends on it: no frame is
+//! published while the link is down, and a pass that reads `LSC` with a
+//! descriptor still unsent resets the function and brings it up again
+//! ([`I219::begin_pass`]) — §10.2.6.7 lets software write the ring's head
+//! only "after a reset (hardware reset or CTRL.RST) and before enabling the
+//! transmit function", so that reset is the one way a ring is taken back.
+//!
 //! # The device is not trusted
 //!
 //! Every number in a written-back descriptor is the device's, and this driver
@@ -388,6 +397,32 @@ pub struct Pass {
     pub causes: u32,
     /// Whether the link's state is not what it was at the last pass.
     pub link_changed: bool,
+    /// Whether this pass reset the function and brought it up again, to take
+    /// back a transmit ring a link change left with unsent descriptors.
+    pub rearmed: bool,
+}
+
+/// Why [`I219::begin_pass`] did not begin a pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PassRefused<C> {
+    /// The claim refused its interrupt record, in its own word: the function
+    /// is no longer this driver's.
+    Claim(C),
+    /// The function did not come back up from the reset that takes its
+    /// transmit ring back.
+    Rearm(Refusal),
+}
+
+impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Claim(why) => write!(f, "its claim refused an interrupt read: {why:?}"),
+            Self::Rearm(why) => write!(
+                f,
+                "it did not come back from the reset that takes its transmit ring back: {why}"
+            ),
+        }
+    }
 }
 
 /// Everything this driver has refused, dropped or been told about, for the one
@@ -407,8 +442,17 @@ pub struct Counters {
     pub overruns: u32,
     /// `ICR.RXDMT0`: free descriptors fell to the threshold.
     pub starved: u32,
-    /// Frames the caller offered that no transmit buffer holds.
-    pub too_long: u32,
+    /// Times a caller with a frame found the transmit ring with no room:
+    /// [`I219::wake_on_room`] answering 0 on a link that is up.
+    pub tx_full: u32,
+    /// Times the transmit cause was unmasked for such a caller.
+    pub tx_wake_armed: u32,
+    /// Passes that read the transmit cause while it was unmasked: the wake a
+    /// full ring was waiting on, taken.
+    pub tx_wake_taken: u32,
+    /// Frames published and never sent: the descriptors a link change gave
+    /// back ([`I219::begin_pass`]).
+    pub unsent: u32,
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
@@ -421,11 +465,11 @@ pub struct Counters {
 
 impl Counters {
     /// The counts that are worth a line: every one but [`Self::spurious`],
-    /// [`Self::sent`] and [`Self::received`], which move on their own on a
-    /// working card, so a diagnostic keyed on them would print on nothing
-    /// having gone wrong.
+    /// [`Self::sent`], [`Self::received`] and the three of a full transmit
+    /// ring, which move on their own on a working card, so a diagnostic keyed
+    /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, sent: 0, received: 0, ..*self }
+        Self { spurious: 0, sent: 0, received: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
     }
 }
 
@@ -673,6 +717,29 @@ pub enum Part {
     I219,
 }
 
+impl Part {
+    /// The cause that says a transmit descriptor was written back, as this
+    /// part raises a message for it.
+    ///
+    /// §7.2.8: "Any write backs are performed; either with the RS bit set or
+    /// when accumulated descriptors are written back [...] Transmit Descriptor
+    /// Write Back (ICR.TXDW)", and §10.2.4.1 gives the 82574 the same event a
+    /// second time as `TxQ0`, "Indicates transmit queue 0 write back" — the
+    /// name §7.4.2 maps to a vector, where "the ICR[24:20] bits reflect
+    /// specific interrupt causes" in MSI-X mode. Both are unmasked on it.
+    ///
+    /// **The PCH's MAC is never in that mode, and gets `TXDW` alone**: its
+    /// function publishes a Message Signaled Interrupt capability and no MSI-X
+    /// one (631120 §8.1, §8.1.15), so §7.4.1's fixed mapping is the only one
+    /// it has, and what its bit 22 means no Intel document publishes.
+    fn tx_done(self) -> u32 {
+        match self {
+            Self::E82574 => cause::TXDW | cause::TXQ0,
+            Self::I219 => cause::TXDW,
+        }
+    }
+}
+
 /// What [`I219::open`] found on the way up, for the one line a caller prints
 /// about a function that raised no link.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -717,7 +784,7 @@ pub struct I219<R: Registers, C, D, I> {
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
-    /// Whether [`cause::TX_DONE`] is unmasked: a caller found the ring full
+    /// Whether [`Part::tx_done`] is unmasked: a caller found the ring full
     /// and no pass has begun since.
     tx_wake: bool,
     counters: Counters,
@@ -731,6 +798,216 @@ impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
             pch::release(&self.regs);
         }
     }
+}
+
+/// What [`program`] leaves beside the registers it wrote.
+struct Programmed {
+    mac: [u8; 6],
+    brought_up: BringUp,
+}
+
+/// §4.6's bring-up from the reset to the interrupt mask: everything
+/// [`I219::open`] programs, which is also everything a reset takes away.
+fn program<R: Registers, C: Clock, D: DmaBuffers>(
+    part: Part,
+    regs: &R,
+    clock: &C,
+    dma: &D,
+) -> Result<Programmed, Refusal> {
+    // The PHY is brought within reach before the reset, and the reset
+    // takes it with the MAC: [`wake`]'s header is why, on the part whose
+    // PHY is not on the MAC's own die.
+    let (woke, whole) = match part {
+        Part::I219 => {
+            let woke = phy::wake(regs, clock, None);
+            (Some(woke), Whole::WithThePhy { after: Some(clock.nanos()) })
+        }
+        Part::E82574 => (None, Whole::MacAlone),
+    };
+    let Reset { master_quiet, at: reset_at, full, released } =
+        reset(regs, clock, whole)?;
+
+    // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
+    // after it and not before.
+    let low = regs.read(regs::RAL0);
+    let high = regs.read(regs::RAH0);
+    if high & rah::AV == 0 {
+        return Err(Refusal::NoStationAddress);
+    }
+    let mac = [
+        low as u8,
+        (low >> 8) as u8,
+        (low >> 16) as u8,
+        (low >> 24) as u8,
+        high as u8,
+        (high >> 8) as u8,
+    ];
+
+    // What the PCH's MAC is given after its reset and before its rings:
+    // [`pch`]'s header. After the last refusal above, so the one place a
+    // refusal has the word to give back is below.
+    if part == Part::I219 {
+        pch::prepare(regs);
+    }
+
+    // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
+    // generally means zeroing all entries initially." The table this part
+    // has, and nothing past it.
+    let table = match part {
+        Part::E82574 => regs::MTA_DWORDS,
+        Part::I219 => regs::MTA_DWORDS_PCH,
+    };
+    for entry in 0..table {
+        regs.write(regs::MTA + entry * 4, 0);
+    }
+
+    // §4.6.3.1: "Refer to the PHY documentation for the initialization and
+    // link setup steps. The device driver uses the MDIC register to
+    // initialize the PHY and setup the link." The PHY documentation this
+    // driver has is the I219's, and §10.2.2.7 addresses the 82574's own PHY
+    // under a scheme of its own — so the sequence is refused by name on the
+    // part it was not written from.
+    let phy = match part {
+        Part::I219 => phy::bring_up(regs, clock, reset_at, released),
+        Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
+    };
+
+    // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
+    // `ASDE` must be zero on this family; forcing speed or duplex would
+    // override what auto-negotiation resolved; and this driver negotiates
+    // no flow control and strips no VLAN tag. §3.1.3.10's master disable
+    // goes with them and is not preserved: a part that came out of the
+    // reset still blocking master requests would fetch no descriptor and
+    // write back no frame, and nothing else in this bring-up would say so.
+    let held = regs.read(regs::CTRL);
+    let wanted = (held
+        & !(ctrl::GIO_MASTER_DISABLE
+            | ctrl::PHY_RST
+            | ctrl::ASDE
+            | ctrl::ILOS
+            | ctrl::FRCSPD
+            | ctrl::FRCDPLX
+            | ctrl::RFCE
+            | ctrl::TFCE
+            | ctrl::VME))
+        | ctrl::SLU;
+    regs.write(regs::CTRL, wanted);
+
+    // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
+    // be read" — and this driver reads it, so auto-clear stays off and
+    // every cause is acknowledged by the write-back in `begin_pass`.
+    regs.write(regs::EIAC, 0);
+
+    // A refusal from here on gives the word to the firmware back: nothing
+    // holds the function that a drop would let go.
+    let armed = rings_and_mask(regs, dma);
+    if armed.is_err() && part == Part::I219 {
+        pch::release(regs);
+    }
+    armed?;
+    Ok(Programmed { mac, brought_up: BringUp { master_quiet, woke, reset: full, phy } })
+}
+
+/// The rest of §4.6: the vector allocation, both rings, the transmitter, the
+/// receiver, and the interrupt mask last.
+fn rings_and_mask<R: Registers, D: DmaBuffers>(regs: &R, dma: &D) -> Result<(), Refusal> {
+
+    // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
+    // part in MSI-X mode with it unprogrammed fills `ICR` and delivers
+    // nothing. Read back, because the document defines the register only
+    // "in MSI-X mode" and says nothing about what a part outside that mode
+    // answers — so a part that does not take the write is refused here
+    // rather than driven on a guess about which interrupt it would raise.
+    regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
+    accepted(regs, regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
+
+    // No moderation on either side: §10.2.4.2's throttle and the two
+    // receive timers all hold an interrupt back, and what this driver
+    // waits on is the frame that has already arrived.
+    regs.write(regs::ITR, 0);
+    regs.write(regs::RDTR, 0);
+    regs.write(regs::RADV, 0);
+    regs.write(regs::TIDV, 0);
+    regs.write(regs::TADV, 0);
+
+    arm_rx_ring(regs, dma);
+    arm_tx_ring(regs, dma);
+
+    // §4.6.6, in its order: the write-back policy, the gap, then the
+    // transmitter.
+    regs.write(regs::TXDCTL, txdctl::SUGGESTED);
+    regs.write(regs::TIPG, regs::TIPG_DEFAULT);
+    regs.write(regs::TCTL, TX_CONTROL);
+    accepted(regs, regs::TCTL, TX_CONTROL)?;
+
+    // §4.6.5.1: the receiver last, "only after all other setup is
+    // accomplished".
+    let rx = rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048;
+    regs.write(regs::RCTL, rx);
+    accepted(regs, regs::RCTL, rx)?;
+
+    // §4.6.5: and only now the mask, so no cause can arrive before there
+    // is a ring to answer it with.
+    regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
+    Ok(())
+}
+
+/// A register wrote what it was told, so a window that is not this register
+/// file is refused here instead of looking like a dead network.
+fn accepted<R: Registers>(regs: &R, reg: usize, wrote: u32) -> Result<(), Refusal> {
+    let read = regs.read(reg);
+    if read & wrote == wrote {
+        Ok(())
+    } else {
+        Err(Refusal::NotAccepted { reg, wrote, read })
+    }
+}
+
+/// Publish every receive descriptor and hand the ring to the device.
+///
+/// §4.6.5.1: base, length, head, then "the tail pointer should be set to
+/// point one descriptor beyond the end" — so the ring holds `RX_RING`
+/// buffers and `RX_RING - 1` of them are the device's at any moment, the
+/// last being the one §7.1.8's "head equals tail is empty" costs.
+fn arm_rx_ring<R: Registers, D: DmaBuffers>(regs: &R, dma: &D) {
+    for index in 0..RX_RING {
+        publish_rx(dma, index);
+    }
+    let base = dma.device_addr(OFF_RX_RING);
+    dma.publish();
+    regs.write(regs::RDBAL, base as u32);
+    regs.write(regs::RDBAH, (base >> 32) as u32);
+    regs.write(regs::RDLEN, (RX_RING * rx_desc::BYTES) as u32);
+    regs.write(regs::RDH, 0);
+    regs.write(regs::RDT, (RX_RING - 1) as u32);
+}
+
+fn arm_tx_ring<R: Registers, D: DmaBuffers>(regs: &R, dma: &D) {
+    for index in 0..TX_RING {
+        let at = OFF_TX_RING + index * tx_desc::BYTES;
+        dma.write(at, 0);
+        dma.write(at + 8, 0);
+    }
+    let base = dma.device_addr(OFF_TX_RING);
+    dma.publish();
+    regs.write(regs::TDBAL, base as u32);
+    regs.write(regs::TDBAH, (base >> 32) as u32);
+    regs.write(regs::TDLEN, (TX_RING * tx_desc::BYTES) as u32);
+    regs.write(regs::TDH, 0);
+    regs.write(regs::TDT, 0);
+}
+
+/// Write descriptor `index` back as an empty buffer the device may fill.
+///
+/// The status word is zeroed before the address is published, because
+/// §7.1.8 says software can "zero the status byte in the descriptor to
+/// make it ready for reuse" and a stale `DD` left behind would be read as
+/// a completion for a frame that never arrived.
+fn publish_rx<D: DmaBuffers>(dma: &D, index: usize) {
+    let at = OFF_RX_RING + index * rx_desc::BYTES;
+    let buffer = OFF_RX_BUFS + index * RX_BUF_BYTES;
+    dma.write(at + 8, 0);
+    dma.write(at, dma.device_addr(buffer));
 }
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
@@ -751,90 +1028,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if (dma.bytes() as u64) < GRANT_BYTES {
             return Err(Refusal::Grant { given: dma.bytes(), needed: GRANT_BYTES as usize });
         }
-        // The PHY is brought within reach before the reset, and the reset
-        // takes it with the MAC: [`wake`]'s header is why, on the part whose
-        // PHY is not on the MAC's own die.
-        let (woke, whole) = match part {
-            Part::I219 => {
-                let woke = phy::wake(&regs, &clock, None);
-                (Some(woke), Whole::WithThePhy { after: Some(clock.nanos()) })
-            }
-            Part::E82574 => (None, Whole::MacAlone),
-        };
-        let Reset { master_quiet, at: reset_at, full, released } =
-            reset(&regs, &clock, whole)?;
-
-        // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
-        // after it and not before.
-        let low = regs.read(regs::RAL0);
-        let high = regs.read(regs::RAH0);
-        if high & rah::AV == 0 {
-            return Err(Refusal::NoStationAddress);
-        }
-        let mac = [
-            low as u8,
-            (low >> 8) as u8,
-            (low >> 16) as u8,
-            (low >> 24) as u8,
-            high as u8,
-            (high >> 8) as u8,
-        ];
-
-        // What the PCH's MAC is given after its reset and before its rings:
-        // [`pch`]'s header. After the last refusal that comes before `Self`
-        // exists, so every refusal after it is a drop that lets the function go.
-        if part == Part::I219 {
-            pch::prepare(&regs);
-        }
-
-        // §4.6.5: "Set up the Multicast Table Array (MTA) per software. This
-        // generally means zeroing all entries initially." The table this part
-        // has, and nothing past it.
-        let table = match part {
-            Part::E82574 => regs::MTA_DWORDS,
-            Part::I219 => regs::MTA_DWORDS_PCH,
-        };
-        for entry in 0..table {
-            regs.write(regs::MTA + entry * 4, 0);
-        }
-
-        // §4.6.3.1: "Refer to the PHY documentation for the initialization and
-        // link setup steps. The device driver uses the MDIC register to
-        // initialize the PHY and setup the link." The PHY documentation this
-        // driver has is the I219's, and §10.2.2.7 addresses the 82574's own PHY
-        // under a scheme of its own — so the sequence is refused by name on the
-        // part it was not written from.
-        let phy = match part {
-            Part::I219 => phy::bring_up(&regs, &clock, reset_at, released),
-            Part::E82574 => Err(phy::PhyRefusal::NotThisRegisterMap),
-        };
-
-        // §10.2.2.1: `SLU` is what lets the MAC see the PHY's link at all;
-        // `ASDE` must be zero on this family; forcing speed or duplex would
-        // override what auto-negotiation resolved; and this driver negotiates
-        // no flow control and strips no VLAN tag. §3.1.3.10's master disable
-        // goes with them and is not preserved: a part that came out of the
-        // reset still blocking master requests would fetch no descriptor and
-        // write back no frame, and nothing else in this bring-up would say so.
-        let held = regs.read(regs::CTRL);
-        let wanted = (held
-            & !(ctrl::GIO_MASTER_DISABLE
-                | ctrl::PHY_RST
-                | ctrl::ASDE
-                | ctrl::ILOS
-                | ctrl::FRCSPD
-                | ctrl::FRCDPLX
-                | ctrl::RFCE
-                | ctrl::TFCE
-                | ctrl::VME))
-            | ctrl::SLU;
-        regs.write(regs::CTRL, wanted);
-
-        // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
-        // be read" — and this driver reads it, so auto-clear stays off and
-        // every cause is acknowledged by the write-back in `begin_pass`.
-        regs.write(regs::EIAC, 0);
-
+        let Programmed { mac, brought_up } = program(part, &regs, &clock, &dma)?;
         let mut nic = Self {
             part,
             regs,
@@ -842,7 +1036,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy },
+            brought_up,
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -855,49 +1049,11 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             counters: Counters::default(),
             wire: Wire::default(),
         };
-
-        // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
-        // part in MSI-X mode with it unprogrammed fills `ICR` and delivers
-        // nothing. Read back, because the document defines the register only
-        // "in MSI-X mode" and says nothing about what a part outside that mode
-        // answers — so a part that does not take the write is refused here
-        // rather than driven on a guess about which interrupt it would raise.
-        nic.regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
-        nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
-
-        // No moderation on either side: §10.2.4.2's throttle and the two
-        // receive timers all hold an interrupt back, and what this driver
-        // waits on is the frame that has already arrived.
-        nic.regs.write(regs::ITR, 0);
-        nic.regs.write(regs::RDTR, 0);
-        nic.regs.write(regs::RADV, 0);
-        nic.regs.write(regs::TIDV, 0);
-        nic.regs.write(regs::TADV, 0);
-
-        nic.arm_rx_ring();
-        nic.arm_tx_ring();
-
-        // §4.6.6, in its order: the write-back policy, the gap, then the
-        // transmitter.
-        nic.regs.write(regs::TXDCTL, txdctl::SUGGESTED);
-        nic.regs.write(regs::TIPG, regs::TIPG_DEFAULT);
-        nic.regs.write(regs::TCTL, TX_CONTROL);
-        nic.accepted(regs::TCTL, TX_CONTROL)?;
-
-        // §4.6.5.1: the receiver last, "only after all other setup is
-        // accomplished".
-        let rx = rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048;
-        nic.regs.write(regs::RCTL, rx);
-        nic.accepted(regs::RCTL, rx)?;
-
-        // §4.6.5: and only now the mask, so no cause can arrive before there
-        // is a ring to answer it with.
-        nic.regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
-
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
         Ok(nic)
     }
+
 
     /// Pass frames sent to the multicast address `group`: the one bit of the
     /// Multicast Table Array its hash names on this part ([`regs::mta_bit_82574`],
@@ -910,64 +1066,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         };
         let at = regs::MTA + dword * 4;
         self.regs.write(at, self.regs.read(at) | 1 << bit);
-    }
-
-    /// A register wrote what it was told, so a window that is not this register
-    /// file is refused here instead of looking like a dead network.
-    fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal> {
-        let read = self.regs.read(reg);
-        if read & wrote == wrote {
-            Ok(())
-        } else {
-            Err(Refusal::NotAccepted { reg, wrote, read })
-        }
-    }
-
-    /// Publish every receive descriptor and hand the ring to the device.
-    ///
-    /// §4.6.5.1: base, length, head, then "the tail pointer should be set to
-    /// point one descriptor beyond the end" — so the ring holds `RX_RING`
-    /// buffers and `RX_RING - 1` of them are the device's at any moment, the
-    /// last being the one §7.1.8's "head equals tail is empty" costs.
-    fn arm_rx_ring(&mut self) {
-        for index in 0..RX_RING {
-            self.publish_rx(index);
-        }
-        let base = self.dma.device_addr(OFF_RX_RING);
-        self.dma.publish();
-        self.regs.write(regs::RDBAL, base as u32);
-        self.regs.write(regs::RDBAH, (base >> 32) as u32);
-        self.regs.write(regs::RDLEN, (RX_RING * rx_desc::BYTES) as u32);
-        self.regs.write(regs::RDH, 0);
-        self.regs.write(regs::RDT, self.rx_tail as u32);
-    }
-
-    fn arm_tx_ring(&mut self) {
-        for index in 0..TX_RING {
-            let at = OFF_TX_RING + index * tx_desc::BYTES;
-            self.dma.write(at, 0);
-            self.dma.write(at + 8, 0);
-        }
-        let base = self.dma.device_addr(OFF_TX_RING);
-        self.dma.publish();
-        self.regs.write(regs::TDBAL, base as u32);
-        self.regs.write(regs::TDBAH, (base >> 32) as u32);
-        self.regs.write(regs::TDLEN, (TX_RING * tx_desc::BYTES) as u32);
-        self.regs.write(regs::TDH, 0);
-        self.regs.write(regs::TDT, 0);
-    }
-
-    /// Write descriptor `index` back as an empty buffer the device may fill.
-    ///
-    /// The status word is zeroed before the address is published, because
-    /// §7.1.8 says software can "zero the status byte in the descriptor to
-    /// make it ready for reuse" and a stale `DD` left behind would be read as
-    /// a completion for a frame that never arrived.
-    fn publish_rx(&mut self, index: usize) {
-        let at = OFF_RX_RING + index * rx_desc::BYTES;
-        let buffer = OFF_RX_BUFS + index * RX_BUF_BYTES;
-        self.dma.write(at + 8, 0);
-        self.dma.write(at, self.dma.device_addr(buffer));
     }
 
     pub fn mac(&self) -> [u8; 6] {
@@ -1026,21 +1124,27 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// refuses to answer at all is not a pass with no messages in it — the
     /// function is no longer this driver's, and the refusal is handed up rather
     /// than counted as quiet.
-    pub fn begin_pass(&mut self) -> Result<Pass, I::Refused> {
+    ///
+    /// **A pass that reads `LSC` with a transmit descriptor still unsent takes
+    /// the ring back**, by the reset and the bring-up [`Self::open`] runs:
+    /// the frames in it are counted [`Counters::unsent`], a frame received and
+    /// not yet handed up goes with them, and the pass lasts as long as a
+    /// bring-up does. Every [`Frame`] is given back before a pass begins.
+    pub fn begin_pass(&mut self) -> Result<Pass, PassRefused<I::Refused>> {
         self.rx_budget = RX_BUDGET;
         let messages = match self.irq.taken() {
             Ok(count) => count,
             Err(why) if why == I::IDLE => 0,
-            Err(why) => return Err(why),
+            Err(why) => return Err(PassRefused::Claim(why)),
         };
 
         // §10.2.4.6: the transmit cause is masked again, because it was wanted
         // for one wake and left unmasked it is a message for every frame sent.
         // Before the room this pass's sends ask for: a ring still full arms it
         // again in [`Self::wake_on_room`].
-        if self.tx_wake {
-            self.regs.write(regs::IMC, cause::TX_DONE);
-            self.tx_wake = false;
+        let waited = core::mem::take(&mut self.tx_wake);
+        if waited {
+            self.regs.write(regs::IMC, self.part.tx_done());
         }
 
         // Once, and written back. §10.2.4.1's case 3 says a read with no
@@ -1064,6 +1168,9 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if messages > 0 && acknowledged == 0 {
             self.counters.spurious = self.counters.spurious.saturating_add(messages);
         }
+        if waited && causes & self.part.tx_done() != 0 {
+            self.counters.tx_wake_taken = self.counters.tx_wake_taken.saturating_add(1);
+        }
 
         // On `LSC` and on every pass that found no cause at all: the link can
         // also come up before the mask was written, and then no `LSC` is ever
@@ -1072,7 +1179,52 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if causes & cause::LSC != 0 || !self.link.is_up() {
             self.refresh_link();
         }
-        Ok(Pass { messages, causes, link_changed: self.link != before })
+        let rearmed = causes & cause::LSC != 0 && self.unsent() > 0;
+        if rearmed {
+            self.rearm().map_err(PassRefused::Rearm)?;
+        }
+        Ok(Pass { messages, causes, link_changed: self.link != before, rearmed })
+    }
+
+    /// Transmit descriptors published and not written back, the written-back
+    /// ones reclaimed first.
+    fn unsent(&mut self) -> usize {
+        self.reclaim_tx();
+        (self.tx_next + TX_RING - self.tx_clean) % TX_RING
+    }
+
+    /// Reset the function and bring it up again, as [`Self::open`] did, with
+    /// both rings empty and the multicast table as it stood.
+    ///
+    /// §10.2.6.1 on `TCTL.EN`: "Software should combine this with a reset if
+    /// the packets in the FIFO need to be flushed" — and §10.2.6.7's head is
+    /// software's to write only after one.
+    fn rearm(&mut self) -> Result<(), Refusal> {
+        let unsent = self.unsent() as u32;
+        let dwords = match self.part {
+            Part::E82574 => regs::MTA_DWORDS,
+            Part::I219 => regs::MTA_DWORDS_PCH,
+        };
+        let mut table = [0u32; regs::MTA_DWORDS];
+        for (entry, word) in table[..dwords].iter_mut().enumerate() {
+            *word = self.regs.read(regs::MTA + entry * 4);
+        }
+        let Programmed { mac: _, brought_up } = program(self.part, &self.regs, &self.clock, &self.dma)?;
+        for (entry, word) in table[..dwords].iter().enumerate() {
+            self.regs.write(regs::MTA + entry * 4, *word);
+        }
+        self.brought_up = brought_up;
+        self.rx_next = 0;
+        self.rx_tail = RX_RING - 1;
+        self.tx_next = 0;
+        self.tx_clean = 0;
+        self.counters.unsent = self.counters.unsent.saturating_add(unsent);
+        // The link change the bring-up itself made is acknowledged before the
+        // link is read: left in `ICR` it would be the next pass's reason to
+        // take back a ring that has frames in it again.
+        self.regs.write(regs::ICR, cause::LSC);
+        self.refresh_link();
+        Ok(())
     }
 
     /// Re-read `STATUS` and take what it says about the link.
@@ -1157,12 +1309,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// one, walk `RDT` backwards over the rest of the ring.
     ///
     /// **Ready is read out of the descriptor, so there is no second record of
-    /// it to disagree.** [`Self::publish_rx`] zeroes the status word, and a
+    /// it to disagree.** [`publish_rx`] zeroes the status word, and a
     /// descriptor still in a caller's hands holds the non-zero word the device
     /// wrote back — `DD` is what [`Self::poll_rx`] took it on. The device
     /// touches neither until the tail passes it.
     fn give_back(&mut self, index: usize) {
-        self.publish_rx(index);
+        publish_rx(&self.dma, index);
         let mut tail = self.rx_tail;
         loop {
             let next = (tail + 1) % RX_RING;
@@ -1187,31 +1339,50 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     }
 
     /// How many frames the transmit ring takes now, every descriptor the part
-    /// has written back taken first.
+    /// has written back taken first — and none while the link is down, whose
+    /// return is `LSC`'s to say.
     ///
     /// §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
     /// descriptor would wrap the tail onto the head and read as empty — one
     /// descriptor is never handed out, and a full ring is [`TX_RING`]` - 1` in
     /// flight.
     pub fn tx_room(&mut self) -> usize {
-        self.reclaim_tx();
-        (self.tx_clean + TX_RING - 1 - self.tx_next) % TX_RING
+        if !self.link.is_up() {
+            return 0;
+        }
+        TX_RING - 1 - self.unsent()
     }
 
     /// Ask for a message when the part next writes a transmit descriptor
     /// back, and answer the room there is now that it has been asked.
     ///
-    /// §10.2.4.5: a write of [`cause::TX_DONE`] to `IMS` unmasks it, and it
-    /// stays unmasked until the next [`Self::begin_pass`].
+    /// §10.2.4.5: "A particular interrupt can be enabled by writing a 1b to
+    /// the corresponding mask bit", and [`Part::tx_done`] stays unmasked until
+    /// the next [`Self::begin_pass`]. Each frame sent is a write-back and each
+    /// write-back the cause: `TXDCTL`'s description has "all descriptors
+    /// written back" with `GRAN` set, §7.2.4.2 writes them back "only when
+    /// TXDCTL.WTHRESH number of descriptors are ready", which at one is each,
+    /// and §7.2.8 sets `TXDW` when "any write backs are performed".
     ///
     /// **Unmasked first and counted after**, so no write-back is lost between
-    /// the two: one that landed before the mask was written raised nothing and
-    /// is in the count, and one that lands after it is a message. A caller
-    /// answered 0 waits on its claim.
+    /// the two: one that landed before the mask was written is in the count,
+    /// and one that lands after it is a message. §7.4.3 signals an interrupt
+    /// "when unmasked bits in this register are set", so the first may be a
+    /// message as well, which costs a pass. A caller answered 0 waits on its
+    /// claim.
+    ///
+    /// With the link down nothing is unmasked and the answer is 0: the wake
+    /// is the link's own cause, which is never masked.
     pub fn wake_on_room(&mut self) -> usize {
+        let room = self.tx_room();
+        if room > 0 || !self.link.is_up() {
+            return room;
+        }
+        self.counters.tx_full = self.counters.tx_full.saturating_add(1);
         if !self.tx_wake {
-            self.regs.write(regs::IMS, cause::TX_DONE);
+            self.regs.write(regs::IMS, self.part.tx_done());
             self.tx_wake = true;
+            self.counters.tx_wake_armed = self.counters.tx_wake_armed.saturating_add(1);
         }
         self.tx_room()
     }
@@ -1224,13 +1395,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     pub fn tx_reserve(&mut self, len: usize) -> Option<TxSlot> {
         // §7.2.10.1: one legacy descriptor carries one buffer, and this
         // driver's is `TX_BUF_BYTES`. A longer frame is refused rather than
-        // truncated into one, and counted because it is a caller that offered
-        // more than it was told it could.
-        if len > TX_BUF_BYTES {
-            self.counters.too_long = self.counters.too_long.saturating_add(1);
-            return None;
-        }
-        if self.tx_room() == 0 {
+        // truncated into one.
+        if len > TX_BUF_BYTES || self.tx_room() == 0 {
             return None;
         }
         let index = self.tx_next;
