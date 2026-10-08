@@ -5918,6 +5918,7 @@ version = "0.1.0"
 dependencies = [
  "etherparse",
  "toyos-dhcp",
+ "toyos-dns",
  "toyos-mdns",
  "toyos-net-ip",
  "toyos-net-shard",

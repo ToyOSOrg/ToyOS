@@ -145,7 +145,7 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
         if self.lookups.len() == MAX_LOOKUPS {
             return Err((client, Refused::Full));
         }
-        let (lookup, step) = Lookup::start(name.clone(), &self.servers, self.ms(now), (self.draw)())
+        let (lookup, step) = Lookup::start(name.clone(), &self.servers, self.ms(now), &mut self.draw)
             .expect("the server list was checked not empty");
         let mut pending = Pending { client, name, lookup, queries: Vec::new() };
         match act(&mut pending, step, socket_set, &mut self.draw) {
@@ -185,7 +185,7 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
                         unreachable!("netstack: recv hands back the whole datagram and truncates nothing")
                     }
                 };
-                let step = pending.lookup.on_datagram(asked, from, port, &reply, now_ms, (self.draw)());
+                let step = pending.lookup.on_datagram(asked, from, port, &reply, now_ms, &mut self.draw);
                 done = act(pending, step, socket_set, &mut self.draw);
                 // The step may have let this query go: its socket is read
                 // again from wherever it now is, or every socket from the
@@ -193,7 +193,7 @@ impl<C, D: FnMut() -> u16> Resolver<C, D> {
                 q = pending.queries.iter().position(|&(a, _)| a == asked).unwrap_or(0);
             }
             if done.is_none() {
-                let step = pending.lookup.on_time(now_ms, (self.draw)());
+                let step = pending.lookup.on_time(now_ms, &mut self.draw);
                 done = act(pending, step, socket_set, &mut self.draw);
             }
             match done {

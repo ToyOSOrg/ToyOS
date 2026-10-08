@@ -2,7 +2,7 @@
 //! IPv4 addresses, which datagram answers that question, what the answer says,
 //! and when the question is asked again. Pure: `core` and `alloc`, no
 //! `unsafe`, no I/O, and no clock or randomness of its own. The caller hands in
-//! the time, every query ID and every datagram with its source.
+//! the time, the draw of every query's ID and every datagram with its source.
 //!
 //! **A reply has crossed a trust boundary.** Anyone on the path can send a
 //! datagram to the port a query left from, so a reply is read only if it
@@ -471,8 +471,10 @@ struct Sent {
 
 /// One name's lookup, from its first query to its answer.
 ///
-/// **Each query carries an ID the caller drew for it**, which the caller takes
-/// from a source an off-path sender cannot predict (RFC 5452 §9.2). A reply to
+/// **Each query carries an ID the caller draws for it**, from a source an
+/// off-path sender cannot predict (RFC 5452 §9.2). Every call that may send a
+/// query takes the draw, and calls it once for a query it sends and not at all
+/// otherwise. A reply to
 /// any query this lookup sent for the name now asked is read, so an answer
 /// late past its query's wait still ends the lookup; it is read only on the
 /// query's own port, with the query's ID, from the server the query went to.
@@ -499,8 +501,8 @@ pub struct Lookup {
 
 impl Lookup {
     /// A lookup of `name` through `servers`, and its first query, sent at
-    /// `now` with ID `id`. `None` when there is no server to ask.
-    pub fn start(name: Name, servers: &[[u8; 4]], now: u64, id: u16) -> Option<(Self, Step)> {
+    /// `now` with the ID `id` draws. `None` when there is no server to ask.
+    pub fn start(name: Name, servers: &[[u8; 4]], now: u64, id: impl FnOnce() -> u16) -> Option<(Self, Step)> {
         if servers.is_empty() {
             return None;
         }
@@ -530,7 +532,7 @@ impl Lookup {
     }
 
     /// The next query for `name`, or the end where every one has been sent.
-    fn ask(&mut self, now: u64, id: u16) -> Step {
+    fn ask(&mut self, now: u64, id: impl FnOnce() -> u16) -> Step {
         if self.asked == ROUNDS * self.servers.len() {
             return Step::Done(Err(match self.failed {
                 Some(rcode) => Failure::ServerFailed(rcode),
@@ -541,14 +543,15 @@ impl Lookup {
         self.asked += 1;
         let asked = Asked(self.next);
         self.next += 1;
+        let id = id();
         self.sent.push(Sent { asked, id, to });
         self.due = now + WAIT_MS;
         Step::Ask { asked, to, query: query(id, &self.name) }
     }
 
     /// The time is `now`: the newest query has had its [`WAIT_MS`] where it
-    /// is due. `id` is for the query this may send.
-    pub fn on_time(&mut self, now: u64, id: u16) -> Step {
+    /// is due. `id` draws the ID of the query this sends.
+    pub fn on_time(&mut self, now: u64, id: impl FnOnce() -> u16) -> Step {
         if now < self.due {
             return Step::Wait;
         }
@@ -556,8 +559,16 @@ impl Lookup {
     }
 
     /// `msg` arrived at `now` from `port` of `from`, on the port `asked` was
-    /// sent from. `id` is for the query this may send.
-    pub fn on_datagram(&mut self, asked: Asked, from: [u8; 4], port: u16, msg: &[u8], now: u64, id: u16) -> Step {
+    /// sent from. `id` draws the ID of the query this sends.
+    pub fn on_datagram(
+        &mut self,
+        asked: Asked,
+        from: [u8; 4],
+        port: u16,
+        msg: &[u8],
+        now: u64,
+        id: impl FnOnce() -> u16,
+    ) -> Step {
         let Some(carried) = msg.get(..2).map(|b| u16::from_be_bytes([b[0], b[1]])) else {
             return Step::Wait;
         };
