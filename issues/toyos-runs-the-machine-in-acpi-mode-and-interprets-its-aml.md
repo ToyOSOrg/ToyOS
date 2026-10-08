@@ -233,14 +233,27 @@ otherwise pay to find again:
   allocator holds the most a load and an evaluation hold while they run to
   it; and the arena's capacity after the real machine's last table is
   read, not derived.
-- **The T14's tables are not in name order, and its initialisation does
-  not hang on the order.** The interpreter's walk of the namespace
-  (`Interpreter::walk`, `userland/acpiserver/aml/src/lib.rs`) reads
-  siblings as their tables declared them. Of the 267 objects of the T14's
-  tables that hold others, 217 declare them against the order their names
-  sort in; and the embedded controller's device is below the PCI root
-  bridge, the two whose `_INI` a dry run found writing anything, so a
-  parent is initialised before its child whichever order siblings take.
+- **The T14's tables are not in name order.** The interpreter's walk of
+  the namespace (`Interpreter::walk`, `userland/acpiserver/aml/src/lib.rs`)
+  reads siblings as their tables declared them. Of the 267 objects of the
+  T14's tables that hold others, 217 declare them against the order their
+  names sort in. What its initialisation needs of the order was read only
+  so far: the tables define 45 `_INI`, all methods; a dry run that answered
+  every read zero but one word of memory and each function's header found
+  two of them writing anything, the PCI root bridge's and the embedded
+  controller's; and that controller's device is below that bridge, so
+  under those answers the two run parent before child whichever order
+  siblings take. What the 45 do under the machine's own answers, and
+  whether any hangs on a sibling's, nothing has read.
+- **An evaluation may ask to wait ten seconds, and no caller names another
+  limit.** The limit counts the time asked of Sleep, Stall and Wait, a
+  load's too (`MAX_WAIT_US`, `userland/acpiserver/aml/src/lib.rs`), and
+  `Interpreter::usage` says what a call asked, the request that was refused
+  included. The T14's 14 tables asked for none while they loaded, and no
+  method of them has been read refused at it. Owner: this stage. **Exit**:
+  the slice that carries a reading of a method refused at ten seconds, on
+  the T14 and by `usage`, brings the limit its caller names with that
+  reading; until one does, ten seconds stands and nothing names more.
 
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:
