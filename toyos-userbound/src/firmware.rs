@@ -53,6 +53,12 @@
 //! passes otherwise.
 //!
 //! **Configuration space is read and never written.**
+//!
+//! **The sleep type of the power-off is the holder's to supply and the
+//! kernel's to write** ([`SleepType`]): `\_S5`'s `SLP_TYPa` is in the
+//! firmware's AML, which only the holder evaluates, and it is written to a
+//! register the holder may not write. A word wider than the register's field
+//! is refused, never masked.
 
 use toyos_abi::acpi::{Refused, Width, UNLISTED};
 use toyos_abi::boot::MemoryMapEntry;
@@ -394,4 +400,43 @@ pub fn config(ecam: Option<Ecam>, segment: u16, function: Function, offset: u16,
         return Err(Refused::ConfigSpan);
     }
     Ok(ConfigAt { function, offset, width })
+}
+
+/// A `SLP_TYPx` the PM1 control register holds (ACPI 6.5 Table 4.16: three
+/// bits, 12:10), as the claim's holder supplied it for the power-off.
+///
+/// ```compile_fail,E0451
+/// let _ = toyos_userbound::firmware::SleepType { slp_typ: 5 };
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SleepType {
+    slp_typ: u8,
+}
+
+impl SleepType {
+    /// The widest value the field holds.
+    const MAX: u64 = 7;
+    const SHIFT: u16 = 10;
+    /// PM1 control's `SLP_TYPx` field.
+    pub const FIELD: u16 = (Self::MAX as u16) << Self::SHIFT;
+
+    pub const fn get(self) -> u8 {
+        self.slp_typ
+    }
+
+    /// `control` with its `SLP_TYPx` field holding this type and every other
+    /// bit as it was.
+    pub const fn in_control(self, control: u16) -> u16 {
+        control & !Self::FIELD | (self.slp_typ as u16) << Self::SHIFT
+    }
+}
+
+/// The sleep type `word` names, or none where it is wider than the field:
+/// shifted into place such a word would set `SLP_EN` and the reserved bits
+/// above it.
+pub const fn sleep_type(word: u64) -> Option<SleepType> {
+    if word > SleepType::MAX {
+        return None;
+    }
+    Some(SleepType { slp_typ: word as u8 })
 }

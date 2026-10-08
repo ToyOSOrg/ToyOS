@@ -283,8 +283,8 @@ pub const SYS_PORT_BADGE: u64 = 126;
 pub const SYS_TRACE_READ: u64 = 127;
 
 /// One operation on the `acpi` claim ([`crate::acpi::op`]): an access the
-/// kernel mediates, or the firmware's Global Lock. See [`acpi_access`] and
-/// [`acpi_lock_take`].
+/// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
+/// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
@@ -1218,6 +1218,9 @@ pub unsafe fn gpu_set_resolution(
 /// **The only way this comes back is refused.** A shutdown that happened has no
 /// caller left to answer, so the return type is the refusal alone; the loop is
 /// what says so, asking again rather than reporting a success that did not happen.
+/// [`SyscallError::NotSupported`] is a machine whose `acpi` claim no holder
+/// has supplied the power-off's sleep type on ([`acpi_s5`]): nothing was
+/// stopped.
 pub fn shutdown(syscap: RawHandle) -> SyscallError {
     loop {
         if let Err(e) = check_unit(syscall(SYS_SHUTDOWN, syscap.0 as u64, 0, 0, 0)) {
@@ -2132,6 +2135,14 @@ pub fn acpi_lock_take(claim: RawHandle) -> Result<bool, SyscallError> {
 /// [`SyscallError::InvalidArgument`].
 pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_RELEASE, 0, 0))
+}
+
+/// Supply the `SLP_TYPa` of the machine's `\_S5` for the kernel's power-off
+/// ([`crate::acpi::op::S5`]). One wider than the register's three bits is
+/// refused [`SyscallError::InvalidArgument`] and a second under one claim
+/// [`SyscallError::AlreadyExists`], and nothing is kept of either.
+pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
 }
 
 /// Sleep for the given number of nanoseconds.

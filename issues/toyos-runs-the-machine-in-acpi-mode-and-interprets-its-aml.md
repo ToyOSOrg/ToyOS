@@ -10,12 +10,12 @@ The T14's firmware hands the machine over in legacy mode, which interrupts
 every CPU every 2.2 s
 (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 
-The ACPI server loads a machine's DSDT and SSDTs and evaluates `\_S5`, and
-nothing else of their AML yet. What ToyOS takes from them it takes another
-way: `toyos-acpi/src/dsdt.rs` finds
-`\_S5_` by a byte scan, and the loader asks UEFI for the root bridges'
-windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing reads
-`_CST`, which names a CPU's C-states.
+The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
+the kernel its sleep type, which the kernel powers the machine off with and
+has from nowhere else; it evaluates nothing else of their AML yet. What else
+ToyOS takes from them it takes another way: the loader asks UEFI for the root
+bridges' windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing
+reads `_CST`, which names a CPU's C-states.
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
 switch to ACPI mode lands as stage 1, together with a userland server that
@@ -169,8 +169,7 @@ otherwise pay to find again:
   are refused for a function above their region that is not there. That
   reading was taken after Linux enumerated the buses, and Linux may number a
   bridge the firmware left unnumbered: it does not show what the firmware
-  leaves at boot, and nothing here does. Owner: the power-off stage, which
-  puts the interpreter in the server. **Exit**: on the T14 the server logs
+  leaves at boot, and nothing here does. Owner: this stage. **Exit**: on the T14 the server logs
   the load result of each of the 14 tables and a T14 row reads all 14
   there; a table refused for a bridge's answer is brought to the owner with
   that bridge's Header Type and bus registers as the firmware left them,
@@ -189,7 +188,7 @@ otherwise pay to find again:
   for the caller's copy while it is built
   (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`;
   `a_full_interpreter_reads_a_field_that_fits_an_integer`, `userland/acpiserver/aml/tests/heap.rs`).
-  Owner: the power-off stage, which decides
+  Owner: this stage, which decides
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
@@ -227,7 +226,7 @@ otherwise pay to find again:
   a counting allocator, in 6,891 nodes. Nothing reads the arena's
   capacity: by its doubling it is 8,192 slots, 1,301 of them free, and a
   method that defines more names than are free moves the arena each time
-  it runs, at a step for every 64 bytes of it. Owner: the power-off stage,
+  it runs, at a step for every 64 bytes of it. Owner: this stage,
   which gives the server its memory. **Exit**: the server states its
   interpreter's bound in heap bytes, and a host test under a counting
   allocator holds the most a load and an evaluation hold while they run to
@@ -269,13 +268,59 @@ mediated access, leaves open:
   machine's log carries the denial, `the Global Lock: the firmware holds it`,
   which the `acpi_tables_loaded` row reds on as on every refusal; the wait
   comes back with the test that reaches its port sequence.
-- **A press during the load waits for it.** The server arms the power button
+- **A press during the load waits for it, and a power-off asked during it is
+  refused.** The server arms the power button
   and then loads the tables before it serves an SCI, so a press in that time
   latches and is served when the load ends: 77 ms on the T14, measured once,
-  and bounded only by what the interpreter lets each table sleep, 10 s.
-  Owner: this stage. **Exit**: the slice that keeps the namespace serves the
-  SCI while a table loads, or the `acpi_tables_loaded` row holds the load's
-  time on the T14 under a bound the owner names.
+  and bounded only by what the interpreter lets each table sleep, 10 s. The
+  kernel has `\_S5`'s sleep type only once the load has handed it over, and
+  until then refuses `SYS_SHUTDOWN` by name, stopping nothing
+  (`kernel/src/arch/x86_64/power.rs`); the asker is told and may ask again.
+  Owner: this stage. **Exit**, of the press's wait: the slice that keeps the
+  namespace serves the SCI while a table loads. The refusal has no exit and
+  stays: `\_S5` is evaluated in a namespace the load has built, so no
+  power-off is made before the load ends, and what bounds the refusal is the
+  load's time. That time is held on the T14 once the `acpi_tables_loaded` row
+  reads it under a bound the owner names.
+- **A machine with no holder of the `acpi` claim has no power-off.** The
+  kernel reads no AML, so a machine whose claim it refuses, one in legacy
+  mode with no ECDT or with a control-method power button, has nobody to
+  evaluate `\_S5`: `SYS_SHUTDOWN` is refused there, where the kernel's own
+  scan of the DSDT powered such a machine off before. Neither the T14 nor q35
+  is one: the T14 has an ECDT and a fixed button, and OVMF hands q35 over in
+  ACPI mode. Owner: this stage. **Exit**: the ECDT stopgap is deleted, so a
+  machine is claimed for what its DSDT names; what a machine with a
+  control-method button does for a power-off is ruled with that button's
+  device.
+
+  Two more machines have no power-off, and that is the ruled state and no
+  weakness with an exit. A boot whose config starts no server: "Power-off
+  always goes through the ACPI server" is the owner's "Yes, one path". A
+  machine whose DSDT the server refuses: the owner's "Go on, say it loudly"
+  (2026-10-07) was given for a refused table, and the option it chose, as
+  the orchestrator's record of the session holds it, logs a refused SSDT and
+  carries on, and after a refused DSDT still serves the button and offers no
+  power-off. That the server says the same, once and at error severity, of a
+  machine whose tables it could not read at all or whose `\_S5` is no
+  package of two integers or names a value the register does not hold, and
+  that a press on any of them is said and dropped, is the slice's design and
+  not his ruling.
+- **The claim's holder chooses the sleep type a power-off enters.** The
+  kernel writes to `PM1a_CNT` the `SLP_TYPa` the holder supplied
+  (`acpi_mode::s5`), and has nothing of its own to hold it against. So a
+  holder that is wrong or hostile decides which of the field's eight values a
+  power-off asked by a holder of `POWER` writes: S1, S3 or S4 where the
+  chipset maps them, or a value it maps to nothing, which is the kernel's
+  `S5 did not take` panic two seconds after the write. Before, only the
+  firmware's bytes chose. The holder cannot cause the write, set `SLP_EN` or
+  reach a bit outside 12:10 (`toyos_userbound::firmware::SleepType`), and
+  supplies one value under a claim. What it supplied outlives it, so a
+  machine whose server died still powers off: the owner's "Keep it"
+  (2026-10-08), asked whether the supplied value survives the server dying
+  or is withdrawn with its claim. Owner: this
+  stage. **Exit**: it stays while "one path" stands, which leaves the kernel
+  no second reading; it goes when the owner rules one in, and a guest test
+  then supplies a sleep type that is not the machine's and reads it refused.
 
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI
@@ -288,9 +333,3 @@ and a dry run of the firmware's `_INI` for the controller clears that bit in
 its two variants that answer all ones, the six that answer zero showing no
 bit, so that slice's first reading on the T14 is the same scout's of that bit, clear
 after the initialisation has run, before the press.
-
-**Stage: power-off through the server** (the orchestrator's placement of "Yes,
-one path"). The ACPI server evaluates `\_S5` and powers the machine off.
-Blocked on the interpreter's evaluation of `\_S5`. **Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
-in `kernel/src/arch/x86_64/power.rs` are deleted, and a test that powers off
-through a broken server is red.

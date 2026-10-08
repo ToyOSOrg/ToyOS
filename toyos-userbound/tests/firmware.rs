@@ -4,7 +4,7 @@
 
 use toyos_abi::acpi::{Refused, Width};
 use toyos_abi::boot::MemoryMapEntry;
-use toyos_userbound::firmware::{config, lock_word, port, type_word, Ecam, Function, Memory, MemoryVerdict, NoLockWord, Standing, FIXED_RANGE_END};
+use toyos_userbound::firmware::{config, lock_word, port, sleep_type, type_word, Ecam, Function, Memory, MemoryVerdict, NoLockWord, Standing, FIXED_RANGE_END};
 use toyos_userbound::Mediated;
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
@@ -571,4 +571,25 @@ fn every_configuration_write_is_refused_by_one_name() {
     assert_eq!(config(ecam, 0, HOST_BRIDGE, 0, Width::QWord, true), Err(Refused::ConfigWrite));
     assert_eq!(config(ecam, 1, HOST_BRIDGE, 0, Width::DWord, true), Err(Refused::ConfigWrite));
     assert_eq!(config(None, 0, HOST_BRIDGE, 0x44, Width::Byte, true), Err(Refused::ConfigWrite));
+}
+
+/// `SLP_TYPx` is bits 12:10 of PM1 control and `SLP_EN` bit 13 (ACPI 6.5
+/// Table 4.16): each of the eight types lands in the field and nowhere else,
+/// whatever the register held, and a word one wider, which shifted would set
+/// `SLP_EN`, names none.
+#[test]
+fn a_sleep_type_is_three_bits_and_lands_only_in_its_field() {
+    const SLP_EN: u16 = 1 << 13;
+    for word in 0..=7u64 {
+        let slp_typ = sleep_type(word).unwrap_or_else(|| panic!("{word} is a sleep type"));
+        assert_eq!(u64::from(slp_typ.get()), word);
+        for held in [0u16, 0x0001, 0x1C00, 0xFFFF, SLP_EN | 0x0401] {
+            let typed = slp_typ.in_control(held);
+            assert_eq!(u64::from(typed >> 10 & 7), word, "{word} over {held:#06x}");
+            assert_eq!(typed & !0x1C00, held & !0x1C00, "{word} over {held:#06x} moved a bit outside SLP_TYPx");
+        }
+    }
+    for wide in [8, 9, 0xFF, 0x100, 1 << 10, 7 << 10, 1 << 32 | 5, u64::MAX] {
+        assert_eq!(sleep_type(wide), None, "{wide:#x}");
+    }
 }

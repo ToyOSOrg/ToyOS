@@ -15,6 +15,9 @@
 //! take that finds the firmware holding it is denied by name ([`HELD`]) and
 //! counted: this server waits for no release of the firmware's yet.
 //!
+//! **The power-off's sleep type is the one thing handed to the kernel**
+//! ([`Kernel::s5`]): the kernel writes the register, and reads no AML.
+//!
 //! **What a line says.** A refusal is said the first time it is seen and
 //! counted after ([`Ledger`]), as its address space, the kernel's name for
 //! the refusal and the memory type: a line that can be quoted anywhere. Its
@@ -64,6 +67,10 @@ pub trait Kernel {
     fn access(&self, access: Access) -> Result<Answer, Stopping>;
     fn lock_take(&self) -> Result<Take, Stopping>;
     fn lock_release(&self) -> Result<(), Stopping>;
+    /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
+    /// once under a claim: `false` where it is wider than the register's
+    /// field, and the kernel kept nothing.
+    fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
 }
 
 /// Why a read was not made.
@@ -294,6 +301,8 @@ pub mod tests {
         pub held: Cell<bool>,
         /// Accesses and lock exchanges answered before the machine stops.
         pub stops_after: Cell<Option<usize>>,
+        /// The `SLP_TYPa` it was handed and kept.
+        pub handed: Cell<Option<u64>>,
     }
 
     impl Scripted {
@@ -351,6 +360,17 @@ pub mod tests {
             self.stopping()?;
             assert!(self.held.replace(false), "a lock nobody held was given back");
             Ok(())
+        }
+
+        fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
+            self.stopping()?;
+            assert!(!self.held.get(), "the sleep type was handed over under the Global Lock");
+            // ACPI 6.5 Table 4.16: `SLP_TYPx` is three bits.
+            if slp_typ_a > 7 {
+                return Ok(false);
+            }
+            assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
+            Ok(true)
         }
     }
 
