@@ -654,10 +654,6 @@ fn carry() {
     // No incremental state: it is most of an entry's bytes, and after a read
     // by content it helps only a crate whose bytes changed.
     std::env::set_var("CARGO_INCREMENTAL", "0");
-    // Line tables alone: a backtrace in a step's log reads them, and nothing
-    // reads the rest of the debuginfo, of which a Linux link copies every
-    // dependency's into each test binary.
-    std::env::set_var("CARGO_PROFILE_DEV_DEBUG", "line-tables-only");
 }
 
 /// Every app the images ship, judged for `os` with the features its image
@@ -1038,8 +1034,8 @@ mod tests {
     const FIXTURE: &str = "TOYOS_CI_TEST_FIXTURE";
 
     /// What a job that carries the cache hands its driver reaches no step: each
-    /// builds in its own workspace's target, with no incremental state and line
-    /// tables alone. The driver is a process of its own, because `carry`
+    /// builds in its own workspace's target, with no incremental state.
+    /// The driver is a process of its own, because `carry`
     /// writes the environment, which no other thread may read meanwhile.
     #[test]
     fn a_step_of_a_job_that_carries_the_cache_builds_in_its_own_target() {
@@ -1052,7 +1048,6 @@ mod tests {
             .env(FIXTURE, fixture.path())
             .env("CARGO_TARGET_DIR", cicache::DRIVER)
             .env_remove("CARGO_INCREMENTAL")
-            .env_remove("CARGO_PROFILE_DEV_DEBUG")
             .output()
             .expect("run the driver");
         let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
@@ -1075,7 +1070,7 @@ mod tests {
         assert_eq!(metadata["target_directory"].as_str().map(Path::new), Some(ours.as_path()));
         let build = String::from_utf8(cargo(&["build", "-v", "--offline"]).stderr).unwrap();
         let rustc = build.lines().find(|l| l.contains("--crate-name one")).unwrap_or_else(|| panic!("{build}"));
-        assert!(!rustc.contains("-C incremental") && rustc.contains("-C debuginfo=line-tables-only"), "{rustc}");
+        assert!(!rustc.contains("-C incremental"), "{rustc}");
     }
 
     fn repo_root() -> PathBuf {
