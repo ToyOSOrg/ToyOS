@@ -82,8 +82,20 @@ writes the reset register itself. Every metal image carries it
 without a hand and leaves the records `logd` never wrote, which is the one
 channel that crosses a reset without `logd`.
 
+**The two records these boots stopped at are no longer written.** A spawn
+writes one record, the `spawn: <path> pid=…` that only the boots that came
+back carry, so the next occurrence's landmark is that record's absence after
+the job's `exit:`: the window opens at the job's exit and takes in the whole
+spawn, the VFS-lock sites this file eliminated for run 19 among them. Nothing
+the spawn writes on its way places a wedge inside it any more.
+
+The `WEDGED` record this file waits for carries the machine's census, sealed
+by the deadline itself above the ring's tail (`kernel/src/census.rs`): every
+CPU's interrupt counts and the shootdowns' at the moment the bound fired.
+
 **Exit condition**: a `WEDGED` record off the stick naming what the machine was
-doing after `spawn: TLS 1 modules`, and then whatever that names.
+doing between a job's `exit:` record and the next `spawn:` record, and then
+whatever that names.
 
 **The mechanism works and the instrument is not yet sharp enough.** T14 run 21
 proved the deadline: a boot wedged on purpose ended itself at 120153 ms against

@@ -1,4 +1,5 @@
-//! Places: the one bound on what clients make the node hold. A stream holds a place from its
+//! Places: the one bound on the streams, listeners and datagram sockets clients make the node
+//! hold. A stream holds a place from its
 //! connect or its accept until the node lets it go, a listener from its listen until it is
 //! closed, a datagram socket from its bind until it is closed, and a connection the node closed
 //! holds the place its stream had until [tcp] has finished it, because it is still two buffers
@@ -9,6 +10,12 @@
 //! of the cut's clock and no bound on the node: peers at however many addresses hold no more of
 //! them than there are places. With no place left a connect, a listen, an accept and a bind are
 //! refused with nothing made.
+//!
+//! **The node's own sockets stand outside the places.** The responder's socket for the
+//! machine's name and the socket of each query `resolve` has out are bound past
+//! [`Node::udp_bind`], the one call in which a datagram socket takes a place, so clients at the
+//! bound refuse no lookup and no answer for the name. A lookup is a client's too, and its bound
+//! is `resolve`'s own: `toyos_dns::MAX_LOOKUPS` lookups, each with the queries of its rounds.
 //!
 //! The number is the shell's: each stream is two of its client's pipes kept alive and watched,
 //! each listener one. A new node has none.

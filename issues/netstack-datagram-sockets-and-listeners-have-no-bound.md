@@ -22,7 +22,12 @@ On the node (`userland/netstack/node/src/places.rs`) a datagram socket and a
 listener each hold a place, and a bind or a listen with none left is refused
 with nothing made: `a_datagram_socket_holds_a_place_and_a_bind_without_one_makes_nothing`
 and `a_listener_holds_a_place_and_a_listen_without_one_makes_nothing`
-(`userland/netstack/node/tests/listeners.rs`). What is left: netstack as it
+(`userland/netstack/node/tests/listeners.rs`). The sockets of the node's own,
+the responder's for the machine's name and each query's of a lookup, hold no
+place: a lookup is bounded by `toyos_dns::MAX_LOOKUPS` and its rounds, so
+clients at the bound refuse no lookup
+(`a_query_with_no_port_to_leave_from_ends_its_lookup_by_name`,
+`userland/netstack/node/tests/resolve.rs`). What is left: netstack as it
 ships is the code above until it runs on the node; the node's places are one
 number for every client, so its tests bind past the bound and see the refusal
 but have no second client whose bind is answered, which the track records

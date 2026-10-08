@@ -13,8 +13,38 @@ start. A metal judge reads what came back, so a line a flooding boot wrote in
 its middle is a line the judge reports missing, and nothing in the harness
 says the readback has a hole.
 
-`testcases` is such a boot: `test_rs_counters_metal` dumps every CPU's
-counters and the boot writes about forty files.
+`testcases` is such a boot, and the flood was the kernel's, not the job's:
+`test_rs_counters_metal`'s `loaded` phase spawns a child per CPU in a loop for
+twenty seconds, and the kernel wrote fourteen records for each.
+
+## What a child cost, and what it costs now
+
+The readback of `testcases` at `809c33c0c`, 16,645,533 bytes of which the
+parts that survived hold 8,304 of those children: per child 1,989 bytes in 14
+records. Eight `irq: cpuN` lines, a census of the whole machine at every
+process's end, were 1,288 of them; `syscalls:` 110, `memory:` 85, `exit:` 95,
+`ELF:` 107 and the two `spawn:` records 304.
+
+A process's end now writes one record, its `exit:`, carrying what `syscalls:`
+and `memory:` said; a spawn writes one, its `spawn:`; and the machine's census
+is taken once, where the machine ends (`kernel/src/census.rs`).
+
+`testcases` on the T14 at `c6269f885`: `kernel.log` is 7,562,577 bytes and
+whole, with no `was deleted` line. It holds 22,178 `spawn:` records of 163
+bytes and 22,168 `exit: … pid=` records of 173, 336 bytes a process against
+1,989, and no `irq: cpu`, thread-exit, `dynamic:`, `dlopen:` or suppression
+line. Fifteen records came back on the black-box page, none dropped: the
+stop's fourteen, the census among them, and the newest record before the
+stop, the spawn of `/system/bin/reboot`, which the seal's range took in at
+that head and takes in no longer.
+
+**The margin is a factor, not a bound.** 7.56 MB is 45% of the sixteen
+megabytes kept, 98.5% of it still that one job's `spawn:` and `exit:` records,
+and the phase spawns a child per CPU for twenty seconds: about 2.2 times the
+children, a sixteen-CPU machine or a faster one, outlogs the retention again.
+**The harness is as silent about a hole as it was**: nothing reds a readback
+whose own boot deleted a part of its log. How many parts this boot wrote was
+not read.
 
 ## Measured
 
