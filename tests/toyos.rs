@@ -462,7 +462,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // is held and what is read beside Linux's.
         "counters",
         metal::Metal {
-            arms: TESTCASES,
+            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
         },
     ),
@@ -473,7 +473,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
-            arms: TESTCASES,
+            arms: TESTCASES_HELD,
             judge: |b| acpi_events_on_metal(b[0]),
         },
     ),
@@ -483,7 +483,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The same boot as `acpi_server_events`.
         "acpi_tables_loaded",
         metal::Metal {
-            arms: TESTCASES,
+            arms: TESTCASES_HELD,
             judge: |b| acpi_tables_on_metal(b[0]),
         },
     ),
@@ -885,7 +885,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "crash_report_reads_no_kernel_memory",
         metal::Metal {
-            arms: TESTCASES,
+            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_fault_gates"])],
             judge: |b| {
                 b[0].job_passed("test_rs_fault_gates")?;
                 faults::crash_report_reads_no_kernel_memory(&b[0].kernel())
@@ -918,13 +918,15 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
         claims::RECLAIM,
-        "test_rs_counters_metal",
-        "test_rs_fault_gates",
-        // Last: the count it waits for comes thirty seconds after the server
-        // arms, and a job after it would wait that out behind it.
-        "test_rs_acpi_hold",
     ],
 )];
+
+/// The same boot, ended on the hold: the count it waits for comes thirty
+/// seconds after the server arms, and a job behind it would wait that out too.
+const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_acpi_hold"),
+    ..metal::once("testcases", "tests/testcases", &[], &[])
+}];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -3992,7 +3994,7 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the server died: {fired}"));
     }
     let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
-    let counts = lines.iter().rfind(|l| l.contains("embedded controller queries taken: "));
+    let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
     };

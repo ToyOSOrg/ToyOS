@@ -14,10 +14,14 @@ its middle is a line the judge reports missing, and a judge that asserts an
 absence passes over the hole.
 
 **A hole is red by name now, and it is the whole boot's.** `bootlog::lost_parts`
-reads `logkeeper`'s own deletion lines for the boot's own stem, and
-`read_readback` (`tests/common/metal.rs`) refuses such a readback before any
-row or member is judged on it: every rider of that boot is red with
-`<boot>'s own log lost parts 2 to N to retention; no row is judged on it`.
+reads the sequence of parts the file itself holds: each continuation carries
+the line of the rotation that opened it, so the parts a boot's log names step
+by one from the part its opening line names, and a longer step is the parts
+that are gone. No deletion line is read: the stop's flush can hold one back,
+and a boot can die before the round that would write it. `read_readback`
+(`tests/common/metal.rs`) refuses such a readback before any row or member is
+judged on it: every rider of that boot is red with
+`<boot>'s own log is missing its parts 2 to N; no row is judged on it`.
 The harness does not guess which rows' lines sat in the hole.
 
 `testcases` is such a boot, and the flood was the kernel's, not the job's:
@@ -79,8 +83,12 @@ in seconds 36 to 47.
 `test_rs_acpi_hold` its last job, and `testcases-hold` is deleted. The job
 waits on the `log` port for the server's count line, bounded by the runner's
 bound less a tenth, and exits non-zero without it. That readback judged
-offline by this harness reds by name: `testcases's own log lost parts 2 to 26
-to retention; no row is judged on it`.
+offline by this harness reds by name: `testcases's own log is missing its
+parts 2 to 26; no row is judged on it`.
+
+On the T14 at `9e70cd2e3` both rows passed on `testcases`: a log of 7,547,522
+bytes, seven rotations and no deletion, the server's count at 43.093 s on the
+log's clock and the hold, started at 54.920 s, ended on it without waiting.
 
 ## Owner
 
@@ -90,11 +98,11 @@ fuller: a boot that carries every shipping-kernel member logs more than
 
 ## Exit condition
 
-Three legs. Met: a readback whose own boot deleted a part of its log reds by
-name before any row is judged on it. Left:
+Three legs, two met. A readback whose own log is missing a part reds by name
+before any row is judged on it; and `acpi_server_events` and
+`acpi_tables_loaded` pass on `testcases` on the T14, on a log no part of which
+was deleted. Left:
 
-- `acpi_server_events` and `acpi_tables_loaded` pass on `testcases` on the
-  T14, on a log no part of which was deleted.
 - No boot of the metal profile can write past `logkeeper`'s retention on a
   machine with more CPUs or faster ones: what `testcases` logs is bounded by
   a count, where today it is twenty seconds of however many children the

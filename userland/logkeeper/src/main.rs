@@ -90,7 +90,7 @@ use toyos::syscap::SysCap;
 use toyos::{Console, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
-    ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, MAX_TAG, ORIGINS, REGISTER, RESUME,
+    ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
     SERVICE,
 };
 use toyos_wallclock::Civil;
@@ -153,7 +153,7 @@ fn main() {
         // This program's half of the startup report, in one line: the kernel
         // says whether it has a console, this program whether it has a volume
         // and what the name it chose was decided by.
-        Some(v) => say!("logkeeper: this boot's kernel log is {} ({dated})", v.path()),
+        Some(v) => say!("{LOG_OPENED}{} ({dated})", v.path()),
         None => say!(
             "logkeeper: no {DIR} on this machine - this boot's kernel log is on the console only \
              ({dated})"

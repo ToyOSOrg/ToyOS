@@ -293,57 +293,43 @@ pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     (loader, logkeeper)
 }
 
-/// What `logkeeper` says as it opens a boot's file, before that file's path, in
-/// `userland/logkeeper/src/main.rs`.
-pub const LOG_OPENED: &str = "logkeeper: this boot's kernel log is ";
-
-/// What `logkeeper` says either side of the path of a file retention deleted,
-/// in `userland/logkeeper/src/store.rs`'s `sweep`.
-pub const LOG_RETIRED: [&str; 2] = [" logs, so ", " was deleted"];
-
-/// One of `logkeeper`'s paths as its boot's stem and its part, as
-/// `userland/logkeeper/src/store.rs` names a part: the first is the bare stem.
-fn stem_and_part(path: &str) -> Option<(&str, u32)> {
-    let name = path.rsplit('/').next()?;
-    let bare = name.strip_suffix(".log").filter(|_| is_logkeeper_file(name))?;
-    match bare.split_once('_') {
-        Some((stem, part)) => Some((stem, part.parse().ok()?)),
-        None => Some((bare, 1)),
-    }
-}
-
-/// The parts of its own log the boot `log` ends in deleted to retention, first
-/// and last, or `None` for a log that is whole.
+/// The parts of its own log the boot `log` ends in no longer has, first and
+/// last, or `None` for a log that is whole.
 ///
-/// **Read off `logkeeper`'s own lines, and off their paths**: a program's line
-/// can carry the same words, and a boot deletes earlier boots' files without
-/// losing a line of its own. Retention takes a boot's continuations oldest
-/// first, and the lines naming the oldest go with the parts that held them, so
-/// the hole opens at the boot's first continuation and the newest line, which
-/// is written into the newest part, closes it.
+/// **Read off the sequence of parts the file itself holds**, which no flush
+/// and no death can take without taking the part: `logkeeper` rotates once a
+/// round, after that round's write, and the line saying so
+/// ([`toyos_logstream::LOG_CONTINUES`]) is written by the next round into the
+/// part it opened. So the parts a boot's log names, from the one its opening
+/// line names, step by one, and a step that is longer is the parts that are
+/// gone. The newest rotation's line may not have reached the file; the part it
+/// opened is no hole. A program's line can carry the same words, so only
+/// `logkeeper`'s are read, and only for this boot's stem.
 pub fn lost_parts(log: &str) -> Option<(u32, u32)> {
-    let mut own: Option<(&str, u32)> = None;
-    let mut last: Option<u32> = None;
-    for said in log.lines().filter_map(toyos_logstream::program_line) {
-        if said.tag != toyos_logstream::LOGKEEPER {
+    use toyos_logstream::{LOGKEEPER, LOG_CONTINUES, LOG_OPENED};
+    use toyos_wallclock::Part;
+    fn named(path: &str) -> Option<Part<'_>> {
+        Part::parse(path.rsplit('/').next()?).map(|(_, part)| part)
+    }
+    let mut newest: Option<Part> = None;
+    let mut lost: Option<(u32, u32)> = None;
+    for said in log.lines().filter_map(toyos_logstream::program_line).filter(|said| said.tag == LOGKEEPER) {
+        if let Some(opened) = said.text.strip_prefix(LOG_OPENED) {
+            newest = opened.split_whitespace().next().and_then(named);
+            lost = None;
             continue;
         }
-        if let Some(opened) = said.text.strip_prefix(LOG_OPENED) {
-            own = opened.split_whitespace().next().and_then(stem_and_part);
-            last = None;
+        let Some((_, path)) = said.text.split_once(LOG_CONTINUES) else { continue };
+        let (Some(next), Some(was)) = (named(path), newest) else { continue };
+        if next.stem != was.stem {
+            continue;
         }
-        let retired = said
-            .text
-            .strip_suffix(LOG_RETIRED[1])
-            .and_then(|head| head.split_once(LOG_RETIRED[0]))
-            .and_then(|(_, path)| stem_and_part(path));
-        if let (Some((stem, part)), Some((mine, _))) = (retired, own) {
-            if stem == mine {
-                last = last.max(Some(part));
-            }
+        if next.part > was.part + 1 {
+            lost = Some((lost.map_or(was.part + 1, |(first, _)| first), next.part - 1));
         }
+        newest = Some(next);
     }
-    Some((own?.1 + 1, last?))
+    lost
 }
 
 /// The kernel's boot-phase record for the end of boot, in
@@ -735,69 +721,70 @@ mod tests {
         }
     }
 
-    /// A boot's own middle, deleted to retention: `logkeeper`'s lines naming
-    /// this boot's stem, and nobody else's words and no other boot's files.
-    #[test]
-    fn a_boot_that_deleted_parts_of_its_own_log_is_told_from_one_that_is_whole() {
-        let opened = |stem: &str| {
-            format!("[2026-10-08 14:06:46 12.841 logkeeper] {LOG_OPENED}/log/{stem}.log (2026-10-08 14:06:46 UTC)\n")
-        };
-        let retired = |tag: &str, file: &str| {
-            format!(
-                "[2026-10-08 14:07:21 47.238 {tag}] logkeeper: /log holds more than 16{}/log/{file}{}\n",
-                LOG_RETIRED[0], LOG_RETIRED[1]
-            )
-        };
-        let continued = "[2026-10-08 14:07:21 47.242 logkeeper] logkeeper: /log/2026-10-08-140646_0026.log reached \
-                         1067282 bytes and this boot continues in /log/2026-10-08-140646_0027.log\n";
-        let own = opened("2026-10-08-140646");
-        // What came back of a boot that wrote forty-one parts: the lines naming
-        // parts 2 to 11 went with those parts.
-        let holed = format!(
-            "{own}{}{continued}{}",
-            retired("logkeeper", "2026-10-08-140646_0012.log"),
-            retired("logkeeper", "2026-10-08-140646_0026.log")
-        );
-        assert_eq!(lost_parts(&holed), Some((2, 26)));
-        assert_eq!(lost_parts(&format!("{own}{}", retired("logkeeper", "2026-10-08-140646_0002.log"))), Some((2, 2)));
+    use toyos_logstream::{LOG_CONTINUES, LOG_OPENED};
 
-        // A boot that rotated and deleted nothing.
-        assert_eq!(lost_parts(&format!("{own}{continued}")), None);
+    const STEM: &str = "2026-10-08-140646";
+
+    fn opened(stem: &str) -> String {
+        format!("[2026-10-08 14:06:46 12.841 logkeeper] {LOG_OPENED}/log/{stem}.log (2026-10-08 14:06:46 UTC)\n")
+    }
+
+    /// `logkeeper`'s line for the rotation that opened part `to` of `stem`.
+    fn continued(tag: &str, stem: &str, to: u32) -> String {
+        let part = |part| toyos_wallclock::Part { stem, part };
+        format!(
+            "[2026-10-08 14:07:21 47.242 {tag}] logkeeper: /log/{} reached 1067282{LOG_CONTINUES}/log/{}\n",
+            part(to - 1),
+            part(to)
+        )
+    }
+
+    fn parts(stem: &str, to: std::ops::RangeInclusive<u32>) -> String {
+        to.map(|to| continued("logkeeper", stem, to)).collect()
+    }
+
+    /// **The hole no deletion line names**: a boot's file holds the rotation
+    /// that opened each part it has, so parts 1 and 3 with nothing said of a
+    /// deletion is part 2 gone — whether the line saying so was held back by
+    /// the stop's flush or the boot died before the round that would write it.
+    #[test]
+    fn a_part_whose_rotation_the_log_does_not_hold_is_a_hole() {
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), continued("logkeeper", STEM, 3))), Some((2, 2)));
+        // Died between the removal of part 2 and the next sync: parts 1 and 3
+        // to 16 came back, and part 17 was never opened.
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), parts(STEM, 3..=16))), Some((2, 2)));
+        // The stop's flush held back the newest rotation's line: part 17 is on
+        // the volume and nothing in the file says so.
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), parts(STEM, 4..=16))), Some((2, 3)));
+    }
+
+    /// What came back of the T14 boot that wrote forty-one parts, a boot that
+    /// rotated and lost nothing, and the lines that are not this boot's.
+    #[test]
+    fn a_boot_that_lost_parts_of_its_own_log_is_told_from_one_that_is_whole() {
+        let own = opened(STEM);
+        assert_eq!(lost_parts(&format!("{own}{}", parts(STEM, 27..=41))), Some((2, 26)));
+        // Two holes are reported from the first lost part to the last.
+        assert_eq!(lost_parts(&format!("{own}{}{}", parts(STEM, 3..=4), parts(STEM, 9..=10))), Some((2, 8)));
+
+        assert_eq!(lost_parts(&format!("{own}{}", parts(STEM, 2..=8))), None);
+        assert_eq!(lost_parts(&own), None);
         assert_eq!(lost_parts(""), None);
-        // An earlier boot's files, whole or a continuation, are not this boot's lines.
-        let earlier = format!(
-            "{own}{}{}",
-            retired("logkeeper", "2026-10-07-091500.log"),
-            retired("logkeeper", "2026-10-07-091500_0003.log")
-        );
-        assert_eq!(lost_parts(&earlier), None);
-        // The same words from another program, from the kernel, and about a
-        // file that is not one of logkeeper's.
+        // The same words from another program, and about another boot's file.
         let quoted = format!(
-            "{own}{}[2026-10-08 14:07:21 47.238 cpu2 kernel] tmpfs: read through a backing whose file was deleted\n{}",
-            retired("test-runner pid=31", "2026-10-08-140646_0012.log"),
-            retired("logkeeper", "loader.log")
+            "{own}{}{}",
+            continued("test-runner pid=31", STEM, 12),
+            continued("logkeeper", "2026-10-07-091500", 5)
         );
         assert_eq!(lost_parts(&quoted), None);
         // The boot the log ends in: an earlier boot's hole on the same volume
         // is that boot's.
-        assert_eq!(lost_parts(&format!("{holed}{}", opened("2026-10-08-141929"))), None);
-    }
-
-    /// Nothing links this crate to `logkeeper` either: both lines are held to
-    /// its source.
-    #[test]
-    fn logkeeper_writes_the_lines_the_host_reads() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/logkeeper/src");
-        for (file, needle) in [
-            ("main.rs", format!("say!(\"{LOG_OPENED}{{}} ({{dated}})\", v.path())")),
-            ("store.rs", format!("{{MAX_LOG_FILES}}{}{{path}}{}\"", LOG_RETIRED[0], LOG_RETIRED[1])),
-            ("store.rs", "1 => format!(\"{DIR}/{stem}.log\")".to_string()),
-            ("store.rs", "n => format!(\"{DIR}/{stem}_{n:04}.log\")".to_string()),
-        ] {
-            let source = std::fs::read_to_string(root.join(file)).expect("a logkeeper module");
-            assert!(source.contains(&needle), "userland/logkeeper/src/{file} does not write {needle:?}");
-        }
+        let next = "2026-10-08-141929";
+        assert_eq!(lost_parts(&format!("{own}{}{}", parts(STEM, 27..=41), opened(next))), None);
+        assert_eq!(
+            lost_parts(&format!("{own}{}{}{}", parts(STEM, 2..=3), opened(next), continued("logkeeper", next, 4))),
+            Some((2, 3))
+        );
     }
 
     /// A program writing a kernel verdict's words, or another program's head,

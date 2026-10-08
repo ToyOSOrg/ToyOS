@@ -902,6 +902,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_boots_last_job_is_behind_every_other() {
+        metal_checks::a_boots_last_job_is_behind_every_other();
+    }
+
+    #[test]
     fn metal_words_take_rows_members_and_whole_boots() {
         metal_checks::words_take_rows_members_and_whole_boots();
     }

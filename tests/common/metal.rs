@@ -57,6 +57,10 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
+    /// The job this boot ends on, before `reboot`: [`batches`] puts it after
+    /// every job any arm on the boot names, so none can land behind it, and
+    /// refuses two arms that name different ones.
+    pub last: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -70,7 +74,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[] }
+    Arm { boot, config, params, jobs, features: &[], last: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -524,11 +528,13 @@ fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
 }
 
 /// One image, and every test that rides it.
-struct Batch {
+pub struct Batch {
     config: &'static str,
     params: Vec<&'static str>,
     features: &'static [&'static str],
-    jobs: Vec<String>,
+    /// What the runner spawns, in order.
+    pub jobs: Vec<String>,
+    last: Option<&'static str>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
 }
@@ -553,7 +559,7 @@ pub fn at(dir: &Path, label: &str) -> PathBuf {
 /// **Two arms naming one boot are refused where they disagree about it**: an
 /// image is one config armed one way, and a silent winner would give one of the
 /// two tests a machine it did not ask for.
-fn batches(
+pub fn batches(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
 ) -> Result<BTreeMap<String, Batch>, String> {
@@ -568,6 +574,7 @@ fn batches(
                 params: boot.params.to_vec(),
                 features: boot.features,
                 jobs: boot.jobs.clone(),
+                last: None,
                 files: boot.files.clone(),
                 links: boot.links.clone(),
             },
@@ -584,6 +591,7 @@ fn batches(
                 params: arm.params.to_vec(),
                 features: arm.features,
                 jobs: Vec::new(),
+                last: None,
                 files: Vec::new(),
                 links: Vec::new(),
             });
@@ -604,6 +612,23 @@ fn batches(
                 ));
             }
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
+            match (batch.last, arm.last) {
+                (Some(was), Some(now)) if was != now => {
+                    return Err(format!(
+                        "{name} ends the boot {:?} on {now} and another row ends it on {was}; one boot \
+                         has one last job",
+                        arm.boot
+                    ));
+                }
+                (None, now) => batch.last = now,
+                (Some(_), _) => {}
+            }
+        }
+    }
+    for batch in out.values_mut() {
+        if let Some(last) = batch.last {
+            batch.jobs.retain(|job| job != last);
+            batch.jobs.push(last.to_string());
         }
     }
     Ok(out)
@@ -818,7 +843,7 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     // and a judge that asserts an absence passes over it.
     if let Some((first, last)) = bootlog::lost_parts(&log) {
         return Err(format!(
-            "{label}'s own log lost parts {first} to {last} to retention; no row is judged on it"
+            "{label}'s own log is missing its parts {first} to {last}; no row is judged on it"
         ));
     }
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
