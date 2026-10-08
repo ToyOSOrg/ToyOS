@@ -24,7 +24,9 @@ every other section the tree cites that was compared sits at the same number.
 
 Neither has been seen to matter: the T14 has sent frames with both. Whether
 either register means the same on the PCH's MAC no document says (631120 §8.2
-publishes neither).
+publishes neither). The transmit wake rests on a write-back per descriptor
+with bit 22 clear, and on the I219 the reading of that is the T14 boot
+`issues/the-intel-nics-room-and-wake-are-unread-on-hardware.md` exits on.
 
 ## Owner
 

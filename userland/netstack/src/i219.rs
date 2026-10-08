@@ -293,7 +293,7 @@ impl Nic {
     /// Take the interrupt, acknowledge its causes and refresh the link — and
     /// answer the link where this pass found it changed.
     ///
-    /// A pass that reset the function to take its transmit ring back says so,
+    /// A pass that reset the 82574 to take its transmit ring back says so,
     /// with what the bring-up found the second time.
     pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, toyos_i219::PassRefused<SyscallError>> {
         let pass = self.driver.borrow_mut().begin_pass()?;
@@ -305,6 +305,12 @@ impl Nic {
             say_brought_up(self.driver.borrow().brought_up());
         }
         Ok(pass.link_changed.then(|| self.link()))
+    }
+
+    /// How long until a pass has to begin with nothing arrived: the driver's
+    /// deadline for descriptors a link change left in the ring.
+    pub fn pass_due_in(&self) -> Option<u64> {
+        self.driver.borrow().pass_due_in()
     }
 
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
@@ -390,7 +396,8 @@ impl Nic {
             crate::say!(
                 "netstack: I219: refused {} over-length, {} errored, {} split and {} empty \
                  descriptor(s); {} overrun(s), {} descriptor-starvation report(s), \
-                 {} frame(s) given back unsent at a link change, {} spurious interrupt(s)",
+                 {} frame(s) given back unsent and {} left in the ring at a link change, \
+                 {} spurious interrupt(s)",
                 counters.over_length,
                 counters.errored,
                 counters.split,
@@ -398,6 +405,7 @@ impl Nic {
                 counters.overruns,
                 counters.starved,
                 counters.unsent,
+                counters.stranded,
                 counters.spurious,
             );
         }

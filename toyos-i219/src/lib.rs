@@ -38,14 +38,25 @@
 //! cause that says a descriptor came back. Nothing here drops a frame for want
 //! of a descriptor, and nothing waits on the part.
 //!
-//! **A link that is down has no room, and a link that changed gives the ring
-//! back.** No Intel document says what either part does with a descriptor it
-//! holds when its link goes away, so nothing here depends on it: no frame is
-//! published while the link is down, and a pass that reads `LSC` with a
-//! descriptor still unsent resets the function and brings it up again
-//! ([`I219::begin_pass`]) — §10.2.6.7 lets software write the ring's head
-//! only "after a reset (hardware reset or CTRL.RST) and before enabling the
-//! transmit function", so that reset is the one way a ring is taken back.
+//! **A link that is down has no room**, and no frame is published while it
+//! is. What the 82574 does with one it already holds is in §10.2.7's Defer
+//! Count: "A defer event occurs when the transmitter cannot immediately send a
+//! packet due to the medium being busy either because: [...] The link is not
+//! up" — it keeps the frame for the link that comes. A pass that reads `LSC`
+//! with a descriptor still unsent ([`I219::begin_pass`]) answers per part:
+//!
+//! - **The 82574 gives the ring back**, because a frame queued for a link that
+//!   has gone is not one for the link that came after it: the function is
+//!   reset and brought up again. §10.2.6.1 on `TCTL.EN`: "Software should
+//!   combine this with a reset if the packets in the FIFO need to be flushed",
+//!   and §10.2.6.7 lets software write the ring's head only "after a reset
+//!   (hardware reset or CTRL.RST) and before enabling the transmit function".
+//! - **The PCH's MAC is never reset over a ring it holds descriptors in.** No
+//!   Intel document says that is safe on that part and none says what it does
+//!   with those descriptors, so they stay its own: it is owed their write-back
+//!   within `STRANDED_DEADLINE_NANOS` of the link being read up over them, the
+//!   ring goes on when they come, and a part that has not written them back by
+//!   then is refused by name ([`PassRefused::Stranded`]) and driven no further.
 //!
 //! # The device is not trusted
 //!
@@ -411,6 +422,9 @@ pub enum PassRefused<C> {
     /// The function did not come back up from the reset that takes its
     /// transmit ring back.
     Rearm(Refusal),
+    /// The PCH's MAC still holds `left` of the descriptors a link change left
+    /// in its transmit ring, this long after the link was read up over them.
+    Stranded { left: usize, after_nanos: u64 },
 }
 
 impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
@@ -420,6 +434,12 @@ impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
             Self::Rearm(why) => write!(
                 f,
                 "it did not come back from the reset that takes its transmit ring back: {why}"
+            ),
+            Self::Stranded { left, after_nanos } => write!(
+                f,
+                "a link change left its transmit ring holding frames, and {} ms after the link \
+                 returned it has not written {left} of their descriptor(s) back",
+                after_nanos / 1_000_000
             ),
         }
     }
@@ -447,12 +467,16 @@ pub struct Counters {
     pub tx_full: u32,
     /// Times the transmit cause was unmasked for such a caller.
     pub tx_wake_armed: u32,
-    /// Passes that read the transmit cause while it was unmasked: the wake a
-    /// full ring was waiting on, taken.
+    /// Passes a message began whose only unmasked cause was the transmit one,
+    /// while it was unmasked: the wake a full ring was waiting on, taken, and
+    /// nothing a pass begun by anything else reads.
     pub tx_wake_taken: u32,
-    /// Frames published and never sent: the descriptors a link change gave
-    /// back ([`I219::begin_pass`]).
+    /// Frames published and never sent: the descriptors the 82574's reset
+    /// gave back at a link change ([`I219::begin_pass`]).
     pub unsent: u32,
+    /// Descriptors a link change found unsent in the PCH MAC's ring, and left
+    /// there for it to write back.
+    pub stranded: u32,
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
@@ -522,6 +546,18 @@ const RESET_SETTLE_NANOS: u64 = 1_000;
 /// handshake and says only that "the software device driver might time out if
 /// the PCIe Master Enable Status bit is not cleared within a given time".
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
+
+/// How long the PCH's MAC has to write back the descriptors a link change left
+/// in its transmit ring, from the pass that read the link up over them.
+///
+/// **A ceiling on an event, and the slowest §10.2.6.1 lets a full ring leave**:
+/// [`TX_RING`]` - 1` frames of a whole buffer each, on a half-duplex link at
+/// 10 Mb/s, where a byte is 800 ns; each sent the "total of 16 attempts" a
+/// `TCTL.CT` of 15 allows, and each attempt behind a back-off that "clamps to
+/// the maximum number of slot times after 10 retries" — ten doublings of a
+/// slot, which is the collision window of "64 bytes for 10/100 Mb/s".
+const STRANDED_DEADLINE_NANOS: u64 =
+    (TX_RING as u64 - 1) * 16 * (TX_BUF_BYTES as u64 + (1 << 10) * 64) * 800;
 
 /// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
 /// the transmitter enabled.
@@ -787,6 +823,9 @@ pub struct I219<R: Registers, C, D, I> {
     /// Whether [`Part::tx_done`] is unmasked: a caller found the ring full
     /// and no pass has begun since.
     tx_wake: bool,
+    /// The descriptors a link change left in the PCH MAC's transmit ring that
+    /// it has not yet written back.
+    stranded: Option<Stranded>,
     counters: Counters,
     /// What [`Self::wire`] has read out of the statistics registers so far.
     wire: Wire,
@@ -798,6 +837,16 @@ impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
             pch::release(&self.regs);
         }
     }
+}
+
+/// The oldest descriptors of the transmit ring, published before a link change
+/// and not written back since.
+#[derive(Clone, Copy)]
+struct Stranded {
+    left: usize,
+    /// When the link change was read, which the deadline runs from while the
+    /// link is up.
+    since: u64,
 }
 
 /// What [`program`] leaves beside the registers it wrote.
@@ -1046,6 +1095,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
+            stranded: None,
             counters: Counters::default(),
             wire: Wire::default(),
         };
@@ -1125,11 +1175,18 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// function is no longer this driver's, and the refusal is handed up rather
     /// than counted as quiet.
     ///
-    /// **A pass that reads `LSC` with a transmit descriptor still unsent takes
-    /// the ring back**, by the reset and the bring-up [`Self::open`] runs:
-    /// the frames in it are counted [`Counters::unsent`], a frame received and
-    /// not yet handed up goes with them, and the pass lasts as long as a
-    /// bring-up does. Every [`Frame`] is given back before a pass begins.
+    /// **On the 82574 a pass that reads `LSC` with a transmit descriptor still
+    /// unsent takes the ring back**, by the reset and the bring-up
+    /// [`Self::open`] runs: the frames in it are counted [`Counters::unsent`],
+    /// a frame received and not yet handed up goes with them, and the pass
+    /// lasts as long as a bring-up does. Every [`Frame`] is given back before
+    /// a pass begins. `LSC` says the link changed and not that it is down, so
+    /// a link that reads up on both sides of it costs the same.
+    ///
+    /// **On the PCH's MAC those descriptors stay the part's**, counted
+    /// [`Counters::stranded`], and a pass that finds one still not written
+    /// back `STRANDED_DEADLINE_NANOS` after the link was read up over them
+    /// is refused. [`Self::pass_due_in`] is when that pass has to begin.
     pub fn begin_pass(&mut self) -> Result<Pass, PassRefused<I::Refused>> {
         self.rx_budget = RX_BUDGET;
         let messages = match self.irq.taken() {
@@ -1168,22 +1225,60 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if messages > 0 && acknowledged == 0 {
             self.counters.spurious = self.counters.spurious.saturating_add(messages);
         }
-        if waited && causes & self.part.tx_done() != 0 {
+        // §7.4.3: "The cause bit stores the interrupt event regardless of the
+        // state of the mask bit", so the transmit cause is in `ICR` on a pass
+        // anything began. It is the wake only where a message came and no
+        // other unmasked cause is there to have raised it.
+        if waited
+            && messages > 0
+            && causes & self.part.tx_done() != 0
+            && causes & (cause::ENABLED | cause::ENABLED_MSIX) == 0
+        {
             self.counters.tx_wake_taken = self.counters.tx_wake_taken.saturating_add(1);
         }
 
-        // On `LSC` and on every pass that found no cause at all: the link can
-        // also come up before the mask was written, and then no `LSC` is ever
-        // delivered for it.
+        // On `LSC` alone: §7.4.3 records it masked or not, so a link that came
+        // up before the mask was written is in this read all the same.
         let before = self.link;
-        if causes & cause::LSC != 0 || !self.link.is_up() {
+        let mut rearmed = false;
+        if causes & cause::LSC != 0 {
             self.refresh_link();
+            match (self.unsent(), self.part) {
+                (0, _) => {}
+                (_, Part::E82574) => {
+                    self.rearm().map_err(PassRefused::Rearm)?;
+                    rearmed = true;
+                }
+                (unsent, Part::I219) => {
+                    // A second change over the same descriptors counts none of
+                    // them twice, and the deadline runs from the newest.
+                    let counted = self.stranded.map_or(0, |stranded| stranded.left);
+                    self.counters.stranded =
+                        self.counters.stranded.saturating_add((unsent - counted) as u32);
+                    self.stranded = Some(Stranded { left: unsent, since: self.clock.nanos() });
+                }
+            }
         }
-        let rearmed = causes & cause::LSC != 0 && self.unsent() > 0;
-        if rearmed {
-            self.rearm().map_err(PassRefused::Rearm)?;
+        if self.stranded.is_some() && self.link.is_up() {
+            self.reclaim_tx();
+        }
+        if let (Some(Stranded { left, since }), true) = (self.stranded, self.link.is_up()) {
+            let waited = self.clock.nanos().saturating_sub(since);
+            if waited >= STRANDED_DEADLINE_NANOS {
+                return Err(PassRefused::Stranded { left, after_nanos: waited });
+            }
         }
         Ok(Pass { messages, causes, link_changed: self.link != before, rearmed })
+    }
+
+    /// How long until a pass has to begin whether or not a message came: when
+    /// the descriptors a link change stranded are owed. `None` where nothing
+    /// is owed, which is every ring but one a link change found unsent frames
+    /// in, and that one too while its link is down.
+    pub fn pass_due_in(&self) -> Option<u64> {
+        let Stranded { since, .. } = self.stranded?;
+        let waited = self.clock.nanos().saturating_sub(since);
+        self.link.is_up().then(|| STRANDED_DEADLINE_NANOS.saturating_sub(waited))
     }
 
     /// Transmit descriptors published and not written back, the written-back
@@ -1193,14 +1288,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         (self.tx_next + TX_RING - self.tx_clean) % TX_RING
     }
 
-    /// Reset the function and bring it up again, as [`Self::open`] did, with
+    /// Reset the 82574 and bring it up again, as [`Self::open`] did, with
     /// both rings empty and the multicast table as it stood.
-    ///
-    /// §10.2.6.1 on `TCTL.EN`: "Software should combine this with a reset if
-    /// the packets in the FIFO need to be flushed" — and §10.2.6.7's head is
-    /// software's to write only after one.
     fn rearm(&mut self) -> Result<(), Refusal> {
         let unsent = self.unsent() as u32;
+        // The reset clears the statistics registers, so what they hold is
+        // taken first.
+        self.wire();
         let dwords = match self.part {
             Part::E82574 => regs::MTA_DWORDS,
             Part::I219 => regs::MTA_DWORDS_PCH,
@@ -1435,6 +1529,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.dma.observe();
             self.tx_clean = (self.tx_clean + 1) % TX_RING;
             self.counters.sent = self.counters.sent.saturating_add(1);
+            // Stranded descriptors are the ring's oldest, so each one taken
+            // back while any is owed is one of them.
+            self.stranded = match self.stranded {
+                Some(Stranded { left, since }) if left > 1 => Some(Stranded { left: left - 1, since }),
+                _ => None,
+            };
         }
     }
 

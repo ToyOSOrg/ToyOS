@@ -1574,6 +1574,8 @@ fn main() {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
         };
+        // A card that never does what it owes sends no interrupt to say so.
+        let timeout = timeout.min(device.nic.pass_due_in().unwrap_or(u64::MAX));
         // A client that connects and then says nothing wakes nothing, so the
         // deadline that removes it has to be a wake in its own right: without
         // this netstack can sit in `wait` forever with `pending` full of clients

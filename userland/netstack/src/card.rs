@@ -63,8 +63,10 @@ impl Card {
     /// silently never arrives, so this dies where it can be read — once, for
     /// whichever driver is running.
     ///
-    /// So does an Intel part that did not come back from the reset a link
-    /// change over unsent frames costs it: nothing drives it from there.
+    /// So does an 82574 that did not come back from the reset a link change
+    /// over unsent frames costs it, and an I219 that kept the frames such a
+    /// change left in its ring past the driver's deadline: nothing drives
+    /// either from there.
     ///
     /// Answers the link where the pass found it changed; virtio reports none.
     pub fn begin_pass(&self) -> Option<toyos_i219::Link> {
@@ -121,6 +123,7 @@ impl Card {
         snap.put("descriptors.sent", counters.sent);
         snap.put("descriptors.received", counters.received);
         snap.put("descriptors.unsent", counters.unsent);
+        snap.put("descriptors.stranded", counters.stranded);
         snap.put("transmit.full", counters.tx_full);
         snap.put("transmit.wake_armed", counters.tx_wake_armed);
         snap.put("transmit.wake_taken", counters.tx_wake_taken);
@@ -157,6 +160,16 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.tx(len, fill),
             Self::Intel(nic) => nic.tx(len, fill),
+        }
+    }
+
+    /// How long until a pass has to begin whether or not the claim reads
+    /// ready, in nanoseconds: [`Self::begin_pass`] is where a card that owes
+    /// something by then is refused. virtio owes nothing.
+    pub fn pass_due_in(&self) -> Option<u64> {
+        match self {
+            Self::Virtio(_) => None,
+            Self::Intel(nic) => nic.pass_due_in(),
         }
     }
 
