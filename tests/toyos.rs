@@ -350,14 +350,16 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "irq_census_conservation",
+        // Off the page: the stop takes the boot's one census after
+        // `logkeeper` has stopped, so no file carries it.
         metal::Metal {
             arms: TESTCASES,
-            judge: |b| irq_census(b[0].kernel().text()),
+            judge: |b| irq_census(b[0].after_the_reset()?.text()),
         },
     ),
     (
-        // The windows on the machine that owes them: every CPU reported beside
-        // its census, and a held window read back.
+        // The windows on the machine that owes them: every CPU in every
+        // report, and a held window read back.
         "mask_windows",
         metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
@@ -1926,7 +1928,7 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     });
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
-    // To the boot's last word, said after every census and its windows: the drain that took the job's end can stop between the two.
+    // To the boot's last word, said after every report: the drain that took the job's end can stop inside one.
     await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
     mask_windows(&serial, VIRT_CPUS)
 }
@@ -2995,7 +2997,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
     }
     if newest.is_empty() {
         return Err(format!(
-            "no `irq: cpu` census in the capture — a process exited and the kernel \
+            "no `irq: cpu` census in the capture — the machine stopped and the kernel \
              said nothing:\n{capture}"
         ));
     }
@@ -3061,9 +3063,8 @@ fn irq_census(capture: &str) -> Result<(), String> {
     //    must be within the issues a `tlb:` line counted — an excess
     //    is a path shooting down uncounted. The lower bound is not
     //    asserted: an issued IPI can be pending on an IF-clear target.
-    //    The bound is the largest count: an exit reads its deliveries
-    //    before the issuer's total, and whichever exit first swaps a
-    //    total into `tlb::REPORTED` logs it.
+    //    The bound is the largest count: the stop reads the deliveries
+    //    before the issuer's total.
     let mut issued: Option<u64> = None;
     for line in capture.lines() {
         let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
@@ -3077,8 +3078,8 @@ fn irq_census(capture: &str) -> Result<(), String> {
     }
     let Some(issued) = issued else {
         return Err(format!(
-            "no `tlb: shootdowns=` census in the capture — two process exits on a \
-             4-CPU guest and the issuer side said nothing:\n{capture}"
+            "no `tlb: shootdowns=` census in the capture — the machine stopped and \
+             the issuer side said nothing:\n{capture}"
         ));
     };
     for census in newest.values() {
@@ -5130,12 +5131,7 @@ fn main() {
         kernels.len(),
     );
 
-    // Where this run's interrupts landed, aggregated over every guest that
-    // said. `issues/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
-    // the number its later change is measured against, produced by an ordinary
-    // run rather than by `--nocapture`, so a CI run's own log carries it.
-    let census = common::irqcensus::summary();
     let summary = tally.summary(total, suite_start.elapsed(), suite_start.suspended());
-    census.lines().chain(summary.lines()).for_each(|line| eprintln!("{line}"));
+    summary.lines().for_each(|line| eprintln!("{line}"));
     run.exit(tally.exit_code());
 }

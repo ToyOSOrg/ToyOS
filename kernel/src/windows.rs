@@ -1,6 +1,7 @@
 //! Each CPU's [`kernel::sched::windows::Windows`], fed where this CPU's
-//! interrupts and preempt count change, and printed beside the IRQ census as
-//! `windows: cpuN irqs_off_ns=… preempt_off_ns=…` (`mask-windows` builds only).
+//! interrupts and preempt count change, and printed at every process's end as
+//! `windows: cpuN irqs_off_ns=… preempt_off_ns=…`, a line per CPU
+//! (`mask-windows` builds only).
 //!
 //! Each architecture calls [`irqs_masked`] and [`irqs_unmasking`] from every
 //! instruction that changes whether it takes a maskable interrupt: its
@@ -161,14 +162,17 @@ pub fn woken() {
     on(|w| w.woken(cpu::counter));
 }
 
-/// `cpu`'s line, taking its longest windows so the next report starts from none.
-pub fn log_cpu(cpu: u32) {
-    let (irqs, preempt) = CPUS[cpu as usize].take();
-    crate::log!(
-        "windows: cpu{cpu} irqs_off_ns={} preempt_off_ns={}",
-        crate::clock::nanos_of_ticks(irqs),
-        crate::clock::nanos_of_ticks(preempt),
-    );
+/// One report: every CPU's line in CPU order, each taking that CPU's longest
+/// windows so the next report starts from none.
+pub fn report() {
+    for cpu in 0..crate::smp::cpu_count() {
+        let (irqs, preempt) = CPUS[cpu as usize].take();
+        crate::log!(
+            "windows: cpu{cpu} irqs_off_ns={} preempt_off_ns={}",
+            crate::clock::nanos_of_ticks(irqs),
+            crate::clock::nanos_of_ticks(preempt),
+        );
+    }
 }
 
 /// The boot's first `SYS_EXIT`, with the preempt count its entry raised,

@@ -6,6 +6,10 @@
 //!
 //! Every number the file names is untrusted: a refusal is
 //! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.
+//!
+//! A spawn that lands writes one record, `spawn: <path> pid=…`, once the
+//! process is in the table and placed; a spawn that is refused writes one,
+//! naming why. Nothing is said on the way (`crate::process`'s header).
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -552,14 +556,8 @@ pub fn spawn<H>(
     }
 
     reloc_index.finalize();
-    let reloc_index = if reloc_index.len() > 0 {
-        log!("ELF: {} relocations indexed (RELATIVE + GLOB_DAT + TPOFF)", reloc_index.len());
-        Some(Arc::new(reloc_index))
-    } else {
-        None
-    };
+    let reloc_index = if reloc_index.len() > 0 { Some(Arc::new(reloc_index)) } else { None };
 
-    log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls.total_memsz());
     let Some((tls_pages, thread_pointer, _)) =
         tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
     else {

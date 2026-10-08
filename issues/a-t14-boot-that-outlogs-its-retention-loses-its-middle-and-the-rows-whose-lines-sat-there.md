@@ -13,8 +13,28 @@ start. A metal judge reads what came back, so a line a flooding boot wrote in
 its middle is a line the judge reports missing, and nothing in the harness
 says the readback has a hole.
 
-`testcases` is such a boot: `test_rs_counters_metal` dumps every CPU's
-counters and the boot writes about forty files.
+`testcases` is such a boot, and the flood was the kernel's, not the job's:
+`test_rs_counters_metal`'s `loaded` phase spawns a child per CPU in a loop for
+twenty seconds, and the kernel wrote fourteen records for each.
+
+## What a child cost, and what it costs now
+
+The readback of `testcases` at `809c33c0c`, 16,645,533 bytes of which the
+parts that survived hold 8,304 of those children: per child 1,989 bytes in 14
+records. Eight `irq: cpuN` lines, a census of the whole machine at every
+process's end, were 1,288 of them; `syscalls:` 110, `memory:` 85, `exit:` 95,
+`ELF:` 107 and the two `spawn:` records 304.
+
+A process's end now writes one record, its `exit:`, carrying what `syscalls:`
+and `memory:` said, and the machine's census is taken once, where the machine
+stops. A spawn writes one record too: `ELF: … relocations indexed` and
+`spawn: TLS …` are gone, which no judge read. What remains per child is the
+`spawn:` record and the `exit:` record.
+
+**Owed:** `testcases`' log bytes and parts on the T14 with that kernel. A
+child that costs less to log is a child sooner done, so the phase may spawn
+more of them than that boot did, whose last pid was 21,897, and bytes per child times that
+count is not yet a measurement.
 
 ## Measured
 

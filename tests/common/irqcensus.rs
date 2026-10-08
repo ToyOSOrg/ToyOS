@@ -1,23 +1,14 @@
 //! The kernel's interrupt census, and the windows a `mask-windows` kernel
-//! prints beside it, read back on the host.
+//! reports, read back on the host.
 //!
-//! The guest prints `irq: cpuN timer=… kick=… …` per online CPU whenever a
-//! process exits, on `SYS_SHUTDOWN` and on the blocked-task dump
-//! (`kernel/src/irq_census.rs`). The counters are cumulative since boot, so the
+//! The kernel prints `irq: cpuN timer=… kick=… …` per online CPU when the
+//! machine stops and in the blocked-task dump (`kernel/src/irq_census.rs`),
+//! and at no process's end. The counters are cumulative since boot, so the
 //! largest count each source reaches on a CPU's lines is that boot's whole
-//! census ([`Census::raise`]).
-//!
-//! Two readers, and they are why this is a module rather than a closure:
-//! `irq_census_conservation` asks whether one boot's census is internally
-//! consistent, and the suite's own summary asks where the machine's interrupts
-//! landed across every guest a run booted. The second is the instrument the
-//! `every-interrupt-lands-on-the-boot-cpu` track's later change is measured
-//! against, so it has to be produced by an ordinary run rather than by
-//! `--nocapture`: a number only a developer's terminal can produce is not a
-//! baseline.
+//! census ([`Census::raise`]). `irq_census_conservation` asks whether one
+//! boot's census is internally consistent.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 
 /// The census's source names, in the order `kernel/src/irq_census.rs` prints
 /// them. The kernel's `Source::NAMES` is the definition; this is the host's copy
@@ -92,11 +83,11 @@ impl Census {
 
     /// Raise each source to its count in `read`, another line of this CPU.
     ///
-    /// **Lines are in stamp order, not read order.** A process exit reads the
-    /// counters before `log::emit` stamps its line, and two exits on two CPUs
-    /// run side by side, so a line stamped later can carry the earlier read.
-    /// The counters are monotonic, so the largest count per source is the
-    /// newest read whatever the order of the lines.
+    /// **Lines are in no read order.** The stop's census comes back on the
+    /// black-box page newest first, and a blocked-task dump reads the counters
+    /// before `log::emit` stamps its lines. The counters are monotonic, so the
+    /// largest count per source is the newest read whatever the order of the
+    /// lines.
     pub fn raise(&mut self, read: &Self) {
         for (most, count) in self.by_source.iter_mut().zip(read.by_source) {
             *most = (*most).max(count);
@@ -110,8 +101,8 @@ impl Census {
 }
 
 /// One CPU's longest interrupts-off and preemption-off windows since the report
-/// before, out of the line a `mask-windows` kernel prints beside that CPU's
-/// census (`kernel/src/windows.rs`).
+/// before, out of that CPU's line of a `mask-windows` kernel's report
+/// (`kernel/src/windows.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Windows {
     pub cpu: u32,
@@ -156,31 +147,27 @@ fn held(line: &str) -> Option<Result<(u32, u64), String>> {
     Some(parsed.ok_or_else(|| format!("unreadable held line {rest:?}")))
 }
 
-/// The judge of every `mask-windows` boot, and it judges no duration: each
-/// census line has its CPU's windows line beside it, and each CPU closed both
-/// kinds of window at some point of the boot. Answers each CPU's longest
-/// windows over the whole capture.
+/// The judge of every `mask-windows` boot, and it judges no duration: every
+/// CPU that reported is in every report, and each closed both kinds of window
+/// at some point of the boot. Answers each CPU's longest windows over the
+/// whole capture.
 pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
-    let mut censuses: BTreeMap<u32, usize> = BTreeMap::new();
     let mut reports: Vec<Windows> = Vec::new();
     for line in capture.lines() {
-        if let Some(census) = Census::parse(line) {
-            *censuses.entry(census.map_err(|why| format!("{why}\nline: {line}"))?.cpu).or_default() += 1;
-        } else if let Some(report) = Windows::parse(line) {
+        if let Some(report) = Windows::parse(line) {
             reports.push(report.map_err(|why| format!("{why}\nline: {line}"))?);
         }
     }
-    if censuses.is_empty() {
-        return Err(format!("no `irq: cpu` census in the capture:\n{capture}"));
+    if reports.is_empty() {
+        return Err(format!("no `windows: cpu` report in the capture:\n{capture}"));
     }
-    let mut beside: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut lines: BTreeMap<u32, usize> = BTreeMap::new();
     for report in &reports {
-        *beside.entry(report.cpu).or_default() += 1;
+        *lines.entry(report.cpu).or_default() += 1;
     }
-    if beside != censuses {
+    if lines.values().min() != lines.values().max() {
         return Err(format!(
-            "census lines per cpu {censuses:?} and windows lines per cpu {beside:?}: a census \
-             went out without its windows, or windows without their census"
+            "windows lines per cpu {lines:?}: a report went out without one of its CPUs"
         ));
     }
     let mut longest: BTreeMap<u32, Windows> = BTreeMap::new();
@@ -295,122 +282,4 @@ pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Meas
     }
     let load = longest(&mut reports[own].1.iter());
     Ok(Measured { held, load })
-}
-
-/// The newest census each CPU of each guest printed, keyed by the boot's own
-/// sequence number.
-///
-/// Newest wins because the counters are cumulative: the last line a guest wrote
-/// is its whole boot. A guest that printed none — one that booted and ran no
-/// program — contributes nothing and is counted as such in the summary, which is
-/// the honest form: it did take interrupts, and no capture says how many.
-static SEEN: Mutex<BTreeMap<u32, BTreeMap<u32, Census>>> = Mutex::new(BTreeMap::new());
-
-/// Offer one console line to the census. Called from every boot's reader thread,
-/// on every line, so it does the cheapest possible thing first.
-pub fn observe(seq: u32, line: &str) {
-    if !line.contains("irq: cpu") {
-        return;
-    }
-    let Some(Ok(census)) = Census::parse(line) else {
-        return;
-    };
-    let mut seen = SEEN.lock().expect("census map poisoned");
-    seen.entry(seq).or_default().insert(census.cpu, census);
-}
-
-/// One guest's whole census.
-struct Guest {
-    /// Interrupts on cpu0 as a fraction of the machine's.
-    boot_cpu_share: f64,
-    /// Interrupts on cpu0, so the run's pooled share is an exact ratio of two
-    /// integers rather than a mean of per-guest fractions.
-    on_boot_cpu: u64,
-    total: u64,
-    /// Per source, summed over every CPU, and the cpu0 part of it.
-    per_source: [(u64, u64); SOURCES.len()],
-    cpus: usize,
-}
-
-fn guests() -> Vec<Guest> {
-    let seen = SEEN.lock().expect("census map poisoned");
-    seen.values()
-        .filter_map(|by_cpu| {
-            let total: u64 = by_cpu.values().map(Census::total).sum();
-            if total == 0 {
-                return None;
-            }
-            let boot = by_cpu.get(&0).map_or(0, Census::total);
-            let mut per_source = [(0u64, 0u64); SOURCES.len()];
-            for census in by_cpu.values() {
-                for (slot, count) in per_source.iter_mut().zip(census.by_source) {
-                    slot.0 += count;
-                    if census.cpu == 0 {
-                        slot.1 += count;
-                    }
-                }
-            }
-            Some(Guest {
-                boot_cpu_share: boot as f64 / total as f64,
-                on_boot_cpu: boot,
-                total,
-                per_source,
-                cpus: by_cpu.len(),
-            })
-        })
-        .collect()
-}
-
-/// The order statistic at `q` of an already-sorted sample, nearest-rank.
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    if sorted.is_empty() {
-        return f64::NAN;
-    }
-    let rank = ((sorted.len() as f64) * q).ceil() as usize;
-    sorted[rank.clamp(1, sorted.len()) - 1]
-}
-
-/// What this run saw, as the suite's last word before its tally.
-///
-/// Empty when no guest printed a census — a filtered run of boot-only tests is
-/// exactly that, and a summary claiming a distribution it never measured would
-/// be worse than none.
-pub fn summary() -> String {
-    use std::fmt::Write;
-    let guests = guests();
-    if guests.is_empty() {
-        return String::new();
-    }
-    let mut shares: Vec<f64> = guests.iter().map(|g| g.boot_cpu_share).collect();
-    shares.sort_by(|a, b| a.partial_cmp(b).expect("a share is never NaN"));
-    let total: u64 = guests.iter().map(|g| g.total).sum();
-    let mut out = String::new();
-    let on_boot_cpu: u64 = guests.iter().map(|g| g.on_boot_cpu).sum();
-    let _ = writeln!(
-        out,
-        "  --- irq census: {} guest(s) reported, {} interrupt(s), {on_boot_cpu} of them on cpu0 \
-         ({:.1}%); per guest cpu0's share is median {:.1}% p90 {:.1}% max {:.1}%",
-        guests.len(),
-        total,
-        on_boot_cpu as f64 / total as f64 * 100.0,
-        quantile(&shares, 0.5) * 100.0,
-        quantile(&shares, 0.9) * 100.0,
-        shares[shares.len() - 1] * 100.0,
-    );
-    for (i, name) in SOURCES.iter().enumerate() {
-        let all: u64 = guests.iter().map(|g| g.per_source[i].0).sum();
-        if all == 0 {
-            continue;
-        }
-        let on_boot_cpu: u64 = guests.iter().map(|g| g.per_source[i].1).sum();
-        let _ = writeln!(
-            out,
-            "      {name:<9} {all:>9} ({:.1}% of all), {:.1}% of them on cpu0",
-            all as f64 / total as f64 * 100.0,
-            on_boot_cpu as f64 / all as f64 * 100.0,
-        );
-    }
-    let widest = guests.iter().map(|g| g.cpus).max().unwrap_or(0);
-    let _ = writeln!(out, "      widest guest reported {widest} cpu(s)");
-    out
 }

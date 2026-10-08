@@ -16,8 +16,6 @@ use crate::invalidation::Origin;
 
 /// Issuer-side census, as x86-64's counts it; there is no receiver side.
 static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin::COUNT];
-/// Total at the last print; process exit logs once per batch.
-static REPORTED: AtomicU64 = AtomicU64::new(0);
 
 macro_rules! tlbi {
     ($op:literal, $operand:expr) => {
@@ -72,16 +70,13 @@ pub fn poll() {}
 /// waiting for the machine's release.
 pub fn join() {}
 
-/// One `tlb:` line when the counts moved, at process exit.
+/// The boot's one `tlb:` line, at the machine's stop, said at zero too.
 pub fn log_census() {
     let mut counts = [0u64; Origin::COUNT];
     for (slot, count) in ISSUED.iter().zip(counts.iter_mut()) {
         *count = slot.load(Ordering::Relaxed);
     }
     let total: u64 = counts.iter().sum();
-    if total == 0 || REPORTED.swap(total, Ordering::Relaxed) == total {
-        return;
-    }
     struct Fields([u64; Origin::COUNT]);
     impl core::fmt::Display for Fields {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

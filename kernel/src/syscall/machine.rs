@@ -92,8 +92,13 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // `/system/bin/supervisor` had it flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
     crate::log::console::drain_for_the_stop();
-    // The final census: no process runs after this to report another.
+    // The boot's one census of the machine, and its only owner: no process's
+    // end takes one. Oldest first is first cut from the sealed tail, so the
+    // flushes lead; the shootdowns' issues follow the deliveries they bound.
+    crate::block::census::log_census();
     crate::irq_census::log_census();
+    crate::arch::tlb::log_census();
+    crate::arch::trap::log_unclaimed();
     crate::drivers::panic_console::log_census();
     // A shortfall is the budget spent, not the reset refused: it is said at
     // alert level, and the reset lands anyway.

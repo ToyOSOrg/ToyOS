@@ -509,8 +509,6 @@ pub mod census {
     }; DEVICES];
     static LATENCY: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
     static MAX_NS: AtomicU64 = AtomicU64::new(0);
-    /// Last-reported event total; suppresses a repeat print when nothing new happened.
-    static REPORTED: AtomicU64 = AtomicU64::new(0);
 
     fn slot(device: DeviceId) -> &'static Slot {
         let key = device + 1;
@@ -563,20 +561,14 @@ pub mod census {
         1u64 << (BUCKETS - 1)
     }
 
-    /// Prints the census once per batch of new events; called at process exit.
-    pub fn print_if_moved() {
+    /// What the boot flushed before its stop, said once there: a line per
+    /// device that was flushed or refused, and the latency of them all.
+    pub fn log_census() {
         let mut counts = [0u64; BUCKETS];
         let mut total = 0u64;
         for (bucket, count) in LATENCY.iter().zip(counts.iter_mut()) {
             *count = bucket.load(Ordering::Relaxed);
             total += *count;
-        }
-        let mut events = total;
-        for slot in &SLOTS {
-            events += slot.expiries.load(Ordering::Relaxed);
-        }
-        if events == 0 || REPORTED.swap(events, Ordering::Relaxed) == events {
-            return;
         }
         for slot in &SLOTS {
             let id = slot.id.load(Ordering::Relaxed);
