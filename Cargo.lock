@@ -3039,7 +3039,6 @@ dependencies = [
  "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
- "toyos-elide",
  "toyos-fat32",
  "toyos-gicv3",
  "toyos-gpt",
@@ -5919,6 +5918,7 @@ version = "0.1.0"
 dependencies = [
  "etherparse",
  "toyos-dhcp",
+ "toyos-dns",
  "toyos-mdns",
  "toyos-net-ip",
  "toyos-net-shard",

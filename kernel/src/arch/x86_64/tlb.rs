@@ -26,20 +26,15 @@ use crate::invalidation::Origin;
 static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin::COUNT];
 static WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static MAX_NS: AtomicU64 = AtomicU64::new(0);
-/// Total at the last print; process exit logs once per batch.
-static REPORTED: AtomicU64 = AtomicU64::new(0);
 
-/// One machine-wide `tlb:` line when the counts moved, at process exit after
-/// `irq_census::log_census`: the conservation check reads deliveries first.
-pub fn log_census() {
+/// The machine-wide `tlb:` line of `crate::census`, after the `irq:` lines:
+/// the conservation check reads deliveries first. Said at zero too.
+pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
     let mut counts = [0u64; Origin::COUNT];
     let mut total = 0u64;
     for (slot, count) in ISSUED.iter().zip(counts.iter_mut()) {
         *count = slot.load(Ordering::Relaxed);
         total += *count;
-    }
-    if total == 0 || REPORTED.swap(total, Ordering::Relaxed) == total {
-        return;
     }
     struct Fields<'a>(&'a [u64; Origin::COUNT]);
     impl core::fmt::Display for Fields<'_> {
@@ -50,12 +45,12 @@ pub fn log_census() {
             Ok(())
         }
     }
-    crate::log!(
+    say(format_args!(
         "tlb: shootdowns={total} wait={}us max={}us{}",
         WAIT_NS.load(Ordering::Relaxed) / 1_000,
         MAX_NS.load(Ordering::Relaxed) / 1_000,
         Fields(&counts)
-    );
+    ));
 }
 
 /// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
