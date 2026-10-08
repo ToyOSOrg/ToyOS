@@ -20,44 +20,30 @@ pub const RECORD_BYTES: usize = 32;
 /// What `pid` and `tid` read when the CPU was running no thread.
 pub const NO_THREAD: u32 = u32::MAX;
 
-/// One diary record, as a read copies it out.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TraceRecord {
-    /// Its sequence number in its CPU's ring, which [`LogCursor::next`] counts in.
-    pub seq: u64,
-    /// The CPU's counter when the record was written.
-    pub stamp: u64,
-    /// A [`Kind`], undecoded: input until [`Kind::from_u16`] says otherwise.
-    pub kind: u16,
-    /// The CPU whose ring holds it, which is the CPU that wrote it.
-    pub cpu: u16,
-    pub data: u32,
-    pub pid: u32,
-    pub tid: u32,
+crate::user_safe! {
+    /// One diary record, as a read copies it out.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct TraceRecord {
+        /// Its sequence number in its CPU's ring, which [`LogCursor::next`] counts in.
+        pub seq: u64,
+        /// The CPU's counter when the record was written.
+        pub stamp: u64,
+        /// A [`Kind`], undecoded: input until [`Kind::from_u16`] says otherwise.
+        pub kind: u16,
+        /// The CPU whose ring holds it, which is the CPU that wrote it.
+        pub cpu: u16,
+        pub data: u32,
+        pub pid: u32,
+        pub tid: u32,
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == RECORD_BYTES);
-/// Every byte belongs to a field: the record crosses the boundary through
-/// [`TraceRecord::as_bytes`], so a gap would publish whatever the kernel stack
-/// held.
-const _: () = assert!(core::mem::size_of::<TraceRecord>() == 8 + 8 + 2 + 2 + 4 + 4 + 4);
 
 impl TraceRecord {
     /// A record no ring wrote, for sizing a read buffer: sequence numbers
     /// start at one, so this is no record.
     pub const EMPTY: Self = Self { seq: 0, stamp: 0, kind: 0, cpu: 0, data: 0, pid: 0, tid: 0 };
-
-    /// The record's own bytes, which is what goes on the wire.
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self`, and the const assert above proves
-        // the `repr(C)` layout has no padding, so every byte is an initialized
-        // field.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
-        }
-    }
 }
 
 /// What a record says happened. `pid`/`tid` name the thread running on the
@@ -118,11 +104,12 @@ impl Kind {
     }
 }
 
-/// A reader's position in the diary: the log's cursor, a type of its own so
-/// that one is never walked over the other's rings.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TraceCursor(pub LogCursor);
+crate::user_safe! {
+    /// A reader's position in the diary: the log's cursor, a type of its own so
+    /// that one is never walked over the other's rings.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct TraceCursor(pub LogCursor);
+}
 
 impl TraceCursor {
     /// A cursor that has read nothing.

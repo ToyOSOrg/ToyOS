@@ -21,10 +21,14 @@ jobs:
   host:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # The driver's own target, and no step's: it says this job carries the
-    # host cache (src/cicache.rs).
     env:
+      # The driver's own target, and no step's: it says this job carries the
+      # host cache (src/cicache.rs).
       CARGO_TARGET_DIR: target/ci-driver
+      # The driver's and every step's: a backtrace in a log reads line tables,
+      # and nothing reads the rest of the debuginfo, of which a Linux link
+      # copies every dependency's into each binary.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

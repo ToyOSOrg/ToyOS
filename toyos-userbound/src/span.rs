@@ -96,22 +96,11 @@ pub const PAGE_4K: u64 = 4096;
 mod tests {
     use super::*;
 
-    /// Every `UserSafe` type, by the shape that decides this: size and align.
-    const TYPES: &[(&str, u64, u64)] = &[
-        ("u32", 4, 4),
-        ("u64", 8, 8),
-        ("[u32; 2]", 8, 4),
-        ("[u64; 2]", 16, 8),
-        ("RawKeyEvent", 2, 1),
-        ("MouseEvent", 6, 2),
-        ("Stat", 24, 8),
-        ("SchedInfo", 24, 8),
-        ("FramebufferInfo", 32, 4),
-        ("SpawnArgs", 136, 8),
-        ("NamespaceBuild", 56, 8),
-        ("InboxSetup", 16, 8),
-        ("ProcessStats", 128, 8),
-    ];
+    /// Every size and alignment a `repr(C)` value of integers up to 256 bytes
+    /// can have: the two numbers are all [`is_user_object`] reads of a type.
+    fn shapes() -> impl Iterator<Item = (u64, u64)> {
+        [1, 2, 4, 8].into_iter().flat_map(|align| (1..=256 / align).map(move |n| (n * align, align)))
+    }
 
     #[test]
     fn a_kernel_address_is_not_a_user_address() {
@@ -135,7 +124,7 @@ mod tests {
     /// The straddle, for every type, at every offset that can produce one.
     #[test]
     fn no_type_may_cross_a_2_mib_boundary() {
-        for &(name, size, align) in TYPES {
+        for (size, align) in shapes() {
             for last in 1..size {
                 let ptr = 4 * PAGE_2M - last;
                 if !ptr.is_multiple_of(align) {
@@ -143,32 +132,31 @@ mod tests {
                 }
                 assert!(
                     !is_user_object(ptr, size, align),
-                    "{name} at {ptr:#x} has {last} bytes below the boundary and {} above",
-                    size - last
+                    "{size}/{align} at {ptr:#x} has {last} bytes below the boundary"
                 );
             }
-            assert!(is_user_object(4 * PAGE_2M - size, size, align), "{name} ending at a boundary");
-            assert!(is_user_object(4 * PAGE_2M, size, align), "{name} starting at a boundary");
+            assert!(is_user_object(4 * PAGE_2M - size, size, align), "{size}/{align} ending at a boundary");
+            assert!(is_user_object(4 * PAGE_2M, size, align), "{size}/{align} starting at a boundary");
         }
     }
 
     #[test]
     fn an_object_is_refused_for_its_alignment_before_anything_else() {
-        for &(name, size, align) in TYPES {
+        for (size, align) in shapes() {
             for off in 1..align {
-                assert!(!is_user_object(PAGE_2M + off, size, align), "{name} at +{off}");
+                assert!(!is_user_object(PAGE_2M + off, size, align), "{size}/{align} at +{off}");
             }
-            assert!(is_user_object(PAGE_2M, size, align), "{name} at a page start");
+            assert!(is_user_object(PAGE_2M, size, align), "{size}/{align} at a page start");
         }
     }
 
     #[test]
     fn an_object_may_not_end_past_the_bound() {
-        for &(name, size, align) in TYPES {
-            assert!(is_user_object(USER_TOP - size, size, align), "{name} ending at the bound");
-            assert!(!is_user_object(USER_TOP, size, align), "{name} at the bound");
-            assert!(!is_user_object(USER_TOP + PAGE_2M, size, align), "{name} above the bound");
-            assert!(!is_user_object(u64::MAX - size + 1, size, align), "{name} wrapping");
+        for (size, align) in shapes() {
+            assert!(is_user_object(USER_TOP - size, size, align), "{size}/{align} ending at the bound");
+            assert!(!is_user_object(USER_TOP, size, align), "{size}/{align} at the bound");
+            assert!(!is_user_object(USER_TOP + PAGE_2M, size, align), "{size}/{align} above the bound");
+            assert!(!is_user_object(u64::MAX - size + 1, size, align), "{size}/{align} wrapping");
         }
     }
 
