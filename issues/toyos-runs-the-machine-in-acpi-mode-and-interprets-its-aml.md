@@ -322,6 +322,49 @@ mediated access, leaves open:
   no second reading; it goes when the owner rules one in, and a guest test
   then supplies a sleep type that is not the machine's and reads it refused.
 
+What the firmware call, which the kernel makes for the server where its AML
+stores a byte to `SMI_CMD`, leaves open. The server's AML makes none yet: its
+host denies every write AML asks for and passes none to the kernel
+(`userland/acpiserver/src/host.rs`).
+
+- **What a call does there is the firmware's**, and the kernel bounds who,
+  when, where, which byte and how often:
+  `issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`.
+- **Eight calls in any second is no measurement**
+  (`toyos_userbound::firmware::CALLS`). Owner: this stage. **Exit**: the
+  slice that evaluates the methods which call brings the T14's count of them
+  and the time each held the boot processor, from the `counters` row's
+  `firmware_calls` and `firmware_nanos` and the kernel's line for the first
+  call of each byte, and the owner rules the number against them.
+- **The `counters` row holds every CPU's SMI count to the commands the
+  kernel wrote to `SMI_CMD`** between its first read and its last, and to
+  nothing else, where it held the count flat; with no call made the two are
+  one judgement. It rests on one reading, that the enable moved every CPU's
+  count by one: a call that moves a CPU's count by none or by two reds the
+  row, and is a reading for the owner and no flake. The exit of
+  `issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`
+  still opens its interval after the boot's last write to the port, which
+  the first method that calls makes false of the row; rewording it is the
+  owner's.
+- **No guest's call interrupts a firmware, and no guest writes the enable.**
+  q35's chipset keeps the byte, with `SMI_EN` reading 0, and its firmware
+  hands the machine over in ACPI mode. So `acpi_mediated_access` reads that
+  a call was written, on which CPU, how often and counted, and that the
+  kernel's own commands were not; the time a handler takes, and the SMI
+  count either side of one, are read on the T14 alone, and there only for
+  the enable and the disable.
+- **`acpi_mediated_access` needs one of three calls to be asked off the boot
+  processor**, each from a thread that read itself there first. The tree
+  has no affinity (`issues/no-test-can-hold-a-thread-on-a-named-cpu.md`), so
+  a thread preempted between that read and the kernel's lock may be taken by
+  the boot processor, the window
+  `issues/no-t14-row-arranges-an-acpi-disable-asked-off-the-boot-processor.md`
+  describes. A boot where all three fall in it reds as `no firmware call was
+  asked from another CPU`, over three kernel lines reading `asked from cpu0`
+  beside the probe's own line naming three non-zero x2APIC ids: that is the
+  window and no defect of the write, and it is answered by the pin, never by
+  a second run. None has been read.
+
 The press issue's measurement of 2026-10-07 found the three presses it lost
 changing nothing its scout read, with the button's event enabled and no SMI
 taken, and its hypothesis is that the controller wants the firmware's

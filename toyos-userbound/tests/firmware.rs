@@ -4,8 +4,11 @@
 
 use toyos_abi::acpi::{Refused, Width};
 use toyos_abi::boot::MemoryMapEntry;
-use toyos_userbound::firmware::{config, lock_word, port, sleep_type, type_word, Ecam, Function, Memory, MemoryVerdict, NoLockWord, Standing, FIXED_RANGE_END};
-use toyos_userbound::Mediated;
+use toyos_userbound::firmware::{
+    config, lock_word, port, sleep_type, type_word, CallRate, Ecam, Function, Memory, MemoryVerdict, NoLockWord, PortVerdict, Standing, CALLS,
+    CALL_PERIOD_NS, FIXED_RANGE_END,
+};
+use toyos_userbound::{KeptCommands, Mediated};
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
     MemoryMapEntry { uefi_type, start, end }
@@ -489,50 +492,150 @@ fn the_lock_word_is_exchanged_only_where_all_four_bytes_are_the_firmwares_own() 
     assert_eq!(lock_word(&[e(10, u64::MAX - 0xFFF, u64::MAX)], 4 * GIB, u64::MAX - 3), Err(NoLockWord::Type(None)), "the address space's last dword");
 }
 
-/// The kernel's declarations as q35 boots with them, and the i8042's row.
+/// What a crafted FADT names for `SMI_CMD`: `ACPI_ENABLE`, `ACPI_DISABLE`,
+/// `S4BIOS_REQ` and `CST_CNT`, and no `PSTATE_CNT`.
+const KEPT: KeptCommands = KeptCommands([0xF0, 0xF1, 0xF2, 0, 0x85]);
+
+/// The kernel's declarations as q35 boots with them, with [`KEPT`] for
+/// `SMI_CMD`'s, and the i8042's row.
 fn standing(port: u16) -> Standing {
     match port {
         0x3F8..=0x3FF | 0x20..=0x21 | 0xA0..=0xA1 | 0x70..=0x71 | 0xCF8 | 0xCFC..=0xCFF | 0xCF9 => Standing::Declared(Mediated::Kept),
         0x80 => Standing::Declared(Mediated::Open),
-        0xB2 | 0x604..=0x605 | 0x660..=0x67F => Standing::Declared(Mediated::ReadOnly),
+        0xB2 => Standing::Declared(Mediated::Command(KEPT)),
+        0x604..=0x605 | 0x660..=0x67F => Standing::Declared(Mediated::ReadOnly),
         0x60 | 0x64 => Standing::Row,
         _ => Standing::Free,
     }
 }
 
+const NO: PortVerdict = PortVerdict::Refused(Refused::KernelPort);
+
+fn refused_port(refused: Refused) -> PortVerdict {
+    PortVerdict::Refused(refused)
+}
+
+fn through(verdict: PortVerdict) -> Option<(u16, Width)> {
+    match verdict {
+        PortVerdict::Through(witness) => Some((witness.port(), witness.width())),
+        _ => None,
+    }
+}
+
 #[test]
 fn a_port_answers_as_its_declaration_says() {
-    for write in [false, true] {
+    for write in [None, Some(0)] {
         for (at, width) in [(0x3F8, Width::Byte), (0x3FF, Width::Byte), (0x20, Width::Word), (0x70, Width::Byte), (0xCF8, Width::DWord), (0xCF9, Width::Byte)] {
-            assert_eq!(port(standing, at, width, write), Err(Refused::KernelPort), "{at:#x}");
+            assert_eq!(port(standing, at, width, write), NO, "{at:#x}");
         }
-        assert_eq!(port(standing, 0x60, Width::Byte, write), Err(Refused::ClaimedPort));
-        assert_eq!(port(standing, 0x64, Width::Byte, write), Err(Refused::ClaimedPort));
+        assert_eq!(port(standing, 0x60, Width::Byte, write), refused_port(Refused::ClaimedPort));
+        assert_eq!(port(standing, 0x64, Width::Byte, write), refused_port(Refused::ClaimedPort));
         // The POST port, and ports nothing declared.
         for (at, width) in [(0x80, Width::Byte), (0x72, Width::Word), (0x1800, Width::DWord), (0xFFFC, Width::DWord), (0xFFFF, Width::Byte)] {
-            let witness = port(standing, at, width, write).expect("a free port");
-            assert_eq!((witness.port(), witness.width()), (at, width));
+            assert_eq!(through(port(standing, at, width, write)), Some((at, width)), "a free port");
         }
     }
-    // SMI_CMD, the PM1a control block and the TCO block: read, never written.
-    for (at, width) in [(0xB2, Width::Byte), (0x604, Width::Word), (0x605, Width::Byte), (0x660, Width::DWord)] {
-        assert!(port(standing, at, width, false).is_ok(), "{at:#x} reads");
-        assert_eq!(port(standing, at, width, true), Err(Refused::ReadOnlyPort), "{at:#x}");
+    // The PM1a control block and the TCO block: read, never written.
+    for (at, width) in [(0x604, Width::Word), (0x605, Width::Byte), (0x660, Width::DWord)] {
+        assert!(through(port(standing, at, width, None)).is_some(), "{at:#x} reads");
+        assert_eq!(port(standing, at, width, Some(0)), refused_port(Refused::ReadOnlyPort), "{at:#x}");
     }
+}
+
+/// `SMI_CMD` is read as a port is. A byte written to it is a call into the
+/// firmware carrying that byte, for every byte but those the FADT gives a
+/// meaning, zero among the callable: a field the FADT leaves zero names no
+/// value.
+#[test]
+fn a_byte_for_smi_cmd_is_a_firmware_call_unless_the_fadt_names_it() {
+    assert_eq!(through(port(standing, 0xB2, Width::Byte, None)), Some((0xB2, Width::Byte)));
+    for value in 0..=0xFFu64 {
+        let verdict = port(standing, 0xB2, Width::Byte, Some(value));
+        if [0xF0, 0xF1, 0xF2, 0x85].contains(&value) {
+            assert_eq!(verdict, refused_port(Refused::KernelCommand), "{value:#04x}");
+        } else {
+            let PortVerdict::FirmwareCall(call) = verdict else { panic!("{value:#04x} answered {verdict:?}") };
+            assert_eq!(u64::from(call.value()), value);
+        }
+    }
+    // A FADT that names none keeps none.
+    let unnamed = |_| Standing::Declared(Mediated::Command(KeptCommands([0; 5])));
+    for value in [0u64, 0xF0, 0xFF] {
+        assert!(matches!(port(unnamed, 0xB2, Width::Byte, Some(value)), PortVerdict::FirmwareCall(call) if u64::from(call.value()) == value));
+    }
+}
+
+/// A command is one byte to the one port: a wider write that reaches it,
+/// from below or from it, is refused, whatever byte would land there, and so
+/// is a value no byte holds.
+#[test]
+fn a_write_that_reaches_smi_cmd_and_is_no_byte_to_it_is_refused() {
+    for (at, width) in [(0xB2, Width::Word), (0xB1, Width::Word), (0xB2, Width::DWord), (0xAF, Width::DWord)] {
+        for value in [0u64, 0x10, 0xF1, 0xF100, 0x10_0000] {
+            assert_eq!(port(standing, at, width, Some(value)), refused_port(Refused::CommandSpan), "{width:?} at {at:#x}");
+        }
+        assert_eq!(through(port(standing, at, width, None)), Some((at, width)), "{width:?} at {at:#x} reads");
+    }
+    assert_eq!(port(standing, 0xB2, Width::Byte, Some(0x100)), refused_port(Refused::CommandSpan));
+    // Beside it, a port nothing declared.
+    assert_eq!(through(port(standing, 0xB3, Width::Byte, Some(0xF1))), Some((0xB3, Width::Byte)));
+    assert_eq!(through(port(standing, 0xAE, Width::DWord, Some(0xF1))), Some((0xAE, Width::DWord)));
+}
+
+/// [`CALLS`] are admitted however close together, and the next only once the
+/// oldest of them is a whole period old: in no period, wherever it begins,
+/// are there more.
+#[test]
+fn the_kernel_admits_a_fixed_few_firmware_calls_in_any_period() {
+    let mut rate = CallRate::new();
+    // A storm: one a millisecond, as firmware's AML retries an unanswered call.
+    let admitted: Vec<u64> = (0..10_000u64).map(|ms| ms * 1_000_000).filter(|&now| rate.admit(now)).collect();
+    assert_eq!(admitted.len(), 10 * CALLS, "ten seconds of a storm");
+    for (i, &at) in admitted.iter().enumerate() {
+        let within = admitted[i..].iter().take_while(|&&later| later - at < CALL_PERIOD_NS).count();
+        assert!(within <= CALLS, "{within} calls in the period from {at}");
+    }
+
+    // The edge: all at one instant, then one nanosecond short of the period, then at it.
+    let mut rate = CallRate::new();
+    let from = 5_000_000_000;
+    assert!((0..CALLS).all(|_| rate.admit(from)));
+    assert!(!rate.admit(from));
+    assert!(!rate.admit(from + CALL_PERIOD_NS - 1));
+    assert!(rate.admit(from + CALL_PERIOD_NS));
+    // That one replaced the first of the eight, so the next waits on the second, which is as old.
+    assert!((1..CALLS).all(|_| rate.admit(from + CALL_PERIOD_NS)));
+    assert!(!rate.admit(from + CALL_PERIOD_NS));
+    assert!(!rate.admit(from + 2 * CALL_PERIOD_NS - 1));
+
+    // A refused call is not kept: refusals do not push the next admission out.
+    let mut rate = CallRate::new();
+    assert!((0..CALLS).all(|_| rate.admit(0)));
+    assert!((1..CALL_PERIOD_NS / 1_000_000).all(|ms| !rate.admit(ms * 1_000_000)));
+    assert!(rate.admit(CALL_PERIOD_NS));
+
+    // A clock that reads earlier than an admission admits nothing early.
+    let mut rate = CallRate::new();
+    assert!((0..CALLS).all(|_| rate.admit(CALL_PERIOD_NS)));
+    assert!(!rate.admit(0));
+
+    // Spaced a period's eighth apart, every call is admitted.
+    let mut rate = CallRate::new();
+    assert!((0..1000u64).all(|i| rate.admit(i * (CALL_PERIOD_NS / CALLS as u64))));
 }
 
 #[test]
 fn a_wide_access_is_held_to_every_port_it_spans() {
     // A word that begins on a free port and ends on a kept one, and the same
     // into a row, a read-only run and out of the port space.
-    assert_eq!(port(standing, 0x3F7, Width::Word, false), Err(Refused::KernelPort));
-    assert_eq!(port(standing, 0x1D, Width::DWord, false), Err(Refused::KernelPort));
-    assert_eq!(port(standing, 0x5F, Width::Word, true), Err(Refused::ClaimedPort));
-    assert_eq!(port(standing, 0xB1, Width::Word, true), Err(Refused::ReadOnlyPort));
-    assert!(port(standing, 0xB1, Width::Word, false).is_ok());
-    assert_eq!(port(standing, 0xFFFF, Width::Word, false), Err(Refused::PortSpan));
-    assert_eq!(port(standing, 0xFFFD, Width::DWord, true), Err(Refused::PortSpan));
-    assert_eq!(port(standing, 0x1800, Width::QWord, false), Err(Refused::PortSpan), "no port access is a qword");
+    assert_eq!(port(standing, 0x3F7, Width::Word, None), NO);
+    assert_eq!(port(standing, 0x1D, Width::DWord, None), NO);
+    assert_eq!(port(standing, 0x5F, Width::Word, Some(0)), refused_port(Refused::ClaimedPort));
+    assert_eq!(port(standing, 0x603, Width::Word, Some(0)), refused_port(Refused::ReadOnlyPort));
+    assert!(through(port(standing, 0x603, Width::Word, None)).is_some());
+    assert_eq!(port(standing, 0xFFFF, Width::Word, None), refused_port(Refused::PortSpan));
+    assert_eq!(port(standing, 0xFFFD, Width::DWord, Some(0)), refused_port(Refused::PortSpan));
+    assert_eq!(port(standing, 0x1800, Width::QWord, None), refused_port(Refused::PortSpan), "no port access is a qword");
 }
 
 const HOST_BRIDGE: Function = Function { bus: 0, device: 0, function: 0 };

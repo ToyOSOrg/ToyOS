@@ -178,6 +178,8 @@ const FADT_SCI_INT: usize = 46;
 const FADT_SMI_CMD: usize = 48;
 const FADT_ACPI_ENABLE: usize = 52;
 const FADT_ACPI_DISABLE: usize = 53;
+const FADT_S4BIOS_REQ: usize = 54;
+const FADT_PSTATE_CNT: usize = 55;
 const FADT_PM1A_EVT_BLK: usize = 56;
 const FADT_PM1B_EVT_BLK: usize = 60;
 const FADT_PM1B_CNT_BLK: usize = 68;
@@ -187,6 +189,7 @@ const FADT_PM1_EVT_LEN: usize = 88;
 const FADT_PM1_CNT_LEN: usize = 89;
 const FADT_GPE0_BLK_LEN: usize = 92;
 const FADT_GPE1_BLK_LEN: usize = 93;
+const FADT_CST_CNT: usize = 95;
 const FADT_X_PM1A_EVT_BLK: usize = 148;
 const FADT_X_PM1B_EVT_BLK: usize = 160;
 const FADT_X_PM1A_CNT_BLK: usize = 172;
@@ -214,23 +217,50 @@ pub enum PowerButton {
     ControlMethod,
 }
 
-/// The way out of legacy mode and back into it: the port, and the value
-/// written to it for each.
+/// The way out of legacy mode and back into it: the value written to
+/// `SMI_CMD` for each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LegacyMode {
-    pub smi_cmd: u16,
     pub acpi_enable: NonZeroU8,
     pub acpi_disable: NonZeroU8,
+}
+
+/// `SMI_CMD`, and each value Table 5.9 gives a meaning written to it; a value
+/// is zero where the FADT names none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SmiCmd {
+    pub port: u16,
+    pub acpi_enable: u8,
+    pub acpi_disable: u8,
+    /// Enters the S4BIOS state.
+    pub s4bios_req: u8,
+    /// Takes over processor performance state control.
+    pub pstate_cnt: u8,
+    /// Declares support for `_CST` and its change notification.
+    pub cst_cnt: u8,
+}
+
+impl SmiCmd {
+    /// `None` where `ACPI_ENABLE` or `ACPI_DISABLE` is zero: Table 5.9
+    /// reserves each as zero on a machine without legacy mode, and one that
+    /// names a way in and no way back is not taken in.
+    pub fn legacy(&self) -> Option<LegacyMode> {
+        Some(LegacyMode { acpi_enable: NonZeroU8::new(self.acpi_enable)?, acpi_disable: NonZeroU8::new(self.acpi_disable)? })
+    }
+
+    /// The five values, zero where the FADT names none.
+    pub const fn named(&self) -> [u8; 5] {
+        [self.acpi_enable, self.acpi_disable, self.s4bios_req, self.pstate_cnt, self.cst_cnt]
+    }
 }
 
 /// The fixed hardware an OS serves the SCI through, as the FADT names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FixedHardware {
     pub sci_int: u16,
-    /// `None` where the FADT leaves `SMI_CMD`, `ACPI_ENABLE` or `ACPI_DISABLE`
-    /// zero: Table 5.9 reserves each as zero on a machine without legacy mode,
-    /// and one that names a way in and no way back is not taken in.
-    pub legacy: Option<LegacyMode>,
+    /// `None` where the FADT leaves `SMI_CMD` zero, as Table 5.9 has a
+    /// machine without System Management Mode leave it.
+    pub smi_cmd: Option<SmiCmd>,
     pub pm1a_event: toyos_abi::acpi::Block,
     /// [`toyos_abi::acpi::Block::NONE`] where the machine has no GPE0 block.
     pub gpe0: toyos_abi::acpi::Block,
@@ -363,14 +393,20 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     };
 
     let smi_cmd = u32_at(FADT_SMI_CMD)?;
-    let smi_cmd = u16::try_from(smi_cmd).map_err(|_| FixedRefused::SmiCmd(smi_cmd))?;
-    let legacy = match (smi_cmd, NonZeroU8::new(byte(FADT_ACPI_ENABLE)?), NonZeroU8::new(byte(FADT_ACPI_DISABLE)?)) {
-        (1.., Some(acpi_enable), Some(acpi_disable)) => Some(LegacyMode { smi_cmd, acpi_enable, acpi_disable }),
-        _ => None,
+    let smi_cmd = match u16::try_from(smi_cmd).map_err(|_| FixedRefused::SmiCmd(smi_cmd))? {
+        0 => None,
+        port => Some(SmiCmd {
+            port,
+            acpi_enable: byte(FADT_ACPI_ENABLE)?,
+            acpi_disable: byte(FADT_ACPI_DISABLE)?,
+            s4bios_req: byte(FADT_S4BIOS_REQ)?,
+            pstate_cnt: byte(FADT_PSTATE_CNT)?,
+            cst_cnt: byte(FADT_CST_CNT)?,
+        }),
     };
     Ok(FixedHardware {
         sci_int: fadt.u16_at(FADT_SCI_INT).ok_or(short)?,
-        legacy,
+        smi_cmd,
         pm1a_event: block(Field::Pm1aEvent, pm1_event, pm1_event_len)?,
         gpe0,
         power_button: if flags & PWR_BUTTON == 0 { PowerButton::Fixed } else { PowerButton::ControlMethod },

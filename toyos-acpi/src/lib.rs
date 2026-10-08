@@ -29,7 +29,7 @@ pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNE
 pub use fadt::{
     century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
     rtc_century,
-    Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, CMOS_RAM,
+    Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, SmiCmd, CMOS_RAM,
     FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK,
 };
 use fadt::FADT_DSDT;

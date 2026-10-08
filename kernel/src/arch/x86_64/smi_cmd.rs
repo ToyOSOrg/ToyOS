@@ -20,6 +20,13 @@
 //! The port is this module's alone, so the `out` in [`answer`] is the only
 //! one the kernel can make to it, and [`answer`] reads which CPU it is on
 //! with interrupts closed beside that `out`: no caller's state decides it.
+//! It is counted there too, with the time it held the boot processor
+//! ([`counted`]), whoever asked for it.
+//!
+//! **The `acpi` claim's holder writes no byte here: it asks for one**, and the
+//! declaration says which bytes are never written for it
+//! (`toyos_userbound::Mediated::Command`): those the FADT gives a meaning,
+//! which are this kernel's own commands.
 //!
 //! **None is made once the stop has begun**: the power-off waits out a write
 //! in flight ([`settle`]) and then owns the hardware, and an SMI it did not
@@ -29,7 +36,7 @@ use core::fmt;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
-use toyos_userbound::{Mediated, Ports, Undeclared};
+use toyos_userbound::{KeptCommands, Mediated, Ports, Undeclared};
 
 use super::pio::{self, Slot, TakenBack};
 use super::{apic, cpu, percpu, IrqGuard};
@@ -52,6 +59,10 @@ static ASKED: AtomicU8 = AtomicU8::new(0);
 /// What the last answer read, published by the round's own answer.
 static ON: AtomicU32 = AtomicU32::new(0);
 static HELD_NS: AtomicU64 = AtomicU64::new(0);
+/// Every write made and the nanoseconds they held the boot processor, which
+/// alone writes and reads them.
+static WRITES: AtomicU64 = AtomicU64::new(0);
+static SPENT_NS: AtomicU64 = AtomicU64::new(0);
 static SMIS: [AtomicU64; 2] = [const { AtomicU64::new(UNREAD) }; 2];
 
 /// No SMI count: the register holds 32 bits.
@@ -69,6 +80,12 @@ pub struct Written {
     smis: [u64; 2],
 }
 
+impl Written {
+    pub fn held(&self) -> Duration {
+        self.held
+    }
+}
+
 impl fmt::Display for Written {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { on, asked_from, held, smis } = self;
@@ -81,12 +98,19 @@ impl fmt::Display for Written {
     }
 }
 
-/// Declare the port the FADT names. Boot's. The `acpi` claim's holder reads it
-/// and never writes it: a write is a command to the firmware, and [`write`]
-/// makes every one.
-pub fn declare(port: u16) -> Result<(), Undeclared> {
-    PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::ReadOnly)?);
+/// Declare the port the FADT names, and the values it names for it. Boot's.
+/// The `acpi` claim's holder reads it and never writes it: a write is a
+/// command to the firmware, and [`write`] makes every one.
+pub fn declare(port: u16, named: [u8; 5]) -> Result<(), Undeclared> {
+    PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::Command(KeptCommands(named)))?);
     Ok(())
+}
+
+/// How many writes this CPU has made and the nanoseconds they held it, on
+/// the boot processor of a machine that names the port; `None` on every
+/// other CPU, which makes none.
+pub fn counted() -> Option<(u64, u64)> {
+    (percpu::cpu_id() == BOOT && PORT.get().is_some()).then(|| (WRITES.load(Relaxed), SPENT_NS.load(Relaxed)))
 }
 
 /// Write `value` to `SMI_CMD` on the boot processor and return once it is
@@ -151,9 +175,14 @@ fn answer() {
         let smi = || super::counters::read().smi.unwrap_or(UNREAD);
         let before = smi();
         let from = crate::clock::now();
-        // SAFETY: `SMI_CMD`, declared; the value is one the FADT names for it, by `write`'s caller.
+        // SAFETY: `SMI_CMD`, declared; the value is one the FADT names for it
+        // or one the mediation's policy passed, by `write`'s caller.
         unsafe { cpu::outb(port, value) };
-        HELD_NS.store((crate::clock::now() - from).nanos(), Relaxed);
+        let held = (crate::clock::now() - from).nanos();
+        HELD_NS.store(held, Relaxed);
+        // One writer, this CPU with interrupts closed: no update is lost.
+        WRITES.store(WRITES.load(Relaxed) + 1, Relaxed);
+        SPENT_NS.store(SPENT_NS.load(Relaxed) + held, Relaxed);
         SMIS[0].store(before, Relaxed);
         SMIS[1].store(smi(), Relaxed);
         ON.store(percpu::cpu_id(), Relaxed);

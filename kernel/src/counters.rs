@@ -50,6 +50,14 @@ pub struct Hardware {
     pub aperf: Option<u64>,
     pub mperf: Option<u64>,
     pub envelope: Option<Envelope>,
+    pub firmware: Option<Firmware>,
+}
+
+/// The commands this CPU wrote to the firmware, where it is the one that
+/// writes them.
+pub struct Firmware {
+    pub calls: u64,
+    pub nanos: u64,
 }
 
 /// The power envelope's registers, where the CPU's performance request is
@@ -113,6 +121,8 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::HwpRequest => hardware.envelope.as_ref().map(|e| e.hwp_request),
             Counter::HwpRequestPkg => hardware.envelope.as_ref().map(|e| e.hwp_request_pkg),
             Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
+            Counter::FirmwareCalls => hardware.firmware.as_ref().map(|f| f.calls),
+            Counter::FirmwareNanos => hardware.firmware.as_ref().map(|f| f.nanos),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

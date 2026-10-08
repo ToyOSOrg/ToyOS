@@ -38,7 +38,7 @@ pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
-pub use port::{port_access, IoBitmap, Mediated, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
+pub use port::{port_access, IoBitmap, KeptCommands, Mediated, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
     align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, Entry,
