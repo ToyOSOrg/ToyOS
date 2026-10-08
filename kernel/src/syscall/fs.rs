@@ -83,18 +83,15 @@ pub(super) fn sys_delete(path: &str) -> u64 {
 
 pub(super) fn sys_chdir(path: &str) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    // Resolve under the VFS guard, then drop it before taking process-data:
-    // `sys_open` nests VFS inside process-data, so chdir must never hold VFS
-    // into it, or two threads of one process deadlock the ticket spinlock.
-    let new_cwd = {
-        let mut vfs = vfs::lock();
-        match vfs.cd(&cwd, path) {
-            Ok(new_cwd) => new_cwd,
-            Err(e) => return e.to_u64(),
+    // The VFS guard ends with this statement: `sys_open` takes VFS under process-data.
+    let resolved = vfs::lock().cd(&cwd, path);
+    match resolved {
+        Ok(new_cwd) => {
+            process::with_process_data(|d| d.cwd = new_cwd);
+            0
         }
-    };
-    process::with_process_data(|d| d.cwd = new_cwd);
-    0
+        Err(e) => e.to_u64(),
+    }
 }
 
 /// A spawned child's working directory, judged as `SYS_CHDIR` judges a path but
