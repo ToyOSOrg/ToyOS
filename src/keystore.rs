@@ -4,8 +4,8 @@
 //!
 //! **One store per host, outside every checkout** ([`host`]). Whichever
 //! checkout or clone first needs a product makes it, and every other finds it:
-//! nothing in a store names the checkout that made it as its owner. A runner's
-//! store is in its checkout (`src/release.rs`).
+//! nothing in a store names the checkout that made it, in a record or as the
+//! target of a link. A runner's store is in its checkout (`src/release.rs`).
 //!
 //! **A key hashes what its product's build reads**: its sources, the
 //! configuration its build is given, the tools that run that build and the keys
@@ -71,23 +71,16 @@ impl AsRef<Path> for Key {
 /// How long a product nobody uses stays in a store.
 const KEPT: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
-/// This host's store: `$TOYOS_STORE`, else `$XDG_CACHE_HOME/toyos`, else
-/// `~/.cache/toyos`.
+/// This host's store: `~/.cache/toyos`. Nothing else in the environment names
+/// another, so no build makes a second toolchain beside the first; a home that
+/// is no absolute path is refused, since its store would be another directory
+/// for every checkout that asks.
 pub fn host() -> PathBuf {
-    host_of(|name| std::env::var_os(name).map(PathBuf::from))
-}
-
-/// [`host`], with the environment it reads. A variable that is empty is unset,
-/// and a store that is no absolute path is refused: it would be another
-/// directory for every checkout that asks.
-fn host_of(var: impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
-    let var = |name: &str| var(name).filter(|value| !value.as_os_str().is_empty());
-    let store = var("TOYOS_STORE")
-        .or_else(|| var("XDG_CACHE_HOME").map(|cache| cache.join("toyos")))
-        .or_else(|| var("HOME").map(|home| home.join(".cache/toyos")))
-        .unwrap_or_else(|| panic!("none of TOYOS_STORE, XDG_CACHE_HOME and HOME is set, so nothing says where this host keeps its toolchains"));
-    assert!(store.is_absolute(), "the host's store is {}, which is no absolute path", store.display());
-    store
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("HOME is unset, so nothing says where this host keeps its toolchains"));
+    assert!(home.is_absolute(), "HOME is {}, which is no absolute path, and the host's store is under it", home.display());
+    home.join(".cache/toyos")
 }
 
 /// `kind`'s `key` in `store`, held in use: made by `make` first when `defect`
@@ -261,7 +254,7 @@ pub(crate) mod tests {
     /// using it**, read-only or not, and so does a half-made or half-removed
     /// one however lately its key was used; one used since stays, one somebody
     /// is using stays however long ago that use began, and one no lock ever
-    /// dated is dated by the sweep that finds it.
+    /// dated is dated by the sweep that finds it, and stays.
     #[test]
     fn a_sweep_removes_what_nobody_used_for_the_keep_time_and_nobody_uses() {
         let store = TempDir::new("sweep");
@@ -293,47 +286,26 @@ pub(crate) mod tests {
         }
         user.release();
         assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&in_use)]);
-
-        last_used(&store, Keyed::Sysroot, &undated, LONG_AGO);
-        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&undated)], "the sweep that first saw a product did not date it");
     }
 
-    /// **A use dates its key**: one last used longer ago than [`KEPT`] and
-    /// then used again stays, and a sweep of another kind takes none of this
-    /// one.
+    /// **A use dates its key**: of two products last used longer ago than
+    /// [`KEPT`], the one used again stays and the other goes, and a sweep of
+    /// another kind takes neither.
     #[test]
     fn a_product_used_again_is_kept() {
         let store = TempDir::new("sweep-used");
-        let key = Key::of(b"a product");
-        let dir = Keyed::Sysroot.store(&store).join(&key);
-        fs::create_dir_all(&dir).unwrap();
-        last_used(&store, Keyed::Sysroot, &key, LONG_AGO);
-        assert_eq!(sweep(&store, Keyed::Compiler), Vec::<PathBuf>::new());
-        // The use is another process's: this one never holds the key's lock.
-        buildlock::tests::sysroot_used_elsewhere(&store, &key).release();
-        assert_eq!(sweep(&store, Keyed::Sysroot), Vec::<PathBuf>::new(), "a product was swept after a use");
-        last_used(&store, Keyed::Sysroot, &key, LONG_AGO);
-        assert_eq!(sweep(&store, Keyed::Sysroot), [dir]);
-    }
-
-    /// **The store is the one the environment names first**: `TOYOS_STORE`,
-    /// then the user's cache directory, then the one under `HOME`; an empty
-    /// variable names nothing, and a relative store, or none, is refused.
-    #[test]
-    fn the_host_s_store_is_the_first_the_environment_names() {
-        let env = |set: &[(&str, &str)]| {
-            let set: Vec<(String, PathBuf)> = set.iter().map(|(name, value)| (name.to_string(), PathBuf::from(value))).collect();
-            move |name: &str| set.iter().find(|(set, _)| set == name).map(|(_, value)| value.clone())
-        };
-        let all = [("TOYOS_STORE", "/s"), ("XDG_CACHE_HOME", "/x"), ("HOME", "/h")];
-        assert_eq!(host_of(env(&all)), Path::new("/s"));
-        assert_eq!(host_of(env(&all[1..])), Path::new("/x/toyos"));
-        assert_eq!(host_of(env(&all[2..])), Path::new("/h/.cache/toyos"));
-        assert_eq!(host_of(env(&[("TOYOS_STORE", ""), ("XDG_CACHE_HOME", ""), ("HOME", "/h")])), Path::new("/h/.cache/toyos"));
-        for refused in [&[("TOYOS_STORE", "store"), ("HOME", "/h")][..], &[]] {
-            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host_of(env(refused))));
-            assert!(refused.is_err(), "a store no absolute path names was taken");
+        let dir = Keyed::Sysroot.store(&store);
+        let [again, never] = ["used again", "never again"].map(|name| Key::of(name.as_bytes()));
+        for key in [&again, &never] {
+            fs::create_dir_all(dir.join(key)).unwrap();
+            last_used(&store, Keyed::Sysroot, key, LONG_AGO);
         }
+        assert_eq!(sweep(&store, Keyed::Compiler), Vec::<PathBuf>::new());
+        // The use is another process's, and one sweep decides both products:
+        // none here takes a key whose lock this process has held.
+        buildlock::tests::sysroot_used_elsewhere(&store, &again).release();
+        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&never)], "a product was swept after a use, or one nothing used was kept");
+        assert!(dir.join(&again).is_dir());
     }
 
     /// **A key is the 16 lowercase hex digits [`Key::of`] gives, and no other

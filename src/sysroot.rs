@@ -651,18 +651,18 @@ fn holds(dir: &Path, commit: &str) -> bool {
     git_try(dir, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
 
-/// What a sysroot's [`SOURCES`] says: its key, the fork checkout its std was
-/// built in, and the witness of the sources it was built from.
-fn sources_text(key: &Key, fork: &Path, witness: &str) -> String {
-    format!("{key}\nfork {}\n{witness}\n", fork.display())
+/// What a sysroot's [`SOURCES`] says: its key, and the witness of the sources
+/// it was built from.
+fn sources_text(key: &Key, witness: &str) -> String {
+    format!("{key}\n{witness}\n")
 }
 
 /// The witness the sysroot at `dir` records it was built from ([`sources_text`]).
 pub(crate) fn recorded_witness(dir: &Path) -> Result<String, String> {
     let path = dir.join(SOURCES);
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    match text.splitn(3, '\n').collect::<Vec<_>>().as_slice() {
-        [_, fork, witness] if fork.starts_with("fork ") => Ok(witness.trim_end_matches('\n').to_string()),
+    match text.split_once('\n') {
+        Some((key, witness)) if Key::parse(key).is_some() && !witness.is_empty() => Ok(witness.trim_end_matches('\n').to_string()),
         _ => Err(format!("{} records no witness: {text:?}", path.display())),
     }
 }
@@ -785,7 +785,7 @@ fn build(root: &Path, store: &Path, compiler: &Compiler, fork: &Path, keys: &Key
             "the sources moved while sysroot {key} was being built (they are now {again}); \
              nothing was kept, and the next build makes the one they name"
         );
-        sources_text(key, fork, &witness(root))
+        sources_text(key, &witness(root))
     });
 }
 
@@ -811,7 +811,7 @@ fn build_freestanding(root: &Path, compiler: &Compiler, fork: &Path, key: &Key, 
             "the sources moved while the freestanding libraries {key} were being built (they are \
              now {again}); nothing was kept, and the next build makes the ones they name"
         );
-        format!("{key}\nfork {}\n", fork.display())
+        format!("{key}\n")
     });
 }
 
@@ -833,7 +833,7 @@ fn publish(dir: &Path, fill: impl FnOnce(&Path) -> String) {
     let sources = fill(&partial);
     fs::write(partial.join(SOURCES), sources)
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
-    keystore::remove(dir);
+    keystore::retire(dir);
     fs::rename(&partial, dir)
         .unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
@@ -1311,15 +1311,16 @@ mod tests {
     }
 
     /// **A sysroot's recorded witness is the one its build wrote**, read back
-    /// whole; a `SOURCES` naming no fork records none.
+    /// whole; a `SOURCES` naming a key alone, as the freestanding libraries'
+    /// does, records none.
     #[test]
     fn a_sysroot_records_the_witness_it_was_built_from() {
         let dir = TempDir::new("recorded-witness");
         let witness = "toyos-abi/src/lib.rs:0011223344556677\ntoyos/Cargo.toml:8899aabbccddeeff";
-        fs::write(dir.join(SOURCES), sources_text(&Key::of(b"a sysroot"), Path::new("/a/fork/rust"), witness)).unwrap();
+        fs::write(dir.join(SOURCES), sources_text(&Key::of(b"a sysroot"), witness)).unwrap();
         assert_eq!(recorded_witness(&dir), Ok(witness.to_string()));
         fs::write(dir.join(SOURCES), "0123456789abcdef\n").unwrap();
-        assert!(recorded_witness(&dir).is_err(), "a SOURCES with no fork line recorded a witness");
+        assert!(recorded_witness(&dir).is_err(), "a SOURCES naming a key alone recorded a witness");
     }
 
     /// **A crate's compiler is the one that built it, made again or not**: a

@@ -12,7 +12,7 @@ opened: 2026-08-19
 
 ```
 __CARGO_TESTS_ONLY_SRC_ROOT=<scratch> CARGO_TARGET_DIR=<scratch-target> \
-  cargo +toyos check -Z build-std=std,panic_abort \
+  RUSTUP_TOOLCHAIN=<sysroot> cargo check -Z build-std=std,panic_abort \
   --target x86_64-pc-windows-msvc --offline -p toyos-build --all-targets
 ```
 

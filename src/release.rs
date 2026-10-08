@@ -832,7 +832,7 @@ mod tests {
         let dir = Keyed::Sysroot.store(&store(root)).join(key);
         fs::create_dir_all(dir.join("bin")).unwrap();
         fs::write(dir.join("bin/rustc"), "rustc").unwrap();
-        fs::write(dir.join("SOURCES"), format!("{key}\nfork /a/runner/s/rust\n{witness}\n")).unwrap();
+        fs::write(dir.join("SOURCES"), format!("{key}\n{witness}\n")).unwrap();
         dir
     }
 

@@ -70,7 +70,7 @@ Vendor firmware a device or CPU verifies by its maker's signature may be shipped
 - **A red test is a defect**: it is fixed, or deleted with its issue recording the commit that restores it; a flaky test is deleted at once, never re-run. A red seen only under load is no flake: it is a defect, recorded with the host's load.
 - **A high-risk change names its checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: a negative control where a defect would otherwise land unseen — the *whole* change reverted onto the base the green arm was measured on — and an independent oracle where one exists: an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence.
 - **Never truncate command output.** No `| head`, `| tail`, `| grep` to reduce it: long output runs in the background and is read from its file — `[N characters truncated]` means data was lost.
-- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started and never another's process, killing only by PID and waiting out a build that holds the global lock, and removes the scratch output it made once it no longer needs it.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started and never another's process, killing only by PID and waiting out a build that holds a lock its own needs (a key's in the host's store or its worktree's, `src/buildlock.rs`), and removes the scratch output it made once it no longer needs it.
 
 ## Repository layout
 

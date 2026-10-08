@@ -1,10 +1,13 @@
 ---
-status: open
+status: assigned
 kind: track
 opened: 2026-10-08
 ---
 
 # The fork's pin is a file, and a worktree checks no fork out
+
+**Owner**: the orchestrator, who briefs each step below as a branch of its
+own.
 
 The `rust` gitlink becomes a pinned commit in a file, and a worktree that does
 not edit the fork holds no checkout of it. The host's store

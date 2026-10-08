@@ -37,7 +37,7 @@ use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is neither them nor
 /// [`config_text`]: the build below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, no LLVM tool copied, rustc without debuginfo; 6";
+const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, no LLVM tool copied, rustc without debuginfo, no link to the checkout's sources; 7";
 
 /// What a compiler's key is the identity of, in its fork checkout.
 const KEYED: [&str; 4] = ["compiler", "src/tools", "src/stage0", "Cargo.lock"];
@@ -62,6 +62,13 @@ const BUILD_DIR: &str = "build/toyos-compiler";
 /// The file a finished compiler carries last, naming its key. A directory
 /// without it is a build that did not finish.
 const SOURCE: &str = "SOURCE";
+
+/// The links bootstrap puts in a `stage2` to the checkout that built it, where
+/// rustup's `rust-src` and `rustc-dev` components would be. A stored compiler
+/// carries neither: the checkout goes and the compiler stays, and rustc reads
+/// one only to translate a library source's path to or from its remapped form
+/// (`rustc_session`'s `real_source_base_dir`), which no build here asks for.
+const CHECKOUT_LINKS: [&str; 2] = ["lib/rustlib/src/rust", "lib/rustlib/rustc-src/rust"];
 
 /// A compiler, held in use for as long as this lives.
 pub struct Compiler {
@@ -141,6 +148,9 @@ fn place(root: &Path, fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path)
     let partial = dir.with_extension("partial");
     keystore::remove(&partial);
     clone_tree(&stage2, &partial.join("stage2"));
+    for link in CHECKOUT_LINKS {
+        keystore::remove(&partial.join("stage2").join(link));
+    }
     // The sources the key named are the ones built, or this is not that key's.
     let again = self::key(fork);
     assert!(
@@ -341,6 +351,10 @@ pub(crate) mod tests {
         let mine = choose(&same, &store, &same.join("rust"), fake);
         let primarys = choose(&primary, &store, &primary.join("rust"), fake);
         assert_eq!((primarys.stage2.clone(), builds.get()), (mine.stage2.clone(), 1), "one compiler/ named two compilers");
+        for link in CHECKOUT_LINKS {
+            assert!(same.join("rust").join(BUILD_DIR).join("stage2").join(link).is_dir(), "the stand-in build made no {link}");
+            assert!(fs::symlink_metadata(mine.stage2.join(link)).is_err(), "a stored compiler links the checkout that built it at {link}");
+        }
 
         let ca = choose(&a, &store, &a.join("rust"), fake);
         let cb = choose(&b, &store, &b.join("rust"), fake);
@@ -439,7 +453,36 @@ pub(crate) mod tests {
         let spec = fs::read_to_string(fork.join("compiler/rustc_target/src/lib.rs")).unwrap();
         write(&stage2.join("bin/rustc"), &format!("a rustc knowing {spec}"));
         write(&stage2.join("lib/librustc_driver-1.dylib"), &spec);
+        for link in CHECKOUT_LINKS {
+            let link = stage2.join(link);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(fork, &link).unwrap();
+        }
         stage2
+    }
+
+    /// **Only a compiler built from what its key names is stored**: one whose
+    /// sources moved while it was being built is refused, and nothing is at
+    /// the key the build began under.
+    #[test]
+    fn a_compiler_whose_sources_moved_while_it_was_built_is_not_stored() {
+        let scratch = TempDir::new("compiler-moved");
+        let (_primary, store, [_same, a, _b]) = estate(&scratch);
+        let fork = a.join("rust");
+        let named = key(&fork);
+        let moving = |fork: &Path| {
+            let stage2 = fake_build(fork);
+            write(&fork.join("compiler/rustc_target/src/lib.rs"), "pub fn targets() { moved() }\n");
+            git(fork, &["commit", "-qam", "moved while built"]);
+            stage2
+        };
+        let said = refusal("a compiler whose sources moved while it was built was stored", || {
+            choose(&a, &store, &fork, moving);
+        });
+        assert!(said.contains("moved while compiler"), "{said}");
+        let stored: Vec<_> = fs::read_dir(Keyed::Compiler.store(&store)).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(stored, [std::ffi::OsString::from(format!("{named}.partial"))], "a compiler its key does not name was kept");
     }
 
     /// `fork`'s LLVM checked out at a commit of its own.

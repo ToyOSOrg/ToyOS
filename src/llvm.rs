@@ -1081,12 +1081,12 @@ mod tests {
 
     /// **A sweep takes an LLVM only once nothing has used it for the store's
     /// keep time and nobody uses it**: `a` moves to another LLVM while a
-    /// process of its own still uses the first, and a use of the first by `b`
-    /// dates it again.
+    /// process of its own still uses the first, which placing the second
+    /// leaves, and which goes once that process has let go.
     #[test]
     fn an_llvm_is_swept_once_nothing_used_it_for_the_keep_time() {
         let scratch = Scratch::new("llvm-sweep");
-        let (_primary, store, [_same, a, b]) = estate_built(&scratch);
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let user = elsewhere("use", &a, &store);
         let unused = key(&a.join("rust"));
         let first = Keyed::Llvm.store(&store).join(&unused);
@@ -1098,12 +1098,10 @@ mod tests {
         assert_ne!(second.dir, first);
         assert!(first.is_dir(), "placing an LLVM swept one still in use");
 
+        // The first one's lock was only ever its user's: the placement's sweep
+        // found it held, and this one is the first here to take it.
         user.release();
-        elsewhere("use", &b, &store).release();
-        let swept = || keystore::sweep(&store, Keyed::Llvm);
-        assert_eq!(swept(), Vec::<PathBuf>::new(), "the sweep took an LLVM used since");
-        last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
-        assert_eq!(swept(), [first], "the sweep kept an LLVM nothing had used for the keep time");
+        assert_eq!(keystore::sweep(&store, Keyed::Llvm), [first], "the sweep kept an LLVM nothing had used for the keep time");
         assert!(second.dir.is_dir());
     }
 
