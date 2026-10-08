@@ -376,7 +376,7 @@ pub(crate) mod tests {
 
         let mine = chosen(&same, &store, &same.join("rust"), fake);
         let primarys = chosen(&primary, &store, &primary.join("rust"), fake);
-        assert_eq!((primarys.stage2.clone(), builds.get()), (mine.stage2.clone(), 1), "one compiler/ named two compilers");
+        assert_eq!((&primarys.stage2, builds.get()), (&mine.stage2, 1), "one compiler/ named two compilers");
         for link in CHECKOUT_LINKS {
             assert!(same.join("rust").join(BUILD_DIR).join("stage2").join(link).is_dir(), "the stand-in build made no {link}");
             assert!(fs::symlink_metadata(mine.stage2.join(link)).is_err(), "a stored compiler links the checkout that built it at {link}");

@@ -268,7 +268,7 @@ pub(crate) mod tests {
         for read_only in [at(&unused, "/sub"), at(&unused, ""), at(&used, ".partial")] {
             fs::set_permissions(read_only, fs::Permissions::from_mode(0o555)).unwrap();
         }
-        last_used(&store, Keyed::Sysroot, &used, KEPT - Duration::from_secs(3600));
+        last_used(&store, Keyed::Sysroot, &used, Duration::from_secs(KEPT.as_secs() - 3600));
         last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
         let user = buildlock::tests::sysroot_used_elsewhere(&store, &in_use);
         last_used(&store, Keyed::Sysroot, &in_use, LONG_AGO);
