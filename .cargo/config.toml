@@ -1,0 +1,44 @@
+# One table per guest triple, since the workspace builds for all of them and for
+# the host: a guest build names its triple with `--target`, and a host build
+# takes no flags from here.
+
+# A checkout's own configuration, untracked: a fork clone under edit is listed
+# there (`.claude/agents/implementer.md`, "A fork").
+include = [{ path = "local.toml", optional = true }]
+
+[target.x86_64-unknown-none]
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
+
+# `-Adead_code` is the AArch64 port's declared debt: until its stage 7 gives
+# the syscall gate, the interrupt controller and the scheduler a way in, every
+# item only those reach is unreachable there and nowhere else — and an
+# `#[expect(dead_code)]` cannot be met under it, hence the second `-A`. Exit:
+# both go when `issues/toyos-runs-on-arm64.md`'s stage 7 lands. The
+# loader takes a static PIE at base 0 (`ET_DYN`, `R_AARCH64_RELATIVE` only),
+# which rust-lld makes of the target's static-model code with `-pie`: `-z
+# notext` lets absolute words stay in read-only sections, which the loader
+# relocates before anything runs. Position-independent codegen is not an
+# option: it reaches symbols through GOT slots holding virtual addresses,
+# which the entry cannot use while the MMU is off.
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "-Adead_code", "-Aunfulfilled_lint_expectations", "-Clink-arg=-pie", "-Clink-arg=-znotext"]
+
+# The loader's two tables are one list:
+# - `ed25519-dalek`'s field arithmetic in plain 64-bit integers: its default on
+#   x86-64 is the AVX2 backend, which this soft-float target has no registers
+#   for.
+# - `/Brepro` stamps the image with a hash of itself rather than the clock, and
+#   `/DEBUG:NONE` writes no PDB, whose GUID the image would otherwise carry and
+#   whose contents name the target directory: without both, two builds of one
+#   tree are two images.
+[target.x86_64-unknown-uefi]
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "--cfg=curve25519_dalek_backend=\"serial\"", "-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"]
+
+[target.aarch64-unknown-uefi]
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "--cfg=curve25519_dalek_backend=\"serial\"", "-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"]
+
+[target.x86_64-unknown-toyos]
+rustflags = ["-Dwarnings"]
+
+[target.aarch64-unknown-toyos]
+rustflags = ["-Dwarnings"]

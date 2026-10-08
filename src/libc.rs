@@ -39,7 +39,7 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .env("RUSTUP_TOOLCHAIN", toolchain)
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
-        .current_dir(root.join("userland"))
+        .current_dir(root)
         .stderr(std::process::Stdio::inherit())
         .output()
         .expect("Failed to build toyos-libc");
@@ -98,7 +98,7 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .env("RUSTUP_TOOLCHAIN", toolchain)
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
-        .current_dir(root.join("userland"))
+        .current_dir(root)
         .output()
         .unwrap_or_else(|e| panic!("run cargo for toyos-libc's staticlib: {e}"));
     assert!(

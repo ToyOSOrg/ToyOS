@@ -41,15 +41,3 @@ sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 # entry pointing at this image is found among the firmware's own variables.
 uefi = { version = "0.26.0", default-features = false, features = ["alloc"] }
 uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
-
-# The one profile every guest binary is built with. Optimised, because an
-# unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here.
-# `--release` would turn the last two off silently.
-[profile.toyos]
-inherits = "dev"
-opt-level = 2
-debug = true
-strip = "debuginfo"
-debug-assertions = true
-overflow-checks = true

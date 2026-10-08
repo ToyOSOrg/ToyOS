@@ -28,8 +28,8 @@ use crate::{flags, release, sdkversion};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
-                    the host workspace, the licences of what ships, clippy, the
-                    model controls, userland and the SDK (ci.yml, nightly)
+                    the workspace's host members, the licences of what ships,
+                    clippy, the model controls, userland and the SDK (ci.yml, nightly)
   seal              `host` from a cold tree, then that tree sealed as the host
                     cache's entry, which the step after it saves (nightly)
   toolchain         the cache entry of each store of this tree's toolchain
@@ -174,7 +174,7 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 /// that takes away the one edge the model's property rests on, and the verdict
 /// lines the model must then print.
 pub(crate) struct Control {
-    /// The model's package: a member of the host workspace, or [`KERNEL`].
+    /// The model's package: a host member of the workspace, or [`KERNEL`].
     pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
     /// The test target the verdicts' tests are in; `None` is the library's own.
@@ -219,14 +219,8 @@ use Verdict::{Fails, Passes, Says};
 
 /// The kernel package, whose library's tests are its models.
 pub(crate) const KERNEL: &str = "kernel";
-/// Its manifest, resolved on its own. Run from the repository root, cargo
-/// builds it for the host: `kernel/.cargo/config.toml` is read only below
-/// `kernel/`.
-pub(crate) const KERNEL_MANIFEST: &str = "kernel/Cargo.toml";
-/// Where a host build from it lands: the root's `target/`, since `kernel/target`
-/// is cleaned whole under the worktree's build lock, which `--ci host` does not
-/// take.
-pub(crate) const KERNEL_HOST_TARGET: &str = "target";
+/// The SDK's package, whose tests link no syscall on a host.
+pub(crate) const SDK: &str = "toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
@@ -486,13 +480,7 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
-    let mut args = vec!["test"];
-    // Cargo refuses `--features` for a package outside the workspace.
-    match control.krate {
-        KERNEL => args.extend(["--manifest-path", KERNEL_MANIFEST, "--target-dir", KERNEL_HOST_TARGET]),
-        member => args.extend(["-p", member]),
-    }
-    args.extend(["--features", control.feature]);
+    let mut args = vec!["test", "-p", control.krate, "--features", control.feature];
     match control.test {
         Some(test) => args.extend(["--test", test]),
         None => args.push("--lib"),
@@ -507,11 +495,11 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 }
 
 /// Every test that runs on the host and boots no guest. The build system's own
-/// tests, every member of the host workspace, the kernel's library, clippy with
-/// warnings denied, the concurrency models' negative controls, every userland
-/// crate with a host test ([`crate::userlandhost`], which also reds on a
-/// userland test none of them runs), every app the images ship for each host
-/// ([`apps_for`]), and the SDK.
+/// tests, every host member of the workspace ([`crate::hostws`]), the kernel's
+/// library, clippy with warnings denied, the concurrency models' negative
+/// controls, every userland crate with a host test ([`crate::userlandhost`],
+/// which also reds on a userland test none of them runs), every app the images
+/// ship for each host ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -521,8 +509,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
 /// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
 /// which any rustup installs, and userland carries no clippy shape
-/// (`src/clippy.rs`). Userland and the SDK are tested against the
-/// host triple for the same reason.
+/// (`src/clippy.rs`).
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
 /// read before any step. A developer's tree keeps the dates its edits gave it.
@@ -547,20 +534,14 @@ fn host(root: &Path) -> Vec<Step> {
     steps.extend([
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
-        step("the host workspace", || {
-            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
+        step("the workspace's host members", || {
+            let guests = crate::hostws::guest_packages(root);
+            let mut args = vec!["test", "--workspace", "--exclude", "toyos-build"];
+            args.extend(guests.iter().flat_map(|guest| ["--exclude", guest.as_str()]));
+            cargo(root, &args)
         }),
         step("the kernel's library", || {
-            cargo(root, &[
-                "test",
-                "--manifest-path",
-                KERNEL_MANIFEST,
-                "--target-dir",
-                KERNEL_HOST_TARGET,
-                "--lib",
-                "--features",
-                "sched-check",
-            ])
+            cargo(root, &["test", "-p", KERNEL, "--lib", "--features", "sched-check"])
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
     ]);
@@ -606,7 +587,7 @@ fn host(root: &Path) -> Vec<Step> {
             for name in survey.gated {
                 let manifest = format!("userland/{name}/Cargo.toml");
                 steps.push(step(&format!("userland/{name}"), || {
-                    cargo(root, &["test", "--manifest-path", &manifest, "--target", &host_triple])
+                    cargo(root, &["test", "--manifest-path", &manifest])
                 }));
             }
         }
@@ -622,11 +603,7 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
     }
-    // The SDK compiles against the ToyOS sysroot everywhere but here, and this
-    // build links no syscall.
-    steps.push(step("the toyos SDK", || {
-        cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
-    }));
+    steps.push(step("the toyos SDK", || cargo(root, &["test", "-p", SDK])));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
@@ -675,12 +652,12 @@ fn apps_for(
     if !status.success() {
         return Err(format!("rustup target add {triple} exited {status}"));
     }
-    let verb = verb(os, host_triple);
+    let how = judged_as(os, host_triple);
     let (attempted, declared) = attempted(programs, os);
     let mut red = Vec::new();
     for program in &attempted {
         let manifest = format!("{}/Cargo.toml", program.dir);
-        let args = [verb, "--manifest-path", manifest.as_str(), "--target", triple];
+        let args = [&how[..], &["--manifest-path", manifest.as_str()]].concat();
         if let Err(exit) = cargo(root, &args) {
             red.push(format!(
                 "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
@@ -692,7 +669,7 @@ fn apps_for(
     if !red.is_empty() {
         return Err(red.join("; "));
     }
-    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
+    let said = format!("{} app(s) pass `cargo {}`", attempted.len(), how.join(" "));
     if declared.is_empty() {
         Ok(said)
     } else {
@@ -700,12 +677,14 @@ fn apps_for(
     }
 }
 
-/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
-fn verb(os: Os, host_triple: &str) -> &'static str {
+/// `build` where the gate runs on `os`'s own triple, and `check --target`
+/// elsewhere. The host's own build names no triple, so it lands in the target
+/// the userland test steps fill and compiles only what they did not.
+fn judged_as(os: Os, host_triple: &str) -> Vec<&'static str> {
     if os.triple() == host_triple {
-        "build"
+        vec!["build"]
     } else {
-        "check"
+        vec!["check", "--target", os.triple()]
     }
 }
 
@@ -1099,7 +1078,11 @@ mod tests {
         assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
         assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
         assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
-        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
+        assert_eq!(Os::ALL.map(|os| judged_as(os, Os::Linux.triple())), [
+            vec!["build"],
+            vec!["check", "--target", Os::Macos.triple()],
+            vec!["check", "--target", Os::Windows.triple()],
+        ]);
     }
 
     #[test]
