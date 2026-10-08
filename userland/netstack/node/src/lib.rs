@@ -18,8 +18,8 @@
 //! [`Node::drain_events`].
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
-//! exchange draws its transaction id first. The lookups in flight draw after it, an id for each
-//! reply read and each wait looked at, and a port for each query sent.
+//! exchange draws its transaction id first. The lookups in flight draw after it: an id and then a
+//! port for each query they send, and nothing else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -48,7 +48,7 @@ use toyos_net_wire::Instant;
 
 pub use datagram::{Datagram, DatagramId, Refused};
 use lease::{Report, Stack, Verified};
-pub use resolve::{Ended, LookupId, Resolved};
+pub use resolve::{Ended, LookupId, NotStarted, Resolved};
 
 toyos_net_wire::counters! {
     DhcpUnsent = "node.dhcp-unsent";
@@ -56,6 +56,7 @@ toyos_net_wire::counters! {
     RouterRefused = "node.router-refused";
     NameUnsent = "node.name-unsent";
     QueryUnsent = "node.query-unsent";
+    QueryFailed = "node.query-failed";
 }
 
 /// A line for the log.

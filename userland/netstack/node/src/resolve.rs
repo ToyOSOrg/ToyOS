@@ -2,31 +2,34 @@
 //! names. Every decision about a question and every byte of a reply is `toyos_dns::Lookup`'s;
 //! this is its sockets on [udp], its clock and its draws.
 //!
-//! - **Each query leaves from a socket of its own**, on an ephemeral port [udp] picks from one
-//!   draw, and carries an id that is another draw (RFC 5452 §9.2): an off-path sender has to
-//!   guess both to be read at all. A reply is handed to the lookup as arriving for the query
-//!   whose socket it reached, and for no other.
+//! - **Each query leaves from a socket of its own, connected to its resolver's port 53**, on an
+//!   ephemeral port [udp] picks from one draw, and carries an id that is another draw (RFC 5452
+//!   §9.2): an off-path sender has to guess both to be read at all. [udp] delivers a connected
+//!   socket only what its peer's address and port sent to the address the socket sends from
+//!   (§9.1), so no reply is read from another source, at a broadcast or group address, or for a
+//!   query other than the one whose socket it reached.
 //! - **A socket lives as long as its query's answer is read**: it is closed when the lookup lets
 //!   the query go, ends, or is let go itself, and its port is free from then.
 //! - **A query [udp] refuses never left**: it is counted, holds no socket, and the lookup waits
-//!   its wait out as for any query nobody answered.
+//!   its wait out as for any query nobody answered. So does one the network reports back, its
+//!   resolver unreachable or its port refused: counted, and waited out.
+//! - **A lookup asks the resolvers of the lease it started under, and ends with that lease's
+//!   word**: when the held lease names other resolvers, or none is held.
 //! - **A wait is a deadline of the node's** ([`Resolver::next_deadline`]); a reply is a frame.
 //! - **At most `toyos_dns::MAX_LOOKUPS` lookups are held**, an ended one until
 //!   [`Node::take_resolved`] hands its answer over.
 //!
 //! **Untrusted input.** A reply's bytes are read by the lookup's reader alone, cut to the largest
-//! datagram [udp] delivers. Its source address and port are the wire's: the lookup reads a reply
-//! only from port 53 of the resolver its query went to.
+//! datagram [udp] delivers.
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_dns::{Asked, Failure, Lookup, Name, Step, MAX_LOOKUPS, PORT};
-use toyos_net_udp::SocketId;
-use toyos_net_wire::{Instant, Port};
+use toyos_net_udp::{Error, SocketId};
+use toyos_net_wire::Instant;
 
-use crate::datagram::Refused;
 use crate::lease::Stack;
 use crate::name::millis;
 use crate::{Counter, Counters, Node};
@@ -35,6 +38,16 @@ use crate::{Counter, Counters, Node};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LookupId(u64);
 
+/// Why a lookup was not started, in the pipe ABI's words (`toyos::net`'s `ERR_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotStarted {
+    /// No lease is held, or the held one names no resolver.
+    NotConnected,
+    /// `toyos_dns::MAX_LOOKUPS` are held, or no ephemeral port is free: the same call succeeds
+    /// later.
+    ResourceExhausted,
+}
+
 /// How a lookup ended without an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ended {
@@ -42,6 +55,8 @@ pub enum Ended {
     Failed(Failure),
     /// Every ephemeral port is held, so the next query had none to leave from.
     NoPort,
+    /// The lease the lookup started under went, or names other resolvers now.
+    LeaseChanged,
 }
 
 /// A lookup that ended: the name's addresses, at least one, or why none.
@@ -51,11 +66,21 @@ pub struct Resolved {
     pub result: Result<Vec<[u8; 4]>, Ended>,
 }
 
+/// One query whose answer is still read.
+#[derive(Clone, Copy)]
+struct Query {
+    asked: Asked,
+    socket: SocketId,
+    /// The resolver the socket is connected to.
+    to: [u8; 4],
+}
+
 struct Asking {
     id: LookupId,
     lookup: Lookup,
-    /// The socket of each query whose answer is still read.
-    queries: Vec<(Asked, SocketId)>,
+    /// The resolvers of the lease the lookup started under.
+    resolvers: Vec<Ipv4Addr>,
+    queries: Vec<Query>,
 }
 
 pub(crate) struct Resolver {
@@ -80,6 +105,22 @@ fn close(stack: &mut Stack, now: Instant, socket: SocketId) {
     }
 }
 
+/// The length of the next reply waiting at one of `queries`' sockets, now in `reply`, and the
+/// query it is for. An error the network reported against a query is counted and read past.
+fn waiting(queries: &[Query], stack: &mut Stack, reply: &mut [u8], counters: &mut Counters) -> Option<(Query, usize)> {
+    for query in queries {
+        loop {
+            match stack.recv_from(query.socket, reply) {
+                Ok(Some(received)) => return Some((*query, received.len)),
+                Ok(None) => break,
+                Err(Error::Failed(_)) => counters.add(Counter::QueryFailed, 1),
+                Err(Error::NoSuchSocket | Error::Refused(_)) => unreachable!("a query's socket is open while it is listed, and no rule refuses a receive"),
+            }
+        }
+    }
+    None
+}
+
 /// Carries out `step` for `asking`, then closes the socket of every query the lookup no longer
 /// reads an answer for. Returns how the lookup ended, if it did.
 fn act(asking: &mut Asking, step: Step, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> Option<Result<Vec<[u8; 4]>, Ended>> {
@@ -87,8 +128,9 @@ fn act(asking: &mut Asking, step: Step, now: Instant, stack: &mut Stack, counter
         // An any-address bind that names no port is refused only for want of a free one.
         Step::Ask { asked, to, query } => match stack.bind(Ipv4Addr::UNSPECIFIED, None, &mut *draw) {
             Ok((socket, _)) => {
-                if stack.send_to(now, socket, Ipv4Addr::from(to), PORT, &query).is_ok() {
-                    asking.queries.push((asked, socket));
+                let resolver = Ipv4Addr::from(to);
+                if stack.connect(now, socket, resolver, PORT).is_ok() && stack.send_to(now, socket, resolver, PORT, &query).is_ok() {
+                    asking.queries.push(Query { asked, socket, to });
                 } else {
                     counters.add(Counter::QueryUnsent, 1);
                     close(stack, now, socket);
@@ -101,10 +143,10 @@ fn act(asking: &mut Asking, step: Step, now: Instant, stack: &mut Stack, counter
         Step::Done(result) => Some(result.map_err(Ended::Failed)),
     };
     let lookup = &asking.lookup;
-    asking.queries.retain(|&(asked, socket)| {
-        let read = lookup.waiting().any(|waiting| waiting == asked);
+    asking.queries.retain(|query| {
+        let read = lookup.waiting().any(|waiting| waiting == query.asked);
         if !read {
-            close(stack, now, socket);
+            close(stack, now, query.socket);
         }
         read
     });
@@ -121,16 +163,17 @@ impl Resolver {
         self.asking.iter().map(|asking| Instant::from_millis(asking.lookup.due())).min()
     }
 
-    fn start(&mut self, now: Instant, name: Name, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> Result<LookupId, Refused> {
-        let servers: Vec<[u8; 4]> = stack.lease().map(|lease| lease.dns.iter().map(Ipv4Addr::octets).collect()).unwrap_or_default();
-        if servers.is_empty() {
-            return Err(Refused::NotConnected);
+    fn start(&mut self, now: Instant, name: Name, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> Result<LookupId, NotStarted> {
+        let resolvers = stack.lease().map(|lease| lease.dns.clone()).unwrap_or_default();
+        if resolvers.is_empty() {
+            return Err(NotStarted::NotConnected);
         }
         if self.asking.len().saturating_add(self.ended.len()) >= MAX_LOOKUPS {
-            return Err(Refused::ResourceExhausted);
+            return Err(NotStarted::ResourceExhausted);
         }
-        let Some((lookup, step)) = Lookup::start(name, &servers, millis(now), id(&mut *draw)) else { unreachable!("the lease names a resolver") };
-        let mut asking = Asking { id: LookupId(self.next), lookup, queries: Vec::new() };
+        let servers: Vec<[u8; 4]> = resolvers.iter().map(Ipv4Addr::octets).collect();
+        let Some((lookup, step)) = Lookup::start(name, &servers, millis(now), || id(&mut *draw)) else { unreachable!("the lease names a resolver") };
+        let mut asking = Asking { id: LookupId(self.next), lookup, resolvers, queries: Vec::new() };
         match act(&mut asking, step, now, stack, counters, &mut *draw) {
             None => {
                 self.next = self.next.wrapping_add(1);
@@ -138,45 +181,35 @@ impl Resolver {
                 self.asking.push(asking);
                 Ok(started)
             }
-            Some(Err(Ended::NoPort)) => Err(Refused::ResourceExhausted),
+            Some(Err(Ended::NoPort)) => Err(NotStarted::ResourceExhausted),
             Some(other) => unreachable!("a lookup's first step is a query, not {other:?}"),
         }
     }
 
-    /// Reads every reply that reached a query's socket and ends every wait that is over. A
-    /// lookup that ended closes its sockets and waits to be taken.
+    /// Ends every lookup whose lease went or names other resolvers, reads every reply that
+    /// reached a query's socket, and ends every wait that is over. A lookup that ended closes
+    /// its sockets and waits to be taken.
     pub(crate) fn pass(&mut self, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) {
         let Self { asking: lookups, ended, reply, .. } = self;
         let ms = millis(now);
         lookups.retain_mut(|asking| {
-            let mut done = None;
-            let mut at = 0usize;
+            let named = stack.lease().is_some_and(|lease| lease.dns == asking.resolvers);
+            let mut done = if named { None } else { Some(Err(Ended::LeaseChanged)) };
             while done.is_none() {
-                let Some(&(asked, socket)) = asking.queries.get(at) else { break };
-                let received = match stack.recv_from(socket, reply.as_mut_slice()) {
-                    Ok(Some(received)) => received,
-                    Ok(None) => {
-                        at = at.saturating_add(1);
-                        continue;
-                    }
-                    Err(_) => unreachable!("a query's socket is open while it is listed, and never connected"),
-                };
-                let Some(message) = reply.get(..received.len) else { continue };
-                // Port 0 is not port 53: the lookup drops it.
-                let port = received.source_port.map_or(0, Port::get);
-                let step = asking.lookup.on_datagram(asked, received.source.octets(), port, message, ms, id(&mut *draw));
+                let Some((query, len)) = waiting(&asking.queries, stack, reply.as_mut_slice(), counters) else { break };
+                let message = reply.get(..len).unwrap_or_default();
+                // The socket is connected: [udp] delivered this from port 53 of the resolver the
+                // query went to, or not at all.
+                let step = asking.lookup.on_datagram(query.asked, query.to, PORT, message, ms, || id(&mut *draw));
                 done = act(asking, step, now, stack, counters, &mut *draw);
-                // The step may have let this query go: its socket is read again from wherever it
-                // now is, or every socket from the first.
-                at = asking.queries.iter().position(|&(listed, _)| listed == asked).unwrap_or(0);
             }
             if done.is_none() {
-                let step = asking.lookup.on_time(ms, id(&mut *draw));
+                let step = asking.lookup.on_time(ms, || id(&mut *draw));
                 done = act(asking, step, now, stack, counters, &mut *draw);
             }
             let Some(result) = done else { return true };
-            for &(_, socket) in &asking.queries {
-                close(stack, now, socket);
+            for query in &asking.queries {
+                close(stack, now, query.socket);
             }
             ended.push(Resolved { id: asking.id, result });
             false
@@ -188,8 +221,8 @@ impl Resolver {
             if asking.id != id {
                 return true;
             }
-            for &(_, socket) in &asking.queries {
-                close(stack, now, socket);
+            for query in &asking.queries {
+                close(stack, now, query.socket);
             }
             false
         });
@@ -199,11 +232,9 @@ impl Resolver {
 
 impl Node {
     /// Starts looking `name` up at the resolvers the held lease names, which spends two draws:
-    /// the first query's id, then its port. Refused `NotConnected` while no lease is held or it
-    /// names no resolver, and `ResourceExhausted` while `toyos_dns::MAX_LOOKUPS` are held or no
-    /// ephemeral port is free. A call refused for want of a port has spent both draws; any other
-    /// refused call spends none.
-    pub fn resolve(&mut self, now: Instant, name: Name, mut draw: impl FnMut() -> u32) -> Result<LookupId, Refused> {
+    /// the first query's id, then its port. A call refused for want of a port has spent both;
+    /// any other refused call spends none.
+    pub fn resolve(&mut self, now: Instant, name: Name, mut draw: impl FnMut() -> u32) -> Result<LookupId, NotStarted> {
         self.resolver.start(now, name, &mut self.stack, &mut self.counters, &mut draw)
     }
 

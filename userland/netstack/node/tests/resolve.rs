@@ -13,10 +13,10 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{arp, terms, A, DNS, MAC, MAC_B, R};
+use common::{arp, from_server, message, message_of, terms, xid, A, ACK, DNS, MAC, MAC_B, NAK, R};
 use lan::{udp, Lan, Seen, Udp, B};
 use toyos_dns::{Failure, Name, MAX_LOOKUPS, ROUNDS, WAIT_MS};
-use toyos_net_node::{Counter, Ended, LookupId, Refused, Resolved};
+use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved};
 use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST};
 use toyos_net_udp::Counter as Rule;
 use toyos_net_wire::{Instant, Port};
@@ -147,8 +147,6 @@ struct Net {
     zone: Vec<(&'static str, u64, Says)>,
     /// Frames [`ANSWERS`] has sent and the wire has not yet delivered, with the time they arrive.
     held: Vec<(Instant, Vec<u8>)>,
-    /// Every address the node asked ARP for.
-    arp_asked: Vec<Ipv4Addr>,
     /// Every query that left, in order.
     queried: Vec<Query>,
     ended: Vec<Resolved>,
@@ -177,7 +175,6 @@ impl Net {
             lan,
             zone: Vec::new(),
             held: Vec::new(),
-            arp_asked: Vec::new(),
             queried: Vec::new(),
             ended: Vec::new(),
             draws: 0x7c00_8000,
@@ -197,7 +194,7 @@ impl Net {
         self.ms_of(self.lan.now)
     }
 
-    fn resolve(&mut self, text: &str) -> Result<LookupId, Refused> {
+    fn resolve(&mut self, text: &str) -> Result<LookupId, NotStarted> {
         self.lan.node.resolve(self.lan.now, name(text), counter(&mut self.draws))
     }
 
@@ -221,12 +218,7 @@ impl Net {
     /// What the far end does with one frame of the node's.
     fn far_end(&mut self, at: Instant, seen: &Seen) {
         match seen {
-            Seen::Arp { request: true, target, .. } => {
-                self.arp_asked.push(*target);
-                if *target == ANSWERS {
-                    self.lan.deliver(&arp(MAC, false, MAC_S, ANSWERS, A));
-                }
-            }
+            Seen::Arp { request: true, target, .. } if *target == ANSWERS => self.lan.deliver(&arp(MAC, false, MAC_S, ANSWERS, A)),
             Seen::Udp(udp) if udp.port == 53 => {
                 assert_eq!((udp.to, udp.destination), (MAC_S, ANSWERS), "a query left for a server the wire cannot reach");
                 let query = Query { at, udp: udp.clone(), id: u16::from_be_bytes([udp.payload[0], udp.payload[1]]), name: asked_name(&udp.payload) };
@@ -326,31 +318,48 @@ fn a_query_is_rfc_1035s_octets_from_a_port_and_with_an_id_of_its_own_draws() {
     assert_eq!(sent, [&Udp { to: MAC_S, source: A, source_port: 49_152 + 7, destination: ANSWERS, port: 53, ttl: 64, payload }]);
 }
 
-// RFC 5452 §9.1: a reply is accepted only from the address the query was sent to.
+// RFC 5452 §9.1: a reply is accepted only from the address the query was sent to. The query's
+// socket is connected to it, so another host's datagram finds no socket (RFC 1122 §4.1.3.1).
 #[test]
 fn a_reply_is_read_only_from_the_resolver_its_query_went_to() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let id = net.resolve("www.example").unwrap();
     net.pass();
     let asked = net.queried[0].clone();
+    let nobodys = net.lan.counted(Rule::RxNoSocket);
     net.lan.deliver(&udp(MAC, MAC_B, (B, 53), (A, asked.udp.source_port), &gives(&asked.udp.payload, FORGED)));
     assert_eq!(net.lan.node.take_resolved(), NONE, "another host's port 53 answered, with the query's id and question");
+    assert_eq!(net.lan.counted(Rule::RxNoSocket), nobodys + 1, "and its datagram reached no socket");
     net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
 }
 
-// RFC 5452 §9.1: and only from the port it was sent to, 53. RFC 768: a source port of zero is
-// no port.
+// RFC 5452 §9.1: and only from the port it was sent to, 53.
 #[test]
 fn a_reply_is_read_only_from_port_53() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let id = net.resolve("www.example").unwrap();
     net.pass();
     let asked = net.queried[0].clone();
-    for source in [5_353, 0] {
-        net.lan.deliver(&udp(MAC, MAC_S, (ANSWERS, source), (A, asked.udp.source_port), &gives(&asked.udp.payload, FORGED)));
-        assert_eq!(net.lan.node.take_resolved(), NONE, "the resolver's port {source} answered");
-    }
+    let reached = net.lan.counted(Rule::Rx);
+    net.lan.deliver(&udp(MAC, MAC_S, (ANSWERS, 5_353), (A, asked.udp.source_port), &gives(&asked.udp.payload, FORGED)));
+    assert_eq!(net.lan.counted(Rule::Rx), reached + 1, "the premise: the datagram reached [udp]");
+    assert_eq!(net.lan.node.take_resolved(), NONE, "the resolver's port 5353 answered");
+    net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
+}
+
+// RFC 768: a source port of zero is no port, and so not port 53.
+#[test]
+fn a_reply_from_port_0_is_not_read() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    let asked = net.queried[0].clone();
+    let portless = net.lan.counted(Rule::RxSrcPortZero);
+    net.lan.deliver(&udp(MAC, MAC_S, (ANSWERS, 0), (A, asked.udp.source_port), &gives(&asked.udp.payload, FORGED)));
+    assert_eq!(net.lan.counted(Rule::RxSrcPortZero), portless + 1, "the premise: the datagram reached [udp], which read it as from port 0");
+    assert_eq!(net.lan.node.take_resolved(), NONE, "the resolver's port 0 answered");
     net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
 }
@@ -418,22 +427,8 @@ fn nothing_but_its_answer_ends_a_lookup() {
 }
 
 // RFC 1035 §4.2.1: a resolver that does not answer is given up on after a wait and the next is
-// asked. The first is on the link and answers no ARP: the second is asked the moment the first
-// one's wait ends, no sooner for the wakes [ip]'s own requests cause, and answers.
-#[test]
-fn a_resolver_that_answers_no_arp_holds_up_no_other() {
-    let mut net = Net::leased(&[SILENT, ANSWERS], Some(R));
-    net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
-    let id = net.resolve("www.example").unwrap();
-    let ended = net.run(id, 25_000);
-    assert!(net.arp_asked.contains(&SILENT), "the premise: the first resolver was asked for its link address");
-    assert_eq!(ended, Some(Ok(vec![ADDRESS])), "the second resolver heard {:?}", net.queried);
-    assert_eq!(net.ms(), WAIT_MS);
-    assert_eq!(net.queried.len(), 1);
-}
-
-// The same, for a resolver no route leads to: [udp] refuses its query (`udp.no-route`), which is
-// counted, holds no port, and is waited out like a query nobody answered.
+// asked. No route leads to the first: [udp] refuses its query's socket that peer (`udp.no-route`),
+// and the query is counted, holds no port, and is waited out like one nobody answered.
 #[test]
 fn a_query_udp_refuses_is_counted_holds_no_port_and_is_waited_out() {
     let mut net = Net::leased(&[UNROUTED, ANSWERS], None);
@@ -479,9 +474,9 @@ fn the_lookup_past_the_cap_is_refused_until_an_answer_is_taken() {
     for held in 1..MAX_LOOKUPS {
         net.resolve("www.example").unwrap_or_else(|why| panic!("lookup {held} was refused: {why:?}"));
     }
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(Refused::ResourceExhausted));
+    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted));
     net.until(1_000);
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(Refused::ResourceExhausted), "an answer nobody took holds its place");
+    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted), "an answer nobody took holds its place");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id: first, result: Ok(vec![ADDRESS]) }]);
     net.resolve("www.example").expect("a taken answer's place is another's");
 }
@@ -491,17 +486,17 @@ fn the_lookup_past_the_cap_is_refused_until_an_answer_is_taken() {
 #[test]
 fn a_lookup_with_no_resolver_to_ask_is_refused_as_not_connected() {
     let mut lan = Lan::new();
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(Refused::NotConnected), "before a lease");
+    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "before a lease");
     let mut options = terms(3_600, Some(R));
     options.retain(|(code, _)| *code != 6);
     lan.lease_on(&options);
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(Refused::NotConnected), "a lease that names no resolver");
+    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "a lease that names no resolver");
 
     let mut lan = Lan::new();
     lan.lease(600);
     lan.node.resolve(lan.now, name("www.example"), sequence([1, 2])).expect("the premise: a held lease's resolver is asked");
     assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(Refused::NotConnected), "after the lease");
+    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "after the lease");
 }
 
 // A lookup nobody waits for is let go at once: the ports its queries left from are free, and its
@@ -521,7 +516,7 @@ fn a_lookup_let_go_frees_its_ports_and_its_place_at_once() {
     let ports = |net: &Net, asked: &str| -> Vec<u16> { net.queried.iter().filter(|query| query.name == asked).map(|query| query.udp.source_port).collect() };
     let (gone, stays) = (ports(&net, &names[3]), ports(&net, &names[4]));
     assert_eq!((gone.len(), stays.len()), (2, 2));
-    assert_eq!(net.resolve("www.example"), Err(Refused::ResourceExhausted), "the premise: every place is held");
+    assert_eq!(net.resolve("www.example"), Err(NotStarted::ResourceExhausted), "the premise: every place is held");
 
     net.lan.node.let_go(net.lan.now, ids[3]);
     for port in gone {
@@ -576,7 +571,7 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
         net.lan.node.udp_bind(ANY, None, || offset).unwrap();
     }
     let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, last])).expect("the one port left");
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("other.example"), sequence([0x8002, 0])), Err(Refused::ResourceExhausted));
+    assert_eq!(net.lan.node.resolve(net.lan.now, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::NoPort)));
     assert_eq!(net.ms(), WAIT_MS);
     let left: Vec<u16> = net.queried.iter().map(|query| query.udp.source_port).collect();
@@ -634,4 +629,116 @@ fn a_lookup_is_not_carried_by_a_later_ones_schedule() {
     assert_eq!(net.ms(), rounds * WAIT_MS, "the first lookup waited on the second's schedule");
     assert_eq!(net.run(second, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::TimedOut))));
     assert_eq!(net.ms(), WAIT_MS / 2 + rounds * WAIT_MS, "the second lookup waited on the first's schedule");
+}
+
+// RFC 5452 §9.1: a reply is matched on the address it was sent to as well, which is the one its
+// query left from. The limited broadcast, the subnet's broadcast and a group the node has joined
+// each reach [udp] at the query's port, which is the premise, and none is the query's answer.
+#[test]
+fn a_reply_is_read_only_at_the_address_its_query_left_from() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    net.lan.node.answer_as(net.lan.now, toyos_mdns::Host::new("toyos").unwrap()).unwrap();
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    let asked = net.queried[0].clone();
+    let group = (Ipv4Addr::new(224, 0, 0, 251), [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
+    for (destination, mac) in [(Ipv4Addr::BROADCAST, common::BROADCAST), (Ipv4Addr::new(192, 0, 2, 255), common::BROADCAST), group] {
+        let reached = net.lan.counted(Rule::Rx);
+        net.lan.deliver(&udp(mac, MAC_S, (ANSWERS, 53), (destination, asked.udp.source_port), &gives(&asked.udp.payload, FORGED)));
+        assert_eq!(net.lan.counted(Rule::Rx), reached + 1, "the premise: the datagram to {destination} reached [udp]");
+        assert_eq!(net.lan.node.take_resolved(), NONE, "a reply sent to {destination} was read");
+    }
+    net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
+}
+
+// `toyos-dns/src/tests.rs` holds this reply as `REAL_GOOGLE`: what a public resolver answered for
+// `dns.google` to a query with id 0x1001, 60 octets, recorded and not written here. Its two
+// addresses come out of the node in the reply's order.
+#[test]
+fn a_recorded_reply_of_a_public_resolver_answers_the_nodes_query() {
+    #[rustfmt::skip]
+    const RECORDED: [u8; 60] = [
+        0x10, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x03, 0x64, 0x6e, 0x73, 0x06, 0x67,
+        0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x00, 0x00, 0x01, 0x00, 0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+        0x02, 0xcf, 0x00, 0x04, 0x08, 0x08, 0x04, 0x04, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0xcf,
+        0x00, 0x04, 0x08, 0x08, 0x08, 0x08,
+    ];
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    let id = net.lan.node.resolve(net.lan.now, name("dns.google"), sequence([0x1001, 3])).unwrap();
+    net.pass();
+    let asked = net.queried[0].clone();
+    assert_eq!((asked.id, &asked.udp.payload[12..]), (0x1001, &RECORDED[12..28]), "the premise: the node's query carries the reply's id and question");
+    net.resolver_says(asked.udp.source_port, &RECORDED);
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![[8, 8, 4, 4], [8, 8, 8, 8]]) }]);
+}
+
+// RFC 1122 §3.3.1.1 and §4.1.3.3: a datagram whose next hop never answers ARP is reported to the
+// socket it left from. Each of a lookup's queries to such a resolver is counted as the network
+// reported it, and waited out like one nobody answered.
+#[test]
+fn a_query_the_network_reports_unreachable_is_counted_and_waited_out() {
+    let mut net = Net::leased(&[SILENT], Some(R));
+    let id = net.resolve("www.example").unwrap();
+    let rounds = u64::try_from(ROUNDS).unwrap();
+    assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::TimedOut))));
+    assert_eq!(net.ms(), rounds * WAIT_MS);
+    assert!(net.queried.is_empty(), "the premise: no query reached the wire: {:?}", net.queried);
+    assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), rounds);
+    assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 0);
+}
+
+/// A lookup in flight as the lease's first renewal leaves: the net, the lookup and the renewal's
+/// transaction id.
+fn renewing_under_a_lookup() -> (Net, LookupId, u32) {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    let sent = net.lan.udp().iter().filter(|udp| udp.port == 67).count();
+    assert!(net.lan.run_until(Duration::from_secs(50_000), |lan| lan.udp().iter().filter(|udp| udp.port == 67).count() > sent), "the renewal leaves");
+    let renewal = xid(&net.lan.udp().iter().rfind(|udp| udp.port == 67).expect("a renewal").payload);
+    net.seen = net.lan.sent.len();
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    assert_eq!(net.queried.len(), 1, "the premise: the lookup's first query left");
+    (net, id, renewal)
+}
+
+/// The options of a day's lease through the router that names `resolver`.
+fn naming(resolver: Ipv4Addr) -> Vec<(u8, Vec<u8>)> {
+    let mut options = terms(86_400, Some(R));
+    options.retain(|(code, _)| *code != 6);
+    options.push((6, resolver.octets().to_vec()));
+    options
+}
+
+// The resolvers are the held lease's and come and go with it. A lookup asks the ones its lease
+// named: a renewal that names the same ones leaves it be, and its answer still ends it.
+#[test]
+fn a_lookup_outlives_a_renewal_that_names_the_same_resolvers() {
+    let (mut net, id, renewal) = renewing_under_a_lookup();
+    net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(ANSWERS))));
+    assert_eq!(net.lan.node.take_resolved(), NONE);
+    let asked = net.queried[0].clone();
+    net.resolver_says(asked.udp.source_port, &gives(&asked.udp.payload, ADDRESS));
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Ok(vec![ADDRESS]) }]);
+}
+
+// A renewal that names another resolver ends the lookup by name, at once: no further query goes
+// to an address the held lease does not name, its answer is not read, and its port is free.
+#[test]
+fn a_lookup_ends_when_its_leases_resolvers_change() {
+    let (mut net, id, renewal) = renewing_under_a_lookup();
+    net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &naming(SILENT))));
+    assert_eq!(net.lan.node.lease().expect("held").dns, [SILENT], "the premise: the renewed lease names another resolver");
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
+    let left = net.queried[0].udp.source_port;
+    assert!(!net.port_held(left), "port {left} of the ended lookup");
+}
+
+// RFC 2131 §3.1: a DHCPNAK takes the lease, and the lookup under it ends by the same name.
+#[test]
+fn a_lookup_ends_when_its_lease_is_lost() {
+    let (mut net, id, renewal) = renewing_under_a_lookup();
+    net.lan.deliver(&from_server(common::BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
+    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
 }
