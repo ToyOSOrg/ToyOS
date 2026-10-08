@@ -39,8 +39,10 @@ use crate::toolchain::{self, host_triple};
 /// [`config_text`]: the build below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, no LLVM tool copied, rustc without debuginfo, no link to the checkout's sources; 7";
 
-/// What a compiler's key is the identity of, in its fork checkout.
-const KEYED: [&str; 4] = ["compiler", "src/tools", "src/stage0", "Cargo.lock"];
+/// What a compiler's key is the identity of, in its fork checkout: `library`
+/// for the host's std its `stage2` carries, which every guest crate's build
+/// scripts and proc macros link.
+const KEYED: [&str; 5] = ["compiler", "library", "src/tools", "src/stage0", "Cargo.lock"];
 
 /// What a compiler build is beyond its sources, as every key reads it:
 /// [`RECIPE`], the configuration bootstrap is given ([`config_text`]) with no
@@ -532,15 +534,16 @@ pub(crate) mod tests {
         assert_eq!(builds.get(), 0, "an LLVM checkout no commit holds built a compiler");
     }
 
-    /// Every source a compiler is built from moves its key: the tools, the
-    /// stage-0 pin and the lockfile by content, committed or not, and LLVM by
-    /// the commit its gitlink records.
+    /// Every source a compiler is built from moves its key: the library its
+    /// host std is built from, the tools, the stage-0 pin and the lockfile by
+    /// content, committed or not, and LLVM by the commit its gitlink records.
     #[test]
     fn every_source_of_a_compiler_moves_its_key() {
         let scratch = TempDir::new("compiler-key");
         let (_primary, _store, [same, _, _]) = estate(&scratch);
         let fork = same.join("rust");
         let sources = [
+            ("library/std/src/lib.rs", "pub fn b() {}\n"),
             ("src/tools/lld-wrapper/src/main.rs", "fn main() {}\n"),
             ("src/stage0", "compiler_version=nightly\n"),
             ("Cargo.lock", "# relocked\n"),
