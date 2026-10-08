@@ -92,10 +92,14 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let mut console = boot.text().to_string();
+    // A wait each: the server's line reaches the console through `logkeeper`
+    // and the kernel's record does not, so a capture that ends at either need
+    // not hold the other.
+    qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
     qemu::await_marker(&mut qemu, &mut console, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
-    let armed = serial::Serial::named("boot", console.clone());
-    armed.must_say(ACPI_ARMED)?;
-    armed.must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+    // The kernel's own record, committed before the one just waited for.
+    serial::Serial::named("boot", console.clone())
+        .must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     writeln!(qemu.stdin_mut(), "run test_rs_stop_short").expect("write to QEMU stdin");
