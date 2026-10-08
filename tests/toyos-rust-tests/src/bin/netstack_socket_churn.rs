@@ -13,9 +13,16 @@
 //! whose send pipe netstack never reads again, so nothing but the kernel's
 //! word on that pipe's other end can tell netstack it is gone: each such
 //! connection is counted ownerless, with the pipe empty and with bytes in it.
+//!
+//! On the same server, a client that moves netstack a handle that is no pipe
+//! end where its receive end belongs, and keeps its send end: the kernel
+//! refuses netstack's watch of it, and that refusal is all that ends the
+//! connection.
 
 use std::time::{Duration, Instant};
 
+use toyos::net::{MsgType, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse};
+use toyos::OwnedHandle;
 use toyos_inspect::{Value, NET};
 
 /// The host, as QEMU's user network names it to a guest.
@@ -57,6 +64,38 @@ fn left_after_a_shutdown(port: u16, unread: &[u8]) {
     }
 }
 
+/// A connection the peer holds open, whose client keeps its send end and moved
+/// netstack an acceptor for the end netstack writes the peer's bytes into. The
+/// peer sends none, so netstack never writes it: its watch is refused, and the
+/// connection is reset and let go.
+fn a_receive_end_that_is_no_pipe_end_is_refused(port: u16) {
+    let live = count("net.piped.live");
+    let (acceptor, _connector) = toyos::port::create().expect("a port");
+    // SAFETY: the acceptor's one handle, which nothing else answers for.
+    let no_pipe_end = unsafe { OwnedHandle::from_raw(acceptor.into_raw()) };
+    let (from_client, kept) = toyos::pipe_pair().expect("a pipe");
+    let connected: TcpConnectResponse = NetstackConn::connect()
+        .and_then(|netstack| {
+            netstack.request_with_handles(
+                [no_pipe_end, OwnedHandle::from(from_client)],
+                MsgType::TcpConnectPiped,
+                &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 0 },
+            )
+        })
+        .and_then(|pending| pending.response())
+        .unwrap_or_else(|e| panic!("the holding server, with an acceptor for a receive end: {e:?}"));
+    let id = connected.socket_id;
+    let asked = Instant::now();
+    while count("net.piped.live") != live {
+        assert!(
+            asked.elapsed() < LET_GO,
+            "netstack still counts connection {id} live {LET_GO:?} after the kernel refused the watch of its \
+             receive end, which is no pipe end"
+        );
+    }
+    drop(kept);
+}
+
 fn main() {
     let port = |at: usize| -> u16 {
         std::env::args()
@@ -94,6 +133,8 @@ fn main() {
         untabled,
         "netstack keeps the socket of a connection whose table entry it let go"
     );
+    a_receive_end_that_is_no_pipe_end_is_refused(holding);
+    println!("netstack_socket_churn: a connection whose receive end is no pipe end was reset");
     left_after_a_shutdown(holding, &[]);
     left_after_a_shutdown(holding, b"never read");
     println!("netstack_socket_churn: two clients that shut down and left are ownerless");

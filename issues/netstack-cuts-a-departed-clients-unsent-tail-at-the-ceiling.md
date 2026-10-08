@@ -6,9 +6,12 @@ opened: 2026-10-08
 
 # netstack cuts a departed client's unsent tail at the ceiling
 
-A piped connection whose client holds neither pipe end has `OWNERLESS_LIFE`,
-100 seconds from the client's leaving, to finish on the wire
-(`userland/netstack/src/main.rs`, `ownerless`). The bound is absolute: at the
+A piped connection whose client holds no end of a direction still open
+(`userland/netstack/src/main.rs`, `clientless`) has `OWNERLESS_LIFE`, 100
+seconds from the pass that found it so, to finish on the wire (`ownerless`).
+That is every client that is gone, and one that is not: a client that let go
+of its send end and still holds the read end of a receive pipe netstack closed
+at the peer's FIN is timed and cut the same way, alive. The bound is absolute: at the
 ceiling the socket is reset whatever it still owes its peer. A program that
 writes and exits is the ordinary case of a client that is gone, so when its
 peer takes longer than 100 seconds to acknowledge what was written, the peer's

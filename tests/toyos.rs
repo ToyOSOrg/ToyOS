@@ -2794,9 +2794,11 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 }
 
 /// netstack's stream count returns once connections that ended without their
-/// client's close request are let go, and a client that left a connection its
-/// peer holds is counted gone. One host server here ends each connection it
-/// accepts at once and one holds each; the guest's comparisons are the verdict.
+/// client's close request are let go, a client that left a connection its
+/// peer holds is counted gone, and a connection whose receive end the kernel
+/// refuses netstack's watch of is reset. One host server here ends each
+/// connection it accepts at once and one holds each; the guest's comparisons
+/// are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
     const LEASED: &str = "netstack: DHCP: lease ";
