@@ -16,16 +16,18 @@
 //! refuses, for whatever reason. [tcp] then resets every connection that still waits, so each
 //! peer learns at once, and the port is free.
 //!
-//! **A stream starts with the options its listener has when it is accepted**, which the node
-//! writes to [tcp] at the accept. The listener's are the node's to hold and not [tcp]'s: [tcp]
-//! hands a listener's options to a connection at its SYN and has no call that reads a
-//! connection's back, so a stream seeded from them would answer for an option its connection,
-//! begun before the option was set, does not have.
+//! **A stream starts with the options its connection has**, and those are its listener's as
+//! they were when its SYN arrived: [tcp] hands them over then (LS-10), the node reads them
+//! back at the accept, and an option set on the listener afterwards reaches the connections
+//! that begin afterwards. A host does the same with `TCP_NODELAY` set on a listening socket
+//! (`tests/host.rs` asks the host the tests run on).
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use core::net::Ipv4Addr;
 
-use toyos_net_tcp::{Endpoint, Options};
+use toyos_net_shard::ListenError;
+use toyos_net_tcp::{Endpoint, Error, Options};
 use toyos_net_wire::{Instant, Port};
 
 use crate::streams::{Pipes, StreamId, WriteRefusal};
@@ -46,7 +48,10 @@ pub struct ListenerId(u64);
 pub enum ListenRefused {
     /// The node holds all it has places for (`places`).
     Full,
-    /// The port is another listener's, or no drawn port was free.
+    /// The address named is not this machine's to bind: what `Node::udp_bind` refuses by the
+    /// same rule.
+    NotLocal,
+    /// The port is another listener's at that address, or no drawn port was free.
     InUse,
 }
 
@@ -76,7 +81,7 @@ struct Listener {
     owner: Box<dyn Wake>,
     /// Wakes written that no accept has spent.
     unspent: usize,
-    /// What a stream accepted here starts with.
+    /// The options last written to [tcp].
     options: Options,
 }
 
@@ -89,10 +94,10 @@ pub(crate) struct Listeners {
 }
 
 impl Node {
-    /// A passive open on `port`, or on a port chosen from `draw`'s candidates, at every address
-    /// the interface holds or comes to hold. Answers the listener and its port. Refused, nothing
-    /// was made and `owner` is dropped.
-    pub fn listen(&mut self, port: Option<Port>, owner: Box<dyn Wake>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
+    /// A passive open at `addr`, 0.0.0.0 meaning every address the interface holds or comes to
+    /// hold, on `port` or on a port chosen from `draw`'s candidates. Answers the listener and
+    /// its port. Refused, nothing was made and `owner` is dropped.
+    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, owner: Box<dyn Wake>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
         if self.room() == 0 {
             return Err(ListenRefused::Full);
         }
@@ -100,18 +105,25 @@ impl Node {
             let [low, high, ..] = draw().to_le_bytes();
             u16::from_le_bytes([low, high])
         };
-        let Some((bound, port)) = self.stack.tcp_listen(port, candidate) else { return Err(ListenRefused::InUse) };
+        let (bound, port) = match self.stack.tcp_listen(addr, port, candidate) {
+            Ok(listening) => listening,
+            Err(ListenError::NotLocal) => return Err(ListenRefused::NotLocal),
+            Err(ListenError::Tcp(Error::AddrInUse)) => return Err(ListenRefused::InUse),
+            Err(ListenError::Tcp(refusal)) => unreachable!("[tcp] refused a passive open for more than its port: {refusal:?}"),
+        };
         let id = ListenerId(self.listeners.next);
         self.listeners.next = self.listeners.next.saturating_add(1);
         self.listeners.live.insert(id, Listener { bound, owner, unspent: 0, options: Options::default() });
         Ok((id, port))
     }
 
-    /// Nagle's algorithm off or on (RFC 9293 §3.7.4) for every stream accepted at `id` from here
-    /// on; one already accepted keeps its own. `false` is an id that names no listener.
+    /// Nagle's algorithm off or on (RFC 9293 §3.7.4) for every connection whose SYN arrives at
+    /// `id` from here on; one that began before keeps what it has. `false` is an id that names
+    /// no listener.
     pub fn set_listener_nodelay(&mut self, id: ListenerId, nodelay: bool) -> bool {
         let Some(listener) = self.listeners.live.get_mut(&id) else { return false };
         listener.options.nodelay = nodelay;
+        self.stack.tcp_set_listener_options(listener.bound, listener.options);
         true
     }
 
@@ -124,20 +136,20 @@ impl Node {
     pub fn accept(&mut self, now: Instant, id: ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
         let Some(listener) = self.listeners.live.get_mut(&id) else { return Err(AcceptRefused::NoListener) };
         listener.unspent = listener.unspent.saturating_sub(1);
-        let (bound, options) = (listener.bound, listener.options);
-        let answer = self.take(now, bound, options, pipes);
+        let bound = listener.bound;
+        let answer = self.take(bound, pipes);
         self.bridge(now);
         answer
     }
 
-    fn take(&mut self, now: Instant, bound: toyos_net_tcp::ListenerId, options: Options, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
+    fn take(&mut self, bound: toyos_net_tcp::ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
         let Some(pipes) = pipes else { return Err(AcceptRefused::NoPipes) };
         if self.room() == 0 {
             return Err(AcceptRefused::Full);
         }
-        let Some((conn, tuple)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
+        let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
         // The peer's address is what `streams` counts a stream its client can see no more by.
-        let id = self.streams.accepted(now, &mut self.stack, conn, tuple.remote.addr, options, pipes);
+        let id = self.streams.accepted(conn, tuple.remote.addr, options, pipes);
         Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port })
     }
 

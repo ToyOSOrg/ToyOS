@@ -319,9 +319,8 @@ impl Streams {
     }
 
     /// Holds a connection a listener's owner accepted, established, on the pipes its accept
-    /// handed over, and writes it its listener's `options`.
-    pub(crate) fn accepted(&mut self, now: Instant, stack: &mut Stack, conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> StreamId {
-        stack.tcp_set_options(now, conn, options);
+    /// handed over. `options` are the ones [tcp] says it has.
+    pub(crate) fn accepted(&mut self, conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> StreamId {
         self.hold(Stream::established(conn, remote, options, pipes))
     }
 

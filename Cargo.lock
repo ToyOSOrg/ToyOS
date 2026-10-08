@@ -5918,6 +5918,7 @@ name = "toyos-net-node"
 version = "0.1.0"
 dependencies = [
  "etherparse",
+ "socket2",
  "toyos-dhcp",
  "toyos-mdns",
  "toyos-net-ip",

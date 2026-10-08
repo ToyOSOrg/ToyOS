@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{arp, terms, Wire, A, MAC, MAC_B, MAC_R, R};
+use common::{arp, terms, Segment, Wire, A, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 use toyos_net_shard::ConnectError;
@@ -127,18 +127,6 @@ fn dropped(client: &Client) -> (bool, bool) {
 }
 
 // ---- the far end ----
-
-/// A segment the node emitted, as `etherparse` read it.
-#[derive(Clone, Debug)]
-struct Segment {
-    seq: u32,
-    ack: Option<u32>,
-    syn: bool,
-    fin: bool,
-    rst: bool,
-    window: u16,
-    text: Vec<u8>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Manner {
@@ -272,9 +260,24 @@ impl Far {
     /// The outside reading of a frame the node emitted, and the frames it is answered with.
     /// Ethernet II from the node's MAC; then ARP, whose requests for this peer and the router
     /// are answered; a datagram of the DHCP client's, which `lease.rs` reads; or a TCP segment
-    /// to port 80, with the lengths and checksums `etherparse` computes, heard if it is to this
-    /// peer's address.
+    /// to port 80, as `common::segment` reads it, heard if it is to this peer's address.
     fn hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
+        if let Some(segment) = common::segment(frame) {
+            assert_eq!(segment.to_port, PORT);
+            if segment.to != self.addr || (self.parked && segment.from_port != self.port) {
+                return Vec::new();
+            }
+            assert_eq!(segment.to_mac, self.mac, "to the peer's MAC");
+            self.segments.push(segment.clone());
+            if segment.syn {
+                self.port = segment.from_port;
+                self.received.clear();
+                self.fin = false;
+            } else if segment.from_port != self.port {
+                return Vec::new();
+            }
+            return self.answer(&segment);
+        }
         let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
         let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
         assert_eq!(ethernet.source(), MAC, "from the node's MAC");
@@ -288,37 +291,7 @@ impl Far {
                 }
             }
             (Some(NetSlice::Ipv4(_)), Some(TransportSlice::Udp(_))) => Vec::new(),
-            (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(tcp))) => {
-                let header = ip.header();
-                assert_eq!(header.header_checksum(), header.to_header().calc_header_checksum(), "the IPv4 header checksum");
-                assert_eq!(usize::from(header.total_len()), 20 + tcp.slice().len(), "IPv4's length is the segment's");
-                assert_eq!(header.source_addr(), A);
-                assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
-                assert_eq!(tcp.destination_port(), PORT);
-                if header.destination_addr() != self.addr || (self.parked && tcp.source_port() != self.port) {
-                    return Vec::new();
-                }
-                assert_eq!(ethernet.destination(), self.mac, "to the peer's MAC");
-                let segment = Segment {
-                    seq: tcp.sequence_number(),
-                    ack: tcp.ack().then(|| tcp.acknowledgment_number()),
-                    syn: tcp.syn(),
-                    fin: tcp.fin(),
-                    rst: tcp.rst(),
-                    window: tcp.window_size(),
-                    text: tcp.payload().to_vec(),
-                };
-                self.segments.push(segment.clone());
-                if segment.syn {
-                    self.port = tcp.source_port();
-                    self.received.clear();
-                    self.fin = false;
-                } else if tcp.source_port() != self.port {
-                    return Vec::new();
-                }
-                self.answer(&segment)
-            }
-            other => panic!("neither ARP, UDP nor TCP: {other:?}"),
+            other => panic!("neither ARP nor UDP: {other:?}"),
         }
     }
 
@@ -401,9 +374,7 @@ impl Net {
     /// request the same answer, which is one frame. A segment to an address no peer is at is
     /// the node's mistake, and no peer would hear it.
     fn hears(&mut self, frame: &[u8]) -> Vec<Vec<u8>> {
-        let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
-        if let (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(_))) = (&packet.net, &packet.transport) {
-            let to = ip.header().destination_addr();
+        if let Some(Segment { to, .. }) = common::segment(frame) {
             assert!(self.far.addr == to || self.parked.iter().any(|far| far.addr == to), "a segment to {to}, where no peer is");
         }
         let mut answers = self.far.hears(frame);

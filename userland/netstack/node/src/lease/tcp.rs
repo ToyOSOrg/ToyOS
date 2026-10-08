@@ -3,7 +3,7 @@
 
 use core::net::Ipv4Addr;
 
-use toyos_net_shard::ConnectError;
+use toyos_net_shard::{ConnectError, ListenError};
 use toyos_net_tcp::{ConnId, Endpoint, Error, ListenerId, Options, Received, Status, Tuple};
 use toyos_net_wire::{Instant, Port};
 
@@ -69,14 +69,16 @@ impl Stack {
         self.shard.orphans()
     }
 
-    /// A passive open on every address the interface holds or comes to hold, at `port` or at one
-    /// of `random`'s candidates. `None` is a port that is taken, or no candidate free.
-    pub(crate) fn tcp_listen(&mut self, port: Option<Port>, random: impl FnMut() -> u16) -> Option<(ListenerId, Port)> {
-        match self.shard.listen(Ipv4Addr::UNSPECIFIED, port, random) {
-            Ok(id) => Some((id, held(self.shard.listener_port(id)))),
-            Err(Error::AddrInUse) => None,
-            Err(refusal) => unreachable!("[tcp] refused a passive open for more than its port: {refusal:?}"),
-        }
+    /// A passive open at `addr`, 0.0.0.0 meaning every address the interface holds or comes to
+    /// hold, and at `port` or at one of `random`'s candidates.
+    pub(crate) fn tcp_listen(&mut self, addr: Ipv4Addr, port: Option<Port>, random: impl FnMut() -> u16) -> Result<(ListenerId, Port), ListenError> {
+        let id = self.shard.listen(addr, port, random)?;
+        Ok((id, held(self.shard.listener_port(id))))
+    }
+
+    /// What a connection whose SYN arrives at `id` from here on starts with.
+    pub(crate) fn tcp_set_listener_options(&mut self, id: ListenerId, options: Options) {
+        held(self.shard.set_listener_options(id, options));
     }
 
     /// How many connections finished their handshake at `id` and wait to be accepted.
@@ -84,10 +86,11 @@ impl Stack {
         held(self.shard.ready(id))
     }
 
-    /// The oldest connection waiting at `id`, the caller's from here, and its two endpoints.
-    pub(crate) fn tcp_accept(&mut self, id: ListenerId) -> Option<(ConnId, Tuple)> {
+    /// The oldest connection waiting at `id`, the caller's from here, its two endpoints and the
+    /// options it has.
+    pub(crate) fn tcp_accept(&mut self, id: ListenerId) -> Option<(ConnId, Tuple, Options)> {
         let conn = held(self.shard.accept(id))?;
-        Some((conn, held(self.shard.tuple(conn))))
+        Some((conn, held(self.shard.tuple(conn)), held(self.shard.options(conn))))
     }
 
     /// [tcp] resets every connection still waiting at `id`; `id` names nothing after.

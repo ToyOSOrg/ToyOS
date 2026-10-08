@@ -215,9 +215,9 @@ pub struct Tcp {
     demux: BTreeMap<Tuple, Entry>,
     time_waits: BTreeSet<(Instant, Tuple)>,
     deadlines: BTreeSet<(Instant, u32)>,
-    /// Connections that became eligible for the caller's round since it last drained them.
     /// Connections whose user let go and that have not ended.
     orphans: usize,
+    /// Connections that became eligible for the caller's round since it last drained them.
     eligible: Vec<ConnId>,
     /// Connections freed while offered to the caller's round, since it last drained them.
     gone: Vec<ConnId>,
@@ -973,6 +973,12 @@ impl Tcp {
     }
 
     // ---- user calls ----
+
+    /// The options the connection has: the ones its listener had when its SYN arrived, or the
+    /// defaults of an active open, until [`Self::set_options`] writes others.
+    pub fn options(&mut self, id: ConnId) -> Result<Options, Error> {
+        Ok(self.conn(id)?.options)
+    }
 
     pub fn set_options(&mut self, now: Instant, id: ConnId, options: Options) -> Result<(), Error> {
         self.conn(id)?.options = options;

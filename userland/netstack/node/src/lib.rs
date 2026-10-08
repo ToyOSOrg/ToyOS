@@ -7,10 +7,11 @@
 //! The node carries out what the client asks and tells it what became of its address. What the
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
 //! its types keep. A client's TCP connection and its two pipes are `streams`', a passive open and
-//! its owner's wakes `listeners`', and how many of either the node holds `places`'.
+//! its owner's wakes `listeners`'.
 //!
 //! A client's datagram sockets are `datagram`'s and the machine's `<host>.local` name is `name`'s:
-//! both read the lease and write none of it.
+//! both read the lease and write none of it. How many streams, listeners and datagram sockets
+//! the node holds is `places`'.
 //!
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
@@ -79,7 +80,10 @@ pub struct Node {
     datagram: Vec<u8>,
     streams: streams::Streams,
     listeners: listeners::Listeners,
-    /// How many streams, listeners and connections [tcp] finishes alone the node holds at most.
+    /// The clients' datagram sockets bound and not closed.
+    sockets: usize,
+    /// How many streams, listeners, datagram sockets and connections [tcp] finishes alone the
+    /// node holds at most.
     places: usize,
 }
 
@@ -100,6 +104,7 @@ impl Node {
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
             streams: streams::Streams::default(),
             listeners: listeners::Listeners::default(),
+            sockets: 0,
             places: 0,
         })
     }

@@ -98,6 +98,15 @@ pub enum ConnectError {
     Tcp(toyos_net_tcp::Error),
 }
 
+/// Why a passive open was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenError {
+    /// The address named is none the interface may be bound to: the rule [udp]'s bind refuses
+    /// by (`udp.bind-address-not-local`).
+    NotLocal,
+    Tcp(toyos_net_tcp::Error),
+}
+
 /// [ip]'s MTU, as TCP's configuration takes it.
 const TCP_MTU: u16 = {
     let [low, high, rest @ ..] = toyos_net_ip::MTU.to_le_bytes();
@@ -467,10 +476,13 @@ impl Shard {
         connected
     }
 
-    /// `addr` is the local address to listen on, UNSPECIFIED for any; port 0 takes `random`'s
-    /// draws.
-    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, random: impl FnMut() -> u16) -> Result<ListenerId, toyos_net_tcp::Error> {
-        self.tcp.listen(addr, port, random)
+    /// `addr` is the local address to listen on, UNSPECIFIED for any, and otherwise one [ip]
+    /// holds assigned or announcing, as a datagram socket's is; port 0 takes `random`'s draws.
+    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, random: impl FnMut() -> u16) -> Result<ListenerId, ListenError> {
+        if !addr.is_unspecified() && !self.ip.is_assigned(addr) {
+            return Err(ListenError::NotLocal);
+        }
+        self.tcp.listen(addr, port, random).map_err(ListenError::Tcp)
     }
 
     pub fn accept(&mut self, id: ListenerId) -> Result<Option<ConnId>, toyos_net_tcp::Error> {
@@ -479,6 +491,12 @@ impl Shard {
 
     pub fn listener_port(&mut self, id: ListenerId) -> Result<Port, toyos_net_tcp::Error> {
         self.tcp.listener_port(id)
+    }
+
+    /// [`Tcp::set_listener_options`]: what a connection whose SYN arrives from here on starts
+    /// with.
+    pub fn set_listener_options(&mut self, id: ListenerId, options: toyos_net_tcp::Options) -> Result<(), toyos_net_tcp::Error> {
+        self.tcp.set_listener_options(id, options)
     }
 
     /// [`Tcp::ready`].
@@ -519,6 +537,11 @@ impl Shard {
         let done = self.tcp.set_options(now, id, options);
         self.settle(now);
         done
+    }
+
+    /// [`Tcp::options`].
+    pub fn options(&mut self, id: ConnId) -> Result<toyos_net_tcp::Options, toyos_net_tcp::Error> {
+        self.tcp.options(id)
     }
 
     pub fn shutdown_write(&mut self, now: Instant, id: ConnId) -> Result<(), toyos_net_tcp::Error> {

@@ -1,11 +1,11 @@
-//! What [tcp] says it holds, for a caller that bounds it: `orphans` and `ready`. No scenario ids:
-//! the specifications hold neither call; the connections counted are `close.rs`'s and
-//! `listen.rs`'s, by their scenarios' own segments.
+//! What [tcp] says it holds, for a caller that bounds it or keeps a copy: `orphans`, `ready` and
+//! `options`. No scenario ids: the specifications hold none of the calls; the connections
+//! counted are `close.rs`'s and `listen.rs`'s, by their scenarios' own segments.
 
 mod common;
 
 use common::*;
-use toyos_net_tcp::{limits, State};
+use toyos_net_tcp::{limits, Error, Options, State};
 
 #[test]
 fn an_orphan_is_counted_until_both_fins() {
@@ -63,4 +63,21 @@ fn ready_counts_the_connections_accept_has_yet_to_return() {
     let now = h.now();
     h.tcp.close_listener(now, listener).unwrap();
     assert_eq!(h.tcp.ready(listener), Err(toyos_net_tcp::Error::NoSuchSocket));
+}
+
+#[test]
+fn options_are_the_ones_the_connection_has() {
+    let mut h = listening();
+    let listener = h.listener.unwrap();
+    let nodelay = Options { nodelay: true, ..Options::default() };
+    h.tcp.set_listener_options(listener, nodelay).unwrap();
+    h.input(0, seg(5000).syn().mss(1460));
+    h.input(1, seg(5001).ack(1001));
+    let conn = h.tcp.accept(listener).unwrap().unwrap();
+    assert_eq!(h.tcp.options(conn), Ok(nodelay), "its listener's, as its SYN found them");
+    let now = h.now();
+    h.tcp.set_options(now, conn, Options::default()).unwrap();
+    assert_eq!(h.tcp.options(conn), Ok(Options::default()));
+    h.tcp.abort(now, conn).unwrap();
+    assert_eq!(h.tcp.options(conn), Err(Error::NoSuchSocket));
 }

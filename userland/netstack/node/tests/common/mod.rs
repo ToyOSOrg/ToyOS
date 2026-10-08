@@ -121,6 +121,52 @@ pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
     }
 }
 
+/// A TCP segment the node emitted, as `etherparse` read it.
+#[derive(Clone, Debug)]
+pub struct Segment {
+    /// Where its frame and its datagram went.
+    pub to_mac: [u8; 6],
+    pub to: Ipv4Addr,
+    /// The node's port, and the peer's.
+    pub from_port: u16,
+    pub to_port: u16,
+    pub seq: u32,
+    pub ack: Option<u32>,
+    pub syn: bool,
+    pub fin: bool,
+    pub rst: bool,
+    pub window: u16,
+    pub text: Vec<u8>,
+}
+
+/// The outside reading of a TCP segment the node emitted, or `None` of a frame that carries
+/// none: Ethernet II from the node's MAC, IPv4 from the node's address, and the lengths and the
+/// two checksums `etherparse` computes.
+pub fn segment(frame: &[u8]) -> Option<Segment> {
+    let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+    let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
+    let (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(tcp))) = (&packet.net, &packet.transport) else { return None };
+    let header = ip.header();
+    assert_eq!(ethernet.source(), MAC, "from the node's MAC");
+    assert_eq!(header.header_checksum(), header.to_header().calc_header_checksum(), "the IPv4 header checksum");
+    assert_eq!(usize::from(header.total_len()), 20 + tcp.slice().len(), "IPv4's length is the segment's");
+    assert_eq!(header.source_addr(), A);
+    assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
+    Some(Segment {
+        to_mac: ethernet.destination(),
+        to: header.destination_addr(),
+        from_port: tcp.source_port(),
+        to_port: tcp.destination_port(),
+        seq: tcp.sequence_number(),
+        ack: tcp.ack().then(|| tcp.acknowledgment_number()),
+        syn: tcp.syn(),
+        fin: tcp.fin(),
+        rst: tcp.rst(),
+        window: tcp.window_size(),
+        text: tcp.payload().to_vec(),
+    })
+}
+
 /// The value of option `code` in a DHCP message (RFC 2132 §2): the first instance.
 pub fn option(message: &[u8], code: u8) -> Option<&[u8]> {
     let mut rest = &message[240..];

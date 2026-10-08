@@ -1,6 +1,6 @@
 [package]
 name = "toyos-net-node"
-description = "Netstack's decisions, pure: one interface of ToyOS's own stack, its DHCP lease, its clients' datagram sockets, streams and listeners, the bound on streams and listeners, and its mDNS name, frames and time in, frames out against the device's credit."
+description = "Netstack's decisions, pure: one interface of ToyOS's own stack, its DHCP lease, its clients' datagram sockets, streams and listeners and the one bound on all three, and its mDNS name, frames and time in, frames out against the device's credit."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -22,3 +22,6 @@ toyos-net-wire = { path = "../../../toyos-net-wire" }
 # The outside reader of every frame the node emits: a published Ethernet, ARP,
 # IPv4, UDP and ICMP parser, used as a black box.
 etherparse = "0.21.0"
+# The host's own TCP as an oracle: sets and reads a socket option std has no call
+# for on a listener, on Linux, macOS and Windows alike, with no `unsafe`.
+socket2 = "0.6"

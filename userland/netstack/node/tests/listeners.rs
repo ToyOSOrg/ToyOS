@@ -18,11 +18,13 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{arp, terms, Wire, A, MAC, MAC_R, R};
+use common::{arp, terms, Segment, Wire, A, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
+use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
+
+const ANY: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
 /// The addresses peers are at.
 const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
@@ -160,20 +162,6 @@ fn client() -> (Client, Pipes) {
 
 // ---- the peers ----
 
-/// A segment the node emitted, as `etherparse` read it.
-#[derive(Clone, Debug)]
-struct Segment {
-    /// The node's port.
-    from: u16,
-    to: Peer,
-    seq: u32,
-    ack: Option<u32>,
-    syn: bool,
-    fin: bool,
-    rst: bool,
-    text: Vec<u8>,
-}
-
 /// A segment from the peer to the node's port `to` in its frame, built by `etherparse`: window
 /// 65,535, an MSS option on a SYN, PSH with text.
 fn frame(from: Peer, to: u16, seq: u32, ack: Option<u32>, flags: u8, text: &[u8]) -> Vec<u8> {
@@ -248,9 +236,15 @@ impl Net {
 
     /// The outside reading of a frame the node emitted, and the ARP answer it gets if it asks
     /// for one. Ethernet II from the node's MAC; then ARP, a datagram of the DHCP client's, or
-    /// a TCP segment to an address a peer is at, with the lengths and checksums `etherparse`
-    /// computes. A segment to any other address is the node's mistake.
+    /// a TCP segment to an address a peer is at, as `common::segment` reads it. A segment to any
+    /// other address is the node's mistake.
     fn hears(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        if let Some(segment) = common::segment(frame) {
+            assert!(self.at.contains(&segment.to), "a segment to {}, where no peer is", segment.to);
+            assert_eq!(segment.to_mac, mac(segment.to), "to the peer's MAC");
+            self.heard.push(segment);
+            return None;
+        }
         let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
         let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
         assert_eq!(ethernet.source(), MAC, "from the node's MAC");
@@ -264,28 +258,7 @@ impl Net {
                 }
             }
             (Some(NetSlice::Ipv4(_)), Some(TransportSlice::Udp(_))) => None,
-            (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(tcp))) => {
-                let header = ip.header();
-                let to = header.destination_addr();
-                assert!(self.at.contains(&to), "a segment to {to}, where no peer is");
-                assert_eq!(ethernet.destination(), mac(to), "to the peer's MAC");
-                assert_eq!(header.header_checksum(), header.to_header().calc_header_checksum(), "the IPv4 header checksum");
-                assert_eq!(usize::from(header.total_len()), 20 + tcp.slice().len(), "IPv4's length is the segment's");
-                assert_eq!(header.source_addr(), A);
-                assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
-                self.heard.push(Segment {
-                    from: tcp.source_port(),
-                    to: Peer { addr: to, port: tcp.destination_port() },
-                    seq: tcp.sequence_number(),
-                    ack: tcp.ack().then(|| tcp.acknowledgment_number()),
-                    syn: tcp.syn(),
-                    fin: tcp.fin(),
-                    rst: tcp.rst(),
-                    text: tcp.payload().to_vec(),
-                });
-                None
-            }
-            other => panic!("neither ARP, UDP nor TCP: {other:?}"),
+            other => panic!("neither ARP nor UDP: {other:?}"),
         }
     }
 
@@ -315,7 +288,7 @@ impl Net {
 
     /// The segments the node sent to `peer`.
     fn to(&self, peer: Peer) -> Vec<Segment> {
-        self.heard.iter().filter(|segment| segment.to == peer).cloned().collect()
+        self.heard.iter().filter(|segment| (segment.to, segment.to_port) == (peer.addr, peer.port)).cloned().collect()
     }
 
     /// The last segment the node sent to `peer`.
@@ -347,6 +320,13 @@ impl Net {
     fn finish(&mut self, peer: Peer) {
         let ack = self.iss(peer).wrapping_add(1);
         self.deliver(&frame(peer, SSH, ISS + 1, Some(ack), 0, &[]));
+    }
+
+    /// The peer's handshake with the node's port `to`.
+    fn handshake_to(&mut self, peer: Peer, to: u16) {
+        self.syn_to(peer, to);
+        let ack = self.iss(peer).wrapping_add(1);
+        self.deliver(&frame(peer, to, ISS + 1, Some(ack), 0, &[]));
     }
 
     fn handshake(&mut self, peer: Peer) {
@@ -385,7 +365,7 @@ impl Net {
 
     fn listen(&mut self, port: u16) -> (ListenerId, Owner) {
         let owner = Owner::default();
-        let (id, bound) = self.node.listen(Port::new(port), Box::new(WakeEnd(owner.clone())), draw(&mut self.draws)).expect("a free port and a place");
+        let (id, bound) = self.node.listen(ANY, Port::new(port), Box::new(WakeEnd(owner.clone())), draw(&mut self.draws)).expect("a free port and a place");
         assert_eq!(bound.get(), port);
         (id, owner)
     }
@@ -454,7 +434,7 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
     let answered = net.to(P1);
     let [synack] = &answered[..] else { panic!("one SYN-ACK, not {:?}", net.heard) };
     assert!(synack.syn && !synack.fin && !synack.rst && synack.text.is_empty(), "{synack:?}");
-    assert_eq!((synack.from, synack.ack), (SSH, Some(ISS + 1)));
+    assert_eq!((synack.from_port, synack.ack), (SSH, Some(ISS + 1)));
     assert_eq!(wakes(&owner), 0, "SYN-RECEIVED is no connection yet");
     assert_eq!(net.accept(id).unwrap_err(), AcceptRefused::Nothing);
 
@@ -659,7 +639,7 @@ fn a_connect_past_the_places_is_refused_and_sends_nothing() {
     let (third, client) = net.connect();
     assert_eq!(third, Err(ConnectRefused::Full), "a connect not yet answered holds a place");
     assert_eq!((client.borrow().dropped, net.node.held()), (2, 2));
-    let sources: BTreeSet<u16> = net.to(WEB).iter().map(|segment| segment.from).collect();
+    let sources: BTreeSet<u16> = net.to(WEB).iter().map(|segment| segment.from_port).collect();
     assert_eq!(sources.len(), 2, "no SYN left for the connect refused: {:?}", net.heard);
 
     net.node.close(net.now, first.unwrap());
@@ -675,7 +655,7 @@ fn a_listener_holds_a_place_and_a_listen_without_one_makes_nothing() {
     let mut net = with_places(1);
     let (id, _owner) = net.listen(SSH);
     let refused = Owner::default();
-    let answer = net.node.listen(Port::new(TELNET), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(ANY, Port::new(TELNET), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::Full);
     assert!(refused.borrow().dropped);
     net.syn_to(P1, TELNET);
@@ -738,55 +718,130 @@ fn a_listen_on_a_taken_port_is_refused_and_a_drawn_port_listens() {
     let mut net = Net::new();
     let (_, owner) = net.listen(SSH);
     let second = Owner::default();
-    let answer = net.node.listen(Port::new(SSH), Box::new(WakeEnd(second.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(ANY, Port::new(SSH), Box::new(WakeEnd(second.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::InUse);
     assert!(second.borrow().dropped);
     assert_eq!((net.node.listeners(), net.node.held()), (1, 1));
     net.handshake(P1);
     assert_eq!(wakes(&owner), 1, "the listener that holds the port still listens");
 
-    let (_, port) = net.node.listen(None, Box::new(WakeEnd(Owner::default())), || 0x0001_0005).unwrap();
+    let (_, port) = net.node.listen(ANY, None, Box::new(WakeEnd(Owner::default())), || 0x0001_0005).unwrap();
     assert_eq!(port.get(), 49_152 + 5);
     net.syn_to(P2, port.get());
     let synack = net.last(P2);
-    assert!(synack.syn && synack.from == port.get(), "{synack:?}");
+    assert!(synack.syn && synack.from_port == port.get(), "{synack:?}");
+}
+
+// A listener is at the address its listen named. One the machine does not hold is refused, as
+// a datagram socket's bind is, and nothing listens: RFC 9293 §3.10.7.1, a SYN for a port
+// nothing listens on is answered <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>. One the machine
+// holds listens beside a listener at every address on the same port, and [tcp] hands a SYN to
+// the one that named the address (LS-09).
+#[test]
+fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
+    let mut net = Net::new();
+    let refused = Owner::default();
+    let answer = net.node.listen(ELSEWHERE, Port::new(SSH), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    assert_eq!(answer.unwrap_err(), ListenRefused::NotLocal);
+    assert!(refused.borrow().dropped);
+    assert_eq!((net.node.listeners(), net.node.held()), (0, 0));
+    net.syn(P1);
+    let reset = net.last(P1);
+    assert!(reset.rst && (reset.seq, reset.ack) == (0, Some(ISS + 1)), "{reset:?}");
+
+    let (_, any) = net.listen(SSH);
+    let named = Owner::default();
+    let (_, port) = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(named.clone())), draw(&mut net.draws)).expect("the machine's address, and a port no listener at it holds");
+    assert_eq!((port.get(), net.node.listeners()), (SSH, 2));
+    net.handshake(P2);
+    assert_eq!((wakes(&named), wakes(&any)), (1, 0));
+    let again = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(Owner::default())), draw(&mut net.draws));
+    assert_eq!(again.unwrap_err(), ListenRefused::InUse);
+}
+
+// A listener ended for a wake its owner's pipe refused gives its place back in the pass that
+// ended it: the listener after it is owed a wake for that place before the node is asked
+// anything more. The last handshake's ACK is delivered with no transmit opportunity after it,
+// since an opportunity ends in a pass of its own.
+#[test]
+fn a_listener_ended_for_its_wake_gives_its_place_to_another_in_the_same_pass() {
+    let mut net = with_places(3);
+    let (first, refusing) = net.listen(SSH);
+    let (_, owner) = net.listen(TELNET);
+    net.handshake_to(P1, TELNET);
+    net.handshake_to(P2, TELNET);
+    assert_eq!(wakes(&owner), 1, "two wait, and there is a place for one");
+    refusing.borrow_mut().refusal = Some(WriteRefusal::Gone);
+    net.syn(P3);
+    let ack = net.iss(P3).wrapping_add(1);
+    net.node.receive(net.now, &frame(P3, SSH, ISS + 1, Some(ack), 0, &[]), draw(&mut net.draws));
+    assert_eq!(wakes(&owner), 2);
+    let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_refused_listeners().collect();
+    assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, WriteRefusal::Gone)], 1, 1));
+}
+
+// A datagram socket is something a client makes the node hold, its two queues of sixteen
+// datagrams, from its bind to its close.
+#[test]
+fn a_datagram_socket_holds_a_place_and_a_bind_without_one_makes_nothing() {
+    let undrawn = || -> u32 { panic!("a named port draws nothing") };
+    let mut net = with_places(2);
+    let (_, owner) = net.listen(SSH);
+    let (socket, _) = net.node.udp_bind(ANY, Port::new(4_000), undrawn).expect("a free port and a place");
+    assert_eq!(net.node.held(), 2);
+    assert_eq!(net.node.udp_bind(ANY, Port::new(4_001), undrawn), Err(Refused::ResourceExhausted));
+    let (connect, _client) = net.connect();
+    assert_eq!(connect, Err(ConnectRefused::Full), "the socket's place is a stream's");
+    net.handshake(P1);
+    assert_eq!(wakes(&owner), 0);
+
+    assert_eq!(net.node.udp_close(net.now, socket), Ok(()));
+    assert_eq!((net.node.held(), wakes(&owner)), (1, 1), "its place is back, and the connection that waited is announced");
+    assert_eq!(net.node.udp_close(net.now, socket), Err(Refused::NotConnected));
+    assert_eq!(net.node.held(), 1, "a close that names no socket gives no place back");
+    net.node.udp_bind(ANY, Port::new(4_001), undrawn).expect("the refused bind left its port free");
+    assert_eq!(net.node.held(), 2);
 }
 
 // ---- the streams an accept makes ----
 
 // RFC 9293 §3.7.4: with text unacknowledged a short segment waits, and with Nagle's algorithm
-// off it leaves. No peer here acknowledges any text.
+// off it leaves. No peer here acknowledges any text. The two answers a host gives for the option
+// on a listening socket are `tests/host.rs`'s: a connection has it if its listener had it when
+// the connection began, whenever it is accepted.
 #[test]
-fn a_stream_starts_with_the_options_its_listener_has_when_it_is_accepted() {
+fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     let mut net = Net::new();
     let (id, _owner) = net.listen(SSH);
     assert_eq!(net.node.listener_nodelay(id), Some(false));
-    // One handshake ends before the option is set and one after; both are accepted after.
+    // One connection begins before the option is set and one after; both are accepted after.
     net.handshake(P1);
     assert!(net.node.set_listener_nodelay(id, true));
     net.handshake(P2);
     assert_eq!(net.node.listener_nodelay(id), Some(true));
     let (first, a) = net.accepts(id, P1);
     let (second, b) = net.accepts(id, P2);
-    for (stream, client, peer) in [(first, &a, P1), (second, &b, P2)] {
-        assert_eq!(net.node.nodelay(stream), Some(true), "{peer:?}");
+    assert_eq!((net.node.nodelay(first), net.node.nodelay(second)), (Some(false), Some(true)));
+    for client in [&a, &b] {
         net.says(client, b"a");
         net.says(client, b"b");
-        assert_eq!(net.texts(peer), [b"a".to_vec(), b"b".to_vec()], "{peer:?}: the second write waits for no acknowledgment");
     }
+    assert_eq!(net.texts(P1), [b"a".to_vec()], "the second write waits for the first's acknowledgment");
+    assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
 
     // An accepted stream's options are its own from then on, and the listener's its own.
     assert!(net.node.set_nodelay(net.now, second, false));
     net.says(&b, b"c");
-    assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the third write waits for the first's acknowledgment");
-    assert!(net.node.set_listener_nodelay(id, false));
-    assert_eq!((net.node.nodelay(first), net.node.nodelay(second), net.node.listener_nodelay(id)), (Some(true), Some(false), Some(false)));
-    net.says(&a, b"c");
-    assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the third write waits");
+    assert!(net.node.set_nodelay(net.now, first, true));
+    net.pump();
+    assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "and the first stream's second waits no longer");
+    assert_eq!((net.node.nodelay(first), net.node.nodelay(second), net.node.listener_nodelay(id)), (Some(true), Some(false), Some(true)));
 
+    assert!(net.node.set_listener_nodelay(id, false));
     net.handshake(P3);
     let (third, c) = net.accepts(id, P3);
-    assert_eq!(net.node.nodelay(third), Some(false));
+    assert_eq!((net.node.nodelay(third), net.node.nodelay(first)), (Some(false), Some(true)));
     net.says(&c, b"a");
     net.says(&c, b"b");
     assert_eq!(net.texts(P3), [b"a".to_vec()]);
@@ -819,7 +874,7 @@ fn an_accepted_stream_is_one_of_its_peers_addresss_sixteen() {
     }
     net.run(Duration::from_secs(51));
     assert_eq!((net.node.streams(), net.events()), (17, vec![StreamEvent::Cut { id: streams[16] }]));
-    let reset: Vec<Peer> = net.heard.iter().filter(|segment| segment.rst).map(|segment| segment.to).collect();
+    let reset: Vec<Peer> = net.heard.iter().filter(|segment| segment.rst).map(|segment| Peer { addr: segment.to, port: segment.to_port }).collect();
     assert_eq!(reset, [peers[16]]);
 }
 
