@@ -538,7 +538,7 @@ fn nothing_leaves_the_stack_that_the_pipe_did_not_take() {
             continue;
         }
         // The window is shut or the text all sent: the client reads what its pipe holds.
-        let taken: Vec<u8> = client.borrow_mut().inbox.drain(..).collect();
+        let taken = std::mem::take(&mut client.borrow_mut().inbox);
         if taken.is_empty() {
             let at = net.node.next_deadline().expect("the lease's renewal, if nothing else");
             net.fire(at);
