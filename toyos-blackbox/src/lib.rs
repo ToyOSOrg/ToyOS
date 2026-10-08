@@ -214,7 +214,80 @@ pub const DROPPED_OPENS_WITH: &str = "older records dropped to fit this page: ";
 /// against the true count, because the count depends on the cut and the cut
 /// would then depend on the count — and a few unused bytes of a page are worth
 /// less than a fixed point nobody can check.
-pub const DROPPED_LINE_BYTES: usize = DROPPED_OPENS_WITH.len() + 20 + 1;
+pub const DROPPED_LINE_BYTES: usize = counted_line_bytes(DROPPED_OPENS_WITH);
+
+/// The widest a line that ends in a count can be: `says`, every digit a `u64`
+/// can have, and its newline.
+const fn counted_line_bytes(says: &str) -> usize {
+    says.len() + 20 + 1
+}
+
+/// How long `line` is, without writing it.
+fn bytes_of(line: core::fmt::Arguments<'_>) -> usize {
+    struct Count(usize);
+    impl core::fmt::Write for Count {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            self.0 = self.0.saturating_add(s.len());
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = core::fmt::write(&mut count, line);
+    count.0
+}
+
+/// Lines that arrive one at a time, kept whole within a room, **and a count of
+/// the ones that were not kept**.
+///
+/// What [`Report::tail`] is for bytes already rendered, for a writer that has
+/// only a walk: the stop's own records, newest first, and a death's census.
+/// A line goes in whole or not at all. **Once one is dropped every later one
+/// is**, because a section with a hole in it reads as whole. [`Self::close`]
+/// then says how many on `says`' line, whose widest form came off the room
+/// before the first line did, so saying it is never what runs the room over.
+pub struct Whole<'s, W: core::fmt::Write> {
+    out: W,
+    says: &'s str,
+    left: usize,
+    dropped: u64,
+}
+
+impl<'s, W: core::fmt::Write> Whole<'s, W> {
+    /// `room` bytes of `out` for the lines and for the line that counts the
+    /// dropped ones, which opens with `says`.
+    pub fn within(out: W, room: usize, says: &'s str) -> Self {
+        Self { out, says, left: room.saturating_sub(counted_line_bytes(says)), dropped: 0 }
+    }
+
+    /// One line, without its newline.
+    pub fn put(&mut self, line: core::fmt::Arguments<'_>) {
+        let bytes = bytes_of(line).saturating_add(1);
+        if self.dropped > 0 || bytes > self.left {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.left -= bytes;
+        let _ = self.out.write_fmt(format_args!("{line}\n"));
+    }
+
+    /// Say how many lines were dropped, under the ones kept; nothing where
+    /// none was.
+    pub fn close(mut self) {
+        if self.dropped > 0 {
+            let _ = self.out.write_fmt(format_args!("{}{}\n", self.says, self.dropped));
+        }
+    }
+}
+
+/// The most a death's census may spend of the record it is sealed into: a
+/// quarter of the box, as [`RECOVERY_BYTES`] is, so that what a kernel built
+/// for more CPUs says of them comes off the census and never off the crash
+/// above it or the ring's tail below.
+pub const CENSUS_BYTES: usize = 4096;
+
+/// What a census that did not fit [`CENSUS_BYTES`] says under the lines it
+/// kept, with the count of the ones it dropped after it.
+pub const CENSUS_DROPPED_OPENS_WITH: &str = "census: lines dropped to fit this record: ";
 
 /// How many records begin in `bytes`, by the same rule [`Report::tail`] cuts on.
 fn records_in(bytes: &[u8], opens_a_record: &[u8]) -> u64 {
@@ -481,16 +554,7 @@ pub fn says_a_break(message: &str) -> bool {
 
 /// What one record's line costs in the section.
 fn recovery_line_bytes(line: &impl core::fmt::Display) -> usize {
-    struct Count(usize);
-    impl core::fmt::Write for Count {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            self.0 = self.0.saturating_add(s.len());
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    let _ = core::fmt::write(&mut count, format_args!("{RECOVERY_OPENS_WITH}{line}\n"));
-    count.0
+    bytes_of(format_args!("{RECOVERY_OPENS_WITH}{line}\n"))
 }
 
 /// The first of the section's two walks over the log ring, **newest record
@@ -1035,6 +1099,73 @@ mod tests {
         // a window out of the middle — and the count names exactly those.
         assert!(records.ends_with(kept));
         assert_eq!(dropped, records[..records.len() - kept.len()].lines().count());
+    }
+
+    /// What [`Whole`] leaves of `lines` in `room` bytes: the lines it kept, and
+    /// the count it said under them.
+    fn whole(room: usize, lines: &[&str]) -> (std::string::String, Option<u64>) {
+        let mut out = std::string::String::new();
+        let mut kept = Whole::within(&mut out, room, DROPPED_OPENS_WITH);
+        for line in lines {
+            kept.put(format_args!("{line}"));
+        }
+        kept.close();
+        match out.find(DROPPED_OPENS_WITH) {
+            Some(at) => {
+                let said = out[at + DROPPED_OPENS_WITH.len()..].trim_end_matches('\n');
+                let dropped = said.parse().expect("the line that counts ends in the count");
+                (out[..at].into(), Some(dropped))
+            }
+            None => (out, None),
+        }
+    }
+
+    /// The room is the lines' own bytes and the count's reserve: a room that
+    /// holds exactly both keeps every line and says nothing, and one byte less
+    /// drops the last.
+    #[test]
+    fn lines_that_fit_their_room_are_kept_and_nothing_is_said() {
+        let lines = ["irq: cpu0 timer=9", "irq: cpu1 timer=4", "tlb: shootdowns=4"];
+        let bytes: usize = lines.iter().map(|line| line.len() + 1).sum();
+        let exact = bytes + DROPPED_LINE_BYTES;
+        assert_eq!(whole(exact, &lines), (format!("{}\n", lines.join("\n")), None));
+        assert_eq!(whole(exact - 1, &lines), (format!("{}\n", lines[..2].join("\n")), Some(1)));
+    }
+
+    /// A line that does not fit takes every later one with it, one that would
+    /// have fitted included: what is kept is a prefix of the walk and the
+    /// count is of everything after it.
+    #[test]
+    fn the_first_line_that_does_not_fit_drops_itself_and_every_later_one() {
+        let wide = "x".repeat(200);
+        let lines = ["the newest", wide.as_str(), "short", "shorter"];
+        let room = DROPPED_LINE_BYTES + lines[0].len() + 1 + 100;
+        assert_eq!(whole(room, &lines), ("the newest\n".into(), Some(3)));
+        // The same walk with the wide line last keeps the three before it.
+        let lines = ["the newest", "short", "shorter", wide.as_str()];
+        assert_eq!(whole(room, &lines), ("the newest\nshort\nshorter\n".into(), Some(1)));
+    }
+
+    /// Whatever the room, the lines kept and the line that counts the rest
+    /// stay inside it, and every line is either kept or counted.
+    #[test]
+    fn the_line_that_counts_the_dropped_fits_the_room_it_was_given() {
+        let lines: std::vec::Vec<std::string::String> =
+            (0..400).map(|i| format!("log-tail: [ 1.{i:03} cpu0 kernel] record {i}")).collect();
+        let lines: std::vec::Vec<&str> = lines.iter().map(|line| line.as_str()).collect();
+        for room in DROPPED_LINE_BYTES..DROPPED_LINE_BYTES + 2048 {
+            let mut out = std::string::String::new();
+            let mut kept = Whole::within(&mut out, room, DROPPED_OPENS_WITH);
+            for line in &lines {
+                kept.put(format_args!("{line}"));
+            }
+            kept.close();
+            assert!(out.len() <= room, "a room of {room} bytes was run to {}", out.len());
+            let (kept, dropped) = whole(room, &lines);
+            let dropped = dropped.expect("400 records do not fit two kilobytes") as usize;
+            assert_eq!(kept.lines().count() + dropped, lines.len());
+            assert!(lines.join("\n").starts_with(kept.trim_end_matches('\n')));
+        }
     }
 
     /// A report that fits says nothing about a cut, because there was none.

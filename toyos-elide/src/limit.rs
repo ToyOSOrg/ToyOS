@@ -2,17 +2,15 @@
 //! record after a suppression says about it.
 //!
 //! **A storm from one site is a storm in the log, and the log is shared.** A
-//! thread-churn loop makes one `exit:` record per thread; a program printing in
-//! a loop fills its ring and then the volume. Past [`Limit`]'s burst in a
+//! program printing in a loop fills its ring and then the volume. Past [`Limit`]'s burst in a
 //! window a site's records are suppressed and counted, and the next record it
 //! is allowed carries the count, so nothing goes silently: the last record a
 //! site says before suppressing says so, and the first it says after it says
 //! how many.
 //!
-//! Atomic, so the kernel's call sites — any CPU, any context `log!` runs in —
-//! share one per site with no lock; one reader-thread caller uses it the same
-//! way. The counts are exact; which of two racing records is the one a window
-//! admits last is not.
+//! Atomic, so callers on any thread share one per site with no lock. The
+//! counts are exact; which of two racing records is the one a window admits
+//! last is not.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 

@@ -8,8 +8,9 @@
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
 //! its types keep.
 //!
-//! A client's datagram sockets are `datagram`'s and the machine's `<host>.local` name is `name`'s:
-//! both read the lease and write none of it.
+//! A client's datagram sockets are `datagram`'s, the machine's `<host>.local` name is `name`'s
+//! and the lookups of other machines' names are `resolve`'s: each reads the lease and writes none
+//! of it.
 //!
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
@@ -17,7 +18,8 @@
 //! [`Node::drain_events`].
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
-//! exchange draws its transaction id first.
+//! exchange draws its transaction id first. The lookups in flight draw after it: an id and then a
+//! port for each query they send, and nothing else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -35,6 +37,7 @@ extern crate alloc;
 mod datagram;
 mod lease;
 mod name;
+mod resolve;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -45,12 +48,15 @@ use toyos_net_wire::Instant;
 
 pub use datagram::{Datagram, DatagramId, Refused};
 use lease::{Report, Stack, Verified};
+pub use resolve::{Ended, LookupId, NotStarted, Resolved};
 
 toyos_net_wire::counters! {
     DhcpUnsent = "node.dhcp-unsent";
     AddressRefused = "node.address-refused";
     RouterRefused = "node.router-refused";
     NameUnsent = "node.name-unsent";
+    QueryUnsent = "node.query-unsent";
+    QueryFailed = "node.query-failed";
 }
 
 /// A line for the log.
@@ -66,6 +72,7 @@ pub struct Node {
     client: Client,
     /// The responder for the machine's name, once [`Self::answer_as`] started it.
     name: Option<name::Name>,
+    resolver: resolve::Resolver,
     counters: Counters,
     events: Vec<Event>,
     /// Room for the largest message the client accepts.
@@ -83,6 +90,7 @@ impl Node {
             stack,
             client,
             name: None,
+            resolver: resolve::Resolver::new(),
             counters: Counters::default(),
             events: Vec::new(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
@@ -141,7 +149,7 @@ impl Node {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         let name = self.name.as_ref().and_then(name::Name::next_deadline);
-        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(name).min()
+        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(name).chain(self.resolver.next_deadline()).min()
     }
 
     /// Every deadline at or before `now`; the frames they make due wait for [`Self::transmit`].
@@ -154,8 +162,8 @@ impl Node {
     }
 
     /// Hands the client what the shard reported and what reached its socket, and carries out
-    /// what it answers, until neither has more; then the name is served, against the lease as
-    /// that left it.
+    /// what it answers, until neither has more; then the name is served and the lookups are
+    /// carried on, against the lease as that left it.
     fn settle(&mut self, now: Instant, draw: &mut impl FnMut() -> u32) {
         loop {
             let (out, verified) = if let Some(report) = self.stack.report() {
@@ -176,6 +184,7 @@ impl Node {
             self.carry_out(now, out, verified, draw);
         }
         self.serve_name(now);
+        self.resolver.pass(now, &mut self.stack, &mut self.counters, draw);
     }
 
     /// What one call of the client's asked for: the lease first, so a message leaves from the

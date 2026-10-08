@@ -11,6 +11,7 @@ doctest = false
 
 [dependencies]
 toyos-dhcp = { path = "../../../toyos-dhcp" }
+toyos-dns = { path = "../../../toyos-dns" }
 toyos-mdns = { path = "../mdns" }
 toyos-net-ip = { path = "../../../toyos-net-ip" }
 toyos-net-shard = { path = "../../../toyos-net-shard" }
