@@ -134,9 +134,14 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
+// The power-off is demanded before anything is torn down, as the reset is below.
 pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
+    }
+    if let Some(why) = power::shutdown_refused() {
+        log!("shutdown: {why} — refused");
+        return SyscallError::NotSupported.to_u64();
     }
     match quiesce("Shutting down.") {
         Ok(stopping) => power::shutdown(stopping),

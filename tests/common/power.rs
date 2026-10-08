@@ -11,9 +11,14 @@ use super::serial;
 /// `kernel/src/syscall/machine.rs`.
 pub const SHUTTING_DOWN: &str = "Shutting down.";
 
-/// What the kernel logs once it has decoded S5 soft-off, ahead of the PM1a
-/// control block's port and the `SLP_TYPa` the DSDT's `\_S5_` names.
-const SOFT_OFF_DECODED: &str = "ACPI: PM1a=";
+/// What the kernel logs once the `acpi` claim's holder has supplied the
+/// power-off's sleep type, ahead of the PM1a control block's port and the
+/// `SLP_TYPa` (`kernel/src/arch/x86_64/power.rs`).
+const S5_SUPPLIED: &str = "power: S5 is PM1a ";
+
+/// That line on q35, whole to the value: QEMU's PM1a control block, and the
+/// `SLP_TYPa` its DSDT's `\_S5` names, which is the one its ICH9 powers off on.
+const Q35_S5_SUPPLIED: &str = "power: S5 is PM1a 0x604 with SLP_TYPa=0,";
 
 /// Wait for the boot's `last` word on a guest asked to end, then for QEMU to
 /// stop for `reason` and exit; `console` gains everything said on the way.
@@ -40,17 +45,21 @@ pub fn ended(
 }
 
 /// A process holding `POWER` runs `shutdown` and the machine powers off: the
-/// boot decoded q35's PM1a block and its `\_S5_`, and QEMU stops for
-/// `guest-shutdown`, which neither a reset nor a halt is.
+/// kernel declared q35's PM1a block, `acpiserver` evaluated the DSDT's `\_S5`
+/// and handed the kernel its `SLP_TYPa`, which the kernel has from nowhere
+/// else, and QEMU stops for `guest-shutdown`, which neither a reset nor a
+/// halt is.
 pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
 
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    // The values this kernel read out of q35's tables, so a decode it got
-    // wrong fails here and not as a machine that stayed up.
-    boot.must_say(&format!("{SOFT_OFF_DECODED}0x604 SLP_TYPa=0"))?;
+    // The values, so a wrong one fails here and not as a machine that stayed
+    // up; and the event the shutdown waits on, since one asked before it is
+    // refused.
+    let mut supplied = boot.text().to_string();
+    qemu::await_marker(&mut qemu, &mut supplied, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
@@ -64,7 +73,8 @@ pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
 }
 
 /// A stop that ends with a userland thread still running is followed by a
-/// power-off all the same: q35 hands over in ACPI mode, so the power-off
+/// power-off all the same, with the sleep type `acpiserver` handed the
+/// kernel: q35 hands over in ACPI mode, so the power-off
 /// quiets the events `acpiserver` enabled, and QEMU stops for
 /// `guest-shutdown`. One CPU and `stop-budget-spent`, so the stop's one sweep
 /// finds `stop_short`'s spinner queued behind the stop's caller.
@@ -85,9 +95,10 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let mut console = boot.text().to_string();
-    qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
-    serial::Serial::named("boot", console.clone())
-        .must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+    qemu::await_marker(&mut qemu, &mut console, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
+    let armed = serial::Serial::named("boot", console.clone());
+    armed.must_say(ACPI_ARMED)?;
+    armed.must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     writeln!(qemu.stdin_mut(), "run test_rs_stop_short").expect("write to QEMU stdin");
@@ -105,14 +116,6 @@ pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
         return Err(format!("the stop left no thread running, so this boot staged no short stop: {record}"));
     }
     eprintln!("  [power] a short stop, then the power-off: {record}");
-    Ok(())
-}
-
-/// The kernel decoded S5 soft-off out of this machine's FADT and DSDT. Every
-/// other branch of `arch::power::init_off` says `no soft-off` and not this.
-pub fn soft_off_decoded(kernel: &serial::Serial) -> Result<(), String> {
-    let line = kernel.must_say(SOFT_OFF_DECODED)?;
-    eprintln!("  [power] {}", line.trim());
     Ok(())
 }
 
@@ -549,8 +552,8 @@ const ACPI_PRESSED: &str =
 /// became of it.
 const ACPI_TABLE: &str = "acpiserver: table ";
 
-/// What it says of `\_S5`, ahead of the two values.
-const ACPI_S5: &str = "acpiserver: \\_S5 evaluated: ";
+/// What it says once the kernel has kept `\_S5`'s `SLP_TYPa`, ahead of it.
+const ACPI_S5_HANDED: &str = "acpiserver: \\_S5 handed to the kernel: ";
 
 /// The number after `SLP_TYPa=` on a line.
 fn slp_typ_a(line: &str) -> Result<u64, String> {
@@ -562,10 +565,8 @@ fn slp_typ_a(line: &str) -> Result<u64, String> {
 
 /// The server loaded every definition block it found, the DSDT first, each
 /// said on a line in its place; and the `SLP_TYPa` its `\_S5` evaluates to
-/// is the one the kernel's byte scan of the DSDT decoded (`kernel`'s
-/// [`SOFT_OFF_DECODED`] line): the interpreter against the scan, over bytes
-/// one read through the mediated access and the other through the direct
-/// map. Answers how many blocks there were.
+/// is the one it handed the kernel and the kernel says it powers off with
+/// (`kernel`'s [`S5_SUPPLIED`] line). Answers how many blocks there were.
 pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Result<usize, String> {
     let said: Vec<&str> = log.text().lines().filter_map(|line| line.split_once(ACPI_TABLE).map(|(_, said)| said.trim())).collect();
     let Some(count) = said.first().and_then(|first| first.split_once(" of ")?.1.split_once(' ')?.0.parse::<usize>().ok()) else {
@@ -576,11 +577,11 @@ pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Resu
     if said != expected {
         return Err(format!("the server's tables are {said:#?}, where {count} loaded ones are {expected:#?}"));
     }
-    let (evaluated, decoded) = (log.must_say(ACPI_S5)?, kernel.must_say(SOFT_OFF_DECODED)?);
-    if slp_typ_a(evaluated)? != slp_typ_a(decoded)? {
-        return Err(format!("the server's \\_S5 is not the kernel's: {:?} beside {:?}", evaluated.trim(), decoded.trim()));
+    let (handed, supplied) = (log.must_say(ACPI_S5_HANDED)?, kernel.must_say(S5_SUPPLIED)?);
+    if slp_typ_a(handed)? != slp_typ_a(supplied)? {
+        return Err(format!("the server's \\_S5 is not what the kernel powers off with: {:?} beside {:?}", handed.trim(), supplied.trim()));
     }
-    eprintln!("  [power] {count} table(s) loaded; {} beside {}", evaluated.trim(), decoded.trim());
+    eprintln!("  [power] {count} table(s) loaded; {} beside {}", handed.trim(), supplied.trim());
     Ok(count)
 }
 
@@ -592,7 +593,8 @@ pub fn acpi_tables_loaded(log: &serial::Serial, kernel: &serial::Serial) -> Resu
 /// power-off. The press is sent as soon as the server has armed, which is
 /// before it loads the machine's tables: the press is latched across the
 /// load, whose lines and `\_S5` are read here, on the one firmware's tables a
-/// guest has.
+/// guest has, and powers the machine off with the sleep type the load handed
+/// the kernel.
 pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
@@ -617,7 +619,8 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     after.must_be_clean()?;
     let whole = serial::Serial::named("the boot and the press", console);
     acpi_tables_loaded(&whole, &whole)?;
-    whole.must_say_after(ACPI_S5, ACPI_PRESSED)?;
+    whole.must_say(Q35_S5_SUPPLIED)?;
+    whole.must_say_after(ACPI_S5_HANDED, ACPI_PRESSED)?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())
 }

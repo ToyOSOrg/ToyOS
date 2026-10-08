@@ -50,8 +50,11 @@
 //! taken; one whose FACS this kernel refuses has a lock nothing here can
 //! take, and every take is refused ([`GlobalLock`]).
 //!
+//! **The power-off's sleep type is the holder's to supply** ([`s5`]): `\_S5`
+//! is AML, and this kernel reads none.
+//!
 //! **Nothing is done for the holder once the stop has begun**, as nothing is
-//! written to `SMI_CMD`: an access and a lock exchange are each made under
+//! written to `SMI_CMD`: an access, a lock exchange and a sleep type taken are each made under
 //! [`HOLDER`], from the decision to the last instruction, and refused there
 //! once the stop has begun; the power-off takes that lock before it owns the
 //! hardware ([`settle`]), which waits out the one in flight.
@@ -541,6 +544,16 @@ pub fn lock_release() -> Result<(), SyscallError> {
         return Err(SyscallError::InvalidArgument);
     }
     give_back(hardware, &mut holder, "");
+    Ok(())
+}
+
+/// Take the `SLP_TYPa` of the machine's `\_S5` from the claim's holder, for
+/// the power-off (`power::supply`): `InvalidArgument` is a word wider than
+/// the register's field, of which nothing is kept.
+pub fn s5(word: u64) -> Result<(), SyscallError> {
+    let slp_typ = firmware::sleep_type(word).ok_or(SyscallError::InvalidArgument)?;
+    let _acting = acting()?;
+    super::power::supply(slp_typ);
     Ok(())
 }
 

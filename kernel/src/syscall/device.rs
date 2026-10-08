@@ -141,6 +141,7 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
         }),
         ops::LOCK_TAKE => crate::arch::acpi_mode::lock_take().map(|taken| if taken { ops::TAKEN } else { ops::PENDING }),
         ops::LOCK_RELEASE => crate::arch::acpi_mode::lock_release().map(|()| 0),
+        ops::S5 => crate::arch::acpi_mode::s5(at).map(|()| 0),
         _ => Err(SyscallError::InvalidArgument),
     };
     done.unwrap_or_else(|e| e.to_u64())

@@ -15,6 +15,11 @@
 //! claim binds to one process for that process's life, so the parent claims
 //! only after, and reads the lock word free.
 //!
+//! Then the power-off, which is the kernel's with the sleep type a holder
+//! supplies: on this boot nothing has, so a shutdown is refused and the
+//! machine goes on; a word the register's field does not hold is refused and
+//! changes nothing; and this guest's own is kept.
+//!
 //! Last it takes the lock once more and asks for the power-off holding it: a
 //! stop ends no process, so the kernel finds a live holder's lock taken and
 //! gives it back before the power-off owns the hardware, which
@@ -128,8 +133,9 @@ fn probe() {
     let mut post = Access::write(Space::SystemIo, 0x80, Width::Byte, 0);
     assert_eq!(syscall::acpi_access(holder.handle(), &mut post), Err(SyscallError::PermissionDenied));
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Err(SyscallError::PermissionDenied));
+    assert_eq!(syscall::acpi_s5(holder.handle(), Q35_SLP_TYP_A), Err(SyscallError::PermissionDenied));
     let info = bind(&holder.0);
-    println!("acpi: an unbound claim was refused its access and the lock");
+    println!("acpi: an unbound claim was refused its access, the lock and the power-off's sleep type");
 
     // A request that names no space, width or direction, a value wider than
     // its width, and a reserved byte that is set.
@@ -151,6 +157,7 @@ fn probe() {
     ports(&holder, &info);
     configuration(&holder, &info);
     lock(&holder, &info);
+    sleep_type(&holder);
 
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true), "acpi: the lock, for the power-off to find");
     println!("{HELD_INTO_THE_STOP}");
@@ -378,6 +385,25 @@ fn lock(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(word(holder), OWNED);
     assert_eq!(syscall::acpi_lock_release(holder.handle()), Ok(()));
     println!("acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it");
+}
+
+/// What this guest's `\_S5` names for `SLP_TYPa` (ACPI 6.5 §7.4.2), as
+/// `acpiserver` evaluates it on the boots that start one: QEMU's ICH9 powers
+/// off on it.
+const Q35_SLP_TYP_A: u64 = 0;
+
+fn sleep_type(holder: &Holder) {
+    let stop = || toyos::power::stop(toyos::power::Stop::Shutdown);
+    let unsupplied = toyos::power::Refused::Kernel(SyscallError::NotSupported);
+    // No server ran on this boot, and the unbound claim's word above was not kept.
+    assert_eq!(stop(), unsupplied, "acpi: a power-off with no sleep type supplied");
+    // `SLP_TYPx` is three bits (Table 4.16): bit 3 would land on `SLP_EN`.
+    for wide in [8u64, 0x100, 1 << 32 | 5, u64::MAX] {
+        assert_eq!(syscall::acpi_s5(holder.handle(), wide), Err(SyscallError::InvalidArgument), "acpi: {wide:#x} as a sleep type");
+    }
+    assert_eq!(stop(), unsupplied, "acpi: a refused sleep type was kept");
+    assert_eq!(syscall::acpi_s5(holder.handle(), Q35_SLP_TYP_A), Ok(()));
+    println!("acpi: the power-off was refused NotSupported until a sleep type was supplied, and a sleep type wider than three bits InvalidArgument");
 }
 
 /// What the keeper says once it holds the lock.

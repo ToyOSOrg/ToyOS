@@ -230,6 +230,12 @@ impl AcpiDev {
     pub fn lock_release(&self) -> Result<(), SyscallError> {
         syscall::acpi_lock_release(self.as_handle())
     }
+
+    /// Supply `\_S5`'s `SLP_TYPa` for the kernel's power-off
+    /// ([`syscall::acpi_s5`]).
+    pub fn s5(&self, slp_typ_a: u64) -> Result<(), SyscallError> {
+        syscall::acpi_s5(self.as_handle(), slp_typ_a)
+    }
 }
 
 impl AsHandle for AcpiDev {

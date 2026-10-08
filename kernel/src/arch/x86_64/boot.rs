@@ -38,7 +38,7 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 /// logs nothing: the read-back is `pat::check`, in [`after_console`], where a
 /// refusal has a channel to reach.
 /// The ACPI tables this architecture decodes: the MADT for its CPUs and I/O
-/// APICs, the FADT for reset, soft-off and the century register, the HPET for
+/// APICs, the FADT for reset, the PM1a control block and the century register, the HPET for
 /// the clock, the MCFG for ECAM and the DMAR for the IOMMU.
 pub const ACPI_TABLES: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR"];
 
@@ -90,7 +90,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     super::power::init_reset(rsdp_addr);
     apic::init();
     percpu::init_bsp(apic::id());
-    super::power::init_off(rsdp_addr);
+    super::power::init_control(rsdp_addr);
     ioapic::init(&madt);
     idt::enable_interrupts();
     super::syscall::init();

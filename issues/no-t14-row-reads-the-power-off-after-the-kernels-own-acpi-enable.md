@@ -43,14 +43,28 @@ the one config whose claim a job mints, `tests/acpicase`, runs its job list
 unprompted. Such a test reads QEMU's model of the ICH9 and never the T14's
 firmware.
 
-Owned by the stage "power-off through the server" of
-`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, which
-rewrites the power-off this exit's test reds on. The orchestrator's
-placement, not the owner's.
+**The mint refuses q35 in legacy mode**, so the test this exit names cannot
+be built yet. Measured on QEMU 11.1.1's q35 under OVMF and TCG, on
+`tests/acpicase` with the monitor's `o /b 0xb2 3` sent before the job
+claimed: the kernel logged `acpi: this machine stays in legacy mode — its
+firmware serves an embedded controller no holder could (the ECDT is unusable:
+Absent)` and the claim answered `NotSupported`. q35 has no ECDT, and
+`acpi_mode::enter` writes `ACPI_ENABLE` only for a machine whose embedded
+controller the ECDT names, the stopgap
+`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`
+records. That write also landed by a race, between the kernel's ACPI row line
+and the job's claim: `tests/acpicase` still runs its job list unprompted.
 
-**Exit** (the orchestrator's placement, not the owner's; not built in stage 1
-of `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`):
-a QEMU guest test whose harness clears `SCI_EN` through the monitor before
-the claim is minted, so that the kernel writes `ACPI_ENABLE` itself, ends in
-ToyOS's power-off, and is red where `SLP_EN` does not take after that enable.
+Owned by the stage "the interpreter" of
+`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose
+deletion of the ECDT stopgap is what lets a machine with no embedded
+controller be put in ACPI mode by the kernel. The orchestrator's placement,
+not the owner's; moved there from the power-off's slice, which found the
+refusal.
+
+**Exit** (the orchestrator's placement, not the owner's): once the ECDT
+stopgap is deleted, a QEMU guest test whose harness clears `SCI_EN` through
+the monitor before the claim is minted, on a boot whose job waits to be
+asked, so that the kernel writes `ACPI_ENABLE` itself, ends in ToyOS's
+power-off, and is red where `SLP_EN` does not take after that enable.
 The T14's own firmware on this path stays unread by any row.

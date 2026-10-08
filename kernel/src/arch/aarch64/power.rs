@@ -22,6 +22,11 @@ pub fn can_reset() -> bool {
     psci::conduit().is_some()
 }
 
+/// Never a reason: `SYSTEM_OFF` takes nothing a process supplies.
+pub fn off_refused() -> Option<&'static str> {
+    None
+}
+
 /// `SYSTEM_RESET`, which asks nothing of the other CPUs (DEN0022 §5.12.2). A
 /// wedge calls this: the call takes no lock, and only its refusal is said.
 pub fn reset() -> ! {
