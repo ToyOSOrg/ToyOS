@@ -38,5 +38,6 @@ lock-order inversion — `chdir` does not hold the VFS guard while it takes
 process-data (the guard is dropped before the `Ok` arm takes the second lock).
 A test that stages chdir past a successful lookup with its guard still alive,
 then drives open to VFS acquisition under process-data, completes both without
-deadlock. (Deterministic staging needs a kernel actuator; the test is in the
-pull request body.)
+deadlock. **Traced, not executed.** No model compiles these two syscalls, and staging the
+window needs an actuator the kernel does not have: one that holds `sys_chdir`
+in its `Ok` arm until a sibling releases it.

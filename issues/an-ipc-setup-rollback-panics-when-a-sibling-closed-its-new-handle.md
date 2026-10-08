@@ -30,6 +30,7 @@ where it must refuse.
 **Exit**: with a sibling closing (or sending) the just-installed handle while
 `SYS_INBOX_SETUP` is in its failing-`copy_out` rollback, and while
 `SYS_NAMESPACE_OPEN` is in its queue-full rollback, both syscalls return their
-original refusal and the kernel does not panic. (Staging the window
-deterministically needs a kernel actuator that pauses the installing thread
-between install and the fallible step; the test is in the pull request body.)
+original refusal and the kernel does not panic. **Traced, not executed.** No model compiles the handle table, and staging the
+window needs an actuator the kernel does not have: one that holds the
+installing thread between its install and its fallible step until a sibling
+releases it.

@@ -33,5 +33,6 @@ pages are freed while still mapped.
 **Exit**: a `SYS_SHM_MAP` that races the last close of its handle either maps
 nothing or is torn down with the object; no shm object's pages are present in
 any page table after its zero-handle teardown has run, and the kernel does not
-panic. (Deterministic staging needs a kernel actuator that pauses the mapping
-thread after it clones the `Arc`; the test is in the pull request body.)
+panic. **Traced, not executed.** No model compiles the object layer, and staging the
+window needs an actuator the kernel does not have: one that holds `sys_shm_map`
+between its clone and `map_into` until a sibling releases it.
