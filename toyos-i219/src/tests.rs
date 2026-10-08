@@ -596,6 +596,7 @@ fn a_frame_goes_out_whole() {
     let nic = Nic::new(10);
     let mut driver = open(&nic);
     nic.set_link(true);
+    one_pass(&mut driver);
     let payload = frame(0x33, 600);
     let slot = driver.tx_reserve(payload.len()).expect("a free transmit descriptor");
     nic.put_bytes(slot.at, &payload);
@@ -604,31 +605,300 @@ fn a_frame_goes_out_whole() {
     assert_eq!(nic.sent(), vec![payload], "{}", nic.because("the frame did not reach the wire"));
 }
 
-/// **A server never blocks.** With every descriptor in flight the next frame is
-/// dropped and counted, never waited on: spinning here would park the caller's
-/// whole event loop on a device.
-#[test]
-fn a_full_transmit_ring_drops_rather_than_waits() {
-    let nic = Nic::new(11);
-    let mut driver = open(&nic);
+/// Both parts, each with the cause its transmit wake is unmasked under: the
+/// 82574 in MSI-X mode under both of §10.2.4.1's names, the PCH's MAC under
+/// the classic one alone.
+const PARTS: [(Part, u32); 2] =
+    [(Part::E82574, cause::TXDW | cause::TXQ0), (Part::I219, cause::TXDW)];
+
+/// Let a partner onto the wire and take the pass that sees the link.
+fn link_up(nic: &Nic, driver: &mut Driver) {
     nic.set_link(true);
-    // The device is held, so nothing is sent, nothing is written back and
-    // nothing is reclaimed: the ring really does fill.
+    if nic.part() == Part::I219 {
+        nic.negotiation_settles();
+    }
+    one_pass(driver);
+    assert!(driver.link().is_up(), "{}", nic.because("a partner on the wire raised no link"));
+}
+
+/// A part of `part`, opened, its link up and its device held: nothing is
+/// sent, written back or reclaimed until `run`.
+fn held_with_a_link(seed: u64, part: Part, permits: Permits) -> (Nic, Driver) {
+    let nic = Nic::with(seed, part, permits);
+    let mut driver = open(&nic);
+    link_up(&nic, &mut driver);
     nic.hold();
-    // The ring keeps one descriptor in software's hands (§7.2.4: hardware owns
-    // `[TDH..TDT)`, so filling the last one would wrap the tail onto the head).
-    let mut taken = 0;
+    (nic, driver)
+}
+
+/// Publish frames tagged from `first` until the driver refuses one, and answer
+/// them. The device is held, so nothing is written back while this runs.
+fn fill(nic: &Nic, driver: &mut Driver, first: u8) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
     while let Some(slot) = driver.tx_reserve(64) {
-        nic.put_bytes(slot.at, &frame(1, 64));
+        let payload = frame(first + out.len() as u8, 64);
+        nic.put_bytes(slot.at, &payload);
         driver.tx_commit(slot);
-        taken += 1;
-        if taken > TX_RING * 2 {
+        out.push(payload);
+        if out.len() > TX_RING * 2 {
             panic!("{}", nic.because("the transmit ring never filled"));
         }
-        // Nothing runs, so nothing is written back and nothing is reclaimed.
     }
-    assert_eq!(taken, TX_RING - 1, "{}", nic.because("the usable depth is not the ring less one"));
-    assert_eq!(driver.counters().tx_dropped, 1);
+    out
+}
+
+/// Let the held device work until every descriptor it was given is back.
+fn settle(nic: &Nic, driver: &mut Driver) {
+    for _ in 0..TX_RING * 4 {
+        if driver.tx_room() == TX_RING - 1 {
+            return;
+        }
+        nic.run();
+    }
+    panic!("{}", nic.because("the transmit ring never emptied"));
+}
+
+/// The three counts of a full transmit ring, as `inspect` carries them.
+fn waits(driver: &Driver) -> (u32, u32, u32) {
+    let counters = driver.counters();
+    (counters.tx_full, counters.tx_wake_armed, counters.tx_wake_taken)
+}
+
+/// §7.2.4: hardware owns `[TDH..TDT)`, so filling the last descriptor would
+/// wrap the tail onto the head and the part would read a full ring as an empty
+/// one. The ring takes one frame fewer than it has descriptors, says so before
+/// a frame is offered, and refuses the next.
+#[test]
+fn a_full_transmit_ring_answers_room_0() {
+    for (part, _) in PARTS {
+        let (nic, mut driver) = held_with_a_link(11, part, Permits::default());
+        assert_eq!(driver.tx_room(), TX_RING - 1, "{}", nic.because("an empty ring is not the ring less one"));
+        let out = fill(&nic, &mut driver, 1);
+        assert_eq!(out.len(), TX_RING - 1, "{}", nic.because("the usable depth is not the ring less one"));
+        assert_eq!(driver.tx_room(), 0, "{}", nic.because("a full ring said it had room"));
+        assert!(driver.tx_reserve(64).is_none());
+        nic.run();
+        assert_eq!(nic.sent(), out, "{}", nic.because("the part did not read the full ring as full"));
+    }
+}
+
+/// §7.2.4.2: a descriptor that carried `RS` is written back with `DD`, and
+/// that is the buffer coming free. Room is counted from memory and returns
+/// with the write-back, by as many frames as were written back.
+#[test]
+fn a_written_back_descriptor_returns_room() {
+    for (part, _) in PARTS {
+        let permits = Permits { batched_writeback: false, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(23, part, permits);
+        fill(&nic, &mut driver, 1);
+        assert_eq!(driver.tx_room(), 0);
+        nic.run();
+        assert_eq!(
+            driver.tx_room(),
+            TX_RING - 1,
+            "{}",
+            nic.because("every descriptor was written back and the room did not return")
+        );
+        assert_eq!(driver.counters().sent, (TX_RING - 1) as u32);
+    }
+}
+
+/// §4.6.5: "There is no reason to enable the transmit interrupts" — until a
+/// caller has a frame and no descriptor. The cause is unmasked by the caller
+/// that found the ring full, under the names this part raises a message for
+/// and no other bit; it raises the one message that ends the wait, and is
+/// masked again by the pass that takes it: a part left with it unmasked sends
+/// a message for every frame. Each step is counted once.
+#[test]
+fn the_transmit_cause_is_armed_only_when_asked() {
+    for (part, tx_done) in PARTS {
+        let permits = Permits { spurious_interrupts: false, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(24, part, permits);
+        let unasked = nic.peek(regs::IMS);
+        assert_eq!(unasked & (cause::TXDW | cause::TXQ0), 0);
+
+        // Not asked: the ring fills and empties, and nothing is said about it.
+        fill(&nic, &mut driver, 1);
+        nic.run();
+        assert_eq!(nic.peek(regs::IMS), unasked);
+        assert_eq!(nic.pending(), 0, "{}", nic.because("a write-back nobody waited on sent a message"));
+        settle(&nic, &mut driver);
+        one_pass(&mut driver);
+        assert_eq!(waits(&driver), (0, 0, 0), "{}", nic.because("a ring nobody waited on was counted"));
+
+        // Asked, on a full ring.
+        fill(&nic, &mut driver, 0x40);
+        assert_eq!(driver.wake_on_room(), 0);
+        assert_eq!(
+            nic.peek(regs::IMS),
+            unasked | tx_done,
+            "{}",
+            nic.because("the transmit cause was not unmasked under this part's names and no other")
+        );
+        assert_eq!(nic.pending(), 0);
+        assert_eq!(waits(&driver), (1, 1, 0));
+        nic.run();
+        assert!(nic.pending() > 0, "{}", nic.because("a write-back the caller waited on sent no message"));
+        let pass = one_pass(&mut driver);
+        assert_eq!(pass.causes & tx_done, tx_done);
+        assert!(driver.tx_room() > 0, "{}", nic.because("the message came and the room did not"));
+        assert_eq!(waits(&driver), (1, 1, 1), "{}", nic.because("the wake was taken and not counted"));
+
+        // And not asked again: the pass that took the message masked the cause.
+        assert_eq!(nic.peek(regs::IMS), unasked, "{}", nic.because("the pass left the transmit cause unmasked"));
+        settle(&nic, &mut driver);
+        assert_eq!(nic.pending(), 0, "{}", nic.because("a write-back after the wake was taken sent a message"));
+        one_pass(&mut driver);
+        assert_eq!(waits(&driver), (1, 1, 1), "{}", nic.because("a cause nobody waited on was counted a wake"));
+    }
+}
+
+/// A burst several rings long, sent by a caller that asks for room before each
+/// frame and sleeps on its claim where there is none: every frame leaves, in
+/// order, and every sleep is ended by a message.
+#[test]
+fn a_burst_past_the_ring_leaves_whole_on_the_room_it_is_told() {
+    for (seed, (part, _)) in (1..=32u64).flat_map(|seed| PARTS.map(|part| (seed, part))) {
+        let (nic, mut driver) = held_with_a_link(seed, part, Permits::default());
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut on_the_wire: Vec<Vec<u8>> = Vec::new();
+        let mut sleeps = 0;
+        for i in 0..(TX_RING as u8 * 4) {
+            while driver.tx_room() == 0 && driver.wake_on_room() == 0 {
+                // Asleep on the claim: the device works, and nothing but a
+                // message begins the next pass.
+                let mut runs = 0;
+                while nic.pending() == 0 {
+                    nic.run();
+                    on_the_wire.extend(nic.sent());
+                    runs += 1;
+                    assert!(runs < 64, "{}", nic.because("no message ever came for a full ring"));
+                }
+                one_pass(&mut driver);
+                sleeps += 1;
+            }
+            let payload = frame(i + 1, 100 + i as usize);
+            let slot = driver.tx_reserve(payload.len()).expect("the room the driver just counted");
+            nic.put_bytes(slot.at, &payload);
+            driver.tx_commit(slot);
+            out.push(payload);
+        }
+        for _ in 0..TX_RING {
+            nic.run();
+            on_the_wire.extend(nic.sent());
+        }
+        assert!(sleeps > 0, "{}", nic.because("the burst never filled the ring"));
+        assert_eq!(on_the_wire, out, "{}", nic.because("what reached the wire is not the burst"));
+        let counters = driver.counters();
+        assert!(counters.tx_wake_taken > 0, "{}", nic.because("no sleep was ended by the transmit cause"));
+        assert_eq!(counters.unsent, 0);
+    }
+}
+
+/// No frame is published on a link that is down: there is no room, nothing is
+/// unmasked for it and nothing counted, because the wake is the link's own
+/// cause.
+#[test]
+fn a_link_that_is_down_has_no_room() {
+    for (part, _) in PARTS {
+        let nic = Nic::with(25, part, Permits::default());
+        let mut driver = open(&nic);
+        let unasked = nic.peek(regs::IMS);
+        assert_eq!(driver.tx_room(), 0, "{}", nic.because("a link that is down had room"));
+        assert!(driver.tx_reserve(64).is_none());
+        assert_eq!(driver.wake_on_room(), 0);
+        assert_eq!(nic.peek(regs::IMS), unasked, "{}", nic.because("a cause was unmasked for a link that is down"));
+        assert_eq!(waits(&driver), (0, 0, 0));
+        link_up(&nic, &mut driver);
+        assert_eq!(driver.tx_room(), TX_RING - 1);
+    }
+}
+
+/// What a part does with the descriptors it holds when its link goes away is
+/// in no Intel document, so the driver asks nothing of it: the pass that reads
+/// `LSC` over unsent descriptors resets the function and brings it up again
+/// (§10.2.6.7: the head is software's to write only after a reset). The ring
+/// is whole when the link returns, on a part that would never have sent those
+/// frames and on one that would; the frames are counted; the multicast table
+/// and the receive ring are as they were.
+#[test]
+fn a_ring_the_link_left_full_is_taken_back() {
+    const MDNS: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb];
+    let mut reached_at_once = 0;
+    for ((part, _), strands, seen_down) in PARTS
+        .into_iter()
+        .flat_map(|part| [(part, true, true), (part, false, true), (part, true, false), (part, false, false)])
+    {
+        let permits = Permits { link_loss_strands_the_ring: strands, ..Permits::default() };
+        let (nic, mut driver) = held_with_a_link(26, part, permits);
+        let why = |what: &str| nic.because(&format!("{part:?}, strands {strands}, seen down {seen_down}: {what}"));
+        driver.accept_multicast(MDNS);
+        let table: Vec<u32> = (0..regs::MTA_DWORDS).map(|dword| nic.peek(regs::MTA + dword * 4)).collect();
+
+        fill(&nic, &mut driver, 1);
+        nic.set_link(false);
+        if !seen_down {
+            // Down and up again between two passes: one `LSC`, and a link that
+            // reads up on both sides of it.
+            nic.set_link(true);
+        }
+        let pass = one_pass(&mut driver);
+        assert!(pass.rearmed, "{}", why("the ring was left with the link's unsent frames"));
+        assert_eq!(driver.counters().unsent, (TX_RING - 1) as u32, "{}", why("the frames given back were not counted"));
+        if seen_down {
+            assert_eq!(driver.tx_room(), 0, "{}", why("a link that is down had room"));
+        }
+        if driver.link().is_up() {
+            // The reset that left the PHY alone has its link back by the
+            // bring-up's own `SLU`, which is a link change of the driver's
+            // making: a frame in flight at the next pass is not given back
+            // for it.
+            let early = frame(0x70, 64);
+            let slot = driver.tx_reserve(early.len()).expect("a ring with room");
+            nic.put_bytes(slot.at, &early);
+            driver.tx_commit(slot);
+            let next = one_pass(&mut driver);
+            assert!(!next.rearmed, "{}", why("the bring-up's own link change took the ring back again"));
+            nic.run();
+            assert_eq!(nic.sent(), vec![early], "{}", why("the frame published after the reset did not leave"));
+            reached_at_once += 1;
+        }
+
+        link_up(&nic, &mut driver);
+        assert_eq!(driver.tx_room(), TX_RING - 1, "{}", why("the ring did not come back whole"));
+        let after: Vec<u32> = (0..regs::MTA_DWORDS).map(|dword| nic.peek(regs::MTA + dword * 4)).collect();
+        assert_eq!(after, table, "{}", why("the multicast table did not survive"));
+
+        // A frame published now leaves, and it is the only one that does: the
+        // pass that follows a frame in flight resets nothing.
+        let payload = frame(0x77, 300);
+        let slot = driver.tx_reserve(payload.len()).expect("a ring with room");
+        nic.put_bytes(slot.at, &payload);
+        driver.tx_commit(slot);
+        let next = one_pass(&mut driver);
+        assert!(!next.rearmed, "{}", why("the bring-up's own link change took the ring back again"));
+        let inbound = frame(0x78, 200);
+        nic.deliver(&inbound);
+        nic.run();
+        assert_eq!(nic.sent(), vec![payload], "{}", why("what left is not the one frame published since"));
+        one_pass(&mut driver);
+        assert_eq!(drain(&nic, &mut driver), vec![inbound], "{}", why("the receive ring did not come back"));
+        assert_eq!(driver.counters().unsent, (TX_RING - 1) as u32);
+    }
+    assert!(reached_at_once > 0, "no part had its link back at the end of the reset");
+}
+
+/// A function that does not come back from that reset is handed up by name,
+/// and not driven on.
+#[test]
+fn a_ring_that_cannot_be_taken_back_is_refused() {
+    let (nic, mut driver) = held_with_a_link(27, Part::E82574, Permits::default());
+    fill(&nic, &mut driver, 1);
+    nic.set_link(false);
+    nic.reset_never_clears();
+    let Err(PassRefused::Rearm(Refusal::ResetUnfinished { .. })) = driver.begin_pass() else {
+        panic!("{}", nic.because("a reset that never cleared began a pass"));
+    };
 }
 
 /// §7.2.4.2 lets the device hold transmit write-backs in a batch, so a later
@@ -641,6 +911,7 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
         let nic = Nic::new(seed);
         let mut driver = open(&nic);
         nic.set_link(true);
+        one_pass(&mut driver);
         let mut out: Vec<Vec<u8>> = Vec::new();
         let mut on_the_wire: Vec<Vec<u8>> = Vec::new();
         for i in 0..(TX_RING as u8 * 4) {
@@ -667,12 +938,7 @@ fn transmit_descriptors_are_reclaimed_under_batched_write_back() {
             "{}",
             nic.because("what reached the wire is not what was published")
         );
-        assert_eq!(
-            driver.counters().tx_dropped,
-            0,
-            "{}",
-            nic.because("a frame was dropped although the ring was being reclaimed")
-        );
+        assert_eq!(out.len(), TX_RING * 4, "{}", nic.because("a frame found no descriptor in eight runs"));
     }
 }
 
@@ -821,7 +1087,7 @@ fn a_claim_that_stops_answering_is_handed_up_and_not_read_as_quiet() {
     nic.set_link(true);
     one_pass(&mut driver);
     nic.claim_taken_away();
-    assert_eq!(driver.begin_pass(), Err(Unanswered::Gone));
+    assert_eq!(driver.begin_pass(), Err(PassRefused::Claim(Unanswered::Gone)));
 }
 
 /// §10.2.4.1's `RXO` and `RXDMT0`: the two the part reports about its own
@@ -839,21 +1105,15 @@ fn the_receiver_reporting_on_itself_is_counted() {
 }
 
 /// §7.2.10.1: one legacy descriptor carries one buffer. A frame longer than one
-/// is refused and counted apart from a full ring, because it is a caller that
-/// offered more than it was told it could.
+/// is refused and counted, because it is a caller that offered more than it
+/// was told it could.
 #[test]
 fn a_frame_longer_than_a_transmit_buffer_is_refused_and_not_truncated() {
     let nic = Nic::new(22);
     let mut driver = open(&nic);
     nic.set_link(true);
+    one_pass(&mut driver);
     assert!(driver.tx_reserve(TX_BUF_BYTES + 1).is_none());
-    assert_eq!(driver.counters().too_long, 1);
-    assert_eq!(
-        driver.counters().tx_dropped,
-        0,
-        "{}",
-        nic.because("a frame that never fit was counted as a full ring")
-    );
     // And the ring is untouched: the next frame that does fit still goes out.
     let payload = frame(0x99, TX_BUF_BYTES);
     let slot = driver.tx_reserve(payload.len()).expect("a free transmit descriptor");
@@ -911,6 +1171,7 @@ fn the_link_going_away_and_coming_back_is_seen() {
     let down = one_pass(&mut driver);
     assert!(down.causes & cause::LSC != 0, "{}", nic.because("no LSC for the link going away"));
     assert!(down.link_changed);
+    assert!(!down.rearmed, "{}", nic.because("a link change over an empty ring reset the function"));
     assert_eq!(driver.link(), Link::Down);
 
     nic.set_link(true);
@@ -967,11 +1228,20 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
         let mut got_out: Vec<Vec<u8>> = Vec::new();
 
         for round in 0..40u8 {
-            let inbound = frame(round + 1, 64 + round as usize * 13);
-            nic.deliver(&inbound);
-            expect_in.push(inbound);
             if round % 5 == 3 {
+                // A frame the part still holds when its link changes goes with
+                // the ring the driver takes back, so the wire is quiet first.
+                for _ in 0..8 {
+                    nic.run();
+                    one_pass(&mut driver);
+                    got_in.extend(drain(&nic, &mut driver));
+                    got_out.extend(nic.sent());
+                }
                 nic.set_link(round % 10 == 3);
+            } else {
+                let inbound = frame(round + 1, 64 + round as usize * 13);
+                nic.deliver(&inbound);
+                expect_in.push(inbound);
             }
             let outbound = frame(0x80 | round, 90 + round as usize * 11);
             if let Some(slot) = driver.tx_reserve(outbound.len()) {
@@ -980,7 +1250,12 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
                 expect_out.push(outbound);
             }
             nic.run();
+            let given_back = driver.counters().unsent;
             one_pass(&mut driver);
+            // Published into a link that had gone and the driver had not yet
+            // seen go: the newest frames, counted and never sent.
+            let given_back = (driver.counters().unsent - given_back) as usize;
+            expect_out.truncate(expect_out.len() - given_back);
             got_in.extend(drain(&nic, &mut driver));
             got_out.extend(nic.sent());
         }
@@ -2555,6 +2830,7 @@ fn the_driver_and_the_macs_statistics_count_the_same_frames() {
     let nic = Nic::new(134);
     let mut driver = open(&nic);
     nic.set_link(true);
+    one_pass(&mut driver);
     for tag in 1..=3u8 {
         let payload = frame(tag, 100);
         let slot = driver.tx_reserve(payload.len()).expect("a free transmit descriptor");

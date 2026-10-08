@@ -36,8 +36,8 @@ pub(crate) struct Name {
     query: Vec<u8>,
 }
 
-/// `now` on the responder's clock: whole milliseconds of the node's.
-fn millis(now: Instant) -> u64 {
+/// `now` on the clock `toyos-mdns` and `toyos-dns` keep: whole milliseconds of the node's.
+pub(crate) fn millis(now: Instant) -> u64 {
     u64::try_from(now.since(Instant::from_millis(0)).as_millis()).unwrap_or(u64::MAX)
 }
 

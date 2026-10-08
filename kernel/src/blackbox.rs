@@ -96,6 +96,9 @@ pub fn record_panic(records: &[u8]) {
         // its tail alone is a report with the crash missing: the panel's newest
         // lines are the ones written after it.
         crate::panic::first_words(&mut report);
+        // The machine's census, which a death takes as a stop does: atomics
+        // alone, so it is inside this region's rules (`crate::census`).
+        let _ = core::fmt::Write::write_fmt(&mut report, format_args!("{}", crate::census::Sealed));
         crate::log::recovery::seal_into(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
         report.seal(State::Panic, stamp, identity);

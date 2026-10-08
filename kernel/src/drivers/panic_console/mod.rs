@@ -695,10 +695,10 @@ pub fn render() -> bool {
 /// that never reached the log file, which are the newest ones.
 pub fn seal_wedge(said: core::fmt::Arguments) {
     if PAINTING.swap(true, Ordering::SeqCst) {
-        crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), &[]);
+        crate::blackbox::record_wedge(format_args!("{said}{}", crate::census::Sealed), &[]);
         return;
     }
-    crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), live_tail().text);
+    crate::blackbox::record_wedge(format_args!("{said}{}", crate::census::Sealed), live_tail().text);
 }
 
 /// Keep the panel as it is until `bound` resets the machine: the panic path's
@@ -1068,9 +1068,7 @@ static TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 /// The head `src/bootlog.rs` reads the census by.
 const CENSUS: &str = "panel: paints=";
 
-/// One line, written to the two channels a boot can end on: [`log_census`] for
-/// a boot that hands the machine back, and [`seal_wedge`] for one a bound ends
-/// with no `logkeeper` left to write a file.
+/// The panel's line of `crate::census`.
 struct Census;
 
 impl core::fmt::Display for Census {
@@ -1087,9 +1085,9 @@ impl core::fmt::Display for Census {
     }
 }
 
-/// The panel's own row in the shutdown census, beside `irq:`.
-pub fn log_census() {
-    log!("{Census}");
+/// The panel's own row in the machine's census.
+pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
+    say(format_args!("{Census}"));
 }
 
 /// Charge one paint to the census.

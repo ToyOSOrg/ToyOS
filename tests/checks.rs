@@ -410,16 +410,10 @@ mod checks {
     #[test]
     fn mask_windows_verdict() -> Result<(), String> {
         use common::irqcensus::{windows_under, Measured};
-        let census = |cpu: u32| {
-            format!(
-                "[ 0.100 cpu0 kernel] irq: cpu{cpu} timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
-                 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
-            )
-        };
         let windows = |cpu: u32, (irqs, preempt): (u64, u64)| {
             format!("[ 0.100 cpu0 kernel] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
         };
-        let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
+        let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [windows(0, cpu0), windows(1, cpu1)].concat();
         let exit = |name: &str| format!("[ 0.100 cpu0 kernel] exit: {name} pid=9 code=0 cpu=1ms\n");
         let held_ns = kernel::sched::windows::HELD_NS;
         let hold = format!("[ 0.100 cpu1 kernel] windows: held cpu1 ns={}\n", held_ns + 7);
@@ -437,9 +431,9 @@ mod checks {
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
         };
-        unpaired("a census without its windows", &good.replace(&windows(0, (100, 100)), ""), "went out without")?;
+        unpaired("a report without one of its CPUs", &good.replace(&windows(0, (100, 100)), ""), "went out without")?;
         unpaired("a CPU that closed no window", &report((0, 7), (3, 4)), "closed no window")?;
-        unpaired("one CPU of two", &[census(0), windows(0, (5, 7))].concat(), "1 of 2")?;
+        unpaired("one CPU of two", &windows(0, (5, 7)), "1 of 2")?;
         unpaired("a field missing", &good.replace(" preempt_off_ns=100", ""), "fields")?;
 
         let read = windows_under(&good, 2, &exited)?;
@@ -486,12 +480,10 @@ mod checks {
         Ok(())
     }
 
-    /// [`irq_census`] over two exits stamped in the other order from their
-    /// reads. X, on cpu2, reads cpu1 and is held before it stamps; Y, on cpu3,
-    /// reads every CPU with one more `kick` on cpu1, stamps, loads the
-    /// issuer's 7 and is held before its swap. Two shootdowns later X stamps
-    /// cpu1, reads cpu2 and cpu3 at 9 deliveries and logs 9; Y's swap then
-    /// returns 9, so Y logs 7.
+    /// [`irq_census`] over two censuses, X's from cpu2 and Y's from cpu3, whose
+    /// lines are in no read order: a CPU's census is the largest count each
+    /// source reaches on any of its lines, and the largest issuer total bounds
+    /// every delivery.
     #[test]
     fn irq_census_verdict() -> Result<(), String> {
         let census = |at: &str, on: u32, cpu: u32, kick: u64, tlb: u64| {
@@ -523,7 +515,7 @@ mod checks {
             y_issued.clone(),
         ]
         .concat();
-        irq_census(&good).map_err(|e| format!("two exits stamped out of read order were refused: {e}"))?;
+        irq_census(&good).map_err(|e| format!("two censuses out of read order were refused: {e}"))?;
 
         let refused = |what: &str, capture: &str, says: &str| match irq_census(capture) {
             Ok(()) => Err(format!("{what} was accepted")),
@@ -985,7 +977,7 @@ mod checks {
                 "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
                  Black box: the last boot read DONE, so it handed the machine back on purpose and \
                  this chain ends here\n\
-                 | log: this boot's newest records follow, newest first (16)\n{tail}\
+                 | log: this boot's newest records follow, newest first\n{tail}\
                  Loader log: the last boot is accounted for, so this pass resets the machine\n",
                 bootlog::SEPARATOR
             )
@@ -1001,19 +993,27 @@ mod checks {
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
-        let wedged = |tail: &str| {
+        // What the seal itself writes of the machine, above the ring's tail.
+        let census = "| irq: cpu0 timer=9 kick=2 xhci=1729 userdev=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 \
+                      nmi=0 spurious=0 unclaimed=0\n\
+                      | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
+                      bench=0\n\
+                      | irq: unclaimed vectors no-isr=0\n\
+                      | panel: paints=9 px=2896256 us=5688 max_us=1285\n";
+        let sealed = |census: &str, tail: &str| {
             format!(
                 "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
                  Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
                  and this chain ends here\n\
                  | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
                  machine in `complete`. Where each CPU's timer last found the kernel:\n\
-                 | The tail of the log ring follows ... which is what nothing was draining.\n\
+                 | The tail of the log ring follows ... which is what nothing was draining.\n{census}\
                  | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
                  Loader log: the last boot is accounted for, so this pass resets the machine\n",
                 bootlog::SEPARATOR
             )
         };
+        let wedged = |tail: &str| sealed(census, tail);
         let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
         let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
@@ -1029,6 +1029,10 @@ mod checks {
         let wedge = format!("{staged}{}{}{inside}", awake(1), awake(0));
         assert_eq!(judge(&[&readback("deadlinewedge", &wedged(&wedge), kernel)]), Ok(()));
         assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+        // A death that sealed no census of the machine, and one that sealed all but the shootdowns'.
+        assert!(judge(&[&readback("deadlinewedge", &sealed("", &wedge), kernel)]).is_err());
+        let no_tlb: String = census.split_inclusive('\n').filter(|line| !line.contains("tlb: ")).collect();
+        assert!(judge(&[&readback("deadlinewedge", &sealed(&no_tlb, &wedge), kernel)]).is_err());
         // The staging CPU arrived deaf: the gate masked the syscall's body, and
         // the others' awake lines say nothing of it.
         let gated = format!("{staged}{deaf}{}{inside}", awake(0));
