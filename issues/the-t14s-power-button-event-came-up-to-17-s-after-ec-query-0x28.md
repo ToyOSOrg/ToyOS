@@ -271,8 +271,11 @@ vendor's platform driver, which writes the controller, and the samples hold
 no list of what was loaded on that boot: any of the fifteen may be its doing
 and not the firmware's, bit 0 of 0x05 among them. ToyOS was read on one boot,
 and nothing says Linux was read on more, so a difference between boots is not
-told from a difference between systems. One bit marks nothing by itself: nine
-of the fifteen differ by one. And no measurement ties bit 0 of 0x05, the bit
+told from a difference between systems. Nine of the fifteen differ by one
+bit, and five of those nine by bit 0 set under ToyOS and clear under Linux,
+0x05 among them: the match of bit and direction at 0x05 is what most of the
+one-bit differences show, and marks nothing by itself. And no measurement
+ties bit 0 of 0x05, the bit
 at 0x03 or any other of the fifteen to a lost press: the scout's boot holds
 no press, the Linux samples say nothing of one, and nothing was written to
 the controller's memory to see what a press then does.
