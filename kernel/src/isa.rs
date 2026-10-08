@@ -15,7 +15,8 @@
 //! threads opens them and every other switch closes them
 //! (`arch::pio::switch_to`). A handle moved on after that answers nothing but
 //! refusals, and the row is claimable again only once both the claim and the
-//! process are gone. A binding reaches the process's other threads at their
+//! process are gone. **That holds for every row**: nothing here tells one from
+//! another. A binding reaches the process's other threads at their
 //! next switch, and its end needs no switch at all: teardown runs once every
 //! thread has left, and no thread that has left returns to Ring 3.
 //!
@@ -26,6 +27,12 @@
 //! its handler too, and stays masked until the holder has served what raised
 //! it and acknowledged the claim ([`ack`]); it is masked from the claim until
 //! the holder's first acknowledgement.
+//!
+//! **A call on a claim is made with the claim's [`Row`] and never with a row
+//! number**, lent under the lock the claim's release takes it with
+//! (`object::Held`): the call runs wholly before the release or finds no row,
+//! so none acknowledges, reads or registers a poll on a row its claim has
+//! given up, and the release answers every poll registered before it.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -37,6 +44,7 @@ use toyos_userbound::Ports;
 
 use crate::arch::pio;
 use crate::device::ClaimError;
+use crate::inbox::PollEntry;
 use crate::pcidev::record::Interrupt;
 use crate::process::Pid;
 use crate::sync::Lock;
@@ -105,8 +113,32 @@ fn lines(row: usize) -> &'static [pio::Line] {
     if at.is_null() { &[] } else { unsafe { &*at } }
 }
 
+/// One claim's hold on a row, from its mint to the release its drop is.
+///
+/// Neither `Copy` nor `Clone` and made only by [`claim_row`], so a reference
+/// to it is a row whose claim has not been released.
+pub struct Row(usize);
+
+/// The claim's last handle went: its lines masked, its record emptied and its
+/// polls answered. The ports stay with the process that bound them until that
+/// process ends.
+impl Drop for Row {
+    fn drop(&mut self) {
+        let row = self.0;
+        for &line in lines(row) {
+            pio::set_masked(line, true);
+        }
+        IRQ[row].clear();
+        // The claim is gone, so a poll on it is answered rather than left for the
+        // next holder's interrupts; the row stays minted until that is made, so no
+        // next claim's poll is among the ones answered.
+        WATCHES[row].cancel_polls();
+        *MINTED[row].lock() = false;
+    }
+}
+
 /// The row an `isa:` selector names whole.
-pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
+pub fn claim(set: IsaId) -> Result<Row, ClaimError> {
     let row = (0..MAX_ROWS)
         .find(|&row| {
             function(row).is_some_and(|f| {
@@ -122,7 +154,7 @@ pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
 /// Mint the claim on `row`: its ports checked against every port this kernel
 /// declared, its edge lines routed and unmasked, its level lines routed and
 /// left masked for the holder's first acknowledgement.
-pub fn claim_row(row: usize) -> Result<usize, ClaimError> {
+pub fn claim_row(row: usize) -> Result<Row, ClaimError> {
     let function = function(row).ok_or(ClaimError::Absent)?;
     if let Some((run, holder)) = function.runs.iter().find_map(|&run| pio::holder(run).map(|h| (run, h))) {
         log!("isa: {}'s ports {:#x}+{} are {holder}'s", function.name, run.first(), run.count());
@@ -155,28 +187,13 @@ pub fn claim_row(row: usize) -> Result<usize, ClaimError> {
         }
     }
     *minted = true;
-    Ok(row)
-}
-
-/// The claim's last handle went: its lines masked, its record emptied and its
-/// polls answered. The ports stay with the process that bound them until that
-/// process ends.
-pub fn release(row: usize) {
-    for &line in lines(row) {
-        pio::set_masked(line, true);
-    }
-    IRQ[row].clear();
-    // The claim is gone, so a poll on it is answered rather than left for the
-    // next holder's interrupts; the row stays minted until that is made, so no
-    // next claim's poll is among the ones answered.
-    WATCHES[row].cancel_polls();
-    *MINTED[row].lock() = false;
+    Ok(Row(row))
 }
 
 /// The holder served what raised the row's level lines: unmask them. A row
 /// with no level line has nothing to acknowledge.
-pub fn ack(row: usize) -> Result<(), ()> {
-    let mut level = lines(row).iter().copied().filter(|&line| pio::level(line)).peekable();
+pub fn ack(row: &Row) -> Result<(), ()> {
+    let mut level = lines(row.0).iter().copied().filter(|&line| pio::level(line)).peekable();
     if level.peek().is_none() {
         return Err(());
     }
@@ -189,7 +206,8 @@ pub fn ack(row: usize) -> Result<(), ()> {
 /// Open the row's ports to `pid` for the rest of its life. Called once per
 /// claim, by the claim's first read, and never twice for a row: [`claim_row`]
 /// mints none while a process holds its ports.
-pub fn bind(row: usize, pid: Pid) {
+pub fn bind(row: &Row, pid: Pid) {
+    let row = row.0;
     let name = function(row).expect("a claimed row was filled").name;
     match BOUND[row].compare_exchange(NOBODY, pid.raw(), Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => log!("isa: {name}'s ports are pid {pid}'s"),
@@ -200,9 +218,15 @@ pub fn bind(row: usize, pid: Pid) {
     pio::switch_to(Some(pid));
 }
 
-/// Whether `pid` holds the row's ports.
+/// Whether `pid` holds the row's ports: the context switch's question, of
+/// every row.
 pub fn bound_to(row: usize, pid: Pid) -> bool {
     BOUND[row].load(Ordering::Acquire) == pid.raw()
+}
+
+/// Whether `pid` holds the ports of the row this claim is on.
+pub fn held_by(row: &Row, pid: Pid) -> bool {
+    bound_to(row.0, pid)
 }
 
 /// Called from the process teardown, once every thread has left.
@@ -215,7 +239,8 @@ pub fn process_ends(pid: Pid) {
 }
 
 /// The interrupts since the last read, or `None` for none.
-pub fn take_record(row: usize) -> Option<DeviceIrqRecord> {
+pub fn take_record(row: &Row) -> Option<DeviceIrqRecord> {
+    let row = row.0;
     let taken = IRQ[row].take();
     if taken.is_some() && IRQ[row].take_unannounced() {
         log!("isa: {} took its first interrupt", function(row).expect("a claimed row was filled").name);
@@ -223,8 +248,8 @@ pub fn take_record(row: usize) -> Option<DeviceIrqRecord> {
     taken.map(|count| DeviceIrqRecord { count })
 }
 
-pub fn has_irq(row: usize) -> bool {
-    IRQ[row].armed()
+pub fn has_irq(row: &Row) -> bool {
+    IRQ[row.0].armed()
 }
 
 /// Records one interrupt, masks the row's level lines and posts the claim's
@@ -240,8 +265,9 @@ pub fn isr(row: usize) {
     WATCHES[row].post_in_place();
 }
 
-pub fn watch(row: usize) -> &'static IrqWatch {
-    &WATCHES[row]
+/// Register a poll on the watch of the row a claim holds.
+pub(crate) fn add_poll(row: &Row, entry: PollEntry) {
+    WATCHES[row.0].add_poll(entry);
 }
 
 /// The function a filled row raises `wire` with too, if one does: a second

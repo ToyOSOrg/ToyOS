@@ -44,12 +44,16 @@ pub struct Claim {
 /// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
 /// view's own hold on the blocks (`block::Partition::of`); an ISA function's and
 /// the ACPI fixed hardware's is its `isa` row's.
+///
+/// The slot and the row are held as what their modules' calls take, and the
+/// drop of each is its release: a call borrows one from the claim's `Held`, so
+/// none is made on a slot or a row its claim has let go.
 enum Claimed {
     Class(DeviceType),
-    PciFunction(usize),
+    PciFunction(crate::pcidev::Binding),
     Partition(crate::block::Partition),
-    Isa(usize),
-    Acpi(usize),
+    Isa(crate::isa::Row),
+    Acpi(crate::isa::Row),
 }
 
 impl Claim {
@@ -62,12 +66,36 @@ impl Claim {
         Ok(Self { what: Claimed::Class(class) })
     }
 
-    /// The guard for a `pcidev` slot the caller has already reserved.
-    ///
-    /// It exists from the moment the slot is taken, so a bring-up that refuses
-    /// half way through frees the slot on the way out rather than stranding it.
-    pub(crate) fn pci(slot: usize) -> Self {
-        Self { what: Claimed::PciFunction(slot) }
+    /// The claim on a function `pcidev` has bound.
+    pub(crate) fn pci(binding: crate::pcidev::Binding) -> Self {
+        Self { what: Claimed::PciFunction(binding) }
+    }
+
+    /// What `pcidev`'s calls on this claim are made with, or `None` for a
+    /// claim on anything but a PCI function.
+    pub(crate) fn binding(&self) -> Option<&crate::pcidev::Binding> {
+        match &self.what {
+            Claimed::PciFunction(binding) => Some(binding),
+            Claimed::Class(_) | Claimed::Partition(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
+        }
+    }
+
+    /// What `isa`'s calls on this claim are made with, or `None` for a claim
+    /// on anything but an ISA function or the ACPI fixed hardware.
+    pub(crate) fn row(&self) -> Option<&crate::isa::Row> {
+        match &self.what {
+            Claimed::Isa(row) | Claimed::Acpi(row) => Some(row),
+            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Partition(_) => None,
+        }
+    }
+
+    /// Register a poll on the watch of the function or row this claim holds.
+    pub(crate) fn add_poll(&self, entry: crate::inbox::PollEntry) {
+        match &self.what {
+            Claimed::PciFunction(binding) => crate::pcidev::add_poll(binding, entry),
+            Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::add_poll(row, entry),
+            Claimed::Class(_) | Claimed::Partition(_) => unreachable!("a poll registered through a claim on no function or row"),
+        }
     }
 
     /// The view a partition claim transfers through, or `None` for any other.
@@ -81,8 +109,8 @@ impl Claim {
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        match self.what {
-            Claimed::Class(class) => {
+        match &self.what {
+            &Claimed::Class(class) => {
                 // Before the flag goes: a poll the next holder registers is not this claim's to answer.
                 match class {
                     DeviceType::HdaAudio | DeviceType::VirtioSound => {
@@ -98,14 +126,16 @@ impl Drop for Claim {
                 }
                 *taken(class).lock() = false;
             }
-            // Bus mastering off, then the domain, then the pages: `release`
-            // owns that order, and this is where a dying process reaches it.
-            Claimed::PciFunction(slot) => crate::pcidev::release(slot),
+            // Bus mastering off, then the domain, then the pages: the
+            // binding's drop owns that order, and this is where a dying
+            // process reaches it.
+            Claimed::PciFunction(_) => {}
             // The view drops with this, and its hold with the last clone of it.
             Claimed::Partition(_) => {}
-            Claimed::Isa(row) => crate::isa::release(row),
-            // Back to the mode the firmware handed over, too.
-            Claimed::Acpi(row) => crate::arch::acpi_mode::release(row),
+            // The row's drop is its release.
+            Claimed::Isa(_) => {}
+            // Back to the mode the firmware handed over, and then the row's drop.
+            Claimed::Acpi(_) => crate::arch::acpi_mode::release(),
         }
     }
 }
@@ -182,8 +212,8 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             // The slot's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
-            let (info, slot, claim) = crate::pcidev::claim(id)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
+            let (info, claim) = crate::pcidev::claim(id)?;
+            Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim))
         }
         DeviceType::Partition => {
             let found = crate::gpt::claimable(toyos_abi::part::PartGuid::from_wire(selector))?;
@@ -200,13 +230,13 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             // The row's own guard, taken inside as a PCI slot's is.
             let row = crate::isa::claim(set)?;
             let claim = Claim { what: Claimed::Isa(row) };
-            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set, row), claim))
+            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set), claim))
         }
         DeviceType::Acpi => {
             // The row's own guard, taken inside, and the switch to ACPI mode.
             let (row, info) = crate::arch::acpi_mode::claim()?;
             let claim = Claim { what: Claimed::Acpi(row) };
-            Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info, row), claim))
+            Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;

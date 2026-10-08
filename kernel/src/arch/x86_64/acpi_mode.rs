@@ -137,26 +137,27 @@ struct Facs {
     word: LockWordAt,
 }
 
-/// What this kernel does for the claim's holder, and for whom.
+/// What this kernel does for the claim's holder.
 struct Holder {
-    /// A claim exists: nothing is done for a holder that is gone.
-    claimed: bool,
     /// The holder took the Global Lock and has not given it back.
     locked: bool,
 }
 
 /// Held across everything this kernel does for the claim's holder, from the
 /// decision to the last instruction of the act: each mediated access, and
-/// each change of the lock word.
-static HOLDER: Lock<Holder> = Lock::new(Holder { claimed: false, locked: false });
+/// each change of the lock word. Taken with the claim's own lock held
+/// (`object::Held`), and `pcidev`'s machine record and then `paging`'s record
+/// of windows under it; nothing holding one of those two takes this or a
+/// claim's.
+static HOLDER: Lock<Holder> = Lock::new(Holder { locked: false });
 
 /// The right to act for the claim's holder, held across the act; none once
-/// the claim is gone or the stop has begun. A claim that exists is the one
-/// the caller's process bound: `isa::claim_row` mints no next one while that
-/// process has a thread left, one inside this call included.
-fn acting() -> Result<LockGuard<'static, Holder>, SyscallError> {
+/// the stop has begun. The claim is there for the whole of the act: its row
+/// is lent under the lock its release takes the row with, and [`release`]
+/// runs only once that has it.
+fn acting(_claimed: &isa::Row) -> Result<LockGuard<'static, Holder>, SyscallError> {
     let holder = HOLDER.lock();
-    if !holder.claimed || crate::quiesce::begun() {
+    if crate::quiesce::begun() {
         return Err(SyscallError::Gone);
     }
     Ok(holder)
@@ -312,19 +313,12 @@ fn embedded_controller(rsdp_addr: u64, gpe0: Block) -> Result<Ec, String> {
 
 /// The row, claimed, with the machine in ACPI mode; or the refusal that
 /// leaves it in legacy mode, said by name.
-pub fn claim() -> Result<(usize, AcpiInfo), ClaimError> {
+pub fn claim() -> Result<(isa::Row, AcpiInfo), ClaimError> {
     let hardware = hardware().ok_or(ClaimError::Absent)?;
+    // Released by the refusal's return, which drops it.
     let row = isa::claim_row(ROW)?;
-    match enter(hardware) {
-        Ok(()) => {
-            HOLDER.lock().claimed = true;
-            Ok((row, info(hardware)))
-        }
-        Err(refused) => {
-            isa::release(row);
-            Err(refused)
-        }
-    }
+    enter(hardware)?;
+    Ok((row, info(hardware)))
 }
 
 fn info(hardware: &Hardware) -> AcpiInfo {
@@ -403,19 +397,15 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
 }
 
 /// The claim's last handle went: the machine back in legacy mode where the
-/// mint took it out of it, and then the row released, so no claimant finds
-/// `SCI_EN` set by a holder whose disable is still to come.
-pub fn release(row: usize) {
+/// mint took it out of it. Before the row's own release, which its caller's
+/// drop of the row is, so no claimant finds `SCI_EN` set by a holder whose
+/// disable is still to come.
+pub fn release() {
     let hardware = hardware().expect("a claimed row has its hardware");
-    {
-        let mut holder = HOLDER.lock();
-        holder.claimed = false;
-        give_back(hardware, &mut holder, "its claim is gone");
-    }
+    give_back(hardware, &mut HOLDER.lock(), "its claim is gone");
     if ENABLED.load(Ordering::Relaxed) {
         leave(hardware);
     }
-    isa::release(row);
 }
 
 /// `ACPI_DISABLE`, written where the mint wrote `ACPI_ENABLE`, and `SCI_EN`
@@ -508,9 +498,9 @@ fn lock_word(word: LockWordAt) -> &'static AtomicU32 {
 /// `Ok(false)` where the firmware owns it, with the pending bit left set for
 /// the firmware's release to answer with `GBL_STS`, and `NotSupported` on a
 /// machine whose lock this kernel cannot take.
-pub fn lock_take() -> Result<bool, SyscallError> {
+pub fn lock_take(row: &isa::Row) -> Result<bool, SyscallError> {
     let hardware = hardware().expect("a claimed row has its hardware");
-    let mut holder = acting()?;
+    let mut holder = acting(row)?;
     if holder.locked {
         return Err(SyscallError::AlreadyExists);
     }
@@ -534,9 +524,9 @@ pub fn lock_take() -> Result<bool, SyscallError> {
 }
 
 /// Give the Global Lock back for the claim's holder.
-pub fn lock_release() -> Result<(), SyscallError> {
+pub fn lock_release(row: &isa::Row) -> Result<(), SyscallError> {
     let hardware = hardware().expect("a claimed row has its hardware");
-    let mut holder = acting()?;
+    let mut holder = acting(row)?;
     if !holder.locked {
         return Err(SyscallError::InvalidArgument);
     }
@@ -712,9 +702,9 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
 }
 
 /// One port access, decided and made.
-fn port(row: usize, _acting: &Holder, address: u64, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+fn port(_acting: &Holder, address: u64, width: Width, write: Option<u64>) -> Result<u64, Refused> {
     let port = u16::try_from(address).map_err(|_| Refused::PortSpan)?;
-    let passed = firmware::port(|port| pio::standing(port, row), port, width, write.is_some())?;
+    let passed = firmware::port(|port| pio::standing(port, ROW), port, width, write.is_some())?;
     match write {
         None => Ok(read_port(&passed)),
         Some(value) => {
@@ -724,12 +714,12 @@ fn port(row: usize, _acting: &Holder, address: u64, width: Width, write: Option<
     }
 }
 
-/// Make the access `request` names for the holder of `row`'s claim, or
-/// refuse it by name: a read's value, the refusal and the memory type are
-/// written back into it. `Err` is a request that names no space, width or
-/// direction, a value wider than its width, or a reserved byte that is not
-/// zero; and `Gone` once the claim is gone or the stop has begun.
-pub fn access(row: usize, request: &mut Access) -> Result<(), SyscallError> {
+/// Make the access `request` names for the holder of the claim that lends
+/// `row`, or refuse it by name: a read's value, the refusal and the memory
+/// type are written back into it. `Err` is a request that names no space,
+/// width or direction, a value wider than its width, or a reserved byte that
+/// is not zero; and `Gone` once the stop has begun.
+pub fn access(row: &isa::Row, request: &mut Access) -> Result<(), SyscallError> {
     let hardware = hardware().expect("a claimed row has its hardware");
     let (Some(space), Some(width)) = (Space::from_raw(request.space), Width::from_raw(request.width)) else {
         return Err(SyscallError::InvalidArgument);
@@ -742,11 +732,11 @@ pub fn access(row: usize, request: &mut Access) -> Result<(), SyscallError> {
     if request.reserved != [0; 3] {
         return Err(SyscallError::InvalidArgument);
     }
-    let acting = acting()?;
+    let acting = acting(row)?;
     request.memory_type = toyos_abi::acpi::UNLISTED;
     let made = match space {
         Space::SystemMemory => memory(hardware, &acting, request, width, write),
-        Space::SystemIo => port(row, &acting, request.address, width, write),
+        Space::SystemIo => port(&acting, request.address, width, write),
         Space::PciConfig => {
             // `toyos_abi::acpi::pci_address`: nothing above the segment group.
             let at = request.address;

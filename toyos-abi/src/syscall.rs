@@ -2364,7 +2364,8 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
 /// kernel's, and a process that could write it could aim the device's interrupt
 /// at any address the LAPIC decodes.
 ///
-/// Idempotent per BAR: a second call answers the same object.
+/// Every call answers an object of its own over the same window, so a BAR
+/// whose handle was closed can be asked for again.
 ///
 /// A window alone drives nothing: the function masters the bus from its first
 /// [`device_dma_alloc`] and not before.
