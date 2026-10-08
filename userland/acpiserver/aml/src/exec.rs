@@ -33,7 +33,7 @@ use crate::object::{
     Object, Ref, Slot, Unresolved, Width,
 };
 use crate::stream::{starts_name, Cursor};
-use crate::{Error, Host, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
+use crate::{Error, Host, Usage, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
 
 pub(crate) struct Machine<'a> {
     pub(crate) ns: &'a mut Namespace,
@@ -239,7 +239,9 @@ impl<'a> Machine<'a> {
     /// Ends an evaluation: whatever it still holds is let go, and holding
     /// anything at its end is itself a refusal (§19.6.88: "the top-level
     /// control method cannot exit while still holding ownership of a Mutex").
-    pub(crate) fn finish<T>(mut self, r: Result<T, Error>) -> Result<T, Error> {
+    /// What it took goes to `took`, whichever way it ends.
+    pub(crate) fn finish<T>(mut self, r: Result<T, Error>, took: &mut Usage) -> Result<T, Error> {
+        (took.steps, took.waited_us) = (self.steps, self.waited_us);
         let held = !self.held.is_empty();
         for m in self.held.drain(..) {
             m.held.set(0);

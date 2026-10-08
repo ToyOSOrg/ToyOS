@@ -132,6 +132,9 @@ const RUST_SKIP: &[&str] = &[
     // launches ask DATA's server while this job's share holds all it may: the
     // `fs_share` metal row runs it on tests/proctreecase.
     "fs_share",
+    // It needs a NIC in front of netstack and a host server behind it:
+    // `netstack_socket_churn` runs it on `tests/netcase`.
+    "netstack_socket_churn",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -257,6 +260,10 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // netstack's own state behind a real stack and a peer that ends its
+    // connections: netstack is one binary that owns its NIC, with no host
+    // build, and the T14's peer is the bench's network.
+    "netstack_socket_churn",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -274,6 +281,10 @@ const MACHINE_TESTS: &[&str] = &[
     // that owes `GBL_RLS` need the FACS's word staged as only an idle firmware
     // allows: neither is done to the T14, which nothing powers on again.
     "acpi_mediated_access",
+    // The same boot on one CPU, where the power-off's CPU is the only one
+    // there is: what it logs reaches the console by the stop's own drain or
+    // not at all, since no other CPU runs `klogd` beside it.
+    "acpi_lock_given_back_on_one_cpu",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
@@ -1727,8 +1738,9 @@ const ACPI_MEDIATED_SAID: [&str; 8] = [
 /// given back for the probe itself, which asks for the power-off holding it
 /// once every arm has passed. The probe does not come back from that, so its
 /// verdict is its last line and the kernel's; a probe that ends instead is
-/// one whose arm failed.
-fn acpi_mediated_access() -> Result<(), String> {
+/// one whose arm failed. On `cpus` CPUs: the second one's range registers are
+/// read where there is one.
+fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
     const GIVEN_BACK_AT_THE_STOP: &str = "acpi: the Global Lock given back for a holder that left it taken (the machine is stopping)";
@@ -1741,6 +1753,7 @@ fn acpi_mediated_access() -> Result<(), String> {
             // The test kernel, for the Global Lock's actuator too.
             kernel_params: &["i8042-withheld"],
             ready_marker: "acpi: the ACPI row: ",
+            smp: cpus,
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
             ..Default::default()
         },
@@ -1749,7 +1762,9 @@ fn acpi_mediated_access() -> Result<(), String> {
     let ended = format!("===TEST_END {JOB} ");
     await_guest(&mut qemu, &mut console, "the probe's power-off to give the lock back", |said| {
         said.contains(GIVEN_BACK_AT_THE_STOP) || said.contains(&ended)
-    })?;
+    })
+    // The probe's whole run: a wait that ends on neither line has no other account of it.
+    .map_err(|why| format!("{why}\nsince its boot the guest said:\n{}", &console[qemu.boot_log().len()..]))?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
     said.must_say(isa::WITHHELD)?;
@@ -1757,7 +1772,8 @@ fn acpi_mediated_access() -> Result<(), String> {
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
     // Whose range registers passed the unlisted read, and how this
     // hypervisor's second CPU holds its own beside them.
-    for line in ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "] {
+    let mtrr = ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "];
+    for line in mtrr.iter().take(cpus as usize) {
         eprintln!("  [acpi] {}", said.must_say(line)?.trim());
     }
     for line in ACPI_MEDIATED_SAID {
@@ -2599,7 +2615,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // Driven by `metal-panic-probe`, which is the same kernel the owner
             // flashes: a gate that staged this with SYS_DEBUG would certify a
             // path his image does not contain.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/panelcase");
             let options = BootOptions {
                 profile,
                 smp: 8,
@@ -2794,15 +2810,55 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// netstack's stream count returns once connections that ended without their
+/// client's close request are let go, a client that left a connection its
+/// peer holds is counted gone, and a connection whose receive end the kernel
+/// refuses netstack's watch of is reset. One host server here ends each
+/// connection it accepts at once and one holds each; the guest's comparisons
+/// are the verdict.
+fn netstack_socket_churn() -> Result<(), String> {
+    const JOB: &str = "netstack_socket_churn";
+    const LEASED: &str = "netstack: DHCP: lease ";
+    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
+    let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
+    // Ends with the process: a guest that never dials leaves it in `accept`.
+    thread::spawn(move || server.incoming().for_each(drop));
+    // A second that holds what it accepts and reads none of it, for as long
+    // as the process lives.
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
+    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
+    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/netcase");
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let result =
+        qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netstack_socket_churn: ok")) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "netstack_socket_churn" => netstack_socket_churn(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
-        "acpi_mediated_access" => acpi_mediated_access(),
+        "acpi_mediated_access" => acpi_mediated_access(2),
+        "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "bar_map_again" => bar_map_again(test_config),
         other => Err(format!("unknown machine test {other}")),

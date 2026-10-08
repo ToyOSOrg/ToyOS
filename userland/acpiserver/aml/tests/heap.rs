@@ -240,6 +240,34 @@ fn a_parent_whose_last_child_is_unwound_holds_no_map() {
     assert_eq!(kept, held, "bytes held after the two evaluations, and before them");
 }
 
+/// A walk of 40,000 devices holds a third of a mebibyte, which is the
+/// interpreter's while the walk lasts: one that is full refuses the walk,
+/// and one that is not holds afterwards what it held before.
+#[test]
+fn a_walk_is_held_against_the_bound_while_it_lasts() {
+    let devices: Vec<Vec<u8>> = (0..40_000).map(|d| device(&seg(d), &[])).collect();
+    let (fill, fills) = fillers(8, &buffer(&int(0), &[]));
+    let (mut i, before) = start(&fill);
+    i.load_bytes(&mut Sink, &table(b"SSDT", 2, &devices.concat())).expect("the table loads");
+    let live = i.usage().live;
+    let held = heap() - before;
+    let walk = i.walk().expect("an interpreter with room is walked");
+    // The root is no entry, and has its links as every node has.
+    let nodes = walk.count() as isize + 1;
+    assert!(nodes > 40_000, "{nodes} nodes");
+    let walking = PEAK.get() - before - held;
+    // Two links a node, and a path one name long.
+    assert_eq!(walking, 8 * nodes + 5, "bytes a walk of {nodes} nodes held");
+    assert_eq!(HELD.get() - before, held, "bytes held after the walk, and before it");
+    assert_eq!(i.evaluate(&mut Sink, "\\_REV", &[]), Ok(Value::Integer(2)));
+    assert_eq!(i.usage().live, live);
+
+    let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
+    Filled::of(before, refused).within_the_bound();
+    assert_eq!(i.walk().err(), Some(Error::Bound(FULL)));
+    assert_eq!(i.evaluate(&mut Sink, "\\_REV", &[]), Ok(Value::Integer(2)));
+}
+
 /// One table naming 204,000 field units is refused, and the interpreter
 /// then holds what it held before, to the byte: its arena has the slots it
 /// had, and what it had room for it has room for again.

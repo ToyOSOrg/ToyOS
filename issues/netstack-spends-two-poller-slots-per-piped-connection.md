@@ -4,22 +4,27 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# netd spends two poller slots per piped connection
+# netstack spends two poller slots per piped connection
 
-A piped connection registers its send pipe `READABLE` and, while it holds
-bytes its receive pipe refused, its receive pipe `WRITABLE` — both in one pass,
-because an ssh receiver sends `WINDOW_ADJUST` while its own receive is held.
-`MAX_PIPED_SLOTS` (`userland/netd/src/main.rs`) divides the batch one poller
-can carry (`Poller::MAX_HANDLES`, less the two fixed registrations and the
-pending connections) by `POLL_HANDLES_PER_PIPED = 2`, so the ceiling on live
-piped connections halved from 222 to 111.
+A piped connection registers both its pipes on every pass, for as long as
+netstack holds them: its send pipe `READABLE` while the socket has send room
+and `OTHER_END_GONE` until the kernel has answered that, and its receive pipe
+`OTHER_END_GONE` and, while it holds bytes the pipe refused, `WRITABLE`
+(`userland/netstack/src/main.rs`, the loop in `main`). `MAX_PIPED_SLOTS`
+divides the batch one poller can carry (`Poller::MAX_HANDLES`, less the fixed
+registrations, the pending connections and the lookups' clients) by
+`POLL_HANDLES_PER_PIPED = 2`, so the ceiling on live piped connections is half
+what one registration each would give.
 
-The memory budget (an eighth of memory at 4 MiB a connection) is the lower
-bound only below 3552 MiB (111 × 4 MiB × 8), so every machine with 4 GiB
-or more is held to 111.
+The memory budget (an eighth of memory at 4 MiB a connection) binds first only
+on a machine whose eighth holds fewer connections than that ceiling.
 
-Exit condition: one registration per connection. netd's side of a
-connection is one kernel `Connection` object, which `read_source` and
-`write_source` both resolve (`kernel/src/object/ops.rs`), so one `OP_WATCH`
-carries `READABLE | WRITABLE` (`kernel/src/inbox/mod.rs`, `process_watch`), and
-`POLL_HANDLES_PER_PIPED` is deleted.
+**Exit condition**: one registration per connection, and
+`POLL_HANDLES_PER_PIPED` deleted. One `OP_WATCH` on a joined `Connection`
+carries `READABLE | WRITABLE` for both its pipes, and is refused
+`OTHER_END_GONE`: `ops::pipe_end_watch` (`kernel/src/object/ops.rs`) answers a
+pipe end alone, and a connection has two other ends for the one bit. So the
+exit also needs the kernel to say of a connection which of its directions has
+no holder left.
+
+**Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`.

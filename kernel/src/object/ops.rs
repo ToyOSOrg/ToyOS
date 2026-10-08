@@ -15,6 +15,7 @@ use crate::drivers::serial;
 use crate::file_cache;
 use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
+use kernel::pipe::End;
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
@@ -243,8 +244,11 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
-    /// A device's, which its interrupt handler posts.
+    /// A device class's, which its interrupt handler posts.
     Irq(&'static IrqWatch),
+    /// The watch of the function or row a claim holds: named by the claim,
+    /// and reached only with what the claim lends.
+    Claim(Arc<DeviceClaim>),
 }
 
 impl WatchRef {
@@ -253,6 +257,7 @@ impl WatchRef {
             Self::Static(watch) => watch.add_poll(entry),
             Self::Shared(watch) => watch.add_poll(entry),
             Self::Irq(watch) => watch.add_poll(entry),
+            Self::Claim(claim) => claim.add_poll(entry),
         }
     }
 
@@ -261,6 +266,8 @@ impl WatchRef {
             Self::Static(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
             Self::Irq(watch) => watch.cancel_polls(),
+            // Its release answers them, and its close ends none (`close_ends_polls`).
+            Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
         }
     }
 }
@@ -277,12 +284,9 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
-            device_registry::DeviceType::PciFunction => {
-                d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
-            }
-            device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                d.isa_row().map(|row| WatchRef::Irq(crate::isa::watch(row)))
-            }
+            device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::Isa
+            | device_registry::DeviceType::Acpi => Some(WatchRef::Claim(d.clone())),
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
                 Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
@@ -312,23 +316,51 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     }
 }
 
+/// The watch of a pipe end, which its other end's last holder posts as it
+/// lets go; `None` for an object that is no pipe end.
+pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
+    match object {
+        KObjectRef::PipeRead(_) => read_watch(object),
+        KObjectRef::PipeWrite(_) => write_watch(object),
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => None,
+    }
+}
+
+/// Whether this pipe end's other end has no holder left; `false` for an
+/// object that is no pipe end.
+pub fn other_end_gone(object: &KObjectRef) -> bool {
+    match object {
+        KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
+        KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
+        | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => false,
+    }
+}
+
 /// Whether closing one handle to this object ends what its watches watch, so
 /// every poll on them — in any ring — is answered as gone. `false` for the log
 /// and the keyboard, which the machine ends on its own and which other handles
 /// share: a console closing is not every console's keyboard going away. `false`
 /// for a process, which only its own end ends: closing one handle to it ends no
-/// other's watch.
+/// other's watch. `false` for a claim on a function or a row: its one handle's
+/// close is its release, which answers every poll on the watch before the slot
+/// or the row can be held again (`pcidev`'s and `isa::Row`'s release).
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
         KObjectRef::Process(_) => false,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => false,
-            device_registry::DeviceType::Mouse
+            device_registry::DeviceType::Keyboard
             | device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
-            | device_registry::DeviceType::Acpi
+            | device_registry::DeviceType::Acpi => false,
+            device_registry::DeviceType::Mouse
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
@@ -427,10 +459,10 @@ pub fn read_device(
             if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
                 return Some(SyscallError::InvalidArgument.to_u64());
             }
-            let slot = claim.pci_slot().expect("a PCI claim knows its slot");
-            let record = match crate::pcidev::take_record(slot) {
-                Ok(record) => record?,
-                Err(refused) => return Some(refused.to_u64()),
+            let record = match claim.pci(crate::pcidev::take_record) {
+                Some(Ok(record)) => record?,
+                Some(Err(refused)) => return Some(refused.to_u64()),
+                None => return Some(SyscallError::Gone.to_u64()),
             };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
@@ -438,19 +470,29 @@ pub fn read_device(
         // The PCI shape, but the description is what binds the ports to the
         // reader, and nothing after it answers any other process.
         device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-            let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
             let pid = crate::process::current_process();
             if !claim.info_read() {
-                crate::isa::bind(row, pid);
+                if claim.isa(|row| crate::isa::bind(row, pid)).is_none() {
+                    return Some(SyscallError::Gone.to_u64());
+                }
                 return Some(claim.describe(table, buf));
             }
-            if !crate::isa::bound_to(row, pid) {
-                return Some(SyscallError::PermissionDenied.to_u64());
-            }
-            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let record = crate::isa::take_record(row)?;
+            let room = buf.len() >= toyos_abi::pci::DeviceIrqRecord::SIZE;
+            // The holder's check and the take are one borrow of the row.
+            let taken = claim.isa(|row| {
+                if !crate::isa::held_by(row, pid) {
+                    Err(SyscallError::PermissionDenied)
+                } else if !room {
+                    Err(SyscallError::InvalidArgument)
+                } else {
+                    Ok(crate::isa::take_record(row))
+                }
+            });
+            let record = match taken {
+                Some(Ok(record)) => record?,
+                Some(Err(refused)) => return Some(refused.to_u64()),
+                None => return Some(SyscallError::Gone.to_u64()),
+            };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
@@ -794,11 +836,13 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
             device_registry::DeviceType::Mouse => mouse::has_data(),
+            // A claim its last handle has let go has nothing to read: a poll
+            // on it is ended where it registers (`DeviceClaim::add_poll`).
             device_registry::DeviceType::PciFunction => {
-                !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
+                !d.info_read() || d.pci(crate::pcidev::has_irq).unwrap_or(false)
             }
             device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                !d.info_read() || d.isa_row().is_some_and(crate::isa::has_irq)
+                !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(false)
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
@@ -876,20 +920,28 @@ fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
         | device_registry::DeviceType::PciFunction
         | device_registry::DeviceType::Partition => return SyscallError::PermissionDenied.to_u64(),
     }
-    let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
-    if !claim.info_read() || !crate::isa::bound_to(row, crate::process::current_process()) {
+    if !claim.info_read() {
         return SyscallError::PermissionDenied.to_u64();
     }
     let mut word = [0u8; 4];
-    if buf.len() != word.len() {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    buf.read_at(0, &mut word);
-    if u32::from_ne_bytes(word) != toyos_abi::acpi::ACK {
-        return SyscallError::InvalidArgument.to_u64();
-    }
-    match crate::isa::ack(row) {
-        Ok(()) => word.len() as u64,
-        Err(()) => SyscallError::InvalidArgument.to_u64(),
+    let acknowledges = buf.len() == word.len() && {
+        buf.read_at(0, &mut word);
+        u32::from_ne_bytes(word) == toyos_abi::acpi::ACK
+    };
+    let pid = crate::process::current_process();
+    // The holder's check and the unmask are one borrow of the row.
+    let acked = claim.isa(|row| {
+        if !crate::isa::held_by(row, pid) {
+            Err(SyscallError::PermissionDenied)
+        } else if !acknowledges {
+            Err(SyscallError::InvalidArgument)
+        } else {
+            crate::isa::ack(row).map_err(|()| SyscallError::InvalidArgument)
+        }
+    });
+    match acked {
+        Some(Ok(())) => word.len() as u64,
+        Some(Err(refused)) => refused.to_u64(),
+        None => SyscallError::Gone.to_u64(),
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use toyos::poller::{READABLE, WRITABLE, Poller};
+use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE, Poller};
 use toyos::ipc;
 use toyos::AsHandle;
 use toyos::ipc::{Connection, IpcPayload, RxStep};
@@ -331,10 +331,31 @@ struct PendingUdpRecv {
 }
 
 /// A piped TCP connection: data flows through kernel pipes instead of IPC messages.
+///
+/// **The socket and its id live exactly as long as this does.** What ends a
+/// connection is what the kernel says of the client's pipe ends and what the
+/// peer says on the wire; a close request only asks for that end early, and a
+/// client that dies sends none.
+///
+/// **A client is gone when the kernel says so of both its ends**
+/// ([`OTHER_END_GONE`], watched on each pipe for as long as netstack holds
+/// it), whatever its send pipe still holds and whether or not the socket
+/// takes bytes. A direction netstack itself has closed counts as gone. Such a
+/// connection is [`ownerless`]: the wire has [`OWNERLESS_LIFE`] to finish it,
+/// and a reset that then cannot leave has [`RESET_LIFE`]. A client holding an
+/// end of a direction still open is never timed.
 struct PipedConnection {
+    socket_id: u32,
     handle: SocketHandle,
     rx_write: Option<Pipe>,
     tx_read: Option<Pipe>,
+    /// The kernel said no holder of the send pipe's write end is left. What
+    /// the pipe holds is still the peer's.
+    writer_gone: bool,
+    /// When a pass first found the client gone, or cut the connection.
+    ownerless: Option<Instant>,
+    /// [`Ownerless::Cut`] was this connection's answer.
+    cut: bool,
     /// The client's receive pipe refused bytes the socket still holds, so the
     /// pipe is watched for room.
     held: bool,
@@ -344,9 +365,9 @@ impl PipedConnection {
     /// **A client's handle that refuses netstack for any reason but a full pipe or
     /// a vanished reader ends that client's connection, never netstack.** The
     /// ends are whatever the client moved, and nothing checks their kind at
-    /// intake: a read end, a file past its size limit or a handle with no
-    /// `WRITE` right each answer a refusal here. So does a pipe whose ring
-    /// page could not be allocated, which no wait cures.
+    /// intake: a read end or a handle with no `WRITE` right answers a refusal
+    /// here, and one that is no pipe end has its watch refused. So does a pipe
+    /// whose ring page could not be allocated, which no wait cures.
     fn refuse(&mut self, socket: &mut tcp::Socket, end: &str, e: toyos_abi::syscall::SyscallError) {
         say!("netstack: resetting a connection — its {end} pipe refused netstack: {e:?}");
         socket.abort();
@@ -366,8 +387,29 @@ impl PipedConnection {
         self.close_tx();
     }
 
-    fn is_fully_closed(&self) -> bool {
-        self.rx_write.is_none() && self.tx_read.is_none()
+    /// The client holds no end of a direction that is still open.
+    fn clientless(&self) -> bool {
+        self.rx_write.is_none() && (self.tx_read.is_none() || self.writer_gone)
+    }
+
+    /// What the kernel answered a watch on the client's send pipe, or on its
+    /// receive pipe. **Of a pipe netstack still holds**: closing one ends its
+    /// watch, and that end is an answer too.
+    fn pipe_answered(
+        &mut self,
+        socket: &mut tcp::Socket,
+        send: bool,
+        answer: Result<u32, toyos_abi::syscall::SyscallError>,
+    ) {
+        let (held, end) = if send { (&self.tx_read, "send") } else { (&self.rx_write, "receive") };
+        match answer {
+            _ if held.is_none() => {}
+            Err(e) => self.refuse(socket, end, e),
+            Ok(met) if met & OTHER_END_GONE == 0 => {}
+            Ok(_) if send => self.writer_gone = true,
+            // Nobody is left to read it.
+            Ok(_) => self.close_rx(),
+        }
     }
 }
 
@@ -419,11 +461,71 @@ fn send_room(socket: &tcp::Socket) -> bool {
     socket.can_send() && socket.send_capacity() > socket.send_queue()
 }
 
-fn piped_connection(handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
+/// Whether `socket` has said its last to its peer: it is closed, and the reset
+/// an abort owes has left. `TimeWait` only waits.
+fn spent(socket: &tcp::Socket) -> bool {
+    !socket.is_open() && !(socket.state() == tcp::State::Closed && socket.remote_endpoint().is_some())
+}
+
+/// How long the wire has to finish a connection whose client's pipe ends are
+/// both gone, before netstack resets it: R2, the time RFC 9293 §3.8.3 gives a
+/// segment's retransmission before the connection is closed, at the 100
+/// seconds it asks for at least.
+///
+/// **From the client's leaving and not from the peer's last word**, so a peer
+/// that keeps answering holds a slot no longer than one that says nothing:
+/// RFC 9293 §3.8.6.1 lets a system reclaim a connection its peer holds open.
+const OWNERLESS_LIFE: Duration = Duration::from_secs(100);
+
+/// How long the reset of a connection cut at [`OWNERLESS_LIFE`] has to leave.
+/// A connection that sent and heard nothing for that long has outlived its
+/// next hop's neighbour entry, so the reset waits on an ARP answer.
+///
+/// Address resolution's own budget: RFC 4861 §7.2.2 fails it after
+/// `MAX_MULTICAST_SOLICIT` solicitations `RETRANS_TIMER` apart, 3 and 1,000
+/// milliseconds in §10. That is IPv6's; RFC 1122 §2.3.2.1 gives ARP a rate of
+/// one request a second per destination and no count, and smoltcp asks at that
+/// rate for as long as the socket lives.
+const RESET_LIFE: Duration = Duration::from_secs(3);
+
+/// What a pass makes of a connection whose client is gone.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownerless {
+    /// The wire still owes something, and has time left.
+    Waits,
+    /// Reset at [`OWNERLESS_LIFE`] with the wire unfinished, and kept until
+    /// the reset has left or [`RESET_LIFE`] is over.
+    Cut,
+    /// The wire is finished.
+    Over,
+    /// Let go with a reset that never left: no next hop took it.
+    Unsaid,
+}
+
+/// The pass's answer for `socket`, whose client has been gone for `waited`, or
+/// which was cut `waited` ago.
+fn ownerless(socket: &mut tcp::Socket, waited: Duration, cut: bool) -> Ownerless {
+    if spent(socket) {
+        Ownerless::Over
+    } else if waited < if cut { RESET_LIFE } else { OWNERLESS_LIFE } {
+        Ownerless::Waits
+    } else if cut {
+        Ownerless::Unsaid
+    } else {
+        socket.abort();
+        Ownerless::Cut
+    }
+}
+
+fn piped_connection(socket_id: u32, handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
     PipedConnection {
+        socket_id,
         handle,
         rx_write: Some(pipes.to_client),
         tx_read: Some(pipes.from_client),
+        writer_gone: false,
+        ownerless: None,
+        cut: false,
         held: false,
     }
 }
@@ -531,8 +633,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// is counted down and discarded, never waited for.
 const MAX_KEPT_REQUEST: usize = 256;
 
-/// Registrations one piped connection can make in a batch: its tx pipe, and
-/// its rx pipe while that pipe is holding bytes back.
+/// Registrations one piped connection can make in a batch: its send pipe and
+/// its receive pipe.
 const POLL_HANDLES_PER_PIPED: u32 = 2;
 
 /// Registrations the lookups make in a batch: each waiting client's
@@ -729,6 +831,7 @@ impl Netstack {
         snap.put("sockets.listeners", listeners);
         snap.put("sockets.udp", udp);
         snap.put("piped.live", self.piped_live());
+        snap.put("piped.ownerless", self.piped_connections.iter().filter(|c| c.ownerless.is_some()).count());
         snap.put("piped.max", self.max_piped_connections);
     }
 
@@ -1246,7 +1349,7 @@ impl Netstack {
         let stream_id = self.alloc_id();
         self.sockets.insert(stream_id, SocketKind::TcpStream(old_handle));
 
-        self.piped_connections.push(piped_connection(old_handle, pipes));
+        self.piped_connections.push(piped_connection(stream_id, old_handle, pipes));
 
         // Create replacement listener
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
@@ -1369,24 +1472,63 @@ impl Netstack {
                 conn.close_tx();
             }
 
-            // Detect client death: a zero-byte write is refused by name once
-            // the pipe has no reader — the kernel's fact, not the client's.
-            if let Some(ref pipe) = conn.rx_write {
-                match toyos_abi::syscall::write_nonblock(pipe.as_handle(), &[]) {
-                    Ok(_) | Err(SyscallError::WouldBlock) => {}
-                    Err(SyscallError::Gone) => conn.close_rx(),
-                    Err(e) => conn.refuse(socket, "receive", e),
+            if conn.clientless() {
+                let waited = conn.ownerless.get_or_insert_with(Instant::now).elapsed();
+                match ownerless(socket, waited, conn.cut) {
+                    Ownerless::Waits => {}
+                    Ownerless::Cut => {
+                        say!(
+                            "netstack: resetting a connection — its client left {}s ago and its peer has not finished it",
+                            waited.as_secs()
+                        );
+                        (conn.ownerless, conn.cut) = (Some(Instant::now()), true);
+                    }
+                    Ownerless::Over => {
+                        if conn.cut {
+                            say!("netstack: the reset has left");
+                        }
+                        closed.push(i);
+                    }
+                    Ownerless::Unsaid => {
+                        say!(
+                            "netstack: letting a connection go with its reset unsent — no next hop took it in {}s",
+                            RESET_LIFE.as_secs()
+                        );
+                        closed.push(i);
+                    }
                 }
-            }
-
-            // Fully clean up when both sides are done
-            if conn.is_fully_closed() && !socket.is_open() {
-                closed.push(i);
             }
         }
 
         for &i in closed.iter().rev() {
-            self.piped_connections.swap_remove(i);
+            let conn = self.piped_connections.swap_remove(i);
+            socket_set.remove(conn.handle);
+            self.sockets.remove(&conn.socket_id);
+        }
+    }
+
+    /// How long until the first connection with no client left reaches
+    /// [`OWNERLESS_LIFE`], or a cut one [`RESET_LIFE`], which nothing on the
+    /// wire wakes a pass for.
+    fn ownerless_wake_in(&self) -> Option<Duration> {
+        self.piped_connections
+            .iter()
+            .filter_map(|c| Some((c.ownerless?, if c.cut { RESET_LIFE } else { OWNERLESS_LIFE })))
+            .map(|(since, life)| life.saturating_sub(since.elapsed()))
+            .min()
+    }
+
+    /// What the kernel answered a watch on a pipe of connection `socket_id`,
+    /// which may be gone since: the watch of a pipe closed with it ends too.
+    fn pipe_answered(
+        &mut self,
+        socket_set: &mut SocketSet<'_>,
+        socket_id: u32,
+        send: bool,
+        answer: Result<u32, toyos_abi::syscall::SyscallError>,
+    ) {
+        if let Some(conn) = self.piped_connections.iter_mut().find(|c| c.socket_id == socket_id) {
+            conn.pipe_answered(socket_set.get_mut::<tcp::Socket>(conn.handle), send, answer);
         }
     }
 
@@ -1474,7 +1616,7 @@ impl Netstack {
                 };
                 pc.client.result(&resp);
                 let pc = self.pending_piped_connects.swap_remove(i);
-                self.piped_connections.push(piped_connection(pc.handle, pc.pipes));
+                self.piped_connections.push(piped_connection(pc.socket_id, pc.handle, pc.pipes));
                 continue;
             }
             if socket.state() == tcp::State::Closed {
@@ -1636,10 +1778,12 @@ fn main() {
     );
     const TOKEN_LISTENER: u64 = 0;
     const TOKEN_NIC: u64 = 1;
-    const TOKEN_TX_PIPE_BASE: u64 = 0x1000;
-    const TOKEN_RX_PIPE_BASE: u64 = 0x8000;
-    // Clear of the tx- and rx-pipe ranges by more than `MAX_PIPED_SLOTS`, and of a
-    // connection's own handle by more than `MAX_HANDLES` (4096,
+    // A piped connection's two pipes, by its socket id in the low word: an
+    // answer names the connection it was asked of and no place in a list,
+    // which a connection let go since would hand to another.
+    const TOKEN_SEND_PIPE: u64 = 1 << 32;
+    const TOKEN_RECEIVE_PIPE: u64 = 2 << 32;
+    // Clear of a connection's own handle by more than `MAX_HANDLES` (4096,
     // `kernel/src/object/handle.rs`).
     const TOKEN_PENDING_BASE: u64 = 0x1_0000;
     // Clear of the pending range by the same margin.
@@ -1722,19 +1866,23 @@ fn main() {
         poller.watch(&acceptor, READABLE, TOKEN_LISTENER);
         poller.watch(device.nic.claim(), READABLE, TOKEN_NIC);
 
-        // The client's bytes to send, and room in a receive pipe that is
-        // holding the peer's back: either is a pass's worth of work.
-        for (i, conn) in daemon.piped_connections.iter().enumerate() {
-            // Only while the socket can take them: a pipe holding bytes is
-            // readable until read, so its watch would complete on every pass
-            // while the peer's window is shut. The ACK that makes room wakes
-            // the NIC.
+        // The client's bytes to send, room in a receive pipe that is holding
+        // the peer's back, and the client letting go of either end: each is a
+        // pass's worth of work.
+        for conn in daemon.piped_connections.iter() {
+            // Readable only while the socket can take the bytes: a pipe
+            // holding some is readable until read, so its watch would complete
+            // on every pass while the peer's window is shut. The ACK that makes
+            // room wakes the NIC. Its writer's leaving is asked until answered,
+            // for the same reason: it stays so.
             let room = send_room(socket_set.get::<tcp::Socket>(conn.handle));
-            if let (true, Some(pipe)) = (room, &conn.tx_read) {
-                poller.watch(pipe, READABLE, TOKEN_TX_PIPE_BASE + i as u64);
+            let send = if room { READABLE } else { 0 } | if conn.writer_gone { 0 } else { OTHER_END_GONE };
+            if let (true, Some(pipe)) = (send != 0, &conn.tx_read) {
+                poller.watch(pipe, send, TOKEN_SEND_PIPE | u64::from(conn.socket_id));
             }
-            if let (true, Some(pipe)) = (conn.held, &conn.rx_write) {
-                poller.watch(pipe, WRITABLE, TOKEN_RX_PIPE_BASE + i as u64);
+            if let Some(pipe) = &conn.rx_write {
+                let room = if conn.held { WRITABLE } else { 0 };
+                poller.watch(pipe, room | OTHER_END_GONE, TOKEN_RECEIVE_PIPE | u64::from(conn.socket_id));
             }
         }
 
@@ -1755,6 +1903,10 @@ fn main() {
         // A lookup waiting on its answer is woken when its wait is over, to
         // ask the next server.
         let timeout = match daemon.resolver.wake_in(Instant::now()) {
+            Some(left) => timeout.min(left.as_nanos() as u64),
+            None => timeout,
+        };
+        let timeout = match daemon.ownerless_wake_in() {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
         };
@@ -1781,7 +1933,11 @@ fn main() {
         };
 
         let mut ready: Vec<u64> = Vec::new();
-        poller.wait(1, timeout, |token| ready.push(token));
+        poller.wait_answers(1, timeout, |token, answer| match token & !u64::from(u32::MAX) {
+            TOKEN_SEND_PIPE => daemon.pipe_answered(&mut socket_set, token as u32, true, answer),
+            TOKEN_RECEIVE_PIPE => daemon.pipe_answered(&mut socket_set, token as u32, false, answer),
+            _ => ready.push(token),
+        });
 
         // A handshake that never completes is why this deadline exists, and the
         // sweep has to happen on a pass that found nothing ready too —

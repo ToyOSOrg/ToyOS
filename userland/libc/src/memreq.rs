@@ -13,6 +13,16 @@ pub(crate) const MAP_ANONYMOUS: i32 = 0x20;
 /// The page `sysconf(_SC_PAGESIZE)` answers.
 pub(crate) const PAGE: usize = 4096;
 
+/// `len` as the whole pages it reaches into, which is what POSIX maps and
+/// unmaps for it. `mmap` asks the kernel for this length and `munmap` names
+/// the mapping by it, the kernel taking only the length it was asked for: so
+/// a `len` that ends in a mapping's last page names all of it, and one that
+/// ends short of that page names a part and is refused. `None` for no bytes,
+/// and for a length whose pages a `usize` cannot count.
+pub(crate) fn whole_pages(len: usize) -> Option<usize> {
+    len.checked_next_multiple_of(PAGE).filter(|&bytes| bytes != 0)
+}
+
 /// Why `mmap` cannot give what it was asked.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MapRefusal {
