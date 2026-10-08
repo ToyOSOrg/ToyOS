@@ -200,7 +200,10 @@ fn neighbour(snapshot: &Snapshot) -> Neighbour {
 /// more frames than the ring holds: netstack accepts one connection a pass and
 /// reads a request only from one it has accepted, so every connection of a
 /// round is opened first, a question asked after them is answered only once
-/// each is accepted, and the requests are written then.
+/// each is accepted, and the requests are written then. **Nothing is asked of
+/// netstack from a round's first request to its last answer**: the driver
+/// counts a wake only on a pass that reads no other cause, and the discard
+/// port answers nothing.
 fn burst(router: [u8; 4]) -> u64 {
     let sockets: Vec<_> = (0..SOCKETS)
         .map(|_| toyos::net::udp_bind([0; 4], 0).unwrap_or_else(|e| panic!("a datagram socket for the burst: {e:?}")))
@@ -258,11 +261,14 @@ fn main() {
                     router.parse().expect("netstack's word for its lease's router reads as an address");
                 let taken = burst(router.octets());
                 let after = ask();
+                let armed = asked(&after, "net.transmit.wake_armed");
+                let woken = asked(&after, "net.transmit.wake_taken");
                 say(Line::Ring {
                     full: asked(&after, "net.transmit.full"),
-                    wake_armed: asked(&after, "net.transmit.wake_armed"),
-                    wake_taken: asked(&after, "net.transmit.wake_taken"),
-                    unsent: asked(&after, "net.descriptors.unsent"),
+                    wake_armed: armed,
+                    wake_taken: woken,
+                    untaken: Asked(armed.0.zip(woken.0).map(|(armed, woken)| armed.saturating_sub(woken))),
+                    stranded: asked(&after, "net.descriptors.stranded"),
                     descriptors_sent: asked(&after, "net.descriptors.sent"),
                     wire_sent: asked(&after, "net.wire.sent"),
                     speed: asked(&after, "net.link.speed_mbps"),

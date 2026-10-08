@@ -104,7 +104,7 @@ pub fn each_verdict_names_its_cause() {
             "green with the ring's line, which no row judges",
             HANDED,
             [&GREEN[..GREEN.len() - 1], &[
-                "ring full=0 (the ring never filled: nothing read) wake_armed=0 wake_taken=0 unsent=not-asked \
+                "ring full=0 (the ring never filled: nothing read) wake_armed=0 wake_taken=0 untaken=0 stranded=not-asked \
                  descriptors_sent=120 wire_sent=121 speed=1000 taken=60",
                 "done",
             ]]
@@ -374,7 +374,8 @@ pub fn no_line_holds_an_address() {
             full: count,
             wake_armed: Asked(Some(7)),
             wake_taken: count,
-            unsent: Asked(None),
+            untaken: count,
+            stranded: Asked(None),
             descriptors_sent: count,
             wire_sent: Asked(Some(61)),
             speed: Asked(Some(1000)),
@@ -396,10 +397,10 @@ pub fn no_line_holds_an_address() {
         "outbound: anchor name=192.0.2.9 lookup=addresses connect=connected",
         "outbound: anchor name=dns.google lookup=addresses connect=connected to 192.0.2.9",
         "outbound: gateway neighbour=reachable ",
-        "outbound: ring full=1 wake_armed=1 wake_taken=1 unsent=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=not-asked",
-        "outbound: ring full=192.0.2.1 wake_armed=1 wake_taken=1 unsent=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
-        "outbound: ring full=3 (the ring never filled: nothing read) wake_armed=1 wake_taken=1 unsent=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
-        "outbound: ring full=0 wake_armed=0 wake_taken=0 unsent=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
+        "outbound: ring full=1 wake_armed=1 wake_taken=1 untaken=0 stranded=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=not-asked",
+        "outbound: ring full=192.0.2.1 wake_armed=1 wake_taken=1 untaken=0 stranded=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
+        "outbound: ring full=3 (the ring never filled: nothing read) wake_armed=1 wake_taken=1 untaken=0 stranded=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
+        "outbound: ring full=0 wake_armed=0 wake_taken=0 untaken=0 stranded=0 descriptors_sent=1 wire_sent=1 speed=1000 taken=60",
         "outbound: gateway 192.0.2.1",
         "outbound: done 192.0.2.1",
         "outbound: ",

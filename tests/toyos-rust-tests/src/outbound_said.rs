@@ -217,14 +217,16 @@ pub enum Line {
     Gateway(Neighbour),
     /// The card's transmit ring after a burst at the router: how often a frame
     /// found it full, how often its wake was armed and taken, the frames a
-    /// link change gave back, the frames the ring and the wire count sent,
+    /// link change left in it, the frames the ring and the wire count sent,
     /// the link's speed in Mb/s, and how many of the burst's datagrams
     /// netstack took.
     Ring {
         full: Asked,
         wake_armed: Asked,
         wake_taken: Asked,
-        unsent: Asked,
+        /// Wakes armed and not taken, where both counts are kept.
+        untaken: Asked,
+        stranded: Asked,
         descriptors_sent: Asked,
         wire_sent: Asked,
         speed: Asked,
@@ -253,14 +255,14 @@ impl fmt::Display for Line {
                 write!(f, "anchor name={} lookup={} connect={}", anchor.word(), lookup.word(), connect.word())
             }
             Self::Gateway(neighbour) => write!(f, "gateway neighbour={}", neighbour.word()),
-            Self::Ring { full, wake_armed, wake_taken, unsent, descriptors_sent, wire_sent, speed, taken } => {
+            Self::Ring { full, wake_armed, wake_taken, untaken, stranded, descriptors_sent, wire_sent, speed, taken } => {
                 write!(f, "ring full={full}")?;
                 if full.0 == Some(0) {
                     f.write_str(NEVER_FILLED)?;
                 }
                 write!(
                     f,
-                    " wake_armed={wake_armed} wake_taken={wake_taken} unsent={unsent} \
+                    " wake_armed={wake_armed} wake_taken={wake_taken} untaken={untaken} stranded={stranded} \
                      descriptors_sent={descriptors_sent} wire_sent={wire_sent} speed={speed} taken={taken}"
                 )
             }
@@ -313,7 +315,8 @@ impl Line {
                 full: Asked::read(value("full")?)?,
                 wake_armed: Asked::read(value("wake_armed")?)?,
                 wake_taken: Asked::read(value("wake_taken")?)?,
-                unsent: Asked::read(value("unsent")?)?,
+                untaken: Asked::read(value("untaken")?)?,
+                stranded: Asked::read(value("stranded")?)?,
                 descriptors_sent: Asked::read(value("descriptors_sent")?)?,
                 wire_sent: Asked::read(value("wire_sent")?)?,
                 speed: Asked::read(value("speed")?)?,
