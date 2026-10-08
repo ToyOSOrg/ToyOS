@@ -1,13 +1,10 @@
-# The metal-sim boot: what `Profile::Metal` puts in front of userland.
-#
 # soundserver, netstack and sshserver are here for exactly the reason they have no device:
 # their graceful exit is half of what this config certifies.
 # sshserver is the one whose absence *is* the device absence — it has no device of
 # its own and reaches the machine's shape only through netstack.
 # test-runner makes the boot announce itself, so the harness waits for a
 # marker instead of guessing from pixels — and it is what lets an in-guest
-# binary run on the machine shape that gets flashed. Under `mute` it simply
-# parks on a console that never produces a byte.
+# binary run on the machine shape that gets flashed.
 
 assets = ["assets"]
 

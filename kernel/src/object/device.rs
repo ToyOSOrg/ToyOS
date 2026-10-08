@@ -20,20 +20,18 @@ pub enum DeviceInfo {
     // Keyboard and mouse answer with events, not a description.
     Events,
     Framebuffer(FramebufferInfo, FramebufferBuffers),
-    /// The function, and the `pcidev` slot every call on this claim reaches it
-    /// through. No buffer handle beside it: a PCI claimant asks for its own
-    /// memory, so this mint installs nothing.
-    PciFunction(toyos_abi::pci::PciFunctionInfo, u8),
+    /// The function. No buffer handle beside it: a PCI claimant asks for its
+    /// own memory, so this mint installs nothing.
+    PciFunction(toyos_abi::pci::PciFunctionInfo),
     Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
     VirtioSound(toyos_abi::virtio_sound::VirtioSoundInfo, Arc<SharedMemObject>),
     /// Which partition, how long, and both its GUIDs; the view it moves blocks
     /// through is the claim's own (`device::Claim::partition`).
     Partition(toyos_abi::part::PartitionInfo),
-    /// The ports and lines granted, as the selector named them, and the `isa`
-    /// row they are.
-    Isa(toyos_abi::syscall::IsaId, usize),
-    /// The fixed hardware's blocks, and the `isa` row they are.
-    Acpi(toyos_abi::acpi::AcpiInfo, usize),
+    /// The ports and lines granted, as the selector named them.
+    Isa(toyos_abi::syscall::IsaId),
+    /// The fixed hardware's blocks.
+    Acpi(toyos_abi::acpi::AcpiInfo),
 }
 
 /// The two scanout buffers and the cursor plane.
@@ -75,10 +73,10 @@ impl DeviceInfo {
             }
             // Nothing to install: every address in it is a size, and the memory
             // is what `SYS_DEVICE_DMA_ALLOC` answers later.
-            Self::PciFunction(info, _) => bytes(info).into(),
+            Self::PciFunction(info) => bytes(info).into(),
             Self::Partition(info) => bytes(info).into(),
-            Self::Isa(set, _) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
-            Self::Acpi(info, _) => bytes(info).into(),
+            Self::Isa(set) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
+            Self::Acpi(info) => bytes(info).into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
@@ -97,12 +95,6 @@ impl DeviceInfo {
 pub struct DeviceClaim {
     pub(super) core: ObjectCore,
     class: DeviceType,
-    /// The `pcidev` slot for a claim on one, read without the `described` lock:
-    /// a poll's readiness check and a `close` are both places that must not
-    /// take it.
-    pci_slot: Option<u8>,
-    /// The `isa` row for a claim on one, read without that lock for the same reasons.
-    isa_row: Option<usize>,
     // No Rights::DUP: at most one handle exists, so info_read needs no per-handle state.
     info_read: AtomicBool,
     described: crate::sync::Lock<Described>,
@@ -118,19 +110,9 @@ struct Described {
 
 impl DeviceClaim {
     pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Arc<Self> {
-        let pci_slot = match &info {
-            DeviceInfo::PciFunction(_, slot) => Some(*slot),
-            _ => None,
-        };
-        let isa_row = match &info {
-            DeviceInfo::Isa(_, row) | DeviceInfo::Acpi(_, row) => Some(*row),
-            _ => None,
-        };
         Arc::new(Self {
             core: Self::new_core(),
             class,
-            pci_slot,
-            isa_row,
             info_read: AtomicBool::new(false),
             described: crate::sync::Lock::new(Described { info, bytes: None }),
             reference: Held::new(claim),
@@ -141,18 +123,34 @@ impl DeviceClaim {
         self.class
     }
 
-    /// Which `pcidev` slot this claim drives, for a claim on a PCI function.
+    /// `f` over the function this claim drives, with what `pcidev`'s calls
+    /// take: `None` for a claim on anything else, and once the last handle has
+    /// let the function go.
     ///
-    /// Every call the substrate answers goes through this: the handle is the
-    /// authority and the slot is what it names.
-    pub fn pci_slot(&self) -> Option<usize> {
-        self.pci_slot.map(usize::from)
+    /// Every call the substrate answers goes through this, under the lock the
+    /// release takes the binding with: `f` has returned before the function is
+    /// let go, or never runs. So `f` does not wait.
+    pub fn pci<R>(&self, f: impl FnOnce(&crate::pcidev::Binding) -> R) -> Option<R> {
+        self.reference.with(|claim| claim.binding().map(f)).flatten()
     }
 
-    /// Which `isa` row this claim holds, for a claim on an ISA function or the
-    /// ACPI fixed hardware.
-    pub fn isa_row(&self) -> Option<usize> {
-        self.isa_row
+    /// [`pci`](Self::pci), for the `isa` row of a claim on an ISA function or
+    /// the ACPI fixed hardware.
+    pub fn isa<R>(&self, f: impl FnOnce(&crate::isa::Row) -> R) -> Option<R> {
+        self.reference.with(|claim| claim.row().map(f)).flatten()
+    }
+
+    /// Register `entry` on the watch of the function or row this claim holds,
+    /// with what the claim lends, so before its release: the release answers
+    /// every poll registered before it, and one that finds the claim released
+    /// is ended here, by its registrant. No poll is left for the interrupts of
+    /// whoever holds the slot or the row next.
+    pub(crate) fn add_poll(&self, entry: crate::inbox::PollEntry) {
+        let mut entry = Some(entry);
+        self.reference.with(|claim| claim.add_poll(entry.take().expect("lent once")));
+        if let Some(entry) = entry {
+            kernel::sched::watch::Ring::fire(&entry, kernel::sched::watch::Fire::Gone);
+        }
     }
 
     /// The view a partition claim transfers through: `None` for a claim on

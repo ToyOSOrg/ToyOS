@@ -659,6 +659,8 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
 pub struct MmapRegion {
     pub addr: UserAddr,
     pub size: usize,
+    /// The length its `mmap` was asked for, which is the one `munmap` and a `FIXED` replacement name it by.
+    pub len: u64,
     /// `None` for a `MmapProt::NONE` mapping: the range is reserved, but no physical page backs an access whose whole purpose is to fault.
     pub _pages: Option<PageAlloc>,
 }
