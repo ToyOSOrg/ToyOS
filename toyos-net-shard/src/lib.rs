@@ -449,11 +449,10 @@ impl Shard {
     }
 
     /// Joins `group` on the interface: frames to its link address are taken from here on, and
-    /// [ip] reports the membership whenever the link can carry the report.
+    /// [ip] reports the membership whenever the link can carry the report. Nothing to settle:
+    /// a join makes no flow eligible and no event.
     pub fn join(&mut self, now: Instant, group: MulticastAddr) -> Result<(), toyos_net_ip::Counter> {
-        let joined = self.ip.join(now, self.iface, group);
-        self.settle(now);
-        joined
+        self.ip.join(now, self.iface, group)
     }
 
     // ---- TCP ----
