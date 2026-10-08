@@ -40,6 +40,34 @@ pub fn is_user_addr(addr: u64) -> bool {
     addr < USER_TOP
 }
 
+/// An instruction pointer the kernel may return to userland at.
+///
+/// A return to an address that is not canonical faults in the returning
+/// instruction itself, in the kernel's ring and not the thread's, so one that
+/// crossed the trust boundary is refused before any frame carries it. No
+/// other constructor: a first return to userland takes this and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Entry(u64);
+
+impl Entry {
+    /// `None` for an address outside the user half; what is mapped at one
+    /// inside it is the thread's own fault to take.
+    pub fn new(addr: u64) -> Option<Self> {
+        is_user_addr(addr).then_some(Self(addr))
+    }
+
+    pub const fn addr(self) -> u64 {
+        self.0
+    }
+}
+
+/// One past the highest address the kernel places anything at, an image or a
+/// [`Window`](crate::Window)'s range: the user half less its last page. An
+/// instruction that ends at [`USER_TOP`] leaves that address, no canonical
+/// one, as where a syscall or an interrupt taken after it returns to, so
+/// nothing executable is placed where one could end there.
+pub(crate) const PLACED_TOP: u64 = USER_TOP - PAGE_2M;
+
 /// Whether `[ptr, ptr + len)` is entirely in the user half.
 ///
 /// Also the bound `sys_mmap` applies to a range it will install rather than
@@ -54,12 +82,13 @@ pub fn in_user_half(ptr: u64, len: u64) -> bool {
 
 /// The load base an `ET_DYN` image rebases to `vm_base` (`vm_base - vaddr_min`),
 /// or `None` when it cannot: a `vaddr_min` above `vm_base` underflows the
-/// subtraction, and a `span` reaching from `vm_base` past the user half does not
+/// subtraction, and a `span` reaching from `vm_base` past [`PLACED_TOP`] does not
 /// fit. The ELF spec leaves an `ET_DYN` `p_vaddr` unconstrained, so the kernel
 /// that picks `vm_base` is the only place that can refuse one.
 pub fn rebase_base(vm_base: u64, vaddr_min: u64, span: u64) -> Option<u64> {
     let base = vm_base.checked_sub(vaddr_min)?;
-    in_user_half(vm_base, span).then_some(base)
+    let end = vm_base.checked_add(span)?;
+    (end <= PLACED_TOP).then_some(base)
 }
 
 /// Whether the kernel may read or write a `size`-byte value of alignment
@@ -109,6 +138,19 @@ mod tests {
         assert!(!is_user_addr(u64::MAX));
         assert!(is_user_addr(USER_TOP - 1));
         assert!(is_user_addr(0));
+    }
+
+    /// The last address of the user half is one, and the first that is not
+    /// canonical, the first of the kernel half and the last of all are not.
+    #[test]
+    fn an_entry_is_an_address_of_the_user_half_and_nothing_else() {
+        assert_eq!(Entry::new(USER_TOP - 1).map(Entry::addr), Some(USER_TOP - 1));
+        assert_eq!(Entry::new(0).map(Entry::addr), Some(0));
+        assert_eq!(Entry::new(USER_TOP), None);
+        assert_eq!(Entry::new(0x0100_0000_0000_0000), None);
+        assert_eq!(Entry::new(0xFFFF_7FFF_FFFF_FFFF), None);
+        assert_eq!(Entry::new(0xFFFF_8000_0000_0000), None);
+        assert_eq!(Entry::new(u64::MAX), None);
     }
 
     #[test]
@@ -185,9 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn an_image_that_rebases_past_the_user_half_is_refused() {
-        assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE), Some(USER_VM_BASE));
-        assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE + 1), None);
+    fn an_image_that_reaches_the_last_page_of_the_user_half_is_refused() {
+        assert_eq!(rebase_base(USER_VM_BASE, 0, PLACED_TOP - USER_VM_BASE), Some(USER_VM_BASE));
+        assert_eq!(rebase_base(USER_VM_BASE, 0, PLACED_TOP - USER_VM_BASE + 1), None);
+        assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE), None);
         assert_eq!(rebase_base(USER_VM_BASE, 0, u64::MAX), None);
+        assert_eq!(rebase_base(u64::MAX, 0, 1), None);
     }
 }

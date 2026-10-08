@@ -1,7 +1,9 @@
 //! Loads a built process onto a CPU, builds the handle table it starts with
 //! and puts its spawner's handle to it in the spawner's table. The frame a new
 //! stack starts from and the trampolines it returns into are the
-//! architecture's (`arch::entry`).
+//! architecture's (`arch::entry`), and [`Start`] is the only way to one: a
+//! trampoline that returns to userland is reached with an
+//! [`Entry`](toyos_userbound::Entry) and with nothing else.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -21,13 +23,24 @@ use toyos_abi::syscall::{
 /// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in bytes.
 pub const SLOT_PAIR_LEN: usize = 8;
 
+/// Where a new context first runs.
+pub(crate) enum Start {
+    /// A program's first instruction, on the stack its loader wrote.
+    Process { entry: toyos_userbound::Entry, sp: u64 },
+    /// A thread's, on a stack its process chose, with its argument.
+    Thread { entry: toyos_userbound::Entry, sp: u64, arg: u64 },
+    /// A kernel thread's body, which never returns to userland.
+    Kernel { body: extern "C" fn(u64) -> !, arg: u64 },
+}
+
 /// Allocate a kernel stack and lay out the frame `context_switch` will restore.
-pub(crate) fn alloc_kernel_stack(
-    trampoline: unsafe extern "C" fn(),
-    user_entry: u64,
-    user_sp: u64,
-    arg: u64,
-) -> Option<(OwnedAlloc, u64)> {
+pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(OwnedAlloc, u64)> {
+    use crate::arch::entry::{kernel_start, process_start, thread_start};
+    let (trampoline, user_entry, user_sp, arg): (unsafe extern "C" fn(), _, _, _) = match start {
+        Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0),
+        Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
+        Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg),
+    };
     let alloc = OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)?;
     scheduler::write_stack_canary(&alloc);
     let top = alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64;
