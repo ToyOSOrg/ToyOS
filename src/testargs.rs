@@ -1,9 +1,10 @@
 //! The suite's command line, checked against the flags it actually has.
 //!
-//! `tests/toyos.rs` takes the first word that is nobody's value as the run's
-//! filter, so a flag this table does not declare would hand its own value to
-//! that filter and report a one-test run as a pass. The table is the harness's
-//! whole vocabulary, and [`SUITE`] is the only way to read a word off its argv.
+//! `tests/toyos.rs` takes every word that is nobody's value as one of the
+//! run's filters, so a flag this table does not declare would hand its own
+//! value to them and report a one-test run as a pass. The table is the
+//! harness's whole vocabulary, and [`SUITE`] is the only way to read a word
+//! off its argv.
 
 use crate::flags::declare_flags;
 use std::path::PathBuf;
@@ -23,18 +24,29 @@ declare_flags!(pub SUITE = {
     pub METAL_READBACK = "--metal-readback", Next;
 });
 
-/// The run's filter and `--metal`'s mode, both decided by [`parse`]: an unknown
-/// flag refuses the line before either is read.
+/// How a filter word names one of the metal profile's boots whole, ahead of
+/// the boot's name as `--metal --list` prints it.
+pub const BOOT: &str = "boot:";
+
+/// The run's filters and `--metal`'s mode, all decided by [`parse`]: an unknown
+/// flag refuses the line before any is read.
 pub struct Parsed<'a> {
-    pub filter: Option<&'a str>,
+    /// A run takes every name any of these is part of, and with none, and no
+    /// `boots`, every name there is.
+    pub filters: Vec<&'a str>,
+    /// The [`BOOT`] words, without it: boots `--metal` takes whole.
+    pub boots: Vec<&'a str>,
     pub metal: Option<MetalMode>,
 }
 
-/// Validate the harness's argv and return the run's filter and metal mode.
+/// Validate the harness's argv and return the run's filters and metal mode.
 ///
 /// `Err` is a refusal to print and exit on. It is asked before the sysroot lock
-/// and before anything is compiled, so a stale command line costs a message
-/// rather than a queue behind it.
+/// and before anything is compiled, so a line this refuses costs a message
+/// rather than a queue behind it. Not every dead word is refused here: under
+/// `--metal`, whether a filter or a [`BOOT`] word takes anything is known only
+/// against the profile's built members, so that refusal comes after the shared
+/// binaries' build.
 pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     let line = SUITE.walk(args);
     if let Some(word) = line.unknown {
@@ -49,20 +61,17 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         return Err(refusal);
     }
 
-    let mut filter: Option<&str> = None;
-    for word in line.positionals {
-        if let Some(first) = filter {
-            return Err(format!(
-                "{first:?} and {word:?}: the suite takes one filter, and the second word \
-                 would have been dropped in silence.\n\
-                 A filter is a substring, so `{first}` and `{word}` are one run only if one \
-                 substring matches both."
-            ));
-        }
-        filter = Some(word);
-    }
+    let (boots, filters): (Vec<&str>, Vec<&str>) =
+        line.positionals.into_iter().partition(|word| word.starts_with(BOOT));
+    let boots: Vec<&str> = boots.into_iter().map(|word| &word[BOOT.len()..]).collect();
 
     let has = |want| SUITE.present(args, want);
+    if let (Some(boot), false) = (boots.first(), has(&METAL)) {
+        return Err(format!(
+            "{BOOT}{boot} names a boot of the metal profile, and a run without --metal has \
+             none, so it would be dropped in silence; add --metal"
+        ));
+    }
     if has(&JOBS) && has(&JOBS_SHORT) {
         return Err(
             "--jobs and -j are two spellings of one width, and the run would read one of \
@@ -87,12 +96,12 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                 ));
             }
         }
-        if let Some(word) = filter {
+        for word in filters.iter().chain(&boots) {
             if word.trim().is_empty() {
                 return Err("--metal with an empty filter: name a registration or drop the word"
                     .to_string());
             }
-            if let Some(flag) = SUITE.0.iter().find(|f| f.name.trim_start_matches('-') == word) {
+            if let Some(flag) = SUITE.0.iter().find(|f| f.name.trim_start_matches('-') == *word) {
                 return Err(format!(
                     "{word:?} beside --metal is {}'s name without its dashes, and would be \
                      read as a filter that selects whatever contains it",
@@ -125,7 +134,7 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         }
     });
 
-    Ok(Parsed { filter, metal })
+    Ok(Parsed { filters, boots, metal })
 }
 
 /// What `--metal`'s own flags resolve a run to.
@@ -147,8 +156,9 @@ mod tests {
         args.iter().map(ToString::to_string).collect()
     }
 
+    /// The run's filters, as one text.
     fn parse_owned(args: &[&str]) -> Result<Option<String>, String> {
-        parse(&owned(args)).map(|p| p.filter.map(ToString::to_string))
+        parse(&owned(args)).map(|p| (!p.filters.is_empty()).then(|| p.filters.join(" ")))
     }
 
     fn metal_owned(args: &[&str]) -> Result<Option<MetalMode>, String> {
@@ -186,9 +196,20 @@ mod tests {
     }
 
     #[test]
-    fn two_filters_are_refused_because_only_one_would_run() {
-        let refusal = parse_owned(&["futex", "dlopen"]).unwrap_err();
-        assert!(refusal.contains("\"futex\"") && refusal.contains("\"dlopen\""), "{refusal}");
+    fn every_word_that_is_nobodys_value_is_a_filter() {
+        assert_eq!(parse_owned(&["futex", "--jobs", "4", "dlopen"]).unwrap().as_deref(), Some("futex dlopen"));
+    }
+
+    /// A boot word is `--metal`'s alone, and never one of the filters.
+    #[test]
+    fn a_boot_word_names_a_metal_boot_and_nothing_else() {
+        let line = owned(&["--metal", "boot:shared-2", "control_regs", "boot:ccorpus"]);
+        let parsed = parse(&line).unwrap();
+        assert_eq!((parsed.filters, parsed.boots), (vec!["control_regs"], vec!["shared-2", "ccorpus"]));
+        let refusal = parse_owned(&["boot:shared"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        let refusal = metal_owned(&["--metal", "boot:"]).unwrap_err();
+        assert!(refusal.contains("empty filter"), "{refusal}");
     }
 
     /// Every `None` here is a default the run then takes in silence: `--jobs`

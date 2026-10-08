@@ -166,6 +166,60 @@ fn sized(shared: &[SharedBoot]) -> Vec<SharedBoot> {
     out
 }
 
+/// The rows and the shared boots a run takes.
+pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
+
+/// What a run's words take of the profile: every row and shared member a
+/// `names` word is part of, chunked as they come, and every boot a `boots`
+/// word names, whole — its shared members as the whole profile chunks them,
+/// and every row with an arm on it, which brings that row's other boots. No
+/// word at all takes everything.
+///
+/// **A word that takes nothing is refused**: it would be dropped in silence.
+pub fn select(
+    names: &[&str],
+    boots: &[&str],
+    rows: &'static [(&'static str, Metal)],
+    shared: &[SharedBoot],
+) -> Result<Taken, String> {
+    // A shared Rust member is filtered by the name its source file has.
+    fn bare(job: &str) -> &str {
+        job.strip_prefix("test_rs_").unwrap_or(job)
+    }
+    let all = names.is_empty() && boots.is_empty();
+    let jobs = || shared.iter().flat_map(|boot| &boot.jobs).map(|job| bare(job));
+    if let Some(dead) = names.iter().find(|word| {
+        !rows.iter().any(|(name, _)| name.contains(**word)) && !jobs().any(|job| job.contains(**word))
+    }) {
+        return Err(format!("{dead:?} is part of no metal registration's name and no shared member's"));
+    }
+    let whole = sized(shared);
+    let arms = || rows.iter().flat_map(|(_, decl)| decl.arms).map(|arm| arm.boot);
+    let known: BTreeSet<&str> = whole.iter().map(|boot| boot.boot.as_str()).chain(arms()).collect();
+    if let Some(dead) = boots.iter().find(|boot| !known.contains(**boot)) {
+        return Err(format!("boot:{dead} names no boot of the metal profile, whose boots are {known:?}"));
+    }
+
+    let named = |name: &str| all || names.iter().any(|word| name.contains(word));
+    let mut taken: Vec<SharedBoot> =
+        whole.iter().filter(|boot| boots.contains(&boot.boot.as_str())).cloned().collect();
+    let by_name: Vec<SharedBoot> = shared
+        .iter()
+        .cloned()
+        .map(|mut boot| {
+            boot.jobs.retain(|job| named(bare(job)));
+            boot
+        })
+        .collect();
+    taken.extend(sized(&by_name));
+    let rows = rows
+        .iter()
+        .filter(|(name, decl)| named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
+        .map(|(name, decl)| (*name, decl))
+        .collect();
+    Ok((rows, taken))
+}
+
 /// How a registration runs on the T14.
 pub struct Metal {
     pub arms: &'static [Arm],
@@ -568,10 +622,6 @@ fn batches(
     // First, so a registration naming a shared boot rides it rather than
     // minting a second one under the same name with a different list.
     for boot in shared {
-        // A boot nothing selected is a boot nothing has to flash.
-        if boot.jobs.is_empty() {
-            continue;
-        }
         let was = out.insert(
             boot.boot.clone(),
             Batch {
@@ -890,7 +940,8 @@ pub enum Verdict {
     Staged,
 }
 
-/// The whole metal profile: batch, build, drive, judge, report.
+/// The whole metal profile over what [`select`] took of it: batch, build,
+/// drive, judge, report.
 // Each argument is one of the suite's own flags or tables, passed through
 // once; a struct holding them would be a second name for the command line.
 #[allow(clippy::too_many_arguments)]
@@ -902,8 +953,6 @@ pub fn run(
     quiet: bool,
 ) -> Verdict {
     let root = super::compile::repo_root();
-    let shared = sized(shared);
-    let shared = shared.as_slice();
     let batches = match batches(tests, shared) {
         Ok(batches) => batches,
         Err(why) => {
@@ -918,10 +967,6 @@ pub fn run(
         shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
         batches.len(),
     );
-    if runs.is_empty() && shared.iter().all(|b| b.jobs.is_empty()) {
-        eprintln!("[metal] nothing to run");
-        return Verdict::Red;
-    }
 
     let (dir, offline): (PathBuf, bool) = match &mode {
         MetalMode::List => {
@@ -1123,9 +1168,6 @@ pub fn judge_readbacks(
     }
     let mut members = 0usize;
     for boot in shared {
-        if boot.jobs.is_empty() {
-            continue;
-        }
         eprintln!("\n[metal] {}: {} member(s)", boot.boot, boot.jobs.len());
         let back = readbacks.get(&boot.boot).expect("every shared boot was batched");
         let mut ran = 0usize;
