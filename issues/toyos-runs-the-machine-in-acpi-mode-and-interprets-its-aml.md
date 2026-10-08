@@ -236,7 +236,12 @@ changing nothing its scout read, with the button's event enabled and no SMI
 taken, and its hypothesis is that the controller wants the firmware's
 initialisation run first. The slice that puts `_REG`, the `_STA` and `_INI`
 walk and the query methods in the server on the T14 is the one that issue's
-one-press test waits on.
+one-press test waits on. Its reading of 2026-10-08 found bit 0 of the
+controller's memory at offset 0x05 set under stage 1 and clear under Linux,
+and a dry run of the firmware's `_INI` for the controller clears that bit in
+its two variants that answer all ones, the six that answer zero showing no
+bit, so that slice's first reading on the T14 is the same scout's of that bit, clear
+after the initialisation has run, before the press.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.
