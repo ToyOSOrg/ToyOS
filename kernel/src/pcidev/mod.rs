@@ -100,8 +100,16 @@
 //! a number carried from a claim to a call would be another holder's function
 //! by the time it was used. The binding is lent by the claim under the lock
 //! its release takes it with (`object::Held`): a call runs wholly before the
-//! release or finds no binding. Only the two handlers name a slot, by the
-//! vector and the requester the hardware gave them.
+//! release or finds no binding. Outside a claim's own mint and release, only
+//! the two handlers name a slot, by the vector and the requester the hardware
+//! gave them.
+//!
+//! **A poll is on a slot's watch only while its claim holds the slot.** It is
+//! registered with the binding ([`add_poll`]), so before the release, whose
+//! own answer to every poll on the watch comes before the slot can be
+//! reserved again; a registration that finds the claim released is ended by
+//! its registrant (`DeviceClaim::add_poll`). So a slot's next holder's
+//! interrupt fires no poll of the last one's, in whatever ring.
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
 /// interleaving no guest test lands on.
@@ -128,6 +136,7 @@ use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;
+use crate::inbox::PollEntry;
 use crate::watch::IrqWatch;
 
 /// How many functions this machine can hand out at once.
@@ -1763,11 +1772,12 @@ pub fn note_fault(slot: usize) {
     crate::preempt::set_need_resched();
 }
 
-/// The watch of the function a claim holds.
-///
-/// It outlives the borrow it was asked with, so a poll can be registered on it
-/// after the claim's release: its registrar's own recheck then finds the claim
-/// released and fires it (`ops::has_data`).
-pub fn watch(binding: &Binding) -> &'static IrqWatch {
-    &WATCHES[binding.slot]
+/// Register a poll on the watch of the function a claim holds.
+pub(crate) fn add_poll(binding: &Binding, entry: PollEntry) {
+    WATCHES[binding.slot].add_poll(entry);
+}
+
+/// Answer every poll on the function a claim holds as gone.
+pub fn cancel_polls(binding: &Binding) {
+    WATCHES[binding.slot].cancel_polls();
 }

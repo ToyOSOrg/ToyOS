@@ -140,6 +140,25 @@ impl DeviceClaim {
         self.reference.with(|claim| claim.row().map(f)).flatten()
     }
 
+    /// Register `entry` on the watch of the function or row this claim holds,
+    /// with what the claim lends, so before its release: the release answers
+    /// every poll registered before it, and one that finds the claim released
+    /// is ended here, by its registrant. No poll is left for the interrupts of
+    /// whoever holds the slot or the row next.
+    pub(crate) fn add_poll(&self, entry: crate::inbox::PollEntry) {
+        let mut entry = Some(entry);
+        self.reference.with(|claim| claim.add_poll(entry.take().expect("lent once")));
+        if let Some(entry) = entry {
+            kernel::sched::watch::Ring::fire(&entry, kernel::sched::watch::Fire::Gone);
+        }
+    }
+
+    /// Answer every poll on this claim's function or row as gone; its release
+    /// has, or will, where the last handle has let it go.
+    pub(crate) fn cancel_polls(&self) {
+        self.reference.with(Claim::cancel_polls);
+    }
+
     /// The view a partition claim transfers through: `None` for a claim on
     /// anything else, and once the last handle has let the partition go.
     ///

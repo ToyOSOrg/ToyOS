@@ -89,6 +89,24 @@ impl Claim {
         }
     }
 
+    /// Register a poll on the watch of the function or row this claim holds.
+    pub(crate) fn add_poll(&self, entry: crate::inbox::PollEntry) {
+        match &self.what {
+            Claimed::PciFunction(binding) => crate::pcidev::add_poll(binding, entry),
+            Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::add_poll(row, entry),
+            Claimed::Class(_) | Claimed::Partition(_) => unreachable!("a poll registered through a claim on no function or row"),
+        }
+    }
+
+    /// Answer every poll on the function or row this claim holds as gone.
+    pub(crate) fn cancel_polls(&self) {
+        match &self.what {
+            Claimed::PciFunction(binding) => crate::pcidev::cancel_polls(binding),
+            Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::cancel_polls(row),
+            Claimed::Class(_) | Claimed::Partition(_) => unreachable!("a poll cancelled through a claim on no function or row"),
+        }
+    }
+
     /// The view a partition claim transfers through, or `None` for any other.
     pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
         match &self.what {

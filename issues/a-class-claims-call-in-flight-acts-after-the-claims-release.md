@@ -26,14 +26,28 @@ on the display, that the second process now holds.
 
 A claim on a PCI function, an ISA function or the ACPI fixed hardware does not
 have this: its calls borrow what names the device from the claim under the
-lock its release takes it with (`DeviceClaim::pci`, `DeviceClaim::isa`). The
-same borrow closes these — the act made inside the claim's `Held`.
+lock its release takes it with (`DeviceClaim::pci`, `DeviceClaim::isa`). That
+borrow is no fix to copy here as it stands: `SYS_GPU_SET_RESOLUTION` allocates,
+and the claim's lock is a spinlock.
+
+**A poll has the same shape on these classes.** The watch a poll on an audio
+claim or the mouse's registers on is the class's one `static`
+(`drivers::AUDIO_WATCH`, `mouse::WATCH`, by `ops::read_watch`), and
+`inbox::arm` registers on it with nothing held. A sibling thread's close
+between the resolve and the registration lets the poll land after the close
+answered the watch's polls (`ops::close`, and for audio `Claim`'s drop in
+`kernel/src/device.rs` too), and the class's next holder's first interrupt
+fires it into the old process's ring: one bit of another process's device
+activity. A claim on a PCI
+function, an ISA function or the ACPI fixed hardware registers with what the
+claim lends (`DeviceClaim::add_poll`) and does not have it.
 
 **Read from the code, not run.** A guest cannot order a close and a second
 claim between the two steps of one syscall.
 
-**Exit condition**: every call on a class claim acts under the lock its
-claim's release takes, or is refused, and no syscall reaches a kernel-driven
-device on a `holds_claim` answer alone.
+**Exit condition**: no call on a released class claim reaches the device, and
+no poll registered on one stays on its watch, once the class's next claim is
+minted; or the class is gone from the kernel, as
+`issues/every-driver-is-still-in-the-kernel.md` retires each of them.
 
-**Owner**: whoever holds `issues/every-driver-is-still-in-the-kernel.md`.
+**Owner**: none. That track is open and nobody holds it.

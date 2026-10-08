@@ -243,8 +243,11 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
-    /// A device's, which its interrupt handler posts.
+    /// A device class's, which its interrupt handler posts.
     Irq(&'static IrqWatch),
+    /// The watch of the function or row a claim holds: named by the claim,
+    /// and reached only with what the claim lends.
+    Claim(Arc<DeviceClaim>),
 }
 
 impl WatchRef {
@@ -253,6 +256,7 @@ impl WatchRef {
             Self::Static(watch) => watch.add_poll(entry),
             Self::Shared(watch) => watch.add_poll(entry),
             Self::Irq(watch) => watch.add_poll(entry),
+            Self::Claim(claim) => claim.add_poll(entry),
         }
     }
 
@@ -261,6 +265,7 @@ impl WatchRef {
             Self::Static(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
             Self::Irq(watch) => watch.cancel_polls(),
+            Self::Claim(claim) => claim.cancel_polls(),
         }
     }
 }
@@ -277,12 +282,9 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
-            device_registry::DeviceType::PciFunction => {
-                d.pci(crate::pcidev::watch).map(WatchRef::Irq)
-            }
-            device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                d.isa(crate::isa::watch).map(WatchRef::Irq)
-            }
+            device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::Isa
+            | device_registry::DeviceType::Acpi => Some(WatchRef::Claim(d.clone())),
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
                 Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
@@ -804,14 +806,13 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
             device_registry::DeviceType::Mouse => mouse::has_data(),
-            // A claim its last handle has let go is ready: nothing will post
-            // for it again, so a poll on it is answered and never left
-            // registered on a watch its slot's or row's next holder posts.
+            // A claim its last handle has let go has nothing to read: a poll
+            // on it is ended where it registers (`DeviceClaim::add_poll`).
             device_registry::DeviceType::PciFunction => {
-                !d.info_read() || d.pci(crate::pcidev::has_irq).unwrap_or(true)
+                !d.info_read() || d.pci(crate::pcidev::has_irq).unwrap_or(false)
             }
             device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
-                !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(true)
+                !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(false)
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,

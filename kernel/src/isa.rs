@@ -31,7 +31,8 @@
 //! **A call on a claim is made with the claim's [`Row`] and never with a row
 //! number**, lent under the lock the claim's release takes it with
 //! (`object::Held`): the call runs wholly before the release or finds no row,
-//! so none acknowledges, reads or waits on a row its claim has given up.
+//! so none acknowledges, reads or registers a poll on a row its claim has
+//! given up, and the release answers every poll registered before it.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -43,6 +44,7 @@ use toyos_userbound::Ports;
 
 use crate::arch::pio;
 use crate::device::ClaimError;
+use crate::inbox::PollEntry;
 use crate::pcidev::record::Interrupt;
 use crate::process::Pid;
 use crate::sync::Lock;
@@ -263,11 +265,14 @@ pub fn isr(row: usize) {
     WATCHES[row].post_in_place();
 }
 
-/// It outlives the borrow it was asked with: a poll registered on it after the
-/// claim's release is fired by its registrar's own recheck, which finds the
-/// claim released (`ops::has_data`).
-pub fn watch(row: &Row) -> &'static IrqWatch {
-    &WATCHES[row.0]
+/// Register a poll on the watch of the row a claim holds.
+pub(crate) fn add_poll(row: &Row, entry: PollEntry) {
+    WATCHES[row.0].add_poll(entry);
+}
+
+/// Answer every poll on the row a claim holds as gone.
+pub fn cancel_polls(row: &Row) {
+    WATCHES[row.0].cancel_polls();
 }
 
 /// The function a filled row raises `wire` with too, if one does: a second

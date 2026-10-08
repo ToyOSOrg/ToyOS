@@ -32,4 +32,4 @@ not run.
 handler's write is refused by a record that has moved on, or this is folded
 into `kernel/src/pcidev/mod.rs`'s header as the bound it is.
 
-**Owner**: whoever holds `issues/every-driver-is-still-in-the-kernel.md`.
+**Owner**: none. No track covers a slot's record.
