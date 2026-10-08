@@ -18,9 +18,10 @@ use core::net::Ipv4Addr;
 
 use toyos_dhcp::{Lease, Transmission};
 use toyos_net_shard::{Config, Event, Refusal, Shard};
-use toyos_net_udp::SocketId;
+use toyos_net_udp::{Received, SocketId};
 use toyos_net_wire::ethernet::MacAddr;
-use toyos_net_wire::Instant;
+use toyos_net_wire::ipv4::{MulticastAddr, Ttl};
+use toyos_net_wire::{Instant, Port};
 
 /// The port a DHCP server listens on (RFC 2131 §4.1).
 const SERVER_PORT: u16 = 67;
@@ -128,6 +129,36 @@ impl Stack {
         };
         let received = received?;
         Some((out.get(..received.len)?, received.source))
+    }
+
+    // ---- datagram sockets: [udp]'s calls passed on, none of which writes the lease ----
+
+    /// Binds a socket to `addr`, 0.0.0.0 meaning any, and to `port` or one `draw` picks. Returns
+    /// it and the port it holds.
+    pub(crate) fn bind(&mut self, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<(SocketId, Port), toyos_net_udp::Error> {
+        let id = self.shard.bind(addr, port, draw)?;
+        Ok((id, self.shard.udp_port(id)?))
+    }
+
+    /// Queues a datagram; accepted means queued, not sent.
+    pub(crate) fn send_to(&mut self, now: Instant, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        self.shard.send_to(now, id, destination, port, payload)
+    }
+
+    pub(crate) fn recv_from(&mut self, id: SocketId, out: &mut [u8]) -> Result<Option<Received>, toyos_net_udp::Error> {
+        self.shard.recv_from(id, out)
+    }
+
+    pub(crate) fn close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_close(now, id)
+    }
+
+    pub(crate) fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_set_ttl(id, unicast, multicast)
+    }
+
+    pub(crate) fn join(&mut self, now: Instant, group: MulticastAddr) {
+        agreed(self.shard.join(now, group));
     }
 
     // ---- the lease ----
