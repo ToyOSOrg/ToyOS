@@ -1755,9 +1755,7 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     let ended = format!("===TEST_END {JOB} ");
     await_guest(&mut qemu, &mut console, "the probe's power-off to give the lock back", |said| {
         said.contains(GIVEN_BACK_AT_THE_STOP) || said.contains(&ended)
-    })
-    // The probe's whole run: a wait that ends on neither line has no other account of it.
-    .map_err(|why| format!("{why}\nsince its boot the guest said:\n{}", &console[qemu.boot_log().len()..]))?;
+    })?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
     said.must_say(isa::WITHHELD)?;
