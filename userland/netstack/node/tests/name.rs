@@ -11,7 +11,7 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{sum, terms, A, MAC_B, MAC_R, R};
+use common::{arp, sum, terms, A, MAC, MAC_B, MAC_R, R};
 use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
 use toyos_mdns::Host;
 use toyos_net_node::{Counter, Refused};
@@ -216,19 +216,24 @@ fn a_second_query_inside_a_second_waits_for_the_second_to_end() {
     assert_eq!(lan.datagrams().len(), from + 2, "one multicast answered both");
 }
 
-// Present state, and wrong: RFC 3927 §2.6.2 has a host send to 169.254/16 directly on the link
-// whatever address it holds, and §7 never through a router. The responder takes a link-local
-// source for one on this link (RFC 6762 §11), and [ip], with no route for 169.254/16 on a leased
-// interface, hands the answer to the router. The track records it; its exit turns `to` here into
-// the asker's own link address.
+// RFC 3927 §2.6.2: "If the destination address is in the 169.254/16 prefix ... then the sender
+// MUST ARP for the destination address and then send the packet directly to the destination on
+// the same physical link. This MUST be done whether the interface is configured with a
+// Link-Local or a routable IPv4 address." §7: such a packet is never sent to a router. The
+// responder takes a link-local source for one on this link (RFC 6762 §11); the node holds a
+// routable lease and a router, asks the link for the asker itself, and answers it there.
 #[test]
-fn an_answer_to_a_link_local_asker_leaves_by_the_router() {
+fn an_answer_to_a_link_local_asker_goes_to_its_own_link_address() {
     let link_local = Ipv4Addr::new(169, 254, 3, 4);
     let mut lan = settled();
-    let from = lan.datagrams().len();
+    let (from, frames) = (lan.datagrams().len(), lan.sent.len());
     lan.deliver(&to_group(MAC_B, (link_local, 53_000), &ours(5, CLASS_IN)));
-    let by_the_router = Udp { to: MAC_R, source: A, source_port: MDNS, destination: link_local, port: 53_000, ttl: 255, payload: legacy_response(5) };
-    assert_eq!(since(&lan, from), [by_the_router]);
+    let asked: Vec<&Seen> = lan.sent[frames..].iter().map(|(_, seen)| seen).collect();
+    assert_eq!(asked, [&Seen::Arp { request: true, sender: A, target: link_local }], "the asker is asked for, and nothing is the router's");
+
+    lan.deliver(&arp(MAC, false, MAC_B, link_local, A));
+    let on_the_link = Udp { to: MAC_B, source: A, source_port: MDNS, destination: link_local, port: 53_000, ttl: 255, payload: legacy_response(5) };
+    assert_eq!(since(&lan, from), [on_the_link]);
 }
 
 // A lease held before the name is told is as new to the responder as one that comes after:

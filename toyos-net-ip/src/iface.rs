@@ -63,9 +63,10 @@ impl Interface {
         self.addresses.iter().any(|a| a.cidr.addr() == addr)
     }
 
-    /// Inside the prefix of a usable address: reachable without a gateway.
+    /// Reachable without a gateway: inside the prefix of a usable address, or in 169.254/16,
+    /// which is this link's whatever address the interface holds (RFC 3927 §2.6.2).
     pub fn on_link(&self, addr: Ipv4Addr) -> bool {
-        self.usable().any(|a| a.cidr.contains(addr))
+        self.usable().any(|a| addr.is_link_local() || a.cidr.contains(addr))
     }
 
     /// A usable address whose prefix holds `toward`, else the first usable one.

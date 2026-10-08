@@ -153,6 +153,27 @@ fn s_ip_nbr_012_an_off_link_sender_is_answered_not_cached() {
     assert_eq!(h.count(Counter::ArpSenderOffLink), 1);
 }
 
+// RFC 3927 §2.6.2: a host in 169.254/16 is on this link whatever address the interface holds, so
+// its request is a neighbour's: answered, and cached to be verified before it is trusted. Before
+// the interface has an address nothing is on its link.
+#[test]
+fn rfc_3927_2_6_2_a_link_local_sender_is_a_neighbour() {
+    let asker = ip4(169, 254, 3, 4);
+    let mut h = H::fixture_i();
+    h.frame(&request(MAC_B, asker, A));
+    let out = h.out();
+    assert_eq!(out.len(), 1);
+    assert_eq!((out[0].to(), out[0].arp().unwrap().target_ip), (MAC_B, asker));
+    assert!(h.is_stale(asker));
+    assert_eq!(h.mac_of(asker), Some(MAC_B));
+    assert_eq!(h.count(Counter::ArpSenderOffLink), 0);
+
+    let mut h = H::bare();
+    h.frame(&request(MAC_B, asker, A));
+    assert!(h.out().is_empty() && h.state(asker).is_none());
+    assert_eq!(h.count(Counter::ArpSenderOffLink), 1);
+}
+
 #[test]
 fn s_ip_nbr_013_a_probe_is_answered_and_not_cached() {
     let mut h = H::fixture_i();

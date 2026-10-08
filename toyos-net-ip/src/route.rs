@@ -1,7 +1,8 @@
 //! The host routing table: the connected prefixes of usable addresses and an ordered list of
-//! on-link gateways per interface; longest prefix first, then the active gateway, and no
-//! forwarding. A lookup considers only interfaces that are up, and with a bound source only the
-//! interface holding it (RFC 1122 §3.3.4.2, the strong model).
+//! on-link gateways per interface; longest prefix first, then 169.254/16 on the link itself (RFC
+//! 3927 §2.6.2), then the active gateway, and no forwarding. A lookup considers only interfaces
+//! that are up, and with a bound source only the interface holding it (RFC 1122 §3.3.4.2, the
+//! strong model).
 
 use core::net::Ipv4Addr;
 
@@ -91,6 +92,11 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
     if let Some((index, i, cidr)) = connected {
         let next_hop = if cidr.broadcast() == Some(destination) { NextHop::Broadcast } else { NextHop::Neighbour(destination) };
         return Ok(Route { iface: IfIndex(index), next_hop, source: pick_source(i, destination)? });
+    }
+    // On the link with no prefix holding it is 169.254/16: resolved and sent to directly, and
+    // never handed to a router (RFC 3927 §2.6.2, §7).
+    if let Some((index, i)) = candidates().find(|(_, i)| i.on_link(destination)) {
+        return Ok(Route { iface: IfIndex(index), next_hop: NextHop::Neighbour(destination), source: pick_source(i, destination)? });
     }
     let (index, i, gateway) = candidates().find_map(|(index, i)| i.active.map(|g| (index, i, g))).ok_or(Counter::RouteNone)?;
     Ok(Route { iface: IfIndex(index), next_hop: NextHop::Neighbour(gateway), source: pick_source(i, gateway)? })

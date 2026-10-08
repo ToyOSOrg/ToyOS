@@ -415,3 +415,67 @@ fn s_ip_rte_017_lookups_send_nothing() {
     }
     assert!(h.run(600_000).is_empty());
 }
+
+const LINK_LOCAL: Ipv4Addr = Ipv4Addr::new(169, 254, 3, 4);
+const MAC_L: MacAddr = MacAddr([2, 0, 0, 0, 0, 0x4c]);
+
+// RFC 3927 §2.6.2: "If the destination address is in the 169.254/16 prefix (excluding the address
+// 169.254.255.255, which is the IPv4 Link-Local subnet broadcast address), then the sender MUST
+// ARP for the destination address and then send the packet directly to the destination on the
+// same physical link. This MUST be done whether the interface is configured with a Link-Local
+// or a routable IPv4 address." §7: "An IPv4 packet whose source and/or destination address is in
+// the 169.254/16 prefix MUST NOT be sent to any router for forwarding".
+#[test]
+fn rfc_3927_2_6_2_a_link_local_destination_is_on_the_link() {
+    let mut h = H::fixture_i();
+    let on_the_link = Route { iface: h.if0, next_hop: NextHop::Neighbour(LINK_LOCAL), source: A };
+    assert_eq!(route(&mut h, LINK_LOCAL), Ok(on_the_link), "with a routable address and a router");
+    assert_eq!(route(&mut h, REMOTE).map(|r| r.next_hop), Ok(NextHop::Neighbour(R)), "the router is still the way off the link");
+    // 169.254.255.255 is that prefix's broadcast, not one of ours: no frame to every host leaves
+    // for it, and no router is handed it either.
+    let edge = ip4(169, 254, 255, 255);
+    assert_eq!(route(&mut h, edge).map(|r| r.next_hop), Ok(NextHop::Neighbour(edge)));
+    h.ip.set_gateways(h.clock(), h.if0, &[]).unwrap();
+    assert_eq!(route(&mut h, LINK_LOCAL), Ok(on_the_link), "and with no router at all");
+    // What is on the link may be the router: a datagram neither from nor to 169.254/16 is its to
+    // forward.
+    let router = ip4(169, 254, 0, 1);
+    h.ip.set_gateways(h.clock(), h.if0, &[router]).unwrap();
+    assert_eq!(route(&mut h, REMOTE), Ok(Route { iface: h.if0, next_hop: NextHop::Neighbour(router), source: A }));
+    assert_eq!(route(&mut h, LINK_LOCAL), Ok(on_the_link));
+
+    let mut h = H::bare();
+    assert_eq!(route(&mut h, LINK_LOCAL), Err(Counter::RouteNoSourceAddress), "an interface with no address sends nothing");
+
+    // The interface is the lowest one up, or the one a bound source names.
+    let mut h = H::raw();
+    let (if0, if1) = (h.if0, h.add_if1());
+    h.assign(if0, A, 24, 0);
+    h.assign(if1, ip4(198, 51, 100, 1), 24, 5_000);
+    h.settle();
+    assert_eq!(route(&mut h, LINK_LOCAL).map(|r| (r.iface, r.source)), Ok((if0, A)));
+    let bound = h.ip.route(LINK_LOCAL, Source::Bound(ip4(198, 51, 100, 1)), None);
+    assert_eq!(bound, Ok(Route { iface: if1, next_hop: NextHop::Neighbour(LINK_LOCAL), source: ip4(198, 51, 100, 1) }));
+    h.ip.link_down(h.clock(), if0).unwrap();
+    assert_eq!(route(&mut h, LINK_LOCAL).map(|r| r.iface), Ok(if1));
+}
+
+// The same rule on the wire: the request names the destination itself, its reply is a
+// neighbour's, and no frame is the router's.
+#[test]
+fn rfc_3927_2_6_2_a_datagram_to_a_link_local_host_is_resolved_and_sent_to_it() {
+    let mut h = H::fixture_i_with(R, MAC_R);
+    assert_eq!(h.udp_to(LINK_LOCAL), Ok(None));
+    let asked = h.out();
+    assert_eq!(asked.len(), 1);
+    let request = asked[0].arp().unwrap();
+    assert_eq!((asked[0].to(), request.sender_ip, request.target_ip), (MacAddr::BROADCAST, A, LINK_LOCAL));
+    h.at(5);
+    h.reply_from(LINK_LOCAL, MAC_L);
+    assert!(h.is_reachable(LINK_LOCAL));
+    assert_eq!(h.count(Counter::ArpSenderOffLink), 0);
+    let out = h.out();
+    assert_eq!(out.len(), 1);
+    assert_eq!((out[0].to(), out[0].ip().unwrap().destination()), (MAC_L, LINK_LOCAL));
+    assert!(matches!(h.udp_to(LINK_LOCAL), Ok(Some(frame)) if destination_of(&frame) == MAC_L));
+}
