@@ -853,3 +853,88 @@ fn rfc5452_9_2_an_id_is_drawn_for_a_query_that_is_sent_and_for_nothing_else() {
     assert_eq!(lookup.on_datagram(asked(&first).0, S1, PORT, &answer, 1, undrawn), Step::Done(Ok(vec![[1, 2, 3, 4]])), "an answer");
     assert!(Lookup::start(name("www.example"), &[], 0, undrawn).is_none(), "a lookup that does not start");
 }
+
+// --- A query that did not reach its server ---
+//
+// RFC 1035 §4.2.1: "Queries sent using UDP may be lost, and hence a
+// retransmission strategy is required", and of that strategy "The client
+// should try other servers and server addresses before repeating a query to a
+// specific address of a server" and "Too aggressive retransmission can easily
+// slow responses for the community at large ... the minimum retransmission
+// interval should be 2-5 seconds". RFC 1122 §4.1.3.3 has UDP hand the
+// application every ICMP error, which is how a resolver learns a query was
+// not lost but never arrived.
+
+#[test]
+fn rfc1035_4_2_1_a_query_that_reached_nobody_is_not_waited_for_and_the_next_server_is_asked_at_once() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let second = lookup.on_unreached(q1, 7, || 2);
+    assert_eq!(to(&second), (S2, 2), "the other server, with the next draw, before any wait");
+    let (q2, ..) = asked(&second);
+    assert_eq!(waiting(&lookup), [q2], "no answer is read for a query that reached nobody");
+    assert_eq!(lookup.due(), 7 + WAIT_MS, "the wait is the second query's");
+    let late = reply(1, OK, "www.example", &[a("www.example", [6, 6, 6, 6])]);
+    assert_eq!(lookup.on_datagram(q1, S1, PORT, &late, 8, undrawn), Step::Wait, "an answer to the query let go");
+    assert_eq!(lookup.on_unreached(q1, 8, undrawn), Step::Wait, "the same report again is no query of this lookup's");
+    let ok = reply(2, OK, "www.example", &[a("www.example", [1, 2, 3, 4])]);
+    assert_eq!(lookup.on_datagram(q2, S2, PORT, &ok, 9, undrawn), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+}
+
+#[test]
+fn rfc1035_4_2_1_no_server_is_asked_again_at_once_a_lookup_that_reached_none_ends() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, || 1).unwrap();
+    assert_eq!(lookup.on_unreached(asked(&first).0, 3_000, undrawn), Step::Done(Err(Failure::Unreachable)), "one server: nobody else to ask");
+
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let second = lookup.on_unreached(asked(&first).0, 0, || 2);
+    assert_eq!(to(&second), (S2, 2));
+    assert_eq!(lookup.on_unreached(asked(&second).0, 0, undrawn), Step::Done(Err(Failure::Unreachable)), "two servers, each asked once and neither reached");
+}
+
+#[test]
+fn rfc1035_4_2_1_a_server_not_reached_is_asked_again_in_its_turn_a_wait_later() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let mut sent = vec![(0, to(&lookup.on_unreached(asked(&first).0, 0, || 2)).0)];
+    let mut now = 0;
+    let ended = loop {
+        now += WAIT_MS;
+        // The wait of the query to S2 is over: S1's turn, and it is not reached.
+        let step = match lookup.on_time(now, || 3) {
+            Step::Done(result) => break result,
+            step => step,
+        };
+        assert_eq!(to(&step).0, S1);
+        match lookup.on_unreached(asked(&step).0, now, || 4) {
+            Step::Done(result) => break result,
+            step => sent.push((now, to(&step).0)),
+        }
+    };
+    let rounds: Vec<(u64, [u8; 4])> = (0..ROUNDS as u64).map(|round| (round * WAIT_MS, S2)).collect();
+    assert_eq!(sent, rounds, "S2 is asked once a round, a wait apart, S1 before it each time");
+    assert_eq!((now, ended), (ROUNDS as u64 * WAIT_MS, Err(Failure::TimedOut)), "S2 was reached and waited for, so the lookup timed out");
+}
+
+#[test]
+fn an_older_query_that_reached_nobody_asks_nobody_and_ends_nothing() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1], 0, || 1).unwrap();
+    let (q1, ..) = asked(&first);
+    let second = lookup.on_time(WAIT_MS, || 2);
+    let (q2, ..) = asked(&second);
+    assert_eq!(lookup.on_unreached(q1, WAIT_MS + 1, undrawn), Step::Wait, "the newer query still waits for its own answer");
+    assert_eq!(waiting(&lookup), [q2]);
+    assert_eq!(lookup.due(), 2 * WAIT_MS, "and its wait is unchanged");
+    assert_eq!(lookup.on_unreached(q2, WAIT_MS + 2, undrawn), Step::Done(Err(Failure::Unreachable)), "the newest reached nobody either");
+}
+
+#[test]
+fn a_server_that_answered_with_a_failure_is_what_a_lookup_that_then_reached_nobody_reports() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    let second = lookup.on_datagram(asked(&first).0, S1, PORT, &reply(1, OK | 2, "www.example", &[]), 1, || 2);
+    assert_eq!(to(&second), (S2, 2));
+    // S2 is not reached: S1 answered, so it is asked again at once, as after
+    // any failure, and the count of queries nobody received starts at S2.
+    let third = lookup.on_unreached(asked(&second).0, 2, || 3);
+    assert_eq!(to(&third), (S1, 3));
+    assert_eq!(lookup.on_unreached(asked(&third).0, 3, undrawn), Step::Done(Err(Failure::ServerFailed(2))));
+}

@@ -1550,6 +1550,9 @@ impl Netstack {
                 // whether the name or only its address is missing.
                 Err(Ended::Failed(Failure::NoSuchName | Failure::NoAddress)) => answer_lookup(&client, &[]),
                 Err(Ended::Failed(Failure::TimedOut)) => client.error(ERR_TIMED_OUT),
+                Err(Ended::Failed(Failure::Unreachable)) => {
+                    unreachable!("netstack: no lookup here is told a query did not reach its server, and {name}'s ended so")
+                }
                 Err(Ended::Failed(why @ (Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases))) => {
                     say!("netstack: a lookup of {name} ended without an answer: {why:?}");
                     client.error(ERR_OTHER);
