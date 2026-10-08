@@ -6,35 +6,35 @@ opened: 2026-10-09
 
 # No machine has read an Intel NIC across a link change, and two things about the I219 there are unknown
 
-A link that changes while the transmit ring holds unsent descriptors is
-answered per part (`toyos-i219/src/lib.rs`, "A frame is offered only to a ring
-with room for it"), and every reading of either answer is the driver's own
+A link that changes while the transmit ring holds unsent descriptors leaves
+them the part's, on the 82574 and on the I219 alike
+(`toyos-i219/src/lib.rs`, "A frame is offered only to a ring with room for
+it"): they are counted `descriptors.stranded`, the part is owed their
+write-back within `STRANDED_DEADLINE_NANOS` (12.98 s, the slowest the 82574
+datasheet's §10.2.6.1 lets a full ring leave) of the link being read up, and a
+part that has not written them back by then is refused by name, so netstack
+ends with "cannot be driven on". Every reading of that is the driver's own
 model.
 
-**The 82574** is reset and brought up again, by its own document: §10.2.6.1
-("Software should combine this with a reset if the packets in the FIFO need to
-be flushed") and §10.2.6.7. The same document's Defer Count (§10.2.7) says the
-part would otherwise have kept those frames for the link that returns. No
-82574 is in reach, and QEMU's `e1000e` is not in the harness.
+**The 82574's document says it writes them back**: its Defer Count (§10.2.7)
+counts a transmit deferred because "The link is not up". No 82574 is in
+reach, and QEMU's `e1000e` is not in the harness.
 
-**The I219 is not reset over a ring it holds descriptors in**, because two
-things are unknown of it:
+**Of the I219 two things are unknown:**
 
 - **Whether it writes those descriptors back when the link returns.** The
-  82574's Defer Count is the only sentence on the subject in any document
-  read, and it is the other part's. The driver gives the I219 the slowest
-  time that document lets a full ring leave (`STRANDED_DEADLINE_NANOS`,
-  12.98 s) from the link being read up, and then refuses it by name: netstack
-  ends with "cannot be driven on".
+  Defer Count is the only sentence on the subject in any document read, and
+  it is the other part's. A part that does not is refused at the deadline.
 - **Whether a reset over a live ring hangs it.** Nothing Intel publishes that
-  was found says it is safe or that it is not. Read, and silent on it: the
-  I219 datasheet (612523 rev 2.02), the 500 Series on-package PCH datasheet
-  volumes 1 and 2 (631119-007 §18, 631120-002 §8), the 100 Series PCH
-  datasheet volume 2 (332691) and specification update (332692-015), the 400
-  Series PCH datasheet volume 2 (620855-002) and specification update
-  (620856-009), the 300 Series PCH specification update (337349-012), the 7th
-  generation U/Y platform I/O specification update (334660-009), the I218
-  specification update (rev 1.0), and the 82574 datasheet (317694 rev 3.4) and
+  was found says it is safe or that it is not, which is why neither part is
+  reset to take a ring back. Read, and silent on it: the I219 datasheet
+  (612523 rev 2.02), the 500 Series on-package PCH datasheet volumes 1 and 2
+  (631119-007 §18, 631120-002 §8), the 100 Series PCH datasheet volume 2
+  (332691) and specification update (332692-015), the 400 Series PCH
+  datasheet volume 2 (620855-002) and specification update (620856-009), the
+  300 Series PCH specification update (337349-012), the 7th generation U/Y
+  platform I/O specification update (334660-009), the I218 specification
+  update (rev 1.0), and the 82574 datasheet (317694 rev 3.4) and
   specification update. intel.com's search finds no I219 specification
   update, sighting or application note, and no specification update for the
   500 Series on-package PCH. The one piece of evidence the tree has is
@@ -65,5 +65,5 @@ away). The reset over a live ring is read by a row that starts netstack again
 under traffic and reboots: the machine comes back, or it does not.
 
 An Intel document that states the I219's sequence for a reset over published
-descriptors closes the second unknown without a machine: the driver then
-does exactly that, in `open` as well.
+descriptors closes the second unknown without a machine: `open` then does
+exactly that.

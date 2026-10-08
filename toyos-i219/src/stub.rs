@@ -97,9 +97,9 @@ pub struct Permits {
     pub spurious_interrupts: bool,
     /// What a part does with the transmit descriptors it holds when its link
     /// goes away. Off: it sends them when the link returns, which is §10.2.7's
-    /// Defer Count on the 82574 — a transmit deferred because "The link is not
-    /// up". On: it never sends them, and takes no other, until it is reset,
-    /// which no document rules out of the PCH's MAC.
+    /// Defer Count — a transmit deferred because "The link is not up". On: it
+    /// never sends them, and takes no other, until it is reset: the part a
+    /// driver has to refuse.
     pub link_loss_strands_the_ring: bool,
     /// §10.2.4.1 case 3: "Interrupt was not asserted (ICR.INT_ASSERT=0): Read
     /// has no side affect." The document's own §7.4.5 says instead that "all
@@ -1101,7 +1101,6 @@ impl Model {
         match reg {
             regs::CTRL => {
                 let was = self.get(regs::CTRL);
-                let link_was = self.get(regs::STATUS) & status::LU;
                 assert_eq!(
                     value & CTRL_RESERVED_SET,
                     CTRL_RESERVED_SET,
@@ -1168,13 +1167,6 @@ impl Model {
                     self.reset_reads = RESET_READS;
                 }
                 self.refresh_status();
-                // §10.2.4.1: `LSC` "is set whenever the link status changes",
-                // and §4.6.3.2 has `LU` reflect the link "qualified with
-                // CTRL.SLU" — so a driver that writes `SLU` over a link the
-                // PHY already has, or resets it away, made a change itself.
-                if self.get(regs::STATUS) & status::LU != link_was {
-                    self.raise(cause::LSC);
-                }
             }
             // §10.2.4.5: set, not assign — and "a PCIe interrupt is generated
             // whenever one of the bits in this register is set, and the

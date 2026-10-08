@@ -46,7 +46,7 @@ A T14 boot whose netstack drives `8086:15fc` queues more than
 `toyos_i219::TX_RING - 1` frames in one pass, from more sockets than one and
 to a destination that answers none of them, and `inspect` then answers
 `transmit.full`, `transmit.wake_armed` and `transmit.wake_taken` each at least
-1, `descriptors.unsent` and `descriptors.stranded` 0, and `descriptors.sent`
+1, `descriptors.stranded` 0, and `descriptors.sent`
 equal to `wire.sent`; the boot's log carries no "cannot be driven on" line
 from netstack. A boot whose `transmit.full` reads 0 never filled the ring and
 has read nothing.
