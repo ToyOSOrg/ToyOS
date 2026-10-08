@@ -30,7 +30,7 @@ pub const DNS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 pub const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
 /// The places `Wire`'s node has for streams and listeners.
-pub const PLACES: usize = 8;
+pub const PLACES: usize = 32;
 
 pub const DISCOVER: u8 = 1;
 pub const OFFER: u8 = 2;

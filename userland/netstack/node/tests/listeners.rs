@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use common::{arp, terms, Wire, A, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, PipeRefusal, Pipes, StreamId, ToClient, Wake};
+use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, StreamId, ToClient, Wake, WriteRefusal};
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
 
@@ -45,7 +45,7 @@ struct Notified {
     /// The wakes written and not refused.
     wakes: usize,
     /// What the pipe answers a wake instead of taking it.
-    refusal: Option<PipeRefusal>,
+    refusal: Option<WriteRefusal>,
     dropped: bool,
 }
 
@@ -54,7 +54,7 @@ type Owner = Rc<RefCell<Notified>>;
 struct WakeEnd(Owner);
 
 impl Wake for WakeEnd {
-    fn wake(&mut self) -> Result<(), PipeRefusal> {
+    fn wake(&mut self) -> Result<(), WriteRefusal> {
         let mut notified = self.0.borrow_mut();
         if let Some(refusal) = notified.refusal {
             return Err(refusal);
@@ -92,18 +92,18 @@ struct WriteEnd(Client);
 struct ReadEnd(Client);
 
 impl ToClient for WriteEnd {
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, PipeRefusal> {
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
         self.0.borrow_mut().inbox.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 }
 
 impl FromClient for ReadEnd {
-    fn read(&mut self, out: &mut [u8]) -> Result<usize, PipeRefusal> {
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
         let mut ends = self.0.borrow_mut();
         let read = out.len().min(ends.outbox.len());
         if read == 0 {
-            return Err(PipeRefusal::WouldBlock);
+            return Err(ReadRefusal::Empty);
         }
         for slot in &mut out[..read] {
             *slot = ends.outbox.pop_front().unwrap();
@@ -519,6 +519,25 @@ fn a_wake_is_owed_only_for_a_connection_there_is_a_place_for() {
     net.accepts(id, P2);
 }
 
+// A client that left with bytes its peer never takes is still a stream, by `streams`' rule for a
+// departed client, and holds its place until that rule cuts it.
+#[test]
+fn a_departed_clients_connection_holds_its_place_until_it_is_cut() {
+    let mut net = with_places(2);
+    let (id, owner) = net.listen(SSH);
+    net.handshake(P1);
+    let (stream, client) = net.accepts(id, P1);
+    net.handshake(P2);
+    client.borrow_mut().outbox.extend(vec![7u8; 100_000]);
+    net.node.close(net.now, stream);
+    net.pump();
+    assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (1, 2, 1), "its pipe still holds what [tcp] had no room for");
+    let (refused, _other) = net.connect();
+    assert_eq!(refused, Err(ConnectRefused::Full));
+    net.run(Duration::from_secs(101));
+    assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 1, 2), "cut, and its place is the connection's that waited");
+}
+
 #[test]
 fn closing_a_connect_gives_its_place_to_a_connection_that_waits() {
     let mut net = with_places(2);
@@ -631,12 +650,12 @@ fn closing_a_listener_resets_what_waits_and_frees_its_port() {
 
 #[test]
 fn a_wake_the_owners_pipe_refuses_ends_the_listener() {
-    for refusal in [PipeRefusal::Gone, PipeRefusal::WouldBlock, PipeRefusal::Broken] {
+    for refusal in [WriteRefusal::Gone, WriteRefusal::Full, WriteRefusal::Broken] {
         let mut net = Net::new();
         let (id, owner) = net.listen(SSH);
         owner.borrow_mut().refusal = Some(refusal);
         net.handshake(P1);
-        let ended: Vec<(ListenerId, PipeRefusal)> = net.node.drain_refused_listeners().collect();
+        let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_refused_listeners().collect();
         assert_eq!(ended, [(id, refusal)]);
         assert!(owner.borrow().dropped && net.last(P1).rst, "{refusal:?}: {:?}", net.heard);
         assert_eq!((net.node.listeners(), net.node.held()), (0, 0), "{refusal:?}");

@@ -22,14 +22,14 @@ use alloc::collections::{BTreeMap, VecDeque};
 use toyos_net_tcp::Endpoint;
 use toyos_net_wire::{Instant, Port};
 
-use crate::streams::{PipeRefusal, Pipes, StreamId};
+use crate::streams::{Pipes, StreamId, WriteRefusal};
 use crate::Node;
 
 /// The write end of the pipe a listener's owner reads its wakes from. Dropped, the owner reads
 /// the end.
 pub trait Wake {
     /// Writes one wake.
-    fn wake(&mut self) -> Result<(), PipeRefusal>;
+    fn wake(&mut self) -> Result<(), WriteRefusal>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,7 +77,7 @@ pub(crate) struct Listeners {
     live: BTreeMap<ListenerId, Listener>,
     /// The next listener's id: none is used twice.
     next: u64,
-    refused: VecDeque<(ListenerId, PipeRefusal)>,
+    refused: VecDeque<(ListenerId, WriteRefusal)>,
 }
 
 impl Node {
@@ -116,7 +116,7 @@ impl Node {
             return Err(AcceptRefused::Full);
         }
         let Some((conn, tuple)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
-        let id = self.streams.accepted(conn, pipes);
+        let id = self.streams.accepted(conn, tuple.remote.addr, pipes);
         Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port })
     }
 
@@ -171,7 +171,7 @@ impl Node {
 
     /// The listeners ended since the last call because their owner's pipe refused a wake, and
     /// what it answered.
-    pub fn drain_refused_listeners(&mut self) -> impl Iterator<Item = (ListenerId, PipeRefusal)> + '_ {
+    pub fn drain_refused_listeners(&mut self) -> impl Iterator<Item = (ListenerId, WriteRefusal)> + '_ {
         self.listeners.refused.drain(..)
     }
 }

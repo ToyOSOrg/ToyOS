@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use common::{arp, terms, Wire, A, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
+use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 use toyos_net_shard::ConnectError;
-use toyos_net_tcp::{Endpoint, Failure};
+use toyos_net_tcp::{Counter, Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
 
 const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
@@ -65,17 +65,17 @@ struct WriteEnd(Client);
 struct ReadEnd(Client);
 
 impl ToClient for WriteEnd {
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, PipeRefusal> {
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
         let mut ends = self.0.borrow_mut();
         if ends.write_broken {
-            return Err(PipeRefusal::Broken);
+            return Err(WriteRefusal::Broken);
         }
         if ends.reader_gone {
-            return Err(PipeRefusal::Gone);
+            return Err(WriteRefusal::Gone);
         }
         let taken = bytes.len().min(ends.room - ends.inbox.len());
         if taken == 0 {
-            return Err(PipeRefusal::WouldBlock);
+            return Err(WriteRefusal::Full);
         }
         ends.inbox.extend_from_slice(&bytes[..taken]);
         Ok(taken)
@@ -89,14 +89,14 @@ impl Drop for WriteEnd {
 }
 
 impl FromClient for ReadEnd {
-    fn read(&mut self, out: &mut [u8]) -> Result<usize, PipeRefusal> {
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
         let mut ends = self.0.borrow_mut();
         if ends.read_broken {
-            return Err(PipeRefusal::Broken);
+            return Err(ReadRefusal::Broken);
         }
         let read = out.len().min(ends.outbox.len());
         if read == 0 {
-            return if ends.writer_gone { Ok(0) } else { Err(PipeRefusal::WouldBlock) };
+            return if ends.writer_gone { Ok(0) } else { Err(ReadRefusal::Empty) };
         }
         for slot in &mut out[..read] {
             *slot = ends.outbox.pop_front().unwrap();
@@ -143,13 +143,20 @@ enum Manner {
     Answers,
     /// Says nothing to any segment.
     Deaf,
+    /// Answers, and takes text only as far as the window it offers, which it then shuts: a
+    /// reader that reads when the test says so ([`Net::run_slowly_until`]).
+    Slow,
     /// Resets a SYN (RFC 9293 §3.10.7.1).
     Refuses,
 }
 
 struct Far {
     manner: Manner,
-    /// The node's port, from its last segment.
+    /// Nobody answers an ARP request for the peer's address.
+    absent: bool,
+    /// The window the peer's segments offer.
+    offers: u16,
+    /// The node's port, from its last SYN: segments from another are heard and not answered.
     port: u16,
     /// The peer's next sequence number.
     snd_nxt: u32,
@@ -172,12 +179,12 @@ fn v4(bytes: &[u8]) -> Ipv4Addr {
 
 impl Far {
     fn new() -> Self {
-        Self { manner: Manner::Answers, port: 0, snd_nxt: ISS, rcv_nxt: 0, acked: 0, window: 0, received: Vec::new(), fin: false, resets: Vec::new(), segments: Vec::new() }
+        Self { manner: Manner::Answers, absent: false, offers: 65_535, port: 0, snd_nxt: ISS, rcv_nxt: 0, acked: 0, window: 0, received: Vec::new(), fin: false, resets: Vec::new(), segments: Vec::new() }
     }
 
-    /// A segment from the peer in its frame, built by `etherparse`: window 65,535, PSH with text.
+    /// A segment from the peer in its frame, built by `etherparse`: PSH with text.
     fn frame(&self, seq: u32, ack: Option<u32>, syn: bool, fin: bool, rst: bool, text: &[u8]) -> Vec<u8> {
-        let mut step = PacketBuilder::ethernet2(MAC_B, MAC).ipv4(B.octets(), A.octets(), 64).tcp(PORT, self.port, seq, 65_535);
+        let mut step = PacketBuilder::ethernet2(MAC_B, MAC).ipv4(B.octets(), A.octets(), 64).tcp(PORT, self.port, seq, self.offers);
         if syn {
             step = step.syn().options(&[TcpOptionElement::MaximumSegmentSize(1460)]).unwrap();
         }
@@ -217,6 +224,11 @@ impl Far {
         self.frame(self.snd_nxt, Some(self.rcv_nxt), false, false, true, &[])
     }
 
+    /// The peer offers a window of `bytes` from its next segment on.
+    fn offer(&mut self, bytes: u16) {
+        self.offers = bytes;
+    }
+
     /// How many bytes the node's window still lets the peer send.
     fn open(&self) -> usize {
         self.acked.wrapping_add(u32::from(self.window)).wrapping_sub(self.snd_nxt) as usize
@@ -234,7 +246,7 @@ impl Far {
             (Some(NetSlice::Arp(asked)), None) => {
                 let asks = asked.operation() == ArpOperation::REQUEST && v4(asked.sender_protocol_addr()) == A;
                 match v4(asked.target_protocol_addr()) {
-                    target if asks && target == B => vec![arp(MAC, false, MAC_B, B, A)],
+                    target if asks && target == B && !self.absent => vec![arp(MAC, false, MAC_B, B, A)],
                     target if asks && target == R => vec![arp(MAC, false, MAC_R, R, A)],
                     _ => Vec::new(),
                 }
@@ -248,7 +260,6 @@ impl Far {
                 assert_eq!((header.source_addr(), header.destination_addr()), (A, B));
                 assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
                 assert_eq!(tcp.destination_port(), PORT);
-                self.port = tcp.source_port();
                 let segment = Segment {
                     seq: tcp.sequence_number(),
                     ack: tcp.ack().then(|| tcp.acknowledgment_number()),
@@ -259,6 +270,13 @@ impl Far {
                     text: tcp.payload().to_vec(),
                 };
                 self.segments.push(segment.clone());
+                if segment.syn {
+                    self.port = tcp.source_port();
+                    self.received.clear();
+                    self.fin = false;
+                } else if tcp.source_port() != self.port {
+                    return Vec::new();
+                }
                 self.answer(&segment)
             }
             other => panic!("neither ARP, UDP nor TCP: {other:?}"),
@@ -276,14 +294,18 @@ impl Far {
         match self.manner {
             Manner::Deaf => return Vec::new(),
             Manner::Refuses => return vec![self.frame(0, Some(segment.seq.wrapping_add(1)), false, false, true, &[])],
-            Manner::Answers => {}
+            Manner::Answers | Manner::Slow => {}
         }
         if segment.syn {
             self.rcv_nxt = segment.seq.wrapping_add(1);
             self.snd_nxt = ISS.wrapping_add(1);
             return vec![self.frame(ISS, Some(self.rcv_nxt), true, false, false, &[])];
         }
-        if segment.seq == self.rcv_nxt {
+        let fits = self.manner != Manner::Slow || segment.text.len() <= usize::from(self.offers);
+        if segment.seq == self.rcv_nxt && fits {
+            if self.manner == Manner::Slow && !segment.text.is_empty() {
+                self.offers = 0;
+            }
             self.received.extend_from_slice(&segment.text);
             self.rcv_nxt = self.rcv_nxt.wrapping_add(u32::try_from(segment.text.len()).unwrap());
             if segment.fin {
@@ -384,6 +406,30 @@ impl Net {
         panic!("100,000 deadlines without the clock passing {limit:?}");
     }
 
+    /// [`Self::run_until`] with a [`Manner::Slow`] peer that reads 1,460 bytes a second: each
+    /// second it offers that window again.
+    fn run_slowly_until(&mut self, limit: Duration, done: impl Fn(&Net) -> bool) -> bool {
+        let end = self.now.after(limit);
+        let mut reads = self.now.after(Duration::from_secs(1));
+        for _ in 0..100_000 {
+            if done(self) {
+                return true;
+            }
+            let at = self.node.next_deadline().map_or(reads, |at| at.min(reads));
+            if at > end {
+                return false;
+            }
+            self.fire(at);
+            if self.now >= reads {
+                reads = self.now.after(Duration::from_secs(1));
+                self.far.offer(1_460);
+                let update = self.far.frame(self.far.snd_nxt, Some(self.far.rcv_nxt), false, false, false, &[]);
+                self.deliver(&update);
+            }
+        }
+        panic!("100,000 deadlines without the clock passing {limit:?}");
+    }
+
     fn connect(&mut self, timeout: Option<Duration>) -> (StreamId, Client) {
         let (client, pipes) = client();
         let id = self.node.connect(self.now, peer(), timeout, pipes).expect("a route to the peer");
@@ -408,8 +454,13 @@ impl Net {
 
 /// A stream whose connect was answered `Connected`.
 fn established() -> (Net, StreamId, Client) {
+    established_within(None)
+}
+
+/// A stream whose connect, with `timeout`, was answered `Connected`.
+fn established_within(timeout: Option<Duration>) -> (Net, StreamId, Client) {
     let mut net = Net::new();
-    let (id, client) = net.connect(None);
+    let (id, client) = net.connect(timeout);
     let local = Port::new(net.far.port).expect("the SYN's source port");
     assert_eq!(net.events(), [StreamEvent::Connected { id, local }]);
     (net, id, client)
@@ -467,7 +518,43 @@ fn a_connect_past_its_deadline_is_timed_out_at_the_deadline() {
     assert_eq!(net.events(), [StreamEvent::TimedOut { id }]);
     assert_eq!(dropped(&client), (true, true));
     assert!(!net.far.segments.is_empty() && net.far.segments.iter().all(|segment| segment.syn), "{:?}", net.far.segments);
-    assert!(net.far.resets.is_empty());
+    // The connection is nobody's from here: its SYN is not sent again.
+    let sent = net.far.segments.len();
+    assert!(!net.run_until(Duration::from_secs(60), |_| false));
+    assert_eq!((net.far.segments.len(), net.far.resets.len()), (sent, 0));
+}
+
+// The peer's address answers no ARP request, so the connect's next hop fails inside a transmit
+// opportunity: the answer is there when that opportunity is over, with no frame and no deadline
+// of the stream's own to bring it.
+#[test]
+fn a_connect_nobody_answers_arp_for_fails_when_tcp_knows() {
+    let mut net = Net::new();
+    net.far.absent = true;
+    let renewal = net.now.after(Duration::from_secs(1_700));
+    let (id, client) = net.connect(None);
+    for _ in 0..10_000 {
+        let failed = net.node.shard().tcp_counters().get(Counter::NextHopFailed) > 0;
+        assert_eq!(net.node.streams() == 0, failed, "the stream goes in the opportunity that failed its connect");
+        if failed {
+            break;
+        }
+        let at = net.node.next_deadline().expect("address resolution is running");
+        assert!(at < renewal, "before the lease's renewal");
+        net.fire(at);
+    }
+    let events = net.events();
+    assert!(matches!(events[..], [StreamEvent::Failed { id: failed, failure: Failure::Unreachable(_) }] if failed == id), "{events:?}");
+    assert_eq!((dropped(&client), net.far.segments.len()), ((true, true), 0));
+}
+
+// A connect's deadline ends with its answer: the stream has none while its client holds it.
+#[test]
+fn an_established_streams_connect_deadline_is_gone() {
+    let (mut net, _, _client) = established_within(Some(Duration::from_secs(30)));
+    net.fire(net.now.after(Duration::from_secs(31)));
+    assert!(net.node.next_deadline().is_none_or(|at| at > net.now), "{:?} at {:?}", net.node.next_deadline(), net.now);
+    assert_eq!(net.node.streams(), 1);
 }
 
 #[test]
@@ -480,6 +567,30 @@ fn a_connect_closed_before_its_answer_is_answered_closed() {
     net.node.close(net.now, id);
     assert_eq!(net.events(), [StreamEvent::Closed { id }]);
     assert_eq!((net.node.streams(), dropped(&client)), (0, (true, true)));
+    // The connection is nobody's from here: its SYN is not sent again.
+    let sent = net.far.segments.len();
+    assert!(!net.run_until(Duration::from_secs(60), |_| false));
+    assert_eq!((net.far.segments.len(), net.far.resets.len()), (sent, 0));
+}
+
+// A frame and a deadline each end in a pass of their own: an opportunity's pass is over the
+// connects only, so neither test offers one.
+#[test]
+fn a_frame_moves_an_established_stream_with_no_opportunity_after_it() {
+    let (mut net, _, client) = established();
+    let frame = net.far.text(b"at once");
+    net.node.receive(net.now, &frame, draw(&mut net.draws));
+    assert_eq!(client.borrow().inbox, b"at once");
+}
+
+#[test]
+fn a_deadline_moves_an_established_stream_with_no_opportunity_after_it() {
+    let mut net = Net::new();
+    let id = departed(&mut net, 100_000, false);
+    net.events();
+    let cut = net.now.after(Duration::from_secs(100));
+    net.node.fire(cut, draw(&mut net.draws));
+    assert_eq!((net.node.streams(), net.events()), (0, vec![StreamEvent::Cut { id }]));
 }
 
 // ---- the bridge ----
@@ -622,12 +733,52 @@ fn the_peers_fin_ends_the_clients_reading_and_not_its_writing() {
     assert_eq!(client.borrow().inbox, b"all there is");
     assert_eq!((dropped(&client), net.node.streams()), ((true, false), 1));
 
+    // CLOSE-WAIT lasts as long as the client likes.
+    net.fire(net.now.after(Duration::from_secs(150)));
+    assert_eq!((net.node.streams(), net.events()), (1, vec![]));
     client.borrow_mut().outbox.extend(b"noted");
     client.borrow_mut().writer_gone = true;
     net.bridge();
     assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"noted"[..], true));
     assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0));
     assert!(net.far.resets.is_empty());
+}
+
+// RFC 9293 §3.6: both FINs end the connection, not the client's reading: text its pipe had no
+// room for when the peer's FIN arrived is still its to read, and the end comes after it.
+#[test]
+fn text_the_pipe_had_no_room_for_outlives_both_fins() {
+    let (mut net, _, client) = established();
+    client.borrow_mut().room = 0;
+    client.borrow_mut().outbox.extend(b"request");
+    client.borrow_mut().writer_gone = true;
+    net.bridge();
+    assert!(net.far.fin);
+    let frame = net.far.text(b"held back");
+    net.deliver(&frame);
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!(net.far.acked, net.far.snd_nxt, "the peer's FIN is acknowledged");
+    assert_eq!((client.borrow().inbox.len(), dropped(&client), net.node.streams()), (0, (false, true), 1));
+
+    client.borrow_mut().room = 65_536;
+    net.bridge();
+    assert_eq!(client.borrow().inbox, b"held back");
+    assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0));
+}
+
+// A client that shut its writing down and still reads is alive: what it cannot send is [tcp]'s
+// to give up on (R2, RFC 9293 §3.8.3), not the node's to cut.
+#[test]
+fn a_live_client_that_is_done_writing_is_not_timed() {
+    let (mut net, id, client) = established();
+    net.far.manner = Manner::Deaf;
+    client.borrow_mut().outbox.extend(text(100_000));
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert!(!net.run_until(Duration::from_secs(150), |_| false));
+    assert_eq!((dropped(&client), net.node.streams(), net.far.resets.len()), ((false, false), 1, 0));
+    assert!(net.events().is_empty());
 }
 
 #[test]
@@ -706,33 +857,119 @@ fn a_reader_that_left_is_not_written_to_again() {
     net.deliver(&frame);
     assert_eq!((dropped(&client), net.node.streams()), ((true, false), 1), "its writer may still write");
     assert_eq!(net.watch(id), Some(Watch { reader: false, ..IDLE }));
+    net.fire(net.now.after(Duration::from_secs(150)));
+    assert_eq!((net.node.streams(), net.events(), net.far.resets.len()), (1, vec![], 0), "and for as long as it likes");
 }
 
-// R2 of RFC 9293 §3.8.3, at the 100 seconds it asks for at least, from the client's leaving; the
-// reset is §3.10.5's.
+/// How a client's reader is found gone.
+#[derive(Clone, Copy, Debug)]
+enum Leaving {
+    /// The kernel says so of the to-client pipe.
+    Kernel,
+    /// A write to it is refused for it.
+    Write,
+    /// The client closes the stream.
+    Close,
+}
+
+// R2 of RFC 9293 §3.8.3, at the 100 seconds it asks for at least, from the moment nobody is left
+// when the pipe gives up nothing after; the reset is §3.10.5's.
 #[test]
 fn a_departed_clients_unsent_bytes_have_100_seconds() {
-    let (mut net, id, client) = established();
-    net.far.manner = Manner::Deaf;
-    client.borrow_mut().outbox.extend(text(100_000));
+    for leaving in [Leaving::Kernel, Leaving::Write, Leaving::Close] {
+        let (mut net, id, client) = established_within(Some(Duration::from_secs(30)));
+        match leaving {
+            Leaving::Kernel => net.node.pipe_gone(net.now, id, PipeEnd::ToClient),
+            Leaving::Write => {
+                client.borrow_mut().reader_gone = true;
+                let frame = net.far.text(b"to nobody");
+                net.deliver(&frame);
+            }
+            Leaving::Close => {}
+        }
+        net.far.manner = Manner::Deaf;
+        client.borrow_mut().outbox.extend(text(100_000));
+        net.bridge();
+        assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER, "{leaving:?}");
+
+        net.fire(net.now.after(Duration::from_secs(5)));
+        assert_eq!(net.node.streams(), 1, "{leaving:?}: its writer is still there");
+        let left = net.now;
+        match leaving {
+            Leaving::Close => net.node.close(left, id),
+            Leaving::Kernel | Leaving::Write => {
+                client.borrow_mut().writer_gone = true;
+                net.node.pipe_gone(left, id, PipeEnd::FromClient);
+            }
+        }
+        net.pump();
+        assert_eq!((dropped(&client), net.node.streams()), ((true, false), 1), "{leaving:?}");
+        assert_eq!(net.watch(id), Some(Watch { readable: false, writer: false, writable: false, reader: false }), "{leaving:?}");
+
+        assert!(net.run_until(Duration::from_secs(200), |net| net.node.streams() == 0), "{leaving:?}: the stream is let go");
+        assert_eq!(net.now, left.after(Duration::from_secs(100)), "{leaving:?}: from the moment nobody was left");
+        assert_eq!(net.events(), [StreamEvent::Cut { id }], "{leaving:?}");
+        assert_eq!((dropped(&client), net.far.resets.len()), ((true, true), 1), "{leaving:?}");
+        assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER, "{leaving:?}: and no byte more was taken");
+    }
+}
+
+/// A stream whose client wrote `len` bytes and is gone, its writer and its reader, at the
+/// clock's present. Its peer hears nothing after the handshake, or is a [`Manner::Slow`] reader
+/// offering 1,460 bytes.
+fn departed(net: &mut Net, len: usize, slow: bool) -> StreamId {
+    net.far.manner = Manner::Answers;
+    net.far.offer(65_535);
+    let (id, client) = net.connect(None);
+    if slow {
+        net.far.manner = Manner::Slow;
+        net.far.offer(1_460);
+        let update = net.far.frame(net.far.snd_nxt, Some(net.far.rcv_nxt), false, false, false, &[]);
+        net.deliver(&update);
+    } else {
+        net.far.manner = Manner::Deaf;
+    }
+    client.borrow_mut().outbox.extend(text(len));
     client.borrow_mut().writer_gone = true;
     net.bridge();
-    assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER);
-
-    net.fire(net.now.after(Duration::from_secs(5)));
     net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
-    net.fire(net.now.after(Duration::from_secs(5)));
-    let left = net.now;
-    net.node.pipe_gone(left, id, PipeEnd::ToClient);
-    net.pump();
-    assert_eq!((dropped(&client), net.node.streams()), ((true, false), 1));
-    assert_eq!(net.watch(id), Some(Watch { readable: false, writer: false, writable: false, reader: false }));
+    net.node.pipe_gone(net.now, id, PipeEnd::ToClient);
+    id
+}
 
-    assert!(net.run_until(Duration::from_secs(200), |net| net.node.streams() == 0), "the stream is let go");
-    assert_eq!(net.now, left.after(Duration::from_secs(100)), "from the moment nobody was left");
-    assert_eq!(net.events(), [StreamEvent::Cut { id }]);
-    assert_eq!((dropped(&client), net.far.resets.len()), ((true, true), 1));
-    assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER, "and no byte more was taken");
+// A peer that takes one segment a second, past the 100 seconds, sees a departed client's whole
+// tail and its FIN: the cut's clock runs from the last byte the pipe gave up.
+#[test]
+fn a_departed_clients_tail_arrives_whole_while_its_peer_takes_it() {
+    let mut net = Net::new();
+    let sent = text(250_000);
+    let id = departed(&mut net, sent.len(), true);
+    let left = net.now;
+    assert_eq!((net.node.streams(), net.events()), (1, vec![StreamEvent::Connected { id, local: Port::new(net.far.port).unwrap() }]));
+
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.far.fin), "the FIN arrives: {} bytes did", net.far.received.len());
+    assert!(net.now > left.after(Duration::from_secs(100)), "{:?} after {left:?}", net.now);
+    assert!(net.far.received == sent, "the peer's stream is the client's, byte for byte");
+    assert_eq!((net.node.streams(), net.events(), net.far.resets.len()), (0, vec![], 0));
+}
+
+// Sixteen connections of departed clients are a peer's to keep alive; the seventeenth has its
+// 100 seconds from the leaving, whatever the peer takes of it.
+#[test]
+fn a_peer_keeps_sixteen_departed_clients_connections_alive_and_no_more() {
+    let mut net = Net::new();
+    for _ in 0..16 {
+        departed(&mut net, 100_000, false);
+    }
+    let id = departed(&mut net, 250_000, true);
+    let left = net.now;
+    assert_eq!(net.node.streams(), 17);
+    net.events();
+
+    assert!(net.run_slowly_until(Duration::from_secs(1_500), |net| net.node.streams() == 0), "every stream is let go");
+    assert_eq!(net.now, left.after(Duration::from_secs(100)), "the peer took {} bytes of the seventeenth", net.far.received.len());
+    assert!(net.events().contains(&StreamEvent::Cut { id }));
+    assert!(net.far.received.len() > 1_460, "and it did take some");
 }
 
 // ---- pipes that refuse the node ----

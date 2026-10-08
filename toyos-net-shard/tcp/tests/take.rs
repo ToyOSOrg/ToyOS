@@ -1,11 +1,12 @@
 //! `recv_with`: the read of a reader that may take less than it is shown. No scenario ids: the
-//! specifications' receive scenarios are `receive.rs`'s, on `recv`; these hold `recv_with` to the
-//! same buffer and the same window update. From E.
+//! specifications hold no such call, which the track lists among stage 4's departures; their
+//! receive scenarios are `receive.rs`'s, on `recv`, and these hold `recv_with` to the same buffer
+//! and the same window update. From E.
 
 mod common;
 
 use common::*;
-use toyos_net_tcp::{Error, Received};
+use toyos_net_tcp::{Error, Received, State};
 
 /// A read whose reader answers `count`, without letting the clock move: the answer, what the
 /// reader was shown, and what the read made A send.
@@ -108,4 +109,22 @@ fn text_across_the_rings_wrap_is_shown_in_two_pieces_and_none_is_lost() {
     }
     assert_eq!(pieces.iter().map(Vec::len).collect::<Vec<_>>(), [535, 1000]);
     assert_eq!(pieces.concat(), text(70_001, 71_536));
+}
+
+// Both FINs end the connection (RFC 9293 §3.6, case 1), and what the peer sent before its own is
+// still the reader's: shown, taken, and only then the end.
+#[test]
+fn text_unread_when_both_fins_ended_the_connection_is_still_taken() {
+    let mut h = fixture_e();
+    let (r, _) = h.call(0, |tcp, now, id| tcp.shutdown_write(now, id));
+    r.unwrap();
+    h.input(10, seg(5001).ack(1002));
+    h.input(20, seg(5001).ack(1002).len(100).fin());
+    assert_eq!(h.status().state, State::TimeWait);
+    let (r, shown, _) = take(&mut h, 40);
+    assert_eq!((r, shown), (Ok(Received::Data(40)), text(5001, 5101)));
+    let (r, shown, _) = take(&mut h, usize::MAX);
+    assert_eq!((r, shown), (Ok(Received::Data(60)), text(5041, 5101)));
+    let (r, shown, _) = take(&mut h, usize::MAX);
+    assert_eq!((r, shown), (Ok(Received::End), Vec::new()));
 }

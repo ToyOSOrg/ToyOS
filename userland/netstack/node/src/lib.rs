@@ -36,7 +36,7 @@ mod places;
 mod streams;
 
 pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake};
-pub use streams::{ConnectRefused, FromClient, PipeEnd, PipeRefusal, Pipes, StreamEvent, StreamId, ToClient, Watch};
+pub use streams::{ConnectRefused, FromClient, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -129,7 +129,9 @@ impl Node {
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
     /// Returns how many left.
     pub fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
-        self.stack.transmit(now, credit, sink)
+        let sent = self.stack.transmit(now, credit, sink);
+        self.pass(now, true);
+        sent
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
