@@ -90,6 +90,7 @@ members = [
     "userland/metalprobe",
     "userland/netstack",
     "userland/netstack/mdns",
+    "userland/netstack/node",
     "userland/paint",
     "userland/pkg",
     "userland/proctest",

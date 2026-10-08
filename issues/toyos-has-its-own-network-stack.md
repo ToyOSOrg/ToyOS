@@ -16,6 +16,14 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 - Stage 5: netd on one shard, pipe ABI unchanged; smoltcp leaves netd, `Cargo.toml` and `Cargo.lock` in the same PR.
 - Then multi-core, netring (blocked on the owner's ABI ruling), TCP and IP hardening, IPv6, offloads, soak.
 
+Stage 5 lands in slices, the orchestrator's cut under the owner's words "i want smoltcp out as fast as possible": netd's decisions go into `toyos-net-node` (`userland/netstack/node`), pure and host-tested and shipped in nothing, and then one change moves netd onto it and deletes smoltcp. In the tree: the node and its DHCP lease. Still to build on it: datagram sockets and mDNS, the resolver, streams, listeners; then the move.
+
+What the node does not yet meet:
+
+- Nothing a third party wrote has answered it: its DHCP server is the tests' own, from RFC 2131's layout. Exit: slirp's OFFER and ACK, captured from a QEMU boot, replay into the node and it holds the lease those bytes name.
+- It counts a DHCP message [udp] refused as `node.dhcp-unsent`, whatever the rule; the `dhcp.renew-unroutable` scenario owed above is not written. Exit: that scenario names the counter, or the node counts the renewal apart.
+- `node.address-refused` has no test: `toyos-dhcp` accepts no address or prefix [ip] refuses, by the same `toyos-net-wire` checks in both, so the refusal cannot be reached from the wire. Exit: the client hands [ip] a type that carries the check, and the counter goes.
+
 The listener defects are this track's: `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept.
 
 Owed from the stage 3 specifications: by stage 5, the scenario for netd's mapping of UDP's refusals onto the pipe ABI, and `dhcp.renew-unroutable`, which netd counts where `toyos-net-udp` refuses the renewal `udp.no-route`; by IP hardening, the scenarios for fragment reassembly and path MTU discovery.

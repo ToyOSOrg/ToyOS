@@ -436,6 +436,14 @@ impl Shard {
         set
     }
 
+    /// Takes one of the interface's addresses away; [ip] withdraws the gateways no usable prefix
+    /// holds any more.
+    pub fn remove_address(&mut self, now: Instant, addr: Ipv4Addr) -> Result<(), toyos_net_ip::Counter> {
+        let removed = self.ip.remove_address(now, self.iface, addr);
+        self.settle(now);
+        removed
+    }
+
     // ---- TCP ----
 
     /// An active open from the source [ip]'s route lookup picks (RFC 9293 MUST-44), to a peer the
@@ -519,6 +527,23 @@ impl Shard {
 
     pub fn recv_from(&mut self, id: SocketId, out: &mut [u8]) -> Result<Option<toyos_net_udp::Received>, toyos_net_udp::Error> {
         self.udp.recv(id, out)
+    }
+
+    /// The DHCP client's socket, on port 68: the one socket that may send from 0.0.0.0 and name
+    /// its source, and the one the acquisition exception delivers to (RFC 2131 §4.1).
+    pub fn acquisition(&mut self) -> Result<SocketId, toyos_net_udp::Error> {
+        let id = self.udp.bind(&self.ip, Ipv4Addr::UNSPECIFIED, Port::new(68), || 0)?;
+        self.udp.set_acquisition(id)?;
+        self.udp.set_broadcast(id, true)?;
+        Ok(id)
+    }
+
+    /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
+    /// assigned address.
+    pub fn send_from(&mut self, now: Instant, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), toyos_net_udp::Error> {
+        let queued = self.udp.send_from(&mut self.ip, id, source, destination, port, payload);
+        self.settle(now);
+        queued
     }
 }
 
