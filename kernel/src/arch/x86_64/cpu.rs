@@ -383,6 +383,23 @@ pub fn inw(port: Port) -> u16 {
     value
 }
 
+/// # Safety
+/// `outb`'s contract, thirty-two bits wide.
+#[inline]
+pub unsafe fn outl(port: Port, value: u32) {
+    asm!("out dx, eax", in("dx") port.number(), in("eax") value);
+}
+
+#[inline]
+pub fn inl(port: Port) -> u32 {
+    let value: u32;
+    // SAFETY: as `inb` — one instruction into the declared output, no memory operand.
+    unsafe {
+        asm!("in eax, dx", out("eax") value, in("dx") port.number());
+    }
+    value
+}
+
 /// One I/O bus cycle of delay, for a device that needs one between two commands.
 #[inline]
 pub fn io_wait() {

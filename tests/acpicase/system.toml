@@ -14,10 +14,13 @@ syscap = ["logread"]
 # `dup` because test-runner hands a job its capability as a duplicate and
 # hands none without it; `power` because the job list ends the machine,
 # asking the supervisor.
+#
+# `args` as it stands is the guest's: `acpi_mediated_access` boots this file
+# with its probe on ROOT. A metal row's job list replaces it.
 [programs.test-runner]
 receives = ["power"]
 syscap = ["device", "dup"]
-args = ["reboot"]
+args = ["test_rs_acpi_mediated", "reboot"]
 
 [programs.toybox]
 

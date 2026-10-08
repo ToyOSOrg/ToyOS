@@ -5,6 +5,7 @@ use core::num::NonZeroU8;
 use crate::{find_table, Phys, Table, TableError, SDT_REVISION};
 
 /// Table 5.9 offsets, from the start of the table.
+pub(crate) const FADT_FIRMWARE_CTRL: usize = 36;
 pub const FADT_DSDT: usize = 40;
 pub const FADT_PM1A_CNT_BLK: usize = 64;
 const FADT_CENTURY: usize = 108;
@@ -15,6 +16,7 @@ const FADT_RESET_REG: usize = 116;
 const FADT_RESET_VALUE: usize = 128;
 const FADT_ARM_BOOT_ARCH: usize = 129;
 const FADT_MINOR_VERSION: usize = 131;
+pub(crate) const FADT_X_FIRMWARE_CTRL: usize = 132;
 pub const FADT_X_DSDT: usize = 140;
 
 /// `ARM_BOOT_ARCH`'s two flags.

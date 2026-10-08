@@ -6,7 +6,7 @@ use super::serial::Serial;
 
 /// The kernel's line under `i8042-withheld`: the premise of every row that
 /// needs the claim granted.
-const WITHHELD: &str = "i8042: withheld, left unprobed for a claim";
+pub const WITHHELD: &str = "i8042: withheld, left unprobed for a claim";
 
 /// How often `needle` is in `log`, which must be `want`.
 fn said(log: &Serial, needle: &str, want: usize) -> Result<(), String> {

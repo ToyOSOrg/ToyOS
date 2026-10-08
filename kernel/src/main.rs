@@ -372,6 +372,9 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         // ROOT's image, `LoaderData` like the black box's page. Empty on a
         // boot the loader handed none.
         root_image,
+        // Firmware's memory map as the loader copied it, which `mm` keeps
+        // (`mm::firmware_map`): `LoaderData` too.
+        mm::Region { start: kernel_args.memory_map_addr, end: kernel_args.memory_map_addr + kernel_args.memory_map_size },
     ];
     // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
     // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
@@ -394,8 +397,8 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, black_box, root] = loader;
-    let reserved = [image, elf, black_box, root, arch::boot::reserved()];
+    let [image, elf, black_box, root, map] = loader;
+    let reserved = [image, elf, black_box, root, map, arch::boot::reserved()];
 
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic

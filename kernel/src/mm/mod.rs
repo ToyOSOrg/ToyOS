@@ -153,10 +153,29 @@ impl core::fmt::Debug for DirectMap {
     }
 }
 
+/// Firmware's memory map, set once by [`init`]: where the loader left it,
+/// which `reserved` withholds from the allocator.
+static FIRMWARE_MAP: (core::sync::atomic::AtomicPtr<MemoryMapEntry>, core::sync::atomic::AtomicUsize) =
+    (core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()), core::sync::atomic::AtomicUsize::new(0));
+
+/// Firmware's memory map as the loader handed it over; empty before [`init`].
+pub fn firmware_map() -> &'static [MemoryMapEntry] {
+    use core::sync::atomic::Ordering::Acquire;
+    let at = FIRMWARE_MAP.0.load(Acquire);
+    if at.is_null() {
+        return &[];
+    }
+    // SAFETY: `init` stored a `'static` slice's pointer before its length, and
+    // nothing writes or frees that memory.
+    unsafe { core::slice::from_raw_parts(at, FIRMWARE_MAP.1.load(Acquire)) }
+}
+
 /// Call once at boot, in order: pmm (physical pages) → paging (direct map) →
 /// alloc (heap) → every kernel root slot, before the first user space copies
-/// them.
-pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
+/// them. `reserved` holds `memory_map`'s own memory.
+pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region]) {
+    FIRMWARE_MAP.1.store(memory_map.len(), core::sync::atomic::Ordering::Release);
+    FIRMWARE_MAP.0.store(memory_map.as_ptr().cast_mut(), core::sync::atomic::Ordering::Release);
     alloc::init_early();
     pmm::init(memory_map, reserved);
     DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout()));
