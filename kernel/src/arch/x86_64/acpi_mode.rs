@@ -104,6 +104,9 @@ struct Hardware {
     /// The window configuration space is reached through, as the MCFG bounds it.
     ecam: Option<Ecam>,
     lock: GlobalLock,
+    /// The boot processor's range registers as firmware handed them over
+    /// (`mtrr::registers`): what types an unlisted address a register's.
+    range_registers: (u64, alloc::vec::Vec<(u64, u64)>),
 }
 
 /// The firmware's Global Lock, as this machine's FADT has it.
@@ -149,7 +152,9 @@ struct Holder {
 static HOLDER: Lock<Holder> = Lock::new(Holder { claimed: false, locked: false });
 
 /// The right to act for the claim's holder, held across the act; none once
-/// the claim is gone or the stop has begun.
+/// the claim is gone or the stop has begun. A claim that exists is the one
+/// the caller's process bound: `isa::claim_row` mints no next one while that
+/// process has a thread left, one inside this call included.
 fn acting() -> Result<LockGuard<'static, Holder>, SyscallError> {
     let holder = HOLDER.lock();
     if !holder.claimed || crate::quiesce::begun() {
@@ -243,7 +248,7 @@ pub fn init(rsdp_addr: u64) {
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
     let (ecam, lock) = (ecam(rsdp_addr), global_lock(&fadt));
-    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock };
+    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock, range_registers: super::mtrr::registers() };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -662,9 +667,12 @@ fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunc
 
 /// Whether a read of `len` bytes at `at` through the direct map is uncached:
 /// its leaves select the PAT's write-back entry, under which the range
-/// registers decide (Intel SDM Vol. 3A, Table 12-7), read here and not assumed.
+/// registers decide (Intel SDM Vol. 3A, Table 12-7). The boot processor's
+/// decide it, as read at boot, so the answer is one whichever CPU asks: a
+/// CPU whose own are off answers nothing of what firmware typed the range.
 fn uncached(at: u64, len: u64) -> bool {
-    super::mtrr::range_type(at, len).typed_uncacheable()
+    let (def_type, pairs) = &hardware().expect("a claimed row has its hardware").range_registers;
+    kernel::mtrr::range_type(*def_type, pairs.iter().copied(), at, at + (len - 1)).typed_uncacheable()
 }
 
 /// One memory access, decided and made; the type firmware's map gives its

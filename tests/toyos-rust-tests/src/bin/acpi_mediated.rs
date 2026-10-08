@@ -186,7 +186,7 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     println!("acpi: the RSDP read through as type {ty} and its write was refused TableWrite");
 
     // An address firmware's map does not list, between the PCI hole's start
-    // and the ECAM window, where this guest's firmware has the range registers
+    // and the ECAM window, where this guest's firmware has the boot processor's range registers
     // type everything from the top of low RAM to 4 GiB uncacheable: a
     // register's address, read and never written. And one the map does not
     // list below 1 MiB, the legacy video hole, which the kernel calls no

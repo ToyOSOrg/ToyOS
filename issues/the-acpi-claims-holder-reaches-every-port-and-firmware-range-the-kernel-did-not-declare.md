@@ -92,8 +92,8 @@ the T14's load was refused one table of 14 for one byte read at an address
 the map lists nowhere, below 4 GiB, outside the ECAM window, in no page the
 kernel drives and no function's BAR: by its place, the chipset's own register
 space. Such a read passes now where the address is inside the direct map and
-the processor's range registers type it uncacheable, which the kernel reads
-at each such access (`acpi_mode::uncached`) and does not assume; a write
+the boot processor's range registers, as the kernel read them at boot, type
+it uncacheable (`acpi_mode::uncached`, decided by `kernel::mtrr`); a write
 stays refused, and range registers that are off type nothing, so there every
 such read is refused.
 
@@ -112,6 +112,17 @@ byte first. Three things are not checked:
   is read there as a register would be. Nothing reads that bit. What such a
   read reaches is RAM the map left out, which the allocator never handed
   out.
+- **Every other CPU's range registers are taken to be the boot
+  processor's**, as firmware is to leave them (Intel SDM Vol. 3A, "MTRR
+  Considerations in MP Systems"), and nothing compares them. They are not on
+  a QEMU 11.1.1 q35 guest under TCG: there the second CPU read
+  `IA32_MTRR_DEF_TYPE` as 0, its range registers off, where the boot
+  processor's type the same address uncacheable. A read the kernel makes on
+  such a CPU is uncached all the same; one made on a CPU whose own registers
+  typed the range write-back would be a cached read of a register. Why that
+  guest's second CPU has them off is unread. **Exit**: the kernel reads each
+  CPU's range registers as it comes up and says where they are not the boot
+  processor's.
 - **The fixed range registers are not read**, so an unlisted address below
   1 MiB is refused whole, a register there included
   (`firmware::FIXED_RANGE_END`).
