@@ -82,7 +82,7 @@ pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
     "toyos-osrelease/Cargo.toml",
     "userland/libc/Cargo.toml",
     "userland/libc/Cargo.lock",
-    "userland/.cargo/config.toml",
+    ".cargo/config.toml",
 ];
 
 /// Of [`SYSROOT_MANIFESTS`], the ones std's lockfile resolves with the fork's
@@ -1237,7 +1237,7 @@ mod tests {
         fs::remove_file(&header).unwrap();
         same("the C sysroot's headers as they were");
 
-        for read in ["userland/libc/Cargo.toml", "userland/libc/Cargo.lock", "userland/.cargo/config.toml"] {
+        for read in ["userland/libc/Cargo.toml", "userland/libc/Cargo.lock", ".cargo/config.toml"] {
             write(&root.join(read), "[package]\nversion = \"0.2.0\"\n");
             sysroot_only(&format!("{read}, which std's lockfile does not resolve,"));
             write(&root.join(read), "[package]\nversion = \"0.1.0\"\n");

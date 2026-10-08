@@ -25,6 +25,9 @@
 //! the kernel's own `self` fills. So a caller's entry labelled `self` is
 //! refused before anything moves, and so is a vector of `MAX_ENDOWMENTS`
 //! entries, while one entry fewer starts.
+//!
+//! **A pipe and a port are two inserts answered as one**: at the cap, and one
+//! slot short of fitting, each is refused with the table as it was.
 
 use toyos_abi::syscall::{
     self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, MAX_SLOT_MAP, SELF_LABEL,
@@ -160,6 +163,8 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
+    a_pair_is_refused_whole(&mut filled);
+
     let last = filled.pop().expect("the fill installed a handle");
     let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
     let spawned = spawn_endowed(&[entry], LABELS);
@@ -178,6 +183,33 @@ fn main() {
 
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");
     println!("handle table capped at {MAX_HANDLES} on every insert path (refused at {n})");
+}
+
+/// A pipe and a port are two handles each: refused at the cap, and refused
+/// with one slot free, which is then still free. Takes a full table and
+/// leaves it full.
+fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
+    let refused = |room: &str| {
+        assert_eq!(
+            syscall::pipe().err(),
+            Some(SyscallError::ResourceExhausted),
+            "a pipe with {room}"
+        );
+        assert_eq!(
+            syscall::port_create().err(),
+            Some(SyscallError::ResourceExhausted),
+            "a port with {room}"
+        );
+    };
+    refused("no slot free");
+    syscall::close(filled.pop().expect("the fill installed a handle"));
+    refused("one slot free");
+    filled.push(syscall::dup(RawHandle(1)).expect("the one free slot survived two refused pairs"));
+    assert_eq!(
+        syscall::dup(RawHandle(1)),
+        Err(SyscallError::ResourceExhausted),
+        "a refused pair left a second slot free"
+    );
 }
 
 /// `SYS_SPAWN` of this binary as a child that exits at once, carrying

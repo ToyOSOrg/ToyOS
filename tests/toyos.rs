@@ -4249,7 +4249,7 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
 
     let repo = compile::repo_root();
     let kernel_elf = repo.join(format!(
-        "kernel/target/{}/{}/kernel",
+        "target/{}/{}/kernel",
         common::qemu::SUITE_ARCH.kernel(),
         toyos_build::build::PROFILE
     ));

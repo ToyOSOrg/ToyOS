@@ -1,8 +1,12 @@
 //! A region of memory more than one process can see.
 //!
 //! Holding a handle allows mapping it; giving one away is `SYS_HANDLE_SEND`.
-//! Mappings are torn down when the last handle goes; pages are freed when
-//! the last `Arc` goes, always later since a handle holds an `Arc`.
+//! The handle count owns the mappings and the `Arc` count owns the pages: the
+//! last handle takes the list of mappings away for good and tears each one
+//! down, and the pages are freed when the last `Arc` goes, always later since
+//! a handle holds an `Arc`. An `Arc` a syscall cloned out of its table can
+//! outlive the last handle, so a map through one finds no list and is refused
+//! under the lock the teardown took it with.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -12,10 +16,9 @@ use toyos_abi::syscall::SyscallError;
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M};
 use crate::process::{PageTables, Pid};
-use crate::sync::Lock;
 use crate::{DirectMap, UserAddr};
 
-use super::{KObjectVariant, ObjectCore, ZeroHandles};
+use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
 /// Physical pages a region keeps alive; behind an `Arc` since one page set
 /// can back several objects.
@@ -52,8 +55,8 @@ impl Region {
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
     region: Region,
-    /// Where this region is mapped, per process; the zero-handle hook empties it.
-    mapped_in: Lock<Vec<(Pid, PageTables, UserAddr)>>,
+    /// Where this region is mapped, per process; released by the zero-handle hook.
+    mapped_in: Held<Vec<(Pid, PageTables, UserAddr)>>,
 }
 
 impl SharedMemObject {
@@ -68,7 +71,7 @@ impl SharedMemObject {
         Arc::new(Self {
             core: Self::new_core(),
             region,
-            mapped_in: Lock::new(Vec::new()),
+            mapped_in: Held::new(Vec::new()),
         })
     }
 
@@ -119,7 +122,7 @@ impl SharedMemObject {
     /// could otherwise write the same bytes while the kernel is still initialising.
     pub fn phys_before_mapping(&self) -> DirectMap {
         assert!(
-            self.mapped_in.lock().is_empty(),
+            self.mapped_nowhere(),
             "shm koid {}: the region is mapped into a process already, so a kernel \
              write through the direct map is not exclusive",
             self.core.koid().raw(),
@@ -127,50 +130,58 @@ impl SharedMemObject {
         self.region.phys
     }
 
+    fn mapped_nowhere(&self) -> bool {
+        self.mapped_in.with(|mapped| mapped.is_empty()).unwrap_or(true)
+    }
+
     /// Map into `pt`, or answer the address it is already mapped at;
-    /// idempotent per process.
+    /// idempotent per process. `Gone` once the last handle has gone.
     pub fn map_into(&self, pid: Pid, pt: &PageTables) -> Result<u64, SyscallError> {
-        let mut mapped = self.mapped_in.lock();
-        if let Some((_, _, vaddr)) = mapped.iter().find(|(p, _, _)| *p == pid) {
-            return Ok(vaddr.raw());
-        }
-        let (addr, _) = pt
-            .lock()
-            .alloc_and_map(self.region.phys.phys(), self.region.size, Prot::ReadWrite, self.region.cache)
-            .ok_or(SyscallError::ResourceExhausted)?;
-        // Logged only for a non-default policy: this process is the one
-        // paying for it. Read back the installed policy, not the request,
-        // so the line describes the mapping.
-        if self.region.cache != CachePolicy::Normal {
-            let installed = pt.lock().user_policy(addr).expect("shm: just mapped");
-            crate::log!(
-                "shm: {:#x} mapped {:?} into pid {}",
-                self.region.phys.phys(),
-                installed,
-                pid
-            );
-        }
-        mapped.push((pid, Arc::clone(pt), addr));
-        Ok(addr.raw())
+        let map = |mapped: &mut Vec<(Pid, PageTables, UserAddr)>| {
+            if let Some((_, _, vaddr)) = mapped.iter().find(|(p, _, _)| *p == pid) {
+                return Ok(vaddr.raw());
+            }
+            let (addr, _) = pt
+                .lock()
+                .alloc_and_map(self.region.phys.phys(), self.region.size, Prot::ReadWrite, self.region.cache)
+                .ok_or(SyscallError::ResourceExhausted)?;
+            // Logged only for a non-default policy: this process is the one
+            // paying for it. Read back the installed policy, not the request,
+            // so the line describes the mapping.
+            if self.region.cache != CachePolicy::Normal {
+                let installed = pt.lock().user_policy(addr).expect("shm: just mapped");
+                crate::log!(
+                    "shm: {:#x} mapped {:?} into pid {}",
+                    self.region.phys.phys(),
+                    installed,
+                    pid
+                );
+            }
+            mapped.push((pid, Arc::clone(pt), addr));
+            Ok(addr.raw())
+        };
+        self.mapped_in.with_mut(map).unwrap_or(Err(SyscallError::Gone))
     }
 
     /// Take this process's mapping away, if it has one; the caller owes a
     /// shootdown before the freed address can be reissued.
     #[must_use = "the caller owes a shootdown before the address can be reissued"]
     pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<()>> {
-        let mut mapped = self.mapped_in.lock();
-        let pos = mapped.iter().position(|(p, _, _)| *p == pid)?;
-        let (_, pt, vaddr) = mapped.swap_remove(pos);
-        pt.lock().free_and_unmap(vaddr);
-        Some(Unmapped::new(()))
+        self.mapped_in.with_mut(|mapped| {
+            let pos = mapped.iter().position(|(p, _, _)| *p == pid)?;
+            let (_, pt, vaddr) = mapped.swap_remove(pos);
+            pt.lock().free_and_unmap(vaddr);
+            Some(Unmapped::new(()))
+        })?
     }
 }
 
-/// Every mapping goes, flushed here; the pages do not, since a handle holds
-/// an `Arc` and `Region::pages` frees them only when the last one drops.
+/// Every mapping goes, flushed here, and with the list gone no later map can
+/// add one; the pages do not, since a handle holds an `Arc` and
+/// `Region::pages` frees them only when the last one drops.
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
-        let mapped = core::mem::take(&mut *self.mapped_in.lock());
+        let mapped = self.mapped_in.take().expect("the zero-handle hook runs once");
         if mapped.is_empty() {
             return;
         }
@@ -184,9 +195,9 @@ impl ZeroHandles for SharedMemObject {
 impl Drop for SharedMemObject {
     fn drop(&mut self) {
         debug_assert!(
-            self.mapped_in.lock().is_empty(),
-            "shm koid {} freed with a live mapping: the zero-handle hook did \
-             not run, so the pages go back to the PMM under somebody's window",
+            self.mapped_nowhere(),
+            "shm koid {} freed with a live mapping, so the pages go back to the \
+             PMM under somebody's window",
             self.core.koid().raw(),
         );
     }
