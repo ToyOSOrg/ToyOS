@@ -80,15 +80,6 @@ impl Change {
             dhcpv4::Event::Deconfigured => Some(Self::Lost),
         }
     }
-
-    /// The address, the router and the server that leased them, where this
-    /// change is a lease.
-    pub fn lease(&self) -> Option<(Ipv4Cidr, Option<Ipv4Address>, Ipv4Address)> {
-        match self {
-            Self::Leased { address, router, server, .. } => Some((*address, *router, *server)),
-            Self::Lost => None,
-        }
-    }
 }
 
 /// The lease the interface holds: everything the server decided.
