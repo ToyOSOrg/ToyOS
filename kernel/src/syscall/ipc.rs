@@ -28,17 +28,27 @@ pub(super) fn sys_pipe() -> u64 {
     let (reader, writer) = pipe::create();
     let read_end = KObjectRef::PipeRead(crate::object::pipe::PipeReadEnd::new(reader));
     let write_end = KObjectRef::PipeWrite(crate::object::pipe::PipeWriteEnd::new(writer));
-    process::with_process_data(|data| {
-        let Ok(read_h) = ops::install(&mut data.handles, read_end) else {
-            return SyscallError::ResourceExhausted.to_u64();
-        };
-        let Ok(write_h) = ops::install(&mut data.handles, write_end) else {
-            ops::close(&mut data.handles, read_h, &mut data.pipe_maps)
-                .expect("the read end this call installed a moment ago");
-            return SyscallError::ResourceExhausted.to_u64();
-        };
-        ((read_h.0 as u64) << 32) | write_h.0 as u64
-    })
+    install_pair(read_end, write_end)
+}
+
+/// Install two objects or neither; the two handles come back packed into one word, which cannot be read as an error.
+fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
+    let installed = process::with_process_data(|data| {
+        // Room for both before either: a refused pair installs nothing, so nothing is taken back.
+        if !data.handles.has_room(2) {
+            return Err((first, second));
+        }
+        let mut install =
+            |object| ops::install(&mut data.handles, object).expect("room was asked for first");
+        let first = install(first);
+        let second = install(second);
+        Ok(((first.0 as u64) << 32) | second.0 as u64)
+    });
+    match installed {
+        Ok(word) => word,
+        // A refused pair drops here, with the hold given up.
+        Err(_pair) => SyscallError::ResourceExhausted.to_u64(),
+    }
 }
 
 /// Map a pipe's ring page into the caller, tracked against the pipe so
@@ -89,22 +99,10 @@ pub(super) fn sys_connection_join(rx_h: RawHandle, tx_h: RawHandle) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-/// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority. The two handles come back packed into one word, which cannot be read as an error.
+/// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority.
 pub(super) fn sys_port_create() -> u64 {
     let (acceptor, connector) = port::create();
-    process::with_process_data(|data| {
-        let Ok(a) = ops::install(&mut data.handles, KObjectRef::Acceptor(acceptor)) else {
-            return SyscallError::ResourceExhausted.to_u64();
-        };
-        let install_c =
-            ops::install(&mut data.handles, KObjectRef::Connector(connector));
-        let Ok(c) = install_c else {
-            // The acceptor goes back so a refused pair leaves no orphaned port half.
-            drop(data.handles.remove(a));
-            return SyscallError::ResourceExhausted.to_u64();
-        };
-        ((a.0 as u64) << 32) | c.0 as u64
-    })
+    install_pair(KObjectRef::Acceptor(acceptor), KObjectRef::Connector(connector))
 }
 
 /// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
