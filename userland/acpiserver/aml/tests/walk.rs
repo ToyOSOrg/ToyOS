@@ -198,7 +198,7 @@ fn deeper(above: usize, levels: usize) -> Vec<u8> {
     }
     let mut left = above;
     while left > 0 {
-        let chunk = if left % 200 == 0 { 200 } else { left % 200 };
+        let chunk = if left.is_multiple_of(200) { 200 } else { left % 200 };
         left -= chunk;
         let path = vec!["D"; chunk].join(".");
         body = scope(&if left == 0 { format!("\\{path}") } else { path }, &body);
