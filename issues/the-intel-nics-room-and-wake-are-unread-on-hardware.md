@@ -22,12 +22,18 @@ interrupt register of that MAC at all.
 A wake that never comes is no wedge and no lost frame: room is counted from
 the descriptors in memory, so the next pass any other event begins finds it.
 It is a stall until that pass, and it reads as `transmit.wake_armed` ahead of
-`transmit.wake_taken`.
+`transmit.wake_taken`: the driver counts a wake only on a pass a message
+began whose one unmasked cause was the transmit one, so a cause the part
+recorded and raised nothing for is never counted.
 
-Not in the exit: the reset that takes the transmit ring back when the link
-changes over unsent frames. It needs a link to drop under traffic, which no
-row can stage. A boot where it happens says so by itself: netstack's line
-"the link changed over unsent frames", and `descriptors.unsent` in `inspect`.
+The same boot is the reading of `TXDCTL` as the bring-up writes it, with bit 22
+clear and a write-back per descriptor
+(`issues/the-intel-driver-writes-txdctl-and-tidv-against-the-82574-datasheets-newer-revision.md`):
+`descriptors.sent` short of `wire.sent`, or armed ahead of taken, makes that
+bit this path's.
+
+What either part does with its ring across a link change is not in this
+exit: `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md`.
 
 ## Owner
 
@@ -36,8 +42,11 @@ first boot that gives netstack the wired card.
 
 ## Exit
 
-A T14 boot whose netstack drives `8086:15fc` sends more than
-`toyos_i219::TX_RING - 1` frames in one pass, and `inspect` then answers
+A T14 boot whose netstack drives `8086:15fc` queues more than
+`toyos_i219::TX_RING - 1` frames in one pass, from more sockets than one and
+to a destination that answers none of them, and `inspect` then answers
 `transmit.full`, `transmit.wake_armed` and `transmit.wake_taken` each at least
-1, `descriptors.unsent` 0, and `descriptors.sent` equal to `wire.sent`; the
-boot's log carries no "cannot be driven on" line from netstack.
+1, `descriptors.stranded` 0, and `descriptors.sent`
+equal to `wire.sent`; the boot's log carries no "cannot be driven on" line
+from netstack. A boot whose `transmit.full` reads 0 never filled the ring and
+has read nothing.

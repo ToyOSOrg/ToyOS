@@ -95,9 +95,11 @@ pub struct Permits {
     /// §7.4.5: an interrupt whose cause was already cleared. "This results in
     /// a spurious interrupt."
     pub spurious_interrupts: bool,
-    /// No Intel document says what a part does with the transmit descriptors
-    /// it holds when its link goes away. On: it never sends them, and takes
-    /// no other, until it is reset. Off: it sends them when the link returns.
+    /// What a part does with the transmit descriptors it holds when its link
+    /// goes away. Off: it sends them when the link returns, which is §10.2.7's
+    /// Defer Count — a transmit deferred because "The link is not up". On: it
+    /// never sends them, and takes no other, until it is reset: the part a
+    /// driver has to refuse.
     pub link_loss_strands_the_ring: bool,
     /// §10.2.4.1 case 3: "Interrupt was not asserted (ICR.INT_ASSERT=0): Read
     /// has no side affect." The document's own §7.4.5 says instead that "all
@@ -1099,7 +1101,6 @@ impl Model {
         match reg {
             regs::CTRL => {
                 let was = self.get(regs::CTRL);
-                let link_was = self.get(regs::STATUS) & status::LU;
                 assert_eq!(
                     value & CTRL_RESERVED_SET,
                     CTRL_RESERVED_SET,
@@ -1166,13 +1167,6 @@ impl Model {
                     self.reset_reads = RESET_READS;
                 }
                 self.refresh_status();
-                // §10.2.4.1: `LSC` "is set whenever the link status changes",
-                // and §4.6.3.2 has `LU` reflect the link "qualified with
-                // CTRL.SLU" — so a driver that writes `SLU` over a link the
-                // PHY already has, or resets it away, made a change itself.
-                if self.get(regs::STATUS) & status::LU != link_was {
-                    self.raise(cause::LSC);
-                }
             }
             // §10.2.4.5: set, not assign — and "a PCIe interrupt is generated
             // whenever one of the bits in this register is set, and the
@@ -2384,6 +2378,18 @@ impl Nic {
     /// on its claim would be woken by.
     pub fn pending(&self) -> u32 {
         self.0.borrow().messages
+    }
+
+    /// The messages the function sent never reach the claim, and its causes
+    /// stay recorded: what a part that raises no message for an unmasked
+    /// cause looks like to a pass something else begins.
+    pub fn messages_are_lost(&self) {
+        self.0.borrow_mut().messages = 0;
+    }
+
+    /// The clock moves on by `nanos` with nothing reaching the part.
+    pub fn time_passes(&self, nanos: u64) {
+        self.0.borrow_mut().nanos += nanos;
     }
 
     /// Stop the device acting on a tail register write, so it acts only when
