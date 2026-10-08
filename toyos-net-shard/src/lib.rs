@@ -466,6 +466,25 @@ impl Shard {
         self.tcp.accept(id)
     }
 
+    pub fn listener_port(&mut self, id: ListenerId) -> Result<Port, toyos_net_tcp::Error> {
+        self.tcp.listener_port(id)
+    }
+
+    /// [`Tcp::ready`].
+    pub fn ready(&mut self, id: ListenerId) -> Result<usize, toyos_net_tcp::Error> {
+        self.tcp.ready(id)
+    }
+
+    /// [`Tcp::close_listener`]. The resets it owes leave outside the round.
+    pub fn close_listener(&mut self, now: Instant, id: ListenerId) -> Result<(), toyos_net_tcp::Error> {
+        self.tcp.close_listener(now, id)
+    }
+
+    /// [`Tcp::orphans`].
+    pub fn orphans(&self) -> usize {
+        self.tcp.orphans()
+    }
+
     pub fn send(&mut self, now: Instant, id: ConnId, data: &[u8]) -> Result<usize, toyos_net_tcp::Error> {
         let done = self.tcp.send(now, id, data);
         self.settle(now);

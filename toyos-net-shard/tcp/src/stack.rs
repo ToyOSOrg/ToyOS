@@ -216,6 +216,8 @@ pub struct Tcp {
     time_waits: BTreeSet<(Instant, Tuple)>,
     deadlines: BTreeSet<(Instant, u32)>,
     /// Connections that became eligible for the caller's round since it last drained them.
+    /// Connections whose user let go and that have not ended.
+    orphans: usize,
     eligible: Vec<ConnId>,
     /// Connections freed while offered to the caller's round, since it last drained them.
     gone: Vec<ConnId>,
@@ -375,6 +377,7 @@ impl Tcp {
             demux: BTreeMap::new(),
             time_waits: BTreeSet::new(),
             deadlines: BTreeSet::new(),
+            orphans: 0,
             eligible: Vec::new(),
             gone: Vec::new(),
             stubs: VecDeque::new(),
@@ -399,6 +402,11 @@ impl Tcp {
 
     pub fn time_wait_count(&self) -> usize {
         self.time_waits.len()
+    }
+
+    /// Connections [`Self::close`] left to finish alone, each until it ends.
+    pub fn orphans(&self) -> usize {
+        self.orphans
     }
 
     fn local(&self, tuple: &Tuple) -> Local {
@@ -441,6 +449,9 @@ impl Tcp {
     fn free(&mut self, index: u32) {
         let Some(generation) = self.conns.get(usize::try_from(index).unwrap_or(usize::MAX)).map(|s| s.generation) else { return };
         let Some(conn) = release(&mut self.conns, &mut self.free_conns, index) else { return };
+        if conn.user == User::Orphan {
+            self.orphans = self.orphans.saturating_sub(1);
+        }
         let remote = conn.tuple.remote.addr;
         let parked = self.parked.get(&remote).is_some_and(|p| p.conns.contains(&index));
         // Its index may name another connection next.
@@ -570,6 +581,11 @@ impl Tcp {
 
     pub fn set_listener_options(&mut self, id: ListenerId, options: Options) -> Result<(), Error> {
         slot(&mut self.listeners, id.index, id.generation).map(|l| l.options = options).ok_or(Error::NoSuchSocket)
+    }
+
+    /// How many children completed their handshake and wait for [`Self::accept`].
+    pub fn ready(&mut self, id: ListenerId) -> Result<usize, Error> {
+        slot(&mut self.listeners, id.index, id.generation).map(|l| l.ready.len()).ok_or(Error::NoSuchSocket)
     }
 
     /// The oldest child that completed its handshake.
@@ -1056,6 +1072,7 @@ impl Tcp {
             Tcb::SynRcvd(rcvd) => {
                 rcvd.shutdown_write();
                 conn.user = User::Orphan;
+                self.orphans = self.orphans.saturating_add(1);
                 self.settle(id.index, now);
             }
             Tcb::Sync(sync) if sync.rx.unread() > 0 => {
@@ -1068,6 +1085,7 @@ impl Tcp {
                 sync.shutdown_write(now);
                 sync.orphan(now);
                 conn.user = User::Orphan;
+                self.orphans = self.orphans.saturating_add(1);
                 self.settle(id.index, now);
             }
         }
