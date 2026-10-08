@@ -167,6 +167,9 @@ const RUST_SKIP: &[&str] = &[
     "acpi_hold",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
+    // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
+    // runs it.
+    "bar_map_again",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -263,6 +266,11 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // A claimable function with a mappable BAR that no program of the boot
+    // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
+    // function is its I219, and a kernel that dies on this takes the bench's
+    // machine down with it.
+    "bar_map_again",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -2713,8 +2721,33 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "bar_map_again" => bar_map_again(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
+}
+
+/// A claim's memory BAR asked for again once the handle the first answer gave
+/// is closed: the kernel answers, with a handle or a refusal, and the job that
+/// asked ends on its own.
+fn bar_map_again(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "bar_map_again";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_bar_map_again", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let answered = ["bar_map_again: answered with a handle", "bar_map_again: refused: "];
+    let Some(line) = result.stdout.lines().find(|l| answered.iter().any(|a| l.contains(a))) else {
+        return Err(format!("the second request was not answered:\n{}", result.stdout));
+    };
+    eprintln!("  [claims] {}", line.trim());
+    Ok(())
 }
 
 /// Every device delivery is still cpu0's, and no CPU took a shootdown IPI the
