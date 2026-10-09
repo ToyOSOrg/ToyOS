@@ -21,13 +21,17 @@ netstack's places may hold.
 
 ## Measured
 
-The T14, `internet_download` at `b323e70ee`, one boot, the link up at
-1000 Mb/s: `whole bytes=170439044 secs=38.826 mbps=35.1 busy=0.014`.
-35.1 Mb/s is 65,535 bytes every 14.9 ms, and the CPUs were 1.4 % busy across
-the transfer. That boot did not read the connection's round trip, so the
-window is the ceiling by arithmetic and not yet by measurement; the job says
-`rtt_ms`, each of its handshakes' times, from the next boot on. netstack exposes no connection's SRTT: its `inspect`
-snapshot counts sockets and nothing of one.
+The T14, `internet_download` at `83ef5a9ae`, one boot, the link up at
+1000 Mb/s: `whole bytes=170439044 secs=38.657 mbps=35.3
+rtt_ms=[16.8 15.7 15.0 16.0 16.5] busy=0.016`, judged `PASS`. One window per
+round trip is 524.3 / `rtt_ms` Mb/s: 31.2 to 35.0 across the five handshakes,
+and the rate sits at the top of that range with the CPUs 1.6 % busy across the
+transfer. Each `rtt_ms` is one handshake, a round trip plus netstack's own time
+for a connect, so it bounds the path's round trip from above and 524.3 over it
+bounds the window's ceiling from below: a rate held at the ceiling clears that
+bound by up to the handshakes' spread, 12 % in this boot. netstack exposes no
+connection's SRTT: its `inspect` snapshot counts sockets and nothing of one.
+The line's own rate is not measured.
 
 ## Owner
 
@@ -35,5 +39,13 @@ snapshot counts sockets and nothing of one.
 
 ## Exit
 
-A T14 `internet_download` boot whose `mbps` exceeds 524.3 over the smallest
-of its `rtt_ms` (65,535 bytes a round trip, in Mb/s).
+Both of:
+
+- A host test in `toyos-net-tcp`, at netstack's stream buffer size, that a
+  stream's SYN carries a window shift above 0 and that the window it
+  advertises with an empty receive buffer exceeds 65,535 bytes. A buffer of
+  65,535 bytes fails both.
+- A T14 `internet_download` boot whose `mbps` exceeds twice 524.3 over the
+  smallest of its `rtt_ms`: 69.9 Mb/s at 15.0 ms. A 64 KiB window reaches
+  it only if the fastest handshake takes twice the path's round trip, where
+  the five at `83ef5a9ae` spread by 12 %.
