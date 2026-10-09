@@ -212,6 +212,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "fault_gates",
     "sched_stress",
     "std_alloc",
+    // Its shared run is the T14's CPU; `https_fetch` runs it on the guest CPU
+    // its fetch ran on, since `ring` picks its code by the CPU's features.
+    "ring_kat",
 ];
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
@@ -3074,11 +3077,15 @@ fn libc_sockets() -> Result<(), String> {
 /// run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
 /// every byte the host computes with another SHA-256 than the guest's; and it
 /// refuses a certificate for another address and one from an authority the
-/// roots file does not hold, each by its own name, at the handshake.
+/// roots file does not hold, each by its own name, at the handshake. First,
+/// on the same CPU, `ring_kat` holds `ring` to its specifications' answers:
+/// the server is `rustls` on `ring` too, so the handshake alone would pass a
+/// `ring` wrong at both ends.
 fn https_fetch() -> Result<(), String> {
     use common::https::{self, Authority, Seen, Server};
     use sha2::Digest;
     const JOB: &str = "https_get";
+    const KAT: &str = "ring_kat";
     /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
     /// against the rule and not against itself.
     const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
@@ -3094,12 +3101,17 @@ fn https_fetch() -> Result<(), String> {
 
     let mut roots = toyos_build::build::trust_roots();
     roots.extend_from_slice(trusted.pem().as_bytes());
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let crate_path = compile::repo_root().join("tests/toyos-rust-tests");
+    let bins = [JOB, KAT].map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, name)));
     let options = BootOptions {
         extra_root_files: vec![(toyos_build::build::TRUST_ROOTS.to_string(), roots)],
         ..Default::default()
     };
-    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], options)?;
+    let mut qemu = boot_netcase(&[], &bins, options)?;
+    let kat = qemu.run_test("test_rs_ring_kat", Duration::from_secs(120));
+    if kat.error.is_some() || kat.exit_code != Some(0) || !kat.stdout.lines().any(|l| l.trim_end() == "ring_kat: ok") {
+        return Err(format!("{KAT} ended {:?} ({:?}):\n{}", kat.exit_code, kat.error, kat.stdout));
+    }
     let roots = format!("/system/{}", toyos_build::build::TRUST_ROOTS);
     let fetches: [(&str, &Server, String, i32); 3] = [
         ("the trusted server", &fetched, want, 0),
