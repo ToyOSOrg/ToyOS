@@ -71,7 +71,7 @@ const ENVIRONMENT: [&str; 2] = ["PATH", "TMPDIR"];
 /// what a host has installed never decides what is built. Bootstrap's LLD step
 /// takes none of these: LLD looks for no library unless asked, and links what this
 /// LLVM chose.
-const NO_HOST_LIBRARIES: [&str; 12] = [
+pub(crate) const NO_HOST_LIBRARIES: [&str; 12] = [
     "LLVM_ENABLE_ZLIB",
     "LLVM_ENABLE_ZSTD",
     "LLVM_ENABLE_LIBXML2",
@@ -145,6 +145,26 @@ fn stamp(fork: &Path) -> Stamp {
     let name = format!("submodule.{LLVM}.url");
     let url = git_out(fork, &["config", "--blob", "HEAD:.gitmodules", "--get", &name]);
     Stamp { revision: gitlink(fork, LLVM), repository: url.trim().to_string() }
+}
+
+impl Stamp {
+    /// The CMake options that make LLVM say it.
+    fn options(&self) -> [(&'static str, &str); 2] {
+        [("LLVM_FORCE_VC_REVISION", &self.revision), ("LLVM_FORCE_VC_REPOSITORY", &self.repository)]
+    }
+}
+
+/// The CMake options that make an LLVM built from `fork`'s say what it says
+/// (`src/hostedclang.rs`).
+pub(crate) fn stamp_options(fork: &Path) -> Vec<(String, String)> {
+    stamp(fork).options().iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
+}
+
+/// The C and C++ compilers an LLVM is built with on this host, as its key
+/// names them (`src/hostedclang.rs` builds its tablegens with them).
+pub(crate) fn host_compilers() -> (PathBuf, PathBuf) {
+    let tools = host_tools();
+    (tools.cc.clone(), tools.cxx.clone())
 }
 
 /// [`key`], with what it reads beside `fork`'s committed `src/bootstrap`:
@@ -377,7 +397,7 @@ fn check_out_committed(checkout: &Path, commit: &str, paths: &[&str], dest: &Pat
 
 /// Take write permission from every file and directory under `dir`, and from
 /// `dir`.
-fn read_only(dir: &Path) {
+pub(crate) fn read_only(dir: &Path) {
     for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display())).path();
         let meta = fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
@@ -454,8 +474,7 @@ fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
 /// host alone.
 fn config_text(build_dir: &Path, host: &str, tools: &HostTools, stamp: &Stamp) -> String {
     let off = NO_HOST_LIBRARIES.iter().map(|option| format!("{option} = \"OFF\""));
-    let stamped = [("LLVM_FORCE_VC_REVISION", &stamp.revision), ("LLVM_FORCE_VC_REPOSITORY", &stamp.repository)];
-    let defines: Vec<String> = off.chain(stamped.map(|(option, value)| format!("{option} = \"{value}\""))).collect();
+    let defines: Vec<String> = off.chain(stamp.options().map(|(option, value)| format!("{option} = \"{value}\""))).collect();
     format!(
         r#"change-id = "ignore"
 profile = "compiler"

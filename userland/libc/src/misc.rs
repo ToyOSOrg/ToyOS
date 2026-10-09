@@ -122,6 +122,18 @@ pub unsafe extern "C" fn waitpid(_pid: i32, _status: *mut i32, _options: i32) ->
     -1
 }
 
+/// `waitpid(-1, status, 0)`.
+#[no_mangle]
+pub unsafe extern "C" fn wait(status: *mut i32) -> i32 {
+    unsafe { waitpid(-1, status, 0) }
+}
+
+/// [`waitpid`]: it answers no child, so no usage is written.
+#[no_mangle]
+pub unsafe extern "C" fn wait4(pid: i32, status: *mut i32, options: i32, _usage: *mut u8) -> i32 {
+    unsafe { waitpid(pid, status, options) }
+}
+
 // Exit / abort / atexit
 
 /// A handler `exit` runs: `atexit`'s takes nothing, `__cxa_atexit`'s its object.

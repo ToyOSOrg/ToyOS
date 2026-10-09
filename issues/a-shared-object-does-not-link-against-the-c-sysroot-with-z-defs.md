@@ -9,12 +9,12 @@ opened: 2026-10-01
 ToyOS loads shared objects, a program's `DT_NEEDED` and `dlopen`'s, and its
 clang links one with `-shared`. None links against the C sysroot with
 `-z defs`. A C one linked without it leaves `__tls_get_addr` undefined, and
-lld refuses the executable that links it for that name. LLVM built for
-`x86_64-unknown-toyos`
-(`issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`)
-builds `libLTO`, `libRemarks`, `libclang` and `libclang-cpp`, linked
-`-shared -z defs`, and each stops on what the sysroot's archives were built
-for, an executable:
+lld refuses the executable that links it for that name. LLVM built whole for
+`x86_64-unknown-toyos`, as M3's rustc needs it
+(`issues/rustc-llvm-cannot-build-for-a-toyos-host.md`), builds `libLTO`,
+`libRemarks`, `libclang` and `libclang-cpp`, linked `-shared -z defs`, none
+of which the ToyOS-hosted clang and LLD (`src/hostedclang.rs`) need, and
+each stops on what the sysroot's archives were built for, an executable:
 
 - `main`, undefined: `libtoyos_c.a`'s entry point, `start_c`, sits in an
   object the link takes for other names.

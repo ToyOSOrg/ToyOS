@@ -28,11 +28,13 @@
 //! removed, and its modification time is when the key was last used or made.
 //!
 //! A compiler key's lock → a sysroot key's lock → a freestanding key's lock → the
-//! worktree build lock → an LLVM key's lock → artifact. A compiler's, a
-//! sysroot's or a freestanding key lock is taken with the worktree lock put
-//! down ([`Held::without_shared`]), because the key's builder takes the
-//! worktree lock exclusively; an LLVM key's is taken inside the worktree lock
-//! covering the fork build directory its builder writes.
+//! worktree build lock → an LLVM key's lock → a ToyOS-hosted clang key's lock
+//! → artifact. A compiler's, a sysroot's or a freestanding key lock is taken
+//! with the worktree lock put down ([`Held::without_shared`]), because the
+//! key's builder takes the worktree lock exclusively; an LLVM key's is taken
+//! inside the worktree lock covering the fork build directory its builder
+//! writes; a ToyOS-hosted clang key's inside the worktree lock and the use of
+//! the sysroot it builds against, writing only the store.
 //!
 //! Holder death: `flock` is released by the kernel when the open file
 //! description closes, so a builder that is SIGKILLed mid-phase — routine here
@@ -171,13 +173,15 @@ pub fn artifact(root: &Path) -> Guard {
 
 /// A content-addressed product of the host, locked per key: a sysroot, the
 /// freestanding targets' libraries it carries (`src/sysroot.rs`), a compiler
-/// (`src/compiler.rs`), or the LLVM a compiler links (`src/llvm.rs`).
+/// (`src/compiler.rs`), the LLVM a compiler links (`src/llvm.rs`), or the
+/// clang and LLD built to run on ToyOS (`src/hostedclang.rs`).
 #[derive(Clone, Copy)]
 pub enum Keyed {
     Sysroot,
     Freestanding,
     Compiler,
     Llvm,
+    HostedClang,
 }
 
 impl Keyed {
@@ -187,6 +191,7 @@ impl Keyed {
             Keyed::Freestanding => "freestanding",
             Keyed::Compiler => "compilers",
             Keyed::Llvm => "llvm",
+            Keyed::HostedClang => "hosted-clang",
         }
     }
 
@@ -201,6 +206,7 @@ impl Keyed {
             Keyed::Freestanding => "freestanding libraries",
             Keyed::Compiler => "compiler",
             Keyed::Llvm => "LLVM",
+            Keyed::HostedClang => "ToyOS-hosted clang",
         }
     }
 }

@@ -54,6 +54,10 @@ const LAYERS: [(Keyed, &str); 4] = [
     (Keyed::Sysroot, "sysroot"),
 ];
 
+/// Why no layer is the ToyOS-hosted clang: it is made only when asked for
+/// (`src/hostedclang.rs`), and a release carries what every build reads.
+const NOT_A_LAYER: &str = "a toolchain release carries no ToyOS-hosted clang: it is made only when asked for";
+
 /// One of [`LAYERS`] of this tree's toolchain: the key the build system files
 /// it under, and where it is, relative to the checkout.
 struct Layer {
@@ -135,6 +139,7 @@ fn layers(root: &Path) -> Vec<Layer> {
                 Keyed::Compiler => &compiler,
                 Keyed::Freestanding => &freestanding,
                 Keyed::Sysroot => &sysroot,
+                Keyed::HostedClang => unreachable!("{NOT_A_LAYER}"),
             };
             let dir = kind.store(&store(root)).join(key);
             let path = dir.strip_prefix(root).expect("a runner's store is in its checkout").to_path_buf();
@@ -154,6 +159,7 @@ fn defect(root: &Path, layer: &Layer) -> Option<String> {
         }
         Keyed::Freestanding => crate::sysroot::unpublished(&dir),
         Keyed::Sysroot => crate::sysroot::unfinished(&dir),
+        Keyed::HostedClang => unreachable!("{NOT_A_LAYER}"),
     }
 }
 
