@@ -15,6 +15,7 @@ pub mod compiler;
 pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;
+pub mod hostedclang;
 pub mod flags;
 pub mod hostws;
 pub mod identity;

@@ -15,6 +15,9 @@
 extern crate alloc;
 
 #[cfg(test)]
+#[path = "../../../userland/libc/src/alarmreq.rs"]
+mod alarmreq;
+#[cfg(test)]
 #[path = "../../../userland/libc/src/arch/mod.rs"]
 mod arch;
 #[cfg(test)]
@@ -57,6 +60,8 @@ mod text;
 #[path = "../../../userland/libc/src/utf8.rs"]
 mod utf8;
 
+#[cfg(test)]
+mod alarm_requests;
 #[cfg(test)]
 mod descriptor_requests;
 #[cfg(test)]
