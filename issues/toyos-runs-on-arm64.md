@@ -46,8 +46,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   is one instance).
 - **C on AArch64**: "Doom and tinycc stay x86-only until userland runs on
   ARM, and that is decided again then." Its doom half is superseded by the
-  2026-10-09 ruling on doom; tinycc and the C test corpus stay as ruled. C
-  goes through clang on both architectures, whose driver knows
+  2026-10-09 ruling on doom; tinycc stays as ruled. C goes through clang on
+  both architectures, whose driver knows
   `aarch64-unknown-toyos` (`issues/toyos-builds-itself.md`).
 - **Randomness** comes from RNDR where the CPU has it, and from virtio-rng
   under QEMU/HVF, behind one `sys_random` source.
@@ -61,16 +61,20 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   then'. Doom now builds for ARM with no changes. May it go on the ARM image
   now, before the ARM desktop can run it?", he answered: "Yes, ship doom on
   ARM now (Recommended)".
-- **The guest suite on the development Mac**: "i want the guest suite on this
-  laptop to run arm."
-- **The default architecture is the host's**: "i still want arm hosts to run
-  toyos under arm per default and same goes for x86." Asked when the default
-  flips to the host's: "When the ARM desktop works (Recommended)".
-- **The ARM desktop**: "then we need the arm desktop asap."
-- **A userland driver on ARM without an IOMMU domain**: "No, isolation first
+- "i want the guest suite on this laptop to run arm."
+- "i still want arm hosts to run toyos under arm per default and same goes
+  for x86."
+- Asked "When should the default architecture flip to the host's (ARM on
+  this Mac)?", he answered: "When the ARM desktop works (Recommended)".
+- "then we need the arm desktop asap. it shouldnt be that hard i mean why
+  would userland care about arch?"
+- Asked "To get the ARM desktop sooner, may a userland driver on ARM run for
+  a while without an IOMMU domain (QEMU guest only)?", he answered: "No,
+  isolation first (Recommended)".
+- Asked "Should the big shared test boots (the Rust test programs and the C
+  corpus, which today run only on the T14) also run as an ARM guest under
+  HVF on this Mac?", he answered: "Yes, once ARM userland boots
   (Recommended)".
-- **The shared test boots as an ARM guest under HVF**: "Yes, once ARM
-  userland boots (Recommended)".
 
 ## Measured, on `main` at `03b1b4db`
 
