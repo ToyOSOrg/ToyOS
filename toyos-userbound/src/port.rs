@@ -119,6 +119,20 @@ pub enum Mediated {
     ReadOnly,
     /// Read and written for the holder.
     Open,
+    /// Read for the holder; a byte written is a command to the firmware,
+    /// which the kernel makes or refuses ([`crate::firmware::FirmwareCall`]).
+    Command(KeptCommands),
+}
+
+/// The bytes a port that commands the firmware takes from the kernel alone:
+/// those the machine's tables give a meaning, `None` where they name none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KeptCommands(pub [Option<u8>; 5]);
+
+impl KeptCommands {
+    pub fn holds(self, value: u8) -> bool {
+        self.0.contains(&Some(value))
+    }
 }
 
 /// The ports no grant reaches, each run named by what holds it: the one

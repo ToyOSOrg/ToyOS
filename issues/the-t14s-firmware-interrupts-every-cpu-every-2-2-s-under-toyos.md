@@ -83,14 +83,33 @@ are this by reading, those kernels not reading the count.
 
 **Owner**: stage 1 of
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
-for the fix and for the reading: its exit holds the count flat on the T14 over
-this exit's interval, so the stage builds the row, and it reads the count
-through the general counters ("General counters", owner, 2026-10-03,
+for the fix and for the reading: its exit holds the count on the T14 to what
+ToyOS asked for over this exit's interval, so the stage builds the row, and
+it reads the count through the general counters ("General counters", owner, 2026-10-03,
 `issues/toyos-explains-itself.md`).
 
-**Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
-and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
-the stop's report at least 4.444 s later, two of the longest period read, and
-on every CPU the two agree. The interval opens after that write because the
-ACPI enable is one, a write of `ACPI_ENABLE` to `SMI_CMD`, and raises one
-firmware interrupt where `APMC_EN` is set.
+**Exit**: every SMI in the interval is one ToyOS asked for. A T14 row reads
+`MSR_SMI_COUNT` on every CPU and the boot processor's `firmware_calls`, the
+kernel's count of its writes to `SMI_CMD`, after init is spawned and after
+the ACPI enable, and again at the stop's report at least 4.444 s later, two
+of the longest period read; and on every CPU the SMI count's delta equals the
+boot processor's `firmware_calls` delta over that interval. A write to
+`SMI_CMD` raises one firmware interrupt where `APMC_EN` is set, so the
+interval may hold such writes, and each is counted on both sides.
+
+Two things the equality rests on, which the row answers before it is read
+over an interval that holds a call:
+
+- **A round of the counters is not one instant.** A call that lands between
+  one CPU's sample and the boot processor's leaves that CPU's SMI delta one
+  short of `firmware_calls` with no unasked interrupt in it. The row takes
+  its two reads where no call is in flight, or bounds the difference by the
+  calls in flight.
+- **"One command moves every CPU's count by exactly one" has been read for
+  the enable alone**: every CPU read the count the writer read after it. The
+  disable's line reads the boot processor's count only, and no other byte has
+  been written on the T14.
+
+The measure holds unasked interrupts to none and says nothing of how many
+ToyOS asks for: that is the rate's
+(`issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`).

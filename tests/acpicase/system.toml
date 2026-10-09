@@ -12,15 +12,16 @@ syscap = ["logread"]
 
 # `device` because the job mints the `acpi` claim the server is handed, and
 # `dup` because test-runner hands a job its capability as a duplicate and
-# hands none without it; `power` because the job list ends the machine,
-# asking the supervisor.
+# hands none without it; `counters` because `acpi_mediated` reads what the
+# boot processor counted of the firmware calls it asked for; `power` because
+# the job list ends the machine, asking the supervisor.
 #
 # `args` as it stands is the guest's: `acpi_mediated_access` and
 # `acpi_supply_outlives_holder` boot this file with their probe on ROOT. A
 # metal row's job list replaces it.
 [programs.test-runner]
 receives = ["power"]
-syscap = ["device", "dup"]
+syscap = ["device", "dup", "counters"]
 args = ["test_rs_acpi_mediated", "reboot"]
 
 [programs.toybox]

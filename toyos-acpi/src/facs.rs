@@ -9,10 +9,13 @@
 use crate::fadt::{FADT_FIRMWARE_CTRL, FADT_X_FIRMWARE_CTRL};
 use crate::{Phys, Table, MAX_TABLE_LEN, SDT_REVISION};
 
-/// Table 5.13: `Length` at 4, the Global Lock at 16, in a structure of 64
-/// bytes or more; §5.2.10 aligns it on a 64-byte boundary.
+/// Table 5.13: `Length` at 4, the Global Lock at 16 and `Flags` at 20, in a
+/// structure of 64 bytes or more; §5.2.10 aligns it on a 64-byte boundary.
 const FACS_LENGTH: u64 = 4;
 pub const FACS_GLOBAL_LOCK: u64 = 16;
+const FACS_FLAGS: u64 = 20;
+/// Table 5.14, bit 0: "Indicates whether the platform supports S4BIOS_REQ."
+const S4BIOS_F: u32 = 1 << 0;
 const FACS_MIN_LEN: u32 = 64;
 const FACS_ALIGN: u64 = 64;
 
@@ -20,11 +23,13 @@ const FACS_ALIGN: u64 = 64;
 pub const PENDING: u32 = 1 << 0;
 pub const OWNED: u32 = 1 << 1;
 
-/// Where the FACS is, and the length it declares.
+/// Where the FACS is, the length it declares, and its `S4BIOS_F`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Facs {
     pub base: u64,
     pub len: u32,
+    /// The firmware gives the FADT's `S4BIOS_REQ` its meaning.
+    pub s4bios: bool,
 }
 
 /// Why a machine's FACS is none this decoder hands out.
@@ -65,7 +70,7 @@ pub fn facs<P: Phys>(phys: P, fadt: &Table<P>) -> Result<Facs, FacsRefused> {
     if len < FACS_MIN_LEN || len as usize > MAX_TABLE_LEN {
         return Err(FacsRefused::Length(len));
     }
-    Ok(Facs { base, len })
+    Ok(Facs { base, len, s4bios: crate::u32le(phys, base + FACS_FLAGS) & S4BIOS_F != 0 })
 }
 
 /// §5.2.10.1's `AcquireGlobalLock`: the word to exchange `word` for, and

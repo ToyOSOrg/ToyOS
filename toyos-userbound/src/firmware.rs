@@ -52,6 +52,15 @@
 //! ([`crate::port::Mediated`]), another claim's where a row names it, and
 //! passes otherwise.
 //!
+//! **A byte written to the port that commands the firmware is no port write:
+//! it is a call into the firmware, the kernel's to make** ([`FirmwareCall`]).
+//! What it does there nothing here can bound; this bounds which byte and how
+//! often. A byte the machine's tables give a meaning is the kernel's own
+//! command and is refused, and of every other the kernel makes [`CALLS`] in
+//! any [`CALL_PERIOD_NS`] ([`CallRate`]): firmware's AML retries a call its
+//! handler has not answered, and each call stops every CPU of the machine
+//! for as long as that handler takes.
+//!
 //! **Configuration space is read and never written.**
 //!
 //! **The sleep type of the power-off is the holder's to supply and the
@@ -63,7 +72,7 @@
 use toyos_abi::acpi::{Refused, Width, UNLISTED};
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::port::{Mediated, IO_PORTS};
+use crate::port::{KeptCommands, Mediated, IO_PORTS};
 use crate::span::PAGE_4K;
 
 /// `EfiReservedMemoryType`, `EfiRuntimeServicesData`, `EfiACPIReclaimMemory`
@@ -334,22 +343,103 @@ impl PortAt {
     }
 }
 
-/// Decide an access of `width` at `port`: every port it spans is asked of
-/// `standing`.
-pub fn port(standing: impl Fn(u16) -> Standing, port: u16, width: Width, write: bool) -> Result<PortAt, Refused> {
-    if width == Width::QWord || port as usize + width.bytes() as usize > IO_PORTS {
-        return Err(Refused::PortSpan);
+/// A command to the firmware the policy passed.
+///
+/// ```compile_fail,E0451
+/// let _ = toyos_userbound::firmware::FirmwareCall { value: 0x10 };
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FirmwareCall {
+    value: u8,
+}
+
+impl FirmwareCall {
+    pub const fn value(&self) -> u8 {
+        self.value
     }
+}
+
+/// What a port access is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PortVerdict {
+    Through(PortAt),
+    /// A byte for the port that commands the firmware: the kernel's to
+    /// write, where and as often as it writes one.
+    FirmwareCall(FirmwareCall),
+    Refused(Refused),
+}
+
+/// Decide an access of `width` at `port`, a write of `write`: every port it
+/// spans is asked of `standing`.
+pub fn port(standing: impl Fn(u16) -> Standing, port: u16, width: Width, write: Option<u64>) -> PortVerdict {
+    use PortVerdict::Refused as No;
+    if width == Width::QWord || port as usize + width.bytes() as usize > IO_PORTS {
+        return No(Refused::PortSpan);
+    }
+    let mut commanded: Option<KeptCommands> = None;
     for port in port..=port + (width.bytes() as u16 - 1) {
         match standing(port) {
             Standing::Free | Standing::Declared(Mediated::Open) => {}
-            Standing::Declared(Mediated::ReadOnly) if !write => {}
-            Standing::Declared(Mediated::ReadOnly) => return Err(Refused::ReadOnlyPort),
-            Standing::Declared(Mediated::Kept) => return Err(Refused::KernelPort),
-            Standing::Row => return Err(Refused::ClaimedPort),
+            Standing::Declared(Mediated::ReadOnly | Mediated::Command(_)) if write.is_none() => {}
+            Standing::Declared(Mediated::ReadOnly) => return No(Refused::ReadOnlyPort),
+            Standing::Declared(Mediated::Command(kept)) => commanded = Some(kept),
+            Standing::Declared(Mediated::Kept) => return No(Refused::KernelPort),
+            Standing::Row => return No(Refused::ClaimedPort),
         }
     }
-    Ok(PortAt { port, width })
+    match (commanded, write) {
+        (Some(kept), Some(value)) => match u8::try_from(value) {
+            Ok(value) if width == Width::Byte => {
+                if kept.holds(value) {
+                    No(Refused::KernelCommand)
+                } else {
+                    PortVerdict::FirmwareCall(FirmwareCall { value })
+                }
+            }
+            _ => No(Refused::CommandSpan),
+        },
+        _ => PortVerdict::Through(PortAt { port, width }),
+    }
+}
+
+/// The most commands to the firmware the kernel writes for the holder in any
+/// [`CALL_PERIOD_NS`]. The kernel's own number, held against no measurement
+/// of a machine's calls: the most one evaluation of the one machine's AML
+/// that was read made is two, and its retry of an unanswered call is one a
+/// millisecond.
+pub const CALLS: usize = 8;
+pub const CALL_PERIOD_NS: u64 = 1_000_000_000;
+
+/// When the last [`CALLS`] commands were admitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CallRate {
+    admitted: [Option<u64>; CALLS],
+    /// The oldest of them, which the next admission replaces.
+    next: usize,
+}
+
+impl Default for CallRate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CallRate {
+    pub const fn new() -> Self {
+        Self { admitted: [None; CALLS], next: 0 }
+    }
+
+    /// Admit a command at `now`, nanoseconds on a clock that does not go
+    /// back; or refuse it, and keep nothing of it, where [`CALLS`] were
+    /// admitted less than [`CALL_PERIOD_NS`] before it.
+    pub fn admit(&mut self, now: u64) -> bool {
+        if self.admitted[self.next].is_some_and(|oldest| now.saturating_sub(oldest) < CALL_PERIOD_NS) {
+            return false;
+        }
+        self.admitted[self.next] = Some(now);
+        self.next = (self.next + 1) % CALLS;
+        true
+    }
 }
 
 /// A configuration read the policy passed.
