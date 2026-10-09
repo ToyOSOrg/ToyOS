@@ -2946,18 +2946,23 @@ fn holding_server() -> Result<u16, String> {
     Ok(port)
 }
 
-/// Boot `tests/netcase` with these binaries staged, to netstack's lease: its
-/// jobs name their peer by an address.
+/// Boot `tests/netcase` with these binaries staged, to netstack's lease, since
+/// its jobs name their peer by an address, and then to the claim of its name:
+/// a responder whose probing never ends leaves the machine nameless, and
+/// nothing else on a boot reads the name.
 fn boot_netcase(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
     const LEASED: &str = "netstack: DHCP: lease ";
+    /// `userland/netstack/src/mdns.rs`'s line for a probing no host answered.
+    const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
     await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
     Ok(qemu)
 }
 
