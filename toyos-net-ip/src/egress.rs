@@ -25,7 +25,7 @@ use crate::iface::Cx;
 use crate::limits::{nud::PENDING_TOTAL, CONTROL_QUEUE, ECHO_REPLIES};
 use crate::nud::{self, Held, Link, Nud};
 use crate::route::{NextHop, Route, Source};
-use crate::{acd, igmp, Event, Flow, IfIndex, Ip, MTU};
+use crate::{acd, igmp, Event, Flow, IfIndex, Ip, Peer, MTU};
 
 /// The largest frame [ip] builds.
 pub const FRAME: usize = toyos_net_wire::ethernet::HEADER_LEN + MTU;
@@ -168,6 +168,9 @@ pub struct UdpOut<'a> {
     pub source: Ipv4Addr,
     pub destination: Ipv4Addr,
     pub ttl: Ttl,
+    /// Whether its socket held the broadcast permission when it accepted the datagram: one
+    /// without it never leaves in a link broadcast, whatever the prefixes have become since.
+    pub broadcast: bool,
     pub datagram: UdpBuilder<'a>,
 }
 
@@ -284,8 +287,9 @@ impl Ip {
     }
 
     /// A UDP datagram at a transmit opportunity: written into `frame` when its link
-    /// destination is known, or held here for its next hop, which spends no credit. A refusal is
-    /// counted and the datagram's flow is told it is unreachable.
+    /// destination is known, or held here for its next hop, which spends no credit. The route is
+    /// the one of this moment, so a link broadcast is refused a datagram that does not carry the
+    /// permission. A refusal is counted and the datagram's flow is told it is unreachable.
     pub fn send_udp(&mut self, now: Instant, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
         let now = self.clock(now);
         let flow = Flow {
@@ -296,6 +300,10 @@ impl Ip {
         };
         let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
         let sent = self.route(out.destination, source, None).and_then(|route| {
+            if route.next_hop == NextHop::Broadcast && !out.broadcast {
+                self.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(out.destination));
+                return Err(Counter::IpBroadcastNotPermitted);
+            }
             let builder = Ipv4Builder {
                 source: Ipv4Source::new(route.source).map_err(|_| Counter::RouteNoSourceAddress)?,
                 destination: out.destination,

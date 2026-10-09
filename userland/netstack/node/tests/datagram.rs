@@ -1,7 +1,7 @@
 //! A client's datagram sockets on the node. [udp]'s rules are its own crate's scenarios; these
 //! are the node's calls over them, and the word each of [udp]'s refusals is answered in, which
 //! the readers' specifications owe a scenario for and do not have. The one id here is US-21's,
-//! the broadcast permission, which the node hands a client. What is not ours: `etherparse` reads
+//! the broadcast permission, which the node hands a client and a datagram keeps. What is not ours: `etherparse` reads
 //! every frame the node emits (`lan::outside`), and each test names the RFC its expectation is
 //! read from.
 
@@ -11,7 +11,7 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{terms, A, BROADCAST, MAC, MAC_B, MAC_R};
+use common::{from_server, message_of, terms, xid, A, ACK, BROADCAST, DNS, MAC, MAC_B, MAC_R, R};
 use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
 use toyos_net_node::{Datagram, Event, Refused};
 use toyos_net_shard::Refusal;
@@ -193,6 +193,39 @@ fn a_broadcast_needs_its_permission() {
 
     lan.node.udp_close(lan.now, id).unwrap();
     assert_eq!(lan.node.udp_set_broadcast(id, true), Err(Refused::NotConnected), "a closed socket is given nothing");
+}
+
+// US-21 from the wire: the prefix a datagram's destination is read against is a DHCP server's
+// value (RFC 2131 §4.4.5: a renewal's ACK carries the parameters again, RFC 2132 §3.3 the mask).
+// A socket without the permission has a datagram accepted for 192.0.2.127, one host of the leased
+// /24; the server's ACK of the renewal then names 255.255.255.128, under which that address is
+// the directed broadcast (RFC 922 §7). The datagram leaves in no frame, and the drop is counted
+// and is the node's line for the log when the opportunity that met it returns.
+#[test]
+fn a_datagram_accepted_for_a_host_is_no_broadcast_after_the_server_renews_a_narrower_prefix() {
+    let edge = Ipv4Addr::new(192, 0, 2, 127);
+    let mut lan = Lan::new();
+    lan.lease(600);
+    let (id, _) = lan.node.udp_bind(ANY, port(5_000), undrawn).unwrap();
+    let requests = |lan: &Lan| lan.udp().into_iter().filter(|udp| udp.port == 67).count();
+    let sent = requests(&lan);
+    assert!(lan.run_until(Duration::from_secs(400), |lan| requests(lan) > sent), "the renewal leaves");
+    let renewal = xid(&lan.udp().into_iter().rfind(|udp| udp.port == 67).unwrap().payload);
+    assert_eq!(lan.node.drain_events().count(), 0, "nothing is owed the log before the send");
+
+    let frames = lan.sent.len();
+    lan.node.udp_send_to(lan.now, id, edge, 5_001, b"hi").expect("one host of the /24");
+    let narrower = [(54, R.octets().to_vec()), (51, 600u32.to_be_bytes().to_vec()), (1, vec![255, 255, 255, 128]), (6, DNS.octets().to_vec())];
+    lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &narrower)));
+    assert_eq!(lan.node.lease().map(|lease| lease.prefix_len), Some(25), "the server's prefix is the lease's");
+    assert_eq!(lan.sent[frames..], [], "nothing left for it: no broadcast, and no request for a link address");
+
+    let rule = toyos_net_ip::Counter::IpBroadcastNotPermitted;
+    let shard = lan.node.shard();
+    assert_eq!(shard.ip().counters().get(rule), 1);
+    let refusal = toyos_net_ip::Refusal { rule, iface: shard.iface(), peer: toyos_net_ip::Peer::Ip(edge) };
+    let logged: Vec<Event> = lan.node.drain_events().collect();
+    assert_eq!(logged, [Event::Stack { refusal: Refusal::Ip(refusal), suppressed: 0 }]);
 }
 
 /// The line the log gets for a send [udp] refused under `rule`, from port 4000 bound to any.

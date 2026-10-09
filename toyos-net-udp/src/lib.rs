@@ -181,6 +181,9 @@ struct Queued {
     destination: Ipv4Addr,
     port: Port,
     ttl: Ttl,
+    /// The socket's broadcast permission at the call: what [ip] may do with the datagram when it
+    /// leaves is decided by this, not by what the socket holds then.
+    broadcast: bool,
     payload: Vec<u8>,
 }
 
@@ -371,7 +374,8 @@ impl Udp {
         self.socket(id).map(|s| s.rx_full)
     }
 
-    /// POSIX's `SO_BROADCAST`: without it a send to a broadcast address is refused.
+    /// POSIX's `SO_BROADCAST`: without it a send to a broadcast address is refused, and a datagram
+    /// accepted without it is refused by [ip] if a broadcast is where it would leave.
     pub fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), Error> {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
@@ -520,7 +524,7 @@ impl Udp {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
-        socket.tx.push_back(Queued { source, destination, port, ttl, payload: payload.to_vec() });
+        socket.tx.push_back(Queued { source, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec() });
         socket.tx_bytes = bytes;
         if !core::mem::replace(&mut socket.offered, true) {
             self.eligible.push(Sender::Socket(id));
@@ -719,6 +723,7 @@ impl Udp {
             source: queued.source,
             destination: queued.destination,
             ttl: queued.ttl,
+            broadcast: queued.broadcast,
             datagram: UdpBuilder { source: port, destination: queued.port, data: &queued.payload },
         });
         if last {

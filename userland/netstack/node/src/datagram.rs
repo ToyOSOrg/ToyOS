@@ -13,10 +13,13 @@
 //!
 //! **A send to a broadcast address needs the socket's permission** ([`Node::udp_set_broadcast`],
 //! POSIX's `SO_BROADCAST`), which a socket is bound without: one sent without it is answered
-//! [`Refused::PermissionDenied`].
+//! [`Refused::PermissionDenied`]. The permission a datagram was accepted under goes with it: one
+//! accepted for a host leaves in no link broadcast, whatever prefix a server has renewed the
+//! address with since, and is dropped, counted `ip.broadcast-not-permitted` and logged instead.
 //!
-//! A refusal [udp] logs is in [`Node::drain_events`] when the send that met it returns; no
-//! other call of a client's meets one.
+//! A refusal [udp] logs is in [`Node::drain_events`] when the send that met it returns, and one
+//! [ip] logs as a datagram leaves when that [`Node::transmit`] returns; no other call of a
+//! client's meets one.
 
 use core::net::Ipv4Addr;
 
@@ -127,8 +130,7 @@ impl Node {
     /// Queues `payload` for `destination:port`; it leaves in a later [`Node::transmit`].
     pub fn udp_send_to(&mut self, now: Instant, id: DatagramId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Refused> {
         let sent = self.stack.send_to(now, id.0, destination, port, payload).map_err(refused);
-        let events = &mut self.events;
-        self.stack.refusals(|refusal, suppressed| events.push(crate::Event::Stack { refusal, suppressed }));
+        self.log();
         sent
     }
 

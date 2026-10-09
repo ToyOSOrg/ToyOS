@@ -46,6 +46,7 @@ toyos_net_wire::counters! {
     IpProtocol = "ip.protocol";
     IpTcpNotUnicast = "ip.tcp-not-unicast";
     IpExceedsMtu = "ip.exceeds-mtu";
+    IpBroadcastNotPermitted = "ip.broadcast-not-permitted", logged;
     IpControlQueueFull = "ip.control-queue-full";
     IpAcquisitionAdmitted = "ip.acquisition-admitted";
     IpEventOverflow = "ip.event-overflow";

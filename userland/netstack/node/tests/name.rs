@@ -217,6 +217,33 @@ fn a_held_name_is_announced_again_when_the_link_returns() {
     assert!(after[1] <= Duration::from_secs(2) && after[1] > Duration::from_millis(1_999), "{after:?}");
 }
 
+// RFC 6762 §8.3's second announcement falling due with the link down: [udp] has no route for it,
+// so it is counted and gone, and the responder holds it sent. The link's return owes both again
+// (§8, §8.3: two, a second apart), the first when the second of the unsent one ends: §6's
+// interval is kept with time to spare and never cut short.
+#[test]
+fn an_announcement_due_with_the_link_down_is_counted_and_the_links_return_owes_both() {
+    let mut lan = named();
+    lan.lease(3_600);
+    let held = lan.now;
+    assert_eq!(lan.datagrams(), [(held, &multicast(response()))], "the first announcement");
+    lan.link(false);
+    let due = held.after(Duration::from_secs(1));
+    lan.fire(due);
+    assert_eq!((lan.datagrams().len(), lan.node.counters().get(Counter::NameUnsent)), (1, 1), "the second has no link to leave on");
+
+    lan.now = due.after(Duration::from_millis(300));
+    lan.link(true);
+    assert_eq!(lan.datagrams().len(), 1, "300 ms after the unsent one");
+    assert!(lan.run_until(Duration::from_secs(3), |lan| lan.datagrams().len() == 3), "both announcements");
+    let after: Vec<Duration> = lan.datagrams()[1..].iter().map(|(at, _)| at.since(due)).collect();
+    assert!(after[0] <= Duration::from_secs(1) && after[0] > Duration::from_millis(999), "{after:?}");
+    assert!(after[1] <= Duration::from_secs(2) && after[1] > Duration::from_millis(1_999), "{after:?}");
+    let quiet = lan.now.after(Duration::from_secs(10));
+    lan.fire(quiet);
+    assert_eq!((lan.datagrams().len(), lan.node.counters().get(Counter::NameUnsent)), (3, 1), "owed twice, sent twice");
+}
+
 // RFC 6762 §6.7: a query from a port other than 5353 is a legacy resolver's, and its answer goes
 // to its own address and port. §5.4: one from port 5353 with the unicast-response bit is
 // answered at its own address, with the response a multicast would carry.

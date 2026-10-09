@@ -39,9 +39,8 @@ enum State {
 /// Proof that [ip] finished conflict detection for the address under probe.
 pub(crate) struct Verified(Ipv4Addr);
 
-/// What the shard said, one event at a time.
+/// What [ip] said became of an address, one event at a time.
 pub(crate) enum Report {
-    Refused { refusal: Refusal, suppressed: u64 },
     Verified(Verified),
     /// Another host holds the address, at this MAC: [ip] removed it, and the state is
     /// `Unaddressed`.
@@ -56,7 +55,15 @@ pub(crate) struct Stack {
     /// The DHCP client's socket.
     socket: SocketId,
     state: State,
-    inbox: VecDeque<Event>,
+    /// What [ip] reported of an address and [`Stack::report`] has not read: never a log line.
+    inbox: VecDeque<Fate>,
+}
+
+/// [ip]'s report on the address this module added.
+enum Fate {
+    Verified(Ipv4Addr),
+    /// Removed by [ip]: for the host at this MAC, or with none, for a link that went down.
+    Taken(Ipv4Addr, Option<MacAddr>),
 }
 
 /// [ip] refuses nothing about the one interface and the one address this module gave it.
@@ -175,37 +182,33 @@ impl Stack {
 
     // ---- the lease ----
 
-    /// The log lines among what the shard has reported, taken ahead of the reports before them:
-    /// none is read against the state.
+    /// Takes what the shard has reported: each log line goes to `line`, ahead of the reports
+    /// before it since none is read against the state, and each report on the address waits its
+    /// turn for [`Self::report`].
     pub(crate) fn refusals(&mut self, mut line: impl FnMut(Refusal, u64)) {
-        self.inbox.extend(self.shard.drain_events());
-        self.inbox.retain(|event| match *event {
-            Event::Refused { refusal, suppressed } => {
-                line(refusal, suppressed);
-                false
-            }
-            Event::Verified(_) | Event::Conflict { .. } | Event::Lost { .. } | Event::NotVerified(_) => true,
-        });
+        for event in self.shard.drain_events() {
+            self.inbox.push_back(match event {
+                Event::Refused { refusal, suppressed } => {
+                    line(refusal, suppressed);
+                    continue;
+                }
+                Event::Verified(addr) => Fate::Verified(addr),
+                Event::Conflict { addr, mac } | Event::Lost { addr, mac } => Fate::Taken(addr, Some(mac)),
+                Event::NotVerified(addr) => Fate::Taken(addr, None),
+            });
+        }
     }
 
-    /// The shard's next event, read against the state.
+    /// The next report [`Self::refusals`] took, read against the state.
     pub(crate) fn report(&mut self) -> Option<Report> {
-        if self.inbox.is_empty() {
-            self.inbox.extend(self.shard.drain_events());
-        }
         Some(match self.inbox.pop_front()? {
-            Event::Refused { refusal, suppressed } => Report::Refused { refusal, suppressed },
-            Event::Verified(addr) => match self.state {
+            Fate::Verified(addr) => match self.state {
                 State::Probing(address) if address == addr => Report::Verified(Verified(addr)),
                 _ => unreachable!("[ip] verified {addr}, which is not under probe"),
             },
-            Event::Conflict { addr, mac } | Event::Lost { addr, mac } => {
+            Fate::Taken(addr, by) => {
                 self.taken(addr);
-                Report::Conflict(mac)
-            }
-            Event::NotVerified(addr) => {
-                self.taken(addr);
-                Report::NotVerified
+                by.map_or(Report::NotVerified, Report::Conflict)
             }
         })
     }
@@ -315,5 +318,7 @@ mod tests {
         assert!(matches!(lines.as_slice(), [Refusal::Udp(refusal)] if refusal.rule == Counter::SendUnspecifiedDestination), "{lines:?}");
         assert!(matches!(stack.report(), Some(Report::Verified(Verified(A)))), "the verification is still to be read");
         assert!(stack.report().is_none());
+        stack.refusals(|refusal, _| lines.push(refusal));
+        assert_eq!((lines.len(), stack.report().is_none()), (1, true), "each was handed over once");
     }
 }

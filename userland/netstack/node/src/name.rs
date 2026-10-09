@@ -10,6 +10,9 @@
 //!   the link, so no new address would tell it (§8).
 //! - What the record is owed later, the second announcement (§8.3) or an answer §6 held back,
 //!   is a deadline of the node's ([`Name::next_deadline`]).
+//! - An announcement that falls due with the link down is [udp]'s to refuse and is counted
+//!   unsent, and the responder is not told: the link's return owes both announcements again
+//!   (§8), and holding the unsent one a multicast only ever delays the first of them (§6).
 //! - Every response leaves with TTL 255 (§11).
 //! - An answer goes where the responder says: to the group on its port, or to the asker's own
 //!   address and port. One [udp] refuses is counted and dropped: the asker asks again.
