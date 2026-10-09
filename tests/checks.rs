@@ -907,6 +907,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_rows_run_before_members_under_a_bound_the_members_widen() {
+        metal_checks::rows_run_before_members_under_a_bound_the_members_widen();
+    }
+
+    #[test]
     fn metal_words_take_rows_members_and_whole_boots() {
         metal_checks::words_take_rows_members_and_whole_boots();
     }

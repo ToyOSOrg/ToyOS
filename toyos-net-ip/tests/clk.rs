@@ -224,7 +224,7 @@ fn s_ip_clk_010_a_deadline_saturates() {
         data: b"hi",
     };
     let out = toyos_net_ip::UdpOut { source: A, destination: B, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, datagram };
-    assert_eq!(h.ip.send_udp(late, &out, &mut frame), Ok(toyos_net_ip::Sent::Held));
+    assert_eq!(h.ip.send_udp(late, &out, &mut frame), Ok(toyos_net_ip::Sent::Pending(B)));
     assert_eq!(h.ip.transmit(late, usize::MAX, |_, _| {}), 1);
     assert!(matches!(h.state(B), Some(Nud::Incomplete(_))));
     assert_eq!(h.ip.next_deadline(), Some(Instant::from_nanos(u64::MAX)));

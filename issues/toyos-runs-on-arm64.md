@@ -44,14 +44,37 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   and `Mmio`'s barrier semantics are real latent defects on x86 too
   (`aaddf38a^:issues/kernel/the-stops-no-lost-wake-claim-rests-on-x86-locked-rmws.md`
   is one instance).
-- **C on AArch64 goes through clang**, whose driver knows
-  `aarch64-unknown-toyos` (`issues/toyos-builds-itself.md`); doomgeneric
-  compiles for it. Doom and the C corpus stay x86-only until userland runs on
-  ARM.
+- **C on AArch64**: "Doom and tinycc stay x86-only until userland runs on
+  ARM, and that is decided again then." Its doom half is superseded by the
+  2026-10-09 ruling on doom; tinycc stays as ruled. C goes through clang on
+  both architectures, whose driver knows
+  `aarch64-unknown-toyos` (`issues/toyos-builds-itself.md`).
 - **Randomness** comes from RNDR where the CPU has it, and from virtio-rng
   under QEMU/HVF, behind one `sys_random` source.
 - **TLS**: each architecture uses its ABI's variant (x86-64 keeps variant II;
   AArch64 uses variant I with TLSDESC), and the loader handles both.
+
+## Owner rulings, 2026-10-09
+
+- **Doom on the AArch64 image.** Asked "On 2026-09-26 you ruled: 'Doom and
+  tinycc stay x86-only until userland runs on ARM, and that is decided again
+  then'. Doom now builds for ARM with no changes. May it go on the ARM image
+  now, before the ARM desktop can run it?", he answered: "Yes, ship doom on
+  ARM now (Recommended)".
+- "i want the guest suite on this laptop to run arm."
+- "i still want arm hosts to run toyos under arm per default and same goes
+  for x86."
+- Asked "When should the default architecture flip to the host's (ARM on
+  this Mac)?", he answered: "When the ARM desktop works (Recommended)".
+- "then we need the arm desktop asap. it shouldnt be that hard i mean why
+  would userland care about arch?"
+- Asked "To get the ARM desktop sooner, may a userland driver on ARM run for
+  a while without an IOMMU domain (QEMU guest only)?", he answered: "No,
+  isolation first (Recommended)".
+- Asked "Should the big shared test boots (the Rust test programs and the C
+  corpus, which today run only on the T14) also run as an ARM guest under
+  HVF on this Mac?", he answered: "Yes, once ARM userland boots
+  (Recommended)".
 
 ## Measured, on `main` at `03b1b4db`
 
@@ -320,9 +343,13 @@ Each stage names its exit; "measured" means a number from a run.
    SAFETY (`kernel/src/sched/driver.rs:49`) already assumes.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
-   built for `aarch64-unknown-toyos`. C programs stay x86-only until this
-   stage runs one. **Exit**: the desktop comes up on virtio-gpu; `ssh`
-   works from the host; `/log` survives a reboot; the same `system.toml`
+   built for `aarch64-unknown-toyos`. Every program of `system.toml` builds
+   for it; no windowed one has run there, `calc`, `snake` and `doom` among
+   them, and no C program has until this stage runs one, `doom` the first:
+   `doom` is on the AArch64 ROOT, built and never run.
+   **Exit**: the desktop comes up on virtio-gpu; `calc`, `snake` and `doom`,
+   each started on it, each map a window and present a frame, read by a test
+   that is red when one of them does not; `ssh` works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 
 8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
