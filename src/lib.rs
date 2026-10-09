@@ -16,6 +16,7 @@ pub mod fatformat;
 pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;
+pub mod gptwrite;
 pub mod flags;
 pub mod hostws;
 pub mod identity;

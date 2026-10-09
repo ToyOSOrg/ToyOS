@@ -2681,37 +2681,26 @@ mod tests {
 
     /// A disk carrying `parts` in order, so `admit`'s refusals are exercised on
     /// tables rather than on prose about tables.
-    fn disk(parts: &[(&str, &gpt::partition_types::Type)]) -> Vec<u8> {
-        use std::io::Cursor;
-        const TOTAL: usize = 16 * 1024 * 1024;
-        let mut bytes = vec![0u8; TOTAL];
-        let mut cursor = Cursor::new(&mut bytes);
-        gpt::mbr::ProtectiveMBR::with_lb_size((TOTAL / 512 - 1) as u32)
-            .overwrite_lba0(&mut cursor)
-            .expect("the protective MBR");
-        let mut gdisk = gpt::GptConfig::default()
-            .initialized(false)
-            .writable(true)
-            .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
-            .create_from_device(Box::new(cursor), None)
-            .expect("a table");
-        gdisk.update_partitions(std::collections::BTreeMap::new()).expect("an empty table");
-        for (name, kind) in parts {
-            gdisk
-                .add_partition(name, 256 * 1024, (*kind).clone(), 0, Some(2048))
-                .expect("a partition");
-        }
-        let mut device = gdisk.write().expect("the table");
-        device.seek(SeekFrom::Start(0)).expect("rewind");
-        let mut out = vec![0u8; TOTAL];
-        device.read_exact(&mut out).expect("read back");
+    fn disk(parts: &[(&str, toyos_gpt::Guid)]) -> Vec<u8> {
+        const TOTAL: u64 = 16 * 1024 * 1024;
+        const ALIGN: u64 = 2048;
+        let entries: Vec<crate::gptwrite::Entry<'_>> = (1..)
+            .zip(parts)
+            .map(|(i, (name, kind))| crate::gptwrite::Entry {
+                kind: *kind,
+                unique: toyos_gpt::Guid(uuid::Uuid::new_v4().to_bytes_le()),
+                first_lba: i * ALIGN,
+                last_lba: i * ALIGN + 511,
+                name,
+            })
+            .collect();
+        let table = crate::gptwrite::table(TOTAL / u64::from(LBA), toyos_gpt::Guid(uuid::Uuid::new_v4().to_bytes_le()), &entries);
+        let mut out = vec![0u8; TOTAL as usize];
+        out[..table.primary.len()].copy_from_slice(&table.primary);
+        let back = out.len() - table.backup.len();
+        out[back..].copy_from_slice(&table.backup);
         out
     }
-
-    const TOYOS_ROOT: gpt::partition_types::Type = gpt::partition_types::Type {
-        guid: toyos_gpt::Guid::TOYOS_ROOT_TEXT,
-        os: gpt::partition_types::OperatingSystem::None,
-    };
 
     #[test]
     fn an_image_admits_only_the_table_the_installed_rule_names() {
@@ -2722,8 +2711,7 @@ mod tests {
             std::fs::write(&at, bytes).expect("write");
             at
         };
-        let esp = gpt::partition_types::EFI;
-        let basic = gpt::partition_types::BASIC;
+        let (esp, basic, root) = (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_ROOT);
 
         assert_eq!(
             admit(&write("ragged.img", &vec![0u8; 1000]), &t),
@@ -2743,24 +2731,24 @@ mod tests {
             Err(Refusal::BackupHeader { .. })
         ));
 
-        let two = disk(&[("a", &esp), ("b", &esp), ("log", &basic), ("root", &TOYOS_ROOT)]);
+        let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("root", root)]);
         assert_eq!(
             admit(&write("two-esps.img", &two), &t),
             Err(Refusal::Partitions { what: "ESP", matched: 2 })
         );
-        let no_log = disk(&[("esp", &esp), ("root", &TOYOS_ROOT)]);
+        let no_log = disk(&[("esp", esp), ("root", root)]);
         assert_eq!(
             admit(&write("no-log.img", &no_log), &t),
             Err(Refusal::Partitions { what: "TOYOS-LOG", matched: 0 })
         );
         // The log where the installed rule does not name it: p2, not p3.
-        let moved = disk(&[("esp", &esp), ("log", &basic), ("root", &TOYOS_ROOT)]);
+        let moved = disk(&[("esp", esp), ("log", basic), ("root", root)]);
         assert_eq!(
             admit(&write("moved-log.img", &moved), &t),
             Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
         );
         // And the shape `src/image.rs` writes, which is the one admitted.
-        let built = disk(&[("esp", &esp), ("root", &TOYOS_ROOT), ("log", &basic)]);
+        let built = disk(&[("esp", esp), ("root", root), ("log", basic)]);
         let ok = admit(&write("built.img", &built), &t).expect("the built shape is admitted");
         assert_eq!((ok.esp.index, ok.log.index), (1, 3));
         assert_eq!(ok.bytes % u64::from(LBA), 0);

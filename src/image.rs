@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -8,6 +7,7 @@ use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBl
 use crate::arch::Arch;
 use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
+use toyos_gpt::Guid;
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
 /// drawn**: two builds of one tree have to agree on the name the kernel
@@ -237,18 +237,16 @@ pub fn create_boot_image(
     // kernel. The kernel is given the partition by name; nothing anywhere goes
     // looking for one by type or by format. Every slot partition is named the
     // same way, by the slot table.
-    let guid = uuid::Uuid::new_v4;
-    let (log_guid, esp_guid, table_guid) = (guid(), guid(), guid());
-    let a = (guid(), guid());
-    let b = second.map(|room| (guid(), guid(), room));
-    let raw = |g: uuid::Uuid| g.to_bytes_le();
+    let (log_guid, esp_guid, table_guid) = (new_guid(), new_guid(), new_guid());
+    let a = (new_guid(), new_guid());
+    let b = second.map(|room| (new_guid(), new_guid(), room));
 
     let s = sections(kernel_bytes, root_bytes, params, signing);
     // Room for a kernel twice this one's size beside it, so an update can
     // write a new kernel into a slot's volume before the old one is gone.
     let slot_bytes = round_up_sectors(((kernel_bytes.len() * 2 + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
     let a_boot = create_slot_volume(Some(&s), slot_bytes);
-    let slot = |(boot, root): (uuid::Uuid, uuid::Uuid), version| toyos_update::slots::Slot { boot: raw(boot), root: raw(root), version };
+    let slot = |(boot, root): (Guid, Guid), version| toyos_update::slots::Slot { boot: boot.0, root: root.0, version };
     let table = toyos_update::slots::Table {
         sequence: 1,
         marked: toyos_update::slots::Which::A,
@@ -258,21 +256,21 @@ pub fn create_boot_image(
     table_volume[..toyos_update::slots::BLOCK].copy_from_slice(&table.encode());
 
     let mut parts = vec![
-        Part::full("ESP", "EFI System", gpt::partition_types::EFI, esp_guid, create_esp_volume(arch, bl_bytes, log_guid), Some(Volume::Fat32)),
-        Part::full("slot table", "ToyOS slots", TOYOS_SLOTS, table_guid, table_volume, None),
+        Part::full("ESP", "EFI System", Guid::EFI_SYSTEM, esp_guid, create_esp_volume(arch, bl_bytes, log_guid), Some(Volume::Fat32)),
+        Part::full("slot table", "ToyOS slots", Guid::TOYOS_SLOTS, table_guid, table_volume, None),
         // Microsoft Basic Data, and that type is the whole reason this is a
         // partition of its own: macOS never auto-mounts an EFI-typed partition
         // and this host refuses even a manual non-root mount of one, so a log on
         // the ESP is unreachable without the admin account. This type mounts in
         // Finder, in Windows and in Linux on plug-in, with nothing configured.
-        Part::full("log partition", "ToyOS log", gpt::partition_types::BASIC, log_guid, create_log_volume(), Some(Volume::Fat32)),
-        Part::full("slot A's volume", "ToyOS slot A", TOYOS_BOOT, a.0, a_boot, Some(Volume::Fat32)),
-        Part::full("slot A's ROOT", "ToyOS root A", TOYOS_ROOT, a.1, root_bytes.to_vec(), Some(Volume::Root)),
+        Part::full("log partition", "ToyOS log", Guid::MICROSOFT_BASIC, log_guid, create_log_volume(), Some(Volume::Fat32)),
+        Part::full("slot A's volume", "ToyOS slot A", Guid::TOYOS_BOOT, a.0, a_boot, Some(Volume::Fat32)),
+        Part::full("slot A's ROOT", "ToyOS root A", Guid::TOYOS_ROOT, a.1, root_bytes.to_vec(), Some(Volume::Root)),
     ];
     if let Some((boot, root, room)) = b {
-        parts.push(Part::full("slot B's volume", "ToyOS slot B", TOYOS_BOOT, boot, create_slot_volume(None, slot_bytes), Some(Volume::Fat32)));
+        parts.push(Part::full("slot B's volume", "ToyOS slot B", Guid::TOYOS_BOOT, boot, create_slot_volume(None, slot_bytes), Some(Volume::Fat32)));
         let len = align_up(room.root_bytes as usize, PARTITION_ALIGN) as u64;
-        parts.push(Part { what: "slot B's ROOT", name: "ToyOS root B", kind: TOYOS_ROOT, guid: root, bytes: Vec::new(), len, judge: None });
+        parts.push(Part { what: "slot B's ROOT", name: "ToyOS root B", kind: Guid::TOYOS_ROOT, guid: root, bytes: Vec::new(), len, judge: None });
     }
     create_gpt_disk(&parts)
 }
@@ -588,7 +586,7 @@ fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
 /// partition the kernel's log goes on. The kernel and its parameter are a
 /// slot's (`create_slot_volume`), because the loader is the one part of the
 /// machine that is not slotted.
-fn create_esp_volume(arch: Arch, bootloader: &[u8], log_guid: uuid::Uuid) -> Vec<u8> {
+fn create_esp_volume(arch: Arch, bootloader: &[u8], log_guid: Guid) -> Vec<u8> {
     let total_size = round_up_sectors(((bootloader.len() + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
     let mut volume = format_fat32(total_size, "TOYOS-BOOT");
     populate(
@@ -602,7 +600,7 @@ fn create_esp_volume(arch: Arch, bootloader: &[u8], log_guid: uuid::Uuid) -> Vec
             // order: nothing converts them on the way to the kernel and nothing
             // converts the table's, so the comparison that decides which
             // partition holds the log cannot be got backwards.
-            ("toyos/log.guid", &log_guid.to_bytes_le()),
+            ("toyos/log.guid", &log_guid.0),
         ],
     );
     volume
@@ -643,33 +641,10 @@ fn create_log_volume() -> Vec<u8> {
     volume
 }
 
-/// `B350BC93-…`, the TOYOS-ROOT partition type, as the writer names a type.
-///
-/// `toyos_gpt::Guid::TOYOS_ROOT` is the same sixteen bytes as the kernel
-/// matches them, and `toyos_root_text_is_the_type_guid` is what keeps the two
-/// spellings one constant — and the same for each type below.
-const TOYOS_ROOT: gpt::partition_types::Type = gpt::partition_types::Type {
-    guid: toyos_gpt::Guid::TOYOS_ROOT_TEXT,
-    os: gpt::partition_types::OperatingSystem::None,
-};
-
-/// `064E3777-…`, the TOYOS-DATA partition type, the same way round.
-const TOYOS_DATA: gpt::partition_types::Type = gpt::partition_types::Type {
-    guid: toyos_gpt::Guid::TOYOS_DATA_TEXT,
-    os: gpt::partition_types::OperatingSystem::None,
-};
-
-/// `94464329-…`, the slot table's partition type.
-const TOYOS_SLOTS: gpt::partition_types::Type = gpt::partition_types::Type {
-    guid: toyos_gpt::Guid::TOYOS_SLOTS_TEXT,
-    os: gpt::partition_types::OperatingSystem::None,
-};
-
-/// `037719D7-…`, a slot's FAT volume.
-const TOYOS_BOOT: gpt::partition_types::Type = gpt::partition_types::Type {
-    guid: toyos_gpt::Guid::TOYOS_BOOT_TEXT,
-    os: gpt::partition_types::OperatingSystem::None,
-};
+/// A partition's or a disk's GUID, drawn once.
+fn new_guid() -> Guid {
+    Guid(uuid::Uuid::new_v4().to_bytes_le())
+}
 
 /// Lay a table on the disk at `path`, already `len` bytes long, carrying one
 /// TOYOS-DATA partition, stamp the designation at its first block, and answer
@@ -684,26 +659,26 @@ pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
     else {
         panic!("a {len}-byte disk has no room for a DATA partition");
     };
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
-    let (mut device, starts) = lay(Box::new(file), len, &[data_row(uuid::Uuid::new_v4(), data_bytes)]);
-    designate(&mut device, starts[0], data_bytes);
-    device.flush().expect("flush the data disk");
+    let starts = lay(&mut file, len, &[data_row(new_guid(), data_bytes)]);
+    write_at(&mut file, starts[0], &designation(data_bytes / SECTOR as u64), "DATA partition's designation");
     (starts[0], data_bytes)
 }
 
 /// A TOYOS-DATA partition's entry.
-fn data_row(guid: uuid::Uuid, len: u64) -> Row {
-    Row { what: "DATA partition".into(), name: "ToyOS data".into(), kind: TOYOS_DATA, guid, len }
+fn data_row(guid: Guid, len: u64) -> Row {
+    Row { what: "DATA partition".into(), name: "ToyOS data".into(), kind: Guid::TOYOS_DATA, guid, len }
 }
 
-/// Stamp the designation on the `bytes`-long partition at byte `at` of `device`.
-fn designate(device: &mut gpt::DiskDeviceObject<'_>, at: u64, bytes: u64) {
-    device.seek(SeekFrom::Start(at)).expect("seek to the data partition");
-    device.write_all(&designation(bytes / SECTOR as u64)).expect("stamp the data partition");
+/// Write `bytes` at byte `at` of `disk`; `what` they are is what a refusal names.
+fn write_at(disk: &mut (impl Write + Seek), at: u64, bytes: &[u8], what: &str) {
+    disk.seek(SeekFrom::Start(at))
+        .and_then(|_| disk.write_all(bytes))
+        .unwrap_or_else(|e| panic!("write the {what} at byte {at}: {e}"));
 }
 
 /// What a machine's own disk holds once the boot image `image` is installed
@@ -716,29 +691,21 @@ fn designate(device: &mut gpt::DiskDeviceObject<'_>, at: u64, bytes: u64) {
 /// blocks that are not zero are written, so the file costs the host what the
 /// image does.
 pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
-    use gpt::disk::LogicalBlockSize::Lb512;
     let mut listed = [None; 16];
     let scan = toyos_gpt::list(&mut ImageSectors(image), &mut listed)
         .unwrap_or_else(|e| panic!("the image to install carries no partition table: {e:?}"));
     assert!(scan.matched as usize <= listed.len(), "the image to install carries {} partitions", scan.matched);
-    // The names, which the reader above does not read; the types, which this one does not keep.
-    let mut names: BTreeMap<uuid::Uuid, String> = gpt::header::read_header_from_arbitrary_device(&mut Cursor::new(image), Lb512)
-        .and_then(|header| gpt::partition::file_read_partitions(&mut Cursor::new(image), &header, Lb512))
-        .unwrap_or_else(|e| panic!("the image to install carries no readable partition entries: {e}"))
-        .into_values()
-        .map(|part| (part.part_guid, part.name))
-        .collect();
     let carried: Vec<(Row, &[u8])> = listed
         .iter()
         .flatten()
         .map(|entry| {
             let part = entry.unwrap_or_else(|unplaced| panic!("the image to install states no partition: {unplaced:?}"));
-            let guid = uuid::Uuid::from_bytes_le(part.unique_guid().0);
-            let kind = [gpt::partition_types::EFI, gpt::partition_types::BASIC, TOYOS_SLOTS, TOYOS_BOOT, TOYOS_ROOT]
-                .into_iter()
-                .find(|kind| uuid::Uuid::parse_str(kind.guid).is_ok_and(|text| text.to_bytes_le() == part.type_guid().0))
-                .unwrap_or_else(|| panic!("partition {guid} is of type {}, which no boot image carries", part.type_guid()));
-            let name = names.remove(&guid).unwrap_or_else(|| panic!("partition {guid} has no name"));
+            let (guid, kind) = (part.unique_guid(), part.type_guid());
+            assert!(
+                [Guid::EFI_SYSTEM, Guid::MICROSOFT_BASIC, Guid::TOYOS_SLOTS, Guid::TOYOS_BOOT, Guid::TOYOS_ROOT].contains(&kind),
+                "partition {guid} is of type {kind}, which no boot image carries"
+            );
+            let name = name_of(image, part.index());
             let at = part.first_lba() as usize * LBA as usize;
             let bytes = &image[at..at + part.lba_count().get() as usize * LBA as usize];
             (Row { what: format!("installed {name}"), name, kind, guid, len: bytes.len() as u64 }, bytes)
@@ -746,10 +713,10 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         .collect();
 
     let (mut rows, volumes): (Vec<Row>, Vec<&[u8]>) = carried.into_iter().unzip();
-    rows.insert(0, data_row(uuid::Uuid::new_v4(), data_bytes));
+    rows.insert(0, data_row(new_guid(), data_bytes));
     let total = disk_bytes(rows.iter().map(|row| row.len));
 
-    let file = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
@@ -757,18 +724,26 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         .unwrap_or_else(|e| panic!("{} is not installed on, being no file this install made: {e}", disk.display()));
     file.set_len(total).unwrap_or_else(|e| panic!("size {} to {total} bytes: {e}", disk.display()));
 
-    let (mut device, starts) = lay(Box::new(file), total, &rows);
-    designate(&mut device, starts[0], data_bytes);
+    let starts = lay(&mut file, total, &rows);
+    write_at(&mut file, starts[0], &designation(data_bytes / SECTOR as u64), "DATA partition's designation");
     for ((row, volume), start) in rows[1..].iter().zip(volumes).zip(&starts[1..]) {
         for (i, block) in volume.chunks(PARTITION_ALIGN).enumerate().filter(|(_, block)| block.iter().any(|byte| *byte != 0)) {
-            let at = start + (i * PARTITION_ALIGN) as u64;
-            device
-                .seek(SeekFrom::Start(at))
-                .and_then(|_| device.write_all(block))
-                .unwrap_or_else(|e| panic!("write the {} at byte {at}: {e}", row.what));
+            write_at(&mut file, start + (i * PARTITION_ALIGN) as u64, block, &row.what);
         }
     }
-    device.flush().unwrap_or_else(|e| panic!("flush {}: {e}", disk.display()));
+}
+
+/// The name `image`'s table gives its entry `index`, which `toyos-gpt` does
+/// not read: the header at block 1 places the array and sizes its entries,
+/// and a name is the UTF-16 units from byte 56 of one, up to the first zero.
+fn name_of(image: &[u8], index: u32) -> String {
+    let field = |at: usize, len: usize| &image[LBA as usize + at..][..len];
+    let array = u64::from_le_bytes(field(72, 8).try_into().expect("eight bytes")) as usize * LBA as usize;
+    let size = u32::from_le_bytes(field(84, 4).try_into().expect("four bytes")) as usize;
+    let entry = &image[array + index as usize * size..][..size];
+    let units: Vec<u16> =
+        entry[56..128].chunks(2).map(|unit| u16::from_le_bytes([unit[0], unit[1]])).take_while(|unit| *unit != 0).collect();
+    String::from_utf16(&units).unwrap_or_else(|e| panic!("partition {index}'s name is no UTF-16: {e}"))
 }
 
 /// Block 0 of a volume: the magic and its block count.
@@ -807,8 +782,8 @@ impl toyos_gpt::Sectors for FileSectors<'_> {
 struct Part {
     what: &'static str,
     name: &'static str,
-    kind: gpt::partition_types::Type,
-    guid: uuid::Uuid,
+    kind: Guid,
+    guid: Guid,
     bytes: Vec<u8>,
     len: u64,
     judge: Option<Volume>,
@@ -816,14 +791,7 @@ struct Part {
 
 impl Part {
     /// A partition exactly as long as its bytes.
-    fn full(
-        what: &'static str,
-        name: &'static str,
-        kind: gpt::partition_types::Type,
-        guid: uuid::Uuid,
-        bytes: Vec<u8>,
-        judge: Option<Volume>,
-    ) -> Self {
+    fn full(what: &'static str, name: &'static str, kind: Guid, guid: Guid, bytes: Vec<u8>, judge: Option<Volume>) -> Self {
         let len = bytes.len() as u64;
         Self { what, name, kind, guid, bytes, len, judge }
     }
@@ -834,8 +802,8 @@ impl Part {
 struct Row {
     what: String,
     name: String,
-    kind: gpt::partition_types::Type,
-    guid: uuid::Uuid,
+    kind: Guid,
+    guid: Guid,
     len: u64,
 }
 
@@ -847,87 +815,40 @@ fn disk_bytes(lens: impl Iterator<Item = u64>) -> u64 {
     round_up_sectors(align_up(end, PARTITION_ALIGN) + PARTITION_ALIGN) as u64
 }
 
-/// Write a protective MBR and a GPT on `device`, `total` bytes long, placing
-/// `rows` in their order, each on a [`PARTITION_ALIGN`] boundary and under
-/// its own GUID: the device, and the byte each row starts at.
-fn lay<'a>(
-    mut device: gpt::DiskDeviceObject<'a>,
-    total: u64,
-    rows: &[Row],
-) -> (gpt::DiskDeviceObject<'a>, Vec<u64>) {
-    assert_eq!(total % 512, 0, "image must be a whole number of 512-byte sectors to be flashable");
-    let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from(total / 512 - 1).unwrap_or(0xFF_FF_FF_FF));
-    mbr.overwrite_lba0(&mut device).expect("failed to write MBR");
-
-    let mut gdisk = gpt::GptConfig::default()
-        .initialized(false)
-        .writable(true)
-        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
-        .create_from_device(device, None)
-        .expect("failed to create GPT disk");
-
-    gdisk
-        .update_partitions(BTreeMap::<u32, gpt::partition::Partition>::new())
-        .expect("failed to initialize partition table");
-
-    let align = Some((PARTITION_ALIGN / 512) as u64);
-    let ids: Vec<u32> = rows
+/// Write a protective MBR and a GPT on `disk`, `total` bytes long, placing
+/// `rows` in their order, each on the first [`PARTITION_ALIGN`] boundary after
+/// the last and under its own GUID: the byte each row starts at.
+fn lay(disk: &mut (impl Write + Seek), total: u64, rows: &[Row]) -> Vec<u64> {
+    assert_eq!(total % u64::from(LBA), 0, "image must be a whole number of {LBA}-byte sectors to be flashable");
+    let mut end = 0;
+    let starts: Vec<u64> = rows
         .iter()
         .map(|row| {
-            gdisk
-                .add_partition(&row.name, row.len, row.kind.clone(), 0, align)
-                .unwrap_or_else(|e| panic!("failed to add the {}: {e}", row.what))
+            // The invariant [`PARTITION_ALIGN`] exists for: the kernel mounts
+            // several at once over one 4 KiB block device, and a device block
+            // belonging to two volumes would be cached twice.
+            assert_eq!(row.len % SECTOR as u64, 0, "the {} is {} bytes, not whole {SECTOR}-byte blocks", row.what, row.len);
+            let start = align_up(end.max(1), PARTITION_ALIGN) as u64;
+            end = (start + row.len) as usize;
+            start
         })
         .collect();
-
-    // The GUID `add_partition` drew for each is discarded for the one its row
-    // names: the log's is written on the ESP, every slot partition's in the
-    // slot table, and the ESP's own because a firmware boot entry names a
-    // partition by GUID and every name is drawn once.
-    let mut table = gdisk.partitions().clone();
-    for (row, id) in rows.iter().zip(&ids) {
-        table.get_mut(id).expect("a partition that was just added").part_guid = row.guid;
-    }
-    gdisk.update_partitions(table).expect("failed to stamp the partitions' unique GUIDs");
-
-    let placed: Vec<(&str, u64, u64)> = rows
+    let lba = u64::from(LBA);
+    let entries: Vec<crate::gptwrite::Entry<'_>> = rows
         .iter()
-        .zip(&ids)
-        .map(|(row, id)| {
-            let entry = gdisk.partitions().get(id).expect("a partition that was just added");
-            let start = entry.bytes_start(gpt::disk::LogicalBlockSize::Lb512).expect("a partition's start");
-            let len = entry.bytes_len(gpt::disk::LogicalBlockSize::Lb512).expect("a partition's length");
-            // A slot's ROOT is read for exactly its signed length, and a
-            // partition the table made any other length than asked is one
-            // whose contents nothing here placed.
-            assert_eq!(len, row.len, "the table gives the {} {len} bytes for a {}-byte partition", row.what, row.len);
-            (row.what.as_str(), start, row.len)
+        .zip(&starts)
+        .map(|(row, start)| crate::gptwrite::Entry {
+            kind: row.kind,
+            unique: row.guid,
+            first_lba: start / lba,
+            last_lba: (start + row.len) / lba - 1,
+            name: &row.name,
         })
         .collect();
-
-    // The invariant [`PARTITION_ALIGN`] exists for, checked rather than
-    // assumed: the kernel mounts several at once over one 4 KiB block device,
-    // and a device block belonging to two volumes would be cached twice.
-    let sector = SECTOR as u64;
-    for (what, start, len) in &placed {
-        assert_eq!(start % sector, 0, "the {what} starts at byte {start}, off a {SECTOR}-byte block");
-        assert_eq!(len % sector, 0, "the {what} is {len} bytes, not whole {SECTOR}-byte blocks");
-    }
-    let mut by_start = placed.clone();
-    by_start.sort_by_key(|(_, start, _)| *start);
-    for (before, after) in by_start.iter().zip(&by_start[1..]) {
-        assert!(
-            before.1 + before.2 <= after.1,
-            "the {} runs to {} and the {} starts at {}",
-            before.0,
-            before.1 + before.2,
-            after.0,
-            after.1
-        );
-    }
-
-    let device = gdisk.write().expect("failed to write GPT");
-    (device, placed.iter().map(|(_, start, _)| *start).collect())
+    let table = crate::gptwrite::table(total / lba, new_guid(), &entries);
+    write_at(disk, 0, &table.primary, "partition table");
+    write_at(disk, total - table.backup.len() as u64, &table.backup, "backup partition table");
+    starts
 }
 
 fn create_gpt_disk(parts: &[Part]) -> Vec<u8> {
@@ -936,32 +857,24 @@ fn create_gpt_disk(parts: &[Part]) -> Vec<u8> {
     }
     let rows: Vec<Row> = parts
         .iter()
-        .map(|part| Row { what: part.what.into(), name: part.name.into(), kind: part.kind.clone(), guid: part.guid, len: part.len })
+        .map(|part| Row { what: part.what.into(), name: part.name.into(), kind: part.kind, guid: part.guid, len: part.len })
         .collect();
     let total_size = disk_bytes(rows.iter().map(|row| row.len));
     let mut disk = vec![0u8; total_size as usize];
-    let (mut disk_device, starts) = lay(Box::new(Cursor::new(&mut disk)), total_size, &rows);
-
-    disk_device.seek(std::io::SeekFrom::Start(0)).expect("failed to seek");
-    let mut final_bytes = vec![0u8; total_size as usize];
-    disk_device.read_exact(&mut final_bytes).expect("failed to read disk");
-
+    let starts = lay(&mut Cursor::new(&mut disk), total_size, &rows);
     for (part, start) in parts.iter().zip(&starts) {
         let start = *start as usize;
-        final_bytes[start..start + part.bytes.len()].copy_from_slice(&part.bytes);
+        disk[start..start + part.bytes.len()].copy_from_slice(&part.bytes);
     }
 
-    let judged: Vec<(&str, toyos_gpt::Guid, Volume)> = parts
-        .iter()
-        .filter_map(|part| part.judge.map(|kind| (part.what, toyos_gpt::Guid(part.guid.to_bytes_le()), kind)))
-        .collect();
-    certify(&final_bytes, &judged).unwrap_or_else(|refusal| panic!("{refusal}"));
-
-    final_bytes
+    let judged: Vec<(&str, Guid, Volume)> =
+        parts.iter().filter_map(|part| part.judge.map(|kind| (part.what, part.guid, kind))).collect();
+    certify(&disk, &judged).unwrap_or_else(|refusal| panic!("{refusal}"));
+    disk
 }
 
 /// A disk image as logical blocks, so a GPT parser can read it without a file.
-struct ImageSectors<'a>(&'a [u8]);
+pub(crate) struct ImageSectors<'a>(pub(crate) &'a [u8]);
 
 impl toyos_gpt::Sectors for ImageSectors<'_> {
     fn lba_bytes(&self) -> u32 {
@@ -1099,7 +1012,7 @@ mod tests {
         let key = key();
         let s = sections(b"kernel", &tiny_root(), "", signing(&key));
         for (what, volume) in [
-            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", uuid::Uuid::new_v4())),
+            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", new_guid())),
             ("slot volume", create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
             ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
@@ -1186,7 +1099,7 @@ mod tests {
     #[test]
     fn the_esp_and_a_slot_carry_what_the_bootloader_looks_for() {
         assert_eq!(
-            files_of(create_esp_volume(Arch::X86_64, b"bootloader", uuid::Uuid::new_v4())),
+            files_of(create_esp_volume(Arch::X86_64, b"bootloader", new_guid())),
             ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
         let key = key();
@@ -1243,9 +1156,13 @@ mod tests {
         assert_eq!(parts.signed, &signed);
     }
 
-    /// Every partition of `image` is on `disk` under its GUID with its bytes,
-    /// found by the reader the kernel and `diskserver` use.
-    fn carries_every_partition_of(disk: &mut std::fs::File, image: &[u8]) {
+    /// Every partition of `image` is on `disk` under its GUID, its name and with
+    /// its bytes, found by the reader the kernel and `diskserver` use: the
+    /// names, in the image's order.
+    fn carries_every_partition_of(disk: &mut std::fs::File, image: &[u8]) -> Vec<String> {
+        let mut table = vec![0u8; 34 * LBA as usize];
+        disk.seek(SeekFrom::Start(0)).and_then(|_| disk.read_exact(&mut table)).expect("the disk's table");
+        let mut names = Vec::new();
         let mut listed = [None; 16];
         toyos_gpt::list(&mut ImageSectors(image), &mut listed).expect("the image's table");
         let parts: Vec<toyos_gpt::Partition> = listed.iter().flatten().map(|entry| entry.expect("a placed entry")).collect();
@@ -1261,7 +1178,10 @@ mod tests {
                 .and_then(|_| disk.read_exact(&mut installed))
                 .expect("read it back");
             assert!(installed == image[at..at + len], "{} was installed as other bytes", part.unique_guid());
+            assert_eq!(name_of(&table, on_disk.index()), name_of(image, part.index()), "{}", part.unique_guid());
+            names.push(name_of(image, part.index()));
         }
+        names
     }
 
     /// An install puts a designated DATA first and the image after it, on a
@@ -1277,7 +1197,10 @@ mod tests {
 
         install(&image, &path, DATA);
         let mut disk = std::fs::File::open(&path).expect("open the disk");
-        carries_every_partition_of(&mut disk, &image);
+        assert_eq!(
+            carries_every_partition_of(&mut disk, &image),
+            ["EFI System", "ToyOS slots", "ToyOS log", "ToyOS slot A", "ToyOS root A"]
+        );
         let data = only_partition(&mut FileSectors(&mut disk), toyos_gpt::Guid::TOYOS_DATA).expect("one DATA partition");
         assert_eq!(
             (data.first_lba() * u64::from(LBA), data.lba_count().get() * u64::from(LBA)),
@@ -1349,7 +1272,7 @@ mod tests {
 
     /// **The independent oracle for ROOT**, asked of the finished image by
     /// readers that did not write it: `toyos-gpt` finds the partition by type
-    /// where the `gpt` crate placed it, `bcachefs`'s mount-and-read path lists
+    /// where the table placed it, `bcachefs`'s mount-and-read path lists
     /// what its format-and-write path put there, and `toyos-fat32` reads the
     /// boot parameter off the ESP.
     ///
