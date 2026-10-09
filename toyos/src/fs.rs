@@ -4,8 +4,8 @@
 //! **A directory capability is a connector in the program's namespace**, named
 //! [`CAPABILITY_PREFIX`] and the absolute directory it serves (`fs:/home`).
 //! Each is a connector to its role's one port, which the supervisor minted with
-//! a [`Grant`]: the directory, and whose share of the server it spends. The
-//! kernel stamps that on every connection made through it and answers it to the
+//! a [`Grant`]: the directory, whether it may be changed, and whose share of
+//! the server it spends. The kernel stamps that on every connection made through it and answers it to the
 //! port's acceptor alone, so the server reads what was granted off the
 //! connection and nothing the client says. A program names a file only under a
 //! directory it holds, and the kernel's part is who holds which connector.
@@ -152,44 +152,64 @@ pub struct Grant<'a> {
     /// one service it starts itself or one login session, and for every
     /// launch made from it that opens no session.
     pub share: u64,
+    /// Whether a request that changes what the directory holds is served.
+    pub access: Access,
     /// The directory, as a path on the role's volume, every path on the
     /// connection is resolved beneath: `home`, or the empty path for a volume
     /// served whole. [`canonical`], and at most [`MAX_GRANT_ROOT`] bytes.
     pub root: &'a str,
 }
 
+/// What a [`Grant`] lets its holder do to the directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Read, list and stat; every request that would change what the
+    /// directory holds is refused `PermissionDenied`.
+    ReadOnly,
+    ReadWrite,
+}
+
 /// The format [`Grant::encode`] writes. Carried because a swap replaces a file
 /// server and not the supervisor, so one server reads grants another build
 /// minted, and an older one is refused by name rather than read as this one.
-const GRANT_VERSION: u8 = 2;
+const GRANT_VERSION: u8 = 3;
 
-/// The longest root a grant carries: what one badge holds past the version and
-/// the share.
-pub const MAX_GRANT_ROOT: usize = MAX_BADGE - 1 - 8;
+/// The longest root a grant carries: what one badge holds past the version,
+/// the share and the access.
+pub const MAX_GRANT_ROOT: usize = MAX_BADGE - 1 - 8 - 1;
 
 impl<'a> Grant<'a> {
-    /// The version, the share, then the root: `None` for a root no grant
-    /// can carry.
+    /// The version, the share, the access, then the root: `None` for a root
+    /// no grant can carry.
     pub fn encode<'b>(&self, out: &'b mut [u8; MAX_BADGE]) -> Option<&'b [u8]> {
         if self.root.len() > MAX_GRANT_ROOT || !canonical(self.root) {
             return None;
         }
         out[0] = GRANT_VERSION;
         out[1..9].copy_from_slice(&self.share.to_le_bytes());
-        let end = 9 + self.root.len();
-        out[9..end].copy_from_slice(self.root.as_bytes());
+        out[9] = match self.access {
+            Access::ReadOnly => 0,
+            Access::ReadWrite => 1,
+        };
+        let end = 10 + self.root.len();
+        out[10..end].copy_from_slice(self.root.as_bytes());
         Some(&out[..end])
     }
 
     /// `None` for bytes [`Self::encode`] cannot have written.
     pub fn decode(bytes: &'a [u8]) -> Option<Self> {
         let (&version, rest) = bytes.split_first()?;
-        if version != GRANT_VERSION || rest.len() < 8 || rest.len() - 8 > MAX_GRANT_ROOT {
+        if version != GRANT_VERSION || rest.len() < 9 || rest.len() - 9 > MAX_GRANT_ROOT {
             return None;
         }
         let share = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
-        let root = core::str::from_utf8(&rest[8..]).ok()?;
-        canonical(root).then_some(Self { share, root })
+        let access = match rest[8] {
+            0 => Access::ReadOnly,
+            1 => Access::ReadWrite,
+            _ => return None,
+        };
+        let root = core::str::from_utf8(&rest[9..]).ok()?;
+        canonical(root).then_some(Self { share, access, root })
     }
 }
 
@@ -625,10 +645,12 @@ mod tests {
     fn a_grant_round_trips_at_every_bound() {
         let longest = "r".repeat(MAX_GRANT_ROOT);
         for (share, root) in [(0, ""), (1, "home"), (u64::MAX, "home/toy/Documents"), (7, longest.as_str())] {
-            let grant = Grant { share, root };
-            let mut out = [0u8; MAX_BADGE];
-            let bytes = grant.encode(&mut out).expect("a root a grant carries");
-            assert_eq!(Grant::decode(bytes), Some(grant), "{root:?}");
+            for access in [Access::ReadOnly, Access::ReadWrite] {
+                let grant = Grant { share, access, root };
+                let mut out = [0u8; MAX_BADGE];
+                let bytes = grant.encode(&mut out).expect("a root a grant carries");
+                assert_eq!(Grant::decode(bytes), Some(grant), "{root:?} {access:?}");
+            }
         }
     }
 
@@ -637,30 +659,38 @@ mod tests {
         let mut out = [0u8; MAX_BADGE];
         let past = "r".repeat(MAX_GRANT_ROOT + 1);
         for root in ["/home", "home/", "a//b", ".", "a/../b", past.as_str()] {
-            assert_eq!(Grant { share: 1, root }.encode(&mut out), None, "{root:?}");
+            assert_eq!(Grant { share: 1, access: Access::ReadWrite, root }.encode(&mut out), None, "{root:?}");
         }
     }
 
     #[test]
     fn bytes_no_grant_was_encoded_as_are_refused() {
         let mut out = [0u8; MAX_BADGE];
-        let good = Grant { share: 3, root: "home" }.encode(&mut out).unwrap().to_vec();
-        // Shorter than a version and a share.
-        for n in 0..9 {
+        let good = Grant { share: 3, access: Access::ReadOnly, root: "home" }.encode(&mut out).unwrap().to_vec();
+        // Shorter than a version, a share and an access.
+        for n in 0..10 {
             assert_eq!(Grant::decode(&good[..n]), None, "{n} bytes");
         }
-        // Another version.
-        let mut other = good.clone();
-        other[0] = GRANT_VERSION + 1;
-        assert_eq!(Grant::decode(&other), None);
+        // Another version, and the one before this.
+        for version in [GRANT_VERSION - 1, GRANT_VERSION + 1] {
+            let mut other = good.clone();
+            other[0] = version;
+            assert_eq!(Grant::decode(&other), None, "version {version}");
+        }
+        // An access byte that is neither, which is never read as either.
+        for access in [2, 0x80, 0xff] {
+            let mut other = good.clone();
+            other[9] = access;
+            assert_eq!(Grant::decode(&other), None, "access {access}");
+        }
         // A root the wire refuses, or not UTF-8.
         for root in [&b"/home"[..], b"a/../b", b"a//b", b"\xff"] {
-            let mut bad = good[..9].to_vec();
+            let mut bad = good[..10].to_vec();
             bad.extend_from_slice(root);
             assert_eq!(Grant::decode(&bad), None, "{root:?}");
         }
         // One byte past the longest root.
-        let mut long = good[..9].to_vec();
+        let mut long = good[..10].to_vec();
         long.extend(core::iter::repeat_n(b'r', MAX_GRANT_ROOT + 1));
         assert_eq!(Grant::decode(&long), None);
     }
