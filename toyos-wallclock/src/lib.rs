@@ -163,29 +163,63 @@ pub enum Class {
     Dated,
 }
 
-/// Whether `name` on the log volume is one of `logkeeper`'s files, and which kind.
+/// One file of a boot's log as its name says it: the boot's stem, and which
+/// part of that boot's sequence the file is, from 1.
 ///
-/// An allow-list, and the strictness is the safety property in both
-/// directions: `logkeeper` deletes nothing this does not recognise, and a host
-/// reading the volume for a boot's log reads nothing else — the bootloader's
-/// own `loader.log` is not one of these.
-pub fn classify(name: &str) -> Option<Class> {
-    let stem = name.strip_suffix(".log")?;
-    let stem = match stem.split_once('_') {
-        Some((head, part)) => {
-            if part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            head
-        }
-        None => stem,
-    };
+/// The first part carries the bare stem, because that is what nearly every
+/// boot ever writes and a `_0001` on it would be noise on every stick. A
+/// continuation takes `_` rather than any other separator for one reason: it
+/// is the only legal character that sorts *after* `.`, so `<stem>.log` still
+/// comes before `<stem>_0002.log` and the names sort in the order the parts
+/// were written. The part is four digits wide: a fifth would sort before the
+/// fourth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Part<'a> {
+    pub stem: &'a str,
+    pub part: u32,
+}
 
-    if let Some(index) = stem.strip_prefix(UNDATED_STEM).and_then(|s| s.strip_prefix('-')) {
-        let ours = index.len() == 2 && index.bytes().all(|b| b.is_ascii_digit());
-        return ours.then_some(Class::Undated);
+impl fmt::Display for Part<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.part {
+            1 => write!(f, "{}.log", self.stem),
+            n => write!(f, "{}_{n:04}.log", self.stem),
+        }
     }
-    is_stem(stem).then_some(Class::Dated)
+}
+
+impl<'a> Part<'a> {
+    /// `name` on the log volume read back, where it is one of `logkeeper`'s
+    /// files, with which kind its boot is.
+    ///
+    /// An allow-list, and the strictness is the safety property in both
+    /// directions: `logkeeper` deletes nothing this does not recognise, and a host
+    /// reading the volume for a boot's log reads nothing else — the bootloader's
+    /// own `loader.log` is not one of these.
+    pub fn parse(name: &'a str) -> Option<(Class, Self)> {
+        let bare = name.strip_suffix(".log")?;
+        let (stem, part) = match bare.split_once('_') {
+            Some((stem, part)) => {
+                if part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                (stem, part.parse().ok()?)
+            }
+            None => (bare, 1),
+        };
+        let class = match stem.strip_prefix(UNDATED_STEM).and_then(|s| s.strip_prefix('-')) {
+            Some(index) => {
+                (index.len() == 2 && index.bytes().all(|b| b.is_ascii_digit())).then_some(Class::Undated)
+            }
+            None => is_stem(stem).then_some(Class::Dated),
+        };
+        Some((class?, Part { stem, part }))
+    }
+}
+
+/// Whether `name` on the log volume is one of `logkeeper`'s files, and which kind.
+pub fn classify(name: &str) -> Option<Class> {
+    Part::parse(name).map(|(class, _)| class)
 }
 
 fn is_leap(year: u64) -> bool {
@@ -232,6 +266,8 @@ mod tests {
     extern crate alloc;
     use super::*;
     use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     /// The round trip, over the dates a calendar gets wrong: a leap day, a
     /// century that is not a leap year, and the epoch itself.
@@ -308,6 +344,26 @@ mod tests {
         ] {
             assert_eq!(classify(no), None, "`{no}` was taken for one of logkeeper's");
         }
+    }
+
+    /// A part's name is read back as the stem and part it was written from,
+    /// and the names of one boot sort in the order its parts were written.
+    #[test]
+    fn a_part_is_its_stem_and_number() {
+        let named = |stem, part| Part { stem, part }.to_string();
+        assert_eq!(named("2026-09-26-100000", 1), "2026-09-26-100000.log");
+        assert_eq!(named("unknown-03", 7), "unknown-03_0007.log");
+        for stem in ["2026-09-26-100000", "unknown-03"] {
+            let mut names = Vec::new();
+            for part in [1, 2, 10, 9999] {
+                let name = named(stem, part);
+                assert_eq!(Part::parse(&name).map(|(_, part)| part), Some(Part { stem, part }), "{name}");
+                names.push(name);
+            }
+            assert!(names.is_sorted(), "{names:?}");
+        }
+        assert_eq!(Part::parse("loader.log"), None);
+        assert_eq!(Part::parse("2026-09-26-100000_0002.txt"), None);
     }
 
     #[test]

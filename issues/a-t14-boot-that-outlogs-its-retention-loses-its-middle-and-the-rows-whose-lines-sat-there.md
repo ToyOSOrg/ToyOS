@@ -10,8 +10,19 @@ opened: 2026-10-08
 `userland/logkeeper/src/store.rs`) and deletes the writing boot's own middle
 past that, by design: one boot's flood costs its own middle and nobody's
 start. A metal judge reads what came back, so a line a flooding boot wrote in
-its middle is a line the judge reports missing, and nothing in the harness
-says the readback has a hole.
+its middle is a line the judge reports missing, and a judge that asserts an
+absence passes over the hole.
+
+**A hole is red by name now, and it is the whole boot's.** `bootlog::lost_parts`
+reads the sequence of parts the file itself holds: each continuation carries
+the line of the rotation that opened it, so the parts a boot's log names step
+by one from the part its opening line names, and a longer step is the parts
+that are gone. No deletion line is read: the stop's flush can hold one back,
+and a boot can die before the round that would write it. `read_readback`
+(`tests/common/metal.rs`) refuses such a readback before any row or member is
+judged on it: every rider of that boot is red with
+`<boot>'s own log is missing its parts 2 to N; no row is judged on it`.
+The harness does not guess which rows' lines sat in the hole.
 
 `testcases` is such a boot, and the flood was the kernel's, not the job's:
 `test_rs_counters_metal`'s `loaded` phase spawns a child per CPU in a loop for
@@ -42,9 +53,8 @@ that head and takes in no longer.
 megabytes kept, 98.5% of it still that one job's `spawn:` and `exit:` records,
 and the phase spawns a child per CPU for twenty seconds: about 2.2 times the
 children, a sixteen-CPU machine or a faster one, outlogs the retention again.
-**The harness is as silent about a hole as it was**: nothing reds a readback
-whose own boot deleted a part of its log. How many parts this boot wrote was
-not read.
+That boot would then red whole, by name, with every row that rides it. The
+readback of `c6269f885` rotated seven times and deleted nothing.
 
 ## Measured
 
@@ -69,8 +79,16 @@ count line is there at 42.579 s (`28 SCIs; embedded controller queries taken:
 0x4f x14`). `testcases`' readback of 2026-10-07 has the same hole: no record
 in seconds 36 to 47.
 
-So `acpi_server_events` and `acpi_tables_loaded` keep `testcases-hold`, a boot
-whose log is whole.
+`acpi_server_events` and `acpi_tables_loaded` ride `testcases` again, with
+`test_rs_acpi_hold` its last job, and `testcases-hold` is deleted. The job
+waits on the `log` port for the server's count line, bounded by the runner's
+bound less a tenth, and exits non-zero without it. That readback judged
+offline by this harness reds by name: `testcases's own log is missing its
+parts 2 to 26; no row is judged on it`.
+
+On the T14 at `9e70cd2e3` both rows passed on `testcases`: a log of 7,547,522
+bytes, seven rotations and no deletion, the server's count at 43.093 s on the
+log's clock and the hold, started at 54.920 s, ended on it without waiting.
 
 ## Owner
 
@@ -80,6 +98,12 @@ fuller: a boot that carries every shipping-kernel member logs more than
 
 ## Exit condition
 
-No boot of the metal profile writes past `logkeeper`'s retention, or a
-readback whose own boot deleted a part of its log reds by name before any row
-is judged on it; and `acpi_server_events` passes on `testcases` on the T14.
+Three legs, two met. A readback whose own log is missing a part reds by name
+before any row is judged on it; and `acpi_server_events` and
+`acpi_tables_loaded` pass on `testcases` on the T14, on a log no part of which
+was deleted. Left:
+
+- No boot of the metal profile can write past `logkeeper`'s retention on a
+  machine with more CPUs or faster ones: what `testcases` logs is bounded by
+  a count, where today it is twenty seconds of however many children the
+  machine spawns.
