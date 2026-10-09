@@ -79,12 +79,17 @@ fn job() {
         Err(e) => println!("  a package named after the shell's row: refused ({e})"),
         Ok(ran) => red.push(format!("a package named after the shell's row ran: {ran:?}")),
     }
-    fs::write(HOME, b"no folder").expect("plant a file where the app's folder goes");
-    match Command::new(PROGRAM).arg(APP).output() {
-        Err(e) => println!("  a package whose folder is a file: refused ({e})"),
-        Ok(ran) => red.push(format!("a package whose folder is a file ran: {ran:?}")),
+    // A launch that went ahead above may have left a folder there.
+    match fs::write(HOME, b"no folder") {
+        Err(e) => red.push(format!("no file could be planted where the app's folder goes: {e}")),
+        Ok(()) => {
+            match Command::new(PROGRAM).arg(APP).output() {
+                Err(e) => println!("  a package whose folder is a file: refused ({e})"),
+                Ok(ran) => red.push(format!("a package whose folder is a file ran: {ran:?}")),
+            }
+            fs::remove_file(HOME).expect("take the planted file away");
+        }
     }
-    fs::remove_file(HOME).expect("take the planted file away");
 
     let ran = Command::new(PROGRAM).arg(APP).output().expect("launch the package through the launcher");
     print!("{}", String::from_utf8_lossy(&ran.stdout));
