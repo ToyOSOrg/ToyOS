@@ -18,7 +18,7 @@ use crate::header;
 use crate::sockopt::{self, Kept, Refusal};
 
 const SOCKET_H: &str = include_str!("../../../userland/libc/include/sys/socket.h");
-const IN_H: &str = include_str!("../../../userland/libc/include/netinet/in.h");
+const TCP_H: &str = include_str!("../../../userland/libc/include/netinet/tcp.h");
 
 unsafe extern "C" {
     fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const u8, len: u32) -> c_int;
@@ -40,7 +40,7 @@ const UNWRITTEN: u8 = 0xAA;
 fn libc_numbers(option: Kept) -> (c_int, c_int) {
     match option {
         Kept::Broadcast => (header::int(SOCKET_H, "SOL_SOCKET"), header::int(SOCKET_H, "SO_BROADCAST")),
-        Kept::NoDelay => (header::int(SOCKET_H, "IPPROTO_TCP"), header::int(IN_H, "TCP_NODELAY")),
+        Kept::NoDelay => (header::int(SOCKET_H, "IPPROTO_TCP"), header::int(TCP_H, "TCP_NODELAY")),
     }
 }
 
