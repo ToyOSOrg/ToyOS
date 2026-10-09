@@ -191,6 +191,22 @@ fn main() {
                 }
             });
             say(Line::Gateway(neighbour(&ask())));
+            // Measurement branch only: the card's ring counts after the
+            // anchors' connects, numbers alone, on a line the rows do not read.
+            let ring = ask();
+            let count = |key: &str| match ring.get(key) {
+                Some(Value::U64(n)) => n.to_string(),
+                _ => "none".to_string(),
+            };
+            println!(
+                "ring: transmit.full={} transmit.wake_armed={} transmit.wake_taken={} descriptors.sent={} wire.sent={} descriptors.stranded={}",
+                count("net.transmit.full"),
+                count("net.transmit.wake_armed"),
+                count("net.transmit.wake_taken"),
+                count("net.descriptors.sent"),
+                count("net.wire.sent"),
+                count("net.descriptors.stranded"),
+            );
         }
     }
     say(Line::Done);
