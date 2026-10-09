@@ -1,6 +1,8 @@
 /* A TCP_NODELAY set on a stream socket before connect is kept and holds for
-   the connection, and one cleared stays cleared. argv: the address and the
-   port of a host that accepts and holds each connection. */
+   the connection, and one cleared stays cleared. A listener's set is refused:
+   netstack has no option for one to hand the connections it accepts, where a
+   host keeps it and they begin with it. argv: the address and the port of a
+   host that accepts and holds each connection. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -52,13 +54,16 @@ int main(int argc, char **argv) {
     said("connect", connect(u, (struct sockaddr *)&peer, sizeof peer), 0);
     said("read after connect", nodelay(u), 0);
 
-    int d = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in any;
+    memset(&any, 0, sizeof any);
+    any.sin_family = AF_INET;
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    said("bind a third socket", bind(l, (struct sockaddr *)&any, sizeof any), 0);
+    said("listen on it", listen(l, 1), 0);
     errno = 0;
-    said("set on a datagram socket", setsockopt(d, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), -1);
-    said("which is invalid at that socket", errno == EINVAL, 1);
-    errno = 0;
-    said("nor read from one", nodelay(d), -1);
-    said("for the same reason", errno == EINVAL, 1);
+    said("set on the listener", setsockopt(l, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), -1);
+    said("which is refused as not connected", errno == ENOTCONN, 1);
+    said("read from the listener", nodelay(l), 0);
 
     if (wrong) {
         printf("nodelay_kept: %d wrong\n", wrong);

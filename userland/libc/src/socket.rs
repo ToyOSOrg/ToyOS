@@ -7,7 +7,10 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errno::{EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOSPC, ENOTCONN, ETIMEDOUT};
+use crate::errno::{
+    EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT, ENOSPC,
+    ENOTCONN, EOPNOTSUPP, ETIMEDOUT,
+};
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::sockopt::{self, Kept};
 
@@ -122,8 +125,7 @@ unsafe fn fill_sockaddr(addr: *mut Sockaddr, addrlen: *mut SocklenT, ip: [u8; 4]
     if addr.is_null() || addrlen.is_null() {
         return;
     }
-    (addr as *mut SockaddrIn).write(SockaddrIn::new(ip, port));
-    *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+    SockaddrIn::new(ip, port).answer(addr as *mut u8, addrlen);
 }
 
 /// Bind a datagram socket netstack does not hold yet, handing over a
@@ -549,13 +551,9 @@ fn option_errno(refusal: sockopt::Refusal) -> i32 {
     match refusal {
         sockopt::Refusal::Short => EINVAL,
         sockopt::Refusal::Fault => EFAULT,
+        sockopt::Refusal::NoSuchOption => ENOPROTOOPT,
+        sockopt::Refusal::NotSupported => EOPNOTSUPP,
     }
-}
-
-/// POSIX's `EINVAL`, an option invalid at the socket's level: TCP's are no
-/// datagram socket's.
-fn tcp_option_of_a_datagram_socket(entry: &SocketEntry, option: Option<Kept>) -> bool {
-    option == Some(Kept::NoDelay) && matches!(entry.kind, SocketKind::Udp)
 }
 
 #[no_mangle]
@@ -576,20 +574,21 @@ pub unsafe extern "C" fn setsockopt(
     };
 
     // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
-    let Some(option) = sockopt::kept(level, optname) else { return 0 };
-    if tcp_option_of_a_datagram_socket(entry, Some(option)) {
-        set_errno(EINVAL);
-        return -1;
-    }
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), true) {
+        Ok(Some(option)) => option,
+        Ok(None) => return 0,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
     let on = match sockopt::switch(optval, optlen) {
         Ok(on) => on,
         Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
     };
     match option {
         Kept::NoDelay => {
-            // netstack holds a connection from `connect` or `accept`; a
-            // listener's id names none.
-            if entry.connected {
+            // netstack holds a connection from `connect` or `accept`, and a
+            // listener from `bind`, whose id names no connection: it refuses
+            // a listener's set, and nothing is kept for one.
+            if entry.netstack_id != 0 {
                 if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, on as u32) {
                     set_errno(net_err_to_errno(e));
                     return -1;
@@ -629,11 +628,10 @@ pub unsafe extern "C" fn getsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
-    let option = sockopt::kept(level, optname);
-    if tcp_option_of_a_datagram_socket(entry, option) {
-        set_errno(EINVAL);
-        return -1;
-    }
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), false) {
+        Ok(option) => option,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
     let value = match option {
         Some(Kept::NoDelay) => entry.nodelay as i32,
         Some(Kept::Broadcast) => entry.broadcast as i32,
@@ -781,17 +779,21 @@ pub unsafe extern "C" fn gai_strerror(_errcode: i32) -> *const u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
-    if af != AF_INET {
-        set_errno(EAFNOSUPPORT);
-        return -1;
-    }
     let text = core::slice::from_raw_parts(src, super::string::strlen(src));
-    match inaddr::dotted_quad(text) {
-        Some(ip) => {
+    match inaddr::pton(af, text) {
+        Ok(Some(ip)) => {
             ptr::copy_nonoverlapping(ip.as_ptr(), dst, 4);
             1
         }
-        None => 0,
+        Ok(None) => 0,
+        Err(refusal) => { set_errno(address_errno(refusal)); -1 }
+    }
+}
+
+fn address_errno(refusal: inaddr::Refusal) -> i32 {
+    match refusal {
+        inaddr::Refusal::Family => EAFNOSUPPORT,
+        inaddr::Refusal::Room => ENOSPC,
     }
 }
 
@@ -802,18 +804,10 @@ pub unsafe extern "C" fn inet_ntop(
     dst: *mut u8,
     size: SocklenT,
 ) -> *const u8 {
-    if af != AF_INET {
-        set_errno(EAFNOSUPPORT);
-        return ptr::null();
+    match inaddr::ntop(af, src, dst, size) {
+        Ok(()) => dst as *const u8,
+        Err(refusal) => { set_errno(address_errno(refusal)); ptr::null() }
     }
-    let mut text = [0u8; 16];
-    let n = inaddr::dotted_text((src as *const [u8; 4]).read(), &mut text);
-    if n as u32 >= size {
-        set_errno(ENOSPC);
-        return ptr::null();
-    }
-    ptr::copy_nonoverlapping(text.as_ptr(), dst, n + 1);
-    dst as *const u8
 }
 
 #[no_mangle]

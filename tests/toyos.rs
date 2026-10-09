@@ -2919,22 +2919,14 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
-    const LEASED: &str = "netstack: DHCP: lease ";
     let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
     let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
     // Ends with the process: a guest that never dials leaves it in `accept`.
     thread::spawn(move || server.incoming().for_each(drop));
-    // A second that holds what it accepts and reads none of it, for as long
-    // as the process lives.
-    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
-    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
-    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    let holding = holding_server()?;
 
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/netcase");
-    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], BootOptions::default());
-    let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)])?;
     let result =
         qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
@@ -2949,19 +2941,37 @@ fn netstack_socket_churn() -> Result<(), String> {
     Ok(())
 }
 
+/// A host server that holds each connection it accepts and reads none of it,
+/// for as long as the process lives: its port. A guest that never dials
+/// leaves it in `accept`.
+fn holding_server() -> Result<u16, String> {
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
+    let port = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
+    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    Ok(port)
+}
+
+/// Boot `tests/netcase` with these binaries staged, to netstack's lease: its
+/// jobs name their peer by an address.
+fn boot_netcase(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<QemuInstance, String> {
+    const LEASED: &str = "netstack: DHCP: lease ";
+    let case = compile::repo_root().join("tests/netcase");
+    let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, BootOptions::default());
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    Ok(qemu)
+}
+
 /// libc's sockets as a C program uses them, on one boot of `tests/netcase`:
 /// each of its C cases dials a host server that holds what it accepts, or
 /// sends to one that answers each datagram with itself, at the address the
 /// guest's network gives the host. A case's own comparisons are its verdict.
 fn libc_sockets() -> Result<(), String> {
-    const LEASED: &str = "netstack: DHCP: lease ";
     const HOST: &str = "10.0.2.2";
-    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
-    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
-    // Each ends with the process: a guest that never dials leaves it waiting.
-    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    let holding = holding_server()?;
     let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
     let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
+    // Ends with the process, as the holding server does.
     thread::spawn(move || {
         let mut datagram = [0u8; 64];
         while let Ok((len, from)) = echo.recv_from(&mut datagram) {
@@ -2976,9 +2986,7 @@ fn libc_sockets() -> Result<(), String> {
         .iter()
         .map(|(name, _)| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
         .collect();
-    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &[], BootOptions::default());
-    let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let mut qemu = boot_netcase(&bins, &[])?;
     for (name, port) in cases {
         let result = qemu.run_test(&format!("test_c_{name} {HOST} {port}"), Duration::from_secs(120));
         if qemu::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {

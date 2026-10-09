@@ -38,6 +38,7 @@ pub(crate) const EDEADLK: i32 = 35;
 pub(crate) const ENOSYS: i32 = 38;
 pub(crate) const EOVERFLOW: i32 = 75;
 pub(crate) const EILSEQ: i32 = 84;
+pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
