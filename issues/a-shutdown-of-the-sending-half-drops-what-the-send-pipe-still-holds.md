@@ -17,7 +17,12 @@ stream that ends short with a clean FIN.
 Dropping the write end instead is the path that works: the bridge reads the
 pipe to its end and closes the socket after the last byte.
 
-Read from the code, not measured. `netstack_socket_churn`
+Measured in a guest on `main`, twice, against the host kernel's TCP behind
+QEMU's user network, with a peer that echoes what it read once the client's
+FIN arrives: a client that wrote 1,048,576 bytes and shut its sending half
+down at once read 65,536 bytes back as sent and then `ConnectionReset`, where
+the same program on a host's TCP reads all 1,048,576 and then the end.
+`netstack_socket_churn`
 (`tests/toyos-rust-tests/src/bin/netstack_socket_churn.rs`) writes into the
 pipe after the shutdown, which is the client's own error and not this.
 
