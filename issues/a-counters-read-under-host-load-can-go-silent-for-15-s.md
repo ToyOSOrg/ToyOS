@@ -138,13 +138,14 @@ the step each stopped in is not read from it:
 
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
 `src/miscompile.rs` now refuses a sysroot for) is not their cause.
-`tests/virtsmpcase`'s image was built and `virt_el1_smp` run with the fixed
-compiler and with the fault switched back on
-(`-C llvm-args=-scev-unconditional-preinc-nowrap-flags`), and every function
-compared in IR and in object code: `counters_read`, `test-runner`, `supervisor`,
-`logkeeper`, `toybox`, `kernelprobe` and the loader are byte-identical between
-the two, and the kernel differs in seven functions of `rustc_demangle`'s `v0`
-printer, a loop peeled or not, which a counters read does not call.
+`tests/virtsmpcase`'s image was built and `virt_el1_smp` run by the compiler
+before the fix and by the fixed one, each with the sysroot it built, and every
+function of the image's 124 crates compared in object code as the image build
+makes it. The two differ in six functions of `rustc_demangle`'s `v0` printer,
+a loop peeled or not, and in the sysroot's std in `fs::DirBuilder::_create`,
+which tests a count where the other tests sixteen times it; a counters read
+calls neither, and no function of `counters_read`, `test-runner`,
+`supervisor`, `logkeeper`, `toybox`, `kernelprobe` or the loader differs.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
