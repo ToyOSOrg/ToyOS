@@ -1449,7 +1449,7 @@ fn main() {
     if let Card::Intel(nic) = &device.nic {
         nic.accept_multicast(toyos_mdns::GROUP_MAC);
     }
-    let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut iface, &mut socket_set, resolve::random_u16);
+    let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut iface, &mut socket_set);
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);

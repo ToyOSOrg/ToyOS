@@ -70,7 +70,10 @@
 //!   the ten seconds before it is probed on at once, as §9 asks. So a peer's
 //!   messages buy at most one probing in five seconds, for as long as it
 //!   sends them, and the name is held again when it stops.
-//! - A lost name sends nothing and reads nothing until a link after none.
+//! - A lost name sends nothing and reads nothing until a link after none: it
+//!   stays lost after the other host has left or a forger has stopped. Two
+//!   packets from any host on the link buy that, a response that takes a held
+//!   name back to probing and a response under the probe.
 //!
 //! Where an answer goes follows the question (§5.4, §6.7):
 //!
