@@ -3368,6 +3368,7 @@ dependencies = [
  "toyos-inspect",
  "toyos-mdns",
  "toyos-tco",
+ "toyos-virtio",
 ]
 
 [[package]]
@@ -6063,6 +6064,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
  "toyos-bootmap",
+]
+
+[[package]]
+name = "toyos-virtio"
+version = "0.1.0"
+dependencies = [
+ "toyos-untrusted",
 ]
 
 [[package]]

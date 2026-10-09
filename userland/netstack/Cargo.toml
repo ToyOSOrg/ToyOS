@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-i219 = { path = "../../toyos-i219" }
+toyos-virtio = { path = "../../toyos-virtio" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }

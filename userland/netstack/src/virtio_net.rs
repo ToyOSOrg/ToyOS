@@ -2,37 +2,45 @@
 //!
 //! What the kernel keeps is the *claim*: config space, the interrupt vector it
 //! programmed into this function's MSI-X table, and the address space the
-//! function translates through. Everything below that is this file, and none of
-//! it is authority: an address written into a descriptor is one
-//! `PciDev::dma_alloc` answered, and one this driver invents instead is refused
-//! at the unit and recorded against this process.
+//! function translates through. Everything below that is this file and
+//! `toyos-virtio`, and none of it is authority: an address written into a
+//! descriptor is one `PciDev::dma_alloc` answered, and one this driver invents
+//! instead is refused at the unit and recorded against this process.
 //!
-//! **The device is not trusted, and neither is a used-ring element it wrote.**
-//! [`Rings::parse_used`] bounds the head against the descriptor table's own
-//! length and the written length against what that chain was given; an element
-//! failing either is counted and dropped, because losing a token costs
-//! throughput and believing a bad one costs memory. The device is on the far
-//! side of the same boundary wherever the driver sits.
+//! **The transport and the rings are `toyos-virtio`'s**, where every word the
+//! device writes is bounded and every refusal is host-tested; [`Bar`] and
+//! [`Grant`] are the two implementations it is written against, one
+//! instruction deep. What is this file's is the network device (§5.1): which
+//! buffer goes with which head, the header in front of every frame, and what
+//! becomes of a refusal.
 //!
-//! Virtio 1.2 throughout: §4.1.4 for the PCI capability layout, §2.7 for the
-//! split virtqueue, §5.1 for the network device.
+//! **A used-ring element the device is not believed on is counted and
+//! dropped**, because losing a token costs throughput and believing a bad one
+//! costs memory; **a used ring that can no longer be read ends this
+//! program**, by name, because every frame after it is one that silently
+//! never arrives ([`finished`]).
+//!
+//! Virtio 1.2 throughout: §4.1.4 for the PCI capability layout, §5.1 for the
+//! network device.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{fence, Ordering};
 
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos_virtio::pci::{Layout, Live, Offer, VendorCap};
+use toyos_virtio::queue::{
+    avail_bytes, desc_bytes, Buffer, Parts, Published, Used, UsedRefusal, Virtqueue,
+};
+use toyos_virtio::{DmaBuffers, Registers};
 
 use crate::device::{KernelRefused, Latch};
 
-/// PCI's own vendor-specific capability id; virtio's four config windows are
-/// all published under it (§4.1.4).
+/// PCI's own vendor-specific capability id; virtio's config structures are all
+/// published under it (§4.1.4).
 const CAP_ID_VENDOR: u8 = 0x09;
-const CAP_COMMON_CFG: u8 = 1;
-const CAP_NOTIFY_CFG: u8 = 2;
-const CAP_ISR_CFG: u8 = 3;
-const CAP_DEVICE_CFG: u8 = 4;
 
 /// Where the capability list starts, and how far a walk may follow it. The
 /// pointer is the *device's*, so a malformed or cyclic chain ends the walk
@@ -40,47 +48,14 @@ const CAP_DEVICE_CFG: u8 = 4;
 const CAPABILITIES_PTR: u32 = 0x34;
 const MAX_CAPABILITIES: usize = 48;
 
-// Common configuration structure, §4.1.4.3.
-const COMMON_DEVICE_FEATURE_SELECT: usize = 0x00;
-const COMMON_DEVICE_FEATURE: usize = 0x04;
-const COMMON_DRIVER_FEATURE_SELECT: usize = 0x08;
-const COMMON_DRIVER_FEATURE: usize = 0x0C;
-const COMMON_MSIX_CONFIG: usize = 0x10;
-const COMMON_DEVICE_STATUS: usize = 0x14;
-const COMMON_QUEUE_SELECT: usize = 0x16;
-const COMMON_QUEUE_SIZE: usize = 0x18;
-const COMMON_QUEUE_MSIX: usize = 0x1A;
-const COMMON_QUEUE_ENABLE: usize = 0x1C;
-const COMMON_QUEUE_NOTIFY_OFF: usize = 0x1E;
-const COMMON_QUEUE_DESC: usize = 0x20;
-const COMMON_QUEUE_DRIVER: usize = 0x28;
-const COMMON_QUEUE_DEVICE: usize = 0x30;
-
-const STATUS_ACKNOWLEDGE: u32 = 1;
-const STATUS_DRIVER: u32 = 2;
-const STATUS_DRIVER_OK: u32 = 4;
-const STATUS_FEATURES_OK: u32 = 8;
-
-const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-/// §6: the device's buffer addresses are the platform's, so what translates any
-/// other function's translates this one's. A device never offered it is one no
-/// unit sees; the driver accepts it wherever it is offered, and the negotiated
-/// set is logged for a gate to read back.
-const VIRTIO_F_ACCESS_PLATFORM: u64 = 1 << 33;
+/// §5.1.3: the device has a MAC address of its own to read.
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
+/// §6, for the feature line: the bit `toyos-virtio` accepts wherever it is
+/// offered, and a gate reads back.
+const VIRTIO_F_ACCESS_PLATFORM: u64 = toyos_virtio::pci::VIRTIO_F_ACCESS_PLATFORM;
 
-/// The one MSI-X table entry the kernel programs. A device answering
-/// [`NO_VECTOR`] for it has refused the binding (§4.1.5.1.2).
+/// The one MSI-X table entry the kernel programs.
 const MSIX_ENTRY: u16 = 0;
-const NO_VECTOR: u16 = 0xFFFF;
-
-const VIRTQ_DESC_F_WRITE: u16 = 2;
-const DESC_BYTES: usize = 16;
-const AVAIL_IDX_OFF: usize = 2;
-const AVAIL_RING_OFF: usize = 4;
-const USED_IDX_OFF: usize = 2;
-const USED_RING_OFF: usize = 4;
-const USED_ELEM_BYTES: usize = 8;
 
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
@@ -103,170 +78,102 @@ pub const TX_BUF_SIZE: usize = 4096;
 /// twelve bytes with `VERSION_1`, `num_buffers` included (§5.1.6).
 pub const NET_HDR_SIZE: usize = 12;
 
-/// The grant's layout: the receive queue's three rings on a page each, the
+/// The grant's layout: the receive queue's three parts on a page each, the
 /// transmit queue's three in one page, then the frames. One grant, because
 /// every byte of it is this process's own — what a wrong offset here corrupts
 /// is this driver's memory and nobody else's.
-const OFF_RX_DESC: usize = 0x0000;
-const OFF_RX_AVAIL: usize = 0x1000;
-const OFF_RX_USED: usize = 0x2000;
-const OFF_TX_RINGS: usize = 0x3000;
+const RX_PARTS: Parts = Parts { desc: 0x0000, avail: 0x1000, used: 0x2000 };
+const TX_PARTS: Parts = Parts::contiguous(0x3000, TX_QUEUE_SIZE);
 const OFF_RX_BUFS: usize = 0x4000;
 const OFF_TX_BUFS: usize = OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE;
 const GRANT_BYTES: u64 = (OFF_TX_BUFS + TX_BUF_COUNT * TX_BUF_SIZE) as u64;
 
-const fn tx_avail_off() -> usize {
-    (TX_QUEUE_SIZE as usize * DESC_BYTES + 1) & !1
-}
-
-const fn tx_used_off() -> usize {
-    (tx_avail_off() + AVAIL_RING_OFF + TX_QUEUE_SIZE as usize * 2 + 3) & !3
-}
-
 const _: () = {
-    assert!(RX_QUEUE_SIZE as usize * DESC_BYTES <= OFF_RX_AVAIL - OFF_RX_DESC);
-    assert!(AVAIL_RING_OFF + RX_QUEUE_SIZE as usize * 2 <= OFF_RX_USED - OFF_RX_AVAIL);
-    assert!(
-        USED_RING_OFF + RX_QUEUE_SIZE as usize * USED_ELEM_BYTES <= OFF_TX_RINGS - OFF_RX_USED
-    );
-    assert!(tx_used_off() + USED_RING_OFF + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES <= 0x1000);
-    assert!(OFF_TX_RINGS + 0x1000 <= OFF_RX_BUFS);
+    assert!(desc_bytes(RX_QUEUE_SIZE) <= RX_PARTS.avail - RX_PARTS.desc);
+    assert!(avail_bytes(RX_QUEUE_SIZE) <= RX_PARTS.used - RX_PARTS.avail);
+    assert!(RX_PARTS.end(RX_QUEUE_SIZE) <= TX_PARTS.desc);
+    assert!(TX_PARTS.end(TX_QUEUE_SIZE) <= OFF_RX_BUFS);
     assert!(NET_HDR_SIZE < RX_BUF_SIZE && NET_HDR_SIZE < TX_BUF_SIZE);
 };
 
-/// One split-virtqueue descriptor (§2.7.5).
-#[repr(C)]
+/// The register window: one volatile access of the width `toyos-virtio` asks
+/// for, at an offset it has bounded.
+struct Bar(Window);
+
+impl Registers for Bar {
+    fn bytes(&self) -> usize {
+        self.0.bytes()
+    }
+
+    fn read8(&self, at: usize) -> u8 {
+        self.0.read(at)
+    }
+
+    fn read16(&self, at: usize) -> u16 {
+        self.0.read(at)
+    }
+
+    fn read32(&self, at: usize) -> u32 {
+        self.0.read(at)
+    }
+
+    fn write8(&self, at: usize, value: u8) {
+        self.0.write(at, value);
+    }
+
+    fn write16(&self, at: usize, value: u16) {
+        self.0.write(at, value);
+    }
+
+    fn write32(&self, at: usize, value: u32) {
+        self.0.write(at, value);
+    }
+}
+
+/// The DMA grant, as both queues reach their rings and this file its frames.
 #[derive(Clone, Copy)]
-struct Desc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-/// Why a used-ring element was refused. The device wrote it, so it is a claim
-/// about this driver's own memory and the only safe answer is to drop it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum UsedRefusal {
-    /// A head index past the descriptor table.
-    Head(u32),
-    /// A head this driver has no chain published at — a completion for a
-    /// buffer it has already taken back, or one it never posted.
-    NoChain(u16),
-    /// More bytes written than the chain was given.
-    Written { id: u16, len: u32, chain: u32 },
-}
-
-/// One queue's rings and the bookkeeping that says what is in flight.
-struct Rings {
-    desc: Window,
-    avail: Window,
-    used: Window,
-    size: u16,
-    last_used: u16,
-    /// Bytes the chain at each head was given, indexed by head: the one bound a
-    /// device-reported length is checked against, and 0 means no chain is
-    /// published there.
-    chain_bytes: Vec<u32>,
-    refused: u32,
-    /// Where this queue's doorbell sits, from `queue_notify_off`.
-    notify_off: u16,
-}
-
-impl Rings {
-    fn new(desc: Window, avail: Window, used: Window, size: u16) -> Self {
-        desc.zero();
-        avail.zero();
-        used.zero();
-        Self {
-            desc,
-            avail,
-            used,
-            size,
-            last_used: 0,
-            chain_bytes: vec![0; size as usize],
-            refused: 0,
-            notify_off: 0,
-        }
-    }
-
-    /// Publish a one-descriptor chain at `head` and ring the doorbell.
-    fn submit(&mut self, head: u16, addr: u64, len: u32, writable: bool, doorbell: Doorbell) {
-        self.chain_bytes[head as usize] = len;
-        let flags = if writable { VIRTQ_DESC_F_WRITE } else { 0 };
-        // One descriptor per chain, so nothing here sets `VIRTQ_DESC_F_NEXT`
-        // and `next` is never followed.
-        self.desc.write(head as usize * DESC_BYTES, Desc { addr, len, flags, next: 0 });
-
-        let avail_idx: u16 = self.avail.read(AVAIL_IDX_OFF);
-        self.avail.write(AVAIL_RING_OFF + (avail_idx % self.size) as usize * 2, head);
-        // The device must see the ring entry before the index that publishes
-        // it, and the index before the doorbell (§2.7.13).
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        self.avail.write(AVAIL_IDX_OFF, avail_idx.wrapping_add(1));
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-        doorbell.ring();
-    }
-
-    /// The next completion, or `None`. A refused element is counted and
-    /// skipped, never returned, so one bad element cannot hide the ones behind
-    /// it.
-    ///
-    /// The chain is retired here, so a device that reports the same head twice
-    /// is refused by the second report rather than handing a caller a buffer it
-    /// has already been given.
-    fn poll_used(&mut self) -> Option<(u16, u32)> {
-        loop {
-            let used_idx: u16 = self.used.read(USED_IDX_OFF);
-            if used_idx == self.last_used {
-                return None;
-            }
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            let at = USED_RING_OFF + (self.last_used % self.size) as usize * USED_ELEM_BYTES;
-            let id: u32 = self.used.read(at);
-            let len: u32 = self.used.read(at + 4);
-            self.last_used = self.last_used.wrapping_add(1);
-            match self.parse_used(id, len) {
-                Ok((head, written)) => {
-                    self.chain_bytes[head as usize] = 0;
-                    return Some((head, written));
-                }
-                Err(_) => {
-                    self.refused = self.refused.saturating_add(1);
-                    continue;
-                }
-            }
-        }
-    }
-
-    /// What a used element must satisfy. Separate from the volatile reads, so
-    /// the tests below can drive it with elements no device would send.
-    fn parse_used(&self, id: u32, len: u32) -> Result<(u16, u32), UsedRefusal> {
-        if id as usize >= self.chain_bytes.len() {
-            return Err(UsedRefusal::Head(id));
-        }
-        let id = id as u16;
-        let chain = self.chain_bytes[id as usize];
-        if chain == 0 {
-            return Err(UsedRefusal::NoChain(id));
-        }
-        if len > chain {
-            return Err(UsedRefusal::Written { id, len, chain });
-        }
-        Ok((id, len))
-    }
-}
-
-/// Where one queue's doorbell is, taken out of the notify window once.
-#[derive(Clone, Copy)]
-struct Doorbell {
+struct Grant {
     window: Window,
-    queue: u16,
+    /// Where the device reaches the grant's first byte. Not a physical address:
+    /// what the unit translates for this function and for nothing else.
+    device_base: u64,
 }
 
-impl Doorbell {
-    fn ring(self) {
-        self.window.write(0, self.queue);
+impl DmaBuffers for Grant {
+    fn bytes(&self) -> usize {
+        self.window.bytes()
+    }
+
+    fn device_addr(&self, at: usize) -> u64 {
+        self.device_base + at as u64
+    }
+
+    fn read16(&self, at: usize) -> u16 {
+        self.window.read(at)
+    }
+
+    fn read32(&self, at: usize) -> u32 {
+        self.window.read(at)
+    }
+
+    fn write16(&self, at: usize, value: u16) {
+        self.window.write(at, value);
+    }
+
+    fn write32(&self, at: usize, value: u32) {
+        self.window.write(at, value);
+    }
+
+    fn write64(&self, at: usize, value: u64) {
+        self.window.write(at, value);
+    }
+
+    fn publish(&self) {
+        fence(Ordering::Release);
+    }
+
+    fn observe(&self) {
+        fence(Ordering::Acquire);
     }
 }
 
@@ -275,32 +182,51 @@ impl Doorbell {
 /// caller.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
-    MissingCap(&'static str),
-    ResetUnanswered,
-    FeaturesRefused { offered: u64, status: u32 },
-    NoVector(&'static str),
+    /// What the device published or answered, as the transport refused it.
+    Device(toyos_virtio::pci::Refusal),
     Kernel(KernelRefused),
     /// The claim answered a configuration read it had to refuse.
     Unbounded(&'static str, u32),
 }
 
+impl From<toyos_virtio::pci::Refusal> for Refusal {
+    fn from(why: toyos_virtio::pci::Refusal) -> Self {
+        Self::Device(why)
+    }
+}
+
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingCap(what) => write!(f, "it published no usable {what}"),
-            Self::ResetUnanswered => write!(f, "it never zeroed DEVICE_STATUS for its reset"),
-            Self::FeaturesRefused { offered, status } => write!(
-                f,
-                "it refused the feature set {offered:#x} this driver accepted, leaving \
-                 DEVICE_STATUS={status:#x} without FEATURES_OK"
-            ),
-            Self::NoVector(what) => write!(f, "it refused a vector for {what}"),
+            Self::Device(why) => write!(f, "{why}"),
             Self::Kernel(why) => write!(f, "{why}"),
             Self::Unbounded(what, at) => write!(
                 f,
                 "the claim answered a {what} at {at:#x}, so it is not a claim on one \
                  function's own configuration space"
             ),
+        }
+    }
+}
+
+/// The next chain the device has finished with on `rings`, or `None`.
+///
+/// An element the device is not believed on is counted into `refused` and
+/// skipped, never returned, so one bad element cannot hide the ones behind it.
+///
+/// A used index past what this driver made available is not an element: from
+/// there on nothing in the ring can be told from a stale entry, so nothing
+/// drives this NIC from there and this dies where it can be read.
+fn finished(rings: &mut Virtqueue<Grant>, refused: &mut u32) -> Option<Used> {
+    loop {
+        match rings.poll_used() {
+            Ok(done) => return done,
+            Err(
+                UsedRefusal::Head(_) | UsedRefusal::NoChain { .. } | UsedRefusal::Written { .. },
+            ) => *refused = refused.saturating_add(1),
+            Err(why @ UsedRefusal::Jumped { .. }) => {
+                panic!("netstack: this NIC cannot be driven on — {why}")
+            }
         }
     }
 }
@@ -338,50 +264,37 @@ fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
 /// The virtio-net function, brought up and driving.
 pub struct VirtioNet {
     dev: PciDev,
-    rx_doorbell: Doorbell,
-    /// Held for their mappings' lives: every window above and below points into
-    /// one of these two.
+    device: Live<Bar>,
+    /// Held for their mappings' lives: the register window points into the
+    /// first and the grant's into the second.
     _bar: SharedMemory,
-    _grant: DmaRegion,
-    dma: Window,
-    /// Where the device reaches the grant's first byte. Not a physical address:
-    /// what the unit translates for this function and for nothing else.
-    dma_device_addr: u64,
-    rx: RefCell<Rings>,
+    _region: DmaRegion,
+    grant: Grant,
+    rx: RefCell<Virtqueue<Grant>>,
     tx: RefCell<TxQueue>,
+    /// Used-ring elements the receive queue's device was not believed on.
+    rx_refused: Cell<u32>,
     reported: Latch<u32>,
     mac: [u8; 6],
 }
 
 impl VirtioNet {
-    /// Bring the function up: the capability chain, the reset handshake, the
-    /// feature negotiation, both queues and the vector binding — in the order
-    /// virtio 1.2 §3.1.1 fixes.
+    /// Bring the function up: the capability chain, then the reset, the
+    /// feature negotiation, both queues and their vectors in the order
+    /// `toyos-virtio`'s types fix, which is virtio 1.2 §3.1.1's.
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
         let info = dev.describe().map_err(KernelRefused::on("the claim's description")).map_err(Refusal::Kernel)?;
 
         config_space_is_bounded(&dev)?;
-        let caps = Capabilities::walk(&dev);
-        let common_cap = caps.find(CAP_COMMON_CFG).ok_or(Refusal::MissingCap("COMMON_CFG"))?;
-        let notify_cap = caps.find(CAP_NOTIFY_CFG).ok_or(Refusal::MissingCap("NOTIFY_CFG"))?;
-        // Found and not used: the vector is bound, so nothing here polls the
-        // ISR status byte. Its absence still refuses the device — a chain
-        // missing it is a chain this driver did not understand.
-        let isr_cap = caps.find(CAP_ISR_CFG).ok_or(Refusal::MissingCap("ISR_CFG"))?;
-        let device_cap = caps.find(CAP_DEVICE_CFG).ok_or(Refusal::MissingCap("DEVICE_CFG"))?;
-
-        // One BAR carries all four on every virtio device in reach, and the
-        // kernel hands out a BAR at a time; a device that spread them would be
-        // refused here rather than driven half-mapped.
-        let bar = common_cap.bar;
-        if [notify_cap, isr_cap, device_cap].iter().any(|cap| cap.bar != bar) {
-            return Err(Refusal::MissingCap("its four config windows in one BAR"));
-        }
+        let layout = Layout::of(&vendor_caps(&dev))?;
+        // The kernel hands out a BAR at a time, and reports 0 bytes for one it
+        // keeps back.
+        let bar = layout.bar();
         let bar_bytes = *info
             .bar_bytes
             .get(bar as usize)
             .filter(|bytes| **bytes > 0)
-            .ok_or(Refusal::MissingCap("a BAR this claim may map"))?;
+            .ok_or(toyos_virtio::pci::Refusal::MissingCap("a BAR this claim may map"))?;
         let mapped = dev
             .map_bar(bar as u32, bar_bytes)
             .map_err(KernelRefused::on("the register window"))
@@ -390,25 +303,10 @@ impl VirtioNet {
         // `mapped`, which this struct holds for its own life.
         let window = unsafe { Window::new(mapped.as_ptr(), bar_bytes as usize) };
 
-        let common = common_cap.window(window)?;
-        let notify = notify_cap.window(window)?;
-        let device_cfg = device_cap.window(window)?;
-
-        common.write::<u32>(COMMON_DEVICE_STATUS, 0);
-        // The reset is acknowledged by the register reading back zero (§4.1.4.3.2).
-        if common.read::<u32>(COMMON_DEVICE_STATUS) != 0 {
-            return Err(Refusal::ResetUnanswered);
-        }
-        common.write::<u32>(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
-        common.write::<u32>(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-
-        common.write::<u32>(COMMON_DEVICE_FEATURE_SELECT, 0);
-        let lo: u32 = common.read(COMMON_DEVICE_FEATURE);
-        common.write::<u32>(COMMON_DEVICE_FEATURE_SELECT, 1);
-        let hi: u32 = common.read(COMMON_DEVICE_FEATURE);
-        let offered = ((hi as u64) << 32) | lo as u64;
-        let features =
-            offered & (VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM | VIRTIO_NET_F_MAC);
+        let offer = Offer::acknowledge(Bar(window), &layout)?;
+        let offered = offer.features();
+        let mut setup = offer.accept(VIRTIO_NET_F_MAC)?;
+        let features = setup.features();
         // The line the kernel's virtio drivers print, in the same shape:
         // `iommu_virtio_platform` reads it back for every virtio function the
         // machine creates.
@@ -421,90 +319,39 @@ impl VirtioNet {
             if features & VIRTIO_F_ACCESS_PLATFORM != 0 { 'y' } else { 'n' },
         );
 
-        common.write::<u32>(COMMON_DRIVER_FEATURE_SELECT, 0);
-        common.write::<u32>(COMMON_DRIVER_FEATURE, features as u32);
-        common.write::<u32>(COMMON_DRIVER_FEATURE_SELECT, 1);
-        common.write::<u32>(COMMON_DRIVER_FEATURE, (features >> 32) as u32);
-        common.write::<u32>(
-            COMMON_DEVICE_STATUS,
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
-        );
-        let answered: u32 = common.read(COMMON_DEVICE_STATUS);
-        if answered & STATUS_FEATURES_OK == 0 {
-            return Err(Refusal::FeaturesRefused { offered: features, status: answered });
-        }
-
-        let grant = dev
+        let region = dev
             .dma_alloc(GRANT_BYTES)
             .map_err(KernelRefused::on("a DMA grant"))
             .map_err(Refusal::Kernel)?;
         // SAFETY: the grant covers at least `GRANT_BYTES` — the kernel rounds
         // the request up to whole pages, never down — and lives as long as
-        // `grant`, which this struct holds.
-        let dma = unsafe { Window::new(grant.memory.as_ptr(), GRANT_BYTES as usize) };
-        dma.zero();
-        let dma_device_addr = grant.device_addr;
+        // `region`, which this struct holds.
+        let window = unsafe { Window::new(region.memory.as_ptr(), GRANT_BYTES as usize) };
+        window.zero();
+        let grant = Grant { window, device_base: region.device_addr };
 
-        let mut rx = Rings::new(
-            dma.sub(OFF_RX_DESC, RX_QUEUE_SIZE as usize * DESC_BYTES),
-            dma.sub(OFF_RX_AVAIL, AVAIL_RING_OFF + RX_QUEUE_SIZE as usize * 2),
-            dma.sub(OFF_RX_USED, USED_RING_OFF + RX_QUEUE_SIZE as usize * USED_ELEM_BYTES),
-            RX_QUEUE_SIZE,
-        );
-        let mut tx = tx_rings(dma);
-
-        setup_queue(common, RX_QUEUE, &mut rx, dma_device_addr, OFF_RX_DESC, OFF_RX_AVAIL, OFF_RX_USED)?;
-        setup_queue(
-            common,
-            TX_QUEUE,
-            &mut tx,
-            dma_device_addr,
-            OFF_TX_RINGS,
-            OFF_TX_RINGS + tx_avail_off(),
-            OFF_TX_RINGS + tx_used_off(),
-        )?;
-
-        // The vector the kernel already put in the table, named to the device.
-        // After the queues are configured and before they are enabled, so no
-        // queue is ever live with no vector bound to it.
-        common.write::<u16>(COMMON_MSIX_CONFIG, MSIX_ENTRY);
-        if common.read::<u16>(COMMON_MSIX_CONFIG) == NO_VECTOR {
-            return Err(Refusal::NoVector("its configuration-change interrupt"));
-        }
-        for (queue, what) in [(RX_QUEUE, "the receive queue"), (TX_QUEUE, "the transmit queue")] {
-            common.write::<u16>(COMMON_QUEUE_SELECT, queue);
-            common.write::<u16>(COMMON_QUEUE_MSIX, MSIX_ENTRY);
-            if common.read::<u16>(COMMON_QUEUE_MSIX) == NO_VECTOR {
-                return Err(Refusal::NoVector(what));
-            }
-        }
-        for queue in [RX_QUEUE, TX_QUEUE] {
-            common.write::<u16>(COMMON_QUEUE_SELECT, queue);
-            common.write::<u16>(COMMON_QUEUE_ENABLE, 1);
-        }
+        let rx = Virtqueue::new(grant, RX_QUEUE, RX_QUEUE_SIZE, RX_PARTS);
+        let tx = TxQueue::new(grant);
+        // The vector the kernel already put in the table, named to the device
+        // for each of its sources.
+        setup.config_vector(MSIX_ENTRY)?;
+        setup.enable(&rx, MSIX_ENTRY)?;
+        setup.enable(&tx.rings, MSIX_ENTRY)?;
 
         let mut mac = [0u8; 6];
-        for (i, byte) in mac.iter_mut().enumerate() {
-            *byte = device_cfg.read::<u8>(i);
+        for (at, byte) in mac.iter_mut().enumerate() {
+            *byte = setup.device_read8(at)?;
         }
-
-        let rx_doorbell = doorbell(notify, notify_cap.notify_multiplier, rx.notify_off, RX_QUEUE);
-        let tx_doorbell = doorbell(notify, notify_cap.notify_multiplier, tx.notify_off, TX_QUEUE);
-
-        common.write::<u32>(
-            COMMON_DEVICE_STATUS,
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
-        );
 
         let nic = Self {
             dev,
-            rx_doorbell,
+            device: setup.driver_ok(),
             _bar: mapped,
-            _grant: grant,
-            dma,
-            dma_device_addr,
+            _region: region,
+            grant,
             rx: RefCell::new(rx),
-            tx: RefCell::new(TxQueue::new(tx, dma, dma_device_addr, tx_doorbell)),
+            tx: RefCell::new(tx),
+            rx_refused: Cell::new(0),
             reported: Latch::default(),
             mac,
         };
@@ -523,7 +370,7 @@ impl VirtioNet {
     /// Say what this driver has refused, when the count has moved. Once a
     /// pass, never per element: a burst of refusals is one line.
     pub fn report(&self) {
-        let refused = self.rx.borrow().refused + self.tx.borrow().rings.refused;
+        let refused = self.rx_refused.get() + self.tx.borrow().refused;
         if self.reported.moved(refused).is_none() {
             return;
         }
@@ -550,30 +397,26 @@ impl VirtioNet {
 
     /// Post receive buffer `index` on its own head.
     fn post_rx(&self, index: usize) {
-        let head = index as u16;
         let at = OFF_RX_BUFS + index * RX_BUF_SIZE;
         // The header is zeroed before the buffer is published: what the device
         // writes there is its own, and what it leaves behind is this driver's.
-        self.dma.sub(at, NET_HDR_SIZE).zero();
-        self.rx.borrow_mut().submit(
-            head,
-            self.dma_device_addr + at as u64,
-            RX_BUF_SIZE as u32,
-            true,
-            self.rx_doorbell,
-        );
+        self.grant.window.sub(at, NET_HDR_SIZE).zero();
+        let buffer = Buffer::writable(self.grant.device_addr(at), RX_BUF_SIZE as u32);
+        let published = self.rx.borrow_mut().publish(index as u16, &[buffer]);
+        self.device.notify(published);
     }
 
     /// The next received frame as `(buffer index, frame bytes)`, the virtio
     /// header excluded, or `None`.
     pub fn poll_rx(&self) -> Option<(usize, usize)> {
         loop {
-            let polled = self.rx.borrow_mut().poll_used();
-            let (head, written) = polled?;
-            // `parse_used` bounded the head by the descriptor table's length,
-            // which is this queue's size, which is the buffer count.
-            let index = head as usize;
-            let total = written as usize;
+            let mut refused = self.rx_refused.get();
+            let done = finished(&mut self.rx.borrow_mut(), &mut refused);
+            self.rx_refused.set(refused);
+            // The head is below this queue's size, which is the buffer count,
+            // and `written` no more than the one buffer its chain is.
+            let Used { head, written } = done?;
+            let (index, total) = (head as usize, written as usize);
             if total <= NET_HDR_SIZE {
                 // Shorter than its own header is nothing to hand up, and the
                 // buffer goes straight back.
@@ -595,7 +438,7 @@ impl VirtioNet {
 
     /// Where a received frame's bytes are, past the virtio header.
     pub fn rx_frame(&self, index: usize, len: usize) -> &[u8] {
-        let window = self.dma.sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
+        let window = self.grant.window.sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — its used-ring
         // element is what said so — and it is not posted again until
@@ -612,7 +455,9 @@ impl VirtioNet {
     /// Fill a transmit buffer with a `len`-byte frame and hand it to the
     /// device ([`TxQueue::send`]).
     pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
-        self.tx.borrow_mut().send(len, fill)
+        let (result, published) = self.tx.borrow_mut().send(len, fill);
+        self.device.notify(published);
+        result
     }
 
     /// The claim, for the poller: readable means an interrupt has landed.
@@ -621,49 +466,45 @@ impl VirtioNet {
     }
 }
 
-/// The transmit queue's three rings, where the grant's layout puts them.
-fn tx_rings(dma: Window) -> Rings {
-    Rings::new(
-        dma.sub(OFF_TX_RINGS, TX_QUEUE_SIZE as usize * DESC_BYTES),
-        dma.sub(OFF_TX_RINGS + tx_avail_off(), AVAIL_RING_OFF + TX_QUEUE_SIZE as usize * 2),
-        dma.sub(OFF_TX_RINGS + tx_used_off(), USED_RING_OFF + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES),
-        TX_QUEUE_SIZE,
-    )
-}
-
 /// The transmit queue: its rings, the heads nothing is in flight on, and the
 /// buffer each head owns. Everything in it is memory, so the host drives it
 /// with a plain allocation for the grant.
 struct TxQueue {
-    rings: Rings,
+    rings: Virtqueue<Grant>,
     /// Transmit heads nothing is in flight on.
     free: Vec<u16>,
-    /// The grant, and where the device reaches its first byte.
-    dma: Window,
-    dma_device_addr: u64,
-    doorbell: Doorbell,
+    grant: Grant,
+    /// Used-ring elements the device was not believed on.
+    refused: u32,
 }
 
 impl TxQueue {
-    fn new(rings: Rings, dma: Window, dma_device_addr: u64, doorbell: Doorbell) -> Self {
-        Self { rings, free: (0..TX_QUEUE_SIZE).rev().collect(), dma, dma_device_addr, doorbell }
+    fn new(grant: Grant) -> Self {
+        Self {
+            rings: Virtqueue::new(grant, TX_QUEUE, TX_QUEUE_SIZE, TX_PARTS),
+            free: (0..TX_QUEUE_SIZE).rev().collect(),
+            grant,
+            refused: 0,
+        }
     }
 
     /// How many frames the queue takes now, every head the device has
     /// finished with taken back first.
     ///
-    /// **Room returning is an interrupt already**: this driver negotiates no
+    /// **Room returning is an interrupt already**: `toyos-virtio` accepts no
     /// `VIRTIO_F_EVENT_IDX` and leaves the transmit queue's `avail.flags` 0,
     /// and §2.7.7 has the device notify for every buffer it uses on such a
     /// queue.
     fn room(&mut self) -> usize {
-        while let Some((head, _)) = self.rings.poll_used() {
-            self.free.push(head);
+        while let Some(done) = finished(&mut self.rings, &mut self.refused) {
+            self.free.push(done.head);
         }
         self.free.len()
     }
 
-    /// Fill a transmit buffer with a `len`-byte frame and hand it to the device.
+    /// Fill a transmit buffer with a `len`-byte frame and make it available:
+    /// the device is told of it by whoever holds the transport, with what this
+    /// answers.
     ///
     /// **The buffer is the head's own and the two are taken together**, so
     /// nothing is written into a buffer the device is reading: a head leaves
@@ -672,7 +513,7 @@ impl TxQueue {
     ///
     /// Non-blocking, and for a caller [`Self::room`] answered: a frame
     /// offered with no head free is a caller that did not ask.
-    fn send<R>(&mut self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
+    fn send<R>(&mut self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> (R, Published) {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
             "netstack: a {len}-byte frame does not fit this NIC's transmit buffer"
@@ -683,170 +524,88 @@ impl TxQueue {
             .expect("netstack: a frame was offered to a transmit queue that had said it has no room");
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
-        self.dma.sub(at, NET_HDR_SIZE).zero();
-        let window = self.dma.sub(at + NET_HDR_SIZE, len);
+        self.grant.window.sub(at, NET_HDR_SIZE).zero();
+        let window = self.grant.window.sub(at + NET_HDR_SIZE, len);
         // SAFETY: the window is inside the grant, which lives as long as the
         // driver that holds this queue; the device is not reading it, because
         // this head is out of `free` and its descriptor is published only
         // after `fill` returns.
         let result = fill(unsafe { std::slice::from_raw_parts_mut(window.as_ptr(), len) });
-        self.rings.submit(
-            head,
-            self.dma_device_addr + at as u64,
-            (NET_HDR_SIZE + len) as u32,
-            false,
-            self.doorbell,
-        );
-        result
+        let frame = Buffer::readable(self.grant.device_addr(at), (NET_HDR_SIZE + len) as u32);
+        (result, self.rings.publish(head, &[frame]))
     }
 }
 
-/// Where a queue's doorbell is, from `queue_notify_off` and the multiplier the
-/// notify capability published (§4.1.4.4).
-fn doorbell(notify: Window, multiplier: u32, notify_off: u16, queue: u16) -> Doorbell {
-    let at = notify_off as usize * multiplier as usize;
-    Doorbell { window: notify.sub(at, 2), queue }
-}
-
-/// Program one queue's size and ring addresses, and read back where its
-/// doorbell sits. Does not enable it: a queue must have its vector first.
-fn setup_queue(
-    common: Window,
-    index: u16,
-    rings: &mut Rings,
-    dma_device_addr: u64,
-    desc_off: usize,
-    avail_off: usize,
-    used_off: usize,
-) -> Result<(), Refusal> {
-    common.write::<u16>(COMMON_QUEUE_SELECT, index);
-    let max: u16 = common.read(COMMON_QUEUE_SIZE);
-    if max < rings.size {
-        // The device's own bound against rings sized at compile time: a device
-        // offering fewer is one this layout does not fit, and shrinking to it
-        // would silently change how many buffers are posted.
-        return Err(Refusal::MissingCap("a queue as deep as this driver's rings"));
-    }
-    common.write::<u16>(COMMON_QUEUE_SIZE, rings.size);
-    common.write::<u64>(COMMON_QUEUE_DESC, dma_device_addr + desc_off as u64);
-    common.write::<u64>(COMMON_QUEUE_DRIVER, dma_device_addr + avail_off as u64);
-    common.write::<u64>(COMMON_QUEUE_DEVICE, dma_device_addr + used_off as u64);
-    rings.notify_off = common.read(COMMON_QUEUE_NOTIFY_OFF);
-    Ok(())
-}
-
-/// One virtio PCI capability, as read out of config space.
-#[derive(Clone, Copy)]
-struct Cap {
-    cfg_type: u8,
-    bar: u8,
-    offset: u32,
-    length: u32,
-    notify_multiplier: u32,
-}
-
-impl Cap {
-    /// The sub-window this capability names inside its BAR's mapping.
-    ///
-    /// Offset and length are the *device's*, so both are checked against the
-    /// window before a sub-window is taken: a capability naming bytes past the
-    /// BAR refuses the device rather than being clamped to one that fits.
-    fn window(&self, bar: Window) -> Result<Window, Refusal> {
-        let length = (self.length as usize).max(4);
-        match (self.offset as usize).checked_add(length) {
-            Some(end) if end <= bar.bytes() => Ok(bar.sub(self.offset as usize, length)),
-            _ => Err(Refusal::MissingCap("a capability inside its own BAR")),
+/// The vendor capabilities a function published, in its list's order, walked
+/// once.
+fn vendor_caps(dev: &PciDev) -> Vec<VendorCap> {
+    let mut found = Vec::new();
+    let mut seen = 0usize;
+    let Ok(first) = dev.config_read(CAPABILITIES_PTR, RegWidth::U8) else {
+        return found;
+    };
+    let mut next = first;
+    // The pointer is the device's: a chain that does not terminate, or one
+    // pointing outside the header, ends the walk rather than running off
+    // the window or for ever.
+    while next >= 0x40 && next < 0x100 && seen < MAX_CAPABILITIES {
+        seen += 1;
+        let Ok(id) = dev.config_read(next, RegWidth::U8) else { break };
+        if id as u8 == CAP_ID_VENDOR {
+            let read = |at: u32, width| dev.config_read(next + at, width).unwrap_or(0);
+            found.push(VendorCap {
+                cfg_type: read(3, RegWidth::U8) as u8,
+                bar: read(4, RegWidth::U8) as u8,
+                offset: read(8, RegWidth::U32),
+                length: read(12, RegWidth::U32),
+                notify_off_multiplier: read(16, RegWidth::U32),
+            });
         }
+        let Ok(link) = dev.config_read(next + 1, RegWidth::U8) else { break };
+        next = link;
     }
+    found
 }
 
-/// The vendor capabilities a function published, walked once.
-struct Capabilities(Vec<Cap>);
-
-impl Capabilities {
-    fn walk(dev: &PciDev) -> Self {
-        let mut found = Vec::new();
-        let mut seen = 0usize;
-        let Ok(first) = dev.config_read(CAPABILITIES_PTR, RegWidth::U8) else {
-            return Self(found);
-        };
-        let mut next = first;
-        // The pointer is the device's: a chain that does not terminate, or one
-        // pointing outside the header, ends the walk rather than running off
-        // the window or for ever.
-        while next >= 0x40 && next < 0x100 && seen < MAX_CAPABILITIES {
-            seen += 1;
-            let Ok(id) = dev.config_read(next, RegWidth::U8) else { break };
-            if id as u8 == CAP_ID_VENDOR {
-                let read = |at: u32, width| dev.config_read(next + at, width).unwrap_or(0);
-                found.push(Cap {
-                    cfg_type: read(3, RegWidth::U8) as u8,
-                    bar: read(4, RegWidth::U8) as u8,
-                    offset: read(8, RegWidth::U32),
-                    length: read(12, RegWidth::U32),
-                    notify_multiplier: read(16, RegWidth::U32),
-                });
-            }
-            let Ok(link) = dev.config_read(next + 1, RegWidth::U8) else { break };
-            next = link;
-        }
-        Self(found)
-    }
-
-    /// The first capability of `cfg_type` — the one §4.1.4.1 says to use where
-    /// a device publishes several.
-    fn find(&self, cfg_type: u8) -> Option<Cap> {
-        self.0.iter().find(|cap| cap.cfg_type == cfg_type).copied()
-    }
-}
-
-/// What a used-ring element must satisfy, driven with elements no device would
-/// send.
-///
-/// **The device is on the far side of a trust boundary and moving the driver
-/// out of the kernel did not change that.** Each of these was a way to make the
-/// old kernel-side driver act on a number the device chose; the arms are the
-/// same and the code they guard is this file's now.
+/// The transmit queue's room, over a plain allocation for the grant. What a
+/// used-ring element must satisfy is `toyos-virtio`'s, and tested there.
 #[cfg(test)]
 mod tests {
+    use toyos_virtio::queue::{AVAIL_ENTRY_BYTES, DESC_BYTES, RING_ENTRIES, USED_ELEM_BYTES};
+
     use super::*;
 
-    /// Rings over a plain allocation. `parse_used` reads none of them — only
-    /// `chain_bytes` and `size` — so what they point at does not matter.
-    fn rings(size: u16) -> Rings {
-        let backing = vec![0u8; 0x1000].leak();
-        // SAFETY: `leak` gives the allocation the `'static` lifetime the window
-        // needs, and nothing here reads or writes through it.
-        let window = unsafe { Window::new(backing.as_mut_ptr(), backing.len()) };
-        Rings::new(window.sub(0, 0x400), window.sub(0x400, 0x400), window.sub(0x800, 0x400), size)
+    const DEVICE_BASE: u64 = 0x4000_0000;
+
+    /// A transmit queue over a plain allocation the size of the grant.
+    fn queue() -> TxQueue {
+        let backing = vec![0u64; GRANT_BYTES as usize / 8].leak();
+        // SAFETY: `leak` gives the allocation the `'static` lifetime the
+        // window needs, and nothing but this queue and the test reaches it.
+        let window = unsafe { Window::new(backing.as_mut_ptr().cast(), GRANT_BYTES as usize) };
+        TxQueue::new(Grant { window, device_base: DEVICE_BASE })
     }
 
-    /// A transmit queue over a plain allocation the size of the grant, and
-    /// the doorbell a write to which nothing hears.
-    fn queue() -> TxQueue {
-        let grant = vec![0u8; GRANT_BYTES as usize].leak();
-        let bell = vec![0u8; 2].leak();
-        // SAFETY: `leak` gives both allocations the `'static` lifetime the
-        // windows need, and nothing but this queue and the test reaches them.
-        let (dma, bell) = unsafe {
-            (Window::new(grant.as_mut_ptr(), grant.len()), Window::new(bell.as_mut_ptr(), bell.len()))
-        };
-        TxQueue::new(tx_rings(dma), dma, 0x4000_0000, Doorbell { window: bell, queue: TX_QUEUE })
+    /// The head in available-ring entry `nth` (§2.7.6).
+    fn made_available(queue: &TxQueue, nth: u16) -> u16 {
+        let entry = (nth % TX_QUEUE_SIZE) as usize;
+        queue.grant.window.read(TX_PARTS.avail + RING_ENTRIES + entry * AVAIL_ENTRY_BYTES)
     }
 
     /// The device, finishing with the `count` oldest chains it was given and
     /// answering their heads (§2.7.8).
     fn device_uses(queue: &TxQueue, count: u16) -> Vec<u16> {
-        let rings = &queue.rings;
-        let used_idx: u16 = rings.used.read(USED_IDX_OFF);
+        let ring = queue.grant.window;
+        let used_idx: u16 = ring.read(TX_PARTS.used + 2);
         (0..count)
             .map(|nth| {
                 let at = used_idx.wrapping_add(nth);
-                let head: u16 = rings.avail.read(AVAIL_RING_OFF + (at % rings.size) as usize * 2);
-                let element = USED_RING_OFF + (at % rings.size) as usize * USED_ELEM_BYTES;
-                rings.used.write(element, head as u32);
-                rings.used.write(element + 4, 0u32);
-                rings.used.write(USED_IDX_OFF, at.wrapping_add(1));
+                let head = made_available(queue, at);
+                let element =
+                    TX_PARTS.used + RING_ENTRIES + (at % TX_QUEUE_SIZE) as usize * USED_ELEM_BYTES;
+                ring.write(element, head as u32);
+                ring.write(element + 4, 0u32);
+                ring.write(TX_PARTS.used + 2, at.wrapping_add(1));
                 head
             })
             .collect()
@@ -862,18 +621,19 @@ mod tests {
         let mut published = 0u8;
         while queue.room() > 0 {
             assert!(published < TX_QUEUE_SIZE as u8 * 2, "the transmit queue never filled");
-            queue.send(60, |frame| frame.fill(published + 1));
+            let ((), told) = queue.send(60, |frame| frame.fill(published + 1));
+            assert_eq!(told.queue(), TX_QUEUE);
             published += 1;
         }
         assert_eq!(published as u16, TX_QUEUE_SIZE);
-        let avail_idx: u16 = queue.rings.avail.read(AVAIL_IDX_OFF);
-        assert_eq!(avail_idx, TX_QUEUE_SIZE);
+        let ring = queue.grant.window;
+        assert_eq!(ring.read::<u16>(TX_PARTS.avail + 2), TX_QUEUE_SIZE);
         for nth in 0..TX_QUEUE_SIZE {
-            let head: u16 = queue.rings.avail.read(AVAIL_RING_OFF + nth as usize * 2);
-            let chain: Desc = queue.rings.desc.read(head as usize * DESC_BYTES);
-            assert_eq!(chain.len as usize, NET_HDR_SIZE + 60);
-            let buffer = queue.dma.sub((chain.addr - queue.dma_device_addr) as usize, chain.len as usize);
-            let bytes: Vec<u8> = (0..chain.len as usize).map(|at| buffer.read::<u8>(at)).collect();
+            let chain = TX_PARTS.desc + made_available(&queue, nth) as usize * DESC_BYTES;
+            let (addr, len): (u64, u32) = (ring.read(chain), ring.read(chain + 8));
+            assert_eq!(len as usize, NET_HDR_SIZE + 60);
+            let buffer = ring.sub((addr - DEVICE_BASE) as usize, len as usize);
+            let bytes: Vec<u8> = (0..len as usize).map(|at| buffer.read::<u8>(at)).collect();
             assert_eq!(bytes[..NET_HDR_SIZE], [0; NET_HDR_SIZE]);
             assert_eq!(bytes[NET_HDR_SIZE..], [nth as u8 + 1; 60]);
         }
@@ -882,10 +642,10 @@ mod tests {
         assert_eq!(queue.room(), 3);
         // The next frame goes out on a head the device gave back, and on no
         // head still in flight.
-        queue.send(60, |frame| frame.fill(0xEE));
-        let reused: u16 = queue.rings.avail.read(AVAIL_RING_OFF + (TX_QUEUE_SIZE % queue.rings.size) as usize * 2);
-        assert!(back.contains(&reused));
+        let _ = queue.send(60, |frame| frame.fill(0xEE));
+        assert!(back.contains(&made_available(&queue, TX_QUEUE_SIZE)));
         assert_eq!(queue.room(), 2);
+        assert_eq!(queue.refused, 0);
     }
 
     /// A frame offered to a queue that said it had no room is netstack's own
@@ -895,42 +655,27 @@ mod tests {
     fn a_frame_offered_to_a_full_transmit_queue_is_not_taken() {
         let mut queue = queue();
         while queue.room() > 0 {
-            queue.send(60, |frame| frame.fill(1));
+            let _ = queue.send(60, |frame| frame.fill(1));
         }
-        queue.send(60, |frame| frame.fill(2));
+        let _ = queue.send(60, |frame| frame.fill(2));
     }
 
+    /// An element the device is not believed on is counted and gives no head
+    /// back; a used index past every frame offered ends the program by name.
     #[test]
-    fn a_head_past_the_table_is_refused() {
-        let queue = rings(16);
-        assert_eq!(queue.parse_used(16, 4), Err(UsedRefusal::Head(16)));
-        assert_eq!(queue.parse_used(u32::MAX, 4), Err(UsedRefusal::Head(u32::MAX)));
-    }
-
-    /// A completion for a head with nothing published at it — a second report
-    /// of one buffer, which is how a device would hand the same frame up twice.
-    #[test]
-    fn a_head_with_no_chain_is_refused() {
-        let queue = rings(16);
-        assert_eq!(queue.parse_used(3, 4), Err(UsedRefusal::NoChain(3)));
-    }
-
-    /// The one that matters most: `written` becomes the length of a slice this
-    /// process hands to smoltcp, so a device claiming more than it was given
-    /// would be a read past the buffer.
-    #[test]
-    fn more_bytes_than_the_chain_was_given_is_refused() {
-        let mut queue = rings(16);
-        queue.chain_bytes[3] = 100;
-        assert_eq!(queue.parse_used(3, 100), Ok((3, 100)));
-        assert_eq!(queue.parse_used(3, 99), Ok((3, 99)));
-        assert_eq!(
-            queue.parse_used(3, 101),
-            Err(UsedRefusal::Written { id: 3, len: 101, chain: 100 })
-        );
-        assert_eq!(
-            queue.parse_used(3, u32::MAX),
-            Err(UsedRefusal::Written { id: 3, len: u32::MAX, chain: 100 })
-        );
+    #[should_panic(expected = "this NIC cannot be driven on — the used index reads 3")]
+    fn a_used_ring_that_cannot_be_read_ends_the_driver() {
+        let mut queue = queue();
+        let _ = queue.send(60, |frame| frame.fill(1));
+        let _ = queue.send(60, |frame| frame.fill(2));
+        let ring = queue.grant.window;
+        // One element for a head past the table: counted, and no room for it.
+        ring.write(TX_PARTS.used + RING_ENTRIES, 0xFFFFu32);
+        ring.write(TX_PARTS.used + 2, 1u16);
+        assert_eq!(queue.room(), TX_BUF_COUNT - 2);
+        assert_eq!(queue.refused, 1);
+        // And then more elements than frames.
+        ring.write(TX_PARTS.used + 2, 3u16);
+        queue.room();
     }
 }
