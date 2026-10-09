@@ -18,10 +18,20 @@
 //! netstack let its send pipe go at the shutdown and its peer sends nothing,
 //! so nothing but the kernel's word on its receive pipe's other end can tell
 //! netstack it is gone.
+//!
+//! A listener and a datagram socket whose owner drops its pipe ends with no
+//! close request, and no peer near either: the kernel's word on the pipe's
+//! other end is all that ends them, and netstack's count of each returns.
+//!
+//! Last, connects to the holding server until netstack refuses one: it holds
+//! as many places as it said it has, and the connect past them is answered
+//! `ResourceExhausted`. Last because the stack keeps each of those
+//! connections' places until it has finished them with a peer that never
+//! ends its half.
 
 use std::time::{Duration, Instant};
 
-use toyos::net::{MsgType, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse};
+use toyos::net::{MsgType, NetError, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse};
 use toyos::OwnedHandle;
 use toyos_inspect::{Value, NET};
 
@@ -65,6 +75,39 @@ fn left_after_a_shutdown(port: u16) {
     toyos::net::tcp_shutdown(conn.socket_id, 1).unwrap_or_else(|e| panic!("shutting the sending half: {e:?}"));
     drop(conn);
     returns("net.piped.live", live, "a client that shut its sending half down dropped both its ends");
+}
+
+fn owners_that_left_are_let_go() {
+    let (listeners, udp) = (count("net.sockets.listeners"), count("net.sockets.udp"));
+    let listener = toyos::net::tcp_bind([0, 0, 0, 0], 0).unwrap_or_else(|e| panic!("a listener: {e:?}"));
+    let socket = toyos::net::udp_bind([0, 0, 0, 0], 0).unwrap_or_else(|e| panic!("a datagram socket: {e:?}"));
+    assert_eq!(count("net.sockets.listeners"), listeners + 1, "netstack counts the listener it just answered");
+    assert_eq!(count("net.sockets.udp"), udp + 1, "netstack counts the datagram socket it just answered");
+    // Their pipe ends, and no close request.
+    drop(listener);
+    drop(socket);
+    returns("net.sockets.listeners", listeners, "a listener's owner dropped its wake pipe");
+    returns("net.sockets.udp", udp, "a datagram socket's owner dropped its pipes");
+}
+
+fn a_connect_past_the_places_is_refused(port: u16) {
+    let (max, held) = (count("net.places.max"), count("net.places.held"));
+    let mut kept = Vec::new();
+    let refused = loop {
+        match toyos::net::tcp_connect(HOST, port, 0) {
+            Ok(conn) => kept.push(conn),
+            Err(refusal) => break refusal,
+        }
+        assert!(kept.len() as u64 <= max, "netstack holds more connections than the {max} places it said it has");
+    };
+    assert_eq!(refused, NetError::ResourceExhausted, "the connect past netstack's places");
+    assert_eq!(
+        kept.len() as u64,
+        max - held,
+        "netstack said it has {max} places with {held} held, and refused the connect after {} more",
+        kept.len()
+    );
+    assert_eq!(count("net.places.held"), max, "every place is held where the connect was refused");
 }
 
 /// A connection the peer holds open, whose client keeps its send end and moved
@@ -125,5 +168,9 @@ fn main() {
     println!("netstack_socket_churn: a connection whose receive end is no pipe end was reset");
     left_after_a_shutdown(holding);
     println!("netstack_socket_churn: a client that shut down and left was let go");
+    owners_that_left_are_let_go();
+    println!("netstack_socket_churn: a listener and a datagram socket whose owner left were let go");
+    a_connect_past_the_places_is_refused(holding);
+    println!("netstack_socket_churn: the connect past netstack's places was refused");
     println!("netstack_socket_churn: ok");
 }

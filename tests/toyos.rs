@@ -2989,7 +2989,8 @@ fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
 
 /// Megabytes out to the host kernel's TCP and back unchanged, and two host
 /// peers that dial the guest's listener before it accepts either, both
-/// accepted and answered: through netstack on `profile`'s card. The host
+/// accepted, answered and read their stream's end: through netstack on
+/// `profile`'s card. The host
 /// server here sends back what it reads; the guest's comparisons and each
 /// peer's answer are the verdict.
 fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
@@ -3043,6 +3044,11 @@ fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
         peer.read_exact(&mut answer).map_err(|e| format!("the peer that said {:?} was not answered: {e}", said as char))?;
         if answer[0] != said {
             return Err(format!("the peer that said {:?} was answered {:?}", said as char, answer[0] as char));
+        }
+        // The guest closed the stream behind its answer.
+        match peer.read(&mut answer) {
+            Ok(0) => {}
+            ended => return Err(format!("the peer that said {:?} read {ended:?} where its stream ends", said as char)),
         }
     }
     Ok(())

@@ -10,16 +10,25 @@
 //! argv[2] is a port the job listens on. It says so and takes no connection
 //! until its listener's pipe has given up two wakes: the harness dials twice,
 //! so the second connection arrives while the first waits to be accepted, and
-//! both are then accepted and answered with the byte each sent.
+//! both are then accepted, answered with the byte each sent and closed, which
+//! each peer reads as its stream's end.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
+use std::time::{Duration, Instant};
+
+use toyos::poller::{Poller, READABLE};
+use toyos_abi::syscall::SyscallError;
 
 /// The host, as QEMU's user network names it to a guest.
 const HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 
 /// Twice a kernel pipe, so the client's pipe fills behind the stack's window.
 const BULK: usize = 4 * 1024 * 1024;
+
+/// A hang ceiling on the two peers' wakes: the harness dials both as it reads
+/// the line that says the listener waits.
+const WOKEN: Duration = Duration::from_secs(60);
 
 /// The sequence's byte at `at`: no period a buffer's or a segment's size
 /// divides.
@@ -59,12 +68,20 @@ fn bulk(port: u16) {
 fn two_peers(port: u16) {
     let bound = toyos::net::tcp_bind([0, 0, 0, 0], port).unwrap_or_else(|e| panic!("listening on {port}: {e:?}"));
     println!("netstack_streams: the listener waits for two peers");
+    let poller = Poller::new(1);
+    let asked = Instant::now();
     let mut wakes = [0u8; 2];
     let mut woken = 0;
     while woken < wakes.len() {
-        match bound.notify.read(&mut wakes[woken..]) {
+        let left = WOKEN
+            .checked_sub(asked.elapsed())
+            .unwrap_or_else(|| panic!("the listener was woken for {woken} of two peers in {WOKEN:?}"));
+        poller.watch(&bound.notify, READABLE, 0);
+        poller.wait(1, left.as_nanos() as u64, |_| {});
+        match bound.notify.read_nonblock(&mut wakes[woken..]) {
             Ok(0) => panic!("netstack ended the listener after {woken} wake(s)"),
             Ok(n) => woken += n,
+            Err(SyscallError::WouldBlock) => {}
             Err(e) => panic!("reading the listener's wakes: {e:?}"),
         }
     }
