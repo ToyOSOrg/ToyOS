@@ -940,16 +940,14 @@ fn one_partition(
 struct DdSaid {
     bytes: u64,
     secs: f64,
-    /// In whatever unit `dd` chose for it.
-    rate: String,
 }
 
 fn dd_said(stderr: &str) -> Option<DdSaid> {
     let line = stderr.lines().find(|l| l.contains(" bytes ") && l.contains("copied"))?;
     let bytes = line.split_whitespace().next()?.parse().ok()?;
     let (_, after) = line.split_once("copied, ")?;
-    let (secs, rate) = after.split_once(" s, ")?;
-    Some(DdSaid { bytes, secs: secs.parse().ok()?, rate: rate.trim().to_string() })
+    let (secs, _) = after.split_once(" s, ")?;
+    Some(DdSaid { bytes, secs: secs.parse().ok()? })
 }
 
 /// The id and the partition GUID of every entry `efibootmgr` lists under
@@ -1104,7 +1102,7 @@ impl Driver {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
             what: "flashing the stick".to_string(),
-            status: "printed no byte count, seconds and rate".to_string(),
+            status: "printed no byte count and seconds".to_string(),
             stderr,
         })?;
         if dd.bytes != image.bytes {
@@ -1126,7 +1124,7 @@ impl Driver {
                 }
             }
         }
-        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd }))
+        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
     }
 
     /// The boot entry for *this* image's ESP. An entry carrying the label but
@@ -1650,16 +1648,15 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         preamble,
         wipe: flashed.wipe,
         flash: flashed.flash,
-        dd_secs: flashed.dd.secs,
-        dd_rate: flashed.dd.rate,
+        dd_secs: flashed.dd,
         entry,
         down,
         read_log,
         raw_log,
-        judge: 0.0,
     };
-    let boot = BootFile { back, stick, machine, phases };
-    judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), boot).map(Some)
+    println!("phases: {phases}");
+    let boot = BootFile { back, stick, machine, phases }.text();
+    judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
 }
 
 /// What [`Driver::flash`] took, on a run that was no rehearsal.
@@ -1667,25 +1664,23 @@ struct Flashed {
     wipe: f64,
     /// The write and the table read back after it.
     flash: f64,
-    dd: DdSaid,
+    /// `dd`'s own seconds for the write.
+    dd: f64,
 }
 
 /// This boot's verdict, **judged before the readback is written, and written
 /// into it**, so a judge reading the directory later reads the verdict this
-/// run returns. `boot`'s judge phase is the verdict's own.
+/// run returns.
 fn judge_and_write_readback(
     armed: &[String],
     loader: &str,
     log: &str,
     readback: Option<&Path>,
-    mut boot: BootFile,
+    boot: &str,
 ) -> Result<u64, Refusal> {
-    let began = std::time::Instant::now();
     let verdict = boot_verdict(armed, loader, log);
-    boot.phases.judge = began.elapsed().as_secs_f64();
-    println!("phases: {}", boot.phases);
     if let Some(dir) = readback {
-        write_readback(dir, loader, log, &boot.text(), &verdict_file(verdict.as_ref().err()))?;
+        write_readback(dir, loader, log, boot, &verdict_file(verdict.as_ref().err()))?;
         println!("readback written to {}", dir.display());
     }
     verdict
@@ -1882,18 +1877,16 @@ pub const VENDOR_KEY: &str = "machine_vendor";
 pub const PRODUCT_KEY: &str = "machine_product";
 pub const BIOS_KEY: &str = "machine_bios";
 
-/// [`Phases`]' keys, each in wall seconds but [`DD_RATE_KEY`], which is `dd`'s
-/// own words; [`RAW_LOG_KEY`] reads [`NOT_READ`] on a run that read no volume.
+/// [`Phases`]' keys, each in wall seconds; [`RAW_LOG_KEY`] reads [`NOT_READ`]
+/// on a run that read no volume.
 const PREAMBLE_KEY: &str = "preamble_secs";
 const WIPE_KEY: &str = "wipe_secs";
 const FLASH_KEY: &str = "flash_secs";
 const DD_SECS_KEY: &str = "dd_secs";
-const DD_RATE_KEY: &str = "dd_rate";
 const ENTRY_KEY: &str = "entry_secs";
 const DOWN_KEY: &str = "down_secs";
 const READ_LOG_KEY: &str = "read_log_secs";
 const RAW_LOG_KEY: &str = "raw_log_secs";
-const JUDGE_KEY: &str = "judge_secs";
 const NOT_READ: &str = "-";
 
 /// Where one run of the loop spent its wall time, by the host's clock, phase
@@ -1908,9 +1901,9 @@ pub struct Phases {
     pub wipe: f64,
     /// `dd` over `ssh`, and the table read back.
     pub flash: f64,
-    /// What `dd` itself said of the write.
+    /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
+    /// whichever of the wire and the stick is slower, and splits neither out.
     pub dd_secs: f64,
-    pub dd_rate: String,
     /// The boot entry, `--bootnext` and `reboot`.
     pub entry: f64,
     pub down: f64,
@@ -1918,44 +1911,40 @@ pub struct Phases {
     /// The volume read whole and the outside judge's check of it; `None` on a
     /// run without `--fat32-check`.
     pub raw_log: Option<f64>,
-    /// The loop's own verdict.
-    pub judge: f64,
 }
 
 impl fmt::Display for Phases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "preamble {:.1} s, wipe {:.1} s, flash {:.1} s (dd {:.1} s, {}), entry {:.1} s, down \
-             {:.1} s, read_log {:.1} s, raw_log ",
+            "preamble {:.1} s, wipe {:.1} s, flash {:.1} s (dd {:.1} s), entry {:.1} s, down {:.1} \
+             s, read_log {:.1} s, raw_log ",
             self.preamble,
             self.wipe,
             self.flash,
             self.dd_secs,
-            self.dd_rate,
             self.entry,
             self.down,
             self.read_log
         )?;
         match self.raw_log {
-            Some(secs) => write!(f, "{secs:.1} s")?,
-            None => f.write_str(NOT_READ)?,
+            Some(secs) => write!(f, "{secs:.1} s"),
+            None => f.write_str(NOT_READ),
         }
-        write!(f, ", judge {:.3} s", self.judge)
     }
 }
 
 /// [`READBACK_BOOT`]'s content: what the host measured about the boot, and the
 /// machine it ran on.
-struct BootFile {
-    back: u64,
-    stick: u64,
-    machine: Machine,
-    phases: Phases,
+pub struct BootFile {
+    pub back: u64,
+    pub stick: u64,
+    pub machine: Machine,
+    pub phases: Phases,
 }
 
 impl BootFile {
-    fn text(&self) -> String {
+    pub fn text(&self) -> String {
         let Self { back, stick, machine, phases } = self;
         let secs = |s: f64| format!("{s:.3}");
         let rows = [
@@ -1968,12 +1957,10 @@ impl BootFile {
             (WIPE_KEY, secs(phases.wipe)),
             (FLASH_KEY, secs(phases.flash)),
             (DD_SECS_KEY, secs(phases.dd_secs)),
-            (DD_RATE_KEY, phases.dd_rate.clone()),
             (ENTRY_KEY, secs(phases.entry)),
             (DOWN_KEY, secs(phases.down)),
             (READ_LOG_KEY, secs(phases.read_log)),
             (RAW_LOG_KEY, phases.raw_log.map_or_else(|| NOT_READ.to_string(), secs)),
-            (JUDGE_KEY, secs(phases.judge)),
         ];
         rows.iter().map(|(name, value)| format!("{name} {value}\n")).collect()
     }
@@ -1991,7 +1978,6 @@ pub fn phases(text: &str) -> Result<Phases, String> {
         wipe: secs(WIPE_KEY)?,
         flash: secs(FLASH_KEY)?,
         dd_secs: secs(DD_SECS_KEY)?,
-        dd_rate: named(DD_RATE_KEY)?,
         entry: secs(ENTRY_KEY)?,
         down: secs(DOWN_KEY)?,
         read_log: secs(READ_LOG_KEY)?,
@@ -1999,7 +1985,6 @@ pub fn phases(text: &str) -> Result<Phases, String> {
             NOT_READ => None,
             _ => Some(secs(RAW_LOG_KEY)?),
         },
-        judge: secs(JUDGE_KEY)?,
     })
 }
 
@@ -2418,12 +2403,10 @@ mod tests {
             wipe: 0.412,
             flash: 121.5,
             dd_secs: 117.234,
-            dd_rate: "3.7 MB/s".to_string(),
             entry: 2.25,
             down: 8.0,
             read_log: 1.375,
             raw_log,
-            judge: 0.002,
         }
     }
 
@@ -2444,7 +2427,7 @@ mod tests {
                 BootFile { back: 141, stick: 2, machine: t14(), phases: phased(raw_log) }.text();
             assert_eq!(phases(&boot), Ok(phased(raw_log)), "{boot}");
             assert_eq!((back_secs(&boot), stick_secs(&boot)), (Some(141), Some(2)));
-            for line in boot.lines().filter(|line| line.contains("_secs ") || line.starts_with("dd_")) {
+            for line in boot.lines().filter(|line| line.contains("_secs ")) {
                 if line.starts_with(BACK_SECS) || line.starts_with(STICK_SECS_KEY) {
                     continue;
                 }
@@ -2479,7 +2462,7 @@ mod tests {
     fn the_readback_carries_the_verdict_the_loop_returns() {
         let dir = toyos_tmpdir::TempDir::new("verdict");
         let armed = [alloc_deadline()];
-        let boot = || BootFile { back: 40, stick: 0, machine: t14(), phases: phased(None) };
+        let boot = "back_secs 40\nstick_secs 0\n";
         let written = || {
             let at = dir.join(READBACK_VERDICT);
             loop_verdict(&std::fs::read_to_string(&at).expect("the verdict is written"))
@@ -2487,7 +2470,7 @@ mod tests {
 
         let hung = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::HUNG_WITHOUT_A_RECORD);
         assert_eq!(
-            judge_and_write_readback(&armed, &hung, "", Some(dir.path()), boot()),
+            judge_and_write_readback(&armed, &hung, "", Some(dir.path()), boot),
             Err(Refusal::HungWithoutARecord)
         );
         assert_eq!(written(), Err(Refusal::HungWithoutARecord.to_string().trim_end().to_string()));
@@ -2510,12 +2493,10 @@ mod tests {
             bootlog::STOPPING
         );
         assert_eq!(
-            judge_and_write_readback(&armed, &loader, &log, Some(dir.path()), boot()),
+            judge_and_write_readback(&armed, &loader, &log, Some(dir.path()), boot),
             Ok(1151)
         );
         assert_eq!(written(), Ok(()));
-        let boot = std::fs::read_to_string(dir.join(READBACK_BOOT)).expect("the boot file");
-        assert_eq!(phases(&boot).map(|p| p.preamble), Ok(phased(None).preamble));
     }
 
     #[test]
@@ -2831,11 +2812,10 @@ mod tests {
     fn dd_is_believed_only_where_it_states_a_count() {
         let real = "44+0 records in\n44+0 records out\n\
                     184549376 bytes (185 MB, 176 MiB) copied, 12.3169 s, 15.0 MB/s\n";
-        let said = |bytes, secs, rate: &str| Some(DdSaid { bytes, secs, rate: rate.to_string() });
-        assert_eq!(dd_said(real), said(184_549_376, 12.3169, "15.0 MB/s"));
+        assert_eq!(dd_said(real), Some(DdSaid { bytes: 184_549_376, secs: 12.3169 }));
         let short = "10+0 records in\n10+0 records out\n\
                      41943040 bytes (42 MB, 40 MiB) copied, 3.1 s, 13.5 MB/s\n";
-        assert_eq!(dd_said(short), said(41_943_040, 3.1, "13.5 MB/s"));
+        assert_eq!(dd_said(short), Some(DdSaid { bytes: 41_943_040, secs: 3.1 }));
         assert_eq!(dd_said("44+0 records in\n44+0 records out\n"), None);
         assert_eq!(dd_said(""), None);
         assert_eq!(dd_said("41943040 bytes (42 MB, 40 MiB) copied\n"), None);
