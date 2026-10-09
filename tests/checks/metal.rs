@@ -213,6 +213,43 @@ pub fn a_boot_with_a_failure_of_its_own_adds_no_row() {
     );
 }
 
+static HOLED: Metal =
+    Metal { arms: &[metal::once("holed", "tests/jobcase", &[], &[])], judge: span };
+
+/// **A boot whose log is missing parts of itself is refused by name, and no
+/// row is judged on what is left**: `span` asserts no line, so it would pass
+/// over the hole. The same boot having rotated and lost nothing is read.
+pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
+    use toyos_logstream::{LOG_CONTINUES, LOG_OPENED};
+    const STEM: &str = "2026-09-29-182239";
+    let part = |part| toyos_wallclock::Part { stem: STEM, part };
+    let opened = format!("[2026-09-29 18:22:39  1.170 logkeeper] {LOG_OPENED}/log/{} (2026-09-29 18:22:39 UTC)\n", part(1));
+    let continued = |to: u32| {
+        format!(
+            "[2026-09-29 18:23:14 36.901 logkeeper] logkeeper: /log/{} reached 1048816{LOG_CONTINUES}/log/{}\n",
+            part(to - 1),
+            part(to)
+        )
+    };
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    // Parts 1, 4 and 5 came back, and no line says where 2 and 3 went.
+    plant(&dir, "holed", PANEL, &format!("{BOOTED}{opened}{}{}", continued(4), continued(5)), None);
+    plant(&dir, "passing", PANEL, &format!("{BOOTED}{opened}{}{}", continued(2), continued(3)), None);
+    let readbacks = read(&dir, &["holed", "passing"]);
+    assert_eq!(
+        readbacks["holed"].as_ref().err().map(String::as_str),
+        Some("holed's own log is missing its parts 2 to 3; no row is judged on it")
+    );
+
+    let tests = [("holed", &HOLED), ("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "a boot with a hole in its log judged green");
+    let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+    assert!(record.measured.contains_key("span.passing.us"), "{:?}", record.measured);
+    assert!(!record.measured.keys().any(|name| name.contains("holed")), "{:?}", record.measured);
+}
+
 /// Two boots under one name are judged on the first reading and recorded off
 /// neither.
 pub fn a_name_two_boots_measured_is_refused() {
@@ -325,6 +362,26 @@ pub fn a_failing_shared_member_fails_its_boot() {
         names,
         ["boot.passing.complete_ms", "boot.passing.panel_max_us", "boot.passing.panel_us"]
     );
+}
+
+/// **A boot's last job is behind every other, whichever row names it first**:
+/// a row after the one that ends the boot adds its job before the last, and
+/// two rows ending one boot on different jobs are refused by both names.
+pub fn a_boots_last_job_is_behind_every_other() {
+    const HELD: metal::Arm = metal::Arm { last: Some("hold"), ..metal::once("own", "tests/testcases", &[], &["early"]) };
+    static ENDS: Metal = Metal { arms: &[HELD], judge: |_| Ok(()) };
+    static LATER: Metal =
+        Metal { arms: &[metal::once("own", "tests/testcases", &[], &["hold", "later"])], judge: |_| Ok(()) };
+    static OTHER: Metal = Metal {
+        arms: &[metal::Arm { last: Some("later"), ..metal::once("own", "tests/testcases", &[], &[]) }],
+        judge: |_| Ok(()),
+    };
+    let boots = metal::batches(&[("ends", &ENDS), ("later", &LATER)], &[]).expect("one last job");
+    assert_eq!(boots["own"].jobs, ["early", "later", "hold"]);
+    let Err(refused) = metal::batches(&[("ends", &ENDS), ("other", &OTHER)], &[]) else {
+        panic!("two last jobs on one boot were batched");
+    };
+    assert!(refused.contains("other ends the boot \"own\" on later and another row ends it on hold"), "{refused}");
 }
 
 /// **What a run's words take**: no word the whole profile; a name word every

@@ -293,6 +293,45 @@ pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     (loader, logkeeper)
 }
 
+/// The parts of its own log the boot `log` ends in no longer has, first and
+/// last, or `None` for a log that is whole.
+///
+/// **Read off the sequence of parts the file itself holds**, which no flush
+/// and no death can take without taking the part: `logkeeper` rotates once a
+/// round, after that round's write, and the line saying so
+/// ([`toyos_logstream::LOG_CONTINUES`]) is written by the next round into the
+/// part it opened. So the parts a boot's log names, from the one its opening
+/// line names, step by one, and a step that is longer is the parts that are
+/// gone. The newest rotation's line may not have reached the file; the part it
+/// opened is no hole. A program's line can carry the same words, so only
+/// `logkeeper`'s are read, and only for this boot's stem.
+pub fn lost_parts(log: &str) -> Option<(u32, u32)> {
+    use toyos_logstream::{LOGKEEPER, LOG_CONTINUES, LOG_OPENED};
+    use toyos_wallclock::Part;
+    fn named(path: &str) -> Option<Part<'_>> {
+        Part::parse(path.rsplit('/').next()?).map(|(_, part)| part)
+    }
+    let mut newest: Option<Part> = None;
+    let mut lost: Option<(u32, u32)> = None;
+    for said in log.lines().filter_map(toyos_logstream::program_line).filter(|said| said.tag == LOGKEEPER) {
+        if let Some(opened) = said.text.strip_prefix(LOG_OPENED) {
+            newest = opened.split_whitespace().next().and_then(named);
+            lost = None;
+            continue;
+        }
+        let Some((_, path)) = said.text.split_once(LOG_CONTINUES) else { continue };
+        let (Some(next), Some(was)) = (named(path), newest) else { continue };
+        if next.stem != was.stem {
+            continue;
+        }
+        if next.part > was.part + 1 {
+            lost = Some((lost.map_or(was.part + 1, |(first, _)| first), next.part - 1));
+        }
+        newest = Some(next);
+    }
+    lost
+}
+
 /// The kernel's boot-phase record for the end of boot, in
 /// `kernel/src/log/mod.rs`'s `boot_phase!`.
 pub const COMPLETE: &str = "Boot: complete (";
@@ -680,6 +719,72 @@ mod tests {
             let source = std::fs::read_to_string(&at).expect("a kernel module");
             assert!(source.contains(&needle), "{} does not write {needle:?}", at.display());
         }
+    }
+
+    use toyos_logstream::{LOG_CONTINUES, LOG_OPENED};
+
+    const STEM: &str = "2026-10-08-140646";
+
+    fn opened(stem: &str) -> String {
+        format!("[2026-10-08 14:06:46 12.841 logkeeper] {LOG_OPENED}/log/{stem}.log (2026-10-08 14:06:46 UTC)\n")
+    }
+
+    /// `logkeeper`'s line for the rotation that opened part `to` of `stem`.
+    fn continued(tag: &str, stem: &str, to: u32) -> String {
+        let part = |part| toyos_wallclock::Part { stem, part };
+        format!(
+            "[2026-10-08 14:07:21 47.242 {tag}] logkeeper: /log/{} reached 1067282{LOG_CONTINUES}/log/{}\n",
+            part(to - 1),
+            part(to)
+        )
+    }
+
+    fn parts(stem: &str, to: std::ops::RangeInclusive<u32>) -> String {
+        to.map(|to| continued("logkeeper", stem, to)).collect()
+    }
+
+    /// **The hole no deletion line names**: a boot's file holds the rotation
+    /// that opened each part it has, so parts 1 and 3 with nothing said of a
+    /// deletion is part 2 gone — whether the line saying so was held back by
+    /// the stop's flush or the boot died before the round that would write it.
+    #[test]
+    fn a_part_whose_rotation_the_log_does_not_hold_is_a_hole() {
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), continued("logkeeper", STEM, 3))), Some((2, 2)));
+        // Died between the removal of part 2 and the next sync: parts 1 and 3
+        // to 16 came back, and part 17 was never opened.
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), parts(STEM, 3..=16))), Some((2, 2)));
+        // The stop's flush held back the newest rotation's line: part 17 is on
+        // the volume and nothing in the file says so.
+        assert_eq!(lost_parts(&format!("{}{}", opened(STEM), parts(STEM, 4..=16))), Some((2, 3)));
+    }
+
+    /// What came back of the T14 boot that wrote forty-one parts, a boot that
+    /// rotated and lost nothing, and the lines that are not this boot's.
+    #[test]
+    fn a_boot_that_lost_parts_of_its_own_log_is_told_from_one_that_is_whole() {
+        let own = opened(STEM);
+        assert_eq!(lost_parts(&format!("{own}{}", parts(STEM, 27..=41))), Some((2, 26)));
+        // Two holes are reported from the first lost part to the last.
+        assert_eq!(lost_parts(&format!("{own}{}{}", parts(STEM, 3..=4), parts(STEM, 9..=10))), Some((2, 8)));
+
+        assert_eq!(lost_parts(&format!("{own}{}", parts(STEM, 2..=8))), None);
+        assert_eq!(lost_parts(&own), None);
+        assert_eq!(lost_parts(""), None);
+        // The same words from another program, and about another boot's file.
+        let quoted = format!(
+            "{own}{}{}",
+            continued("test-runner pid=31", STEM, 12),
+            continued("logkeeper", "2026-10-07-091500", 5)
+        );
+        assert_eq!(lost_parts(&quoted), None);
+        // The boot the log ends in: an earlier boot's hole on the same volume
+        // is that boot's.
+        let next = "2026-10-08-141929";
+        assert_eq!(lost_parts(&format!("{own}{}{}", parts(STEM, 27..=41), opened(next))), None);
+        assert_eq!(
+            lost_parts(&format!("{own}{}{}{}", parts(STEM, 2..=3), opened(next), continued("logkeeper", next, 4))),
+            Some((2, 3))
+        );
     }
 
     /// A program writing a kernel verdict's words, or another program's head,

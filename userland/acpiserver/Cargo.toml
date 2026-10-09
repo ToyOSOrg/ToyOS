@@ -11,6 +11,8 @@ toyos-abi = { path = "../../toyos-abi" }
 # The tables' decode, which the kernel reads its own of by.
 toyos-acpi = { path = "../../toyos-acpi" }
 toyos-aml = { path = "aml" }
+# Its own lines, as their readers spell them.
+acpiserver-api = { path = "../acpiserver-api" }
 
 [package.metadata.toyos.host]
 exempt.owns = "ToyOS's ACPI fixed hardware, claimed from the kernel with the SCI it raises"
