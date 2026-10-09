@@ -4,9 +4,9 @@
 //! One file per machine under [`DIR`], named for its SMBIOS vendor and product,
 //! written by a run and committed by whoever ran it. A run on a machine with no
 //! record is recorded and not judged; a name the record lacks is added and not
-//! judged, and only off a boot with no failure of its own; a recorded value is
-//! never moved by a run, so a slow run cannot become the baseline the next is
-//! judged by. A run under a BIOS other than the record's is judged against it,
+//! judged, and only where its owner passed, the boot or the row that measured
+//! it; a recorded value is never moved by a run, so a slow run cannot become
+//! the baseline the next is judged by. A run under a BIOS other than the record's is judged against it,
 //! fails naming both, and records nothing. Deleting a row is how a number is
 //! re-recorded, and deleting the file is how a machine is, firmware and all.
 //!
@@ -136,8 +136,8 @@ enum Unread {
     Refused(String),
 }
 
-/// One number a run measured, and whether the boot that measured it passed:
-/// every reading is judged, and only a passing boot's becomes a record.
+/// One number a run measured, and whether its owner passed: every reading is
+/// judged, and only a passing owner's becomes a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reading {
     pub value: u64,
@@ -386,9 +386,9 @@ mod tests {
         );
     }
 
-    /// **A failed boot's numbers are judged and never become a baseline.**
+    /// **A failed owner's numbers are judged and never become a baseline.**
     #[test]
-    fn a_failing_boots_reading_is_judged_and_not_recorded() {
+    fn a_failing_owners_reading_is_judged_and_not_recorded() {
         let machine = t14(BIOS);
         let record = recorded(&machine, &[("boot.a.complete_ms", 1000)]);
         let failed = |value| Reading { value, passed: false };
