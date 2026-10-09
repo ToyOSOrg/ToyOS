@@ -1046,8 +1046,9 @@ fn own(
 /// **A number is its owner's, and fails with its owner alone.** What a boot
 /// reads off itself is the boot's, and stands or falls with the boot's own
 /// checks; what a row's judge measured is the row's, and stands or falls with
-/// that judge. Neither is moved by another row or a shared member riding the
-/// same boot.
+/// that judge, and with the clocks of every boot it rode agreeing
+/// ([`Readback::one_clock`]). Neither is moved by another row or a shared
+/// member riding the same boot.
 pub fn judge_readbacks(
     root: &Path,
     readbacks: &BTreeMap<String, Result<Readback, String>>,
@@ -1130,14 +1131,21 @@ pub fn judge_readbacks(
             Some(why) => Err(why),
             None => judge(&owed),
         };
+        // A clock at another rate scales every duration a row measures. No
+        // other finding of a boot's own touches a row's number while each is
+        // read off one line that is present: one summed or maximised over the
+        // log would fall with a log that is not whole too.
+        let clocked = owed.iter().all(|back| back.one_clock().is_ok());
+        let twice = own(&mut measured, name, verdict.is_ok() && clocked, &owed);
         match &verdict {
+            // `own` said so, by name.
+            Ok(()) if twice => {}
             Ok(()) => {
                 eprintln!("  PASS {name}");
                 passed += 1;
             }
             Err(why) => eprintln!("  FAIL {name}: {why}"),
         }
-        let twice = own(&mut measured, name, verdict.is_ok(), &owed);
         red |= twice || verdict.is_err();
     }
     let mut members = 0usize;

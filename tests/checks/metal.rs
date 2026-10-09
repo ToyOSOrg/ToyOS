@@ -167,6 +167,11 @@ fn unqualified(b: &[&Readback]) -> Result<(), String> {
     b[0].measured("latency.p99_us", 16)
 }
 
+fn unqualified_and_fail(b: &[&Readback]) -> Result<(), String> {
+    unqualified(b)?;
+    Err("a planted failure".to_string())
+}
+
 static PASSING: Metal =
     Metal { arms: &[metal::once("passing", "tests/jobcase", &[], &[])], judge: span };
 static FAILING: Metal = Metal {
@@ -181,15 +186,22 @@ static REFUSED: Metal =
     Metal { arms: &[metal::once("refused", "tests/jobcase", &[], &[])], judge: span };
 static LATE: Metal =
     Metal { arms: &[metal::once("late", "tests/jobcase", &[], &[])], judge: span };
+static SKEWED: Metal =
+    Metal { arms: &[metal::once("skewed", "tests/jobcase", &[], &[])], judge: span };
 static ONE: Metal =
     Metal { arms: &[metal::once("one", "tests/jobcase", &[], &[])], judge: unqualified };
+static ONE_FAILS: Metal = Metal {
+    arms: &[metal::once("one", "tests/jobcase", &[], &[])],
+    judge: unqualified_and_fail,
+};
 static TWO: Metal =
     Metal { arms: &[metal::once("two", "tests/jobcase", &[], &[])], judge: unqualified };
 
 /// **A number is recorded off its owner's verdict and nobody else's.** A row
 /// that fails keeps its own number out of the record, and neither its boot's
 /// numbers nor those of the row beside it on that boot; a boot whose own check
-/// fails keeps its own out, and not those of the row that passed on it; a boot
+/// fails keeps its own out, and not those of the row that passed on it, unless
+/// the check is of its clocks, which every duration on it was read by; a boot
 /// the loop refused measured nothing.
 pub fn a_number_fails_with_its_owner_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
@@ -198,7 +210,13 @@ pub fn a_number_fails_with_its_owner_alone() {
     plant(&dir, "failing", PANEL, BOOTED, None);
     plant(&dir, "refused", PANEL, BOOTED, Some(&Refusal::HungWithoutARecord));
     plant(&dir, "late", &expired_at(120_160), &armed(), None);
-    let readbacks = read(&dir, &["passing", "failing", "refused", "late"]);
+    // The supervisor's line 10 ms before the spawn it reports.
+    plant(&dir, "skewed", PANEL, BOOTED, None);
+    let at = metal::at(&dir, "skewed").join(READBACK_KERNEL);
+    let kernel = fs::read_to_string(&at).expect("a planted log");
+    fs::write(&at, kernel.replacen("0.050 supervisor]", "0.040 supervisor]", 1)).expect("a planted log");
+    let readbacks = read(&dir, &["passing", "failing", "refused", "late", "skewed"]);
+    assert!(readbacks["skewed"].as_ref().expect("a readback").one_clock().is_err());
     let why = readbacks["refused"].as_ref().err().expect("the loop's refusal, read back");
     assert!(why.contains("never reported: no panic"), "{why}");
 
@@ -208,9 +226,10 @@ pub fn a_number_fails_with_its_owner_alone() {
         ("beside", &BESIDE),
         ("refused", &REFUSED),
         ("late", &LATE),
+        ("skewed", &SKEWED),
     ];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "three failures judged green");
+    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "four failures judged green");
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
@@ -275,19 +294,21 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
 }
 
 /// Two rows under one name are judged on the first reading and recorded off
-/// neither.
+/// neither, whether the first of them passed or failed.
 pub fn a_name_two_owners_measured_is_refused() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-    let root = toyos_tmpdir::TempDir::new("metal-records");
     plant(&dir, "one", PANEL, BOOTED, None);
     plant(&dir, "two", PANEL, BOOTED, None);
     let readbacks = read(&dir, &["one", "two"]);
-    let tests = [("one", &ONE), ("two", &TWO)];
-    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
-    let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
-    assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
-    assert_eq!(record.measured.len(), 6, "{:?}", record.measured);
+    for first in [&ONE, &ONE_FAILS] {
+        let root = toyos_tmpdir::TempDir::new("metal-records");
+        let tests = [("one", first), ("two", &TWO)];
+        let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+        assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
+        let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+        assert!(!record.measured.contains_key("latency.p99_us"), "{:?}", record.measured);
+        assert_eq!(record.measured.len(), 6, "{:?}", record.measured);
+    }
 }
 
 /// `passing`'s four rows under `bios`: its planted readings, with `complete_ms`
