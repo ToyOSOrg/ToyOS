@@ -243,7 +243,7 @@ impl Drop for Owner {
 
 fn listen(wire: &mut Wire, addr: Ipv4Addr, port: u16) -> Result<Rc<Told>, ListenRefused> {
     let told = Rc::new(Told::default());
-    wire.node.listen(addr, Port::new(port), Box::new(Owner(told.clone())), || panic!("a named port draws nothing")).map(|_| told)
+    wire.node.listen(addr, Port::new(port), false, Box::new(Owner(told.clone())), || panic!("a named port draws nothing")).map(|_| told)
 }
 
 /// Where the peer of the listeners is, at `MAC_B`.

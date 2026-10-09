@@ -364,8 +364,13 @@ impl Net {
     }
 
     fn listen(&mut self, port: u16) -> (ListenerId, Owner) {
+        self.listen_with(port, false)
+    }
+
+    /// A listen that names the listener's `TCP_NODELAY`.
+    fn listen_with(&mut self, port: u16, nodelay: bool) -> (ListenerId, Owner) {
         let owner = Owner::default();
-        let (id, bound) = self.node.listen(ANY, Port::new(port), Box::new(WakeEnd(owner.clone())), draw(&mut self.draws)).expect("a free port and a place");
+        let (id, bound) = self.node.listen(ANY, Port::new(port), nodelay, Box::new(WakeEnd(owner.clone())), draw(&mut self.draws)).expect("a free port and a place");
         assert_eq!(bound.get(), port);
         (id, owner)
     }
@@ -378,10 +383,12 @@ impl Net {
         answer.map(|accepted| (accepted, client))
     }
 
-    /// An accept that takes `peer`'s connection.
+    /// An accept that takes `peer`'s connection, which the answer and the node say the same
+    /// option of.
     fn accepts(&mut self, id: ListenerId, peer: Peer) -> (StreamId, Client) {
         let (accepted, client) = self.accept(id).expect("a connection and a place");
         assert_eq!((accepted.remote, accepted.local), (peer.endpoint(), Port::new(SSH).unwrap()));
+        assert_eq!(Some(accepted.nodelay), self.node.nodelay(accepted.id), "the accept's answer and the stream it made");
         (accepted.id, client)
     }
 
@@ -655,7 +662,7 @@ fn a_listener_holds_a_place_and_a_listen_without_one_makes_nothing() {
     let mut net = with_places(1);
     let (id, _owner) = net.listen(SSH);
     let refused = Owner::default();
-    let answer = net.node.listen(ANY, Port::new(TELNET), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(ANY, Port::new(TELNET), false, Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::Full);
     assert!(refused.borrow().dropped);
     net.syn_to(P1, TELNET);
@@ -718,14 +725,14 @@ fn a_listen_on_a_taken_port_is_refused_and_a_drawn_port_listens() {
     let mut net = Net::new();
     let (_, owner) = net.listen(SSH);
     let second = Owner::default();
-    let answer = net.node.listen(ANY, Port::new(SSH), Box::new(WakeEnd(second.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(ANY, Port::new(SSH), false, Box::new(WakeEnd(second.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::InUse);
     assert!(second.borrow().dropped);
     assert_eq!((net.node.listeners(), net.node.held()), (1, 1));
     net.handshake(P1);
     assert_eq!(wakes(&owner), 1, "the listener that holds the port still listens");
 
-    let (_, port) = net.node.listen(ANY, None, Box::new(WakeEnd(Owner::default())), || 0x0001_0005).unwrap();
+    let (_, port) = net.node.listen(ANY, None, false, Box::new(WakeEnd(Owner::default())), || 0x0001_0005).unwrap();
     assert_eq!(port.get(), 49_152 + 5);
     net.syn_to(P2, port.get());
     let synack = net.last(P2);
@@ -740,7 +747,7 @@ fn a_listen_on_a_taken_port_is_refused_and_a_drawn_port_listens() {
 fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
     let mut net = Net::new();
     let refused = Owner::default();
-    let answer = net.node.listen(ELSEWHERE, Port::new(SSH), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(ELSEWHERE, Port::new(SSH), false, Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::NotLocal);
     assert!(refused.borrow().dropped);
     assert_eq!((net.node.listeners(), net.node.held()), (0, 0));
@@ -749,7 +756,7 @@ fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
     assert!(reset.rst && (reset.seq, reset.ack) == (0, Some(ISS + 1)), "{reset:?}");
 
     let named = Owner::default();
-    let (_, port) = net.node.listen(A, Port::new(SSH), Box::new(WakeEnd(named.clone())), draw(&mut net.draws)).expect("the machine's address, and a port no listener holds");
+    let (_, port) = net.node.listen(A, Port::new(SSH), false, Box::new(WakeEnd(named.clone())), draw(&mut net.draws)).expect("the machine's address, and a port no listener holds");
     assert_eq!((port.get(), net.node.listeners()), (SSH, 1));
     net.handshake(P2);
     assert_eq!(wakes(&named), 1);
@@ -760,9 +767,9 @@ fn a_listener_is_at_the_address_it_named_and_only_one_the_machine_holds() {
 fn a_port_is_one_listeners(first: Ipv4Addr, second: Ipv4Addr) {
     let mut net = Net::new();
     let holder = Owner::default();
-    let (id, _) = net.node.listen(first, Port::new(SSH), Box::new(WakeEnd(holder.clone())), draw(&mut net.draws)).expect("a port no listener holds");
+    let (id, _) = net.node.listen(first, Port::new(SSH), false, Box::new(WakeEnd(holder.clone())), draw(&mut net.draws)).expect("a port no listener holds");
     let refused = Owner::default();
-    let answer = net.node.listen(second, Port::new(SSH), Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
+    let answer = net.node.listen(second, Port::new(SSH), false, Box::new(WakeEnd(refused.clone())), draw(&mut net.draws));
     assert_eq!(answer.unwrap_err(), ListenRefused::InUse, "{second} beside {first}");
     assert!(refused.borrow().dropped);
     assert_eq!((net.node.listeners(), net.node.held()), (1, 1));
@@ -880,6 +887,85 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
 
     assert!(net.node.close_listener(net.now, id));
     assert_eq!((net.node.set_listener_nodelay(id, true), net.node.listener_nodelay(id)), (false, None));
+}
+
+// A listen names its listener's option, so no SYN reaches the port between the passive open and
+// a set: the first connection has it with no call between, as a host's has the option set
+// before `listen` (`tests/host.rs`, its first answer). The wire is RFC 9293 §3.7.4's, as above.
+#[test]
+fn a_listener_holds_the_option_its_listen_named_from_its_first_connection() {
+    let mut net = Net::new();
+    let (id, _owner) = net.listen_with(SSH, true);
+    assert_eq!(net.node.listener_nodelay(id), Some(true));
+    net.handshake(P1);
+    let (accepted, client) = net.accept(id).unwrap();
+    assert_eq!((accepted.nodelay, net.node.nodelay(accepted.id)), (true, Some(true)));
+    net.says(&client, b"a");
+    net.says(&client, b"b");
+    assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
+
+    assert!(net.node.set_listener_nodelay(id, false));
+    net.handshake(P2);
+    let (accepted, _client) = net.accept(id).unwrap();
+    assert_eq!((accepted.nodelay, net.node.listener_nodelay(id)), (false, Some(false)), "a listen's option is the listener's to change");
+}
+
+// A handshake its peer resets before it ends (RFC 9293 §3.10.7.4, first check, in SYN-RECEIVED)
+// leaves nothing of its options behind: the listener's option changed while it was in progress,
+// and the next connection begins with what the listener holds when its own SYN arrives. Both
+// ways round, since the stack this one replaces keeps the reset handshake's option for the next
+// connection (`issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`).
+#[test]
+fn a_handshake_reset_before_it_ends_leaves_the_next_connection_its_listeners_option() {
+    for held in [true, false] {
+        let mut net = Net::new();
+        let (id, owner) = net.listen_with(SSH, held);
+        net.syn(P1);
+        assert!(net.node.set_listener_nodelay(id, !held));
+        net.rst(P1);
+        assert_eq!((wakes(&owner), net.accept(id).unwrap_err()), (0, AcceptRefused::Nothing), "the reset handshake is no connection");
+        net.handshake(P2);
+        let (accepted, _client) = net.accept(id).unwrap();
+        assert_eq!((accepted.remote, accepted.nodelay), (P2.endpoint(), !held), "the listener held {held} at the reset handshake's SYN");
+        assert_eq!((net.node.nodelay(accepted.id), net.node.listener_nodelay(id)), (Some(!held), Some(!held)));
+
+        // And a set while the reset handshake was in progress, taken back before the next SYN.
+        net.syn(P3);
+        assert!(net.node.set_listener_nodelay(id, held));
+        net.rst(P3);
+        assert!(net.node.set_listener_nodelay(id, !held));
+        let again = Peer { addr: C, port: 40_001 };
+        net.handshake(again);
+        let (accepted, _client) = net.accept(id).unwrap();
+        assert_eq!((accepted.remote, accepted.nodelay), (again.endpoint(), !held));
+    }
+}
+
+/// The write end of a client's pipe whose reader is gone for good: the node resets the stream.
+struct BrokenEnd;
+
+impl ToClient for BrokenEnd {
+    fn write(&mut self, _: &[u8]) -> Result<usize, WriteRefusal> {
+        Err(WriteRefusal::Broken)
+    }
+}
+
+// The accept's own pass moves what the connection already received, and a pipe that refuses it
+// for good ends the stream there (RFC 9293 §3.10.7.4's reset is the peer's notice). The answer
+// still says what the stream was handed over with, where `Node::nodelay` of its id has no stream
+// left to answer for.
+#[test]
+fn an_accept_answers_the_option_of_a_stream_its_own_pass_let_go() {
+    let mut net = Net::new();
+    let (id, _owner) = net.listen_with(SSH, true);
+    net.handshake(P1);
+    net.text(P1, b"hello");
+    let (client, Pipes { from_client, .. }) = client();
+    let accepted = net.node.accept(net.now, id, Some(Pipes { to_client: Box::new(BrokenEnd), from_client })).unwrap();
+    net.pump();
+    assert!(net.last(P1).rst, "{:?}", net.heard);
+    assert_eq!((accepted.remote, accepted.nodelay), (P1.endpoint(), true));
+    assert_eq!((net.node.nodelay(accepted.id), net.node.streams(), client.borrow().dropped), (None, 0, 2));
 }
 
 // `streams` counts a stream its client can see no more by its peer's address, and lets an

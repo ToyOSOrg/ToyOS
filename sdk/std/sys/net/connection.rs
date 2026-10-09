@@ -129,12 +129,17 @@ pub struct TcpStream {
     local_port: u16,
     read_timeout_ms: AtomicU32,
     write_timeout_ms: AtomicU32,
-    nodelay: AtomicBool,
+    /// What netstack holds for the connection every duplicate names, locked
+    /// across the request that changes it so the two cannot come to differ.
+    nodelay: Arc<crate::sync::Mutex<bool>>,
     nonblocking: AtomicBool,
 }
 
 impl TcpStream {
-    fn new(fd: OwnedFd, id: TcpSocketId, peer: SocketAddr, local_port: u16) -> TcpStream {
+    /// A stream on a connection netstack holds with `nodelay`: off for one a
+    /// connect made, and what its accept answered for one a listener was
+    /// handed.
+    fn new(fd: OwnedFd, id: TcpSocketId, peer: SocketAddr, local_port: u16, nodelay: bool) -> TcpStream {
         TcpStream {
             fd,
             socket: Arc::new(NetstackSocket::Tcp(id)),
@@ -144,7 +149,7 @@ impl TcpStream {
             local_port,
             read_timeout_ms: AtomicU32::new(0),
             write_timeout_ms: AtomicU32::new(0),
-            nodelay: AtomicBool::new(false),
+            nodelay: Arc::new(crate::sync::Mutex::new(nodelay)),
             nonblocking: AtomicBool::new(false),
         }
     }
@@ -165,7 +170,7 @@ impl TcpStream {
         let conn = toyos::net::tcp_connect(ip, port, duration_to_ms(Some(timeout)))
             .map_err(net_err_to_io)?;
         let fd = make_socket_fd(conn.rx, conn.tx)?;
-        Ok(TcpStream::new(fd, conn.socket_id, *addr, conn.local_port))
+        Ok(TcpStream::new(fd, conn.socket_id, *addr, conn.local_port, false))
     }
 
     fn raw_handle(&self) -> RawHandle {
@@ -308,7 +313,7 @@ impl TcpStream {
             local_port: self.local_port,
             read_timeout_ms: AtomicU32::new(self.read_timeout_ms.load(Relaxed)),
             write_timeout_ms: AtomicU32::new(self.write_timeout_ms.load(Relaxed)),
-            nodelay: AtomicBool::new(self.nodelay.load(Relaxed)),
+            nodelay: Arc::clone(&self.nodelay),
             nonblocking: AtomicBool::new(self.nonblocking.load(Relaxed)),
         })
     }
@@ -322,14 +327,15 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        let mut held = self.nodelay.lock().unwrap();
         toyos::net::tcp_set_option(self.socket_id(), toyos::net::OPT_NODELAY, nodelay as u32)
             .map_err(net_err_to_io)?;
-        self.nodelay.store(nodelay, Relaxed);
+        *held = nodelay;
         Ok(())
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        Ok(self.nodelay.load(Relaxed))
+        Ok(*self.nodelay.lock().unwrap())
     }
 
     pub fn set_keepalive(&self, _keepalive: bool) -> io::Result<()> {
@@ -427,7 +433,8 @@ impl TcpListener {
             Ipv4Addr::from(accepted.remote_addr),
             accepted.remote_port,
         ));
-        Ok((TcpStream::new(fd, accepted.socket_id, peer, accepted.local_port), peer))
+        let nodelay = accepted.options.nodelay();
+        Ok((TcpStream::new(fd, accepted.socket_id, peer, accepted.local_port, nodelay), peer))
     }
 
     pub fn duplicate(&self) -> io::Result<TcpListener> {
