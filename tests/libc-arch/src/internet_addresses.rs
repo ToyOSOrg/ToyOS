@@ -94,9 +94,9 @@ fn numbers_and_dots_read_as_the_host_reads_them() {
     texts(&parts, 1..=3, &["", " ", "\n", "\t9", " x", "x", "."], &mut judge);
     texts(&parts, 4..=4, &["", " x"], &mut judge);
     texts(&parts[..6], 5..=5, &[""], &mut judge);
-    judge(" 1.2.3.4");
-    judge("1.2.3.4\x0b");
-    judge("1.2.3.4\x0c\r");
+    judge(" 192.0.2.1");
+    judge("192.0.2.1\x0b");
+    judge("192.0.2.1\x0c\r");
     assert!(read > 10_000, "{read} texts were addresses");
 }
 
