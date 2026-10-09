@@ -212,9 +212,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "fault_gates",
     "sched_stress",
     "std_alloc",
-    // Its shared run is the T14's CPU; `https_fetch` runs it on the guest CPU
-    // its fetch ran on, since `ring` picks its code by the CPU's features.
-    "ring_kat",
+    // Its shared run asserts what holds of one boot's draws on x86-64;
+    // `virt_random_differs` builds it for AArch64, runs it on that
+    // architecture's job case, and compares two boots' draws.
+    "random_draws",
 ];
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
@@ -242,24 +243,35 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
     ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
-    ("virt_user_mode", qemu::Profile::VirtEl2),
-    ("virt_timer_preempts", qemu::Profile::VirtEl2),
-    ("virt_irq_storm", qemu::Profile::VirtEl2),
-    ("virt_timer_floor", qemu::Profile::VirtEl2),
-    ("virt_fp_isolation", qemu::Profile::VirtEl2),
-    ("virt_first_entry", qemu::Profile::VirtEl2),
-    ("virt_unmap_touch", qemu::Profile::VirtEl2),
-    ("virt_debug_refused", qemu::Profile::VirtEl2),
-    ("virt_readonly_copyout", qemu::Profile::VirtEl2),
-    ("virt_ring0_timer_in_syscall", qemu::Profile::VirtEl2),
+    ("virt_user_mode", qemu::Profile::Virt),
+    ("virt_timer_preempts", qemu::Profile::Virt),
+    ("virt_irq_storm", qemu::Profile::Virt),
+    ("virt_timer_floor", qemu::Profile::Virt),
+    ("virt_fp_isolation", qemu::Profile::Virt),
+    ("virt_first_entry", qemu::Profile::Virt),
+    ("virt_unmap_touch", qemu::Profile::Virt),
+    ("virt_debug_refused", qemu::Profile::Virt),
+    ("virt_readonly_copyout", qemu::Profile::Virt),
+    ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
+    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
+    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
+    // under HVF the power-off can come before `klogd` has put it on the wire
+    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
-    ("virt_failed_ap_leaves_no_hole", qemu::Profile::VirtEl2),
-    ("virt_fatal_halts_the_others_first", qemu::Profile::VirtEl2),
+    ("virt_failed_ap_leaves_no_hole", qemu::Profile::Virt),
+    ("virt_fatal_halts_the_others_first", qemu::Profile::Virt),
+    // Emulated at EL2: its last word comes through the same stop, and it is
+    // the one test of `SYSTEM_RESET` through the SMC conduit.
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
-    ("virt_reboot_refused_without_psci", qemu::Profile::VirtEl2),
+    ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
+    // The job case entered at EL2, once: the entry's EL2 writes for the timer
+    // and FP, which no boot under HVF runs.
+    ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
+    ("virt_random_differs", qemu::Profile::Virt),
+    ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -1638,14 +1650,35 @@ fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<
     (format!("bin/test_rs_{name}"), bytes)
 }
 
-/// Boot `tests/virtjobcase` on one CPU and judge its job `job`: it ends with
-/// exit 0, having said `said`. One CPU because `preempt` and `fp_isolation`
+/// The same for its job `test_rs_random_draws`.
+const VIRT_RANDOM: &str = "random_draws";
+
+/// `tests/virtjobcase`'s jobs, in the order its job list runs them, and what
+/// each says once the kernel kept what it asks about.
+const VIRT_JOBS: &[(&str, &str)] = &[
+    ("preempt", "preempt: the counting thread was preempted twice"),
+    ("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
+    ("first_entry", "first_entry: x1-x30 were zero"),
+    ("unmap_touch", UNMAP_TOUCH_SAID),
+    ("debug_refused", "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused"),
+    ("test_rs_ring0_timer_in_syscall", "the timer interrupted the syscall's body and re-armed a quantum"),
+    ("test_rs_random_draws", RANDOM_DRAWS_SAID),
+    ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
+];
+
+/// What `random_draws` says before the draw its line carries.
+const RANDOM_DRAWS_SAID: &str = "random_draws: 8 threads drew 1000 times each and no two draws were alike; one more: ";
+
+/// What the kernel says once the loader's seed is in its generator's key.
+const LOADER_SEED_MIXED: &str = "random: the loader's seed is mixed into the generator's key";
+
+/// Boot `tests/virtjobcase` on one CPU, because `preempt` and `fp_isolation`
 /// see a sibling run only when it took theirs. The kernel carries `SYS_DEBUG`
 /// for `debug_refused`, and every job runs in every boot of the case.
-fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String> {
+fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let mut qemu = QemuInstance::boot_with_options(
+    QemuInstance::boot_with_options(
         case,
         &[],
         &[],
@@ -1654,10 +1687,19 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT), suite_bin(profile.arch(), VIRT_RING0_TIMER)],
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM]
+                .map(|name| suite_bin(profile.arch(), name))
+                .to_vec(),
             ..Default::default()
         },
-    );
+    )
+}
+
+/// Boot [`boot_virt_jobs`]' case and judge its job `job`: it ends with exit 0,
+/// having said what [`VIRT_JOBS`] has it say.
+fn virt_job(profile: qemu::Profile, job: &str) -> Result<(), String> {
+    let (_, said) = VIRT_JOBS.iter().find(|(name, _)| *name == job).expect("a job of the case");
+    let mut qemu = boot_virt_jobs(profile);
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, job, said)?;
     // The kernel's record `one_clock` reads beside the supervisor's line: it
@@ -1867,6 +1909,82 @@ fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
             "  [windows] cpu{} irqs_off_ns={} preempt_off_ns={}",
             most.cpu, most.irqs_off_ns, most.preempt_off_ns
         );
+    }
+    Ok(())
+}
+
+/// One boot of the job case entered at EL2, every job judged: the kernel's
+/// entry there writes `CNTHCTL_EL2`, `CNTVOFF_EL2` and `CPTR_EL2` for the
+/// timer and FP the jobs then use at EL0, which a boot under HVF never runs.
+fn virt_jobs_at_el2(profile: qemu::Profile) -> Result<(), String> {
+    let mut qemu = boot_virt_jobs(profile);
+    let mut serial = virt_console(&qemu);
+    const ENTERED: &str = "as declared; entered at EL2";
+    if !serial.contains(ENTERED) {
+        return Err(format!("{ENTERED:?} not on the PL011, so this boot judges no EL2 entry\nserial:\n{serial}"));
+    }
+    for (job, said) in VIRT_JOBS {
+        judge_virt_job(&mut qemu, &mut serial, job, said)?;
+    }
+    Ok(())
+}
+
+/// Two boots of the job case, each keyed from the loader's seed, and the draw
+/// `random_draws` prints on each: the two differ. A generator keyed from
+/// anything an image carries prints one draw on every boot.
+fn virt_random_differs(profile: qemu::Profile) -> Result<(), String> {
+    let mut draws = Vec::new();
+    for boot in 1..=2 {
+        let mut qemu = boot_virt_jobs(profile);
+        let mut serial = virt_console(&qemu);
+        judge_virt_job(&mut qemu, &mut serial, "test_rs_random_draws", RANDOM_DRAWS_SAID)?;
+        if !serial.contains(LOADER_SEED_MIXED) {
+            return Err(format!("{LOADER_SEED_MIXED:?} not on the PL011 of boot {boot}\nserial:\n{serial}"));
+        }
+        let draw = serial
+            .lines()
+            .find_map(|l| l.split_once(RANDOM_DRAWS_SAID).map(|(_, draw)| draw.trim().to_string()))
+            .expect("judge_virt_job found the line");
+        if draw.len() != 64 || !draw.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("boot {boot} printed no 32-byte draw: {draw:?}"));
+        }
+        draws.push(draw);
+    }
+    if draws[0] == draws[1] {
+        return Err("two boots of one image printed the same 32-byte draw".to_string());
+    }
+    eprintln!("  [virt] two boots keyed from the loader's seed printed two draws");
+    Ok(())
+}
+
+/// A machine with no source at all: no virtio-rng, so firmware has no
+/// `EFI_RNG_PROTOCOL` and the loader hands no seed, and a CPU with no RNDR.
+/// The kernel says each and refuses by name before its first hash container.
+fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    const REFUSED: &str = "random: nothing keyed the generator";
+    let options = BootOptions { profile, ready_marker: REFUSED, ..Default::default() };
+    // The premise: the machine the test names is the one QEMU is asked for.
+    let argv = qemu::profile_argv(&options);
+    if let Some(rng) = argv.iter().find(|a| a.contains("virtio-rng")) {
+        return Err(format!("the machine with no seed has {rng}: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains("EARLY PANIC: panicked at"));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    for want in [
+        "random: the loader's seed is not mixed: the loader handed none",
+        "random: RNDR is not mixed: ID_AA64ISAR0_EL1.RNDR is zero, so this CPU has no RNDR",
+        REFUSED,
+        "EARLY PANIC: panicked at",
+    ] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    for never in ["random: the generator is keyed", "paging: the direct map holds memory below"] {
+        if serial.contains(never) {
+            return Err(format!("{never:?} on the PL011 of a machine with no source\nserial:\n{serial}"));
+        }
     }
     Ok(())
 }
@@ -2554,26 +2672,24 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             Ok(())
         }
         "virt_user_mode" => {
-            // The port's stage 4, under the EL2 profile whose
-            // entry also writes what the drop leaves EL2 holding: the kernel's
-            // own tables, the GIC and the timer, and a process at EL0 — the supervisor,
-            // whose every page arrives by a demand fault and whose spawn of
-            // `logkeeper` is a syscall the kernel answered. Emulated, and not under
-            // HVF, which exposes no RNDR for the kernel's hash seed.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions {
-                    profile,
-                    ready_marker: "control registers: SCTLR_EL1=",
-                    ..Default::default()
-                },
-            );
+            // The port's stage 4: the generator keyed from the seed the loader
+            // read from firmware's virtio-rng, the kernel's own tables, the GIC
+            // and the timer, and a process at EL0 — the supervisor, whose every
+            // page arrives by a demand fault and whose spawn of `logkeeper` is
+            // a syscall the kernel answered.
+            let options =
+                BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
+            let argv = qemu::profile_argv(&options);
+            if !argv.iter().any(|a| a.starts_with("virtio-rng-pci")) {
+                return Err(format!("`virt` has no virtio-rng for firmware's EFI_RNG_PROTOCOL: {argv:?}"));
+            }
+            let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
             const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
             let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
+                LOADER_SEED_MIXED,
+                "random: the generator is keyed from",
                 "paging: the direct map holds memory below",
                 "percpu: BSP cpu_id=0",
                 "GIC: v",
@@ -2587,23 +2703,16 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             Ok(())
         }
-        "virt_timer_preempts" => virt_job(profile, "preempt", "preempt: the counting thread was preempted twice"),
-        "virt_fp_isolation" => virt_job(profile, "fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
-        "virt_first_entry" => virt_job(profile, "first_entry", "first_entry: x1-x30 were zero"),
-        "virt_unmap_touch" => virt_job(profile, "unmap_touch", UNMAP_TOUCH_SAID),
-        "virt_debug_refused" => virt_job(
-            profile,
-            "debug_refused",
-            "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
-        ),
-        "virt_readonly_copyout" => {
-            virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
-        }
-        "virt_ring0_timer_in_syscall" => virt_job(
-            profile,
-            &format!("test_rs_{VIRT_RING0_TIMER}"),
-            "the timer interrupted the syscall's body and re-armed a quantum",
-        ),
+        "virt_timer_preempts" => virt_job(profile, "preempt"),
+        "virt_fp_isolation" => virt_job(profile, "fp_isolation"),
+        "virt_first_entry" => virt_job(profile, "first_entry"),
+        "virt_unmap_touch" => virt_job(profile, "unmap_touch"),
+        "virt_debug_refused" => virt_job(profile, "debug_refused"),
+        "virt_readonly_copyout" => virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}")),
+        "virt_ring0_timer_in_syscall" => virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}")),
+        "virt_jobs_at_el2" => virt_jobs_at_el2(profile),
+        "virt_random_differs" => virt_random_differs(profile),
+        "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a

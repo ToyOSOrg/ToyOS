@@ -33,6 +33,7 @@ mod params;
 mod blackbox;
 mod deadline;
 mod quiesce;
+mod random;
 mod hardlockup;
 mod mm;
 mod panic;
@@ -229,12 +230,12 @@ fn report_log_destination() {
 /// The architecture's entry calls this once, on the kernel's own stack, with
 /// the loader's arguments.
 /// # Safety
-/// `kernel_args` is the loader's live [`KernelArgs`], and nothing has run before this.
-pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
+/// `loader_args` is the loader's live [`KernelArgs`], which nothing else names, and nothing has run before this.
+pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before the first record, which is stamped at the rate it states.
     clock::state();
     // Copied onto the kernel stack: the original lives on the UEFI stack, unreachable once mm::init drops the identity map.
-    let kernel_args = *kernel_args;
+    let mut kernel_args = *loader_args;
 
     let entry_count = kernel_args.memory_map_size as usize / core::mem::size_of::<MemoryMapEntry>();
     let maps = core::slice::from_raw_parts(
@@ -354,6 +355,9 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         DirectMap::from_phys(kernel_args.kernel_elf_addr).as_ptr::<u8>(),
         kernel_args.kernel_elf_size as usize,
     );
+    // After the boot's own lines, so its refusal reaches a channel that says
+    // what machine this is, and while the loader's arguments are still mapped.
+    random::key(loader_args, &mut kernel_args);
     let kernel_args = &kernel_args;
 
     // `kernel_stack_addr` is an offset into the image, so the image's region is what keeps the stack.
@@ -401,9 +405,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let [image, elf, black_box, root, map] = loader;
     let reserved = [image, elf, black_box, root, map, arch::boot::reserved()];
 
-    // The last point before the first hash container (`mm::init`'s address
-    // space), and not earlier: seeding fails only by panicking, and a panic
-    // before the boot's own log lines reaches no channel at all.
+    // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
 
     mm::init(maps, &reserved);
