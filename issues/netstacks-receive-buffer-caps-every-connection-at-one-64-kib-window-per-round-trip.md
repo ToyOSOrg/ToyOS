@@ -31,7 +31,11 @@ for a connect, so it bounds the path's round trip from above and 524.3 over it
 bounds the window's ceiling from below: a rate held at the ceiling clears that
 bound by up to the handshakes' spread, 12 % in this boot. netstack exposes no
 connection's SRTT: its `inspect` snapshot counts sockets and nothing of one.
-The line's own rate is not measured.
+
+The T14 sits on a gigabit connection, wired to its router, by the owner's
+statement; the line's own rate is not measured. The goal is close to that:
+"No bar but its a gigabit connection and i would like close to that" (the
+owner, asked the line's speed).
 
 ## Owner
 
@@ -45,7 +49,6 @@ Both of:
   stream's SYN carries a window shift above 0 and that the window it
   advertises with an empty receive buffer exceeds 65,535 bytes. A buffer of
   65,535 bytes fails both.
-- A T14 `internet_download` boot whose `mbps` exceeds twice 524.3 over the
-  smallest of its `rtt_ms`: 69.9 Mb/s at 15.0 ms. A 64 KiB window reaches
-  it only if the fastest handshake takes twice the path's round trip, where
-  the five at `83ef5a9ae` spread by 12 %.
+- A T14 `internet_download` reading after the fix, recorded here with its
+  `mbps` and `rtt_ms`. It carries no rate threshold: the owner set "No bar but
+  its a gigabit connection and i would like close to that".
