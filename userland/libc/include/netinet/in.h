@@ -8,21 +8,26 @@
 extern "C" {
 #endif
 
-#define INADDR_ANY       ((uint32_t)0x00000000)
-#define INADDR_LOOPBACK  ((uint32_t)0x7f000001)
-#define INADDR_NONE      ((uint32_t)0xffffffff)
+typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
+
+/* In host byte order: a program passes each through htonl. */
+#define INADDR_ANY       ((in_addr_t)0x00000000)
+#define INADDR_LOOPBACK  ((in_addr_t)0x7f000001)
+#define INADDR_BROADCAST ((in_addr_t)0xffffffff)
+#define INADDR_NONE      ((in_addr_t)0xffffffff)
 
 #define INET_ADDRSTRLEN  16
 
-#define TCP_NODELAY 1
-
+/* Both in network byte order: the port's two bytes and the address's four
+   octets, in memory order. */
 struct in_addr {
-    uint32_t s_addr;
+    in_addr_t s_addr;
 };
 
 struct sockaddr_in {
-    unsigned short sin_family;
-    uint16_t       sin_port;
+    sa_family_t    sin_family;
+    in_port_t      sin_port;
     struct in_addr sin_addr;
     char           sin_zero[8];
 };

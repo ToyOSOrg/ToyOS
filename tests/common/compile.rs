@@ -49,25 +49,26 @@ fn first_error(stderr: &[u8]) -> String {
         .to_string()
 }
 
-/// Compile one of the corpus's files to an object with the toolchain's clang,
-/// from the corpus's own directory and by its bare name, as TinyCC's runner
-/// does: `__FILE__` is part of what some cases print.
-fn compile_one(c: &CSysroot, source: &str, object: &Path) {
+/// Compile `source` in `dir` to an object with the toolchain's clang, from
+/// that directory and by its bare name.
+fn compile_one(c: &CSysroot, dir: &Path, flags: &[&str], source: &str, object: &Path) {
     let output = Command::new(&c.clang)
         .args(c.args())
-        .args(CORPUS_FLAGS)
+        .args(flags)
         .arg("-c")
         .arg(source)
         .arg("-o")
         .arg(object)
-        .current_dir(testcases_dir())
+        .current_dir(dir)
         .output()
         .unwrap_or_else(|e| panic!("run {}: {e}", c.clang.display()));
     assert!(output.status.success(), "{}", first_error(&output.stderr));
 }
 
 /// Compile a corpus case, and its companion if it has one (`104+_inline.c`
-/// for `104_inline`), and return the objects.
+/// for `104_inline`), and return the objects. Each is compiled as TinyCC's
+/// runner does, in the corpus's directory by its bare name: `__FILE__` is
+/// part of what some cases print.
 pub fn compile_c(name: &str) -> Vec<PathBuf> {
     let c = c_sysroot();
     let mut sources = vec![format!("{name}.c")];
@@ -82,10 +83,18 @@ pub fn compile_c(name: &str) -> Vec<PathBuf> {
         .enumerate()
         .map(|(i, source)| {
             let object = scratch(name, &format!("-{i}.o"));
-            compile_one(&c, source, &object);
+            compile_one(&c, &testcases_dir(), CORPUS_FLAGS, source, &object);
             object
         })
         .collect()
+}
+
+/// Compile `name.c` in `dir`, a C program of ToyOS's own outside the corpus,
+/// with every warning an error, and return its object.
+pub fn compile_own_c(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let object = scratch(name, ".o");
+    compile_one(&c_sysroot(), dir, &["-Wall", "-Wextra", "-Werror"], &format!("{name}.c"), &object);
+    vec![object]
 }
 
 /// Link flags a case needs beyond the corpus's, by case name.
