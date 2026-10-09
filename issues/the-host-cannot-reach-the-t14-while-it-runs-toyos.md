@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-10-08
 ---
 
-# The host cannot reach the T14 while it runs ToyOS, and no T14 row reads its wired card
+# The host cannot reach the T14 while it runs ToyOS
 
 The development host reaches the T14 only while it runs Ubuntu. Under ToyOS no
 connection the host opens to it arrives, so every row whose boot the host had
@@ -65,11 +65,12 @@ the tree has is the flat sleep
 
 ## What stands in the meantime
 
-No T14 row reads netstack on the I219, and none reads a message the card
+One T14 row reads netstack on the I219, `internet_download`, which judges one
+HTTPS download and no count of the card's; none reads a message the card
 raised. `claim_reuses_its_remapping_entry` claims the function and gives it
 back twice and takes no traffic. So the calls #763 moved onto a claim's
-binding — the I219's interrupt records, its polls and its DMA grants, driven
-at rate — have not been read on real hardware since they landed; under QEMU
+binding — the I219's interrupt records, its polls and its DMA grants — have
+carried that download on real hardware and been read by nothing else; under QEMU
 `iommu_virtio_platform` and the suite's network tests drive the same `pcidev`
 functions through virtio-net's claim.
 

@@ -148,6 +148,15 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host peer that ends each stream as the stream asks:
     // `libc_sockets` runs it on `tests/netcase`.
     "stream_ends_std",
+    // It needs a NIC in front of netstack and HTTPS servers behind it:
+    // `https_fetch` runs it on `tests/netcase`.
+    "https_get",
+    // `https_fetch` runs it on the boot its fetches run on, so that test
+    // carries its own oracle; a shared run would be the same QEMU CPU twice.
+    "ring_kat",
+    // It downloads from the internet, inside a job list's bound alone: the
+    // `internet_download` metal row runs it.
+    "https_download",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -306,6 +315,11 @@ const MACHINE_TESTS: &[&str] = &[
     // kernel's pipes and the library read together, netstack has no host
     // build, and the T14's bench has no peer that answers or resets on cue.
     "libc_sockets",
+    // An HTTPS client's fetch from a peer on the host, and its refusals:
+    // `ring`'s ToyOS build, the random source and wall clock it trusts a
+    // certificate by and the sockets under it exist in a ToyOS guest alone,
+    // and the T14's row is the next stage's, against a server on the bench.
+    "https_fetch",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -938,7 +952,52 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/downloadcase, the internet download ----
+    (
+        // A public file over HTTPS through netstack on the I219, for as long as
+        // the list's bound leaves it: its rate is reported, never judged. A boot
+        // of its own, so the transfer has the machine alone.
+        "internet_download",
+        metal::Metal {
+            arms: &[metal::once("download", "tests/downloadcase", &[], &["test_rs_https_download"])],
+            judge: |b| https_download_on_metal(b[0]),
+        },
+    ),
 ];
+
+/// What `https_download` said of its transfer, printed as it said it: green
+/// for a job that ended 0 having read some of the body, and, where it read
+/// all of it, a body of the file's length and hash. Its busy fraction is
+/// read: the T14 counts MPERF on every CPU (`counters_on_metal`), so one it
+/// could not read is the job's defect.
+fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
+    /// The job's file's length, and the SHA-256 its publisher states beside it
+    /// (`<url>.sha256`).
+    const DOWNLOAD_BYTES: &str = "170439044";
+    const DOWNLOAD_SHA256: &str = "1a9ee8caaa18a3e433fef93cea8a55dc1ebd478ed761b2fef69d4565f9d00e7f";
+    const SAID: &str = "https_download: ";
+    let log = back.log();
+    let said = log.text().lines().find_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim()));
+    if let Some(said) = said {
+        eprintln!("  [download] {said}");
+    }
+    back.job_passed("test_rs_https_download")?;
+    let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
+    let field = |name: &str| said.split_whitespace().find_map(|word| word.strip_prefix(name)?.strip_prefix('='));
+    match said.split_whitespace().next() {
+        Some("whole") if field("bytes") == Some(DOWNLOAD_BYTES) && field("sha256") == Some(DOWNLOAD_SHA256) => {}
+        Some("whole") => {
+            return Err(format!("https_download's body is not {DOWNLOAD_BYTES} bytes hashing {DOWNLOAD_SHA256}: {said}"))
+        }
+        // A cut says its bytes only where the body's first read came.
+        Some("cut") if field("bytes").is_some() => {}
+        _ => return Err(format!("https_download read none of the body: {said}")),
+    }
+    if field("busy") == Some("unread") {
+        return Err(format!("https_download read no MPERF on the T14: {said}"));
+    }
+    Ok(())
+}
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.
@@ -3265,13 +3324,12 @@ fn boot_netcase(
     rust_bins: &[(String, Vec<u8>)],
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
-    const LEASED: &str = "netstack: DHCP: lease ";
     /// `userland/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    await_marker(&mut qemu, &mut console, toyos_tco::LEASE_SAID, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
     await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
     Ok(qemu)
 }
@@ -3390,6 +3448,92 @@ fn libc_sockets() -> Result<(), String> {
     Ok(())
 }
 
+/// An unchanged HTTPS client — `ureq` on `rustls` on `ring`, as published but
+/// for `ring`'s ToyOS arms — trusting `build::trust_roots` and this run's
+/// authority, and sending the project's `User-Agent`, on one boot of
+/// `tests/netcase` against servers this run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
+/// every byte the host computes with another SHA-256 than the guest's; and it
+/// refuses a certificate for another address and one from an authority the
+/// roots file does not hold, each by its own name, at the handshake. First,
+/// on the same CPU, `ring_kat` holds `ring` to its specifications' answers:
+/// the server is `rustls` on `ring` too, so the handshake alone would pass a
+/// `ring` wrong at both ends.
+fn https_fetch() -> Result<(), String> {
+    use common::https::{self, Authority, Seen, Server};
+    use sha2::Digest;
+    const JOB: &str = "https_get";
+    const KAT: &str = "ring_kat";
+    /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
+    /// against the rule and not against itself.
+    const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
+    const WAIT: Duration = Duration::from_secs(30);
+    let host: std::net::IpAddr = https::HOST.parse().expect("an address");
+    let trusted = Authority::new("ToyOS harness test authority");
+    let stranger = Authority::new("ToyOS harness authority nothing trusts");
+    let body = std::sync::Arc::new(https::body());
+    let want = format!("{JOB}: ok bytes={} sha256={:x}", body.len(), sha2::Sha256::digest(body.as_slice()));
+    let fetched = Server::start(trusted.leaf(host), body.clone())?;
+    let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
+    let untrusted = Server::start(stranger.leaf(host), body)?;
+
+    // The shipped roots and the harness's authority, under a name of the
+    // test's own: the client reads the file its argument names.
+    const ROOTS: &str = "etc/ssl/harness-cert.pem";
+    let mut roots = toyos_build::build::trust_roots();
+    roots.extend_from_slice(trusted.pem().as_bytes());
+    let crate_path = compile::repo_root().join("tests/toyos-rust-tests");
+    let bins = [JOB, KAT].map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, name)));
+    let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
+    let mut qemu = boot_netcase(&[], &bins, options)?;
+    let kat = qemu.run_test("test_rs_ring_kat", Duration::from_secs(120));
+    if kat.error.is_some() || kat.exit_code != Some(0) || !kat.stdout.lines().any(|l| l.trim_end() == "ring_kat: ok") {
+        return Err(format!("{KAT} ended {:?} ({:?}):\n{}", kat.exit_code, kat.error, kat.stdout));
+    }
+    let roots = format!("/system/{ROOTS}");
+    let fetches: [(&str, &Server, String, i32); 3] = [
+        ("the trusted server", &fetched, want, 0),
+        ("the server named for another address", &wrong_name, format!("{JOB}: refused not-valid-for-name"), 2),
+        ("the server no root vouches for", &untrusted, format!("{JOB}: refused unknown-issuer"), 2),
+    ];
+    for (what, server, line, code) in &fetches {
+        let url = format!("https://{}:{}/body", https::HOST, server.port);
+        let result = qemu.run_test(&format!("test_rs_{JOB} {url} {roots}"), Duration::from_secs(120));
+        if let Some(why) = &result.error {
+            return Err(format!("{what}: {why}\nthe job said:\n{}", result.stdout));
+        }
+        if result.exit_code != Some(*code) || !result.stdout.lines().any(|l| l.trim_end() == line) {
+            return Err(format!(
+                "{what}: the client ended {:?} and was to end {code} saying {line:?}:\n{}",
+                result.exit_code, result.stdout
+            ));
+        }
+    }
+
+    // Of a refused handshake the server sees the connection arrive and no
+    // more: this client sends it no alert, on the host as here, and the close
+    // after it need not arrive
+    // (`issues/a-guest-close-after-a-refused-handshake-can-leave-its-peer-waiting.md`).
+    for (what, server, _, code) in &fetches {
+        if !matches!(server.next(WAIT).map_err(|e| format!("{what}: {e}"))?, Seen::Accepted) {
+            return Err(format!("{what} saw something before a connection"));
+        }
+        if *code != 0 {
+            continue;
+        }
+        match server.next(WAIT).map_err(|e| format!("{what}: {e}"))? {
+            Seen::Served { version: Some(rustls::ProtocolVersion::TLSv1_3), path, user_agents }
+                if path == "/body" && user_agents == [USER_AGENT] => {}
+            other => return Err(format!("{what} saw {other:?}, not a TLS 1.3 GET of /body as {USER_AGENT:?}")),
+        }
+    }
+    for (what, server, _, _) in &fetches {
+        if let Some(seen) = server.more().into_iter().find(|seen| !matches!(seen, Seen::Failed)) {
+            return Err(format!("{what} saw more than the one connection it was asked for: {seen:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
@@ -3399,6 +3543,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
+        "https_fetch" => https_fetch(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
