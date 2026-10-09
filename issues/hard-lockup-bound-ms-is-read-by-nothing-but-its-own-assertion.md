@@ -7,7 +7,7 @@ opened: 2026-09-30
 # `toyos_tco::HARD_LOCKUP_BOUND_MS` is read by nothing but its own assertion
 
 `toyos-tco/src/lib.rs` declares `HARD_LOCKUP_BOUND_MS`,
-`hard_lockup_bound_ms(WEDGE_BOUND_MS)`, as "the one a T14 boot runs under",
+`hard_lockup_bound_ms(wedge_bound_ms(JOB_BOUND_MS))`, as "the one a T14 boot runs under",
 and the `const _` beside it is its one reader. Its last other reader was the
 metal profile's list of declared ceilings, which went with
 `tests/metal-profile.toml`. The T14's `hardlockup` arm no longer runs under it
