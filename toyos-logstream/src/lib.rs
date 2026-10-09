@@ -93,6 +93,16 @@ pub const RESUME: u32 = 7;
 /// boot `/log` is owed, since `logkeeper` answers only once it is durable.
 pub const STOPPING: &str = "supervisor: power: the machine stops, and logkeeper makes the log whole first";
 
+/// What `logkeeper` says as it opens a boot's file, before that file's path:
+/// the first of its own lines in the file it names.
+pub const LOG_OPENED: &str = "logkeeper: this boot's kernel log is ";
+
+/// What `logkeeper` says of a part that reached its bound, between the bytes it
+/// reached and the path of the part the boot continues in, which ends the
+/// line. Said once the next part is open and written by the next round, so
+/// each continuation holds the line of the rotation that opened it.
+pub const LOG_CONTINUES: &str = " bytes and this boot continues in ";
+
 /// What a [`REGISTER`] frame says: the pid the supervisor started, and its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Registration<'a> {

@@ -25,6 +25,7 @@ mod pthread;
 mod refused;
 mod sigmask;
 mod socket;
+mod sockopt;
 mod stdio;
 mod string;
 mod strtonum;

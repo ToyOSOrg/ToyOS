@@ -35,13 +35,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
-use toyos::Pipe;
 use toyos_abi::clock::stamp_ns;
 use toyos_abi::counters::{Counter, RawRecord, Record};
-use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{parse, program_line, Lines, Source};
+use toyos_abi::syscall;
+use toyos_logstream::{parse, program_line, Source};
+
+#[path = "../served_log.rs"]
+mod served_log;
+use served_log::Log;
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -163,47 +165,6 @@ fn print(phase: &str, read: &Read) {
     println!("counters_metal {phase}: at {} ns, the read took {} ns", read.at, read.took.as_nanos());
     for (path, value) in toyos_inspect::kernel::render(&read.records).expect("one record per cpu") {
         println!("counters_metal {phase}: {}", toyos_inspect::line(&path, &value));
-    }
-}
-
-/// This boot's log as logkeeper serves it, from its first line. A reader of
-/// the `log` port is handed each round only after it is on the stick.
-struct Log {
-    pipe: Pipe,
-    poller: Poller,
-    lines: Lines,
-    chunk: Vec<u8>,
-}
-
-impl Log {
-    fn open() -> Log {
-        let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
-        Log { pipe, poller: Poller::new(1), lines: Lines::new(), chunk: vec![0u8; 64 * 1024] }
-    }
-
-    /// Hand `seen` each line in turn until it has answered `true`, for at most
-    /// `bound`; `what` names what it waits for.
-    fn until(&mut self, what: &str, bound: Duration, mut seen: impl FnMut(&str) -> bool) {
-        let by = Instant::now() + bound;
-        let mut done = false;
-        while !done {
-            let left = by
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("the log did not show {what} within {bound:?}"));
-            match self.pipe.read_nonblock(&mut self.chunk) {
-                Ok(0) => panic!("logkeeper closed the log before it showed {what}"),
-                Ok(n) => self.lines.push(&self.chunk[..n], |line, _| {
-                    let line = std::str::from_utf8(line)
-                        .unwrap_or_else(|e| panic!("logkeeper served a line that is not UTF-8 ({e}): {line:?}"));
-                    done |= seen(line);
-                }),
-                Err(SyscallError::WouldBlock) => {
-                    self.poller.watch(&self.pipe, READABLE, 0);
-                    self.poller.wait(1, left.as_nanos() as u64, |_| {});
-                }
-                Err(e) => panic!("the log's pipe refused a read: {e:?}"),
-            }
-        }
     }
 }
 

@@ -582,7 +582,7 @@ impl Netstack {
             Some(MsgType::UdpClose) => self.handle_udp_close(&req, socket_set),
             Some(MsgType::DnsLookup) => self.handle_dns_lookup(req, socket_set),
             Some(MsgType::TcpSetOption) => self.handle_tcp_set_option(&req, socket_set),
-            Some(MsgType::TcpGetOption) => self.handle_tcp_get_option(&req, socket_set),
+            Some(MsgType::UdpSetOption) => self.handle_udp_set_option(&req),
             Some(MsgType::TcpConnectPiped) => self.handle_tcp_connect_piped(req, socket_set, iface),
             Some(MsgType::TcpBindPiped) => self.handle_tcp_bind_piped(&req, socket_set),
             Some(MsgType::TcpAcceptPiped) => self.handle_tcp_accept_piped(&req, socket_set),
@@ -870,21 +870,19 @@ impl Netstack {
         }
     }
 
-    fn handle_tcp_get_option(&mut self, msg: &Request, socket_set: &mut SocketSet<'_>) {
+    /// smoltcp sends to a broadcast address for every socket, so the
+    /// permission has nothing here to switch.
+    fn handle_udp_set_option(&self, msg: &Request) {
         let Ok(req) = ipc::decode_payload::<SocketOptionRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some(SocketKind::TcpStream(handle)) = self.sockets.get(&req.socket_id) else {
+        let Some(SocketKind::Udp(_)) = self.sockets.get(&req.socket_id) else {
             msg.client.error(ERR_NOT_CONNECTED);
             return;
         };
-        let socket = socket_set.get_mut::<tcp::Socket>(*handle);
         match req.option {
-            OPT_NODELAY => {
-                let val = if socket.nagle_enabled() { 0u32 } else { 1u32 };
-                msg.client.result(&SocketOptionResponse { value: val });
-            }
+            OPT_BROADCAST => msg.client.done(),
             _ => msg.client.error(ERR_INVALID_INPUT),
         }
     }

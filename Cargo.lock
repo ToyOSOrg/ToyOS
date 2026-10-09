@@ -6,11 +6,16 @@ version = 4
 name = "acpiserver"
 version = "0.1.0"
 dependencies = [
+ "acpiserver-api",
  "toyos",
  "toyos-abi",
  "toyos-acpi",
  "toyos-aml",
 ]
+
+[[package]]
+name = "acpiserver-api"
+version = "0.1.0"
 
 [[package]]
 name = "adler2"
@@ -5743,6 +5748,7 @@ dependencies = [
 name = "toyos-build"
 version = "0.1.0"
 dependencies = [
+ "acpiserver-api",
  "bcachefs",
  "fatfs",
  "flate2",

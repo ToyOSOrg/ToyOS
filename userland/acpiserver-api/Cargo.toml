@@ -1,0 +1,12 @@
+[package]
+name = "acpiserver-api"
+description = "What acpiserver says in the boot's log, as the programs that wait on its lines and the judges that read them spell it."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[lints.rust]
+unsafe_code = "forbid"

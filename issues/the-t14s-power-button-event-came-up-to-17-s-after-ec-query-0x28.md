@@ -10,8 +10,9 @@ On the T14 in ACPI mode, a press of the power button is sometimes lost: the
 machine stops only on a later press. On every boot that served a press,
 `/system/bin/acpiserver` took embedded-controller query 0x28 first, and the
 fixed power-button event, `PWRBTN_STS`, which is what powers the machine off,
-arrived after it. The boots that served one, each held open by `acpi_hold`,
-as `logkeeper` wrote them to the stick:
+arrived after it. The boots that served one, each held open by `acpi_hold`
+as it then was, a sleep to 54 s after boot, as `logkeeper` wrote them to the
+stick:
 
 | head | query 0x28 first taken | power button pressed | gap | owner's presses |
 |---|---|---|---|---|
@@ -303,8 +304,12 @@ One boot decides neither a fix nor this issue's close.
 
 **Exit**: an on-demand check by the owner, which the orchestrator asks him
 for at the head that claims the fix and which no test or CI job waits on. On
-ten boots of that head held open by `acpi_hold` he presses the power button
-once, briefly; every boot's log carries the server's press line and the
+ten boots of that head he presses the power button once, briefly. Each is
+held open by a job of this check's own, which waits, bounded, for the press
+the boot is about; that job is owed with the check, built with the ACPI
+track's later slice on the owner's go. `acpi_hold` no longer holds a boot
+for a press: it ends at the server's first count line. Then every boot's
+log carries the server's press line and the
 supervisor's power-off, and he reports one press for each. Each boot ends in
 S5 and leaves no readback, so each log is read off the stick's log partition,
 copied before the next flash, as at `ee6aadecb`. The head, the ten logs'
