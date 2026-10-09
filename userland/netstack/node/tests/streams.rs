@@ -854,7 +854,7 @@ fn a_shutdown_sends_what_the_pipe_held_and_then_the_fin() {
 
 // RFC 9293 §3.6, case 1, as a client that shut its sending half down reads it: the peer's FIN
 // after its last byte ends the to-client pipe while the from-client pipe is still there, which is
-// what an orderly end is to std's `ended` and libc's `streamend`. The send pipe goes when its
+// what an orderly end is to std's `ended`. The send pipe goes when its
 // writer does, and not before, however long that is.
 #[test]
 fn the_peers_fin_after_the_clients_shutdown_leaves_the_send_pipe_to_its_writer() {
@@ -877,6 +877,29 @@ fn the_peers_fin_after_the_clients_shutdown_leaves_the_send_pipe_to_its_writer()
     net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
     assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient, PipeEnd::FromClient], 0));
     assert!(net.far.resets.is_empty());
+}
+
+// RFC 9293 §3.6, case 1, with the client's writer gone after its shutdown and before the peer's
+// FIN: the finished send pipe goes with its writer, and the stream lives on its to-client pipe,
+// which still carries the peer's text and then its end.
+#[test]
+fn a_writer_that_leaves_after_the_shutdown_leaves_the_stream_to_its_reader() {
+    let (mut net, id, client) = established();
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert!(net.far.fin);
+    client.borrow_mut().writer_gone = true;
+    net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient], 1));
+    assert_eq!(net.watch(id), Some(Watch { readable: false, writer: false, writable: false, reader: true }));
+
+    let frame = net.far.text(b"late");
+    net.deliver(&frame);
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!(client.borrow().inbox, b"late");
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0));
+    assert!(net.far.resets.is_empty() && net.events().is_empty());
 }
 
 // RFC 9293 §3.6, case 2, with the client's end a shutdown: the connection is over in order, and

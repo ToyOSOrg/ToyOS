@@ -167,8 +167,8 @@ struct Stream {
     /// The client writes no more: its writer is gone, it shut its sending half down or it
     /// closed. An empty pipe is then the end.
     done_writing: bool,
-    /// The FIN is queued after the client's last byte. A from-client end still held is not read
-    /// again: it is kept for its client to find there, until its writer leaves.
+    /// The FIN is queued after the client's last byte. A from-client end still held is kept for
+    /// its client to find there, until its writer leaves.
     fin_queued: bool,
     /// The client let go of the stream, or nobody reads it: nobody asks how it ended.
     left: bool,
@@ -265,9 +265,9 @@ impl Stream {
         }
 
         let mut gave_up = false;
-        while let Some(pipe) = self.from_client.as_mut().filter(|_| !self.fin_queued) {
+        while let Some(pipe) = self.from_client.as_mut() {
             // Never more than [tcp] has room for, and so never a read of no bytes, whose answer
-            // would be the end's.
+            // would be the end's; [tcp] has none once the FIN is queued.
             let room = stack.tcp_status(conn).writable.min(CHUNK);
             if room == 0 {
                 break;
@@ -469,7 +469,7 @@ impl Node {
         self.streams.live.iter().filter(|(_, stream)| !stream.connecting).map(|(id, stream)| {
             let (from, to) = (stream.from_client.is_some(), stream.to_client.is_some());
             (*id, Watch {
-                readable: from && stream.room && !stream.fin_queued,
+                readable: from && stream.room,
                 writer: from && (!stream.done_writing || stream.fin_queued),
                 writable: to && stream.held,
                 reader: to,
