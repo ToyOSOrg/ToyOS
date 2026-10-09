@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ops::ControlFlow;
 
-use crate::alloc_bitmap::BitmapAllocator;
+use crate::alloc_bitmap::{BitmapAllocator, Reserve};
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, DeviceError, BLOCK_SIZE};
 use crate::btree::{self, Entry, Key, KeyType, Node};
 use crate::superblock::{FsUuid, Superblock};
@@ -596,7 +596,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// Open an existing filesystem from disk.
     pub fn open(io: IO) -> Result<Mounted<IO, Mode>, FsError> {
         let sb = Superblock::read(&io)?;
-        let alloc = BitmapAllocator::open(&sb);
+        let alloc = BitmapAllocator::open(&io, &sb)?;
         Ok(Mounted {
             io,
             sb,
@@ -753,15 +753,26 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
 
 /// **Every change is one operation and every sync one commit.** An operation
 /// ([`Mounted::atomic`]) takes effect whole or, refused anywhere, leaves the
-/// tree and the allocator as they were; it never writes over a block the last
+/// tree and the allocator as they were; it never writes over a node the last
 /// commit's tree reaches, but to new blocks up to a new root. A commit
-/// ([`Mounted::sync`]) is the primary superblock naming that root landing on
-/// the device, after everything the root reaches, and before the backup copy:
-/// killed anywhere, the device holds the last commit's tree whole or the new
-/// one whole, a torn primary failing its checksum for the backup, which is the
-/// last commit still. What a kill costs is the blocks taken since the last
-/// commit and those only the old tree reached: marked used, and named by no
-/// tree, until a sweep (`issues/a-crash-leaks-the-blocks-of-its-last-commit.md`).
+/// ([`Mounted::sync`]) is both superblock copies naming that root landing on
+/// the device after everything the root reaches. A superblock's bytes lie in
+/// its first 512-byte sector, which a device writes whole, so killed anywhere
+/// each copy names the last commit's tree whole or the new one whole.
+///
+/// That is true of names, and of each entry's length and extents; not of a
+/// file's bytes. A page written over where the file already holds it
+/// ([`Mounted::resolve_or_alloc_block`]) is written in place, so a kill can
+/// leave a file's committed blocks holding pages from both sides of a write
+/// (`issues/a-write-over-a-files-committed-page-is-not-shadowed.md`). What a
+/// kill costs besides is the blocks taken since the last commit and those only
+/// the old tree reached: marked used, and named by no tree, until a sweep
+/// (`issues/a-crash-leaks-the-blocks-of-its-last-commit.md`).
+///
+/// A delete, and an update whose entry grows no longer, may take the blocks
+/// [`crate::alloc_bitmap::NODE_RESERVE`] keeps from every other change, so a
+/// full volume still shrinks, by as many committed nodes as the reserve holds
+/// between two commits (`issues/a-full-data-volume-frees-space-only-at-a-commit.md`).
 impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// Create a file, replacing whatever answered to `name`.
     pub fn create(&mut self, name: &str, data: &[u8], mtime: u64) -> Result<(), FsError> {
@@ -775,9 +786,13 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 
     /// Run `change` as one operation: whole, or refused with the root and
     /// every block as they were.
-    fn atomic<T>(&mut self, change: impl FnOnce(&mut Self) -> Result<T, FsError>) -> Result<T, FsError> {
+    fn atomic<T>(
+        &mut self,
+        reserve: Reserve,
+        change: impl FnOnce(&mut Self) -> Result<T, FsError>,
+    ) -> Result<T, FsError> {
         let root = self.sb.root_node;
-        self.alloc.begin();
+        self.alloc.begin(reserve);
         match change(self) {
             Ok(done) => {
                 self.alloc.succeed(&self.io);
@@ -815,7 +830,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
             return Err(FsError::NameTooLong { len: name.len(), max: MAX_NAME_LEN });
         }
 
-        self.atomic(|fs| {
+        self.atomic(Reserve::Keep, |fs| {
             let displaced = match fs.find_by_name(name)? {
                 Some((key, value)) => Some((key, fs.decode(&value)?.extents().to_vec())),
                 None => None,
@@ -867,7 +882,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// types, where the old shape fell through from File to Symlink after a
     /// non-matching removal and could take two entries out in one call.
     pub fn delete(&mut self, name: &str) -> Result<bool, FsError> {
-        self.atomic(|fs| {
+        self.atomic(Reserve::Draw, |fs| {
             let Some((key, value)) = fs.find_by_name(name)? else { return Ok(false) };
             let extents = fs.decode(&value)?.extents().to_vec();
 
@@ -892,10 +907,8 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         // From the first superblock write on, this commit may be what a mount
         // finds, even where the write is refused.
         self.alloc.seal();
-        for copy in self.sb.copies() {
-            self.sb.write_at(&self.io, copy)?;
-            self.io.flush()?;
-        }
+        self.sb.write(&self.io)?;
+        self.io.flush()?;
         self.alloc.committed(&self.io)
     }
 
@@ -907,7 +920,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// Rename every `(old, new)` pair in turn, as one operation: a directory
     /// is the names beneath it, and moves whole or not at all.
     pub fn rename_all(&mut self, renames: &[(&str, &str)]) -> Result<(), FsError> {
-        self.atomic(|fs| renames.iter().try_for_each(|&(old, new)| fs.rename_one(old, new)))
+        self.atomic(Reserve::Keep, |fs| renames.iter().try_for_each(|&(old, new)| fs.rename_one(old, new)))
     }
 
     /// The new entry goes in before the old one comes out. What that ordering
@@ -966,14 +979,17 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         size: u64,
         mtime: u64,
     ) -> Result<(), FsError> {
-        self.atomic(|fs| {
-            let (old_key, old_value) = fs.find_by_name(name)?
-                .ok_or(FsError::NotFound)?;
-            let leaf = fs.decode(&old_value)?;
+        let (old_key, old_value) = self.find_by_name(name)?.ok_or(FsError::NotFound)?;
+        let leaf = self.decode(&old_value)?;
+        let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, new_extents);
+        // An entry no longer than the one it replaces splits no node.
+        let reserve = match new_value.len() <= old_value.len() {
+            true => Reserve::Draw,
+            false => Reserve::Keep,
+        };
+        let new_entry = Entry { key: old_key, value: new_value };
 
-            let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, new_extents);
-            let new_entry = Entry { key: old_key, value: new_value };
-
+        self.atomic(reserve, |fs| {
             // No delete first: the key is unchanged and `btree::insert` replaces
             // on an equal key. Blocks the caller drops from the extent list are
             // the caller's to free, through [`Self::free_extents`], after this

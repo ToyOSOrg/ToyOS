@@ -27,13 +27,14 @@ pub struct Run {
 /// The bitmap is stored on disk starting at `bitmap_start` and spanning
 /// `bitmap_blocks` blocks. Each bit represents one block: 1 = used, 0 = free.
 ///
-/// **With `shadow` on, no block the last committed tree reaches is written
-/// over or handed out again before the next commit lands** (`fs::commit`): a
-/// btree node is written in place only when the operation in progress took
-/// its block ([`Self::in_place`]), and a block given up is free at once only
-/// if no commit has named it since it was taken (`fresh`); any other waits in
-/// `pending` for the commit. An operation ([`Self::begin`]) gives up its
-/// blocks only when it succeeds, and refused gives back every one it took.
+/// **With `shadow` on, no node the last committed tree reaches is written
+/// over, and no block it reaches is handed out again, before the next commit
+/// lands** (`Mounted::sync`): a btree node is written in place only when the
+/// operation in progress took its block ([`Self::in_place`]), and a block
+/// given up is free at once only if no commit has named it since it was taken
+/// (`fresh`); any other waits in `pending` for the commit. An operation
+/// ([`Self::begin`]) gives up its blocks only when it succeeds, and refused
+/// gives back every one it took.
 /// mkfs runs with `shadow` off: nothing it writes is committed until it ends.
 pub struct BitmapAllocator {
     pub bitmap_start: BlockNum,
@@ -49,15 +50,22 @@ pub struct BitmapAllocator {
     op: Option<Op>,
 }
 
-/// Blocks a file's data never takes while `shadow` is on, so a volume its
-/// files filled can still copy the nodes a delete changes: a rename in a tree
-/// four levels deep copies four, splits four and adds a root for its insert,
-/// and copies four more for its delete.
+/// Blocks only an operation that [`Reserve::Draw`]s may take while `shadow`
+/// is on, so a full volume still copies the nodes a delete or a shrink
+/// changes, as many as sixteen between two commits.
 pub const NODE_RESERVE: u64 = 16;
 
+/// Whether an operation may take the blocks [`NODE_RESERVE`] keeps: only one
+/// that leaves the tree no larger, so a commit gives back all it drew.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Reserve {
+    Keep,
+    Draw,
+}
+
 /// The operation in progress: what it took, and what it gives up if it succeeds.
-#[derive(Default)]
 struct Op {
+    reserve: Reserve,
     taken: Runs,
     given: Vec<(u64, u32)>,
 }
@@ -93,25 +101,46 @@ impl Runs {
 }
 
 impl BitmapAllocator {
-    /// The allocator of a mounted volume, as its superblock left it.
-    pub fn open(sb: &Superblock) -> Self {
-        Self {
+    /// The allocator of a mounted volume, its free count read off the bitmap:
+    /// the superblock's is the last commit's, and a stop after it leaves the
+    /// bitmap holding fewer.
+    pub fn open(io: &dyn BlockIO, sb: &Superblock) -> Result<Self, FsError> {
+        let mut free_blocks = 0;
+        let mut buf = BlockBuf::zeroed();
+        for i in 0..sb.block_count.div_ceil(BITS_PER_BLOCK) {
+            io.read(BlockNum::new(sb.bitmap_start.raw() + i), &mut buf)?;
+            let bits = (sb.block_count - i * BITS_PER_BLOCK).min(BITS_PER_BLOCK);
+            let (whole, rest) = buf.0[..bits.div_ceil(8) as usize].split_at((bits / 8) as usize);
+            free_blocks += whole.iter().map(|b| b.count_zeros() as u64).sum::<u64>();
+            free_blocks += rest.first().map_or(0, |b| (!b & ((1u8 << (bits % 8)) - 1)).count_ones() as u64);
+        }
+        Ok(Self {
             bitmap_start: sb.bitmap_start,
             bitmap_blocks: sb.bitmap_blocks,
             total_blocks: sb.block_count,
-            free_blocks: sb.free_blocks,
+            free_blocks,
             next_alloc: sb.next_alloc,
             shadow: true,
             fresh: Runs::default(),
             pending: Vec::new(),
             op: None,
-        }
+        })
     }
 
     /// Begin one operation on the tree, which [`Self::succeed`] or
     /// [`Self::fail`] ends.
-    pub fn begin(&mut self) {
-        assert!(self.op.replace(Op::default()).is_none(), "an operation began inside another");
+    pub fn begin(&mut self, reserve: Reserve) {
+        let op = Op { reserve, taken: Runs::default(), given: Vec::new() };
+        assert!(self.op.replace(op).is_none(), "an operation began inside another");
+    }
+
+    /// What an allocation may take now: every free block, but for those
+    /// [`NODE_RESERVE`] keeps from all but an operation that draws on it.
+    fn spare(&self) -> u64 {
+        match !self.shadow || self.op.as_ref().is_some_and(|op| op.reserve == Reserve::Draw) {
+            true => self.free_blocks,
+            false => self.free_blocks.saturating_sub(NODE_RESERVE),
+        }
     }
 
     /// Whether a node at `block` may be written where it is.
@@ -167,11 +196,15 @@ impl BitmapAllocator {
     }
 
     /// Give up `count` blocks from `start`: free now if no commit has named
-    /// them, and otherwise once the next one lands.
+    /// them, and otherwise once the next one lands. A block whose bit the
+    /// device would not clear is leaked, and the rest are given up still.
     fn give(&mut self, io: &dyn BlockIO, start: u64, count: u32) -> Result<(), FsError> {
+        let mut refused = Ok(());
         for block in start..start + count as u64 {
             if !self.shadow || self.fresh.remove(block) {
-                self.set_free(io, BlockNum::new(block))?;
+                if let Err(e) = self.set_free(io, BlockNum::new(block)) {
+                    refused = refused.and(Err(e));
+                }
             } else {
                 match self.pending.last_mut() {
                     Some((at, n)) if *at + *n as u64 == block => *n += 1,
@@ -179,7 +212,7 @@ impl BitmapAllocator {
                 }
             }
         }
-        Ok(())
+        refused
     }
 
     /// Where a block's bit lives, and which bit of that byte it is.
@@ -242,15 +275,12 @@ impl BitmapAllocator {
     }
 
     /// Reserve as much of `wanted` as one contiguous run can cover, scanning
-    /// from block `from`: a file's data, which leaves [`NODE_RESERVE`] free.
+    /// from block `from`.
     ///
     /// The run is never empty and may be shorter than asked for, so every
     /// caller has to loop or has to be wrong.
     pub fn alloc_up_to(&mut self, io: &dyn BlockIO, from: u64, wanted: u32) -> Result<Run, FsError> {
-        let spare = match self.shadow {
-            true => self.free_blocks.saturating_sub(NODE_RESERVE),
-            false => self.free_blocks,
-        };
+        let spare = self.spare();
         if spare == 0 {
             return Err(FsError::NoSpace { requested: wanted, available: 0 });
         }
@@ -263,6 +293,10 @@ impl BitmapAllocator {
     /// Reserve all of `count` or nothing, for callers that cannot place a
     /// short run. Nothing is marked used unless the whole run is there.
     pub fn alloc_exact(&mut self, io: &dyn BlockIO, count: u32) -> Result<Run, FsError> {
+        let spare = self.spare();
+        if spare < count as u64 {
+            return Err(FsError::NoSpace { requested: count, available: spare });
+        }
         let (start, len) = self.longest_free_run(io, self.next_alloc, count)?;
         if len < count {
             return Err(FsError::NoSpace {

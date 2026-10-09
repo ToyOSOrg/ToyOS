@@ -833,7 +833,7 @@ mod tests {
         let mut middle: Vec<Entry> = (0..40).map(|_| entry(72)).collect();
         middle.insert(20, entry(MAX_ENTRY_SIZE - KEY_HEADER_SIZE));
         assert_eq!(pack(middle.clone()).len(), 3, "two siblings, and a block for one");
-        alloc.begin();
+        alloc.begin(crate::alloc_bitmap::Reserve::Keep);
         assert!(matches!(
             split_node(&io, &mut alloc, leaf, Node::Leaf(middle)),
             Err(FsError::NoSpace { .. }),

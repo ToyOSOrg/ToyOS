@@ -1,20 +1,23 @@
 //! A directory rename, changes after it and the sync that commits them,
 //! stopped at every block write: the crash-point model of the commit.
 //!
-//! **A device keeps what a flush covered and any part of what it did not.**
-//! The writes since the last flush may land in any order, so each stop is
-//! tried twice: every write of the open epoch up to the stop landed, and the
-//! stop's write alone did. What the device then holds must mount, keep every
-//! name beside the directory, and name the directory whole under exactly one
-//! of its two names.
+//! **A device keeps what a flush covered and any part of what it did not, a
+//! 512-byte sector at a time.** The writes since the last flush may land in
+//! any order, so each stop is tried with every write of the open epoch before
+//! it landed and with none of them; and the stop's write itself whole, or
+//! torn at a sector boundary: its first sectors new and the rest old, or its
+//! last. What the device then holds must mount, keep every name beside the
+//! directory, and name the directory whole under exactly one of its two
+//! names; and so must it with block 0 lost, from the backup superblock.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, Formatted, FsError, Mounted, ReadOnly, ReadWrite, TransferError, VecBlockIO};
+use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, Formatted, FsError, Mounted, ReadOnly, ReadWrite, Superblock, TransferError, VecBlockIO};
 
 const BLOCKS: u64 = 512;
 const BLOCK: usize = 4096;
+const SECTOR: usize = 512;
 const STAGED: &str = "staged";
 const INSTALLED: &str = "apps/pkg";
 
@@ -180,23 +183,51 @@ fn a_directory_rename_is_whole_under_one_name_wherever_the_device_stops() {
 
     let writes: Vec<usize> = (0..log.len()).filter(|&i| matches!(log[i], Event::Write(..))).collect();
     assert!(writes.len() > 10, "the run wrote {} blocks", writes.len());
-    let mut torn = Vec::new();
+    let sb = Superblock::read(&VecBlockIO::from_vec(image.clone())).expect("the staged superblock");
+    let in_place: Vec<u64> = [0, BLOCKS - 1]
+        .into_iter()
+        .chain(sb.bitmap_start.raw()..sb.bitmap_start.raw() + sb.bitmap_blocks)
+        .collect();
+    let sectors = BLOCK / SECTOR;
+    let parts: Vec<(String, std::ops::Range<usize>)> = std::iter::once(("whole".to_string(), 0..sectors))
+        .chain((1..sectors).flat_map(|k| [(format!("its first {k} sectors"), 0..k), (format!("its last {k} sectors"), sectors - k..sectors)]))
+        .collect();
+    let (mut torn, mut tried) = (Vec::new(), 0);
     for (k, &stop) in writes.iter().enumerate() {
         let epoch = log[..stop].iter().rposition(|e| matches!(e, Event::Flush)).map_or(0, |f| f + 1);
-        for (shape, landed) in [("in order", epoch..=stop), ("alone", stop..=stop)] {
-            let mut held = image.clone();
-            for event in log[..epoch].iter().chain(&log[landed]) {
+        let Event::Write(block, data) = &log[stop] else { unreachable!("a stop is a write") };
+        for (shape, before) in [("the epoch's writes before it landed", epoch..stop), ("alone", stop..stop)] {
+            let mut landed = image.clone();
+            for event in log[..epoch].iter().chain(&log[before]) {
                 if let Event::Write(block, data) = event {
                     let at = *block as usize * BLOCK;
-                    held[at..at + BLOCK].copy_from_slice(&data[..]);
+                    landed[at..at + BLOCK].copy_from_slice(&data[..]);
                 }
             }
-            if let Err(why) = want.held(held) {
-                torn.push(format!("stopped at write {k} of {}, the epoch's writes {shape}: {why}", writes.len()));
+            let at = *block as usize * BLOCK;
+            let old = landed[at..at + BLOCK].to_vec();
+            for (part, range) in &parts {
+                let mut held = landed.clone();
+                held[at + range.start * SECTOR..at + range.end * SECTOR]
+                    .copy_from_slice(&data[range.start * SECTOR..range.end * SECTOR]);
+                // A tear only of a block the layout writes in place, and only
+                // where it leaves bytes neither the old nor the new did.
+                let new = &held[at..at + BLOCK];
+                if range.len() < sectors && (!in_place.contains(block) || new == &old[..] || new == &data[..]) {
+                    continue;
+                }
+                let mut lost = held.clone();
+                lost[..BLOCK].fill(0);
+                for (copy, image) in [("", held), (", block 0 lost", lost)] {
+                    tried += 1;
+                    if let Err(why) = want.held(image) {
+                        torn.push(format!("stopped at write {k} of {} (block {block}), {shape}, {part}{copy}: {why}", writes.len()));
+                    }
+                }
             }
         }
     }
-    assert!(torn.is_empty(), "{} of {} stops tear the volume:\n{}", torn.len(), 2 * writes.len(), torn.join("\n"));
+    assert!(torn.is_empty(), "{} of {tried} stops tear the volume:\n{}", torn.len(), torn.join("\n"));
 }
 
 /// The same with the one write numbered `n` refused, the filesystem alive

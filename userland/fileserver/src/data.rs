@@ -21,10 +21,12 @@
 //! between the two leaks blocks rather than leaving an entry naming freed ones.
 //!
 //! **What a kill costs.** A sync is the format's commit (`bcachefs`'s
-//! `Mounted::sync`): a server killed anywhere leaves the volume as the last
-//! sync that finished, or as the one it was inside, whole either way. A
-//! directory's rename is one operation of the format's
-//! (`Mounted::rename_all`): it moves whole, or is refused with nothing moved.
+//! `Mounted::sync`): a server killed anywhere leaves every name, and every
+//! file's length and extents, as the last sync that finished or as the one it
+//! was inside, whole either way; a file's bytes are not so held, since a page
+//! written over is written in place. A directory's rename is one operation of
+//! the format's (`Mounted::rename_all`): it moves whole, or is refused with
+//! nothing moved.
 //!
 //! Every name a client chose is bounded by the format ([`FsError::NameTooLong`])
 //! before it reaches the tree.
@@ -909,7 +911,7 @@ mod tests {
 
     /// A volume whose free blocks are all apart, so every run a file is given
     /// is one block: every block a file's data may take, taken in one run,
-    /// every other one given back, and the run left at the end for nodes
+    /// every other one given back, and the run the reserve kept
     /// (`bcachefs`'s `NODE_RESERVE`, 16) taken after.
     fn fragmented() -> DataVolume<Ram> {
         let mut v = DataVolume::format(Ram::new(1024), &["home"], clock).unwrap();
