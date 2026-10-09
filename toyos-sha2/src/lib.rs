@@ -88,22 +88,16 @@ fn compress256(state: &mut [u32; 8], block: &[u8; 64]) {
             .wrapping_add(s1);
     }
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for (k, w) in K256.iter().zip(w) {
-        let t1 = h
-            .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
-            .wrapping_add((e & f) ^ (!e & g))
-            .wrapping_add(*k)
-            .wrapping_add(w);
-        let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
-            .wrapping_add((a & b) ^ (a & c) ^ (b & c));
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(t1);
-        d = c;
-        c = b;
-        b = a;
-        a = t1.wrapping_add(t2);
+    for t in (0..64).step_by(8) {
+        let kw = |i: usize| K256[t + i].wrapping_add(w[t + i]);
+        round256([a, b, c, e, f, g], &mut d, &mut h, kw(0));
+        round256([h, a, b, d, e, f], &mut c, &mut g, kw(1));
+        round256([g, h, a, c, d, e], &mut b, &mut f, kw(2));
+        round256([f, g, h, b, c, d], &mut a, &mut e, kw(3));
+        round256([e, f, g, a, b, c], &mut h, &mut d, kw(4));
+        round256([d, e, f, h, a, b], &mut g, &mut c, kw(5));
+        round256([c, d, e, g, h, a], &mut f, &mut b, kw(6));
+        round256([b, c, d, f, g, h], &mut e, &mut a, kw(7));
     }
     for (word, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
         *word = word.wrapping_add(v);
@@ -126,22 +120,16 @@ fn compress512(state: &mut [u64; 8], block: &[u8; 128]) {
             .wrapping_add(s1);
     }
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for (k, w) in K512.iter().zip(w) {
-        let t1 = h
-            .wrapping_add(e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41))
-            .wrapping_add((e & f) ^ (!e & g))
-            .wrapping_add(*k)
-            .wrapping_add(w);
-        let t2 = (a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39))
-            .wrapping_add((a & b) ^ (a & c) ^ (b & c));
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(t1);
-        d = c;
-        c = b;
-        b = a;
-        a = t1.wrapping_add(t2);
+    for t in (0..80).step_by(8) {
+        let kw = |i: usize| K512[t + i].wrapping_add(w[t + i]);
+        round512([a, b, c, e, f, g], &mut d, &mut h, kw(0));
+        round512([h, a, b, d, e, f], &mut c, &mut g, kw(1));
+        round512([g, h, a, c, d, e], &mut b, &mut f, kw(2));
+        round512([f, g, h, b, c, d], &mut a, &mut e, kw(3));
+        round512([e, f, g, a, b, c], &mut h, &mut d, kw(4));
+        round512([d, e, f, h, a, b], &mut g, &mut c, kw(5));
+        round512([c, d, e, g, h, a], &mut f, &mut b, kw(6));
+        round512([b, c, d, f, g, h], &mut e, &mut a, kw(7));
     }
     for (word, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
         *word = word.wrapping_add(v);
@@ -239,4 +227,32 @@ hash! {
 hash! {
     /// SHA-512, §6.4: a 64-byte digest.
     Sha512: u64, block 128, length 16, digest 64, H512, compress512
+}
+
+/// One round of §6.2.2 step 3, the working variables named where they stand
+/// this round rather than moved along: `d` takes `e`'s new value and `h`
+/// takes `a`'s.
+#[inline(always)]
+fn round256([a, b, c, e, f, g]: [u32; 6], d: &mut u32, h: &mut u32, kw: u32) {
+    let t1 = h
+        .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+        .wrapping_add(g ^ (e & (f ^ g)))
+        .wrapping_add(kw);
+    let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+        .wrapping_add((a & b) ^ (c & (a ^ b)));
+    *d = d.wrapping_add(t1);
+    *h = t1.wrapping_add(t2);
+}
+
+/// One round of §6.4.2 step 3, named as [`round256`] names them.
+#[inline(always)]
+fn round512([a, b, c, e, f, g]: [u64; 6], d: &mut u64, h: &mut u64, kw: u64) {
+    let t1 = h
+        .wrapping_add(e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41))
+        .wrapping_add(g ^ (e & (f ^ g)))
+        .wrapping_add(kw);
+    let t2 = (a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39))
+        .wrapping_add((a & b) ^ (c & (a ^ b)));
+    *d = d.wrapping_add(t1);
+    *h = t1.wrapping_add(t2);
 }
