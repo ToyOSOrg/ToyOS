@@ -74,17 +74,12 @@ pub(crate) fn format(bytes: usize, label: [u8; 11]) -> Vec<u8> {
     volume
 }
 
-/// 512 bytes up to 260 MiB, 4 KiB up to 8 GiB, and past that 1 KiB a 2 GiB
-/// of the size rounded up to a power of two, at most 32 KiB.
+/// 512 bytes up to 260 MiB and 4 KiB up to 8 GiB, past anything the build
+/// formats.
 fn sectors_per_cluster(bytes: u64) -> u32 {
     const MIB: u64 = 1024 * 1024;
-    let cluster = if bytes <= 260 * MIB {
-        512
-    } else if bytes <= 8 * 1024 * MIB {
-        4096
-    } else {
-        (bytes.next_power_of_two() / (2 * 1024 * MIB) * 1024).clamp(512, 32 * 1024)
-    };
+    assert!(bytes <= 8 * 1024 * MIB, "a {bytes}-byte volume is larger than this format lays out");
+    let cluster = if bytes <= 260 * MIB { 512 } else { 4096 };
     (cluster / SECTOR as u64) as u32
 }
 
@@ -105,17 +100,13 @@ fn boot_sector(total: u32, per_cluster: u32, per_fat: u32, label: [u8; 11]) -> [
     s[13] = per_cluster as u8;
     put(&mut s, 14, &(RESERVED_SECTORS as u16).to_le_bytes());
     s[16] = FATS as u8;
-    // The FAT12/16 root entry count and 16-bit sizes stay zero on FAT32.
-    if total < 0x1_0000 {
-        put(&mut s, 19, &(total as u16).to_le_bytes());
-    }
+    // The FAT12/16 root entry count and 16-bit sizes stay zero on FAT32, whose
+    // volumes `format` holds to more sectors than 16 bits count.
     s[21] = MEDIA;
     // Sectors per track and heads: no reader of a FAT32 volume uses either.
     put(&mut s, 24, &0x20u16.to_le_bytes());
     put(&mut s, 26, &0x40u16.to_le_bytes());
-    if total >= 0x1_0000 {
-        put(&mut s, 32, &total.to_le_bytes());
-    }
+    put(&mut s, 32, &total.to_le_bytes());
     put(&mut s, 36, &per_fat.to_le_bytes());
     put(&mut s, 44, &ROOT_CLUSTER.to_le_bytes());
     put(&mut s, 48, &(FSINFO_SECTOR as u16).to_le_bytes());
