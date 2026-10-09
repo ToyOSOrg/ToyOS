@@ -271,8 +271,10 @@ Each stage names its exit; "measured" means a number from a run.
    seed the loader reads from firmware's `EFI_RNG_PROTOCOL`, which edk2
    answers from a virtio-rng (`kernel/src/random.rs`); `virt_el2_drop`,
    `virt_smp` and `virt_jobs_at_el2`, one boot of the job case with the timer
-   and FP jobs in it, stay emulated at EL2, which HVF gives no guest. Each
-   judges an event, never a rate: no QEMU test measures time.
+   and FP jobs in it, stay emulated at EL2, which HVF gives no guest, and
+   three more stay emulated until
+   `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`
+   is fixed. Each judges an event, never a rate: no QEMU test measures time.
    Owed before the exit holds: the interrupts-off window against x86's, a
    measurement only metal can make, with no instrument on either arch yet; the
    instruction-cache maintenance before a mapping is executable
@@ -315,9 +317,11 @@ Each stage names its exit; "measured" means a number from a run.
    `owed!` on a machine of more than one CPU, and which nothing but the
    `dump-deaf-cpu` actuator asks for until AArch64 has a keyboard; and, for
    the clean of an AP's start block to the point of coherency, which TCG
-   cannot fail on: `virt_el1_smp`, `virt_mask_windows` and
-   `virt_off_names_the_cpus_left_on` start eight CPUs through PSCI under HVF
-   and are green there, and nothing shows the clean deleted red.
+   cannot fail on: `virt_el1_smp` under HVF started eight CPUs through PSCI
+   in each of 131 boots of the entropy stage's measurement, all eight online
+   and scheduling every time, and `virt_failed_ap_leaves_no_hole` and
+   `virt_fatal_halts_the_others_first` start theirs under HVF in the suite;
+   nothing shows the clean deleted red.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the

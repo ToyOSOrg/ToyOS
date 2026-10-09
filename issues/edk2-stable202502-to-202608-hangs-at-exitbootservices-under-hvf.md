@@ -10,10 +10,10 @@ When a host's QEMU installation ships an edk2 from stable202502 to
 stable202608, `virt` guests under HVF never return from `ExitBootServices`.
 Owner: the orchestrator.
 
-Every `virt_` test but the three that need EL2 (`virt_el2_drop`, `virt_smp`
-and `virt_jobs_at_el2`) boots under HVF on an Apple host, so a QEMU upgrade
-there that bundles an edk2 from this range reds all of them, where it once
-would have red two.
+Every `virt_` test whose profile is `Profile::Virt` or `Profile::VirtNoRng`
+(`tests/toyos.rs`), which is most of them, boots under HVF on an Apple host,
+so a QEMU upgrade there that bundles an edk2 from this range reds all of
+those, where it once would have red two.
 
 Under QEMU 11.1.1's HVF a `virt` guest reads `ID_AA64PFR0_EL1.GIC` as 0,
 though its GICv3's system registers answer. `hvf_arch_init_vcpu`

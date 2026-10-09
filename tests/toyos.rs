@@ -247,13 +247,17 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    ("virt_mask_windows", qemu::Profile::Virt),
+    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
+    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
+    // under HVF the power-off can come before `klogd` has put it on the wire
+    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
+    ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
-    ("virt_el1_smp", qemu::Profile::Virt),
+    ("virt_el1_smp", qemu::Profile::VirtTcg),
     ("virt_failed_ap_leaves_no_hole", qemu::Profile::Virt),
     ("virt_fatal_halts_the_others_first", qemu::Profile::Virt),
     ("virt_reboot", qemu::Profile::Virt),
-    ("virt_off_names_the_cpus_left_on", qemu::Profile::Virt),
+    ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
@@ -2745,7 +2749,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_timer_floor" => virt_selftest(profile, test_config, &["timer-floor"]),
         "virt_smp" => virt_smp(profile, "SMC", 2),
         // The EL1 entry's own arm, which fetches at a physical address under
-        // the bring-up root, and PSCI through `HVC`.
+        // the bring-up root, and PSCI through `HVC`: the path HVF takes.
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),

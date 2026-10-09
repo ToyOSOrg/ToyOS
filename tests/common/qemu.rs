@@ -713,13 +713,18 @@ pub enum Profile {
     /// register name is EL1's own, so the loader's EL2 arm alone turns EL2's
     /// MMU off.
     VirtEl2NoVhe,
+    /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
+    /// hands the loader the CPU at EL1 and QEMU's FADT names PSCI's conduit
+    /// `HVC`, as under HVF. `virt_el1_smp`'s machine while a boot's last word
+    /// can miss the console under HVF.
+    VirtTcg,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe => Arch::Aarch64,
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::Metal => Arch::X86_64,
@@ -729,7 +734,7 @@ impl Profile {
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
@@ -866,7 +871,7 @@ pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
