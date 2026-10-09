@@ -1308,9 +1308,10 @@ mod tests {
     }
 
     /// An install puts a designated DATA first and the image after it; a
-    /// second install, of an image of another size, replaces the image and
-    /// leaves DATA where it was, under its GUID, holding what was written to
-    /// it; and a DATA of another size is a disk made anew.
+    /// second install, of an image of another size, puts that image's bytes
+    /// where the first's were written over, and leaves DATA where it was,
+    /// under its GUID, holding what was written to it; and a DATA of another
+    /// size is a disk made anew.
     #[test]
     fn an_install_replaces_the_image_around_the_data_it_keeps() {
         const DATA: u64 = 4 << 20;
@@ -1328,10 +1329,12 @@ mod tests {
         assert_eq!((start, bytes), (PARTITION_ALIGN as u64, DATA));
         assert_eq!(stamp, designation(DATA / SECTOR as u64));
 
-        // What a volume's format does to the stamp, and a block at DATA's end.
+        // What a volume's format does to the stamp, a block at DATA's end, and
+        // what a boot writes where its image's log partition holds nothing.
         let written = vec![0xA5u8; SECTOR];
-        for at in [start, start + bytes - SECTOR as u64] {
-            disk.seek(SeekFrom::Start(at)).and_then(|_| disk.write_all(&written)).expect("write DATA");
+        let (log_at, log_bytes) = partition_extent(&mut disk, only(&first, toyos_gpt::Guid::MICROSOFT_BASIC).0).expect("the log");
+        for at in [start, start + bytes - SECTOR as u64, log_at + log_bytes - SECTOR as u64] {
+            disk.seek(SeekFrom::Start(at)).and_then(|_| disk.write_all(&written)).expect("write the disk");
         }
         drop(disk);
 
