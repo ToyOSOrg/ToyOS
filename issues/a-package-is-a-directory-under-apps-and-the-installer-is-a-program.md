@@ -66,7 +66,9 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **Running is the desktop's.** gbae opens a window through winit and
   softbuffer and plays through cpal, all three on the forks the SDK release
   branches carry. It lists a directory itself and reads the ROM the user picks
-  out of it. The first run is the milestone's end.
+  out of it. The first run is the milestone's end. Under stage 5's view that
+  listing reaches no ROM outside its own folder
+  (`issues/an-installed-gbae-browses-to-no-rom.md`).
 
 ## Stages, in order
 
