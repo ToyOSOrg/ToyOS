@@ -67,10 +67,31 @@ the 60 000 ms list bound and 120 000 ms deadline of a boot no member rides:
 | `shared` | 86.4 s | 172.8 s | 473 s |
 
 **It grows with every member and has no ceiling**: 0.6 s of deadline a Rust
-member and 0.2 s a C case. The 88 Rust members and 137 C cases on one boot,
-which is what joining `shared` and `ccorpus` to `testcases` makes, arm a list
-bound of 100 100 ms and a deadline of 200 200 ms, waited 501 s. A clamp is no
-answer: a ceiling under the derived bound ends a healthy list.
+member and 0.2 s a C case. The 88 Rust members and 137 C cases now ride
+`testcases` behind its rows' jobs, and arm a list bound of 100 100 ms, a
+deadline of 200 200 ms and a hard-lockup bound of 100 100 ms, waited 501 s. A
+clamp is no answer: a ceiling under the derived bound ends a healthy list.
+
+## The merged list, summed from the boots it was
+
+No machine has run the merged `testcases`. Each part between its own markers,
+over three readings of the boot that carried it: `testcases` at `9e70cd2e3`,
+`473efea22` and `accbd79dd`, `shared` and `ccorpus` at `eff8b20ee`,
+`d6d008e88` and `49e12f23b`.
+
+| part | least | most | its share of the bound |
+|---|---|---|---|
+| the boot, to its first job | 1 190 ms | 1 196 ms | |
+| the rows' ten jobs | 41 913 ms | 41 983 ms | 60 000 ms |
+| the 88 Rust members | 7 068 ms | 7 115 ms | 26 400 ms |
+| the 137 C cases | 1 667 ms | 2 183 ms | 13 700 ms |
+| the list's last record | 51 838 ms | 52 477 ms | 100 100 ms |
+
+**Half the bound is 50 050 ms, and the sum is 1.8 to 2.4 s past it**, by the
+rows' jobs: they take seven tenths of the base no allowance widens,
+`counters_metal` alone 32.7 s of it, where the members take under a quarter of
+what they add. The exit's second line reads the whole list against half its
+bound, so a boot whose members are well inside their share does not meet it.
 
 **A late expiry adds to the longer bound.**
 `issues/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md` is open:
