@@ -10,7 +10,7 @@ toyos = { path = "../../toyos" }
 toyos-hda = { path = "../../toyos-hda" }
 toyos-mixer = { path = "mixer" }
 toyos-inspect = { path = "../../toyos-inspect" }
-rubato = "0.16"
+rubato = { version = "0.16", default-features = false }
 
 [package.metadata.toyos.host]
 exempt.owns = "ToyOS's audio devices, claimed from the kernel"
