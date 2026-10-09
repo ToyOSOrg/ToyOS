@@ -37,6 +37,15 @@ What is left of the staged work:
    `virtio-sound` classes, their arms of `SYS_DEVICE_REG_READ`/`WRITE`, and
    `SYS_GPU_*`, which is an ABI change. GOP stays: it is memory the loader
    hands over, and the panic console paints it.
+   A virtio holder stands on `toyos-virtio`, whose first client is netstack's
+   NIC, and the second one owes that crate two things. The walk of the
+   capability list moves into it from `userland/netstack/src/virtio_net.rs`,
+   over a configuration read the caller passes in, which closes
+   `issues/the-virtio-capability-walk-reads-a-refused-configuration-read-as-zeros.md`.
+   And before a client ends its device on `UsedRefusal::Written` for a chain
+   the device only reads, whose bound is 0, what QEMU's device reports as
+   `len` on such a queue is measured: the NIC's transmit queue is the only
+   one read so far.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.

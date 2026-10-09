@@ -12,7 +12,7 @@ use std::{format, vec};
 use crate::phy as toyos_phy;
 use crate::phy::{Others, PhyRefusal};
 use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
-use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
+use crate::stub::{Access, Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
 
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
@@ -154,10 +154,22 @@ fn a_window_or_grant_too_small_is_refused() {
         fn bytes(&self) -> usize {
             self.0
         }
-        fn read(&self, _: usize) -> u32 {
+        fn read8(&self, _: usize) -> u8 {
             panic!("a refused window was read")
         }
-        fn write(&self, _: usize, _: u32) {
+        fn read16(&self, _: usize) -> u16 {
+            panic!("a refused window was read")
+        }
+        fn read32(&self, _: usize) -> u32 {
+            panic!("a refused window was read")
+        }
+        fn write8(&self, _: usize, _: u8) {
+            panic!("a refused window was written")
+        }
+        fn write16(&self, _: usize, _: u16) {
+            panic!("a refused window was written")
+        }
+        fn write32(&self, _: usize, _: u32) {
             panic!("a refused window was written")
         }
     }
@@ -178,10 +190,22 @@ fn a_window_or_grant_too_small_is_refused() {
         fn device_addr(&self, _: usize) -> u64 {
             panic!("a refused grant was addressed")
         }
-        fn read(&self, _: usize) -> u64 {
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a refused grant was read at {at:#x} as 16 bits")
+        }
+        fn read32(&self, at: usize) -> u32 {
+            panic!("a refused grant was read at {at:#x} as 32 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a refused grant was written at {at:#x} as 16 bits")
+        }
+        fn write32(&self, at: usize, _: u32) {
+            panic!("a refused grant was written at {at:#x} as 32 bits")
+        }
+        fn read64(&self, _: usize) -> u64 {
             panic!("a refused grant was read")
         }
-        fn write(&self, _: usize, _: u64) {
+        fn write64(&self, _: usize, _: u64) {
             panic!("a refused grant was written")
         }
         fn publish(&self) {}
@@ -232,10 +256,22 @@ fn a_window_that_reads_ones_is_refused() {
         fn bytes(&self) -> usize {
             regs::REGISTER_BYTES
         }
-        fn read(&self, _: usize) -> u32 {
+        fn read8(&self, at: usize) -> u8 {
+            panic!("a 32-bit register was read at {at:#x} as 8 bits")
+        }
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a 32-bit register was read at {at:#x} as 16 bits")
+        }
+        fn write8(&self, at: usize, _: u8) {
+            panic!("a 32-bit register was written at {at:#x} as 8 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a 32-bit register was written at {at:#x} as 16 bits")
+        }
+        fn read32(&self, _: usize) -> u32 {
             u32::MAX
         }
-        fn write(&self, _: usize, _: u32) {}
+        fn write32(&self, _: usize, _: u32) {}
     }
     struct NoClock;
     impl Clock for NoClock {
@@ -1292,6 +1328,123 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
         assert_eq!(counters.over_length, 0, "{}", nic.because("a length was refused"));
         assert_eq!(counters.errored, 0, "{}", nic.because("a frame was reported bad"));
         assert_eq!(counters.split, 0, "{}", nic.because("a frame was split"));
+    }
+}
+
+// --- the order of the driver's accesses against the part's ---
+
+/// Frames both ways on `part` with every latitude on, and everything the
+/// driver did to the grant and the registers while they moved.
+fn a_worked_trace(seed: u64, part: Part) -> (Vec<Access>, usize, usize) {
+    let nic = Nic::with(seed, part, Permits::default());
+    let mut driver = open(&nic);
+    link_up(&nic, &mut driver);
+    let (mut sent, mut received) = (0, 0);
+    for round in 0..(TX_RING as u8 * 3) {
+        nic.deliver(&frame(round + 1, 64 + round as usize));
+        if let Some(slot) = driver.tx_reserve(64) {
+            nic.put_bytes(slot.at, &frame(0x80 | round, 64));
+            driver.tx_commit(slot);
+            sent += 1;
+        }
+        nic.run();
+        one_pass(&mut driver);
+        received += drain(&nic, &mut driver).len();
+    }
+    driver.reclaim();
+    (nic.trace(), sent, received)
+}
+
+/// Whether `word`, loaded from `at`, is a descriptor's status with `DD` set.
+fn found_done(at: usize, word: u64) -> bool {
+    let status_of = |ring: usize, count: usize, bytes: usize| {
+        (ring..ring + count * bytes).contains(&at) && (at - ring) % bytes == 8
+    };
+    if status_of(OFF_RX_RING, RX_RING, rx_desc::BYTES) {
+        (word >> rx_desc::STATUS_SHIFT) as u8 & rx_desc::status::DD != 0
+    } else if status_of(OFF_TX_RING, TX_RING, tx_desc::BYTES) {
+        (word >> tx_desc::STATUS_SHIFT) as u8 & tx_desc::STATUS_DD != 0
+    } else {
+        false
+    }
+}
+
+/// `toyos_device_memory::DmaBuffers::publish`'s order, at both tails: §7.2.4.1
+/// and §7.1.8 have the part fetch on the tail write, so no store into the
+/// grant stands between the last `publish` and a write of `TDT` or `RDT`.
+/// The model reads one memory whole and cannot fail on it; the trace can.
+#[test]
+fn a_tail_register_is_written_only_after_a_publish_that_follows_the_last_descriptor_store() {
+    for (part, _) in PARTS {
+        for seed in 1..=8u64 {
+            let (trace, sent, received) = a_worked_trace(seed, part);
+            let mut unpublished = None;
+            let (mut stored, mut moved) = ([false; 2], [0usize; 2]);
+            for access in trace {
+                match access {
+                    Access::Store { at } => {
+                        unpublished = Some(at);
+                        stored[(at >= OFF_TX_RING) as usize] = true;
+                    }
+                    Access::Publish => unpublished = None,
+                    Access::Write { reg } if reg == regs::RDT || reg == regs::TDT => {
+                        assert_eq!(
+                            unpublished, None,
+                            "seed {seed}, {part:?}: tail register {reg:#x} was written over a \
+                             store into the grant that no publish followed"
+                        );
+                        let ring = (reg == regs::TDT) as usize;
+                        moved[ring] += core::mem::take(&mut stored[ring]) as usize;
+                    }
+                    Access::Load { .. } | Access::Observe | Access::Write { .. } => {}
+                }
+            }
+            // The arming of each ring is one more than the frames.
+            assert!(received > 0 && sent > 0, "seed {seed}, {part:?}: no frame moved");
+            assert!(moved[0] > 1, "seed {seed}, {part:?}: RDT never moved over a stored descriptor");
+            assert_eq!(moved[1], sent + 1, "seed {seed}, {part:?}: TDT did not move once a frame");
+        }
+    }
+}
+
+/// `toyos_device_memory::DmaBuffers::observe`'s order, on both rings: §7.1.7.1
+/// and §7.2.4.2 write descriptors back in batches, so after the load that
+/// first finds `DD` in a descriptor the driver loads nothing from the grant
+/// before an `observe` — the descriptor's own length and errors least of all.
+#[test]
+fn a_descriptors_fields_are_read_only_after_an_observe_that_follows_the_load_that_found_dd() {
+    for (part, _) in PARTS {
+        for seed in 1..=8u64 {
+            let (trace, sent, received) = a_worked_trace(seed, part);
+            // Status words whose `DD` the driver has found since it last
+            // stored them, and the one no `observe` has followed yet.
+            let mut taken = std::collections::BTreeSet::new();
+            let mut unobserved = None;
+            let mut found = [0usize; 2];
+            for access in trace {
+                match access {
+                    Access::Store { at } => {
+                        taken.remove(&at);
+                    }
+                    Access::Load { at, word } => {
+                        assert_eq!(
+                            unobserved, None,
+                            "seed {seed}, {part:?}: {at:#x} was loaded after the load that found \
+                             DD, with no observe between them"
+                        );
+                        if found_done(at, word) && taken.insert(at) {
+                            unobserved = Some(at);
+                            found[(at >= OFF_TX_RING) as usize] += 1;
+                        }
+                    }
+                    Access::Observe => unobserved = None,
+                    Access::Publish | Access::Write { .. } => {}
+                }
+            }
+            assert_eq!(unobserved, None, "seed {seed}, {part:?}: a DD was found and never observed");
+            assert_eq!(found[0], received, "seed {seed}, {part:?}: not every frame was found by its DD");
+            assert_eq!(found[1], sent, "seed {seed}, {part:?}: not every sent descriptor was found by its DD");
+        }
     }
 }
 // --- the PHY behind MDIC ---
@@ -2933,20 +3086,32 @@ fn quiesce_stops_what_a_previous_holder_left_running() {
         fn bytes(&self) -> usize {
             crate::regs::REGISTER_BYTES
         }
-        fn read(&self, reg: usize) -> u32 {
+        fn read8(&self, at: usize) -> u8 {
+            panic!("a 32-bit register was read at {at:#x} as 8 bits")
+        }
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a 32-bit register was read at {at:#x} as 16 bits")
+        }
+        fn write8(&self, at: usize, _: u8) {
+            panic!("a 32-bit register was written at {at:#x} as 8 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a 32-bit register was written at {at:#x} as 16 bits")
+        }
+        fn read32(&self, reg: usize) -> u32 {
             *self.0.borrow().get(&reg).unwrap_or(&0)
         }
-        fn write(&self, reg: usize, value: u32) {
+        fn write32(&self, reg: usize, value: u32) {
             self.0.borrow_mut().insert(reg, value);
         }
     }
     let regs = Regs(core::cell::RefCell::default());
     let rctl = crate::regs::rctl::EN | crate::regs::rctl::BAM;
     let tctl = crate::regs::tctl::EN | crate::regs::tctl::PSP;
-    crate::Registers::write(&regs, crate::regs::RCTL, rctl);
-    crate::Registers::write(&regs, crate::regs::TCTL, tctl);
+    crate::Registers::write32(&regs, crate::regs::RCTL, rctl);
+    crate::Registers::write32(&regs, crate::regs::TCTL, tctl);
     crate::quiesce(&regs);
-    let read = |reg| crate::Registers::read(&regs, reg);
+    let read = |reg| crate::Registers::read32(&regs, reg);
     assert_eq!(read(crate::regs::RCTL), crate::regs::rctl::BAM);
     assert_eq!(read(crate::regs::TCTL), crate::regs::tctl::PSP);
     assert_eq!(read(crate::regs::IMC), u32::MAX);

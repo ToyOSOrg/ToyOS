@@ -690,6 +690,10 @@ pub enum Profile {
     /// netstack runs its Intel driver, a ring of fifteen frames and a wake
     /// for transmit room.
     HeadlessE1000e,
+    /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
+    /// disk is the only storage it has, and the only device its firmware can
+    /// boot.
+    HeadlessNoUsb,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -727,6 +731,7 @@ impl Profile {
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
+            | Self::HeadlessNoUsb
             | Self::Metal => Arch::X86_64,
         }
     }
@@ -838,15 +843,36 @@ struct Shape {
     /// one input handler per device class, so with a usb-kbd present every
     /// injected keystroke goes to it.
     usb: &'static [&'static str],
-    /// The NVMe namespace's size. The backing file is sparse, so this is free
-    /// to state honestly — and it has to be stated, because a kernel
-    /// structure sized per device block is bounded by this number and by
-    /// nothing else.
-    nvme_bytes: u64,
+    storage: Storage,
     /// The unit that decodes this machine's DMA, or its absence. Stated per
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
     iommu: Option<Iommu>,
+}
+
+/// Where a machine's image and its DATA are. A size is stated because a
+/// structure sized per device block is bounded by it and by nothing else; the
+/// backing file is sparse either way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Storage {
+    /// The image on a USB stick on the first xHCI, which the kernel drives,
+    /// and DATA on an NVMe disk of its own of this many bytes; zero is a
+    /// machine with no NVMe controller.
+    Stick { nvme_bytes: u64 },
+    /// One NVMe disk and no stick: DATA, of this many bytes, and the image
+    /// installed after it (`toyos_build::image::install`). The firmware boots
+    /// it, and after the loader every partition of it is `diskserver`'s.
+    Disk { data_bytes: u64 },
+}
+
+impl Storage {
+    /// The id of the `-drive` the image's file is.
+    fn image_drive(self) -> &'static str {
+        match self {
+            Self::Stick { .. } => "stick",
+            Self::Disk { .. } => "disk",
+        }
+    }
 }
 
 /// The boot stick's device id: the removal the owner's machine dies on is the
@@ -859,8 +885,8 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
 
-/// What every x86-64 profile gives the guest. Large enough for a filesystem,
-/// small enough that a boot formats it quickly.
+/// The DATA every x86-64 profile gives the guest. Large enough for a
+/// filesystem, small enough that a boot formats it quickly.
 pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 
 impl Profile {
@@ -874,7 +900,7 @@ impl Profile {
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
-                nvme_bytes: 0,
+                storage: Storage::Stick { nvme_bytes: 0 },
                 iommu: None,
             },
             Self::Headless => Shape {
@@ -884,7 +910,7 @@ impl Profile {
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 usb: &["usb-kbd,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
+                storage: Storage::Disk { data_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
             },
             Self::Metal => Shape {
@@ -898,11 +924,12 @@ impl Profile {
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
-                nvme_bytes: NVME_SMALL,
+                storage: Storage::Stick { nvme_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
+            Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
         }
     }
 
@@ -1029,6 +1056,10 @@ pub struct QemuInstance {
     smp: u32,
     /// The test binaries this boot put on ROOT, by the name `run` takes.
     carried: BTreeSet<String>,
+    /// What this machine was booted with, and the 16550's file: what a
+    /// second wait for its ready marker reads.
+    options: BootOptions,
+    uart_log: PathBuf,
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -1214,7 +1245,11 @@ impl QemuInstance {
             &params,
             options.debug_wait,
         );
-        fs::write(&boot_image, image).expect("Failed to write test boot image");
+        let storage = options.profile.shape().storage;
+        match storage {
+            Storage::Stick { .. } => fs::write(&boot_image, image).expect("Failed to write test boot image"),
+            Storage::Disk { data_bytes } => toyos_build::image::install(&image, &boot_image, data_bytes),
+        }
         let carried = c_tests
             .iter()
             .map(|(name, _)| format!("test_c_{name}"))
@@ -1228,16 +1263,20 @@ impl QemuInstance {
 
         // **Every boot gets a blank DATA volume**, so what one boot leaves under
         // `/home` — sshserver's host identity, a package, a cache — is never the
-        // premise of whatever test the lane runs next. The lane's one file is
-        // remade rather than a file per boot.
+        // premise of whatever test the lane runs next. A disk that carries the
+        // image is its boot's own file, made just above; a DATA disk beside a
+        // stick is the lane's one file, remade rather than a file per boot.
         //
         // One live guest per image, claimed here rather than discovered from
         // QEMU's stderr after the second process has already exited — see
         // [`NvmeClaim`] — and claimed before the remaking, which truncates.
-        let nvme_bytes = options.profile.shape().nvme_bytes;
+        let nvme_bytes = match storage {
+            Storage::Stick { nvme_bytes } => nvme_bytes,
+            Storage::Disk { .. } => 0,
+        };
         let nvme_image = if nvme_bytes == 0 {
-            // A profile with no controller gets no backing file either; the
-            // path is never passed to QEMU.
+            // A profile with no NVMe disk beside its image gets no backing
+            // file either; the path is never passed to QEMU.
             test_dir.join("no-nvme")
         } else {
             test_dir.join(format!("test-nvme-{nvme_bytes}.img"))
@@ -1267,7 +1306,7 @@ impl QemuInstance {
         let qemu = qemu_command(&boot_image, nvme.path(), &uart_log, &sockets.dir, &vars, &options);
         spawn_and_wait_ready(
             qemu,
-            &options,
+            options,
             Files {
                 seq,
                 uart_log,
@@ -1279,6 +1318,20 @@ impl QemuInstance {
                 carried,
             },
         )
+    }
+
+    /// From here a reset this guest asks for resets the machine, its memory
+    /// and its disks kept, where `-no-reboot` would have ended QEMU with it.
+    pub fn reset_on_reboot(&mut self) {
+        let socket = self.sockets.qmp.clone().expect("reset_on_reboot needs BootOptions { qmp: true }");
+        Qmp::connect(&socket).execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\"}}");
+    }
+
+    /// Wait for this machine to reach its ready marker again, on the boot
+    /// after a reset: [`Self::boot_log`] is that boot's from here, opening
+    /// with what the boot before it said last.
+    pub fn await_boot(&mut self) {
+        self.boot_log = wait_for_ready(&mut self.child, &self.rx, &self.options, &self.uart_log);
     }
 
     /// A span of the guest's *physical* memory, as QEMU reads it.
@@ -2022,8 +2075,12 @@ fn qemu_command(
         .arg("-drive")
         .arg(firmware_vars)
         .arg("-drive")
-        .arg(format!("if=none,id=stick,format=raw,file={}", boot_image.display()));
+        .arg(format!("if=none,id={},format=raw,file={}", shape.storage.image_drive(), boot_image.display()));
     assert!(!shape.xhci.is_empty() || shape.usb.is_empty(), "a USB device needs a controller");
+    assert!(
+        !shape.xhci.is_empty() || matches!(shape.storage, Storage::Disk { .. }),
+        "a boot stick needs a controller"
+    );
 
     // Ahead of every other `-device`: QEMU gives a PCI function the bypassing
     // address space unless the unit exists when the function is created, so a
@@ -2046,9 +2103,11 @@ fn qemu_command(
         qemu.arg("-device").arg(*controller);
     }
 
-    qemu.arg("-device").arg(format!(
-        "usb-storage,bus=xhci.0,drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},bootindex=0"
-    ));
+    if let Storage::Stick { .. } = shape.storage {
+        qemu.arg("-device").arg(format!(
+            "usb-storage,bus=xhci.0,drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},bootindex=0"
+        ));
+    }
     match (arch, shape.vga) {
         (Arch::X86_64, vga) => {
             qemu.arg("-vga").arg(vga);
@@ -2085,17 +2144,22 @@ fn qemu_command(
     // no console line and no screendump can see a device that is absent.
     //
     // Its MSI-X table in a BAR of its own, because diskserver drives it and a claim
-    // never maps the BAR holding the table. On a machine that boots off NVMe it
-    // answers under Intel's ids, so the `pci:1b36:0010` row names the boot
-    // controller alone and this one is nobody's, as the kernel's first-by-class
-    // probe left it.
-    if shape.nvme_bytes != 0 {
-        qemu.arg("-drive")
-            .arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()))
-            .arg("-device")
+    // never maps the BAR holding the table. One controller and one namespace
+    // whichever disk it is: diskserver reads namespace 1 of the one controller
+    // its row names.
+    let namespace = match shape.storage {
+        Storage::Stick { nvme_bytes: 0 } => None,
+        Storage::Stick { .. } => {
+            qemu.arg("-drive").arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()));
+            Some("drive=nvme0")
+        }
+        Storage::Disk { .. } => Some("drive=disk,bootindex=0"),
+    };
+    if let Some(namespace) = namespace {
+        qemu.arg("-device")
             .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
             .arg("-device")
-            .arg("nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size=512,physical_block_size=512");
+            .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }
     for dev in shape.usb {
         qemu.arg("-device").arg(*dev);
@@ -2203,7 +2267,7 @@ struct Files {
     carried: BTreeSet<String>,
 }
 
-fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
+fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -> QemuInstance {
     let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried } = files;
 
     // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
@@ -2268,7 +2332,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let boot_log = if options.mute {
         String::new()
     } else {
-        wait_for_ready(&mut child, &rx, options, &uart_log)
+        wait_for_ready(&mut child, &rx, &options, &uart_log)
     };
     // The ready marker is test-runner's, which the supervisor starts after its
     // first line, so a boot that reached it has said its build, and the kernel
@@ -2311,6 +2375,8 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         boot_log,
         smp: options.smp,
         carried,
+        options,
+        uart_log,
     }
 }
 

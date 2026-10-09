@@ -190,9 +190,10 @@ impl Card {
 
     /// Say what the driver counted, once a pass and after every frame the pass
     /// sent: a line per refused descriptor is itself more frames to send.
+    /// virtio counts nothing: what its device is not believed on ends it.
     pub fn report(&self) {
         match self {
-            Self::Virtio(nic) => nic.report(),
+            Self::Virtio(_) => {}
             Self::Intel(nic) => nic.report(),
         }
     }

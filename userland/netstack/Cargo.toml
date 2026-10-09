@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
+toyos-device-memory = { path = "../../toyos-device-memory" }
 toyos-i219 = { path = "../../toyos-i219" }
+toyos-virtio = { path = "../../toyos-virtio" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }

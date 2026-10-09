@@ -3356,6 +3356,7 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-device-memory",
  "toyos-dhcp",
  "toyos-dns",
  "toyos-i219",
@@ -3368,6 +3369,7 @@ dependencies = [
  "toyos-net-udp",
  "toyos-net-wire",
  "toyos-tco",
+ "toyos-virtio",
 ]
 
 [[package]]
@@ -5785,6 +5787,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-device-memory"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-dhcp"
 version = "0.1.0"
 dependencies = [
@@ -5848,6 +5854,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-i219"
 version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+]
 
 [[package]]
 name = "toyos-inspect"
@@ -6049,6 +6058,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
  "toyos-bootmap",
+]
+
+[[package]]
+name = "toyos-virtio"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-untrusted",
 ]
 
 [[package]]

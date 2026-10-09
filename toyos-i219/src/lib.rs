@@ -18,13 +18,24 @@
 //!
 //! # The boundary
 //!
-//! Four traits, named by what they do and not by what chip is behind them:
-//! [`Registers`] is one memory-mapped access, [`Clock`] is one counter read,
-//! [`DmaBuffers`] is the memory the device and this process share, and
-//! [`Interrupts`] is what the claim answered. Each is a generic parameter
-//! resolved at compile time — no trait object, no dispatch — and no
+//! Four traits, named by what they do and not by what chip is behind them.
+//! `Registers`, one memory-mapped access, and `DmaBuffers`, the memory the
+//! device and this process share, are `toyos-device-memory`'s: the boundary
+//! every userland driver is written against, where the order of the two
+//! barriers is stated. [`Clock`] is one counter read and [`Interrupts`] is
+//! what the claim answered, and both are this crate's. Each is a generic
+//! parameter resolved at compile time — no trait object, no dispatch — and no
 //! implementation of one decides anything: every branch is above the boundary,
 //! in this crate, where the host tests it.
+//!
+//! **Every register is a 32-bit access and every descriptor a 64-bit one**:
+//! the register offsets are this crate's own constants, every one of them
+//! under [`regs::REGISTER_BYTES`], which [`I219::open`] refuses a smaller
+//! window than, and a legacy descriptor is two 64-bit halves. `publish` is
+//! rung before a tail register is written, so a part that fetches on the
+//! doorbell cannot fetch a descriptor that is half-written; `observe` is
+//! taken after the load that found `DD` set, so a written-back length cannot
+//! be read from before the write-back.
 //!
 //! In netstack those four are the substrate's own: the mapped BAR, the monotonic
 //! clock, a `DmaRegion` in this function's IOMMU domain, and the claim's
@@ -104,23 +115,9 @@ mod stub;
 #[cfg(test)]
 mod tests;
 
-use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
+use toyos_device_memory::{DmaBuffers, Registers};
 
-/// One memory-mapped register access.
-///
-/// **The offsets are this crate's own constants**, every one of them under
-/// [`regs::REGISTER_BYTES`], which [`I219::open`] refuses a smaller window
-/// than.
-pub trait Registers {
-    /// Bytes the window covers.
-    fn bytes(&self) -> usize;
-    /// One volatile 32-bit load. Volatile because the device writes the same
-    /// bytes, and a plain load of a status register can be hoisted out of the
-    /// loop that waits on it.
-    fn read(&self, reg: usize) -> u32;
-    /// One volatile 32-bit store.
-    fn write(&self, reg: usize, value: u32);
-}
+use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
 
 /// The clock, and the one way this driver gives the processor away.
 pub trait Clock {
@@ -133,39 +130,6 @@ pub trait Clock {
     /// register is next reached and never what a reading of one means. A
     /// substrate with nothing to yield to may return at once.
     fn pause(&self, nanos: u64);
-}
-
-/// The memory this process and the device both reach.
-///
-/// **Two addresses, because neither derives from the other**: the offsets this
-/// driver computes are where its own loads and stores land, and
-/// [`Self::device_addr`] is what a descriptor must carry for the device to
-/// reach the same bytes through the unit.
-///
-/// The two fences are here rather than beside the doorbell because the
-/// ordering they impose is over *this* memory: the architecture's rules about
-/// when a store to DMA memory becomes visible to a device live in the
-/// implementation and nowhere above it.
-pub trait DmaBuffers {
-    /// Bytes in the grant.
-    fn bytes(&self) -> usize;
-    /// Where the device reaches byte `at`. Never a physical address once a
-    /// unit translates for this function.
-    fn device_addr(&self, at: usize) -> u64;
-    /// One volatile aligned 64-bit load of the grant.
-    fn read(&self, at: usize) -> u64;
-    /// One volatile aligned 64-bit store into the grant.
-    fn write(&self, at: usize, word: u64);
-    /// One release barrier: every store made above this call is visible to the
-    /// device before any store made below it. Rung before a tail register is,
-    /// so a device that fetches on the doorbell cannot fetch a descriptor that
-    /// is half-written.
-    fn publish(&self);
-    /// One acquire barrier: every load made below this call sees memory at
-    /// least as new as the load above it that found `DD` set. Taken before a
-    /// descriptor's other fields are read, so a written-back length cannot be
-    /// read from before the write-back.
-    fn observe(&self);
 }
 
 /// What the claim answered when its interrupt record was read.
@@ -585,11 +549,11 @@ pub(crate) enum Whole {
 /// function where it advertises a reset; this is the driver not trusting that
 /// it did. Register writes only, so it is safe with mastering off.
 pub fn quiesce<R: Registers>(regs: &R) {
-    regs.write(regs::IMC, u32::MAX);
-    let rctl = regs.read(regs::RCTL);
-    regs.write(regs::RCTL, rctl & !rctl::EN);
-    let tctl = regs.read(regs::TCTL);
-    regs.write(regs::TCTL, tctl & !tctl::EN);
+    regs.write32(regs::IMC, u32::MAX);
+    let rctl = regs.read32(regs::RCTL);
+    regs.write32(regs::RCTL, rctl & !rctl::EN);
+    let tctl = regs.read32(regs::TCTL);
+    regs.write32(regs::TCTL, tctl & !tctl::EN);
 }
 
 /// §4.6.1's reset, with every interrupt masked on both sides of it.
@@ -601,7 +565,7 @@ fn reset<R: Registers, C: Clock>(
     // A window nothing decodes answers ones on every access, and a driver
     // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
     // it and never say why nothing arrived.
-    if regs.read(regs::STATUS) == u32::MAX {
+    if regs.read32(regs::STATUS) == u32::MAX {
         return Err(Refusal::Dead);
     }
 
@@ -609,8 +573,8 @@ fn reset<R: Registers, C: Clock>(
     // while the register file is being rebuilt. `ICR` is read afterwards
     // because §10.2.4.1's case 1 — mask all — is the one arm that clears
     // it unconditionally.
-    regs.write(regs::IMC, u32::MAX);
-    let _ = regs.read(regs::ICR);
+    regs.write32(regs::IMC, u32::MAX);
+    let _ = regs.read32(regs::ICR);
 
     // §10.2.2.1: "Before issuing this reset, software has to insure that Tx
     // and Rx processes are stopped by following the procedure described in
@@ -620,11 +584,11 @@ fn reset<R: Registers, C: Clock>(
     // section sanctions it: "the software device driver might time out if
     // the PCIe Master Enable Status bit is not cleared within a given
     // time", and the reset clears the bit either way.
-    let held = regs.read(regs::CTRL);
-    regs.write(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
+    let held = regs.read32(regs::CTRL);
+    regs.write32(regs::CTRL, held | ctrl::GIO_MASTER_DISABLE);
     let started = clock.nanos();
     let master_quiet = loop {
-        if regs.read(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
+        if regs.read32(regs::STATUS) & status::GIO_MASTER_ENABLE == 0 {
             break true;
         }
         if clock.nanos().saturating_sub(started) >= MASTER_QUIESCE_DEADLINE_NANOS {
@@ -636,14 +600,14 @@ fn reset<R: Registers, C: Clock>(
     // reserved bits are documented as "Set to 1b" and one as "must be set
     // to 1b" — a driver that wrote a value it composed itself would clear
     // them.
-    let held = regs.read(regs::CTRL);
+    let held = regs.read32(regs::CTRL);
     // Held until the reset has finished and the PHY's configuration with it:
     // the drop is paced from the reset's own write, and the waits below are
     // measured from that write too.
     let mut flag = None;
     let (reset_at, full) = match whole {
         Whole::MacAlone => {
-            regs.write(regs::CTRL, held | ctrl::RST);
+            regs.write32(regs::CTRL, held | ctrl::RST);
             // The write is the event §10.2.2.1's two bounds and §9.2's delay
             // before the first MDIO access are measured from.
             let reset_at = clock.nanos();
@@ -656,7 +620,7 @@ fn reset<R: Registers, C: Clock>(
             (reset_at, None)
         }
         Whole::WithThePhy { after } => {
-            let firmware = regs.read(regs::FWSM);
+            let firmware = regs.read32(regs::FWSM);
             let word = wake::reset_word(held, firmware);
             // Under §8.2.4's flag, which arbitrates the CSRs this MAC shares
             // with its firmware — and a flag that would not come is no reason
@@ -666,7 +630,7 @@ fn reset<R: Registers, C: Clock>(
             let claimed = phy::Owned::claim(regs, clock, after);
             match &claimed {
                 Ok(mdi) => mdi.write_paced(regs::CTRL, word),
-                Err(_) => regs.write(regs::CTRL, word),
+                Err(_) => regs.write32(regs::CTRL, word),
             }
             let reset_at = clock.nanos();
             // Nothing is touched while the part resets both ends of its
@@ -682,7 +646,7 @@ fn reset<R: Registers, C: Clock>(
         }
     };
     loop {
-        if regs.read(regs::CTRL) & ctrl::RST == 0 {
+        if regs.read32(regs::CTRL) & ctrl::RST == 0 {
             break;
         }
         let waited = clock.nanos().saturating_sub(reset_at);
@@ -703,8 +667,8 @@ fn reset<R: Registers, C: Clock>(
     });
     // Again after the reset: §4.6.1 keeps them masked until the rings
     // exist, and the reset itself is an event the part may have recorded.
-    regs.write(regs::IMC, u32::MAX);
-    let _ = regs.read(regs::ICR);
+    regs.write32(regs::IMC, u32::MAX);
+    let _ = regs.read32(regs::ICR);
     Ok(Reset { master_quiet, at: reset_at, full, released })
 }
 
@@ -712,7 +676,7 @@ fn reset<R: Registers, C: Clock>(
 /// where [`wake::PHY_CONFIGURED_DEADLINE_NANOS`] ran out first.
 fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Option<u64> {
     loop {
-        let done = regs.read(regs::STATUS) & status::PHY_CONFIGURED != 0;
+        let done = regs.read32(regs::STATUS) & status::PHY_CONFIGURED != 0;
         let waited = clock.nanos().saturating_sub(since);
         if done {
             return Some(waited);
@@ -869,8 +833,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
         // §10.2.5.23: the reset reloads entry 0 from the NVM, so this is read
         // after it and not before.
-        let low = regs.read(regs::RAL0);
-        let high = regs.read(regs::RAH0);
+        let low = regs.read32(regs::RAL0);
+        let high = regs.read32(regs::RAH0);
         if high & rah::AV == 0 {
             return Err(Refusal::NoStationAddress);
         }
@@ -898,7 +862,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             Part::I219 => regs::MTA_DWORDS_PCH,
         };
         for entry in 0..table {
-            regs.write(regs::MTA + entry * 4, 0);
+            regs.write32(regs::MTA + entry * 4, 0);
         }
 
         // §4.6.3.1: "Refer to the PHY documentation for the initialization and
@@ -919,7 +883,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // goes with them and is not preserved: a part that came out of the
         // reset still blocking master requests would fetch no descriptor and
         // write back no frame, and nothing else in this bring-up would say so.
-        let held = regs.read(regs::CTRL);
+        let held = regs.read32(regs::CTRL);
         let wanted = (held
             & !(ctrl::GIO_MASTER_DISABLE
                 | ctrl::PHY_RST
@@ -931,12 +895,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
                 | ctrl::TFCE
                 | ctrl::VME))
             | ctrl::SLU;
-        regs.write(regs::CTRL, wanted);
+        regs.write32(regs::CTRL, wanted);
 
         // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
         // be read" — and this driver reads it, so auto-clear stays off and
         // every cause is acknowledged by the write-back in `begin_pass`.
-        regs.write(regs::EIAC, 0);
+        regs.write32(regs::EIAC, 0);
 
         let mut nic = Self {
             part,
@@ -966,37 +930,37 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // "in MSI-X mode" and says nothing about what a part outside that mode
         // answers — so a part that does not take the write is refused here
         // rather than driven on a guess about which interrupt it would raise.
-        nic.regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
+        nic.regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
         nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
 
         // No moderation on either side: §10.2.4.2's throttle and the two
         // receive timers all hold an interrupt back, and what this driver
         // waits on is the frame that has already arrived.
-        nic.regs.write(regs::ITR, 0);
-        nic.regs.write(regs::RDTR, 0);
-        nic.regs.write(regs::RADV, 0);
-        nic.regs.write(regs::TIDV, 0);
-        nic.regs.write(regs::TADV, 0);
+        nic.regs.write32(regs::ITR, 0);
+        nic.regs.write32(regs::RDTR, 0);
+        nic.regs.write32(regs::RADV, 0);
+        nic.regs.write32(regs::TIDV, 0);
+        nic.regs.write32(regs::TADV, 0);
 
         nic.arm_rx_ring();
         nic.arm_tx_ring();
 
         // §4.6.6, in its order: the write-back policy, the gap, then the
         // transmitter.
-        nic.regs.write(regs::TXDCTL, txdctl::SUGGESTED);
-        nic.regs.write(regs::TIPG, regs::TIPG_DEFAULT);
-        nic.regs.write(regs::TCTL, TX_CONTROL);
+        nic.regs.write32(regs::TXDCTL, txdctl::SUGGESTED);
+        nic.regs.write32(regs::TIPG, regs::TIPG_DEFAULT);
+        nic.regs.write32(regs::TCTL, TX_CONTROL);
         nic.accepted(regs::TCTL, TX_CONTROL)?;
 
         // §4.6.5.1: the receiver last, "only after all other setup is
         // accomplished".
         let rx = rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048;
-        nic.regs.write(regs::RCTL, rx);
+        nic.regs.write32(regs::RCTL, rx);
         nic.accepted(regs::RCTL, rx)?;
 
         // §4.6.5: and only now the mask, so no cause can arrive before there
         // is a ring to answer it with.
-        nic.regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
+        nic.regs.write32(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
 
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
@@ -1013,13 +977,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             Part::I219 => regs::mta_bit_pch(group),
         };
         let at = regs::MTA + dword * 4;
-        self.regs.write(at, self.regs.read(at) | 1 << bit);
+        self.regs.write32(at, self.regs.read32(at) | 1 << bit);
     }
 
     /// A register wrote what it was told, so a window that is not this register
     /// file is refused here instead of looking like a dead network.
     fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal> {
-        let read = self.regs.read(reg);
+        let read = self.regs.read32(reg);
         if read & wrote == wrote {
             Ok(())
         } else {
@@ -1039,26 +1003,26 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
         let base = self.dma.device_addr(OFF_RX_RING);
         self.dma.publish();
-        self.regs.write(regs::RDBAL, base as u32);
-        self.regs.write(regs::RDBAH, (base >> 32) as u32);
-        self.regs.write(regs::RDLEN, (RX_RING * rx_desc::BYTES) as u32);
-        self.regs.write(regs::RDH, 0);
-        self.regs.write(regs::RDT, self.rx_tail as u32);
+        self.regs.write32(regs::RDBAL, base as u32);
+        self.regs.write32(regs::RDBAH, (base >> 32) as u32);
+        self.regs.write32(regs::RDLEN, (RX_RING * rx_desc::BYTES) as u32);
+        self.regs.write32(regs::RDH, 0);
+        self.regs.write32(regs::RDT, self.rx_tail as u32);
     }
 
     fn arm_tx_ring(&mut self) {
         for index in 0..TX_RING {
             let at = OFF_TX_RING + index * tx_desc::BYTES;
-            self.dma.write(at, 0);
-            self.dma.write(at + 8, 0);
+            self.dma.write64(at, 0);
+            self.dma.write64(at + 8, 0);
         }
         let base = self.dma.device_addr(OFF_TX_RING);
         self.dma.publish();
-        self.regs.write(regs::TDBAL, base as u32);
-        self.regs.write(regs::TDBAH, (base >> 32) as u32);
-        self.regs.write(regs::TDLEN, (TX_RING * tx_desc::BYTES) as u32);
-        self.regs.write(regs::TDH, 0);
-        self.regs.write(regs::TDT, 0);
+        self.regs.write32(regs::TDBAL, base as u32);
+        self.regs.write32(regs::TDBAH, (base >> 32) as u32);
+        self.regs.write32(regs::TDLEN, (TX_RING * tx_desc::BYTES) as u32);
+        self.regs.write32(regs::TDH, 0);
+        self.regs.write32(regs::TDT, 0);
     }
 
     /// Write descriptor `index` back as an empty buffer the device may fill.
@@ -1070,8 +1034,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     fn publish_rx(&mut self, index: usize) {
         let at = OFF_RX_RING + index * rx_desc::BYTES;
         let buffer = OFF_RX_BUFS + index * RX_BUF_BYTES;
-        self.dma.write(at + 8, 0);
-        self.dma.write(at, self.dma.device_addr(buffer));
+        self.dma.write64(at + 8, 0);
+        self.dma.write64(at, self.dma.device_addr(buffer));
     }
 
     pub fn mac(&self) -> [u8; 6] {
@@ -1103,7 +1067,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// what separates "nothing arrived" from "something arrived and went
     /// nowhere" on a boot with no other record.
     pub fn wire(&mut self) -> Wire {
-        let take = |reg| u64::from(self.regs.read(reg));
+        let take = |reg| u64::from(self.regs.read32(reg));
         let read = Wire {
             sent: take(regs::GPTC),
             received: take(regs::GPRC),
@@ -1152,7 +1116,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // again in [`Self::wake_on_room`].
         let waited = core::mem::take(&mut self.tx_wake);
         if waited {
-            self.regs.write(regs::IMC, self.part.tx_done());
+            self.regs.write32(regs::IMC, self.part.tx_done());
         }
 
         // Once, and written back. §10.2.4.1's case 3 says a read with no
@@ -1161,10 +1125,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // for ever; and §7.4.5's "Write to Clear" is the arm that always
         // works. `INT_ASSERTED` is left out because the same section says
         // writing it has no effect and it clears when its causes do.
-        let causes = self.regs.read(regs::ICR);
+        let causes = self.regs.read32(regs::ICR);
         let acknowledged = causes & !cause::INT_ASSERTED;
         if acknowledged != 0 {
-            self.regs.write(regs::ICR, acknowledged);
+            self.regs.write32(regs::ICR, acknowledged);
         }
 
         if causes & cause::RXO != 0 {
@@ -1234,7 +1198,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
     /// Re-read `STATUS` and take what it says about the link.
     fn refresh_link(&mut self) {
-        let status = self.regs.read(regs::STATUS);
+        let status = self.regs.read32(regs::STATUS);
         self.link = if status & status::LU != 0 {
             Link::Up {
                 speed: Speed::in_status(status),
@@ -1261,7 +1225,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             }
             let index = self.rx_next;
             let at = OFF_RX_RING + index * rx_desc::BYTES;
-            let word = self.dma.read(at + 8);
+            let word = self.dma.read64(at + 8);
             let status = ((word >> rx_desc::STATUS_SHIFT) & rx_desc::BYTE_MASK) as u8;
             if status & rx_desc::status::DD == 0 {
                 return None;
@@ -1269,7 +1233,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             // §7.1.7.1: the descriptor was written back in a batch, so its
             // other fields are read only after the load that found `DD`.
             self.dma.observe();
-            let word = self.dma.read(at + 8);
+            let word = self.dma.read64(at + 8);
             self.rx_next = (index + 1) % RX_RING;
             self.rx_budget -= 1;
             match parse_rx(word) {
@@ -1328,7 +1292,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             if next == self.rx_next {
                 break;
             }
-            if self.dma.read(OFF_RX_RING + next * rx_desc::BYTES + 8) != 0 {
+            if self.dma.read64(OFF_RX_RING + next * rx_desc::BYTES + 8) != 0 {
                 break;
             }
             tail = next;
@@ -1340,7 +1304,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // §7.1.8: the device fetches on the tail write, so the descriptors have
         // to be there before the write is.
         self.dma.publish();
-        self.regs.write(regs::RDT, tail as u32);
+        self.regs.write32(regs::RDT, tail as u32);
     }
 
     /// How many frames the transmit ring takes now, every descriptor the part
@@ -1385,7 +1349,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
         if !self.tx_wake {
-            self.regs.write(regs::IMS, self.part.tx_done());
+            self.regs.write32(regs::IMS, self.part.tx_done());
             self.tx_wake = true;
             self.counters.tx_wake_armed = self.counters.tx_wake_armed.saturating_add(1);
         }
@@ -1414,14 +1378,14 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         let command = (tx_desc::cmd::ONE_FRAME as u64) << tx_desc::CMD_SHIFT;
         // The status nibble is zeroed with the rest of the word, so the `DD`
         // this driver waits for is one the device wrote.
-        self.dma.write(at + 8, (slot.len as u64 & tx_desc::LENGTH_MASK) | command);
-        self.dma.write(at, self.dma.device_addr(slot.at));
+        self.dma.write64(at + 8, (slot.len as u64 & tx_desc::LENGTH_MASK) | command);
+        self.dma.write64(at, self.dma.device_addr(slot.at));
         self.tx_next = (slot.index + 1) % TX_RING;
         // §7.2.4.1: "The 82574 NEVER fetches descriptors beyond the descriptor
         // tail pointer", so the descriptor and the frame both have to be
         // visible before the tail moves over them.
         self.dma.publish();
-        self.regs.write(regs::TDT, self.tx_next as u32);
+        self.regs.write32(regs::TDT, self.tx_next as u32);
     }
 
     /// Take back every transmit descriptor the device has written back.
@@ -1432,7 +1396,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     fn reclaim_tx(&mut self) {
         while self.tx_clean != self.tx_next {
             let at = OFF_TX_RING + self.tx_clean * tx_desc::BYTES;
-            let word = self.dma.read(at + 8);
+            let word = self.dma.read64(at + 8);
             let status = ((word >> tx_desc::STATUS_SHIFT) & tx_desc::STATUS_MASK) as u8;
             if status & tx_desc::STATUS_DD == 0 {
                 return;
