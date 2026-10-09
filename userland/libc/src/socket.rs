@@ -8,10 +8,9 @@ use toyos_abi::syscall;
 use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
 use crate::errno::{
-    EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT,
-    ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
+    EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT, ENOSPC,
+    ENOTCONN, EOPNOTSUPP, ETIMEDOUT,
 };
-use crate::streamend::{self, Refusal};
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::sockopt::{self, Kept};
 
@@ -70,9 +69,6 @@ struct SocketEntry {
     // after its `connect`.
     nodelay: bool,
     broadcast: bool,
-    /// `shutdown` was asked for this half of a stream.
-    read_shut: bool,
-    write_shut: bool,
 }
 
 const MAX_SOCKETS: usize = 128;
@@ -182,8 +178,6 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
         notify_fd: 0,
         nodelay: false,
         broadcast: false,
-        read_shut: false,
-        write_shut: false,
     };
     let fd = alloc_socket(entry);
     if fd < 0 {
@@ -325,8 +319,6 @@ pub unsafe extern "C" fn accept(
         notify_fd: 0,
         nodelay: accepted.options.nodelay(),
         broadcast: false,
-        read_shut: false,
-        write_shut: false,
     };
     let new_fd = alloc_socket(new_entry);
     if new_fd < 0 {
@@ -354,14 +346,10 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
 
     match entry.kind {
         SocketKind::Tcp => {
-            if entry.write_shut {
-                set_errno(EPIPE);
-                return -1;
-            }
             let data = core::slice::from_raw_parts(buf, len);
             match syscall::write(RawHandle(entry.tx_fd as u32), data) {
                 Ok(n) => n as isize,
-                Err(e) => { set_errno(stream_errno(streamend::write_refused(e))); -1 }
+                Err(_) => { set_errno(EIO); -1 }
             }
         }
         SocketKind::Udp => {
@@ -392,17 +380,10 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
 
     match entry.kind {
         SocketKind::Tcp => {
-            if entry.read_shut {
-                return 0;
-            }
             let data = core::slice::from_raw_parts_mut(buf, len);
-            let read = syscall::read(RawHandle(entry.rx_fd as u32), data).map_err(|_| Refusal::Other).and_then(|n| match n {
-                0 => streamend::read_end(syscall::write_nonblock(RawHandle(entry.tx_fd as u32), &[])).map(|()| 0),
-                n => Ok(n),
-            });
-            match read {
+            match syscall::read(RawHandle(entry.rx_fd as u32), data) {
                 Ok(n) => n as isize,
-                Err(refusal) => { set_errno(stream_errno(refusal)); -1 }
+                Err(_) => { set_errno(EIO); -1 }
             }
         }
         SocketKind::Udp => {
@@ -523,7 +504,7 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
-    let entry = match slot.as_mut() {
+    let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
     };
@@ -533,22 +514,8 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
             set_errno(net_err_to_errno(e));
             return -1;
         }
-        entry.read_shut |= matches!(how, SHUT_RD | SHUT_RDWR);
-        entry.write_shut |= matches!(how, SHUT_WR | SHUT_RDWR);
     }
     0
-}
-
-const SHUT_RD: i32 = 0;
-const SHUT_WR: i32 = 1;
-const SHUT_RDWR: i32 = 2;
-
-fn stream_errno(refusal: Refusal) -> i32 {
-    match refusal {
-        Refusal::Reset => ECONNRESET,
-        Refusal::Again => EAGAIN,
-        Refusal::Other => EIO,
-    }
 }
 
 

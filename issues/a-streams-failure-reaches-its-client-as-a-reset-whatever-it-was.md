@@ -9,10 +9,12 @@ opened: 2026-10-09
 The pipe ABI tells a stream's client how the stream ended by the order its two
 pipes end in (`userland/netstack/node/src/streams.rs`'s header), which carries
 one bit: the peer's FIN, or a failure. The node knows which failure
-(`toyos_net_tcp::Failure`: a reset, R2's timeout, an ICMP error), and std and
-libc answer every one `ConnectionReset` and `ECONNRESET`, where Linux answers a
-connection [tcp] gave up on `ETIMEDOUT` and one an ICMP error ended
-`EHOSTUNREACH` or `ENETUNREACH`.
+(`toyos_net_tcp::Failure`: a reset, R2's timeout, an ICMP error), and std
+answers every one `ConnectionReset`, where Linux answers a connection [tcp]
+gave up on `ETIMEDOUT` and one an ICMP error ended `EHOSTUNREACH` or
+`ENETUNREACH`. libc reads no failure yet
+(`issues/a-netstack-client-cannot-tell-a-reset-from-the-peers-fin.md`), and
+the change the move carries for it answers every one `ECONNRESET`.
 
 A pipe's end carries no word, and every other carrier costs what this one does
 not: a third pipe or a kept request connection is a 2 MiB page each

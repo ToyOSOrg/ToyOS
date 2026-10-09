@@ -9,7 +9,7 @@
 //! `long double` widening against compiler-builtins', the errno codes against
 //! `include/errno.h`, IPv4 addresses and their texts against the host C
 //! library's, and the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, and the rule that reads a stream's end.
+//! `getsockopt`.
 
 #[cfg(test)]
 extern crate alloc;
@@ -47,9 +47,6 @@ mod sigmask;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/sockopt.rs"]
 mod sockopt;
-#[cfg(test)]
-#[path = "../../../userland/libc/src/streamend.rs"]
-mod streamend;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/strtonum.rs"]
 mod strtonum;
@@ -90,8 +87,6 @@ mod prototypes;
 mod signal_masks;
 #[cfg(test)]
 mod socket_options;
-#[cfg(test)]
-mod stream_ends;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]
