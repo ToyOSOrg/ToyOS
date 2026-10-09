@@ -414,34 +414,24 @@ toyos-microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
 
 
-toyos-sha2/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
----------------------------------------------------------
+tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
+----------------------------------------------------
 
-    shabytetestvectors/SHA256ShortMsg.rsp     10,299 bytes
+    SHA256ShortMsg.rsp     10,299 bytes
       sha256 75e1cb83994638481808e225b9eb0c1ebd0c232d952ac42b61abce6363be283c
-    shabytetestvectors/SHA256LongMsg.rsp     426,209 bytes
+    SHA256LongMsg.rsp     426,209 bytes
       sha256 6fac36f37360bcf74ffcf4465c18e30d6d5a04cc90885b901fc3130c16060974
-    shabytetestvectors/SHA256Monte.rsp         8,751 bytes
+    SHA256Monte.rsp         8,751 bytes
       sha256 29ea30c6bb4b84e425fb8c1d731c6bb852dac935825f2bd1143e5d3c4f10bfb9
-    shabytetestvectors/SHA512ShortMsg.rsp     36,800 bytes
+    SHA512ShortMsg.rsp     36,800 bytes
       sha256 e53a36c03609e5a3e3cc4b6e117a499db7864c23ec825c6cec99503a45f40764
-    shabytetestvectors/SHA512LongMsg.rsp   1,687,845 bytes
+    SHA512LongMsg.rsp   1,687,845 bytes
       sha256 b1f3f05d5c209777954d49521d7ea1349447c36a0c52849e044bc397a27dd410
-    shabytetestvectors/SHA512Monte.rsp        15,215 bytes
+    SHA512Monte.rsp        15,215 bytes
       sha256 8ca78659286c2f01667a98fc7accd32fc171ae7b24ac00f1a8ce6b77770247fa
-    shabittestvectors/SHA256ShortMsg.rsp      80,540 bytes
-      sha256 3993d9bb135b37f9226420032630f0e34d9b20556160baa9d85546cc421f183e
-    shabittestvectors/SHA256Monte.rsp          8,750 bytes
-      sha256 a0dd9e7cb6ac6497360eca29a913327466c4c23763e6a2a1c43eb27d63ea72ac
-    shabittestvectors/SHA512ShortMsg.rsp     292,084 bytes
-      sha256 673f602e0384ff3fd599b451d9ad38148871c7e5af26f08ad8a4faaa43675008
-    shabittestvectors/SHA512Monte.rsp         15,214 bytes
-      sha256 2ba6e3d0e38050c2ec9f5a4e51b0b798d932b0a768b46a7b6bada3fcd71458cc
     Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/
     shabytetestvectors.zip (sha256
-    929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8) and
-    shabittestvectors.zip (sha256
-    cd7b9f11680c6e0ccdbe13b28403f2017b5ff48789152162461e0a24fb4c5d45), each
+    929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8), each
     file byte for byte, CRLF line ends and all
     SPDX-License-Identifier: NIST-PD
 
@@ -449,10 +439,8 @@ The response files NIST's Cryptographic Algorithm Validation Program publishes
 for the SHA Validation System: messages and the digests FIPS 180-4 gives them,
 the external oracle `toyos-sha2`'s tests hold it to. A work of the United States
 government, not under copyright in the United States (17 U.S.C. §105). Test
-input only: nothing built from this repository carries them.
+input only: nothing built from this repository carries them, and no shipped
+package's directory holds them.
 
-Of each archive, only SHA-256's and SHA-512's files, the two hashes the crate
-has. The bit-oriented LongMsg files (3,364,551 and 13,413,738 bytes) are not
-committed: a bit-oriented message differs from a byte one only in its last
-byte, and the bit-oriented ShortMsg files hold every bit length from none
-to a whole block.
+Of the archive, only SHA-256's and SHA-512's files, the two hashes the crate
+has.

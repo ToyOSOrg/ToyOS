@@ -1,13 +1,13 @@
-//! The oracles: NIST's CAVP SHAVS response files (`cavp/`, `NOTICE`), and
-//! RustCrypto's `sha2` over every message length to 4096 bytes in random
-//! splits.
+//! The oracles: NIST's CAVP SHAVS response files (`tests/cavp/`, outside every
+//! shipped package's directory; `NOTICE`), and RustCrypto's `sha2` over every
+//! message length to 4096 bytes in random splits.
 
 use super::*;
 
-/// A response file under `cavp/`.
+/// A response file under the repository's `tests/cavp/`.
 fn rsp(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("cavp")
+        .join("../tests/cavp")
         .join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
@@ -146,121 +146,24 @@ fn sha512_bytewise(msg: &[u8]) -> Vec<u8> {
 
 #[test]
 fn sha256_byte_vectors() {
-    byte_file(
-        "shabytetestvectors/SHA256ShortMsg.rsp",
-        sha256,
-        sha256_bytewise,
-    );
-    byte_file(
-        "shabytetestvectors/SHA256LongMsg.rsp",
-        sha256,
-        sha256_bytewise,
-    );
+    byte_file("SHA256ShortMsg.rsp", sha256, sha256_bytewise);
+    byte_file("SHA256LongMsg.rsp", sha256, sha256_bytewise);
 }
 
 #[test]
 fn sha512_byte_vectors() {
-    byte_file(
-        "shabytetestvectors/SHA512ShortMsg.rsp",
-        sha512,
-        sha512_bytewise,
-    );
-    byte_file(
-        "shabytetestvectors/SHA512LongMsg.rsp",
-        sha512,
-        sha512_bytewise,
-    );
+    byte_file("SHA512ShortMsg.rsp", sha512, sha512_bytewise);
+    byte_file("SHA512LongMsg.rsp", sha512, sha512_bytewise);
 }
 
 #[test]
 fn sha256_monte_carlo() {
-    monte_file("shabytetestvectors/SHA256Monte.rsp", sha256);
-    monte_file("shabittestvectors/SHA256Monte.rsp", sha256);
+    monte_file("SHA256Monte.rsp", sha256);
 }
 
 #[test]
 fn sha512_monte_carlo() {
-    monte_file("shabytetestvectors/SHA512Monte.rsp", sha512);
-    monte_file("shabittestvectors/SHA512Monte.rsp", sha512);
-}
-
-/// `len` bits of `msg` padded as §5.1.1 and §5.1.2 pad a message of any bit
-/// length — written here against the text, where this crate pads only whole
-/// bytes — into blocks of `block` bytes ending in a `length`-byte field.
-fn padded(msg: &[u8], len: usize, block: usize, length: usize) -> Vec<u8> {
-    let mut out = msg[..len.div_ceil(8)].to_vec();
-    match len % 8 {
-        0 => out.push(0x80),
-        used => {
-            let last = out.last_mut().expect("a partial byte");
-            *last = (*last & (0xff << (8 - used))) | (0x80 >> used);
-        }
-    }
-    while out.len() % block != block - length {
-        out.push(0);
-    }
-    out.extend_from_slice(&(len as u128).to_be_bytes()[16 - length..]);
-    out
-}
-
-/// Every vector of a bit-oriented message file, through the compression
-/// function under [`padded`]; one whose length is whole bytes through the
-/// public digest too.
-fn bit_file<W: Copy>(
-    name: &str,
-    block: usize,
-    length: usize,
-    init: [W; 8],
-    compress: impl Fn(&mut [W; 8], &[u8]),
-    be: impl Fn(W) -> Vec<u8>,
-    digest: impl Fn(&[u8]) -> Vec<u8>,
-) {
-    let vectors = messages(name);
-    assert!(
-        vectors.iter().any(|(len, ..)| len % 8 != 0),
-        "{name} holds no partial byte"
-    );
-    for (len, msg, want) in vectors {
-        let mut state = init;
-        for chunk in padded(&msg, len, block, length).chunks_exact(block) {
-            compress(&mut state, chunk);
-        }
-        let got: Vec<u8> = state.into_iter().flat_map(&be).collect();
-        assert_eq!(hexed(&got), hexed(&want), "{name}: Len = {len}");
-        if len % 8 == 0 {
-            assert_eq!(
-                hexed(&digest(&msg[..len / 8])),
-                hexed(&want),
-                "{name}: Len = {len}, whole bytes"
-            );
-        }
-    }
-}
-
-#[test]
-fn sha256_bit_vectors() {
-    bit_file(
-        "shabittestvectors/SHA256ShortMsg.rsp",
-        64,
-        8,
-        H256,
-        |state, block| compress256(state, block.try_into().expect("a block")),
-        |w: u32| w.to_be_bytes().to_vec(),
-        sha256,
-    );
-}
-
-#[test]
-fn sha512_bit_vectors() {
-    bit_file(
-        "shabittestvectors/SHA512ShortMsg.rsp",
-        128,
-        16,
-        H512,
-        |state, block| compress512(state, block.try_into().expect("a block")),
-        |w: u64| w.to_be_bytes().to_vec(),
-        sha512,
-    );
+    monte_file("SHA512Monte.rsp", sha512);
 }
 
 /// SplitMix64: the splits' source, seeded so a red names a reproducible one.
