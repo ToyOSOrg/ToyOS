@@ -1,6 +1,6 @@
 //! ARP reception: the sender's MAC and address are checked, then the packet classified, in
 //! `receive`'s order. Only our own
-//! need to send, and a request for one of our addresses from an on-link host, create an entry;
+//! need to send, and a request for one of our addresses from a neighbour, create an entry;
 //! any other packet can confirm, assert a MAC into STALE, or be ignored, and a MAC change is
 //! always logged.
 
@@ -9,7 +9,7 @@ use toyos_net_wire::arp::{Arp, Operation};
 use toyos_net_wire::ethernet::MacClass;
 
 use crate::counters::Counter;
-use crate::iface::{Cx, Interface};
+use crate::iface::{link_local_edge, Cx, Interface};
 use crate::{acd, egress, nud};
 
 pub(crate) fn receive(i: &mut Interface, cx: &mut Cx<'_>, arp: &Arp) {
@@ -24,7 +24,7 @@ pub(crate) fn receive(i: &mut Interface, cx: &mut Cx<'_>, arp: &Arp) {
     if mac == i.mac.get() {
         return cx.log.count(Counter::ArpOwnSender);
     }
-    if i.usable().any(|a| a.cidr.is_edge(sender)) {
+    if link_local_edge(sender) || i.usable().any(|a| a.cidr.is_edge(sender)) {
         return cx.log.count(Counter::ArpInvalidSenderAddress);
     }
     if !probe && i.owns(sender) {
@@ -36,7 +36,7 @@ pub(crate) fn receive(i: &mut Interface, cx: &mut Cx<'_>, arp: &Arp) {
     let for_us = arp.operation == Operation::Request && i.is_usable(target);
     let mut noticed = for_us;
     if !probe {
-        if !i.on_link(sender) {
+        if !i.is_neighbour(sender) {
             cx.log.count(Counter::ArpSenderOffLink);
             noticed = true;
         } else if i.neighbours.contains_key(&sender) {
