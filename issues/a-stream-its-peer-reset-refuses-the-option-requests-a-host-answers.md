@@ -37,6 +37,9 @@ the connection closed, which no host's `connect` or `accept` answers.
 
 **Exit condition**: a guest test on `tests/netcase` whose peer resets a stream
 the client still holds, and `nodelay()` on it answers `Ok`, with
-`netstack_socket_churn` still green.
+`netstack_socket_churn` still green; and the two compromises above ended: the
+option request on a stream its peer reset is answered by netstack, and a libc
+`connect` and a libc `accept` whose peer resets before the hand-over answer as
+the host does, each held by a test that can be red.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`.
