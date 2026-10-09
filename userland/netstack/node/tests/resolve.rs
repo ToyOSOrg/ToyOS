@@ -898,7 +898,7 @@ fn a_lookup_is_not_carried_by_a_later_ones_schedule() {
 #[test]
 fn a_reply_is_read_only_at_the_address_its_query_left_from() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
-    net.lan.node.answer_as(net.lan.now, toyos_mdns::Host::new("toyos").unwrap()).unwrap();
+    net.lan.node.answer_as(net.lan.now, toyos_mdns::Host::new("toyos").unwrap(), || 0).unwrap();
     let id = net.resolve("www.example").unwrap();
     net.pass();
     let asked = net.queried[0].clone();

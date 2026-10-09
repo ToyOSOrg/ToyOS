@@ -3,10 +3,18 @@
 //! the network reaches it by name with nothing configured on either — the
 //! development host finds the T14's served log this way.
 //!
-//! **Answered only while an address is held**, and announced on every new
-//! one. Every decision is `toyos_mdns::Responder`'s; this is the socket and
-//! the clock. What the record is owed later — the second announcement (§8.3),
-//! or an answer §6 held back — is a wake of netstack's own loop
+//! **Answered only while an address is held on a link that is up, and the
+//! name is claimed**: every address after none and every return of the link
+//! is probed on first (§8, §8.1), which takes the name's first answer three
+//! quarters of a second and a drawn delay past it, and a name another host
+//! answers for is not this machine's. Every decision is
+//! `toyos_mdns::Responder`'s; this is the socket, the clock, the draw of the
+//! delay the responder asks for, and the log line for what became of the
+//! name. A pass tells the responder its link, hands it every message that
+//! has arrived, and only then asks what the name is owed: a conflicting
+//! response received as a probing ends takes the name before it is claimed.
+//! What the name is owed later — a probe, an announcement (§8.3), or an
+//! answer §6 held back — is a wake of netstack's own loop
 //! ([`Responder::wake_in`]) rather than a sleep, because the protocol names
 //! the interval and nothing on the wire says when it has passed.
 
@@ -16,15 +24,16 @@ use std::time::{Duration, Instant};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint};
-use toyos_mdns::{Asker, Host, Link, To, GROUP, PORT};
+use toyos_mdns::{Event, Host, Link, Source, To, GROUP, PORT};
 
-/// A query is a few hundred bytes; this holds a handful of them between two
-/// passes, and a query past it is dropped by the socket, which is what the
-/// asker's own retry is for.
+/// A message is a few hundred bytes; this holds a handful of them between two
+/// passes, and one past it is dropped by the socket, which is what its
+/// sender's own retry is for.
 const BUFFER: usize = 4096;
 
 pub struct Responder {
     handle: SocketHandle,
+    host: &'static str,
     record: toyos_mdns::Responder<'static>,
     /// The origin of the responder's clock.
     born: Instant,
@@ -34,7 +43,7 @@ impl Responder {
     /// Join the group and bind its port. `host` is the name this machine asks
     /// its network to record for it (`dhcp::HOSTNAME`).
     pub fn new(host: &'static str, iface: &mut Interface, socket_set: &mut SocketSet<'static>) -> Self {
-        let host = Host::new(host).unwrap_or_else(|_| panic!("netstack: {host:?} is no host name"));
+        let label = Host::new(host).unwrap_or_else(|_| panic!("netstack: {host:?} is no host name"));
         iface
             .join_multicast_group(IpAddress::Ipv4(Ipv4Addr::from(GROUP)))
             .expect("netstack: the multicast DNS group is the one group this interface joins");
@@ -43,27 +52,29 @@ impl Responder {
         };
         let mut socket = udp::Socket::new(buffer(), buffer());
         socket.bind(PORT).expect("netstack: nothing else binds the multicast DNS port");
-        Self { handle: socket_set.add(socket), record: toyos_mdns::Responder::new(host), born: Instant::now() }
+        Self { handle: socket_set.add(socket), host, record: toyos_mdns::Responder::new(label), born: Instant::now() }
     }
 
-    /// After each poll: send what the record is owed now, then answer every
-    /// query that arrived.
-    pub fn pass(&mut self, iface: &Interface, socket_set: &mut SocketSet<'_>, now: Instant) {
+    /// After each poll: tell the responder its link, which is the interface's
+    /// address while the card's link is up; hand it every message that
+    /// arrived and send what each is answered; then send what the name is
+    /// owed now. What became of the name is said as it happens.
+    pub fn pass(&mut self, iface: &Interface, socket_set: &mut SocketSet<'_>, link_up: bool, now: Instant) {
         let socket = socket_set.get_mut::<udp::Socket>(self.handle);
         // IPv4 is the one protocol this netstack is built with, so every address is one.
-        let link = iface.ip_addrs().first().map(|&IpCidr::Ipv4(cidr)| Link {
+        let link = iface.ip_addrs().first().filter(|_| link_up).map(|&IpCidr::Ipv4(cidr)| Link {
             addr: cidr.address().octets(),
             prefix: cidr.prefix_len(),
         });
         let now_ms = self.ms(now);
         let group = IpEndpoint::new(IpAddress::Ipv4(Ipv4Addr::from(GROUP)), PORT);
-        if let Some(record) = self.record.on(link, now_ms) {
-            send(socket, &record, group);
-        }
-        while let Ok((query, meta)) = socket.recv() {
+        self.record.on(link, now_ms);
+        while let Ok((message, meta)) = socket.recv() {
             let IpAddress::Ipv4(from) = meta.endpoint.addr;
-            let asker = Asker { addr: from.octets(), port: meta.endpoint.port };
-            let Some(answer) = self.record.answer(query, asker, now_ms) else {
+            let from = Source { addr: from.octets(), port: meta.endpoint.port };
+            let (answer, event) = self.record.heard(message, from, now_ms);
+            said(self.host, event);
+            let Some(answer) = answer else {
                 continue;
             };
             let to = match answer.to {
@@ -72,15 +83,29 @@ impl Responder {
             };
             send(socket, &answer.bytes, to);
         }
+        let (owed, event) = self.record.owed(now_ms, || u32::from(crate::resolve::random_u16()));
+        said(self.host, event);
+        if let Some(owed) = owed {
+            send(socket, &owed, group);
+        }
     }
 
-    /// When the loop must wake for what the record is owed, if anything is.
+    /// When the loop must wake for what the name is owed, if anything is.
     pub fn wake_in(&self, now: Instant) -> Option<Duration> {
         self.record.owed_at().map(|at| Duration::from_millis(at.saturating_sub(self.ms(now))))
     }
 
     fn ms(&self, now: Instant) -> u64 {
         now.saturating_duration_since(self.born).as_millis() as u64
+    }
+}
+
+/// The log line for what became of `host`'s name.
+fn said(host: &str, event: Option<Event>) {
+    match event {
+        Some(Event::Claimed) => crate::say!("netstack: mDNS: no host answered for {host}.local; this machine answers as it"),
+        Some(Event::Lost) => crate::say!("netstack: mDNS: another host answered for {host}.local; this machine answers to no name"),
+        None => {}
     }
 }
 
@@ -109,19 +134,21 @@ mod tests {
         let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0u8; 64]);
         let mut set = SocketSet::new(Vec::new());
         let handle = set.add(udp::Socket::new(buffer(), buffer()));
-        Responder { handle, record: toyos_mdns::Responder::new(Host::new("t14").unwrap()), born: Instant::now() }
+        Responder { handle, host: "t14", record: toyos_mdns::Responder::new(Host::new("t14").unwrap()), born: Instant::now() }
     }
 
-    /// **A wake is asked for exactly what the record owes.** Nothing before
-    /// an address is held; the §8.3 second announcement's own instant once
-    /// `on` schedules it. A responder that never asks for this wake answers a
-    /// query §6 held back only on some other, unrelated one.
+    /// **A wake is asked for exactly what the name owes.** Nothing before an
+    /// address is held; the first probe's own instant, the drawn delay after
+    /// the address, once the record schedules it. A responder that never asks
+    /// for this wake sends that probe, and every one after it, only on some
+    /// other, unrelated wake.
     #[test]
-    fn wake_in_asks_for_what_the_record_owes_and_nothing_else() {
+    fn wake_in_asks_for_what_the_name_owes_and_nothing_else() {
         let mut r = responder();
         assert_eq!(r.wake_in(r.born), None, "nothing is owed before an address is held");
         r.record.on(Some(LINK), 0);
-        let owed_ms = r.record.owed_at().expect("§8.3 owes the second announcement");
-        assert_eq!(r.wake_in(r.born), Some(Duration::from_millis(owed_ms)));
+        assert_eq!(r.record.owed(0, || 100), (None, None), "§8.1: the delay before the first probe");
+        assert_eq!(r.wake_in(r.born), Some(Duration::from_millis(100)));
+        assert_eq!(r.wake_in(r.born + Duration::from_millis(40)), Some(Duration::from_millis(60)));
     }
 }
