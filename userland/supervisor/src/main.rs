@@ -2517,6 +2517,12 @@ const _: () = assert!(
         <= toyos::fs::MAX_GRANT_ROOT
 );
 
+/// A granted folder's root is one a grant carries, and every grant listed is
+/// one answer.
+const _: () = assert!(
+    grants::MAX_ROOT <= toyos::fs::MAX_GRANT_ROOT && grants::MAX_LIST_BYTES <= ipc::MAX_FRAME_LEN as usize
+);
+
 /// A grant on `acceptor`, `dir`'s role's port, naming `share`, by the
 /// namespace name a program opens it under.
 fn mint(acceptor: &Acceptor, share: u64, dir: &View) -> (String, Connector) {
