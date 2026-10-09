@@ -307,6 +307,12 @@ const MACHINE_TESTS: &[&str] = &[
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // A machine whose one NVMe disk is all it has: its firmware boots the
+    // image off it, and `/log` and `/home` are `diskserver`'s partitions of
+    // it across a reset. The claim on the controller and the firmware that
+    // reads it have no host build, and the T14 boots from a stick beside an
+    // NVMe disk that is another system's.
+    "nvme_disk_keeps_log_and_home",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3106,8 +3112,119 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
+        "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
+}
+
+/// What each role's file server says once it serves a volume it mounted, up to
+/// the volume's own counts.
+const SERVED_FROM_DISK: [&str; 3] = [
+    "fileserver: Data serving /apps, /config, /home, /state — bcachefs, ",
+    "fileserver: Log serving /log — FAT32, ",
+    "fileserver: Boot serving /boot — FAT32 read-only, ",
+];
+
+/// Wait for the three file servers of a machine with no disk the kernel
+/// drives to say what they serve: each a volume it mounted, on a session of
+/// its own that `diskserver` opened, and ROOT's partition refused to all.
+fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result<(), String> {
+    await_guest(qemu, console, "the three file servers to say what they serve", |c| {
+        ["Data", "Log", "Boot"].iter().all(|role| c.contains(&format!("fileserver: {role} serving ")))
+    })
+    .map_err(|e| format!("{e}\n{console}"))?;
+    let said = serial::Serial::named("the boot", console.clone());
+    for served in SERVED_FROM_DISK {
+        said.must_say(served)?;
+    }
+    said.must_say("is the ROOT this machine runs from; refusing every session to it")?;
+    let sessions: BTreeSet<&str> = said
+        .text()
+        .lines()
+        .filter(|line| line.contains("diskserver: session "))
+        .filter_map(|line| line.split_once(" opened ")?.1.split_whitespace().next())
+        .collect();
+    if sessions.len() != SERVED_FROM_DISK.len() {
+        return Err(format!(
+            "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
+        ));
+    }
+    Ok(())
+}
+
+/// Run `command` as a job of the boot, to exit 0: what it said.
+fn job_said(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
+    let result = qemu.run_test(command, Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("`{command}`: {why}\nit said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    Ok(result.stdout)
+}
+
+/// A machine with one NVMe disk and no USB controller boots the image off
+/// that disk, and what one boot wrote to `/home` and said into `/log` the next
+/// boot reads back: a file under a name of this run's, byte for byte, and a
+/// line of this run's in a log file the first boot listed.
+fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, qmp: true, ..Default::default() };
+    if let Some(usb) = qemu::profile_argv(&options).iter().find(|arg| arg.contains("usb") || arg.contains("xhci")) {
+        return Err(format!("this machine was to have no USB controller, and QEMU is given {usb}"));
+    }
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("this host's clock is past 1970");
+    let nonce = format!("kept-{}-{}", std::process::id(), since.as_nanos());
+    let kept = format!("/home/{nonce}/release");
+    let source = toyos_osrelease::GUEST_PATH;
+
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    served_by_diskserver(&mut qemu, &mut console)?;
+    job_said(&mut qemu, &format!("mkdir /home/{nonce}"))?;
+    job_said(&mut qemu, &format!("cp {source} {kept}"))?;
+    job_said(&mut qemu, &format!("echo {nonce}"))?;
+    // `ls` says a file as two spaces, its name, and its size in brackets.
+    let logs: Vec<String> = job_said(&mut qemu, "ls /log")?
+        .lines()
+        .filter_map(|line| Some(line.strip_prefix("  ")?.split_once(" (")?.0.to_string()))
+        .collect();
+    if logs.is_empty() {
+        return Err(format!("the first boot's /log lists no file\n{console}"));
+    }
+
+    // The reset the guest asks for, and the one its loader makes of the pass
+    // that reads how that boot ended: the boot after both is the one waited for.
+    qemu.reset_on_reboot();
+    writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    qemu.await_boot();
+    let mut console = qemu.boot_log().to_string();
+    if !console.contains(bootlog::REBOOTING) {
+        return Err(format!("the machine reached {} again without saying {}\n{console}", qemu::DEFAULT_READY, bootlog::REBOOTING));
+    }
+    // What the second boot said, and none of the first's servers' lines.
+    console = console.split_once(bootlog::REBOOTING).expect("checked above").1.to_string();
+    served_by_diskserver(&mut qemu, &mut console)?;
+    let shipped = job_said(&mut qemu, &format!("cat {source}"))?;
+    let read_back = job_said(&mut qemu, &format!("cat {kept}"))?;
+    if shipped.trim().is_empty() || read_back != shipped {
+        return Err(format!("{kept} reads back after the reboot as\n{read_back}\nand {source} is\n{shipped}"));
+    }
+    // The line as the first boot's `logkeeper` filed it: `echo`'s own, whose
+    // whole text is the nonce, which nothing the second boot says is.
+    let mut found = None;
+    for log in &logs {
+        let lines = job_said(&mut qemu, &format!("grep {nonce} /log/{log}"))?;
+        found = found.or(lines.lines().find_map(|line| {
+            toyos_logstream::program_line(line).filter(|said| said.text == nonce).map(|said| format!("{log}: {}", said.tag))
+        }));
+    }
+    let Some(found) = found else {
+        return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
+    };
+    eprintln!("  [disk] after the reboot {kept} is {} bytes of {source}, and /log/{found} said {nonce}", read_back.len());
+    Ok(())
 }
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and
