@@ -210,4 +210,26 @@ fn main() {
         }
     }
     say(Line::Done);
+    // Measurement branch only: netstack's word on its name, which comes
+    // 750 ms to 1 s after the lease (RFC 6762 §8.1's delay, three probes and
+    // the wait after them), on a line the rows do not read. The boot holds
+    // for it, at most 15 s: past the line above, a panic here moves no row.
+    if word == Word::Lease {
+        let name = std::panic::catch_unwind(|| {
+            let mut said = "none";
+            served_log::Log::open().until("netstack's word on its name", Duration::from_secs(15), |line| {
+                let Some(line) = program_line(line).filter(|line| line.tag == NETSTACK) else { return false };
+                said = if line.text.starts_with("netstack: mDNS: no host answered for ") {
+                    "claimed"
+                } else if line.text.starts_with("netstack: mDNS: another host answered for ") {
+                    "lost"
+                } else {
+                    return false;
+                };
+                true
+            });
+            said
+        });
+        println!("name: {}", name.unwrap_or("none within 15 s"));
+    }
 }
