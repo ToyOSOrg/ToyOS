@@ -266,10 +266,19 @@ impl Superblock {
 
     /// Write superblock to both block 0 and the backup at the last block.
     pub fn write(&self, io: &dyn BlockIO) -> Result<(), FsError> {
+        self.copies().try_for_each(|copy| self.write_at(io, copy))
+    }
+
+    /// Block 0, which [`Self::read`] tries first, then the backup.
+    pub fn copies(&self) -> impl Iterator<Item = BlockNum> {
+        [BlockNum::new(0), BlockNum::new(self.block_count - 1)].into_iter()
+    }
+
+    /// Write this superblock to one of its [`Self::copies`].
+    pub fn write_at(&self, io: &dyn BlockIO, copy: BlockNum) -> Result<(), FsError> {
         let mut buf = BlockBuf::zeroed();
         self.write_to(&mut buf);
-        io.write(BlockNum::new(0), &buf)?;
-        io.write(BlockNum::new(self.block_count - 1), &buf)
+        io.write(copy, &buf)
     }
 }
 

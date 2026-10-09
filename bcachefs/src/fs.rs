@@ -139,12 +139,10 @@ impl FsError {
 pub struct ReadOnly;
 pub struct ReadWrite;
 
-/// A formatted but not yet mounted filesystem. Used for building images (mkfs).
-pub struct Formatted<IO: BlockIO> {
-    io: IO,
-    sb: Superblock,
-    alloc: BitmapAllocator,
-}
+/// A formatted but not yet mounted filesystem. Used for building images
+/// (mkfs): written in place, since nothing it holds is committed before
+/// [`Formatted::into_io`].
+pub struct Formatted<IO: BlockIO>(Mounted<IO, ReadWrite>);
 
 /// A mounted filesystem. Mode is ReadOnly or ReadWrite.
 pub struct Mounted<IO: BlockIO, Mode = ReadWrite> {
@@ -412,9 +410,8 @@ fn decode_leaf_value(value: &[u8], volume_blocks: u64) -> Result<LeafValue, FsEr
 /// Allocate blocks and write `data` into them, returning the extent list.
 ///
 /// The allocator answers with a run that may be shorter than the request, so
-/// covering `data` takes a loop — and a run reserved by an earlier turn of that
-/// loop is a block the bitmap calls taken that no entry names, once a later
-/// turn fails. Every run goes back before the error does.
+/// covering `data` takes a loop. A run reserved by an earlier turn of that loop
+/// is the operation's, which gives it back if a later turn fails.
 fn write_data(
     io: &dyn BlockIO,
     alloc: &mut BitmapAllocator,
@@ -430,10 +427,7 @@ fn write_data(
     let mut data_offset = 0usize;
 
     while remaining > 0 {
-        let run = match alloc.alloc_up_to(io, alloc.next_alloc, remaining) {
-            Ok(run) => run,
-            Err(err) => return Err(give_back(io, alloc, &extents, err)),
-        };
+        let run = alloc.alloc_up_to(io, alloc.next_alloc, remaining)?;
         push_extent(&mut extents, run.start.raw(), run.len);
 
         let mut buf = BlockBuf::zeroed();
@@ -444,9 +438,7 @@ fn write_data(
                 let len = chunk_end - data_offset;
                 buf.0[..len].copy_from_slice(&data[data_offset..chunk_end]);
             }
-            if let Err(err) = io.write(BlockNum::new(run.start.raw() + i), &buf) {
-                return Err(give_back(io, alloc, &extents, err));
-            }
+            io.write(BlockNum::new(run.start.raw() + i), &buf)?;
             data_offset += BLOCK_SIZE;
         }
 
@@ -454,24 +446,6 @@ fn write_data(
     }
 
     Ok(extents)
-}
-
-/// Hand back the runs a failed [`write_data`] had already reserved, and return
-/// the failure that stopped it.
-///
-/// Best effort by construction: this runs because something has already gone
-/// wrong, and a bitmap write that also fails has no better answer to give than
-/// the error already in hand.
-fn give_back(
-    io: &dyn BlockIO,
-    alloc: &mut BitmapAllocator,
-    extents: &[Extent],
-    err: FsError,
-) -> FsError {
-    for ext in extents {
-        let _ = alloc.free_range(io, BlockNum::new(ext.start_block), ext.block_count);
-    }
-    err
 }
 
 /// Read file data from a list of extents.
@@ -575,84 +549,44 @@ impl<IO: BlockIO> Formatted<IO> {
 
         sb.write(&io)?;
 
-        Ok(Self { io, sb, alloc })
+        Ok(Self(Mounted { io, sb, alloc, _mode: PhantomData }))
     }
 
     /// Name this filesystem, so a role's kernel argument can select it.
     ///
     /// A separate act from formatting: a volume nothing names is legal, and
-    /// nothing here invents a name for one. Persisted by [`Self::sync`], which
-    /// [`Self::into_io`] runs.
+    /// nothing here invents a name for one. Persisted by [`Self::into_io`].
     pub fn set_uuid(&mut self, uuid: FsUuid) {
-        self.sb.uuid = uuid;
+        self.0.sb.uuid = uuid;
     }
 
     /// Create a file on the formatted filesystem (used during mkfs).
     pub fn create(&mut self, name: &str, data: &[u8], mtime: u64) -> Result<(), FsError> {
-        if name.is_empty() || name.len() > MAX_NAME_LEN {
-            return Err(FsError::NameTooLong { len: name.len(), max: MAX_NAME_LEN });
-        }
-
-        let extents = write_data(&self.io, &mut self.alloc, data)?;
-        let value = encode_leaf_value(KeyType::File, name, data.len() as u64, mtime, &extents);
-        let key = make_key(&self.sb.hash_seed, name, KeyType::File);
-        let entry = Entry { key, value };
-
-        self.sb.root_node = btree::insert(&self.io, &mut self.alloc, self.sb.root_node, entry)?;
-
-        Ok(())
+        self.0.create(name, data, mtime)
     }
 
     /// Create a symlink on the formatted filesystem.
     pub fn create_symlink(&mut self, name: &str, target: &str, mtime: u64) -> Result<(), FsError> {
-        if name.is_empty() || name.len() > MAX_NAME_LEN {
-            return Err(FsError::NameTooLong { len: name.len(), max: MAX_NAME_LEN });
-        }
-
-        let target_bytes = target.as_bytes();
-        let extents = write_data(&self.io, &mut self.alloc, target_bytes)?;
-        let value = encode_leaf_value(KeyType::Symlink, name, target_bytes.len() as u64, mtime, &extents);
-        let key = make_key(&self.sb.hash_seed, name, KeyType::Symlink);
-        let entry = Entry { key, value };
-
-        self.sb.root_node = btree::insert(&self.io, &mut self.alloc, self.sb.root_node, entry)?;
-
-        Ok(())
-    }
-
-    /// Finalize the filesystem: write superblock with clean flag.
-    pub fn sync(&mut self) -> Result<(), FsError> {
-        self.sb.free_blocks = self.alloc.free_blocks;
-        self.sb.next_alloc = self.alloc.next_alloc;
-        self.sb.set_clean(true);
-        self.sb.write(&self.io)?;
-        self.io.flush()
+        self.0.put(name, KeyType::Symlink, target.as_bytes(), mtime)
     }
 
     /// Mount this formatted filesystem for read-write access.
     pub fn mount(self) -> Mounted<IO, ReadWrite> {
-        Mounted {
-            io: self.io,
-            sb: self.sb,
-            alloc: self.alloc,
-            _mode: PhantomData,
-        }
+        let mut fs = self.0;
+        fs.alloc.shadow = true;
+        fs
     }
 
     /// Mount this formatted filesystem for read-only access.
     pub fn mount_readonly(self) -> Mounted<IO, ReadOnly> {
-        Mounted {
-            io: self.io,
-            sb: self.sb,
-            alloc: self.alloc,
-            _mode: PhantomData,
-        }
+        let Mounted { io, sb, alloc, .. } = self.0;
+        Mounted { io, sb, alloc, _mode: PhantomData }
     }
 
     /// Consume and return the underlying IO (for extracting the image bytes).
     pub fn into_io(mut self) -> Result<IO, FsError> {
-        self.sync()?;
-        Ok(self.io)
+        self.0.sync()?;
+        Ok(self.0.io)
     }
 }
 
@@ -662,13 +596,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// Open an existing filesystem from disk.
     pub fn open(io: IO) -> Result<Mounted<IO, Mode>, FsError> {
         let sb = Superblock::read(&io)?;
-        let alloc = BitmapAllocator {
-            bitmap_start: sb.bitmap_start,
-            bitmap_blocks: sb.bitmap_blocks,
-            total_blocks: sb.block_count,
-            free_blocks: sb.free_blocks,
-            next_alloc: sb.next_alloc,
-        };
+        let alloc = BitmapAllocator::open(&sb);
         Ok(Mounted {
             io,
             sb,
@@ -803,11 +731,9 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
 
     /// Convert back to Formatted state (for testing — insert more files after reading).
     pub fn into_formatted(self) -> Formatted<IO> {
-        Formatted {
-            io: self.io,
-            sb: self.sb,
-            alloc: self.alloc,
-        }
+        let Self { io, sb, mut alloc, .. } = self;
+        alloc.shadow = false;
+        Formatted(Mounted { io, sb, alloc, _mode: PhantomData })
     }
 
     /// Return the extents and file size for a file.
@@ -825,6 +751,17 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
 
 // --- ReadWrite-only operations ---
 
+/// **Every change is one operation and every sync one commit.** An operation
+/// ([`Mounted::atomic`]) takes effect whole or, refused anywhere, leaves the
+/// tree and the allocator as they were; it never writes over a block the last
+/// commit's tree reaches, but to new blocks up to a new root. A commit
+/// ([`Mounted::sync`]) is the primary superblock naming that root landing on
+/// the device, after everything the root reaches, and before the backup copy:
+/// killed anywhere, the device holds the last commit's tree whole or the new
+/// one whole, a torn primary failing its checksum for the backup, which is the
+/// last commit still. What a kill costs is the blocks taken since the last
+/// commit and those only the old tree reached: marked used, and named by no
+/// tree, until a sweep (`issues/a-crash-leaks-the-blocks-of-its-last-commit.md`).
 impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// Create a file, replacing whatever answered to `name`.
     pub fn create(&mut self, name: &str, data: &[u8], mtime: u64) -> Result<(), FsError> {
@@ -834,6 +771,24 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// Create a symlink, replacing whatever answered to `name`.
     pub fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), FsError> {
         self.put(name, KeyType::Symlink, target.as_bytes(), 0)
+    }
+
+    /// Run `change` as one operation: whole, or refused with the root and
+    /// every block as they were.
+    fn atomic<T>(&mut self, change: impl FnOnce(&mut Self) -> Result<T, FsError>) -> Result<T, FsError> {
+        let root = self.sb.root_node;
+        self.alloc.begin();
+        match change(self) {
+            Ok(done) => {
+                self.alloc.succeed(&self.io);
+                Ok(done)
+            }
+            Err(e) => {
+                self.sb.root_node = root;
+                self.alloc.fail(&self.io);
+                Err(e)
+            }
+        }
     }
 
     /// Put `name` on the volume, displacing whatever answered to it.
@@ -860,21 +815,28 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
             return Err(FsError::NameTooLong { len: name.len(), max: MAX_NAME_LEN });
         }
 
-        let displaced = match self.find_by_name(name)? {
-            Some((key, value)) => Some((key, self.decode(&value)?.extents().to_vec())),
-            None => None,
+        self.atomic(|fs| {
+            let displaced = match fs.find_by_name(name)? {
+                Some((key, value)) => Some((key, fs.decode(&value)?.extents().to_vec())),
+                None => None,
+            };
+
+            let extents = write_data(&fs.io, &mut fs.alloc, data)?;
+            let value = encode_leaf_value(key_type, name, data.len() as u64, mtime, &extents);
+            let key = make_key(&fs.sb.hash_seed, name, key_type);
+            fs.sb.root_node = btree::insert(&fs.io, &mut fs.alloc, fs.sb.root_node, Entry { key, value })?;
+
+            fs.retire_displaced(displaced, key)
+        })
+    }
+
+    /// Remove `key`'s entry, if the tree has one.
+    fn remove(&mut self, key: &Key) -> Result<bool, FsError> {
+        let Some((root, _)) = btree::delete(&self.io, &mut self.alloc, self.sb.root_node, key)? else {
+            return Ok(false);
         };
-
-        let extents = write_data(&self.io, &mut self.alloc, data)?;
-        let value = encode_leaf_value(key_type, name, data.len() as u64, mtime, &extents);
-        let key = make_key(&self.sb.hash_seed, name, key_type);
-        self.sb.root_node = btree::insert(
-            &self.io, &mut self.alloc,
-            self.sb.root_node,
-            Entry { key, value },
-        )?;
-
-        self.retire_displaced(displaced, key)
+        self.sb.root_node = root;
+        Ok(true)
     }
 
     /// Remove the entry the insert of `new_key` did not replace, and free the
@@ -890,26 +852,9 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     ) -> Result<(), FsError> {
         let Some((old_key, old_extents)) = displaced else { return Ok(()) };
         if old_key != new_key {
-            btree::delete(&self.io, self.sb.root_node, &old_key)?;
+            self.remove(&old_key)?;
         }
-        for ext in &old_extents {
-            self.alloc.free_range(&self.io, BlockNum::new(ext.start_block), ext.block_count)?;
-        }
-        Ok(())
-    }
-
-    /// Delete a file or symlink by name. Returns true if found and deleted.
-    pub fn delete(&mut self, name: &str) -> Result<bool, FsError> {
-        self.delete_by_name(name)
-    }
-
-    /// Sync filesystem state to disk.
-    pub fn sync(&mut self) -> Result<(), FsError> {
-        self.sb.free_blocks = self.alloc.free_blocks;
-        self.sb.next_alloc = self.alloc.next_alloc;
-        self.sb.set_clean(true);
-        self.sb.write(&self.io)?;
-        self.io.flush()
+        self.free_extents(&old_extents)
     }
 
     /// Delete a file/symlink by name, freeing its data blocks. Returns true if found.
@@ -921,32 +866,57 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// caller nothing had happened. It also answers it once for both key
     /// types, where the old shape fell through from File to Symlink after a
     /// non-matching removal and could take two entries out in one call.
-    fn delete_by_name(&mut self, name: &str) -> Result<bool, FsError> {
-        let Some((key, value)) = self.find_by_name(name)? else { return Ok(false) };
-        let extents = self.decode(&value)?.extents().to_vec();
+    pub fn delete(&mut self, name: &str) -> Result<bool, FsError> {
+        self.atomic(|fs| {
+            let Some((key, value)) = fs.find_by_name(name)? else { return Ok(false) };
+            let extents = fs.decode(&value)?.extents().to_vec();
 
-        // `find_by_name` reached this key by the descent `btree::delete` is
-        // about to repeat, so an empty removal is not "no such file" — it is a
-        // tree that answers two ways.
-        if btree::delete(&self.io, self.sb.root_node, &key)?.is_none() {
-            return Err(FsError::CorruptedNode(self.sb.root_node));
+            // `find_by_name` reached this key by the descent `btree::delete` is
+            // about to repeat, so an empty removal is not "no such file" — it is a
+            // tree that answers two ways.
+            if !fs.remove(&key)? {
+                return Err(FsError::CorruptedNode(fs.sb.root_node));
+            }
+            fs.free_extents(&extents)?;
+            Ok(true)
+        })
+    }
+
+    /// Commit the tree as it stands: see this block's header.
+    pub fn sync(&mut self) -> Result<(), FsError> {
+        self.io.flush()?;
+        // What the volume holds free once this commit's own frees are made.
+        self.sb.free_blocks = self.alloc.free_blocks + self.alloc.pending();
+        self.sb.next_alloc = self.alloc.next_alloc;
+        self.sb.set_clean(true);
+        // From the first superblock write on, this commit may be what a mount
+        // finds, even where the write is refused.
+        self.alloc.seal();
+        for copy in self.sb.copies() {
+            self.sb.write_at(&self.io, copy)?;
+            self.io.flush()?;
         }
-        for ext in &extents {
-            self.alloc.free_range(&self.io, BlockNum::new(ext.start_block), ext.block_count)?;
-        }
-        Ok(true)
+        self.alloc.committed(&self.io)
     }
 
     /// Rename a file or symlink.
-    ///
-    /// The new entry goes in before the old one comes out, so a crash between
-    /// the two leaves the file under both names rather than under neither. What
-    /// that ordering costs is that the insert *is* the removal of whatever
-    /// `new_name` named — same name and same type is the same key, and
-    /// `btree::insert` replaces on an equal key — so the displaced entry has to
-    /// be read out of the tree before the insert. Asking for it afterwards, by
-    /// name, answers with the file that was just renamed and frees its extents.
     pub fn rename(&mut self, old_name: &str, new_name: &str) -> Result<(), FsError> {
+        self.rename_all(&[(old_name, new_name)])
+    }
+
+    /// Rename every `(old, new)` pair in turn, as one operation: a directory
+    /// is the names beneath it, and moves whole or not at all.
+    pub fn rename_all(&mut self, renames: &[(&str, &str)]) -> Result<(), FsError> {
+        self.atomic(|fs| renames.iter().try_for_each(|&(old, new)| fs.rename_one(old, new)))
+    }
+
+    /// The new entry goes in before the old one comes out. What that ordering
+    /// costs is that the insert *is* the removal of whatever `new_name` named —
+    /// same name and same type is the same key, and `btree::insert` replaces on
+    /// an equal key — so the displaced entry has to be read out of the tree
+    /// before the insert. Asking for it afterwards, by name, answers with the
+    /// file that was just renamed and frees its extents.
+    fn rename_one(&mut self, old_name: &str, new_name: &str) -> Result<(), FsError> {
         // Every other name-taking entry point bounds its name; this one did
         // not, and `user_ptr::MAX_USER_STR` lets 64 KiB of it through.
         if new_name.is_empty() || new_name.len() > MAX_NAME_LEN {
@@ -982,7 +952,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         // extent list. Nothing to delete when the two names share a key — the
         // entry under it is the one the insert just wrote.
         if new_key != old_key {
-            btree::delete(&self.io, self.sb.root_node, &old_key)?;
+            self.remove(&old_key)?;
         }
 
         Ok(())
@@ -996,29 +966,24 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         size: u64,
         mtime: u64,
     ) -> Result<(), FsError> {
-        let (old_key, old_value) = self.find_by_name(name)?
-            .ok_or(FsError::NotFound)?;
-        let leaf = self.decode(&old_value)?;
+        self.atomic(|fs| {
+            let (old_key, old_value) = fs.find_by_name(name)?
+                .ok_or(FsError::NotFound)?;
+            let leaf = fs.decode(&old_value)?;
 
-        let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, new_extents);
-        let new_entry = Entry { key: old_key, value: new_value };
+            let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, new_extents);
+            let new_entry = Entry { key: old_key, value: new_value };
 
-        // No delete first. The key is unchanged and `btree::insert` replaces on
-        // an equal key, so the delete bought nothing and cost the file: a
-        // pre-check for `EntryTooLarge` does not cover `insert`'s other
-        // rejection, a split with no free block to split into, and that one
-        // left the entry deleted and never put back. Blocks the caller drops
-        // from the extent list are the caller's to free, through
-        // [`Self::free_extents`], after this records the shortened list.
-        self.sb.root_node = btree::insert(
-            &self.io, &mut self.alloc,
-            self.sb.root_node,
-            new_entry,
-        )?;
-        Ok(())
+            // No delete first: the key is unchanged and `btree::insert` replaces
+            // on an equal key. Blocks the caller drops from the extent list are
+            // the caller's to free, through [`Self::free_extents`], after this
+            // records the shortened list.
+            fs.sb.root_node = btree::insert(&fs.io, &mut fs.alloc, fs.sb.root_node, new_entry)?;
+            Ok(())
+        })
     }
 
-    /// Return `extents`' blocks to the allocator. Record first, free second:
+    /// Give `extents`' blocks back to the allocator. Record first, free second:
     /// the caller shortens the entry's list before calling this, so a failure
     /// between the two leaks blocks rather than leaving an entry naming freed
     /// ones.

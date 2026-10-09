@@ -20,11 +20,11 @@
 //! shrinks is recorded before the blocks past it are freed, so a failure
 //! between the two leaks blocks rather than leaving an entry naming freed ones.
 //!
-//! **What a kill costs.** The format updates its btree in place and keeps no
-//! journal (`issues/bcachefs-crate-is-not-bcachefs.md`): what the disk
-//! holds is what the last sync wrote, and a server that dies inside a sync can
-//! leave a node half of that sync's. Nothing but a sync writes a dirty block,
-//! unless the cache is holding more than it keeps.
+//! **What a kill costs.** A sync is the format's commit (`bcachefs`'s
+//! `Mounted::sync`): a server killed anywhere leaves the volume as the last
+//! sync that finished, or as the one it was inside, whole either way. A
+//! directory's rename is one operation of the format's
+//! (`Mounted::rename_all`): it moves whole, or is refused with nothing moved.
 //!
 //! Every name a client chose is bounded by the format ([`FsError::NameTooLong`])
 //! before it reaches the tree.
@@ -687,37 +687,41 @@ impl<D: Disk> Volume for DataVolume<D> {
                 if to.starts_with(&format!("{from}/")) {
                     return Err(SyscallError::InvalidArgument);
                 }
-                // One entry at a time: the format has no rename of a prefix,
-                // so a kill in the middle leaves the directory in two halves,
-                // every entry under exactly one of its names.
+                // Every entry beneath, and the directory's own, in one
+                // operation of the format's: the directory moves whole or not at all.
                 let prefix = format!("{from}/");
                 let moving: Vec<(String, Kind)> = self
                     .names
-                    .range(prefix.clone()..)
-                    .take_while(|(n, _)| n.starts_with(&prefix))
+                    .get_key_value(from)
+                    .into_iter()
+                    .chain(self.names.range(prefix.clone()..).take_while(|(n, _)| n.starts_with(&prefix)))
                     .map(|(n, k)| (n.clone(), *k))
                     .collect();
-                for (name, kind) in &moving {
-                    let moved = format!("{to}/{}", &name[prefix.len()..]);
+                for (name, _) in &moving {
                     if let Some(node) = self.by_path.get(name).copied() {
                         self.persist(node)?;
                     }
-                    let (on_disk_from, on_disk_to) = match kind {
-                        Kind::Dir => (format!("{name}/"), format!("{moved}/")),
-                        _ => (name.clone(), moved.clone()),
-                    };
-                    mapped("rename", name, self.fs.rename(&on_disk_from, &on_disk_to))?;
-                    self.names.remove(name);
-                    self.names.insert(moved.clone(), *kind);
-                    if let Some(node) = self.by_path.remove(name) {
+                }
+                let renames: Vec<(String, String)> = moving
+                    .iter()
+                    .map(|(name, kind)| {
+                        let moved = format!("{to}{}", &name[from.len()..]);
+                        match kind {
+                            Kind::Dir => (format!("{name}/"), format!("{moved}/")),
+                            _ => (name.clone(), moved),
+                        }
+                    })
+                    .collect();
+                let pairs: Vec<(&str, &str)> = renames.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                mapped("rename", from, self.fs.rename_all(&pairs))?;
+                for (name, kind) in moving {
+                    let moved = format!("{to}{}", &name[from.len()..]);
+                    self.names.remove(&name);
+                    self.names.insert(moved.clone(), kind);
+                    if let Some(node) = self.by_path.remove(&name) {
                         self.open.get_mut(&node).expect("indexed").path = moved.clone();
                         self.by_path.insert(moved, node);
                     }
-                }
-                if self.names.get(from) == Some(&Kind::Dir) {
-                    mapped("rename", from, self.fs.rename(&format!("{from}/"), &format!("{to}/")))?;
-                    self.names.remove(from);
-                    self.names.insert(to.to_string(), Kind::Dir);
                 }
                 Ok(())
             }
@@ -903,22 +907,23 @@ mod tests {
         again
     }
 
-    /// A full volume of one-page files, every other one then deleted: no two
-    /// free blocks are adjacent, so every run a file is given is one block.
+    /// A volume whose free blocks are all apart, so every run a file is given
+    /// is one block: every block a file's data may take, taken in one run,
+    /// every other one given back, and the run left at the end for nodes
+    /// (`bcachefs`'s `NODE_RESERVE`, 16) taken after.
     fn fragmented() -> DataVolume<Ram> {
         let mut v = DataVolume::format(Ram::new(1024), &["home"], clock).unwrap();
-        let mut made = 0;
-        while let Ok(n) = v.open(&format!("home/fill/{made}"), CREATE) {
-            let written = v.write(n, 0, &[9; BLOCK]);
-            v.close(n).unwrap();
-            if written.is_err() {
-                break;
-            }
-            made += 1;
+        let mut run = Vec::new();
+        let mut page = 0;
+        while v.fs.resolve_or_alloc_block(&mut run, page).is_ok() {
+            page += 1;
         }
-        for i in (0..made).step_by(2) {
-            v.unlink(&format!("home/fill/{i}")).unwrap();
-        }
+        let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
+        let holes: Vec<Extent> =
+            taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
+        v.fs.free_extents(&holes).unwrap();
+        let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
+        v.fs.resolve_or_alloc_block(&mut tail, 16).unwrap();
         v
     }
 
@@ -1091,5 +1096,240 @@ mod tests {
         assert_eq!(v.sync(), Ok(Vec::new()));
         v.close(to).unwrap();
         assert_eq!(v.lstat(&to_path).unwrap().size, 22, "`to`'s length reached the volume");
+    }
+
+    /// A disk whose blocks are a map the test can copy, that keeps the first
+    /// `keep` block writes and loses every later one — the server killed there
+    /// — or refuses the one numbered `refuse` and keeps the rest. A request of
+    /// several blocks counts each, so a kill can land inside one.
+    type Image = BTreeMap<u64, Box<[u8; BLOCK]>>;
+
+    struct Stops {
+        blocks: u64,
+        /// Shared, so a test reads what the disk holds while the server runs.
+        image: Rc<std::cell::RefCell<Image>>,
+        writes: usize,
+        keep: usize,
+        refuse: Option<usize>,
+    }
+
+    impl Stops {
+        fn new(blocks: u64) -> Self {
+            Self { blocks, image: Rc::default(), writes: 0, keep: usize::MAX, refuse: None }
+        }
+
+        fn from(image: &Image, blocks: u64, keep: usize, refuse: Option<usize>) -> Self {
+            Self { blocks, image: Rc::new(image.clone().into()), writes: 0, keep, refuse }
+        }
+    }
+
+    impl Disk for Stops {
+        fn blocks(&self) -> u64 {
+            self.blocks
+        }
+
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            for (i, chunk) in out.chunks_exact_mut(BLOCK).enumerate() {
+                match self.image.borrow().get(&(first + i as u64)) {
+                    Some(block) => chunk.copy_from_slice(&block[..]),
+                    None => chunk.fill(0),
+                }
+            }
+            Ok(())
+        }
+
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            for (i, chunk) in data.chunks_exact(BLOCK).enumerate() {
+                let n = self.writes;
+                self.writes += 1;
+                if Some(n) == self.refuse {
+                    return Err(DiskError::Device);
+                }
+                if n < self.keep {
+                    self.image.borrow_mut().insert(first + i as u64, Box::new(chunk.try_into().expect("a block")));
+                }
+            }
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DiskError> {
+            Ok(())
+        }
+    }
+
+    fn take(v: DataVolume<Stops>) -> Stops {
+        let DataVolume { fs, cache, .. } = v;
+        drop(fs);
+        Rc::try_unwrap(cache).ok().expect("one owner").into_disk()
+    }
+
+    /// Every file under `dir` with its bytes, by its path beneath `dir`; a
+    /// directory with nothing under it is listed with a trailing `/`.
+    fn tree<D: Disk>(v: &mut DataVolume<D>, dir: &str) -> Option<BTreeMap<String, Vec<u8>>> {
+        let listed = v.list(dir).ok()?;
+        let mut out = BTreeMap::new();
+        if listed.is_empty() {
+            out.insert("/".to_string(), Vec::new());
+        }
+        for (name, meta) in listed {
+            let path = join(dir, &name);
+            match meta.kind {
+                Kind::Dir => {
+                    for (below, bytes) in tree(v, &path)? {
+                        let below = if below == "/" { format!("{name}/") } else { format!("{name}/{below}") };
+                        out.insert(below, bytes);
+                    }
+                }
+                _ => {
+                    let n = v.open(&path, PLAIN).ok()?;
+                    let mut bytes = vec![0u8; meta.size as usize];
+                    let read = v.read(n, 0, &mut Buf(&mut bytes));
+                    v.close(n).ok()?;
+                    (read.ok()? == bytes.len()).then_some(())?;
+                    out.insert(name, bytes);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    const STAGED: &str = "home/staged";
+    const INSTALLED: &str = "apps/pkg";
+
+    /// Where the directory is: `Ok(true)` whole under its new name and absent
+    /// under its old, `Ok(false)` the reverse, and otherwise what was found.
+    fn whole_under_one<D: Disk>(v: &mut DataVolume<D>, want: &BTreeMap<String, Vec<u8>>) -> Result<bool, String> {
+        let (old, new) = (tree(v, STAGED), tree(v, INSTALLED));
+        match (&old, &new) {
+            (Some(old), None) if old == want => Ok(false),
+            (None, Some(new)) if new == want => Ok(true),
+            _ => Err(format!(
+                "{} names under {STAGED} and {} under {INSTALLED}",
+                old.as_ref().map_or(0, |t| t.len()),
+                new.as_ref().map_or(0, |t| t.len())
+            )),
+        }
+    }
+
+    /// A staged package: files enough to fill several leaves, a subdirectory,
+    /// an empty one, and names beside it the rename must not move; synced.
+    fn staged() -> (Image, BTreeMap<String, Vec<u8>>) {
+        let mut v = DataVolume::format(Stops::new(1024), &["home", "apps"], clock).unwrap();
+        for i in 0..80 {
+            let n = v.open(&format!("home/beside{i}"), CREATE).unwrap();
+            v.write(n, 0, format!("beside {i}").as_bytes()).unwrap();
+            v.close(n).unwrap();
+        }
+        v.mkdir(STAGED).unwrap();
+        v.mkdir(&format!("{STAGED}/empty")).unwrap();
+        for i in 0..60 {
+            let path = if i % 4 == 0 { format!("{STAGED}/sub/f{i}") } else { format!("{STAGED}/f{i}") };
+            let n = v.open(&path, CREATE).unwrap();
+            v.write(n, 0, format!("file {i} of the package").as_bytes()).unwrap();
+            v.close(n).unwrap();
+        }
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let want = tree(&mut v, STAGED).unwrap();
+        (take(v).image.take(), want)
+    }
+
+    fn mounted(disk: Stops) -> Result<DataVolume<Stops>, String> {
+        match DataVolume::probe(disk, &["home", "apps"], clock) {
+            Probed::Mounted(v) => Ok(v),
+            Probed::Unmountable(why) => Err(format!("unmountable: {why}")),
+            Probed::Foreign => Err("foreign".into()),
+        }
+    }
+
+    /// The rename and the sync that makes it durable, against a disk that
+    /// stops at every block write the two make in turn: what the disk then
+    /// holds mounts, and names the directory whole under exactly one name.
+    #[test]
+    fn a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed() {
+        let (image, want) = staged();
+        let blocks = 1024;
+        let mut v = mounted(Stops::from(&image, blocks, usize::MAX, None)).unwrap();
+        v.rename(STAGED, INSTALLED).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        assert_eq!(whole_under_one(&mut v, &want), Ok(true));
+        let writes = take(v).writes;
+        assert!(writes > 4, "the rename and its sync wrote {writes} blocks");
+
+        let mut torn = Vec::new();
+        for keep in 0..=writes {
+            let mut v = mounted(Stops::from(&image, blocks, keep, None)).unwrap();
+            let _ = v.rename(STAGED, INSTALLED);
+            let _ = v.sync();
+            let verdict = mounted(take(v)).and_then(|mut again| whole_under_one(&mut again, &want));
+            if let Err(why) = verdict {
+                torn.push(format!("killed after {keep} of {writes} writes: {why}"));
+            }
+        }
+        assert!(torn.is_empty(), "{} of {} kill points tear the directory:\n{}", torn.len(), writes + 1, torn.join("\n"));
+    }
+
+    /// The same, with the one write numbered `n` refused and the server
+    /// alive: what it answers and what it then serves agree, the disk holds
+    /// the directory whole under one name past the refused sync, and the next
+    /// sync makes the answer what the disk holds.
+    #[test]
+    fn a_directory_rename_is_whole_under_one_name_whichever_write_is_refused() {
+        let (image, want) = staged();
+        let blocks = 1024;
+        let mut v = mounted(Stops::from(&image, blocks, usize::MAX, None)).unwrap();
+        v.rename(STAGED, INSTALLED).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let writes = take(v).writes;
+        let held = |on_disk: &Image| {
+            mounted(Stops::from(on_disk, blocks, usize::MAX, None)).and_then(|mut v| whole_under_one(&mut v, &want))
+        };
+
+        let mut torn = Vec::new();
+        for refuse in 0..writes {
+            let disk = Stops::from(&image, blocks, usize::MAX, Some(refuse));
+            let on_disk = Rc::clone(&disk.image);
+            let mut v = mounted(disk).unwrap();
+            let renamed = v.rename(STAGED, INSTALLED).is_ok();
+            let first = v.sync();
+            let between = held(&on_disk.borrow());
+            let served = whole_under_one(&mut v, &want);
+            let second = v.sync();
+            let after = held(&on_disk.borrow());
+            if served != Ok(renamed) || between.is_err() || second != Ok(Vec::new()) || after != Ok(renamed) {
+                torn.push(format!(
+                    "write {refuse} of {writes} refused: answered {renamed}, served {served:?}, \
+                     the sync {first:?} left {between:?}, the next {second:?} left {after:?}"
+                ));
+            }
+        }
+        assert!(torn.is_empty(), "{} of {writes} refusals tear the directory:\n{}", torn.len(), torn.join("\n"));
+    }
+
+    /// A rename the format refuses part-way — `z`'s extents fit its own name
+    /// and not the long one — leaves the directory whole under its old name.
+    #[test]
+    fn a_directory_rename_the_format_refuses_part_way_moves_nothing() {
+        let mut v = fragmented();
+        let a = v.open("home/staged/a", CREATE).unwrap();
+        v.write(a, 0, b"small").unwrap();
+        v.close(a).unwrap();
+        let z = v.open("home/staged/z", CREATE).unwrap();
+        for page in 0..240u64 {
+            v.write(z, page * BLOCK as u64, &[1; BLOCK]).unwrap();
+        }
+        v.close(z).unwrap();
+        let to = format!("home/{}", "t".repeat(300));
+
+        assert_eq!(v.rename("home/staged", &to), Err(SyscallError::ResourceExhausted));
+
+        let names = |v: &mut DataVolume<Ram>, dir: &str| -> Vec<String> {
+            v.list(dir).map(|l| l.into_iter().map(|(n, _)| n).collect()).unwrap_or_default()
+        };
+        assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
+        assert_eq!(v.lstat(&to), Err(SyscallError::NotFound));
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let mut v = remount(v);
+        assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
+        assert_eq!(v.lstat(&to), Err(SyscallError::NotFound));
     }
 }
