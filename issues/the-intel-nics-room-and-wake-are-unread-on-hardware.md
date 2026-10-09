@@ -10,8 +10,9 @@ netstack offers its card a frame only when the driver counts room for it, and
 where there is none it sleeps on the claim until `toyos_i219::I219::wake_on_room`'s
 cause arrives. On the I219 and the 82574 every reading of that path is the
 driver's own model (`toyos-i219/src/stub.rs`), which is Intel's documents
-written down: no image gives netstack `pci:8086:15fc`, and the harness has no
-Intel card, so neither the T14 nor QEMU's `e1000e` has run it.
+written down: the one image that gives netstack `pci:8086:15fc`,
+`tests/downloadcase`, reads none of the counters below, and the harness has no
+Intel card, so neither the T14 nor QEMU's `e1000e` has been read running it.
 
 What the documents do not say of the T14's part, and the model therefore takes
 on trust: that the PCH's MAC raises a message for `TXDW` once it is unmasked.
