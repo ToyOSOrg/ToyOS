@@ -35,8 +35,7 @@ pub type Digest = [u8; 32];
 /// The SHA-256 of `bytes`: the one definition the Mac, the loader and the
 /// updater share.
 pub fn sha256(bytes: &[u8]) -> Digest {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(bytes).into()
+    toyos_sha2::Sha256::digest(bytes)
 }
 
 /// A digest in lowercase hex, into `out`.

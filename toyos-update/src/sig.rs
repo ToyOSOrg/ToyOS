@@ -16,7 +16,7 @@
 //! as an image.
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use sha2::{Digest as _, Sha512};
+use toyos_sha2::Sha512;
 
 use crate::image::{HEADER_BYTES, SIGNATURE_BYTES};
 
