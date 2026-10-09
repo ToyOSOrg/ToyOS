@@ -1,0 +1,42 @@
+# The T14 on its own cable: netstack on the machine's wired card, and a job
+# that says in the log what the card, the lease, the router and two public
+# services answered. `outbound_router` and `outbound_internet` read it off the
+# stick; no guest boots it, since no guest has this card or this network.
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+
+# `log` is the port the job reads netstack's own lines on: a program's lines
+# are in no record the kernel's cursor serves.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+# The T14's onboard I219, by vendor and device.
+[programs.netstack]
+service = true
+serves = ["netstack"]
+devices = ["pci:8086:15fc"]
+
+# `netstack` for the job's lookups, its connects and what it asks `inspect`;
+# `log` for netstack's word on its lease.
+[programs.test-runner]
+receives = ["netstack", "log"]
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
