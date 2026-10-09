@@ -793,10 +793,13 @@ fn a_query_holds_its_port_while_its_answer_is_read_and_an_ended_lookup_holds_non
 fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let last = u32::from(EPHEMERAL_COUNT) - 1;
+    // A client's socket holds a place; a query's holds none.
+    net.lan.node.set_places(net.lan.now, usize::from(EPHEMERAL_COUNT) - 1);
     for offset in 0..last {
         net.lan.node.udp_bind(ANY, None, || offset).unwrap();
     }
-    let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, last])).expect("the one port left");
+    assert_eq!(net.lan.node.udp_bind(ANY, None, || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
+    let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, last])).expect("the one port left, and a query needs no place");
     assert_eq!(net.lan.node.resolve(net.lan.now, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::NoPort)));
     assert_eq!(net.ms(), WAIT_MS);

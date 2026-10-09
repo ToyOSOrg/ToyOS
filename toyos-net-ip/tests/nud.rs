@@ -887,3 +887,47 @@ fn s_ip_nud_031_a_request_queued_before_the_lifetime_is_not_idle() {
     assert_eq!(h.out_with(1).iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_REQ_R)]);
     assert_eq!(h.ip.next_deadline(), Some(H::instant(end + 3_000)), "3 s after the hand-off");
 }
+
+// RFC 4861 §7.2.2: "While waiting for address resolution to complete, the sender MUST, for each
+// neighbor, retain a small queue of packets waiting for address resolution to complete. ... When
+// a queue overflows, the new arrival SHOULD replace the oldest entry." The queue is the next
+// hop's: a router that never answers holds every datagram routed by it, drops only its own, and
+// holds up none to a host on the link.
+#[test]
+fn rfc_4861_7_2_2_a_silent_next_hop_holds_up_no_other() {
+    let per = limits::nud::PENDING_PER_NEIGHBOUR as u8;
+    let mut h = H::fixture_i();
+    let behind_r = |n: u8| Ipv4Addr::new(198, 51, 100, 1 + n);
+    for n in 0..=per {
+        assert_eq!(h.send(A, behind_r(n), 5001, 5001, &[b'r', n]), Ok(None));
+    }
+    assert_eq!(h.count(Counter::NbPendingOverflow), 1, "one more than R's queue holds");
+    for n in 0..per {
+        assert_eq!(h.send(A, B, 5001, 5001, &[b'b', n]), Ok(None));
+    }
+    assert_eq!(h.count(Counter::NbPendingOverflow), 1, "B's datagrams wait in B's queue, and R's full one drops none of them");
+    let queued = |h: &H, addr| match h.state(addr) {
+        Some(Nud::Incomplete(s)) => Some(s.pending.queued()),
+        _ => None,
+    };
+    assert_eq!((queued(&h, R), queued(&h, B)), (Some(usize::from(per)), Some(usize::from(per))));
+    let asked = h.out();
+    assert!(asked.len() == 2 && asked[0].requests(R) && asked[1].requests(B), "one request each, and no datagram");
+
+    h.at(5);
+    h.frame(&hex(V_ARP_REPLY));
+    let released: Vec<(MacAddr, Vec<u8>)> = h.out().iter().map(|o| (o.to(), payload(o))).collect();
+    let all_of_bs: Vec<(MacAddr, Vec<u8>)> = (0..per).map(|n| (MAC_B, vec![b'b', n])).collect();
+    assert_eq!(released, all_of_bs, "B answered: every datagram to B leaves, in order, while R is silent");
+    assert_eq!(queued(&h, R), Some(usize::from(per)), "and R's wait on");
+    assert!(matches!(h.send(A, B, 5001, 5001, b"now"), Ok(Some(frame)) if destination_of(&frame) == MAC_B));
+
+    let later = h.run(3_000);
+    assert!(later.iter().all(|o| o.requests(R)), "nothing but R's own requests leaves as R fails");
+    assert!(matches!(h.state(R), Some(Nud::Failed)));
+    assert_eq!(h.count(Counter::NbPendingDropped), u64::from(per));
+    let told: Vec<Event> = h.events.iter().filter(|e| matches!(e, Event::Unreachable(_))).copied().collect();
+    let behind: Vec<Event> = (1..=per).map(|n| Event::Unreachable(flow_to(behind_r(n)))).collect();
+    assert_eq!(told, behind, "only the flows routed by R are told, the oldest having given its place");
+    assert!(matches!(h.send(A, B, 5001, 5001, b"still"), Ok(Some(frame)) if destination_of(&frame) == MAC_B));
+}

@@ -19,6 +19,12 @@
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
 //! back the same way ([`op::LOCK_TAKE`]), and goes back with the claim.
 //!
+//! **A byte written to the FADT's `SMI_CMD` is a call into the firmware, which
+//! the kernel makes on the boot processor** (ACPI 6.5 Table 5.9) and returns
+//! from once the firmware's handler has. It makes none of a value the FADT
+//! itself gives a meaning ([`Refused::KernelCommand`]), and no more than a
+//! fixed few in a second ([`Refused::CommandRate`]).
+//!
 //! **The power-off is the kernel's, with the sleep type the holder supplies**
 //! ([`op::S5`]): what `\_S5` evaluates to is in the firmware's AML, and
 //! until a holder has supplied it [`crate::syscall::SYS_SHUTDOWN`] is refused
@@ -208,6 +214,15 @@ pub enum Refused {
     /// what types the address a register is not what every CPU reads it
     /// under.
     RangeRegistersDiffer = 16,
+    /// A byte for `SMI_CMD` that the FADT gives a meaning (ACPI 6.5 Table
+    /// 5.9: `ACPI_ENABLE`, `ACPI_DISABLE`, `S4BIOS_REQ`, `PSTATE_CNT`,
+    /// `CST_CNT`): the kernel's to write, or nobody's.
+    KernelCommand = 17,
+    /// A write that reaches `SMI_CMD` and is not one byte to it.
+    CommandSpan = 18,
+    /// A byte for `SMI_CMD` past the most the kernel writes for the holder in
+    /// a second.
+    CommandRate = 19,
 }
 
 impl Refused {
@@ -229,6 +244,9 @@ impl Refused {
             14 => Self::ConfigWrite,
             15 => Self::UnlistedCached,
             16 => Self::RangeRegistersDiffer,
+            17 => Self::KernelCommand,
+            18 => Self::CommandSpan,
+            19 => Self::CommandRate,
             _ => return None,
         })
     }
