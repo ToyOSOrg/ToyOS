@@ -15,8 +15,11 @@ endless one. Measured: an inclusive range that ends at `u16::MAX`, for
 `aarch64-unknown-toyos` and `x86_64-unknown-toyos`. The fault is in LLVM's
 ScalarEvolution and is the same on every target: it moves a no-wrap flag from
 an increment whose wrapped result nothing uses onto a value that is used, and
-`indvars` deletes the loop's exit on it. Upstream LLVM has the fault, has a
-report of it open, and has merged no fix.
+`indvars` deletes the loop's exit on it. Upstream LLVM has the fault and has
+merged no fix. Its open report llvm/llvm-project#175729 has the same symptom
+on another loop: that ToyOS's loop is that report's fault is this file's
+reading, and that the report is the known fault is a maintainer's
+"probably" ("Upstream" below, "Not established").
 
 ## The fault, with no front end
 
@@ -378,8 +381,8 @@ that never reaches the wrap loses an exit it never takes.
 traces of `minns.rs` under the fork's compiler. For `x86_64-unknown-toyos`,
 `indvars` changes `port`'s loop before the run of CorrelatedValuePropagation
 that marks the add for AArch64: it rewrites the exit test onto the
-incremented value, the add has a second use, and the trace has no `add nuw`
-anywhere. For `aarch64-unknown-toyos` the trace has no
+incremented value, the add has a second use, and no dump in the trace has
+`nuw` on the `i16` increment. For `aarch64-unknown-toyos` the trace has no
 `indvars` change on `port`; read from the source, `IndVarSimplify.cpp:964`
 refuses that rewrite for a counter whose width is not `DL.isLegalInteger`, and
 16 is not in AArch64's `n32:64` where x86-64's layout is `n8:16:32:64`. So the
@@ -479,9 +482,13 @@ compiler the tree builds with by all of:
 
 1. `m1.ll` above through that LLVM's `opt -passes=indvars -S`: the output has
    no `br i1 false`, and `@f` returns;
-2. `caller` is `ret i1 true` for `aarch64-unknown-toyos` and for
-   `x86_64-unknown-toyos`, in `minns.rs` and in `c_u128.rs`, by the command
-   above from the key the ToyOS targets take;
+2. `caller` is `ret i1 true` by the command above: for `aarch64-unknown-toyos`
+   and for `x86_64-unknown-toyos`, in `minns.rs` and in `c_u128.rs`, from the
+   key `target/.deps-stamp` gives the ToyOS targets; and for
+   `aarch64-unknown-none-softfloat` and `aarch64-unknown-uefi`, in `minns.rs`,
+   from the key it gives those two, the one the kernel and the loader take,
+   which is not the key the table's rows for them were made from
+   (`8618c089fa736cb0`, the ToyOS targets');
 3. the test binary above, built with that compiler on Apple silicon without
    incremental state, exits 0;
 4. the tree's own functions read: the fix behind an LLVM option, the tree

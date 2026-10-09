@@ -102,8 +102,10 @@ host suite right, and nothing measured says either way.
 **No stable is known to be coming that the job can go back to.** Five
 nightlies were run, of 10, 13 and 22 July, 25 September and 8 October 2026,
 the last the newest there was, and each hangs the table's second row; none
-between them was run. Upstream's LLVM has a report of the fault open and has
-merged no fix.
+between them was run. Upstream's LLVM has merged no fix. That its open report
+llvm/llvm-project#175729 is of this fault is the reading of
+`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`,
+which lists it under "Not established".
 
 `guest.yml`, and so `guest / suite` and the nightly's `tcg / suite`, and
 `nightly.yml`'s `portability-linux` install `stable` and log its version:
