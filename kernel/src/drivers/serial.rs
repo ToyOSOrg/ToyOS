@@ -12,7 +12,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::IrqGuard;
 use crate::log;
-use super::serial_lock::{self, BackendLock, Held, Seized};
+use super::serial_lock::{BackendLock, Held, Seized};
 use crate::scheduler::Parkable;
 use crate::sleeplock::{SleepGuard, SleepLock};
 
@@ -253,29 +253,27 @@ pub unsafe fn panic_flush() {
     unsafe { crate::log::console::drain_bypassed(&mut uart) };
 }
 
-/// Drains the ring before the machine powers off, so the tail of a shutdown
-/// is not lost to `power::shutdown()` cutting power with logs still queued.
-///
-/// Bounded on the wire like `panic_flush`, but never bypasses: every CPU is
-/// still live here, and reading the ring unsynchronized is only safe once
-/// nothing else runs. Losing the tail is better than not powering off, and
-/// the black box says it was lost, since the console cannot.
-pub fn flush_final() {
-    if let Some(wire) = serial_lock::within(PANIC_LOCK_SPIN_LIMIT, try_wire) {
-        crate::log::console::drain_all(&wire);
+/// Every committed record through the registers, for a stop whose wire
+/// `klogd` kept: a line of the holder's still in flight may interleave with
+/// these. Never bypasses: every CPU is still live here, and reading the ring
+/// unsynchronised is only safe once nothing else runs.
+pub fn drain_over_the_wire() {
+    if !has_console() {
         return;
     }
-    crate::blackbox::append(|lines| {
-        let _ = writeln!(
-            lines,
-            "console: the wire stayed held through the stop's last drain, so this boot's last \
-             records are not on the console"
-        );
-    });
+    let mut uart = panic_registers();
+    match &mut uart.0 {
+        Hold::Held(guard) => crate::log::console::drain_locked(guard),
+        Hold::Reentered(_) | Hold::Expired(_) => uart.write(NOT_DRAINED),
+    }
 }
 
-/// Who may put a line on the wire: `klogd`, and the few drains that stand in
-/// for it (boot before it runs, the stop, the power-off). **Held with
+/// What a stop whose registers stayed held too writes in place of its records.
+const NOT_DRAINED: &[u8] =
+    b"\n[serial] the stop's records are not on the console: its wire and its registers stayed held\n";
+
+/// Who may put a line on the wire: `klogd`, the drains that stand in for it
+/// before it runs, and the stop, which takes it from `klogd` for good. **Held with
 /// interrupts on and preemption allowed**, for a whole line, so a line is one
 /// holder's; [`BackendGuard`] is taken inside it once per burst, which is the
 /// only interrupts-off window the console costs.
@@ -284,6 +282,20 @@ static WIRE: SleepLock<()> = SleepLock::new(());
 /// The wire, for a task that may park until it is free.
 pub fn wire(parkable: &Parkable) -> SleepGuard<'_, ()> {
     WIRE.lock(parkable)
+}
+
+/// Who holds the wire, for the stop that waited it out.
+pub fn wire_holder() -> impl core::fmt::Display {
+    struct Holder(Option<crate::scheduler::TaskId>);
+    impl core::fmt::Display for Holder {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self.0 {
+                Some(task) => write!(f, "task {task}"),
+                None => write!(f, "a context with no task"),
+            }
+        }
+    }
+    Holder(WIRE.holder())
 }
 
 /// The wire, if it is free, from any context — the boot before per-CPU state

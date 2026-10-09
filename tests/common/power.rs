@@ -74,6 +74,79 @@ pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What the stop alerts where `klogd` kept the console's wire through the
+/// stop's whole budget, in `kernel/src/log/console.rs`.
+const WIRE_KEPT: &str = "kept the wire through the stop's";
+
+/// What both of the stop's alerts say where `klogd` let the wire go only past
+/// the stop's budget or not at all, in `kernel/src/log/console.rs`.
+pub const WIRE_LATE: &str = "the wire through the stop's";
+
+/// What a stop staged by `wire-held-across-the-stop` logs once `klogd` holds
+/// the console's wire, in `kernel/src/log/console.rs`.
+const WIRE_HELD: &str = "console: klogd holds the wire as the stop begins, staged";
+
+/// What `klogd` logs as it lets the console's wire go to the stop, in
+/// `kernel/src/log/console.rs`.
+const WIRE_LET_GO: &str = "console: klogd let the wire go to the stop";
+
+/// The actuators that stage `klogd` holding the wire across the stop: until
+/// the stop asks for it, or, `kept`, for good.
+pub fn wire_staged(kept: bool) -> &'static [&'static str] {
+    if kept { &["wire-kept-through-the-stop"] } else { &["wire-held-across-the-stop"] }
+}
+
+/// A stop that found `klogd` holding the console's wire, judged on the whole
+/// `console` of a boot that ended with the `last` word: the staged hold, the
+/// stop's record and the last word are all on it, in that order; where `klogd`
+/// `kept` the wire the stop said so between the hold and the record, and
+/// where it did not `klogd` said it let the wire go there and the console is
+/// otherwise clean.
+pub fn judge_the_held_wire(console: &str, last: &str, kept: bool) -> Result<(), String> {
+    let lines: Vec<&str> = console.lines().collect();
+    let at = |what: &str| lines.iter().position(|l| l.contains(what));
+    let held = at(WIRE_HELD).ok_or_else(|| format!("the staged klogd never said it held the wire\n{console}"))?;
+    let record = lines
+        .iter()
+        .position(|l| toyos_quiesce::Record::parse(l).is_some())
+        .ok_or_else(|| format!("the stop's record is not on the console\n{console}"))?;
+    let said = at(last).ok_or_else(|| format!("{last:?} is not on the console\n{console}"))?;
+    if !(held < record && record < said) {
+        return Err(format!("the hold, the stop's record and {last:?} are on lines {held}, {record} and {said}\n{console}"));
+    }
+    match (kept, at(WIRE_KEPT), at(WIRE_LET_GO)) {
+        (true, Some(alert), None) if held < alert && alert < record => Ok(()),
+        (false, None, Some(let_go)) if held < let_go && let_go < record => {
+            serial::Serial::named("the stop", console.to_string()).must_be_clean()
+        }
+        (_, alert, let_go) => Err(format!(
+            "klogd {} the wire, and the stop's alert is on line {alert:?} and klogd's let-go on line {let_go:?}\n{console}",
+            if kept { "kept" } else { "was asked for" },
+        )),
+    }
+}
+
+/// `klogd` holds the console's wire as the stop begins, on one CPU, where it
+/// runs only when the stop gives the CPU back: the machine powers off with the
+/// stop's record and its last word on the console. `kept`, `klogd` keeps the
+/// wire through the stop's whole budget, and the stop says so and writes
+/// over it.
+pub fn machine_shutdown_wire_held(test_config: &Path, kept: bool) -> Result<(), String> {
+    let options = BootOptions { qmp: true, smp: 1, kernel_params: wire_staged(kept), ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let mut console = boot.text().to_string();
+    qemu::await_marker(&mut qemu, &mut console, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    judge_the_held_wire(&console, SHUTTING_DOWN, kept)?;
+    eprintln!("  [power] klogd held the wire across the stop{}; the record and the last word reached it", if kept { " and kept it" } else { "" });
+    Ok(())
+}
+
 /// A stop that ends with a userland thread still running is followed by a
 /// power-off all the same, with the sleep type `acpiserver` handed the
 /// kernel: q35 hands over in ACPI mode, so the power-off

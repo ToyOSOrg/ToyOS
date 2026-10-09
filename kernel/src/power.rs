@@ -9,17 +9,18 @@
 //! it is owed. Resets this kernel does not perform — a TCO or firmware
 //! watchdog, a triple fault, power loss — are outside it and always will be.
 //!
-//! **Nothing an end says is logged after the console's last drain.**
-//! `serial::flush_final` is the log ring's last reader for the console: a
-//! record committed past it reaches the wire only if `klogd`, on another CPU,
-//! beats the register write. What an end says through the ring it says above
-//! the flush (`arch::power::settle`); `arch::power::off` and
-//! `arch::power::reset` log nothing, and a panic in either drains for itself.
-//! The black box's page is another reader and an earlier one: its tail is
-//! sealed before either end is entered (`log::seal_tail`), so what `settle`
-//! says is on the console and in no page.
+//! **Nothing an end says is logged after the console's last drain.** The
+//! stop holds the console's wire (`log::console::StopWire`), which `klogd`
+//! let go of for good, and its drain here is the log ring's last reader for
+//! the console: a record committed past it reaches no wire. What an end says
+//! through the ring it says above the drain (`arch::power::settle`);
+//! `arch::power::off` and `arch::power::reset` log nothing, and a panic in
+//! either drains for itself. The black box's page is another reader and an
+//! earlier one: its tail is sealed before either end is entered
+//! (`log::seal_tail`), so what `settle` says is on the console and in no page.
 
-use crate::drivers::{serial, xhci::stop};
+use crate::drivers::xhci::stop;
+use crate::log::console::StopWire;
 
 /// Whether this machine has a reset this kernel can perform.
 pub fn can_reboot() -> bool {
@@ -32,8 +33,8 @@ pub fn shutdown_refused() -> Option<&'static str> {
 }
 
 /// Return the machine to firmware.
-pub fn reboot() -> ! {
-    serial::flush_final();
+pub fn reboot(wire: StopWire) -> ! {
+    wire.drain();
     // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
     assert!(can_reboot(), "reboot: no reset, and the caller did not ask can_reboot() first");
     reset_now()
@@ -42,10 +43,10 @@ pub fn reboot() -> ! {
 /// Reset the machine and do nothing else.
 ///
 /// **[`reboot`] is not reachable from a wedge**, which is why this exists
-/// beside it: that path opens with `serial::flush_final`, and a `BackendGuard`
-/// masks interrupts for its whole life — so a CPU stuck inside one holds what
-/// the call would wait for, on exactly the boots `crate::deadline` exists for.
-/// This takes no lock.
+/// beside it: that path is the stop's, which waits on `klogd` and the
+/// console's registers, and a `BackendGuard` masks interrupts for its whole
+/// life — so a CPU stuck inside one holds what the stop would wait for, on
+/// exactly the boots `crate::deadline` exists for. This takes no lock.
 ///
 /// A machine with no reset halts here rather than returning: the caller has
 /// already sealed why, and holding is what such a machine has always done.
@@ -63,11 +64,11 @@ pub fn reset_now() -> ! {
 }
 
 /// Power the machine off. The caller asked [`shutdown_refused`] first.
-pub fn shutdown(stopping: crate::quiesce::Stopping) -> ! {
-    // Above the flush, because it logs.
+pub fn shutdown(stopping: crate::quiesce::Stopping, wire: StopWire) -> ! {
+    // Above the drain, because it logs.
     let settled = crate::arch::power::settle(stopping);
     // Nothing drains the log ring after this point, and nothing below logs.
-    serial::flush_final();
+    wire.drain();
     // A power-off takes VBUS with it on a machine whose ports are not
     // always-on and takes nothing on one whose are, so the devices are handed
     // back here for the same reason as at a reboot.

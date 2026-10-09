@@ -9,6 +9,12 @@
 //!
 //! [`Drain::Inline`] and [`Drain::Thread`] are phases, not fallbacks: exactly
 //! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
+//!
+//! **The stop takes the wire from `klogd` for good** ([`take_for_the_stop`]):
+//! asked, `klogd` lets it go between two writes and never takes it again, and
+//! the stop holds it to the machine's end, so every record the stop commits
+//! reaches the wire before a CPU is taken down. A `klogd` that keeps it through
+//! [`LET_GO`] has the stop write over it, through the registers.
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
@@ -23,11 +29,13 @@ use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
 use crate::sched::kthread;
 use crate::sleeplock::SleepGuard;
+use crate::time::{Budget, Deadline, Duration, DEAF_CPU};
 use crate::watch;
 use crate::sched::payload::KShared;
-use crate::scheduler;
+use crate::scheduler::{self, Parkable};
 use crate::sync::Lock;
 
+use super::handoff::Handoff;
 use super::read::{drain_ordered, Published, RecordSink};
 use super::shard;
 
@@ -84,35 +92,109 @@ pub fn post_wake() {
 }
 
 /// Put every committed record this machine has not yet spoken on the wire,
-/// where the wire is free: the boot before `klogd` runs, and the few contexts
-/// that stand in for it. Declining loses nothing: the record stays committed,
-/// and whoever holds the wire drains it too.
+/// where the wire is free: the boot before `klogd` runs, and a backend's
+/// arrival. Declining loses nothing: the record stays committed, and whoever
+/// holds the wire drains it too.
 pub fn drain_inline() {
     if !serial::has_console() {
         return;
     }
     let Some(wire) = serial::try_wire() else { return };
-    drain_records(&wire, u64::MAX);
+    drain_records(&wire, u64::MAX, Yield::Never);
 }
 
-/// Everything owed to the wire — records and queued lines — for a caller that
-/// holds it and is about to take the machine down.
-pub fn drain_all(wire: &SleepGuard<'_, ()>) {
-    drain_records(wire, u64::MAX);
-    drain_queue(wire, usize::MAX);
+/// Whether a drain lets the wire go to the stop that asks for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Yield {
+    /// `klogd`'s: it stops between two writes once the stop asks.
+    ToTheStop,
+    Never,
 }
 
-/// Every queued line onto the wire, for the stop once it has stopped every
-/// console holder: what a holder queued before it was stopped goes on the wire
-/// under the boot's last word and never after it. The record backlog stays
-/// `klogd`'s, so the sync behind this is not spent behind a slow wire.
-pub fn drain_for_the_stop() {
-    if !serial::has_console() {
-        return;
+/// The stop's claim on the wire, which `klogd` answers.
+static HANDOFF: Handoff = Handoff::new();
+
+/// Posted by `klogd` once it has let the wire go for the stop.
+static LET_GO_POSTED: watch::Watch = watch::Watch::new();
+
+/// How long the stop waits for `klogd` to let the wire go once asked.
+///
+/// `klogd` lets go between two writes, so what it owes is the write it is in:
+/// one rendered line, at most [`LINE_BYTES`], which the slowest wire this
+/// kernel programs, the 16550 at 38400 baud, takes in 300 ms. [`DEAF_CPU`]'s
+/// span is far past that and is the span after which a CPU that has not run
+/// what it was given is a wedged one: a `klogd` that has not let go by then is
+/// on one, or holds the wire through a defect.
+pub(crate) const LET_GO: Budget = Budget::of(
+    Duration::from_nanos(DEAF_CPU.nanos()),
+    "the stop says who kept the wire, and writes every record over it through the registers",
+);
+
+/// The console as the stop holds it, from the moment it has stopped every
+/// console holder to the machine's end. Never dropped: what holds one ends
+/// the machine.
+pub enum StopWire {
+    /// The wire, which `klogd` let go of and never takes again.
+    Held(SleepGuard<'static, ()>),
+    /// `klogd` kept the wire through [`LET_GO`]; the stop writes over it.
+    Kept,
+}
+
+impl StopWire {
+    /// Every committed record onto the console, and every line console
+    /// holders queued where the wire is held.
+    pub fn drain(&self) {
+        match self {
+            Self::Held(wire) => {
+                drain_records(wire, u64::MAX, Yield::Never);
+                drain_queue(wire, usize::MAX, Yield::Never);
+            }
+            Self::Kept => serial::drain_over_the_wire(),
+        }
     }
-    let parkable = scheduler::Parkable::at_entry();
-    let wire = serial::wire(&parkable);
-    drain_queue(&wire, usize::MAX);
+}
+
+/// The wire, for the stop once it has stopped every console holder, held from
+/// here to the machine's end; and every queued line onto it, so what a holder
+/// queued before it was stopped goes on the wire under the boot's last word
+/// and never after it.
+///
+/// Waits on `klogd`'s letting go, bounded by [`LET_GO`]: past it the stop
+/// alerts by name and writes over the holder (a line of `klogd`'s still in
+/// flight may interleave; nothing is lost but the queued lines, which the
+/// alert says). The record backlog stays undrained here, so the sync behind
+/// this is not spent behind a slow wire: the boot's last word drains it.
+pub fn take_for_the_stop(parkable: &Parkable) -> StopWire {
+    // Armed before the ask: a let-go posted between the ask and the park is
+    // one the park returns on at once.
+    let armed = watch::arm(&LET_GO_POSTED, 0, kernel::sched::task::WaitClass::Other)
+        .expect("console: the stop holds no task to park");
+    HANDOFF.ask();
+    // A staged `klogd` waits for the ask parked, with the wire held; a
+    // shipping one never parks holding it.
+    #[cfg(feature = "boot-actuators")]
+    post_wake();
+    let deadline = Deadline::at(crate::clock::now() + LET_GO.duration());
+    loop {
+        let late = deadline.reached(crate::clock::now());
+        if let Some(wire) = serial::try_wire() {
+            if late {
+                crate::alert!("console: klogd held the wire through the stop's {LET_GO}, and let it go only after");
+            }
+            drain_queue(&wire, usize::MAX, Yield::Never);
+            return StopWire::Held(wire);
+        }
+        if late {
+            break;
+        }
+        watch::wait_uncancellable(parkable, &armed, deadline);
+    }
+    crate::alert!(
+        "console: {} kept the wire through the stop's {LET_GO}; the lines console holders queued are not \
+         on it",
+        serial::wire_holder(),
+    );
+    StopWire::Kept
 }
 
 /// Records and queued lines `klogd` takes per hold of the wire, so a console
@@ -140,9 +222,9 @@ fn discard_pending() {
 }
 
 /// At most `budget` records onto the wire the caller holds. Returns how many went.
-fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
+fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64, yields: Yield) -> u64 {
     let mut cursor = DRAINED.take();
-    let mut sink = Wire { wire, records: 0, budget };
+    let mut sink = Wire { wire, records: 0, budget, yields };
     drain_ordered(&super::shards(), &mut cursor, &mut sink);
     let records = sink.records;
     DRAINED.put(&cursor);
@@ -257,12 +339,16 @@ pub static SPACE: watch::Watch = watch::Watch::new();
 /// with a newline, so a line a holder left unended is not joined to the next.
 /// A line's pieces go on together, whatever the budget: they are one line,
 /// and a queue's worth past it at most. Answers whether it freed room.
-fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize) -> bool {
+fn drain_queue(wire: &SleepGuard<'_, ()>, budget: usize, yields: Yield) -> bool {
     let mut line = [0u8; MAX_CONSOLE_LINE + 1];
     let mut freed = false;
     let (mut ended, mut taken) = (0, 0);
     // A holder that never ends its line gets a queue's worth past the budget.
     while (ended < budget || MID_LINE.load(Ordering::Relaxed)) && taken < budget.saturating_add(QUEUED_LINES) {
+        // A line left mid-way is the stop's to end: `MID_LINE` goes with the wire.
+        if yields == Yield::ToTheStop && HANDOFF.asked() {
+            break;
+        }
         taken += 1;
         let (len, continues) = {
             let mut queue = QUEUE.lock();
@@ -360,11 +446,12 @@ struct Wire<'w, 'g> {
     wire: &'w SleepGuard<'g, ()>,
     records: u64,
     budget: u64,
+    yields: Yield,
 }
 
 impl RecordSink for Wire<'_, '_> {
     fn put(&mut self, record: &LogRecord) -> bool {
-        if self.records >= self.budget {
+        if self.records >= self.budget || (self.yields == Yield::ToTheStop && HANDOFF.asked()) {
             return false;
         }
         end_the_line(self.wire);
@@ -412,15 +499,21 @@ extern "C" fn body(_arg: u64) -> ! {
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
     loop {
+        #[cfg(feature = "boot-actuators")]
+        staged::hold_if_staged(&parkable, &handle);
         let freed = if serial::has_console() {
             // A chunk of each per hold, with interrupts on throughout.
             let wire = serial::wire(&parkable);
-            drain_records(&wire, CHUNK);
-            drain_queue(&wire, CHUNK as usize)
+            drain_records(&wire, CHUNK, Yield::ToTheStop);
+            drain_queue(&wire, CHUNK as usize, Yield::ToTheStop)
         } else {
             discard_pending();
             discard_queue()
         };
+        // With the wire let go of: the read the stop's try pairs with.
+        if HANDOFF.asked() {
+            let_go(&parkable, &handle);
+        }
         // A holder that found the queue full waits on room; this is the room.
         if freed {
             SPACE.post();
@@ -453,6 +546,76 @@ extern "C" fn body(_arg: u64) -> ! {
         PARKS.fetch_add(1, Ordering::Relaxed);
         // `klogd` is never killed, so this cancel arm is unreachable.
         let _ = watch::wait(&parkable, &armed, crate::time::Deadline::never());
+    }
+}
+
+/// `klogd`'s end: the wire is the stop's, and this thread parks for the
+/// machine's life, a commit's wake answered by parking again.
+fn let_go(parkable: &Parkable, handle: &crate::sched::payload::TaskHandle) -> ! {
+    // The backlog this leaves reaches the wire at the boot's last word.
+    crate::log!("console: klogd let the wire go to the stop");
+    LET_GO_POSTED.post();
+    loop {
+        let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
+        let _ = watch::wait(parkable, &armed, crate::time::Deadline::never());
+    }
+}
+
+#[cfg(feature = "boot-actuators")]
+pub use staged::hold_the_wire as stage_a_held_wire;
+
+/// `klogd` holding the wire across the stop, which only an actuator stages.
+#[cfg(feature = "boot-actuators")]
+mod staged {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use kernel::sched::task::WaitClass;
+    use crate::sched::payload::TaskHandle;
+
+    use crate::drivers::serial;
+    use crate::scheduler::Parkable;
+    use crate::time::Deadline;
+    use crate::watch;
+
+    /// Set by the stop: `klogd` takes the wire at its next pass.
+    static STAGED: AtomicBool = AtomicBool::new(false);
+    /// Set by `klogd` once it holds the wire, and posted.
+    static HOLDING: AtomicBool = AtomicBool::new(false);
+    static HELD: watch::Watch = watch::Watch::new();
+
+    /// The stop's, before it takes anything down: `klogd` takes the wire, and
+    /// this returns once it has.
+    pub fn hold_the_wire(parkable: &Parkable) {
+        let armed = watch::arm(&HELD, 0, WaitClass::Other).expect("the stop holds a task");
+        STAGED.store(true, Ordering::Release);
+        super::post_wake();
+        // No bound in guest time, which runs on while a host starves the
+        // guest: the harness's ceiling, scaled by the host, is this wait's.
+        while !HOLDING.load(Ordering::Acquire) {
+            watch::wait_uncancellable(parkable, &armed, Deadline::never());
+        }
+        crate::log!("console: klogd holds the wire as the stop begins, staged");
+    }
+
+    /// `klogd`'s, at the top of its loop: once staged, it takes the wire and
+    /// keeps it — until the stop asks for it, then lets it go and goes on as
+    /// a shipping `klogd` does, or, with `wire-kept-through-the-stop`, for good.
+    pub fn hold_if_staged(parkable: &Parkable, handle: &TaskHandle) {
+        if !STAGED.swap(false, Ordering::Acquire) {
+            return;
+        }
+        let wire = serial::wire(parkable);
+        HOLDING.store(true, Ordering::Release);
+        HELD.post();
+        let kept = crate::actuator::wire_kept_through_the_stop();
+        loop {
+            let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
+            if !kept && super::HANDOFF.asked() {
+                break;
+            }
+            let _ = watch::wait(parkable, &armed, Deadline::never());
+        }
+        drop(wire);
     }
 }
 
