@@ -6,34 +6,53 @@ opened: 2026-09-26
 
 # A netstack client cannot tell a reset connection from the peer's FIN
 
-A stream reaches its client as two pipes, and the only thing the receive pipe
-can say about the end of the stream is EOF: its write end closed. std reads
-the rest off the send pipe (`sdk/std/sys/net/connection.rs`, `ended`): a send
-pipe with no reader behind a receive pipe at its end is a reset, on the rule
-that netstack ends the send pipe too, and first, when a connection did not end
-in order.
+A stream reaches its client as two pipes, and the receive pipe's end says only
+that it ended. std (`ended`, `sdk/std/sys/net/connection.rs`) reads the kind
+off the send pipe: one with no reader behind a receive pipe at its end is a
+failure. libc reads no kind: its `recv` answers every end 0 and every refused
+read `EIO` (`userland/libc/src/socket.rs`), so a C client reads a reset as the
+peer's FIN.
 
-The node ends both pipes for a reset (`a_reset_ends_both_pipes_and_the_stream`,
-`userland/netstack/node/tests/streams.rs`), so a reset is read as one. It also
-lets the send pipe go at an orderly end of the client's writing, once the last
-byte is queued and the FIN after it, and whenever the connection is over
-(`userland/netstack/node/src/streams.rs`). So a client that shut its sending
-half down and then reads its peer's bytes to the end reads `ConnectionReset`
-where the peer sent a FIN, and so does one whose connection finished both ways
-in one pass. Measured in a guest on the first run of `netstack_streams`, whose
-job then read to the end: every one of its 4,194,304 bytes came back as sent,
-and the read after the last answered `connection reset`, on virtio and on the
-e1000e alike. netstack on smoltcp kept the send pipe until its socket closed,
-which for a client that had sent its FIN first was after the peer's.
+On the node that order holds: a failure lets the send pipe go before the
+receive pipe, and an orderly end keeps a send pipe whose last byte and FIN are
+queued until its writer leaves (`userland/netstack/node/src/streams.rs`'s
+header; its host tests in `userland/netstack/node/tests/streams.rs`, each red
+with the order broken).
 
-The pipe carries no word for which it was, so std cannot tell the two apart by
-looking harder: either the node keeps the send pipe of a connection that ends
-in order until its client has read the end, or std stops reading a send pipe
-it shut itself, which leaves a reset after a shutdown read as a FIN.
+What `main` ships is netstack on smoltcp, whose `bridge_piped`
+(`userland/netstack/src/main.rs`) closes the receive pipe and then, in the same
+pass, the send pipe of a connection that is no longer open, whether it failed
+or ended in order. A client that reads the end between the two reads a
+failure as a FIN, and one that reads it after both reads an orderly end as a
+failure. A client that shut its sending half down before the peer's FIN is
+the second: its connection is done in both directions at that FIN. Measured
+in a guest on `main`, std, against the host kernel's TCP behind QEMU's user
+network, the same program on the harness host's TCP (macOS) as the oracle:
 
-**Exit condition**: a guest test whose client shuts its sending half down,
-reads its peer's echo and then the end as an end; one whose peer resets a
-stream reads the reset as a reset; and neither is told
-by a rule that the other ending can also meet.
+- a client that shut its sending half down with nothing pending, then read the
+  peer's four bytes and its FIN, read the four and then `ConnectionReset`, in
+  each of two runs, where the host read `Ok(0)`; a C client doing the same
+  read `recv` 0 with `main`'s libc, which reads every end so, and
+  `ECONNRESET` with a libc that reads the kind as std does;
+- a client that read the peer's FIN and then shut its sending half down read
+  its next read as `Ok(0)` in two runs and as `ConnectionReset` in two others,
+  where the host read `Ok(0)`: the race between the two closes;
+- a reset mid-stream, a reset after the client's half-close and a FIN before
+  the client's write read as the host read them, in each of four runs.
+
+**Exit condition**: netstack runs on the node, and on `tests/netcase`:
+
+- a guest std test whose client shuts its sending half down reads its peer's
+  bytes and then the end as an end, one whose peer resets a stream reads the
+  reset as a reset, and each line it prints is the host kernel's for the same
+  program against the same peer;
+- libc reads an end's kind as std does, and a guest C case reads `recv` 0 at
+  the peer's FIN after `shutdown(SHUT_WR)`, `ECONNRESET` on a reset mid-stream
+  and on one after `SHUT_WR`, `send` `EPIPE` after `SHUT_WR` and `recv` 0
+  after `SHUT_RD`; and it is red with `recv`'s probe of the send pipe replaced
+  by a plain 0, with `shutdown` not marking the sending half shut, and with
+  `recv` not answering 0 after `SHUT_RD`. The libc change and its host test
+  were written for the node and are posted on pull request #803 for the move
+  to carry with that case.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`.
