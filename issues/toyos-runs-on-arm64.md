@@ -76,6 +76,17 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   HVF on this Mac?", he answered: "Yes, once ARM userland boots
   (Recommended)".
 
+## The default architecture
+
+`cargo run` and the build pick x86-64 when no architecture is named, whatever
+the host (`src/build.rs`'s `arch_for`, the `None => Arch::X86_64` arm), and
+the owner's word of 2026-10-09 makes the default the host's own, which
+`src/arch.rs`'s `Arch::HOST` already knows. It cannot be flipped without
+taking the desktop away from an Apple-silicon host: the AArch64 image has no
+virtio devices and no userland servers yet (stages 6 and 7). The flip is an
+exit item of stage 7, and until then the default staying x86-64 on an ARM
+host is a weakness of this track, not a choice.
+
 ## Measured, on `main` at `03b1b4db`
 
 **Size.**
@@ -277,17 +288,39 @@ Each stage names its exit; "measured" means a number from a run.
    the kernel's own tables (`TTBR1_EL1` holding memory and nothing else, each
    user space on `TTBR0_EL1` under a 16-bit ASID from `kernel/pure/pcid`), the
    GICv3's SGIs and the virtual timer's PPI, the EL0 entry, and the context
-   switch carrying FP/SIMD; the `virt_` tests other than `virt_early_panic`,
-   `virt_early_fault` and `virt_el2_drop` judge it under the EL2 profile, emulated, because HVF
-   exposes no RNDR and the kernel's hash seed refuses there until stage 6's
-   virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
+   switch carrying FP/SIMD. The `virt_` tests judge it under HVF on an Apple
+   host and emulated at EL1 elsewhere, the kernel's generator keyed from the
+   seed the loader reads from firmware's `EFI_RNG_PROTOCOL`, which edk2
+   answers from a virtio-rng (`kernel/src/random.rs`); `virt_el2_drop`,
+   `virt_smp` and `virt_jobs_at_el2`, one boot of the job case with the timer
+   and FP jobs in it, stay emulated at EL2, which HVF gives no guest, and
+   `virt_reboot` and three more stay emulated at EL2 until
+   `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`
+   is fixed. Each judges an event, never a rate: no QEMU test measures time.
+   **Accepted with the move to HVF:** `virt_user_mode`, `virt_irq_storm`,
+   `virt_timer_floor`, `virt_failed_ap_leaves_no_hole` and
+   `virt_fatal_halts_the_others_first` no longer boot entered at EL2. The
+   entry's drop from EL2 stays judged by `virt_el2_drop`, `virt_smp` and
+   `virt_jobs_at_el2`, and PSCI through the SMC conduit by `virt_smp`
+   (`CPU_ON`, `CPU_OFF`, `SYSTEM_OFF`) and `virt_reboot` (`SYSTEM_RESET`);
+   what those five judge after the entry is the same kernel at EL1 either way.
    Owed before the exit holds: the interrupts-off window against x86's, a
    measurement only metal can make, with no instrument on either arch yet; the
    instruction-cache maintenance before a mapping is executable
    (`cache::make_executable`), the break-before-make ordering of a live
    entry's replacement, and the TLB flush before a reclaimed ASID is issued
-   again, which QEMU's TCG, the only oracle this stage has, cannot fail on:
-   the first HVF run, once stage 6 gives HVF its RNDR, is their exit; and the
+   again, which QEMU's TCG cannot fail on. Under HVF since the entropy stage
+   every program the `virt_` tests run at EL0 is mapped executable through
+   `cache::make_executable`, with no test red, which is no proof: a stale
+   instruction is not certain to show in one boot. Each of the three closes
+   on a guest test under HVF that is red with its step deleted, and stays
+   owed with that test until one is: for `make_executable`, a program that
+   runs code it wrote over code it ran at the same address, on a host whose
+   `CTR_EL0.DIC` the test reads and says clear; for break-before-make, two
+   CPUs, one reading a page whose live entry the other replaces with
+   another frame's, every read the old frame's value or the new one's; for
+   the ASID flush, a test kernel whose ASIDs an actuator bounds to two, and
+   three processes each reading back its own frame at one address. And the
    three deletions shown red. They are shown red on a machine whose
    firmware leaves the registers otherwise, or by a loader that writes the
    opposite values before the handoff. The ITS moves to stage 6: a claimed
@@ -317,13 +350,21 @@ Each stage names its exit; "measured" means a number from a run.
    (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s
    `owed!` on a machine of more than one CPU, and which nothing but the
    `dump-deaf-cpu` actuator asks for until AArch64 has a keyboard; and, for
-   the first HVF run, the clean of an AP's start block to the point of
-   coherency, which TCG cannot fail on.
+   the clean of an AP's start block to the point of coherency, which TCG
+   cannot fail on: `virt_el1_smp` under HVF started eight CPUs through PSCI
+   in each of 131 boots of the entropy stage's measurement, all eight online
+   and scheduling every time, and `virt_failed_ap_leaves_no_hole` and
+   `virt_fatal_halts_the_others_first` start theirs under HVF in the suite;
+   it stays owed until `virt_el1_smp` under HVF is shown red with the clean
+   deleted.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
-   key-transition source. virtio-rng, or SMCCC TRNG, feeds `sys_random`
-   alongside RNDR. SMMUv3 is on `virt` (`-M virt,iommu=smmuv3`), decoded from
+   key-transition source. The rng is done, and is no ToyOS driver: edk2
+   drives the virtio-rng, the loader reads the seed once, and the kernel's
+   generator is keyed from it and RNDR (`kernel/src/random.rs`); SMCCC TRNG
+   is absent from QEMU 11.1.1's `virt` under HVF and TCG alike
+   (`TRNG_VERSION` answers -1 through HVC). SMMUv3 is on `virt` (`-M virt,iommu=smmuv3`), decoded from
    IORT. **Exit**: netd claims its NIC through an SMMUv3 domain; a
    foreign-DMA test faults into a `DMA FAULT` record, not a crash.
    Stage 0's three DMA-ordering fixes (NVMe's phase before its body, xHCI
@@ -350,7 +391,8 @@ Each stage names its exit; "measured" means a number from a run.
    **Exit**: the desktop comes up on virtio-gpu; `calc`, `snake` and `doom`,
    each started on it, each map a window and present a frame, read by a test
    that is red when one of them does not; `ssh` works from the host; `/log` survives a reboot; the same `system.toml`
-   drives both arches.
+   drives both arches; `cargo run` with no architecture named boots the
+   host's.
 
 8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).

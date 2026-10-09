@@ -59,6 +59,7 @@ members = [
     "toyos-osrelease",
     "toyos-phys",
     "toyos-quiesce",
+    "toyos-random",
     "toyos-rootimage",
     "toyos-smmu",
     "toyos-swap",

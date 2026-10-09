@@ -60,6 +60,8 @@ struct Ends {
     read_broken: bool,
     to_dropped: bool,
     from_dropped: bool,
+    /// The ends the node let go of, in the order it did.
+    let_go: Vec<PipeEnd>,
 }
 
 type Client = Rc<RefCell<Ends>>;
@@ -87,7 +89,9 @@ impl ToClient for WriteEnd {
 
 impl Drop for WriteEnd {
     fn drop(&mut self) {
-        self.0.borrow_mut().to_dropped = true;
+        let mut ends = self.0.borrow_mut();
+        ends.to_dropped = true;
+        ends.let_go.push(PipeEnd::ToClient);
     }
 }
 
@@ -110,7 +114,9 @@ impl FromClient for ReadEnd {
 
 impl Drop for ReadEnd {
     fn drop(&mut self) {
-        self.0.borrow_mut().from_dropped = true;
+        let mut ends = self.0.borrow_mut();
+        ends.from_dropped = true;
+        ends.let_go.push(PipeEnd::FromClient);
     }
 }
 
@@ -124,6 +130,11 @@ fn client() -> (Client, Pipes) {
 fn dropped(client: &Client) -> (bool, bool) {
     let ends = client.borrow();
     (ends.to_dropped, ends.from_dropped)
+}
+
+/// The ends the node let go of, in the order it did.
+fn let_go(client: &Client) -> Vec<PipeEnd> {
+    client.borrow().let_go.clone()
 }
 
 // ---- the far end ----
@@ -837,7 +848,125 @@ fn a_shutdown_sends_what_the_pipe_held_and_then_the_fin() {
     assert!(net.node.shutdown_write(net.now, id));
     net.pump();
     assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"written before the shutdown"[..], true));
-    assert_eq!((dropped(&client), net.node.streams()), ((false, true), 1));
+    assert_eq!((dropped(&client), net.node.streams()), ((false, false), 1), "the send pipe is kept for its writer");
+    assert_eq!(net.watch(id), Some(Watch { readable: false, writer: true, writable: false, reader: true }));
+}
+
+// RFC 9293 §3.6, case 1, as a client that shut its sending half down reads it: the peer's FIN
+// after its last byte ends the to-client pipe while the from-client pipe is still there, which is
+// what an orderly end is to std's `ended`. The send pipe goes when its
+// writer does, and not before, however long that is.
+#[test]
+fn the_peers_fin_after_the_clients_shutdown_leaves_the_send_pipe_to_its_writer() {
+    let (mut net, id, client) = established();
+    client.borrow_mut().outbox.extend(b"request");
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"request"[..], true));
+    let frame = net.far.text(b"response");
+    net.deliver(&frame);
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!(client.borrow().inbox, b"response");
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient], 1));
+    assert_eq!(net.watch(id), Some(Watch { readable: false, writer: true, writable: false, reader: false }));
+
+    net.fire(net.now.after(Duration::from_secs(300)));
+    assert_eq!((let_go(&client), net.node.streams(), net.events()), (vec![PipeEnd::ToClient], 1, vec![]), "past TIME-WAIT");
+    client.borrow_mut().writer_gone = true;
+    net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient, PipeEnd::FromClient], 0));
+    assert!(net.far.resets.is_empty());
+}
+
+// RFC 9293 §3.6, case 1, with the client's writer gone after its shutdown and before the peer's
+// FIN: the finished send pipe goes with its writer, and the stream lives on its to-client pipe,
+// which still carries the peer's text and then its end.
+#[test]
+fn a_writer_that_leaves_after_the_shutdown_leaves_the_stream_to_its_reader() {
+    let (mut net, id, client) = established();
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert!(net.far.fin);
+    client.borrow_mut().writer_gone = true;
+    net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient], 1));
+    assert_eq!(net.watch(id), Some(Watch { readable: false, writer: false, writable: false, reader: true }));
+
+    let frame = net.far.text(b"late");
+    net.deliver(&frame);
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!(client.borrow().inbox, b"late");
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0));
+    assert!(net.far.resets.is_empty() && net.events().is_empty());
+}
+
+// RFC 9293 §3.6, case 2, with the client's end a shutdown: the connection is over in order, and
+// the send pipe is still there for the client that reads the end after it.
+#[test]
+fn a_shutdown_after_the_peers_fin_keeps_the_send_pipe_past_the_connections_end() {
+    let (mut net, id, client) = established();
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    assert_eq!(let_go(&client), vec![PipeEnd::ToClient]);
+    client.borrow_mut().outbox.extend(b"noted");
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"noted"[..], true));
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient], 1));
+    client.borrow_mut().writer_gone = true;
+    net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient, PipeEnd::FromClient], 0));
+    assert!(net.far.resets.is_empty());
+}
+
+// RFC 9293 §3.10.7.4 after the client's FIN: the reset lets the send pipe go before the to-client
+// pipe ends, so a client that shut its sending half down reads a failure and not a FIN.
+#[test]
+fn a_reset_after_the_clients_shutdown_lets_the_send_pipe_go_first() {
+    let (mut net, id, client) = established();
+    assert!(net.node.shutdown_write(net.now, id));
+    net.pump();
+    assert!(net.far.fin);
+    net.far.manner = Manner::Deaf;
+    let frame = net.far.rst();
+    net.deliver(&frame);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0));
+}
+
+// A client whose reader is gone reads no end, so its finished send pipe goes with its reader,
+// however that was found gone.
+#[test]
+fn a_finished_send_pipe_goes_with_its_reader() {
+    for kernel in [true, false] {
+        let (mut net, id, client) = established();
+        assert!(net.node.shutdown_write(net.now, id));
+        net.pump();
+        assert_eq!(dropped(&client), (false, false), "kernel: {kernel}");
+        client.borrow_mut().reader_gone = true;
+        if kernel {
+            net.node.pipe_gone(net.now, id, PipeEnd::ToClient);
+        } else {
+            let frame = net.far.text(b"to nobody");
+            net.deliver(&frame);
+        }
+        assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient, PipeEnd::FromClient], 0), "kernel: {kernel}");
+    }
+}
+
+// A reset after the peer's FIN ends the send pipe its client still writes into.
+#[test]
+fn a_reset_after_the_peers_fin_ends_the_send_pipe() {
+    let (mut net, _, client) = established();
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    net.far.manner = Manner::Deaf;
+    client.borrow_mut().outbox.extend(b"late");
+    net.bridge();
+    let frame = net.far.rst();
+    net.deliver(&frame);
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::ToClient, PipeEnd::FromClient], 0));
 }
 
 #[test]
@@ -876,7 +1005,7 @@ fn a_reset_ends_both_pipes_and_the_stream() {
     net.far.manner = Manner::Deaf;
     let frame = net.far.rst();
     net.deliver(&frame);
-    assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0));
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0), "the send pipe first");
     assert!(net.events().is_empty() && net.far.resets.is_empty());
 }
 
@@ -1136,7 +1265,7 @@ fn a_pipe_that_is_no_pipe_resets_its_connection() {
             client.borrow_mut().read_broken = true;
             net.bridge();
         }
-        assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0), "write: {write}");
+        assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0), "write: {write}");
         let [reset] = &net.far.resets[..] else { panic!("one reset, not {:?}", net.far.resets) };
         assert_eq!(reset.seq, net.first(), "write: {write}");
     }

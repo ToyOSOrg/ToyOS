@@ -36,6 +36,8 @@ const CACHE_FLUSH: u16 = 0x8000;
 /// apart.
 const QUARTER: Duration = Duration::from_millis(250);
 const SECOND: Duration = Duration::from_secs(1);
+/// How long after losing its name the responder probes for it again.
+const MINUTE: Duration = Duration::from_secs(60);
 
 /// The draw of a call that starts no probing.
 fn undrawn() -> u32 {
@@ -374,7 +376,7 @@ fn a_conflicting_response_received_as_the_probing_ends_takes_the_name() {
     lan.now = ends;
     lan.deliver(&to_group(MAC_B, (B, MDNS), &says(B)));
     assert_eq!(said(&mut lan), [Event::Lost]);
-    let later = lan.now.after(Duration::from_secs(60));
+    let later = lan.now.after(Duration::from_secs(59));
     lan.fire(later);
     assert_eq!(since(&lan, 0), [probe(), probe(), probe()].map(multicast), "three probes, and no announcement");
     assert_eq!(said(&mut lan), []);
@@ -396,7 +398,7 @@ fn another_hosts_answer_under_the_probe_takes_the_name_and_the_node_says_so() {
         until(&mut lan, 1, SECOND);
         lan.deliver(&defended);
         assert_eq!(said(&mut lan), [Event::Lost]);
-        let later = lan.now.after(Duration::from_secs(60));
+        let later = lan.now.after(Duration::from_secs(59));
         lan.fire(later);
         lan.deliver(&to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN)));
         lan.deliver(&to_group(MAC_B, (B, MDNS), &ours(0, CLASS_IN)));
@@ -410,6 +412,77 @@ fn another_hosts_answer_under_the_probe_takes_the_name_and_the_node_says_so() {
         claimed(&lan, 1, back);
         assert_eq!(said(&mut lan), [Event::Claimed], "the other host is gone, and the name is this machine's");
     }
+}
+
+/// [`named`], its lease held, and its name lost to B's answer under the first probe. Returns
+/// when.
+fn lost() -> (Lan, Instant) {
+    let mut lan = named();
+    lan.lease(3_600);
+    until(&mut lan, 1, SECOND);
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &says(B)));
+    assert_eq!(said(&mut lan), [Event::Lost]);
+    let at = lan.now;
+    (lan, at)
+}
+
+/// Whether `probed` is where a probing owed `MINUTE` after `lost` puts its first probe: behind
+/// the minute and at most §8.1's 250 ms of delay, on the responder's clock of whole milliseconds.
+fn retried(lost: Instant, probed: Instant) -> bool {
+    let waited = probed.since(lost);
+    waited + Duration::from_millis(1) > MINUTE && waited <= MINUTE + QUARTER
+}
+
+// A lost name is probed for again a minute after each loss, and that probe is a deadline of the
+// node's: nothing but its own deadlines moves the clock here. RFC 6762 §9 has the loser "cease
+// using the name", and between the loss and a claim nothing is announced or answered. The host
+// that holds the name answers the first retry (§8.1): lost again, said to nobody, and a minute
+// from that answer. It has left by the second: three probes unanswered, and the name is claimed
+// and announced as at start-up (§8.1, §8.3).
+#[test]
+fn a_lost_name_is_probed_for_again_a_minute_after_each_loss_and_claimed_once_no_host_answers() {
+    let (mut lan, first) = lost();
+    let asked = to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN));
+    assert!(!lan.run_until(Duration::from_secs(59), |lan| lan.datagrams().len() > 1), "every deadline of 59 seconds, and no probe");
+    lan.fire(first.after(Duration::from_secs(59)));
+    lan.deliver(&asked);
+    assert_eq!(lan.datagrams().len(), 1, "and no answer");
+    until(&mut lan, 2, Duration::from_secs(2));
+    assert!(retried(first, times(&lan, 1)[0]), "{:?} after the loss", times(&lan, 1)[0].since(first));
+
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &says(B)));
+    let second = lan.now;
+    assert_eq!(said(&mut lan), [], "the name was said lost, and is not said so again");
+    assert!(!lan.run_until(Duration::from_secs(59), |lan| lan.datagrams().len() > 2), "every deadline of 59 seconds, and no probe");
+    lan.fire(second.after(Duration::from_secs(59)));
+    assert_eq!(since(&lan, 0), [probe(), probe()].map(multicast), "one probe a loss, and no announcement");
+
+    until(&mut lan, 7, Duration::from_secs(4));
+    let probed = times(&lan, 2)[0];
+    assert!(retried(second, probed), "{:?} after the second loss", probed.since(second));
+    claimed(&lan, 2, probed);
+    assert_eq!(said(&mut lan), [Event::Claimed], "B is gone, and the name is this machine's");
+    lan.deliver(&asked);
+    assert_eq!(since(&lan, 7), [unicast(53_000, legacy_response(7))], "and is answered with");
+}
+
+// RFC 6762 §8: the link's return is probed on at once, under a lost name too, and in place of the
+// retry that was owed: five datagrams claim the name, and nothing follows them a minute after the
+// loss.
+#[test]
+fn a_links_return_under_a_lost_name_is_probed_on_at_once_and_no_retry_follows_it() {
+    let (mut lan, _) = lost();
+    let half = lan.now.after(Duration::from_secs(30));
+    lan.fire(half);
+    assert_eq!(lan.datagrams().len(), 1, "nothing in half a minute");
+    lan.link(false);
+    lan.link(true);
+    let back = lan.now;
+    until(&mut lan, 6, Duration::from_secs(3));
+    claimed(&lan, 1, back);
+    assert_eq!(said(&mut lan), [Event::Claimed]);
+    assert!(!lan.run_until(Duration::from_secs(120), |lan| lan.datagrams().len() > 6), "every deadline of two minutes");
+    assert_eq!(lan.datagrams().len(), 6, "one probing, and no second where the retry was owed");
 }
 
 // RFC 6762 §8.2: "The two records are compared and the lexicographically later data wins. This
