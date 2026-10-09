@@ -64,6 +64,22 @@ pub fn session_home() -> String {
     format!("/home/{USER}")
 }
 
+/// An installed package's own folder in the session user's home: its `HOME`,
+/// and the one directory of the home its view holds.
+pub fn app_home(name: &str) -> String {
+    format!("{}/Apps/{name}", session_home())
+}
+
+/// Why a launch of the package `name` is refused when a row the image declares
+/// has that name: [`app_home`] is a folder that row keeps its own in.
+pub fn row_named(name: &str) -> String {
+    format!("the package {name} is named after a row the image declares, and {} is that row's folder", app_home(name))
+}
+
+/// What an app's own folder holds, made with it: where it keeps its config,
+/// data, cache and state. English on disk, as every home folder is.
+pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
+
 /// Where each system service keeps its own persistent data, one directory per
 /// program key.
 pub const STATE: &str = "/state";
@@ -94,6 +110,42 @@ pub const ROLES: [(&str, &[RoleDir]); 3] = [
 /// The directories `role` serves, or `None` for a name that is no role.
 pub fn role_dirs(role: &str) -> Option<&'static [RoleDir]> {
     ROLES.iter().find(|(name, _)| *name == role).map(|(_, dirs)| *dirs)
+}
+
+/// One directory capability in a program's view: the grant the supervisor
+/// mints on `role`'s port (`toyos::fs::Grant`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct View {
+    pub role: &'static str,
+    /// What the program's namespace calls it, after `fs:`.
+    pub dir: String,
+    /// Where it is on the role's volume.
+    pub root: String,
+    /// Whether a request that changes what it holds is served.
+    pub write: bool,
+}
+
+/// Every directory every role serves, each read-write: the view of a program
+/// no narrower one is declared for.
+pub fn whole_tree() -> Vec<View> {
+    ROLES
+        .iter()
+        .flat_map(|(role, dirs)| {
+            dirs.iter().map(|d| View { role, dir: d.dir.to_string(), root: d.root.to_string(), write: true })
+        })
+        .collect()
+}
+
+/// The DATA directory `dir`, beneath one DATA serves.
+fn data_dir(dir: String, write: bool) -> View {
+    let role = "data";
+    let parent = role_dirs(role)
+        .expect("DATA is a role")
+        .iter()
+        .find(|d| dir.strip_prefix(d.dir).is_some_and(|rest| rest.starts_with('/')))
+        .unwrap_or_else(|| panic!("manifest: {dir} is beneath no directory DATA serves"));
+    let root = format!("{}{}", parent.root, &dir[parent.dir.len()..]);
+    View { role, dir, root, write }
 }
 
 /// How often a `restart` row is started again before the supervisor gives up on it: at
@@ -221,12 +273,32 @@ impl Program {
         self.slots || self.receives.iter().any(|r| r == SWAP_PORT)
     }
 
+    /// The installed package this row launches: a row [`Manifest::app_row`]
+    /// made.
+    pub fn package(&self) -> Option<&str> {
+        package::package_of(&self.path)
+    }
+
     /// The `HOME` the supervisor starts this row with. A location grants nothing: what
     /// the program can reach is its view's business, never this string's.
     pub fn home(&self) -> String {
-        match self.service {
-            true => format!("{STATE}/{}", self.name),
-            false => session_home(),
+        match (self.service, self.package()) {
+            (true, _) => format!("{STATE}/{}", self.name),
+            (false, Some(name)) => app_home(name),
+            (false, None) => session_home(),
+        }
+    }
+
+    /// The directories this row's program is endowed. **An installed package
+    /// sees its own directory read-only and its own folder of the home
+    /// read-write, and nothing else any role serves**: no other package, no
+    /// other part of the home, no `/config`, `/state`, `/log` or `/boot`.
+    /// Every other row sees the whole tree, until each declares its own
+    /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
+    pub fn view(&self) -> Vec<View> {
+        match self.package() {
+            Some(name) => vec![data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)],
+            None => whole_tree(),
         }
     }
 }
@@ -239,10 +311,11 @@ pub struct Manifest {
     /// Names the supervisor serves itself. The supervisor is in every image and is no `[programs]`
     /// key, so these have no declaration to come from.
     pub supervisor_serves: Vec<String>,
-    /// The namespace every program launched from `/apps` is given: connectors,
-    /// and nothing else. A package directory is writable, so this row is the
-    /// image's rather than the package's — which is why a device class and a
-    /// `syscap` right have no spelling on the package side at all.
+    /// The connectors every program launched from `/apps` is given beside its
+    /// view ([`Program::view`]), and nothing else. `/apps` is writable to
+    /// the installer, so this row is the image's rather than the package's —
+    /// which is why a device class and a `syscap` right have no spelling on
+    /// the package side at all.
     pub apps: Vec<String>,
     /// Program names, in the order `[boot] start` gave them — which orders
     /// nothing, because every port exists before any server runs.
@@ -255,14 +328,19 @@ impl Manifest {
     }
 
     /// The row a launch of an installed package is built from: synthesized,
-    /// because a package has no `[programs]` key to hold one.
-    pub fn app_row(&self, name: &str, program: &str) -> Program {
-        Program {
+    /// because a package has no `[programs]` key to hold one. **A package
+    /// named after a row the image declares is refused** ([`row_named`]): its
+    /// folder of the home would be that row's.
+    pub fn app_row(&self, name: &str, program: &str) -> Result<Program, String> {
+        if self.program(name).is_some() {
+            return Err(row_named(name));
+        }
+        Ok(Program {
             name: name.to_string(),
             path: program.to_string(),
             receives: self.apps.clone(),
             ..Program::default()
-        }
+        })
     }
 
     /// Every `serves` name in the whole manifest, not only the ones [`start`]
@@ -514,7 +592,7 @@ mod tests {
     /// row's construction rather than by a check.
     #[test]
     fn a_package_row_is_connectors_and_nothing_else() {
-        let row = sample().app_row("gbae", "/apps/gbae/gbae");
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
         assert_eq!(row.receives, ["compositor", "soundserver"]);
         assert!(row.devices.is_empty());
         assert!(row.syscap.is_empty());
@@ -550,10 +628,81 @@ mod tests {
         let m = sample();
         assert_eq!(m.program("soundserver").unwrap().home(), "/state/soundserver");
         assert_eq!(m.program("terminal").unwrap().home(), "/home/toy");
-        assert_eq!(m.app_row("gbae", "/apps/gbae/gbae").home(), "/home/toy");
         let m = parse("program sshserver /system/bin/sshserver\nservice\nprogram shell /system/bin/shell\n");
         assert!(m.program("sshserver").unwrap().service);
         assert!(!m.program("shell").unwrap().service);
+        // The shell keeps its history under the session's home, in its own
+        // `Apps/shell` (`OWN_FOLDER` in `userland/shell`).
+        assert_eq!(m.program("shell").unwrap().home(), "/home/toy");
+    }
+
+    /// **An installed package's `HOME` is its own folder** of the session
+    /// user's home, the layout's `/home/<user>/Apps/<name>`.
+    #[test]
+    fn a_package_s_home_is_its_own_folder() {
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
+        assert_eq!(row.package(), Some("gbae"));
+        assert_eq!(row.home(), "/home/toy/Apps/gbae");
+        assert_eq!(sample().program("compositor").unwrap().package(), None);
+    }
+
+    /// **A package named after a declared row is refused**, by name: the
+    /// shell keeps its history in `Apps/shell`, which would be the package's
+    /// folder.
+    #[test]
+    fn a_package_named_after_a_declared_row_is_refused() {
+        let m = parse("program shell /system/bin/shell\n");
+        assert_eq!(m.app_row("shell", "/apps/shell/shell"), Err(row_named("shell")));
+        assert!(row_named("shell").contains("/home/toy/Apps/shell"));
+        let s = sample();
+        for row in &s.programs {
+            assert_eq!(s.app_row(&row.name, &format!("/apps/{0}/{0}", row.name)), Err(row_named(&row.name)));
+        }
+        assert!(m.app_row("gbae", "/apps/gbae/gbae").is_ok());
+    }
+
+    fn views(row: &Program) -> Vec<(&'static str, String, String, bool)> {
+        row.view().into_iter().map(|v| (v.role, v.dir, v.root, v.write)).collect()
+    }
+
+    /// **An installed package sees its own directory read-only and its own
+    /// folder read-write, and nothing else any role serves.** Spelled out
+    /// whole, so a third directory, a wider root or a writable package is red.
+    #[test]
+    fn a_package_s_view_is_its_own_directory_read_only_and_its_own_folder() {
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
+        assert_eq!(
+            views(&row),
+            [
+                ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
+                ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
+            ]
+        );
+        // The longest name a package has is still beneath its own directories.
+        let longest = "n".repeat(MAX_PROGRAM_NAME);
+        let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}")).unwrap();
+        assert_eq!(
+            views(&row).into_iter().map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
+            [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
+        );
+    }
+
+    /// Every row the image declares sees the whole tree read-write, the
+    /// installer and the shell included: neither has authority over `/apps`
+    /// the other lacks.
+    #[test]
+    fn every_declared_row_sees_the_whole_tree_read_write() {
+        let m = parse("program pkg /system/bin/pkg\nprogram shell /system/bin/shell\n");
+        let whole: Vec<_> = ["/apps", "/config", "/home", "/state", "/log", "/boot"]
+            .iter()
+            .zip(["apps", "config", "home", "state", "", ""])
+            .zip(["data", "data", "data", "data", "log", "boot"])
+            .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true))
+            .collect();
+        let s = sample();
+        for row in [m.program("pkg").unwrap(), m.program("shell").unwrap(), s.program("compositor").unwrap()] {
+            assert_eq!(views(row), whole, "{}", row.name);
+        }
     }
 
     #[test]

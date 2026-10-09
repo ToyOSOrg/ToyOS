@@ -66,7 +66,9 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **Running is the desktop's.** gbae opens a window through winit and
   softbuffer and plays through cpal, all three on the forks the SDK release
   branches carry. It lists a directory itself and reads the ROM the user picks
-  out of it. The first run is the milestone's end.
+  out of it. The first run is the milestone's end. Under stage 5's view that
+  listing reaches no ROM outside its own folder
+  (`issues/an-installed-gbae-browses-to-no-rom.md`).
 
 ## Stages, in order
 
@@ -93,9 +95,10 @@ The storage track's users and mount-protocol stages do not block this one.
    project.
 5. The users track's per-user `/home`
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`) decides
-   where a package's own data goes. Until then nothing says where: a
-   committed `/apps/<name>` is written by nothing, and that directory is where
-   a package wrote before the stage-then-commit ruling.
+   where a package's own data goes. Until then it goes in its own folder of
+   the session user's home, `/home/toy/Apps/<name>`, which is its `HOME` and
+   the one part of the home it sees; its own `/apps/<name>` is read-only to
+   it (`toyos_manifest::Program::view`).
 6. **An app's rights are its request ∩ the user's grant ∩ the image's
    ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
    package's manifest *requests* rights; the user *grants* them per user

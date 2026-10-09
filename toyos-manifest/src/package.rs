@@ -4,8 +4,8 @@
 //! to resolve a launch, so the format lives beside [`crate::Manifest`] for the
 //! same reason: one renderer, one parser, one round-trip test.
 //!
-//! **Nothing here is a grant.** `/apps` is writable to every program that can
-//! name it, so a manifest is a peer's claim about itself: it says which binary
+//! **Nothing here is a grant.** `/apps` is writable to every row the image
+//! declares, so a manifest is a peer's claim about itself: it says which binary
 //! *of its own directory* a launch starts. A device, a right and another
 //! package's binary have no spelling in this file at all.
 //!
