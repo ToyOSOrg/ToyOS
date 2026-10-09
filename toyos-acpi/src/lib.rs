@@ -7,7 +7,8 @@
 //!
 //! Multi-byte fields are composed from bytes, little-endian, so no firmware
 //! byte is transmuted into a type. Field offsets cite ACPI 6.5, except MCFG's
-//! (PCI Firmware Specification), HPET's (IA-PC HPET Specification) and SPCR's (Microsoft's SPCR specification).
+//! (PCI Firmware Specification), HPET's (IA-PC HPET Specification), SPCR's (Microsoft's SPCR specification)
+//! and the IORT's (Arm DEN 0049).
 //!
 //! `no_std`, no allocation, no `unsafe`.
 
@@ -18,6 +19,7 @@ mod ecdt;
 mod facs;
 mod fadt;
 mod gtdt;
+mod iort;
 mod madt;
 mod resource;
 mod spcr;
@@ -33,6 +35,7 @@ pub use fadt::{
     FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK,
 };
 use fadt::FADT_DSDT;
+pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3};
 pub use madt::{
     isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,

@@ -33,7 +33,7 @@ const OUTER_SHAREABLE: u64 = 0b10 << 8;
 /// The access flag, bit 10: set, so the first access does not fault.
 const AF: u64 = 1 << 10;
 /// Privileged execute-never, bit 53.
-const PXN: u64 = 1 << 53;
+pub const PXN: u64 = 1 << 53;
 /// Unprivileged execute-never, bit 54.
 const UXN: u64 = 1 << 54;
 
