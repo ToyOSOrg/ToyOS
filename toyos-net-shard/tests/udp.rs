@@ -198,6 +198,24 @@ fn s_udp_us_024_shard_a_waiting_datagram_whose_route_goes_is_dropped() {
     assert!(left(shard, now).iter().all(|frame| !frame.starts_with("UDP")));
 }
 
+// As built, and no scenario's: a datagram that waited, whose link goes down and returns with no
+// transmit opportunity between, is refused by nobody; it waits for its next hop anew and leaves
+// when the hop answers, where NUD-23 drops what waits as the link goes down.
+#[test]
+fn a_waiting_datagram_whose_link_returns_before_an_opportunity_waits_anew_and_leaves() {
+    let (mut net, a, socket) = b_resolved();
+    let now = net.now();
+    let shard = &mut net.nodes[a].shard;
+    shard.send_to(now, socket, C, 9, b"c1").unwrap();
+    assert_eq!(left(shard, now), ["ARP request 192.0.2.3"]);
+    shard.link_down(now).unwrap();
+    shard.link_up(now).unwrap();
+    assert_eq!(left(shard, now), ["ARP request 192.0.2.1", "ARP request 192.0.2.3"], "the address announced, and the hop asked for anew");
+    assert_eq!((shard.udp_counters().get(Counter::TxUnreachable), shard.ip().counters().get(toyos_net_ip::Counter::RouteNoSourceAddress)), (0, 0));
+    shard.receive(now, &c_answers());
+    assert_eq!(left(shard, now), ["UDP 192.0.2.3 c1"]);
+}
+
 /// One host of 192.0.2.0/24, and the directed broadcast address of 192.0.2.0/25 (RFC 922 §7).
 const EDGE_OF_25: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 127);
 /// The directed broadcast address of 192.0.2.0/24, which under 192.0.2.0/25 is a host off the link.
