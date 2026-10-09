@@ -147,7 +147,9 @@ impl HardDrive {
     pub const GUID_SIGNATURE: u8 = 2;
     const LEN: usize = 42;
 
-    /// `node`, where it is a HARDDRIVE node of the length §10.3.5.1 gives it.
+    /// `node`, where it is a HARDDRIVE node of the length §10.3.5.1 gives it:
+    /// a node of a device path firmware built. A load option's path is any
+    /// writer's bytes, and `bootnext` walks it by its own rule.
     pub fn parse(node: &[u8]) -> Option<HardDrive> {
         if node.len() != Self::LEN || (node[0], node[1]) != Self::TYPE {
             return None;

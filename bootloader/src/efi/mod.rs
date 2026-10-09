@@ -321,6 +321,11 @@ pub const ACPI2_GUID: Guid = Guid::new(0x8868e871, 0xe4f1, 0x11d3, [0xbc, 0x22, 
 /// console and the allocator read it; nothing else does.
 static SYSTEM: AtomicPtr<RawSystemTable> = AtomicPtr::new(ptr::null_mut());
 
+/// Set before the first `ExitBootServices` call: from then on only the memory
+/// allocation services may be called, even where the call fails (UEFI 2.10
+/// §7.4.6), so firmware's console is not written again.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
 /// This image's handle, the agent every protocol open names.
 static IMAGE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
@@ -384,6 +389,7 @@ impl SystemTable {
                     continue;
                 }
             };
+            EXITING.store(true, Ordering::Release);
             status = bs.exit(image, filled.key);
             if status.is_success() {
                 SYSTEM.store(ptr::null_mut(), Ordering::Release);
@@ -406,6 +412,12 @@ fn live() -> Option<&'static RawSystemTable> {
     unsafe { SYSTEM.load(Ordering::Acquire).as_ref() }
 }
 
+/// The system table while firmware's console may be written: until the first
+/// `ExitBootServices` call.
+fn console() -> Option<&'static RawSystemTable> {
+    live().filter(|_| !EXITING.load(Ordering::Acquire))
+}
+
 /// The image's entry (UEFI 2.10 §4.1, `EFI_IMAGE_ENTRY_POINT`), under the name
 /// the UEFI targets link as the PE entry point.
 #[unsafe(no_mangle)]
@@ -423,9 +435,10 @@ extern "efiapi" fn efi_main(image: *mut c_void, system_table: *mut RawSystemTabl
 /// character past UCS-2 is written as U+FFFD.
 ///
 /// # Panics
-/// Once boot services are gone, and where the console refuses the line.
+/// From the first `ExitBootServices` call, and where the console refuses the
+/// line.
 pub fn print(args: fmt::Arguments) {
-    let raw = live().expect("the console is gone with boot services");
+    let raw = console().expect("the console is gone with boot services");
     let mut out = Console { out: raw.con_out, units: [0; Console::CHUNK + 1], len: 0 };
     let written = fmt::write(&mut out, args).and_then(|()| out.flush());
     assert!(written.is_ok(), "firmware's console refused a line");
@@ -529,12 +542,13 @@ unsafe impl core::alloc::GlobalAlloc for Pool {
 /// power-off.
 static PANICKED: AtomicBool = AtomicBool::new(false);
 
-/// Say the panic on firmware's console and power the machine off; once boot
+/// Say the panic on firmware's console and power the machine off; from the
+/// first `ExitBootServices` call the console is not written, and once boot
 /// services are gone neither is there, and the CPU spins.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(raw) = live() {
-        if !PANICKED.swap(true, Ordering::Relaxed) {
+        if console().is_some() && !PANICKED.swap(true, Ordering::Relaxed) {
             print(format_args!("[PANIC]: {info}\n"));
         }
         // SAFETY: runtime services live as long as the table.

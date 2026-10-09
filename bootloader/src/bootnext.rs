@@ -153,7 +153,7 @@ fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
         // A node shorter than its own header, or longer than what is left, ends
         // the walk: neither can be stepped over.
         let Some(this) = path.get(..len).filter(|_| len >= NODE_HEADER) else { return false };
-        if (this[0], this[1]) == HardDrive::TYPE {
+        if this[0] == MEDIA_HARD_DRIVE.0 && this[1] == MEDIA_HARD_DRIVE.1 {
             if let Some(guid) = gpt_signature(this) {
                 return guid == *ours;
             }
@@ -166,8 +166,18 @@ fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
 /// A device path node's type, subtype and length (UEFI 2.10 §10.2).
 const NODE_HEADER: usize = 4;
 
-/// A HARD_DRIVE node's GUID signature, or `None` where it carries another or
-/// is not the length §10.3.5.1 gives it.
+/// The MEDIA/HARD_DRIVE node this looks for, as the two bytes it is on the wire.
+const MEDIA_HARD_DRIVE: (u8, u8) = (4, 1);
+
+/// A HARD_DRIVE node's GPT signature, or `None` where it names an MBR one or
+/// the node is short (UEFI 2.10 §10.3.6: the signature is sixteen bytes at
+/// offset 24, and `SignatureType` 2 is the GPT one).
 fn gpt_signature(node: &[u8]) -> Option<[u8; 16]> {
-    HardDrive::parse(node).filter(|hd| hd.signature_type == HardDrive::GUID_SIGNATURE).map(|hd| hd.signature)
+    const SIGNATURE: usize = 24;
+    const SIGNATURE_TYPE: usize = 41;
+    const GPT: u8 = 2;
+    if node.get(SIGNATURE_TYPE) != Some(&GPT) {
+        return None;
+    }
+    node.get(SIGNATURE..SIGNATURE + 16)?.try_into().ok()
 }

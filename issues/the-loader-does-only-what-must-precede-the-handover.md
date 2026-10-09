@@ -14,8 +14,8 @@ The owner's bounds:
   loader's, before `ExitBootServices` (root `CLAUDE.md`);
 - the anti-rollback floor counts a signed security version, raised only by a
   release that fixes a security hole;
-- the loader calls UEFI through its own bindings (`bootloader/src/efi/`),
-  never the `uefi` crate's (the owner's ruling on the dependency audit).
+- the loader calls UEFI through its own bindings, never the `uefi` crate's
+  (the owner's ruling on the dependency audit).
 
 PR #539 does not land. Its pieces:
 
