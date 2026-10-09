@@ -21,8 +21,8 @@
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
 //! exchange draws its transaction id first. The name draws after it, the delay of each probing it
-//! starts. The lookups in flight draw after both: an id and then a port for each query they send,
-//! and nothing else.
+//! starts. The lookups in flight draw after both, and alone in [`Node::transmit`], which serves no
+//! name: an id and then a port for each query they send, and nothing else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -156,11 +156,19 @@ impl Node {
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
-    /// Returns how many left.
-    pub fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
-        let sent = self.stack.transmit(now, credit, sink);
-        // A datagram [ip] refused as it left is a line of this opportunity.
-        self.log();
+    /// Returns how many left. A lookup's query that found no way out as its turn came is read
+    /// here, and the query asked in its place leaves in this opportunity while credit lasts.
+    pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&[u8]), mut draw: impl FnMut() -> u32) -> usize {
+        let mut sent = 0usize;
+        loop {
+            sent = sent.saturating_add(self.stack.transmit(now, credit.saturating_sub(sent), &mut sink));
+            // A datagram [ip] refused as it left is a line of this opportunity.
+            self.log();
+            let asked = self.resolver.pass(now, &mut self.stack, &mut self.counters, &mut draw);
+            if !asked || sent >= credit {
+                break;
+            }
+        }
         self.pass(now, true);
         sent
     }

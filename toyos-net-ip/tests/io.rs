@@ -424,6 +424,9 @@ fn unicast_frames() -> Vec<Vec<u8>> {
     }
     h.frame(&eth(MAC_A, MAC_DNS, 0x0806, &arp_packet(2, MAC_DNS, DNS, MAC_A, A)));
     h.reply_from(R, MAC_R);
+    for destination in [DNS, REMOTE] {
+        frames.extend(h.udp_to(destination).unwrap());
+    }
     frames.extend(h.run(5_000).into_iter().map(|o| o.frame));
     frames
 }
@@ -535,7 +538,7 @@ fn s_ip_out_006_the_control_queue_is_bounded() {
 fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
     let mut h = H::fixture_i();
     for data in [b"1", b"2"] {
-        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
+        h.echo(B, MAC_B, A, data);
     }
     for n in 1..limits::CONTROL_QUEUE as u8 {
         let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n), A);
@@ -560,7 +563,7 @@ fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
 
     // B's request, queued in INCOMPLETE and still queued in PROBE, leaves as PROBE's: to MAC B.
     let mut h = H::fixture_i();
-    assert_eq!(h.udp_to(B), Ok(None));
+    h.echo(B, MAC_B, A, b"hi");
     h.frame(&eth(MacAddr::BROADCAST, MAC_B, 0x0806, &arp_packet(1, MAC_B, B, MacAddr::ZERO, B)));
     assert!(h.is_stale(B));
     assert!(h.udp_to(B).unwrap().is_some_and(|frame| destination_of(&frame) == MAC_B));

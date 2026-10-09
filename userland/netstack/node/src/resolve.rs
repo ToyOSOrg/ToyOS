@@ -13,18 +13,17 @@
 //! - **A query the node knows did not reach its resolver is let go**
 //!   (`toyos_dns::Lookup::on_unreached`): the lookup asks its next resolver at once, or ends
 //!   where no query's answer is read any more. The node knows it of a query [udp] refuses in the
-//!   call, which never left, is counted and holds no socket; and of one [ip] reports it found no
-//!   next hop for, which is counted and its socket closed.
+//!   call, which never left, is counted and holds no socket; and of one [udp] reports found no
+//!   way out, no route or no link address for its next hop, which is counted and its socket
+//!   closed. That report is read in the call that made it, a transmit opportunity included.
 //! - **An ICMP error is a report and not knowledge** (`toyos_dns::Lookup::on_report`): [udp]
 //!   hands a query's socket one that quotes the socket's addresses and ports and says refused or
 //!   prohibited, which takes an off-path sender the query's port to forge and not its id (RFC
 //!   8085 §5.2). It is counted, and the next resolver is asked at once; the query's socket stays
 //!   open and its answer is read, and no number of them ends a lookup.
-//! - **Every lookup's first query can wait in [ip] for one next hop at once**, where no link
-//!   address is known yet: [ip] holds `PENDING_PER_NEIGHBOUR` datagrams for a next hop it is
-//!   resolving and keeps the newest (RFC 4861 §7.2.2), which is no fewer than the lookups held
-//!   here. A datagram another socket sends to that next hop meanwhile takes a place in the same
-//!   queue.
+//! - **A query whose resolver's link address is not known yet waits in its own socket**, as
+//!   [udp] keeps every datagram: no other lookup's query and no client's datagram to that next
+//!   hop takes its place, and it leaves when the address is known.
 //! - **A lookup asks the resolvers of the lease it started under, and ends with that lease's
 //!   word**: when the held lease names other resolvers, or none is held.
 //! - **A wait is a deadline of the node's** ([`Resolver::next_deadline`]); a reply is a frame.
@@ -39,15 +38,12 @@ use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_dns::{Asked, Failure, Lookup, Name, Step, MAX_LOOKUPS, PORT};
-use toyos_net_ip::limits::nud::PENDING_PER_NEIGHBOUR;
 use toyos_net_udp::{Error, SocketError, SocketId};
 use toyos_net_wire::Instant;
 
 use crate::lease::Stack;
 use crate::name::millis;
 use crate::{Counter, Counters, Node};
-
-const _: () = assert!(PENDING_PER_NEIGHBOUR >= MAX_LOOKUPS);
 
 /// One lookup, from [`Node::resolve`] until its answer is taken or it is let go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -124,7 +120,7 @@ fn close(stack: &mut Stack, now: Instant, socket: SocketId) {
 enum Heard {
     /// A datagram of this length, now in the reply buffer.
     Reply(usize),
-    /// [ip]'s word that the query never left.
+    /// The stack's own word that the query never left.
     Unreached,
     /// An ICMP error's word that the query was refused.
     Reported,
@@ -146,8 +142,8 @@ fn waiting(queries: &[Query], stack: &mut Stack, reply: &mut [u8]) -> Option<(Qu
 
 /// Carries out `step` for `asking`, and every step the lookup answers a query [udp] refused
 /// with, then closes the socket of every query the lookup no longer reads an answer for. Returns
-/// how the lookup ended, if it did.
-fn act(asking: &mut Asking, mut step: Step, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> Option<Result<Vec<[u8; 4]>, Ended>> {
+/// how the lookup ended, if it did, and sets `queued` when [udp] accepted a query.
+fn act(asking: &mut Asking, mut step: Step, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32, queued: &mut bool) -> Option<Result<Vec<[u8; 4]>, Ended>> {
     let done = loop {
         match step {
             Step::Ask { asked, to, query } => {
@@ -156,6 +152,7 @@ fn act(asking: &mut Asking, mut step: Step, now: Instant, stack: &mut Stack, cou
                 let resolver = Ipv4Addr::from(to);
                 if stack.connect(now, socket, resolver, PORT).is_ok() && stack.send_to(now, socket, resolver, PORT, &query).is_ok() {
                     asking.queries.push(Query { asked, socket, to });
+                    *queued = true;
                     break None;
                 }
                 counters.add(Counter::QueryUnsent, 1);
@@ -198,7 +195,7 @@ impl Resolver {
         let servers: Vec<[u8; 4]> = resolvers.iter().map(Ipv4Addr::octets).collect();
         let Some((lookup, step)) = Lookup::start(name, &servers, millis(now), || id(&mut *draw)) else { unreachable!("the lease names a resolver") };
         let mut asking = Asking { id: LookupId(self.next), lookup, resolvers, queries: Vec::new() };
-        let done = act(&mut asking, step, now, stack, counters, &mut *draw);
+        let done = act(&mut asking, step, now, stack, counters, &mut *draw, &mut false);
         if done == Some(Err(Ended::NoPort)) {
             return Err(NotStarted::ResourceExhausted);
         }
@@ -215,10 +212,12 @@ impl Resolver {
 
     /// Ends every lookup whose lease went or names other resolvers, reads every reply that
     /// reached a query's socket, and ends every wait that is over. A lookup that ended closes
-    /// its sockets and waits to be taken.
-    pub(crate) fn pass(&mut self, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) {
+    /// its sockets and waits to be taken. Returns whether a query was queued, which the next
+    /// transmit opportunity carries.
+    pub(crate) fn pass(&mut self, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> bool {
         let Self { asking: lookups, ended, reply, .. } = self;
         let ms = millis(now);
+        let mut queued = false;
         lookups.retain_mut(|asking| {
             let named = stack.lease().is_some_and(|lease| lease.dns == asking.resolvers);
             let mut done = if named { None } else { Some(Err(Ended::LeaseChanged)) };
@@ -237,11 +236,11 @@ impl Resolver {
                         asking.lookup.on_report(query.asked, ms, || id(&mut *draw))
                     }
                 };
-                done = act(asking, step, now, stack, counters, &mut *draw);
+                done = act(asking, step, now, stack, counters, &mut *draw, &mut queued);
             }
             if done.is_none() {
                 let step = asking.lookup.on_time(ms, || id(&mut *draw));
-                done = act(asking, step, now, stack, counters, &mut *draw);
+                done = act(asking, step, now, stack, counters, &mut *draw, &mut queued);
             }
             let Some(result) = done else { return true };
             for query in &asking.queries {
@@ -250,6 +249,7 @@ impl Resolver {
             ended.push(Resolved { id: asking.id, result });
             false
         });
+        queued
     }
 
     fn let_go(&mut self, now: Instant, id: LookupId, stack: &mut Stack) {

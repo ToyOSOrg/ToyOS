@@ -141,7 +141,7 @@ impl Lan {
     /// One transmit opportunity with all the credit the node wants. Returns how many frames left.
     pub fn opportunity(&mut self) -> usize {
         let (sent, now) = (&mut self.sent, self.now);
-        self.node.transmit(now, usize::MAX, |frame| sent.push((now, outside(frame))))
+        self.node.transmit(now, usize::MAX, |frame| sent.push((now, outside(frame))), draw(&mut self.draws))
     }
 
     /// Opportunities until the node sends nothing more, the router and B answering each ARP

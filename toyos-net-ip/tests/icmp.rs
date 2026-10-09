@@ -455,7 +455,7 @@ fn s_ip_icd_012_a_resolution_failure_is_local() {
     h.out();
     let out = h.run(3_000);
     assert_eq!(out.len(), 2, "only the two retransmitted requests");
-    assert!(h.events.iter().any(|e| matches!(e, Event::Unreachable(f) if f.destination == B)));
+    assert!(h.events.contains(&Event::Failed { iface: h.if0, next_hop: B }), "the sender that waits for B is told by this");
     assert!(matches!(h.state(B), Some(Nud::Failed)));
 }
 

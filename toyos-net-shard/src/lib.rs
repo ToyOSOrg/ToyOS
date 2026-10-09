@@ -13,7 +13,11 @@
 //! next hop is unresolved or failed builds nothing, spends nothing, and is not asked again until
 //! [ip] reports a change for that next hop, for the routes, or, to a flow a full neighbour table
 //! refused, that the table has room: a waiting flow costs one question per such change. A UDP
-//! datagram whose next hop is unresolved waits in [ip], spending nothing and charged nothing.
+//! datagram [ip] does not take, its next hop unresolved, stays in its sender's queue in [udp],
+//! spending nothing and charged nothing, while the sender's datagrams to other next hops leave:
+//! it is handed to [ip] again when [ip] reports that hop resolved or the routes changed, and
+//! dropped by [udp] when [ip] reports the hop failed. One [ip] refuses, for want of a route or
+//! for a next hop it holds failed or has no room for, is [ip]'s to count and report.
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
@@ -45,7 +49,7 @@ use core::net::Ipv4Addr;
 
 use toyos_net_ip::{Advice, Delivery, ErrorKind, IfIndex, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
 use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
-use toyos_net_udp::{Sender, SocketId, Udp, Verdict};
+use toyos_net_udp::{Offer, Sender, SocketId, Udp, Verdict};
 use toyos_net_udp::Served as UdpServed;
 use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, MulticastAddr, TrafficClass, Ttl};
@@ -144,8 +148,8 @@ struct Member {
 
 /// What serving a flow did with a frame of credit.
 struct Outcome {
-    /// The length of the frame that left; none when the flow had nothing, or when [ip] holds its
-    /// datagram for its next hop or refused it.
+    /// The length of the frame that left; none when the flow had nothing to offer, or when [ip]
+    /// refused its datagram.
     frame: Option<i32>,
     /// The flow has nothing left: it leaves the round, its deficit with it.
     leaves: bool,
@@ -338,18 +342,22 @@ impl Shard {
         (done, Some(len))
     }
 
-    /// One datagram of `sender`'s, framed by [ip]; one [ip] holds for its next hop or refuses
-    /// leaves no frame.
+    /// One datagram of `sender`'s, framed by [ip]: the oldest whose next hop's link address is
+    /// known, or that needs none. One [ip] refuses as it leaves makes no frame.
     fn udp_frame(&mut self, now: Instant, sender: Sender, sink: &mut impl FnMut(&[u8])) -> Outcome {
         let Self { ip, udp, frame, .. } = self;
         let mut sent = None;
-        let served = udp.serve(sender, |out| {
-            if let Ok(Sent::Frame(len)) = ip.send_udp(now, out, frame) {
+        let served = udp.serve(sender, |out| match ip.send_udp(now, out, frame) {
+            Ok(Sent::Frame(len)) => {
                 sent = frame.get(..len).map(|bytes| {
                     sink(bytes);
                     charge(bytes)
                 });
+                Offer::Taken
             }
+            Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+            // Counted by [ip], which tells the datagram's flow.
+            Err(_) => Offer::Taken,
         });
         Outcome { frame: sent, leaves: served != UdpServed::More }
     }
@@ -389,9 +397,16 @@ impl Shard {
                     }
                 }
                 toyos_net_ip::Event::Unreachable(flow) => udp.unreachable(&flow),
-                toyos_net_ip::Event::Resolved { next_hop, .. } | toyos_net_ip::Event::Failed { next_hop, .. } | toyos_net_ip::Event::Cleared { next_hop, .. } => {
+                toyos_net_ip::Event::Resolved { next_hop, .. } => {
                     wake(tcp, waiting, Wait::Hop(next_hop));
+                    udp.wake(next_hop);
                 }
+                toyos_net_ip::Event::Failed { next_hop, .. } => {
+                    wake(tcp, waiting, Wait::Hop(next_hop));
+                    udp.fail(next_hop);
+                }
+                // No datagram waits on a failed next hop: the failure dropped them.
+                toyos_net_ip::Event::Cleared { next_hop, .. } => wake(tcp, waiting, Wait::Hop(next_hop)),
                 toyos_net_ip::Event::Room { .. } => wake(tcp, waiting, Wait::Room),
                 toyos_net_ip::Event::Verified { addr, .. } => events.push(Event::Verified(addr)),
                 toyos_net_ip::Event::Conflict { addr, mac, .. } => events.push(Event::Conflict { addr, mac }),
@@ -408,6 +423,7 @@ impl Shard {
             self.routes = ip.generation();
             waiting.clear();
             tcp.wake_all();
+            udp.wake_all();
         }
         let head = self.round.front().map(|m| m.flow);
         let gone: BTreeSet<Flow> = tcp.drain_gone().map(Flow::Tcp).chain(udp.drain_gone().map(Flow::Udp)).collect();
@@ -746,6 +762,32 @@ mod tests {
             shard.abort(now, id).unwrap();
             assert!(shard.round.is_empty());
         }
+    }
+
+    // No id: a sender all of whose datagrams wait for a next hop is out of the round, and a next
+    // hop that resolves puts back the senders that waited for it and no other: a waiting datagram
+    // costs one question per change of its own next hop.
+    #[test]
+    fn a_resolved_next_hop_wakes_the_senders_that_waited_for_it_and_no_other() {
+        const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
+        const D: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 4);
+        let (mut shard, now) = verified();
+        shard.transmit(now, usize::MAX, |_| {});
+        let port = |n| Port::new(n).unwrap();
+        let (to_c, to_d) = (shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5000)), || 0).unwrap(), shard.bind(Ipv4Addr::UNSPECIFIED, Some(port(5001)), || 0).unwrap());
+        shard.send_to(now, to_c, C, 9, b"c").unwrap();
+        shard.send_to(now, to_d, D, 9, b"d").unwrap();
+        assert_eq!(shard.round.len(), 2);
+        assert_eq!(shard.transmit(now, usize::MAX, |_| {}), 2, "a request for each");
+        assert!(shard.round.is_empty(), "what waits is not served");
+
+        let mut reply = [[2, 0, 0, 0, 0, 0x0a], [2, 0, 0, 0, 0, 0x0c]].concat();
+        reply.extend_from_slice(&[0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 2, 2, 0, 0, 0, 0, 0x0c]);
+        reply.extend_from_slice(&C.octets());
+        reply.extend_from_slice(&[2, 0, 0, 0, 0, 0x0a]);
+        reply.extend_from_slice(&A.octets());
+        shard.receive(now, &reply);
+        assert_eq!(shard.round.iter().map(|m| m.flow).collect::<Vec<_>>(), [Flow::Udp(Sender::Socket(to_c))]);
     }
 
     // No id: the head freed in its turn takes the turn with it, so the next flow's turn adds its
