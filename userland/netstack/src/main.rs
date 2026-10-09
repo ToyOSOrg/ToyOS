@@ -72,8 +72,9 @@ const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
 ];
 
 /// The name this machine asks its network to record for it, and answers to on
-/// it as `<name>.local`. One name, because there is one machine.
-const HOSTNAME: &str = "toyos-t14";
+/// it as `<name>.local` once no other host does. One name, because there is
+/// one machine.
+pub const HOSTNAME: &str = "toyos-t14";
 
 /// How long this machine waits for its first lease before saying it has none.
 /// It bounds the report, never the client: the node asks for the life of the
@@ -334,7 +335,7 @@ fn main() {
         nic.accept_multicast(toyos_mdns::GROUP_MAC);
     }
     let name = toyos_mdns::Host::new(HOSTNAME).unwrap_or_else(|_| panic!("netstack: {HOSTNAME:?} is no host name"));
-    node.answer_as(clock(), name)
+    node.answer_as(clock(), name, draw)
         .unwrap_or_else(|why| panic!("netstack: a new node refused the multicast DNS port: {why:?}"));
 
     let total_mem = total_memory();

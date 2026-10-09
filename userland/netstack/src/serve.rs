@@ -40,6 +40,7 @@ use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
 use crate::pipes::{self, Watched};
+use crate::HOSTNAME;
 
 /// A watch's token names the socket it was asked of by its id, in the low
 /// word, and never a place in a list: an answer can arrive after its socket
@@ -685,6 +686,12 @@ impl Sockets {
                 Event::Stack { refusal, suppressed: 0 } => say!("netstack: refused {refusal:?}"),
                 Event::Stack { refusal, suppressed } => say!("netstack: refused {refusal:?}, and {suppressed} more by its rule"),
                 Event::Dhcp(refusal) => say!("netstack: DHCP: refused {refusal:?}"),
+                Event::Name(toyos_mdns::Event::Claimed) => {
+                    say!("netstack: mDNS: no host answered for {HOSTNAME}.local; this machine answers as it")
+                }
+                Event::Name(toyos_mdns::Event::Lost) => {
+                    say!("netstack: mDNS: another host answered for {HOSTNAME}.local; this machine answers to no name")
+                }
             }
         }
 
