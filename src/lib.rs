@@ -17,6 +17,7 @@ pub mod firmware;
 pub mod gitfixture;
 pub mod flags;
 pub mod hostws;
+pub mod icons;
 pub mod identity;
 pub mod image;
 pub mod kernelconsole;
