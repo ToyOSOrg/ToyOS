@@ -2945,21 +2945,23 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// netstack's stream count returns once connections that ended without their
 /// client's close request are let go, a client that left a connection its
 /// peer holds is counted gone, and a connection whose receive end the kernel
-/// refuses netstack's watch of is reset. One host server here ends each
-/// connection it accepts at once and one holds each; the guest's comparisons
-/// are the verdict.
+/// refuses netstack's watch of is reset; a listener and a datagram socket
+/// whose owner left are let go, a receive that waits is answered by its
+/// datagram, and the connect past netstack's places is refused. One host
+/// server here ends each connection it accepts at once, one holds each and
+/// one answers each datagram; the guest's comparisons are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
     let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
     let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
     // Ends with the process: a guest that never dials leaves it in `accept`.
     thread::spawn(move || server.incoming().for_each(drop));
-    let holding = holding_server()?;
+    let (holding, answering) = (holding_server()?, answering_server()?);
 
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
     let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
-    let result =
-        qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
+    let result = qemu
+        .run_test(&format!("test_rs_netstack_socket_churn {port} {holding} {answering}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -3073,6 +3075,20 @@ fn holding_server() -> Result<u16, String> {
     Ok(port)
 }
 
+/// A host server that answers each datagram with itself, for as long as the
+/// process lives: its port.
+fn answering_server() -> Result<u16, String> {
+    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
+    let port = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
+    thread::spawn(move || {
+        let mut datagram = [0u8; 64];
+        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
+            echo.send_to(&datagram[..len], from).expect("answer a datagram");
+        }
+    });
+    Ok(port)
+}
+
 /// Boot `tests/netcase` with these binaries staged, to netstack's lease: its
 /// jobs name their peer by an address.
 fn boot_netcase(
@@ -3127,16 +3143,7 @@ fn libc_sockets() -> Result<(), String> {
     /// guest, which nothing else on its boot binds.
     const LISTENERS: [u16; 4] = [7001, 7002, 7003, 7004];
     const RUST_JOB: &str = "nodelay_accepted";
-    let holding = holding_server()?;
-    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
-    let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
-    // Ends with the process, as the holding server does.
-    thread::spawn(move || {
-        let mut datagram = [0u8; 64];
-        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
-            echo.send_to(&datagram[..len], from).expect("answer a datagram");
-        }
-    });
+    let (holding, answering) = (holding_server()?, answering_server()?);
 
     let case = compile::repo_root().join("tests/netcase");
     let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound"]

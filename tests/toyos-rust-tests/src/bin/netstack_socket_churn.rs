@@ -23,6 +23,10 @@
 //! close request, and no peer near either: the kernel's word on the pipe's
 //! other end is all that ends them, and netstack's count of each returns.
 //!
+//! argv[3] is the port of a third, which answers each datagram with itself. A
+//! receive is asked of netstack before any datagram has been sent, so it waits
+//! there, and is answered by the datagram the server sends back.
+//!
 //! Last, connects to the holding server until netstack refuses one: it holds
 //! as many places as it said it has, and the connect past them is answered
 //! `ResourceExhausted`. Last because the stack keeps each of those
@@ -31,7 +35,9 @@
 
 use std::time::{Duration, Instant};
 
-use toyos::net::{MsgType, NetError, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse};
+use toyos::net::{
+    MsgType, NetError, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse, UdpRecvFromRequest, UdpRecvResponse,
+};
 use toyos::OwnedHandle;
 use toyos_inspect::{Value, NET};
 
@@ -90,6 +96,28 @@ fn owners_that_left_are_let_go() {
     returns("net.sockets.udp", udp, "a datagram socket's owner dropped its pipes");
 }
 
+fn a_receive_that_waits_is_answered(port: u16) {
+    const SAID: &[u8] = b"a datagram for a receive that waits";
+    let socket = toyos::net::udp_bind([0, 0, 0, 0], 0).unwrap_or_else(|e| panic!("a datagram socket: {e:?}"));
+    let waiting = NetstackConn::connect()
+        .and_then(|netstack| {
+            netstack.request(MsgType::UdpRecvFrom, &UdpRecvFromRequest { socket_id: socket.socket_id.0, max_len: 64 })
+        })
+        .unwrap_or_else(|e| panic!("asking for a datagram: {e:?}"));
+    // netstack reads its clients' requests in the order they connected, so
+    // this answer says the receive above is waiting there.
+    count("net.sockets.udp");
+    assert_eq!(socket.tx.write_nonblock(SAID), Ok(SAID.len()), "a datagram into the socket's send pipe");
+    toyos::net::udp_send_to(socket.socket_id, HOST, port, SAID.len() as u16)
+        .unwrap_or_else(|e| panic!("sending to the answering server: {e:?}"));
+    let answer: UdpRecvResponse = waiting.response().unwrap_or_else(|e| panic!("the receive that waited: {e:?}"));
+    assert_eq!((answer.addr, answer.port, usize::from(answer.len)), (HOST, port, SAID.len()), "the answer's source and length");
+    let mut back = [0u8; 64];
+    assert_eq!(socket.rx.read(&mut back), Ok(SAID.len()), "the answer's bytes in the socket's receive pipe");
+    assert_eq!(&back[..SAID.len()], SAID);
+    toyos::net::udp_close(socket.socket_id).unwrap_or_else(|e| panic!("closing the datagram socket: {e:?}"));
+}
+
 fn a_connect_past_the_places_is_refused(port: u16) {
     let (max, held) = (count("net.places.max"), count("net.places.held"));
     let mut kept = Vec::new();
@@ -143,9 +171,9 @@ fn main() {
         std::env::args()
             .nth(at)
             .and_then(|p| p.parse().ok())
-            .expect("usage: netstack_socket_churn <ending host port> <holding host port>")
+            .expect("usage: netstack_socket_churn <ending host port> <holding host port> <answering host port>")
     };
-    let (port, holding) = (port(1), port(2));
+    let (port, holding, answering) = (port(1), port(2), port(3));
     let (streams, live) = (count("net.sockets.tcp"), count("net.piped.live"));
     let held = count("net.places.held");
     for round in 1..=ROUNDS {
@@ -170,6 +198,8 @@ fn main() {
     println!("netstack_socket_churn: a client that shut down and left was let go");
     owners_that_left_are_let_go();
     println!("netstack_socket_churn: a listener and a datagram socket whose owner left were let go");
+    a_receive_that_waits_is_answered(answering);
+    println!("netstack_socket_churn: a receive that waited was answered by its datagram");
     a_connect_past_the_places_is_refused(holding);
     println!("netstack_socket_churn: the connect past netstack's places was refused");
     println!("netstack_socket_churn: ok");
