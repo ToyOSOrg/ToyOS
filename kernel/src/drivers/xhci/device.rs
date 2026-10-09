@@ -17,6 +17,7 @@ use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_
 use super::enqueue_control;
 
 use super::hid::{HidType, HidRole, HidDevice};
+use toyos_usbhid::{keyboard, pointer::Pointer};
 use super::msc::{Bind, MscInterface, MscRings};
 
 // `wTotalLength` is clamped to this size; the scratch page is four times it.
@@ -751,16 +752,17 @@ fn bind_hid(
     int_ring: TrbRing,
 ) -> bool {
     let report = ctrl.dma().subview(state.block + DEV_REPORT, 8);
-    let report_size = match info.protocol {
-        HidType::Keyboard => 8,
-        HidType::Mouse => 4,
-        HidType::Tablet => 6,
+    let pointer = match info.protocol {
+        HidType::Keyboard => None,
+        HidType::Mouse => Some(Pointer::Mouse),
+        HidType::Tablet => Some(Pointer::Tablet),
     };
-    let role = match info.protocol {
-        HidType::Keyboard => HidRole::Keyboard,
+    let report_size = pointer.map_or(keyboard::REPORT, Pointer::request) as u32;
+    let role = match pointer {
+        None => HidRole::Keyboard(keyboard::Keyboard::new()),
         // A pointer with no free button-table entry can't be bound; sharing one would publish another's releases.
-        HidType::Mouse | HidType::Tablet => match crate::mouse::PointerSource::claim() {
-            Some(source) => HidRole::Pointer(source),
+        Some(pointer) => match crate::mouse::PointerSource::claim() {
+            Some(source) => HidRole::Pointer(source, pointer),
             None => {
                 log!("xHCI: slot {} is past the pointers this machine can number, dropping it",
                     state.slot_id);
@@ -781,7 +783,7 @@ fn bind_hid(
         report,
         report_size,
         role,
-        prev_report: [0; 8],
+        refused: 0,
         broke_with: None,
         failures: 0,
     };
@@ -791,7 +793,7 @@ fn bind_hid(
     log!("xHCI: USB {} ready on slot {}, int_ring +{:#x}",
         hid_kind(info.protocol), state.slot_id, state.block + DEV_INT_RING);
     // Logged because a source derived from the slot id would merge two controllers' slot-1 devices into one.
-    if let HidRole::Pointer(source) = dev.role {
+    if let HidRole::Pointer(source, _) = dev.role {
         log!("xHCI: pointer on slot {} merges as source {}", state.slot_id, source.id());
     }
     ctrl.devices.push(dev);

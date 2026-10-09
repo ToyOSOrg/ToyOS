@@ -4,6 +4,7 @@
 
 use crate::keyboard::{self, RawKeyEvent, MOD_RELEASED, MOD_SHIFT};
 use crate::mouse::{self, Motion, PointerSource};
+use toyos_usbhid::keyboard::Keyboard;
 
 fn next_key(what: &str) -> RawKeyEvent {
     keyboard::try_read_event().unwrap_or_else(|| panic!("input-merge: no event for {what}"))
@@ -54,27 +55,22 @@ pub fn run() {
     assert_eq!(keyboard::modifiers(), 0, "input-merge: a modifier survived release_all");
 
     // An unchanged report must queue nothing — the wake guard depends on it.
-    let mut one = [0u8; 8];
-    let report = [0u8, 0, 0x05, 0, 0, 0, 0, 0];
-    assert_eq!(
-        keyboard::handle_report(&mut one, &report),
-        1,
-        "input-merge: new report queued nothing"
-    );
-    assert_eq!(
-        keyboard::handle_report(&mut one, &report),
-        0,
-        "input-merge: an unchanged report queued an event"
-    );
+    let mut one = Keyboard::new();
+    let report = |keyboard: &mut Keyboard, bytes: &[u8; 8]| {
+        keyboard::apply(keyboard.report(bytes).expect("input-merge: a boot report was refused"))
+    };
+    let held = [0u8, 0, 0x05, 0, 0, 0, 0, 0];
+    assert_eq!(report(&mut one, &held), 1, "input-merge: new report queued nothing");
+    assert_eq!(report(&mut one, &held), 0, "input-merge: an unchanged report queued an event");
 
     // Each keyboard diffs against its own report array; sharing one flapped the held key.
-    let mut two = [0u8; 8];
+    let mut two = Keyboard::new();
     assert_eq!(
-        keyboard::handle_report(&mut two, &[0u8; 8]),
+        report(&mut two, &[0u8; 8]),
         0,
         "input-merge: an idle second keyboard released the first one's key"
     );
-    assert_eq!(keyboard::handle_report(&mut one, &[0u8; 8]), 1, "input-merge: the release went missing");
+    assert_eq!(report(&mut one, &[0u8; 8]), 1, "input-merge: the release went missing");
 
     drain();
 
