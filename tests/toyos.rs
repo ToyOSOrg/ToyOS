@@ -1669,6 +1669,9 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
     );
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, job, said)?;
+    // The kernel's record `one_clock` reads beside the supervisor's line: it
+    // reaches the PL011 by the kernel's road, and the job's end by `logkeeper`'s.
+    await_marker(&mut qemu, &mut serial, bootlog::LOGKEEPER_SPAWN, "the kernel's record of logkeeper's spawn")?;
     // The one console that carries the loader's, the kernel's and a program's
     // lines on a CPU that states its counter's rate: the T14's metal rows
     // judge the same on x86-64, and no machine of this architecture has one.
@@ -1984,12 +1987,17 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     let mut want = vec![format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online")];
     for cpu in 1..VIRT_CPUS {
         want.push(format!("SMP: cpu{cpu} mpidr={cpu:#x} online"));
-        want.push(format!("CPU {cpu}: joining scheduler"));
     }
     for want in want {
         if !serial.contains(&want) {
             return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
         }
+    }
+    // Waited for: a CPU says this once the machine is released, so it reaches
+    // the PL011 by the kernel's road beside the job's end on `logkeeper`'s.
+    for cpu in 1..VIRT_CPUS {
+        let joined = format!("CPU {cpu}: joining scheduler");
+        await_marker(&mut qemu, &mut serial, &joined, &format!("cpu{cpu} to join the scheduler"))?;
     }
     let entered = format!("as declared; entered at EL{el}");
     for cpu in 0..VIRT_CPUS {
@@ -2220,13 +2228,14 @@ fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String
             ..Default::default()
         },
     );
-    let mut rest = String::new();
-    await_marker(&mut qemu, &mut rest, "===TEST_END reboot ", "the job reboot to end")?;
-    let console = format!("{}\n{rest}", qemu.boot_log());
-    for said in [REBOOT_REFUSED, "===TEST_END reboot exit=1==="] {
-        if !console.contains(said) {
-            return Err(format!("{said:?} not on the PL011\n{console}"));
-        }
+    let mut console = virt_console(&qemu);
+    // A wait each: the job's end is test-runner's line and the refusal the
+    // kernel's record, and the two reach the PL011 by different roads.
+    await_marker(&mut qemu, &mut console, "===TEST_END reboot ", "the job reboot to end")?;
+    await_marker(&mut qemu, &mut console, REBOOT_REFUSED, "the kernel's refusal of the reboot")
+        .map_err(|why| format!("{why}\n{console}"))?;
+    if !console.contains("===TEST_END reboot exit=1===") {
+        return Err(format!("the job reboot did not end with exit 1\n{console}"));
     }
     if console.contains(bootlog::REBOOTING) {
         return Err(format!("a machine with no reset began one\n{console}"));

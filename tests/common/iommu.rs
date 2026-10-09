@@ -64,11 +64,19 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // that runs it. A daemon's line is waited for on the stream: the boot
         // log ends at test-runner's `===READY===`, its first act, and nothing
         // orders that against what the programs the supervisor started before it print.
+        // And the kernel's records of a claim with them: those reach the
+        // console by the kernel's own road, which nothing orders against a
+        // program's line either.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
-        let said: &[&str] = if behind_unit {
-            &[CLAIM_BOUNDED, NETSTACK_NEGOTIATED]
+        let said: Vec<String> = if behind_unit {
+            vec![CLAIM_BOUNDED.to_string(), NETSTACK_NEGOTIATED.to_string(), bar_moved(), msix_armed()]
         } else {
-            &[DISKSERVER_REFUSED, FILESERVER_WITHOUT_DATA]
+            vec![
+                DISKSERVER_REFUSED.to_string(),
+                FILESERVER_WITHOUT_DATA.to_string(),
+                not_handed_over(CLAIMED_AT, NOT_REMAPPED),
+                not_handed_over(NVME_AT, NOT_REMAPPED),
+            ]
         };
         let mut text = qemu.boot_log().to_string();
         qemu::await_guest(&mut qemu, &mut text, &format!("{name}: {said:?}"), |t| {
@@ -174,6 +182,14 @@ const FILESERVER_WITHOUT_DATA: &str =
 /// the one its diskserver row claims.
 const NVME_AT: &str = "00:02.0";
 
+/// Why a machine with no unit hands no function over, in the kernel's words.
+const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
+
+/// The kernel's record of a claim on the function at `at` refused for `why`.
+fn not_handed_over(at: &str, why: &str) -> String {
+    format!("pcidev: PCI {at} NOT HANDED OVER — {why}")
+}
+
 /// **A machine with no unit hands no function to a process**, and says so
 /// three times over.
 ///
@@ -188,10 +204,9 @@ const NVME_AT: &str = "00:02.0";
 /// NVMe controller is refused the same, and DATA with it by name: a disk that
 /// is there and cannot be used is never answered with memory.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
     // netstack's own exit is the third saying, and is not read here.
     refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT])?;
-    log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NOT_REMAPPED}"))?;
+    log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
     log.must_say(DISKSERVER_REFUSED)?;
     log.must_say(FILESERVER_WITHOUT_DATA)?;
@@ -315,7 +330,7 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     // By the reason true of the path that raised it, on the line that names the
     // function: a refusal whose reason belongs to another path is worse than no
     // line at all.
-    log.must_say(&format!("pcidev: PCI {CLAIMED_AT} NOT HANDED OVER — {why}"))?;
+    log.must_say(&not_handed_over(CLAIMED_AT, why))?;
     log.must_not_say(&format!("[{claims}] handed over"))?;
     log.must_not_say(&msix_armed())?;
     log.must_not_say(&msi_armed())?;
