@@ -27,6 +27,8 @@ toyos-gpt = { path = "../toyos-gpt" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-tco = { path = "../toyos-tco" }
+# What bytes are a seed: the judgment the kernel makes of what this hands it.
+toyos-random = { path = "../toyos-random" }
 # The counter's rate each line's stamp is converted at, decoded as the kernel
 # decodes it.
 toyos-tsc = { path = "../toyos-tsc" }

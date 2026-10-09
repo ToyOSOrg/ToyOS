@@ -87,6 +87,9 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
         log.must_say("supervisor: started netstack")?;
+        // The CPU's own source in the generator's key, which firmware's seed
+        // alone would key without it wherever firmware answers EFI_RNG_PROTOCOL.
+        log.must_say("random: RDRAND is mixed into the generator's key")?;
 
         // **Whether the NIC's function is handed to a process at all is the
         // machine's answer, not a choice.** A process driving a device writes
