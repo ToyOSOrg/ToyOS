@@ -3232,9 +3232,10 @@ fn ending_server() -> Result<u16, String> {
                 let _ = stream.write_all(b"bye");
             }
             stream_ends::SHUT_FIRST => {
-                if stream.write_all(b".").is_ok() && stream.read_to_end(&mut Vec::new()).is_ok() {
-                    let _ = stream.write_all(b"late");
-                }
+                let _ = stream
+                    .write_all(b".")
+                    .and_then(|()| stream.read_to_end(&mut Vec::new()))
+                    .and_then(|_| stream.write_all(b"late"));
             }
             _ => {}
         }
