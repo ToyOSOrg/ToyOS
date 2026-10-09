@@ -1511,7 +1511,7 @@ fn main() {
             );
         }
 
-        mdns.pass(&iface, &mut socket_set, Instant::now());
+        mdns.pass(&iface, &mut socket_set, link_up, Instant::now());
 
         daemon.bridge_piped(&mut socket_set);
 
