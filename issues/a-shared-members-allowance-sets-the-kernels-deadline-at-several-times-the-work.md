@@ -63,14 +63,13 @@ the 60 000 ms list bound and 120 000 ms deadline of a boot no member rides:
 |---|---|---|---|
 | no member | 60.0 s | 120.0 s | 420 s |
 | `shared-debug` | 62.1 s | 124.2 s | 425 s |
-| `ccorpus` | 73.7 s | 147.4 s | 448 s |
-| `shared` | 86.4 s | 172.8 s | 473 s |
+| `testcases` | 100.1 s | 200.2 s | 501 s |
 
 **It grows with every member and has no ceiling**: 0.6 s of deadline a Rust
-member and 0.2 s a C case. The 88 Rust members and 137 C cases now ride
-`testcases` behind its rows' jobs, and arm a list bound of 100 100 ms, a
-deadline of 200 200 ms and a hard-lockup bound of 100 100 ms, waited 501 s. A
-clamp is no answer: a ceiling under the derived bound ends a healthy list.
+member and 0.2 s a C case. The 88 Rust members and 137 C cases the readings
+above took on `shared` and `ccorpus` ride `testcases` behind its rows' jobs,
+and those two boots are gone. A clamp is no answer: a ceiling under the
+derived bound ends a healthy list.
 
 ## The merged list, summed from the boots it was
 
@@ -87,17 +86,21 @@ over three readings of the boot that carried it: `testcases` at `9e70cd2e3`,
 | the 137 C cases | 1 667 ms | 2 183 ms | 13 700 ms |
 | the list's last record | 51 838 ms | 52 477 ms | 100 100 ms |
 
-**Half the bound is 50 050 ms, and the sum is 1.8 to 2.4 s past it**, by the
-rows' jobs: they take seven tenths of the base no allowance widens,
-`counters_metal` alone 32.7 s of it, where the members take under a quarter of
-what they add. The exit's second line reads the whole list against half its
-bound, so a boot whose members are well inside their share does not meet it.
+**The two shares are wide by different factors, and the rows' is the
+tighter.** The members take 8 735 to 9 298 ms of the 40 100 ms they add: the
+allowances stand at about 4.3 times their work. The rows' jobs end 43 103 to
+43 173 ms into the kernel's clock, of the 60 000 ms `toyos_tco::JOB_BOUND_MS`
+gives them: about 1.4 times theirs, `counters_metal` alone 32.7 s of it. That
+constant is the same for a boot of no job and for this boot of ten, and no
+allowance widens it. By the same sum the list's last record leaves 47.6 s of
+its bound, and nothing reads that margin.
 
 **A late expiry adds to the longer bound.**
 `issues/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md` is open:
-that deadline was reached at 252 859 ms, and the same lateness on `shared` is
-305 659 ms. The wait moves with the deadline, so what is left of it after such
-an expiry is the same 167 s; the machine is held 52.8 s longer.
+that deadline was reached at 252 859 ms, and the same lateness on `testcases`
+is 333 059 ms. The wait moves with the deadline, so what is left of it after
+such an expiry is 167 s there and 168 s here; the machine is held 80.2 s
+longer.
 
 ## Owner
 
@@ -106,13 +109,18 @@ The metal suite: `tests/common/metal.rs`, which derives the bounds, and
 
 ## Exit
 
-Both, on the T14:
+Three parts, each on the T14. None is built.
 
-- Each allowance is derived at its declaration from what the T14 measures of a
-  list's total over its members, by one stated factor: a factor over a
-  per-member mean says nothing of a list of slow members. And the judge reds a
-  shared boot whose list's last record came past half its bound, which today
-  is a line a reader reads.
-- The boot that carries `shared`, `ccorpus` and `testcases` together reads its
-  list's last record within half its list bound, with the pair read from the
-  kernel's own `boot deadline:` and `hard lockup:` lines.
+1. **The members.** Each allowance is derived at its declaration from the
+   members' sum between their own markers, by one stated factor: a factor over
+   a per-member mean says nothing of a list of slow members. And the judge
+   reds a boot whose members' sum is past the share they add, which today is a
+   line a reader reads.
+2. **The rows' jobs.** What a boot's rows' jobs are given is derived the same
+   way from what they take, where today it is one constant,
+   `toyos_tco::JOB_BOUND_MS`, for a boot of no job and a boot of ten, one of
+   them 32.7 s. And the judge reds a boot whose rows' jobs end past their
+   share, which today nothing reads.
+3. **`testcases` reads both inside their shares**, with the armed pair read
+   from the kernel's own `boot deadline:` and `hard lockup:` lines and the
+   margin from the list's last record to its list bound stated beside them.

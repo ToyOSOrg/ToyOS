@@ -1205,15 +1205,23 @@ pub fn judge_readbacks(
             }
         }
         if let (Ok(back), true) = (back, ran > 0) {
-            // Each member between its own markers: the rows' jobs share the list.
+            // Each member between its own markers: the rows' jobs share the
+            // list. One cut inside its run has no pair and is named, not
+            // summed as nothing.
             let jobs = back.jobs_ms();
-            let took: u64 = boot.members.iter().filter_map(|member| jobs.get(member.job.as_str())).sum();
+            let (timed, unpaired): (Vec<&Member>, Vec<&Member>) =
+                boot.members.iter().partition(|member| jobs.contains_key(member.job.as_str()));
+            let took: u64 = timed.iter().map(|member| jobs[member.job.as_str()]).sum();
             eprintln!(
-                "  its members took {took} ms of the {} ms they add to the list's bound, {} ms a member over \
-                 the {ran} that ran",
+                "  its members took {took} ms of the {} ms they add to the list's bound, summed over the {} of \
+                 {} with both markers",
                 boot.members_ms(),
-                took / ran as u64
+                timed.len(),
+                boot.members.len()
             );
+            if let Some(first) = unpaired.first() {
+                eprintln!("  {} without a start and an end marker, the first {}", unpaired.len(), first.job);
+            }
             // On the clock the runner counts its bound on, the kernel's own,
             // whose reading `Boot: complete` states beside its stamp.
             if let (Some(complete), Some(last), Some(boot_ms)) =
