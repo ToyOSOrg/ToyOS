@@ -29,6 +29,9 @@ pub const R: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 254);
 pub const DNS: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 53);
 pub const MASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
+/// The places `Wire`'s node has for streams and listeners.
+pub const PLACES: usize = 32;
+
 pub const DISCOVER: u8 = 1;
 pub const OFFER: u8 = 2;
 pub const REQUEST: u8 = 3;
@@ -43,6 +46,7 @@ pub enum Seen {
     /// A datagram from port 68 to port 67, and its payload.
     Dhcp { to: [u8; 6], source: Ipv4Addr, destination: Ipv4Addr, message: Vec<u8> },
     EchoReply { source: Ipv4Addr, destination: Ipv4Addr, id: u16, seq: u16, data: Vec<u8> },
+    Tcp(Segment),
 }
 
 impl Seen {
@@ -50,7 +54,7 @@ impl Seen {
     pub fn dhcp(&self) -> Option<(u8, &[u8])> {
         match self {
             Seen::Dhcp { message, .. } => Some((option(message, 53).expect("a message type")[0], message.as_slice())),
-            Seen::Arp { .. } | Seen::EchoReply { .. } => None,
+            Seen::Arp { .. } | Seen::EchoReply { .. } | Seen::Tcp(_) => None,
         }
     }
 
@@ -58,6 +62,7 @@ impl Seen {
     pub fn source(&self) -> Option<Ipv4Addr> {
         match self {
             Seen::Dhcp { source, .. } | Seen::EchoReply { source, .. } => Some(*source),
+            Seen::Tcp(_) => Some(A),
             Seen::Arp { .. } => None,
         }
     }
@@ -78,8 +83,8 @@ fn v4(bytes: &[u8]) -> Ipv4Addr {
 }
 
 /// The outside reading of a frame the node emitted: Ethernet II from the node's MAC, then ARP, a
-/// DHCP client's datagram or an echo reply, each with the lengths and checksums `etherparse`
-/// computes. Anything else the node has no business sending here.
+/// DHCP client's datagram, an echo reply or a TCP segment, each with the lengths and checksums
+/// `etherparse` computes. Anything else the node has no business sending here.
 pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
     let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
     let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
@@ -111,11 +116,58 @@ pub fn outside(frame: &[u8], mac: [u8; 6]) -> Seen {
                     let Icmpv4Type::EchoReply(echo) = icmp.icmp_type() else { panic!("{:?}", icmp.icmp_type()) };
                     Seen::EchoReply { source, destination, id: echo.id, seq: echo.seq, data: icmp.payload().to_vec() }
                 }
-                other => panic!("neither UDP nor ICMP: {other:?}"),
+                TransportSlice::Tcp(_) => Seen::Tcp(segment(frame).expect("a TCP segment")),
+                other => panic!("neither UDP, ICMP nor TCP: {other:?}"),
             }
         }
         other => panic!("neither ARP nor IPv4: {other:?}"),
     }
+}
+
+/// A TCP segment the node emitted, as `etherparse` read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Segment {
+    /// Where its frame and its datagram went.
+    pub to_mac: [u8; 6],
+    pub to: Ipv4Addr,
+    /// The node's port, and the peer's.
+    pub from_port: u16,
+    pub to_port: u16,
+    pub seq: u32,
+    pub ack: Option<u32>,
+    pub syn: bool,
+    pub fin: bool,
+    pub rst: bool,
+    pub window: u16,
+    pub text: Vec<u8>,
+}
+
+/// The outside reading of a TCP segment the node emitted, or `None` of a frame that carries
+/// none: Ethernet II from the node's MAC, IPv4 from the node's address, and the lengths and the
+/// two checksums `etherparse` computes.
+pub fn segment(frame: &[u8]) -> Option<Segment> {
+    let packet = SlicedPacket::from_ethernet(frame).expect("Ethernet II");
+    let Some(LinkSlice::Ethernet2(ethernet)) = &packet.link else { panic!("{:?}", packet.link) };
+    let (Some(NetSlice::Ipv4(ip)), Some(TransportSlice::Tcp(tcp))) = (&packet.net, &packet.transport) else { return None };
+    let header = ip.header();
+    assert_eq!(ethernet.source(), MAC, "from the node's MAC");
+    assert_eq!(header.header_checksum(), header.to_header().calc_header_checksum(), "the IPv4 header checksum");
+    assert_eq!(usize::from(header.total_len()), 20 + tcp.slice().len(), "IPv4's length is the segment's");
+    assert_eq!(header.source_addr(), A);
+    assert_eq!(tcp.checksum(), tcp.calc_checksum_ipv4(header.source(), header.destination()).unwrap(), "the TCP checksum");
+    Some(Segment {
+        to_mac: ethernet.destination(),
+        to: header.destination_addr(),
+        from_port: tcp.source_port(),
+        to_port: tcp.destination_port(),
+        seq: tcp.sequence_number(),
+        ack: tcp.ack().then(|| tcp.acknowledgment_number()),
+        syn: tcp.syn(),
+        fin: tcp.fin(),
+        rst: tcp.rst(),
+        window: tcp.window_size(),
+        text: tcp.payload().to_vec(),
+    })
 }
 
 /// The value of option `code` in a DHCP message (RFC 2132 §2): the first instance.
@@ -272,7 +324,8 @@ impl Wire {
         let now = Instant::from_millis(3_600_000);
         let config = Config { mac: IndividualMac::new(MacAddr(mac)).unwrap(), receive_buffer: 65_535, send_buffer: 65_535, secrets };
         let mut draws = 0x5a00_0000;
-        let node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
+        let mut node = Node::new(now, config, HostName::new("toyos"), draw(&mut draws)).unwrap();
+        node.set_places(now, PLACES);
         Self { node, mac, now, sent: Vec::new(), draws }
     }
 
