@@ -50,7 +50,10 @@
 //!
 //! **The applets nobody compared.** A row's granularity is the binary and
 //! `/system/bin/toybox` is many programs behind many links, so every applet is endowed
-//! the union; the last half holds each against a policy table.
+//! the union; the last half holds each against a policy table. A link is an
+//! applet only where its target has a row: a link to a binary no row names
+//! buys no row's authority, since the supervisor answers it undeclared and its
+//! spawner endows it, and the C corpus's cases are such links.
 //!
 //! **A wrong-typed handle is refused with a word here, and that is a property of
 //! the check rather than an exception to the policy.** The table resolves rights
@@ -533,6 +536,7 @@ fn every_applet_holds_only_what_its_policy_names() {
     let rows = manifest_rows(&manifest);
 
     let mut applets: Vec<String> = Vec::new();
+    let mut unrowed = 0;
     for entry in std::fs::read_dir(BIN).expect("read /system/bin") {
         let path = entry.expect("a /system/bin entry").path();
         let meta = std::fs::symlink_metadata(&path).expect("lstat a /system/bin entry");
@@ -540,6 +544,11 @@ fn every_applet_holds_only_what_its_policy_names() {
             continue;
         }
         let target = std::fs::read_link(&path).expect("read a /system/bin link");
+        // A row is matched by its whole path, as the supervisor matches one.
+        if !target.to_str().is_some_and(|to| rows.contains_key(to)) {
+            unrowed += 1;
+            continue;
+        }
         assert_eq!(
             target.to_str(),
             Some(MULTICALL),
@@ -574,7 +583,8 @@ fn every_applet_holds_only_what_its_policy_names() {
          list this test declares — a row was split, or one grew",
     );
     println!(
-        "  applets: {} links behind {MULTICALL}, {} declared over-grants and no undeclared one",
+        "  applets: {} links behind {MULTICALL}, {} declared over-grants and no undeclared one; \
+         {unrowed} links to a binary no row names",
         applets.len(),
         over.len(),
     );

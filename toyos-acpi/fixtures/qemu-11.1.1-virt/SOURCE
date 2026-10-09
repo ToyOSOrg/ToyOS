@@ -1,0 +1,28 @@
+The RSDP, the XSDT, the MADT and the IORT QEMU 11.1.1 published to its `virt`
+machine under edk2-stable202408 (QEMU's own `edk2-aarch64-code.fd`), with no
+operating system in the guest: the firmware was left to reach its shell, and
+the guest's memory was then written out by the monitor's `pmemsave`. Every
+address was walked host-side from the RSDP, found by its signature and both
+checksums, so no byte here came through the decoder these fixtures judge. Each
+table sums to zero.
+
+  qemu-system-aarch64 -M <machine> -accel hvf -cpu host -smp 4 -m 256 \
+      -nodefaults -display none \
+      -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd
+
+  hwgic/  -M virt,gic-version=3,iommu=smmuv3
+          the hypervisor's own GICv3, which has no ITS: the MADT ends in a
+          GIC MSI Frame structure, and the IORT is an SMMUv3 and a root complex
+  its/    -M virt,gic-version=3,its=on,iommu=smmuv3,kernel-irqchip=off
+          QEMU's emulated GICv3 with its ITS: the MADT ends in a GIC ITS
+          structure, and the IORT is an ITS group, an SMMUv3 and a root complex
+
+Both boots put every table at the same address, so the RSDP and the XSDT are
+one file each:
+
+  rsdp.bin  0x4cb43018      xsdt.bin  0x4cb43f18
+  apic.bin  0x4cb43c98      iort.bin  0x4cb43198
+
+Those are `tests/iort.rs`'s regions, so the XSDT's own entries point at them
+and the walk under test is the real one. The XSDT's other six entries (FACP,
+PPTT, GTDT, MCFG, SPCR, DBG2) name tables that are not here.

@@ -43,6 +43,7 @@ mod gcd;
 mod loaderlog;
 mod rootbridge;
 mod rootimage;
+mod seed;
 mod slot;
 mod stamp;
 mod watchdog;
@@ -627,7 +628,11 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         loader_entry_counter: entry_counter,
         loader_handoff_counter: 0,
         root_read_ticks,
+        // Read into this struct below, and nowhere else: the kernel zeroes it here.
+        loader_seed: [0; toyos_abi::boot::SEED_LEN],
+        loader_seed_len: 0,
     };
+    kernel_args.loader_seed_len = seed::read(&system_table, &mut kernel_args.loader_seed);
     report_reach(
         "Kernel arguments",
         &kernel_args as *const KernelArgs as u64,

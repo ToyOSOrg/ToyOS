@@ -270,6 +270,46 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    // The tables QEMU 11.1.1 published to its `virt` machine in both of its
+    // GIC modes, read out of guest physical memory over the monitor with no
+    // operating system in the guest. Firmware output, as the q35 tables above:
+    // `toyos-acpi/tests/iort.rs` decodes them.
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/hwgic/apic.bin",
+        "5f65e29aa3c1d4b7afce9f22c144797f2d4234a58e7fbeaae48c1744d0713976",
+        "ours: QEMU `virt`'s own MADT under the hypervisor's GIC, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/hwgic/iort.bin",
+        "6b0a25a264422e32097f761d5d82cd7d5142bbe20a6d6ef22b7750c9ff7cd8e2",
+        "ours: QEMU `virt`'s own IORT under the hypervisor's GIC, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/its/apic.bin",
+        "ca5ef1376c5e30ee314a9a22c225fe34e9721889a6884bc36239c9d145759452",
+        "ours: QEMU `virt`'s own MADT under its emulated GIC and ITS, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/its/iort.bin",
+        "57b1d81a2995c018d623a8d4a0ecb7318624f03065c3deb820773f3c7d5c7a93",
+        "ours: QEMU `virt`'s own IORT under its emulated GIC and ITS, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/rsdp.bin",
+        "88f4591b661d951ae67bca4b740dbebf8e0382b1e27dc915ae44ceddb3a09df7",
+        "ours: QEMU `virt`'s own RSDP, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-virt/xsdt.bin",
+        "8129cb6793e7b6f375e60f6e9780feff0b11b1e99da8c0b1dc4135700123725d",
+        "ours: QEMU `virt`'s own XSDT, captured by the commit that decodes the IORT",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     (
         "toyos-acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
         "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",

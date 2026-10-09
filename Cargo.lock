@@ -381,6 +381,7 @@ dependencies = [
  "toyos-bootmap",
  "toyos-elf",
  "toyos-gpt",
+ "toyos-random",
  "toyos-rootimage",
  "toyos-tco",
  "toyos-tsc",
@@ -3051,6 +3052,7 @@ dependencies = [
  "toyos-pci",
  "toyos-ps2",
  "toyos-quiesce",
+ "toyos-random",
  "toyos-rootimage",
  "toyos-symbols",
  "toyos-tco",
@@ -5866,6 +5868,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-its"
+version = "0.1.0"
+dependencies = [
+ "toyos-phys",
+]
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -5983,6 +5992,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-phys"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-ps2"
 version = "0.1.0"
 
@@ -5991,8 +6004,20 @@ name = "toyos-quiesce"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-random"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-rootimage"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-smmu"
+version = "0.1.0"
+dependencies = [
+ "toyos-bootmap",
+ "toyos-phys",
+]
 
 [[package]]
 name = "toyos-swap"

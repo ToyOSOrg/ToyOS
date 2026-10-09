@@ -370,6 +370,10 @@ pub fn a_run_under_another_bios_fails_and_records_nothing() {
     assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
 }
 
+fn member(job: &str, adds_ms: u64) -> metal::Member {
+    metal::Member { job: job.to_string(), adds_ms }
+}
+
 /// **A failing shared member fails itself alone**: the run is red, and the
 /// boot it rode records its own numbers as the boot whose members all passed
 /// does.
@@ -391,8 +395,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
         config: "tests/testcases",
         params: &[],
         features: &[],
-        member_ms: toyos_tco::RUST_MEMBER_MS,
-        jobs: Vec::from(jobs.map(String::from)),
+        members: jobs.iter().map(|job| member(job, toyos_tco::RUST_MEMBER_MS)).collect(),
         files: Vec::new(),
         links: Vec::new(),
     };
@@ -436,12 +439,13 @@ pub fn a_boots_last_job_is_behind_every_other() {
     assert!(refused.contains("other ends the boot \"own\" on later and another row ends it on hold"), "{refused}");
 }
 
-/// **A boot's rows' jobs run before its members, its last job behind both,
-/// and its bounds follow from who rides it**: the runner's bound over the list
-/// is the rows' and what each member adds, the kernel's over the boot twice
-/// that, and a boot no member rides keeps the bounds a row's boot had. A
+/// **A boot's rows' jobs run before its members, the rows' last job among
+/// them, and its bounds follow from who rides it**: the runner's bound over
+/// the list is the rows' and what each member adds, the kernel's over the boot
+/// twice that, and a boot no member rides keeps the bounds a row's boot had. A
 /// shared boot that disagrees with a row about the image is refused, and so
-/// are two under one name.
+/// are two under one name, and two jobs of one boot the kernel records under
+/// one name.
 pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     static EARLY: Metal =
         Metal { arms: &[metal::once("shared", "tests/testcases", &[], &["tone", "cost"])], judge: |_| Ok(()) };
@@ -456,23 +460,25 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         arms: &[metal::once("wedge", "tests/jobcase", &[toyos_build::metal::WEDGE_ARM], &[])],
         judge: |_| Ok(()),
     };
-    let members = |boot: &str, member_ms: u64, jobs: &[&str]| metal::SharedBoot {
+    let members = |boot: &str, members: &[(&str, u64)]| metal::SharedBoot {
         boot: boot.to_string(),
         config: "tests/testcases",
         params: &[],
         features: &[],
-        member_ms,
-        jobs: jobs.iter().map(ToString::to_string).collect(),
-        files: vec![(format!("expect/{}", jobs[0]), Vec::new())],
+        members: members.iter().map(|(job, adds_ms)| member(job, *adds_ms)).collect(),
+        files: vec![(format!("expect/{}", members[0].0), Vec::new())],
         links: Vec::new(),
     };
     let rows = [("early", &EARLY), ("held", &HELD), ("wedges", &WEDGES)];
-    let shared = [members("shared", 860, &["m1", "m2", "m3"]), members("corpus", 260, &["c1", "c2"])];
+    let shared = [
+        members("shared", &[("m1", 860), ("c1", 260), ("m2", 860)]),
+        members("corpus", &[("c2", 260), ("c3", 260)]),
+    ];
     let boots = metal::batches(&rows, &shared).expect("one image a boot");
     let bounds = |boot: &str| (boots[boot].bound_ms(), boots[boot].deadline_ms());
-    assert_eq!(boots["shared"].jobs, ["tone", "cost", "late", "m1", "m2", "m3", "hold"]);
-    assert_eq!(bounds("shared"), (62_580, 125_160));
-    assert_eq!(boots["corpus"].jobs, ["c1", "c2"]);
+    assert_eq!(boots["shared"].jobs, ["tone", "cost", "late", "hold", "m1", "c1", "m2"]);
+    assert_eq!(bounds("shared"), (61_980, 123_960));
+    assert_eq!(boots["corpus"].jobs, ["c2", "c3"]);
     assert_eq!(bounds("corpus"), (60_520, 121_040));
     // No member: the bounds every row's boot had before a list could widen.
     assert_eq!(bounds("own"), (60_000, 120_000));
@@ -488,6 +494,11 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         panic!("two shared boots under one name were batched");
     };
     assert!(refused.contains("two shared boots are both named \"shared\""), "{refused}");
+    let long = members("shared", &[("test_rs_a_name_past_what_is_kept", 860), ("test_rs_a_name_past_what_is_lost", 860)]);
+    let Err(refused) = metal::batches(&rows, &[long]) else {
+        panic!("two jobs the kernel records under one name were batched");
+    };
+    assert!(refused.contains("the kernel records both as \"test_rs_a_name_past_what_is\""), "{refused}");
 }
 
 /// **What a run's words take**: no word the whole profile; a name word every
@@ -505,8 +516,7 @@ pub fn words_take_rows_members_and_whole_boots() {
         config: "tests/testcases",
         params: &[],
         features: &[],
-        member_ms: toyos_tco::RUST_MEMBER_MS,
-        jobs: jobs.iter().map(ToString::to_string).collect(),
+        members: jobs.iter().map(|job| member(job, toyos_tco::RUST_MEMBER_MS)).collect(),
         files: jobs
             .iter()
             .flat_map(|job| [(format!("expect/{job}"), Vec::new()), (format!("bin/test_c_{job}"), Vec::new())])
@@ -514,11 +524,12 @@ pub fn words_take_rows_members_and_whole_boots() {
         links: jobs.iter().map(|job| (format!("bin/{job}"), "/system/bin/test_rs_ccheck".to_string())).collect(),
     };
     let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1", "c2"])];
+    let jobs_of = |boot: &metal::SharedBoot| boot.members.iter().map(|m| m.job.clone()).collect::<Vec<_>>();
     let taken = |names: &[&str], boots: &[&str]| {
         metal::select(names, boots, &ROWS, &profile).map(|(rows, shared)| {
             let rows: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
             let shared: Vec<String> =
-                shared.iter().map(|boot| format!("{}={}", boot.boot, boot.jobs.join("+"))).collect();
+                shared.iter().map(|boot| format!("{}={}", boot.boot, jobs_of(boot).join("+"))).collect();
             (rows.join(","), shared.join(","))
         })
     };

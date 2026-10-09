@@ -80,9 +80,11 @@ count line is there at 42.579 s (`28 SCIs; embedded controller queries taken:
 in seconds 36 to 47.
 
 `acpi_server_events` and `acpi_tables_loaded` ride `testcases` again, with
-`test_rs_acpi_hold` its last job, and `testcases-hold` is deleted. The job
-waits on the `log` port for the server's count line, bounded by the runner's
-bound less a tenth, and exits non-zero without it. That readback judged
+`test_rs_acpi_hold` the last of its rows' jobs and the shared members behind
+it, and `testcases-hold` is deleted. The job waits on the `log` port for the
+server's count line until 54 000 ms after boot
+(`issues/acpi-hold-gives-up-at-a-time-counted-from-boot-whatever-its-runner-was-given.md`),
+and exits non-zero without it. That readback judged
 offline by this harness reds by name: `testcases's own log is missing its
 parts 2 to 26; no row is judged on it`.
 
