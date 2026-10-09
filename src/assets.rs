@@ -299,23 +299,6 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
             }
         }
 
-        // Pre-decode JPEG images
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "jpg") && ships(&path) {
-                let jpg_data = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-                let img = image::load_from_memory_with_format(&jpg_data, image::ImageFormat::Jpeg)
-                    .expect("Failed to decode JPEG")
-                    .to_rgb8();
-                let stem = path.file_stem().unwrap().to_str().unwrap();
-                let mut data = Vec::new();
-                data.extend((img.width() as u32).to_le_bytes());
-                data.extend((img.height() as u32).to_le_bytes());
-                data.extend(img.as_raw());
-                files.push((format!("share/{stem}.rgb"), data));
-            }
-        }
-
         // Include all other files recursively (skipping pre-processed types).
         // A TTF at the top is the console font's raster source and ships only
         // as the raster above; one under `fonts/` is a system font and ships
@@ -332,7 +315,7 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                 if path.is_dir() {
                     let subdir = path.file_name().unwrap().to_str().unwrap();
                     add_dir(&path, &format!("{prefix}{subdir}/"), ships, files);
-                } else if !system_font && path.extension().is_some_and(|e| e == "ttf" || e == "jpg") {
+                } else if !system_font && path.extension().is_some_and(|e| e == "ttf") {
                     continue;
                 } else if ships(&path) {
                     let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();

@@ -189,11 +189,6 @@ fn main() {
         return;
     }
 
-    if asked(&flags::REGEN_WALLPAPER) {
-        toyos_build::wallpaper::regen(&root);
-        return;
-    }
-
     if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
         toyos_build::soundfont::regen(&root, Path::new(bank));
         return;

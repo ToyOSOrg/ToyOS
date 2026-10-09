@@ -730,6 +730,9 @@ fn build_and_assemble(
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
     }
+    if config.programs.contains_key(crate::wallpaper::READER) {
+        root_files.push((crate::wallpaper::PATH.to_string(), crate::wallpaper::rgb()));
+    }
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {

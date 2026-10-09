@@ -1,47 +1,23 @@
-//! The desktop background, written down as a description instead of fetched.
-//!
-//! `assets/wallpaper.jpg` used to be a file of unknown origin — an aggregator
-//! upload naming no author and no copyright holder, under a "wallpaper use
-//! only" restriction nobody on that page had the standing to grant. What
-//! replaces it is the output of [`draw`], so provenance is answered by source
-//! anyone can re-run rather than by a paragraph in `NOTICE`.
+//! The desktop background, drawn by the build: what the compositor reads as
+//! `/system/share/wallpaper.rgb` is [`draw`]'s output, byte for byte, so its
+//! provenance is source anyone can re-run and no file stands between the two.
 //!
 //! The picture is a lit horizon: a night sky, a glow behind it, and three
-//! ridges receding into haze. It is nothing but the constants below — change
-//! one, run `cargo run -- --regen-wallpaper`, and the committed artifact moves
-//! with it.
+//! ridges receding into haze. It is nothing but the constants below.
 //!
 //! All compositing is in **linear light**, converted to sRGB once per pixel at
 //! the end. Mixing two colours in sRGB mixes two numbers that were never linear
 //! to begin with, which is what sends a naive gradient grey through its middle.
 
-use std::path::Path;
-
-use image::codecs::jpeg::JpegEncoder;
-use image::ExtendedColorType;
-
-/// Where the artifact lives, relative to the repository root.
-pub const WALLPAPER_PATH: &str = "assets/wallpaper.jpg";
+/// Where ROOT carries the wallpaper, and the one program that opens it.
+pub const PATH: &str = "share/wallpaper.rgb";
+pub const READER: &str = "compositor";
 
 /// Drawn at the panel this project targets, the T14's 1920x1080. The
 /// compositor scales whatever it is handed, so this is the size at which it
 /// scales by nothing.
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
-
-/// **The quantization table is why this is up here and not at the usual 90.**
-/// libjpeg's scaling leaves every entry of both tables at 1 by 99, and `image`'s
-/// encoder never subsamples chroma (`h: 1, v: 1` on all three components), so
-/// the round trip is the DCT's own rounding and nothing else. Anywhere below
-/// that the DC coefficient alone is quantized in steps of two or three levels,
-/// which lays an 8x8 staircase across exactly the smooth field this picture is
-/// made of — and the same quantizer crushes the dither that was there to stop
-/// one. `the_wallpaper_neither_bands_nor_blocks` is that stated as a bound.
-///
-/// Not 100, which is the same file size to within 0.2% and worse on every other
-/// measure. Both readings come from a sweep of the encoder across the quality
-/// range at this picture's own dimensions.
-pub const QUALITY: u8 = 99;
 
 /// The sky, top to horizon, as sRGB.
 ///
@@ -184,7 +160,7 @@ const VIGNETTE_OUT: f32 = 1.25;
 /// This is dither and not decoration. Eight bits a channel over a field this
 /// smooth puts a contour every few dozen rows; a triangular perturbation of
 /// this size turns the contour into noise the eye integrates away, and it is
-/// what lets `the_wallpaper_neither_bands_nor_blocks` hold.
+/// what lets `the_wallpaper_does_not_band` hold.
 const GRAIN: f32 = 1.6;
 
 fn srgb_to_linear(c: u8) -> f32 {
@@ -353,24 +329,16 @@ pub fn draw(width: u32, height: u32) -> Vec<u8> {
     out
 }
 
-/// [`draw`] at [`WIDTH`]x[`HEIGHT`], JPEG-encoded at [`QUALITY`].
-pub fn encoded() -> Vec<u8> {
-    let rgb = draw(WIDTH, HEIGHT);
-    let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, QUALITY)
-        .encode(&rgb, WIDTH, HEIGHT, ExtendedColorType::Rgb8)
-        .expect("encode the wallpaper");
-    jpeg
+/// The file ROOT carries at [`PATH`]: the width and the height as
+/// little-endian `u32`s, then [`draw`]'s RGB triples at that size, unencoded —
+/// a lossy codec here would throw away the dither first.
+pub fn rgb() -> Vec<u8> {
+    let mut file = Vec::with_capacity(8 + WIDTH as usize * HEIGHT as usize * 3);
+    file.extend(WIDTH.to_le_bytes());
+    file.extend(HEIGHT.to_le_bytes());
+    file.extend(draw(WIDTH, HEIGHT));
+    file
 }
-
-/// Rewrite `assets/wallpaper.jpg` from the constants in this file.
-pub fn regen(root: &Path) {
-    let jpeg = encoded();
-    let path = root.join(WALLPAPER_PATH);
-    std::fs::write(&path, &jpeg).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    println!("wrote {} ({} bytes)", path.display(), jpeg.len());
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -386,15 +354,6 @@ mod tests {
     /// almost four times it.
     const MAX_FLAT_RUN: usize = 40;
 
-    /// How much more a pixel may differ from the one above it across an 8x8
-    /// block boundary than inside one.
-    ///
-    /// JPEG's characteristic artifact *is* this ratio going up — the blocks are
-    /// quantized independently, so what a person sees as blocking is a step
-    /// that appears only where two of them meet. A picture with none of it
-    /// sits at 1.0, and the value this bound separates from is a doubling.
-    const MAX_BLOCKING: f64 = 1.25;
-
     fn longest_column_run(rgb: &[u8], width: usize, height: usize, channel: usize) -> usize {
         let mut worst = 0;
         for x in 0..width {
@@ -409,71 +368,21 @@ mod tests {
         worst
     }
 
-    fn blocking(rgb: &[u8], width: usize, height: usize) -> f64 {
-        let (mut across, mut across_n) = (0.0f64, 0u64);
-        let (mut within, mut within_n) = (0.0f64, 0u64);
-        for y in 1..height {
-            for x in 0..width {
-                for c in 0..3 {
-                    let step = (rgb[(y * width + x) * 3 + c] as i32
-                        - rgb[((y - 1) * width + x) * 3 + c] as i32)
-                        .abs() as f64;
-                    if y % 8 == 0 {
-                        across += step;
-                        across_n += 1;
-                    } else {
-                        within += step;
-                        within_n += 1;
-                    }
-                }
-            }
-        }
-        (across / across_n as f64) / (within / within_n as f64)
-    }
-
-    /// What ships is the decoded JPEG, so the decoded JPEG is what is measured.
-    ///
-    /// Asking either question of [`draw`]'s own output would pass at an encoder
-    /// setting that undoes both: the dither is the highest-frequency thing in
-    /// the picture and therefore the first thing a quantizer throws away, and
-    /// the staircase it was holding off comes back as blocking. Between the two
-    /// they pin the encoder as well as the drawing — nothing here can be
-    /// weakened without one of them saying so.
+    /// The file that ships, read the way the compositor reads it, does not band.
     #[test]
-    fn the_wallpaper_neither_bands_nor_blocks() {
-        let decoded = image::load_from_memory_with_format(&encoded(), image::ImageFormat::Jpeg)
-            .expect("decode what we just encoded")
-            .to_rgb8();
-        let (w, h) = (decoded.width() as usize, decoded.height() as usize);
+    fn the_wallpaper_does_not_band() {
+        let file = rgb();
+        let (head, pixels) = file.split_at(8);
+        let w = u32::from_le_bytes(head[..4].try_into().unwrap()) as usize;
+        let h = u32::from_le_bytes(head[4..].try_into().unwrap()) as usize;
+        assert_eq!(pixels.len(), w * h * 3, "a {w}x{h} wallpaper of {} bytes", pixels.len());
         for (channel, name) in ["red", "green", "blue"].iter().enumerate() {
-            let run = longest_column_run(decoded.as_raw(), w, h, channel);
+            let run = longest_column_run(pixels, w, h, channel);
             assert!(
                 run <= MAX_FLAT_RUN,
                 "{run} rows of one {name} value down a column, over a bound of \
                  {MAX_FLAT_RUN}: this wallpaper bands"
             );
         }
-        let blocking = blocking(decoded.as_raw(), w, h);
-        assert!(
-            blocking <= MAX_BLOCKING,
-            "steps across the 8x8 block boundaries are {blocking:.2}x the steps inside them, \
-             over a bound of {MAX_BLOCKING}: QUALITY = {QUALITY} is not enough for a field \
-             this smooth"
-        );
-    }
-
-    /// The committed file is [`draw`]'s output and not a picture somebody put
-    /// there — the property this whole module exists to establish, and the
-    /// answer to the licence question that replacing it was about.
-    #[test]
-    fn the_committed_wallpaper_is_the_one_this_file_describes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let on_disk = std::fs::read(root.join(WALLPAPER_PATH)).expect("read the wallpaper");
-        assert!(
-            on_disk == encoded(),
-            "{WALLPAPER_PATH} is {} bytes and is not what this file draws — run \
-             `cargo run -- --regen-wallpaper`",
-            on_disk.len()
-        );
     }
 }

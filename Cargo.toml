@@ -202,7 +202,6 @@ getrandom = "0.3"
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # The digest behind `NOTICE`'s record of every committed binary file
 # (`src/sourcegate.rs`).
 sha2 = "0.10"

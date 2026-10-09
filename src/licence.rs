@@ -468,12 +468,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("LicenseRef-GeneralUser-GS-2.0"),
     ),
     (
-        "assets/wallpaper.jpg",
-        "b6f0c89bf966cfb458333b280614f0c7723615e42e340b9d43a760a64fe05976",
-        "ours: `cargo run -- --regen-wallpaper` writes it from src/wallpaper.rs",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
-    (
         "doom.jpg",
         "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
         "the owner's own screenshot of this system running doom, in README.md; \
