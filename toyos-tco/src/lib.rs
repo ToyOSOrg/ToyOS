@@ -114,10 +114,17 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
-/// What one member of a metal shared boot is allowed of [`JOB_BOUND_MS`], in
-/// milliseconds: a Rust test on the shipping kernel, and a C corpus case.
+/// What one member of a metal shared boot adds to its list's bound, in
+/// milliseconds: a Rust test, and a C corpus case. A share of the list's and
+/// no bound of the member's own: nothing ends one member.
 pub const RUST_MEMBER_MS: u64 = 860;
 pub const C_MEMBER_MS: u64 = 260;
+
+/// The bound the runner gives a metal boot's whole list, in milliseconds:
+/// [`JOB_BOUND_MS`] for the jobs its rows name, and what its members add.
+pub const fn list_bound_ms(members_ms: u64) -> u64 {
+    JOB_BOUND_MS + members_ms
+}
 
 /// The bound netstack gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
@@ -129,16 +136,22 @@ pub const LEASE_BOUND_MS: u64 = 20_000;
 /// bound for every watchdog.
 pub const PANIC_BOUND_MS: u64 = 60_000;
 
-/// The bound the *kernel* gives a whole boot, in milliseconds, before it seals
-/// a record and writes the reset register itself.
+/// The bound the *kernel* gives a whole boot whose runner bounds its list at
+/// `list_ms`, in milliseconds, before it seals a record and writes the reset
+/// register itself.
 ///
-/// **Twice [`JOB_BOUND_MS`], and derived from it rather than chosen.** A job the
+/// **Twice the list's, and derived from it rather than chosen.** A job the
 /// runner is still inside is not a wedge: the runner's own bound ends it and the
 /// boot goes on, so a kernel bound at or under that number resets a machine
 /// whose test was about to be reported. Twice it is wider than the runner's
 /// bound plus the boot around it — the slowest healthy T14 boot measured is
 /// 6.242 s of kernel time — and narrower than a wait for a hand.
-pub const WEDGE_BOUND_MS: u64 = JOB_BOUND_MS * 2;
+pub const fn wedge_bound_ms(list_ms: u64) -> u64 {
+    list_ms * 2
+}
+
+/// [`wedge_bound_ms`] of a list with no member on it.
+pub const WEDGE_BOUND_MS: u64 = wedge_bound_ms(JOB_BOUND_MS);
 
 /// The kernel's bound has to outlast the one that ends a single job, or a slow
 /// test is a reset where it should have been a verdict.

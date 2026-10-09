@@ -44,7 +44,7 @@ metal rows.
 Every stage below has the host drive a T14 that runs ToyOS, so the track is
 blocked on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`.
 
-**Next: two sessions in place of six boots.** `shared`, `shared-2`, `ccorpus`,
+**Next: two sessions in place of five boots.** `shared`, `ccorpus`,
 `testcases`, `testcases-mkdir` and `testcases-readdir` share a config, a
 parameter line and the shipping kernel. The session image is `tests/testcases`
 with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
