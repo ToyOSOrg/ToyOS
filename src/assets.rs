@@ -242,16 +242,30 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
     declared.iter().map(|name| dir.join(name)).filter(|path| !path.exists()).collect()
 }
 
-/// An asset on ROOT, and the one program that opens it.
+/// A file of ROOT's `share/`, and the one program that opens it.
 ///
 /// **`assets = [..]` names a directory and sweeps it whole**, so a config that
-/// builds no reader for a file still shipped it: these two are 19.7 MB of the
-/// 20.8 MB `assets/` holds. Named here rather than per config, because which program
-/// opens a file is a property of the program and not of any one image, and a
-/// list repeated in five configs is a list that goes stale in four of them.
-/// The names are ROOT's, which [`collect`] lower-cases.
-/// `only_doom_opens_doom_s_assets` is what keeps the right-hand column true.
-const OPENED_BY: &[(&str, &str)] = &[("doom1.wad", "doom"), ("soundfont.sf2", "doom")];
+/// builds no reader for a file would still ship it. Named here rather than per
+/// config, because which program opens a file is a property of the program and
+/// not of any one image, and a list repeated in five configs is a list that goes
+/// stale in four of them. The names are ROOT's, which [`collect`] lower-cases;
+/// `wallpaper.rgb` is the build's own drawing ([`crate::wallpaper`]) rather than
+/// a swept file. `only_its_reader_opens_an_owned_file` is what keeps the
+/// right-hand column true.
+const OPENED_BY: &[(&str, &str)] =
+    &[("doom1.wad", "doom"), ("soundfont.sf2", "doom"), ("wallpaper.rgb", "compositor")];
+
+/// Whether ROOT's `share/<name>` goes into an image building exactly
+/// `programs`: unless [`OPENED_BY`] names a reader the image does not build.
+pub fn wanted(name: &str, programs: &BTreeSet<&str>) -> bool {
+    match OPENED_BY.iter().find(|(file, _)| *file == name) {
+        Some((_, reader)) if !programs.contains(reader) => {
+            eprintln!("assets: leaving out share/{name} — only /system/bin/{reader} opens it and this image builds no {reader}");
+            false
+        }
+        _ => true,
+    }
+}
 
 /// ROOT's asset files, for an image building exactly `programs`.
 pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u8>)> {
@@ -274,18 +288,7 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                 eprintln!("assets: skipping {} — git does not track it", path.display());
                 return false;
             }
-            let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-            if let Some((_, reader)) = OPENED_BY.iter().find(|(asset, _)| *asset == name) {
-                if !programs.contains(reader) {
-                    eprintln!(
-                        "assets: leaving out {} — only /system/bin/{reader} opens it and this image \
-                         builds no {reader}",
-                        path.display()
-                    );
-                    return false;
-                }
-            }
-            true
+            wanted(&path.file_name().unwrap_or_default().to_string_lossy().to_lowercase(), programs)
         };
 
         // Pre-rasterize TTF fonts
@@ -296,23 +299,6 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                 let stem = path.file_stem().unwrap().to_str().unwrap();
                 let font_data = rasterize_font(&ttf, 8, 16);
                 files.push((format!("share/fonts/{stem}-8x16.font"), font_data));
-            }
-        }
-
-        // Pre-decode JPEG images
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "jpg") && ships(&path) {
-                let jpg_data = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-                let img = image::load_from_memory_with_format(&jpg_data, image::ImageFormat::Jpeg)
-                    .expect("Failed to decode JPEG")
-                    .to_rgb8();
-                let stem = path.file_stem().unwrap().to_str().unwrap();
-                let mut data = Vec::new();
-                data.extend((img.width() as u32).to_le_bytes());
-                data.extend((img.height() as u32).to_le_bytes());
-                data.extend(img.as_raw());
-                files.push((format!("share/{stem}.rgb"), data));
             }
         }
 
@@ -332,7 +318,7 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                 if path.is_dir() {
                     let subdir = path.file_name().unwrap().to_str().unwrap();
                     add_dir(&path, &format!("{prefix}{subdir}/"), ships, files);
-                } else if !system_font && path.extension().is_some_and(|e| e == "ttf" || e == "jpg") {
+                } else if !system_font && path.extension().is_some_and(|e| e == "ttf") {
                     continue;
                 } else if ships(&path) {
                     let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
@@ -453,7 +439,7 @@ mod tests {
     #[test]
     fn an_owned_asset_ships_only_where_its_reader_does() {
         let dir = toyos_tmpdir::TempDir::new("owned");
-        for name in ["doom1.wad", "soundfont.sf2", "wallpaper.rgb"] {
+        for name in ["doom1.wad", "soundfont.sf2", "readme.txt"] {
             fs::write(dir.join(name), b"tracked").unwrap_or_else(|e| panic!("write {name}: {e}"));
         }
         let git = |args: &[&str]| {
@@ -465,7 +451,7 @@ mod tests {
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         };
         git(&["init", "-q"]);
-        git(&["add", "doom1.wad", "soundfont.sf2", "wallpaper.rgb"]);
+        git(&["add", "doom1.wad", "soundfont.sf2", "readme.txt"]);
 
         let shipped = |programs: BTreeSet<&str>| -> BTreeSet<String> {
             collect(&[dir.display().to_string()], &programs)
@@ -481,13 +467,13 @@ mod tests {
             BTreeSet::from([
                 "share/doom1.wad".to_string(),
                 "share/soundfont.sf2".to_string(),
-                "share/wallpaper.rgb".to_string(),
+                "share/readme.txt".to_string(),
             ]),
             "an image that builds doom did not get doom's assets"
         );
         assert_eq!(
             without,
-            BTreeSet::from(["share/wallpaper.rgb".to_string()]),
+            BTreeSet::from(["share/readme.txt".to_string()]),
             "an image with no doom in it still carries what only doom opens"
         );
     }
@@ -552,10 +538,9 @@ mod tests {
     ///
     /// The claim is that one program opens the file, so a second program naming
     /// its path is an image losing a file it needs. `userland/` only: the
-    /// harness names both paths in assertions about doom, and it runs on the
-    /// host.
+    /// harness names doom's paths in its assertions, and it runs on the host.
     #[test]
-    fn only_doom_opens_doom_s_assets() {
+    fn only_its_reader_opens_an_owned_file() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         for (asset, reader) in OPENED_BY {
             let out = Command::new("git")

@@ -54,6 +54,11 @@ pub const MAX_ENTRY_ARRAY_BYTES: u64 = 128 * 1024;
 const MIN_HEADER_BYTES: u32 = 92;
 /// The smallest a partition entry may be, from the UEFI specification.
 const MIN_ENTRY_BYTES: u32 = 128;
+/// UTF-16 units in an entry's name field, from byte 56 to the end of the
+/// 128 bytes every entry has.
+const NAME_UNITS: usize = 36;
+/// An entry's name field whole, zero units included.
+type Name = [u16; NAME_UNITS];
 const HEADER_SIGNATURE: &[u8; 8] = b"EFI PART";
 const HEADER_REVISION_1_0: u32 = 0x0001_0000;
 /// The MBR partition type that says "this disk is GPT, keep out".
@@ -164,11 +169,12 @@ pub struct Partition {
     first_lba: u64,
     last_lba: u64,
     lba_count: NonZeroU64,
+    name: Name,
 }
 
 impl Partition {
     /// `stated`, if its blocks are a partition inside `header`'s usable range.
-    fn place(stated: Stated, header: &Header) -> Result<Self, Stated> {
+    fn place(stated: Stated, name: Name, header: &Header) -> Result<Self, Stated> {
         if stated.first < header.first_usable_lba || stated.last > header.last_usable_lba {
             return Err(stated);
         }
@@ -185,6 +191,7 @@ impl Partition {
             first_lba: stated.first,
             last_lba: stated.last,
             lba_count,
+            name,
         })
     }
 
@@ -212,6 +219,12 @@ impl Partition {
 
     pub const fn lba_count(&self) -> NonZeroU64 {
         self.lba_count
+    }
+
+    /// The entry's name, UTF-16 as the table states it, up to the first zero
+    /// unit: what it says is the caller's to decode.
+    pub fn name(&self) -> &[u16] {
+        self.name.split(|unit| *unit == 0).next().unwrap_or_default()
     }
 
     /// Whether this is an ESP *by type*. A sanity check for a log line and
@@ -455,13 +468,13 @@ fn scan_type_at(
     let mut slots = out.iter_mut();
     // Meaningless unless `walk_entries` returns `Ok`: the array's CRC is
     // checked at the end of the walk, and an `Err` hands the caller nothing.
-    let used_entries = walk_entries(dev, &header, disk.lba, &mut |stated| {
+    let used_entries = walk_entries(dev, &header, disk.lba, &mut |stated, name| {
         if !keep(stated.type_guid) {
             return;
         }
         matched = matched.saturating_add(1);
         if let Some(slot) = slots.next() {
-            *slot = Some(Partition::place(stated, &header));
+            *slot = Some(Partition::place(stated, name, &header));
         }
     })?;
 
@@ -483,10 +496,10 @@ fn locate_at(
     let header = parse_header(block, disk, header_lba)?;
 
     let (found, used_entries) = scan_entries(dev, &header, target, disk.lba)?;
-    let Some(stated) = found else {
+    let Some((stated, name)) = found else {
         return Err(GptError::NotFound { used_entries });
     };
-    let partition = Partition::place(stated, &header)
+    let partition = Partition::place(stated, name, &header)
         .map_err(|stated| GptError::PartitionRange { first: stated.first, last: stated.last })?;
     check_no_overlap(dev, &header, &partition, disk.lba)?;
 
@@ -682,7 +695,7 @@ fn walk_entries(
     dev: &mut dyn Sectors,
     header: &Header,
     lba: LbaSize,
-    visit: &mut dyn FnMut(Stated),
+    visit: &mut dyn FnMut(Stated, Name),
 ) -> Result<u32, GptError> {
     let mut block: Block = [0; 4096];
     let block = lba.of_block(&mut block);
@@ -699,12 +712,12 @@ fn walk_entries(
         for entry in block.chunks_exact(header.entry_len) {
             let Some(index) = indices.next() else { break };
             crc.update(entry);
-            let Some(stated) = Stated::decode(index, entry) else {
+            let (Some(stated), Some(name)) = (Stated::decode(index, entry), name(entry)) else {
                 return Err(GptError::EntrySize(header.entry_bytes));
             };
             if !stated.type_guid.is_zero() {
                 used = used.saturating_add(1);
-                visit(stated);
+                visit(stated, name);
             }
         }
     }
@@ -735,17 +748,17 @@ fn scan_entries(
     header: &Header,
     target: Guid,
     lba: LbaSize,
-) -> Result<(Option<Stated>, u32), GptError> {
-    let mut found: Option<Stated> = None;
+) -> Result<(Option<(Stated, Name)>, u32), GptError> {
+    let mut found: Option<(Stated, Name)> = None;
     let mut duplicate: Option<(u32, u32)> = None;
 
-    let used = walk_entries(dev, header, lba, &mut |stated| {
+    let used = walk_entries(dev, header, lba, &mut |stated, name| {
         if stated.unique_guid != target {
             return;
         }
         match &found {
-            None => found = Some(stated),
-            Some(first) if duplicate.is_none() => duplicate = Some((first.index, stated.index)),
+            None => found = Some((stated, name)),
+            Some((first, _)) if duplicate.is_none() => duplicate = Some((first.index, stated.index)),
             Some(_) => {}
         }
     })?;
@@ -769,7 +782,7 @@ fn check_no_overlap(
     lba: LbaSize,
 ) -> Result<(), GptError> {
     let mut overlap = None;
-    walk_entries(dev, header, lba, &mut |other| {
+    walk_entries(dev, header, lba, &mut |other, _| {
         if overlap.is_none()
             && other.index != matched.index
             && other.first <= other.last
@@ -788,6 +801,16 @@ fn check_no_overlap(
 /// `N` bytes of `buf` from `at`, or `None` where `buf` ends first.
 fn bytes<const N: usize>(buf: &[u8], at: usize) -> Option<[u8; N]> {
     buf.get(at..)?.first_chunk::<N>().copied()
+}
+
+/// An entry's name field as UTF-16 units, `None` only where `entry` ends first.
+fn name(entry: &[u8]) -> Option<Name> {
+    let field: [u8; 72] = bytes(entry, 56)?;
+    let mut units = [0; NAME_UNITS];
+    for (unit, pair) in units.iter_mut().zip(field.as_chunks::<2>().0) {
+        *unit = u16::from_le_bytes(*pair);
+    }
+    Some(units)
 }
 
 fn le_u32(buf: &[u8], at: usize) -> Option<u32> {
