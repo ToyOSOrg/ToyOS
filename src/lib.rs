@@ -35,6 +35,7 @@ pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;
 pub mod metaltimings;
+pub mod miscompile;
 pub mod n2;
 pub mod release;
 pub mod sdkversion;
