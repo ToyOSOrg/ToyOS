@@ -489,6 +489,19 @@ impl Shard {
         done
     }
 
+    /// [`Tcp::recv_with`]: `take` is shown the oldest bytes held and answers how many it took.
+    pub fn recv_with(&mut self, now: Instant, id: ConnId, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, toyos_net_tcp::Error> {
+        let done = self.tcp.recv_with(now, id, take);
+        self.settle(now);
+        done
+    }
+
+    pub fn set_options(&mut self, now: Instant, id: ConnId, options: toyos_net_tcp::Options) -> Result<(), toyos_net_tcp::Error> {
+        let done = self.tcp.set_options(now, id, options);
+        self.settle(now);
+        done
+    }
+
     pub fn shutdown_write(&mut self, now: Instant, id: ConnId) -> Result<(), toyos_net_tcp::Error> {
         let done = self.tcp.shutdown_write(now, id);
         self.settle(now);

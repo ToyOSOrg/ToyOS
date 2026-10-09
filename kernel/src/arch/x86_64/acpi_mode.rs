@@ -41,6 +41,19 @@
 //! whose CPUs holds registers that are on and not those (`mtrr::compare`):
 //! the read is made on whichever CPU the call runs on.
 //!
+//! **A byte the holder's AML stores to `SMI_CMD` is a call into the firmware,
+//! made here and by nobody else** ([`call`]): the policy answers which byte,
+//! `smi_cmd::write` makes it on the boot processor and returns once the
+//! firmware's handler has, and the holder's thread is the one that waits and
+//! is charged. What the handler does with the byte, and with whatever the
+//! holder wrote to firmware's memory before it, nothing here bounds: system
+//! management mode outranks this kernel. What is bounded is who, a holder of
+//! the claim; when, never once the stop has begun; where, the boot processor;
+//! which byte, none the FADT gives a meaning; and how often,
+//! `firmware::CALLS` in any second, because the AML that calls retries a
+//! call its handler has not answered and each call stops every CPU. A call
+//! past that is refused to the caller by name and written nowhere.
+//!
 //! **The firmware's Global Lock is taken and given back here** (ACPI 6.5
 //! §5.2.10.1), by compare-and-exchange on the FACS's lock word; a release the
 //! firmware asked for meanwhile is signalled by `GBL_RLS` in `PM1a_CNT`
@@ -70,7 +83,9 @@ use core::sync::atomic::AtomicU32;
 use toyos_abi::acpi::{Access, AcpiInfo, Block, Refused, Space, Width, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::SyscallError;
 use toyos_acpi::{Ec, FixedHardware, LegacyMode, PowerButton};
-use toyos_userbound::firmware::{self, Ecam, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt};
+use toyos_userbound::firmware::{
+    self, CallRate, Ecam, FirmwareCall, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
+};
 use toyos_userbound::Ports;
 
 use super::pio::{self, Declared, TakenBack};
@@ -101,8 +116,6 @@ const HANDBACK: Duration = Duration::from_millis(100);
 struct Hardware {
     fixed: FixedHardware,
     control: Declared,
-    /// `SMI_CMD`, declared to `smi_cmd`, and what is written to it.
-    legacy: Option<LegacyMode>,
     /// Or why it is none a holder can be handed.
     ec: Result<Ec, String>,
     rsdp: u64,
@@ -146,6 +159,16 @@ struct Holder {
     locked: bool,
     /// The holder supplied the power-off's sleep type: it supplies no second.
     supplied: bool,
+    /// The calls into the firmware made for every holder there has been: a
+    /// holder that dies and is started again begins no new second.
+    calls: Calls,
+}
+
+/// The firmware calls made for the claim's holders, and which have been said.
+struct Calls {
+    rate: CallRate,
+    /// A bit a byte, set once a call of it has been said.
+    said: [u64; 4],
 }
 
 /// Held across everything this kernel does for the claim's holder, from the
@@ -154,7 +177,11 @@ struct Holder {
 /// (`object::Held`), and `pcidev`'s machine record and then `paging`'s record
 /// of windows under it; nothing holding one of those two takes this or a
 /// claim's.
-static HOLDER: Lock<Holder> = Lock::new(Holder { locked: false, supplied: false });
+static HOLDER: Lock<Holder> = Lock::new(Holder {
+    locked: false,
+    supplied: false,
+    calls: Calls { rate: CallRate::new(), said: [0; 4] },
+});
 
 /// The right to act for the claim's holder, held across the act; none once
 /// the stop has begun. The claim is there for the whole of the act: its row
@@ -215,10 +242,16 @@ pub fn init(rsdp_addr: u64) {
     let Some(control) = super::power::pm1a_control() else {
         return log!("acpi: no ACPI row — no PM1a control block declared");
     };
-    if let Some(Err(why)) = fixed.legacy.map(|legacy| smi_cmd::declare(legacy.smi_cmd)) {
+    let facs = toyos_acpi::facs(fadt.phys(), &fadt);
+    // A FACS this kernel cannot read leaves `S4BIOS_F` unread, and the byte kept.
+    let s4bios = match facs {
+        Ok(facs) => facs.s4bios,
+        Err(toyos_acpi::FacsRefused::Absent) => false,
+        Err(_) => true,
+    };
+    if let Some(Err(why)) = fixed.smi_cmd.map(|named| smi_cmd::declare(named.port, named.named(s4bios))) {
         return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}");
     }
-    let legacy = fixed.legacy;
     let ec = embedded_controller(rsdp_addr, fixed.gpe0);
     let Some(sci) = super::ioapic::sci(fixed.sci_int) else {
         return log!("acpi: no ACPI row — no I/O APIC carries the SCI");
@@ -252,8 +285,8 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(rsdp_addr), global_lock(&fadt));
-    let hardware = Hardware { fixed, control, legacy, ec, rsdp: rsdp_addr, ecam, lock };
+    let (ecam, lock) = (ecam(rsdp_addr), global_lock(facs));
+    let hardware = Hardware { fixed, control, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -275,12 +308,12 @@ fn ecam(rsdp_addr: u64) -> Option<Ecam> {
 /// The Global Lock of the FACS the FADT names, said by name where there is
 /// none or it is none this kernel takes: a FACS that does not decode, and one
 /// whose lock word is not in memory the firmware's map gives the firmware.
-fn global_lock<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>) -> GlobalLock {
+fn global_lock(facs: Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>) -> GlobalLock {
     let refused = |why: core::fmt::Arguments| {
         log!("acpi: a Global Lock this kernel cannot take — {why}: every take is refused");
         GlobalLock::Refused
     };
-    let facs = match toyos_acpi::facs(fadt.phys(), fadt) {
+    let facs = match facs {
         Ok(facs) => facs,
         Err(toyos_acpi::FacsRefused::Absent) => {
             log!("acpi: no Global Lock — the FADT names no FACS: every take is answered taken");
@@ -343,6 +376,13 @@ fn info(hardware: &Hardware) -> AcpiInfo {
     }
 }
 
+/// `SMI_CMD` and the way out of legacy mode and back, where the FADT names
+/// all three.
+fn legacy(hardware: &Hardware) -> Option<(u16, LegacyMode)> {
+    let named = hardware.fixed.smi_cmd?;
+    Some((named.port, named.legacy()?))
+}
+
 fn sci_enabled(hardware: &Hardware) -> bool {
     cpu::inw(hardware.control.port(0)) & SCI_EN != 0
 }
@@ -360,7 +400,7 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         log!("acpi: this machine stays in legacy mode — {why}");
         Err(ClaimError::Unusable)
     };
-    let Some(legacy) = hardware.legacy else {
+    let Some((port, legacy)) = legacy(hardware) else {
         return refuse("the FADT names no SMI_CMD, ACPI_ENABLE and ACPI_DISABLE to leave it and come back with");
     };
     let enable = legacy.acpi_enable.get();
@@ -394,8 +434,7 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         }
     }
     log!(
-        "acpi: ACPI mode: ACPI_ENABLE {enable:#04x} written to SMI_CMD {:#x} {write}; SCI_EN set {} after",
-        legacy.smi_cmd,
+        "acpi: ACPI mode: ACPI_ENABLE {enable:#04x} written to SMI_CMD {port:#x} {write}; SCI_EN set {} after",
         crate::clock::now() - written,
     );
     Ok(())
@@ -424,7 +463,7 @@ pub fn release() {
 /// the hardware's to reset (ACPI 6.5 §4.8.2.5, Table 4.13), so it is not
 /// cleared here before the write as Table 5.9's `ACPI_DISABLE` has it.
 fn leave(hardware: &Hardware) {
-    let legacy = hardware.legacy.expect("ACPI_ENABLE was written to it");
+    let (port, legacy) = legacy(hardware).expect("ACPI_ENABLE was written to it");
     let disable = legacy.acpi_disable.get();
     let Some(write) = smi_cmd::write(disable) else {
         return log!("acpi: ACPI_DISABLE not written: the machine is stopping, and its power-off owns ACPI mode");
@@ -438,19 +477,17 @@ fn leave(hardware: &Hardware) {
         }
         if by.reached(crate::clock::now()) {
             return log!(
-                "acpi: still in ACPI mode: ACPI_DISABLE {disable:#04x} written to SMI_CMD {:#x} {write}; PM1a_CNT reads \
+                "acpi: still in ACPI mode: ACPI_DISABLE {disable:#04x} written to SMI_CMD {port:#x} {write}; PM1a_CNT reads \
                  {control:#06x} {HANDBACK} after, SCI_EN still set: nothing serves this machine's buttons until a holder \
-                 claims them",
-                legacy.smi_cmd
+                 claims them"
             );
         }
         core::hint::spin_loop();
     };
     ENABLED.store(false, Ordering::Relaxed);
     log!(
-        "acpi: legacy mode again: ACPI_DISABLE {disable:#04x} written to SMI_CMD {:#x} {write}; PM1a_CNT reads \
+        "acpi: legacy mode again: ACPI_DISABLE {disable:#04x} written to SMI_CMD {port:#x} {write}; PM1a_CNT reads \
          {control:#06x} {} after, SCI_EN clear",
-        legacy.smi_cmd,
         crate::clock::now() - written,
     );
 }
@@ -727,24 +764,59 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
     }
 }
 
+/// Why an access was not made: the policy's refusal, which goes back in the
+/// request, or the stop, which begun after the claim's holder was let act.
+enum Unmade {
+    Refused(Refused),
+    Stopping,
+}
+
+impl From<Refused> for Unmade {
+    fn from(refused: Refused) -> Self {
+        Self::Refused(refused)
+    }
+}
+
 /// One port access, decided and made.
-fn port(_acting: &Holder, address: u64, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+fn port(hardware: &Hardware, acting: &mut Holder, address: u64, width: Width, write: Option<u64>) -> Result<u64, Unmade> {
     let port = u16::try_from(address).map_err(|_| Refused::PortSpan)?;
-    let passed = firmware::port(|port| pio::standing(port, ROW), port, width, write.is_some())?;
-    match write {
-        None => Ok(read_port(&passed)),
-        Some(value) => {
+    match (firmware::port(|port| pio::standing(port, ROW), port, width, write), write) {
+        (PortVerdict::Through(passed), None) => Ok(read_port(&passed)),
+        (PortVerdict::Through(passed), Some(value)) => {
             write_port(&passed, value);
             Ok(0)
         }
+        (PortVerdict::FirmwareCall(asked), _) => call(hardware, &mut acting.calls, asked),
+        (PortVerdict::Refused(refused), _) => Err(refused.into()),
     }
+}
+
+/// Make the call into the firmware the policy passed, on the boot processor,
+/// or refuse it past the rate; returned from once the firmware's handler has.
+/// The first call of each byte is said with what the boot processor read
+/// around it; every call is counted beside the `out` (`smi_cmd::counted`),
+/// and a refusal is the caller's to say.
+fn call(hardware: &Hardware, calls: &mut Calls, asked: FirmwareCall) -> Result<u64, Unmade> {
+    if !calls.rate.admit(crate::clock::nanos_since_boot()) {
+        return Err(Refused::CommandRate.into());
+    }
+    let value = asked.value();
+    let written = smi_cmd::write(value).ok_or(Unmade::Stopping)?;
+    let (word, bit) = (&mut calls.said[usize::from(value / 64)], 1u64 << (value % 64));
+    if *word & bit == 0 {
+        *word |= bit;
+        let port = hardware.fixed.smi_cmd.expect("the policy passed a call to the SMI_CMD the FADT names").port;
+        log!("acpi: firmware call {value:#04x} written to SMI_CMD {port:#x} {written}; the first of that byte");
+    }
+    Ok(0)
 }
 
 /// Make the access `request` names for the holder of the claim that lends
 /// `row`, or refuse it by name: a read's value, the refusal and the memory
 /// type are written back into it. `Err` is a request that names no space,
 /// width or direction, a value wider than its width, or a reserved byte that
-/// is not zero; and `Gone` once the stop has begun.
+/// is not zero; and `Gone` once the stop has begun, whether before the access
+/// or under a call into the firmware it asked for.
 pub fn access(row: &isa::Row, request: &mut Access) -> Result<(), SyscallError> {
     let hardware = hardware().expect("a claimed row has its hardware");
     let (Some(space), Some(width)) = (Space::from_raw(request.space), Width::from_raw(request.width)) else {
@@ -758,18 +830,18 @@ pub fn access(row: &isa::Row, request: &mut Access) -> Result<(), SyscallError> 
     if request.reserved != [0; 3] {
         return Err(SyscallError::InvalidArgument);
     }
-    let acting = acting(row)?;
+    let mut acting = acting(row)?;
     request.memory_type = toyos_abi::acpi::UNLISTED;
     let made = match space {
-        Space::SystemMemory => memory(hardware, &acting, request, width, write),
-        Space::SystemIo => port(&acting, request.address, width, write),
+        Space::SystemMemory => memory(hardware, &acting, request, width, write).map_err(Unmade::from),
+        Space::SystemIo => port(hardware, &mut acting, request.address, width, write),
         Space::PciConfig => {
             // `toyos_abi::acpi::pci_address`: nothing above the segment group.
             let at = request.address;
             let function = PciFunction { bus: (at >> 24) as u8, device: (at >> 19 & 0x1F) as u8, function: (at >> 16 & 7) as u8 };
             match at >> 48 {
-                0 => config(hardware, &acting, (at >> 32) as u16, function, at as u16, width, write.is_some()),
-                _ => Err(Refused::ConfigUnreachable),
+                0 => config(hardware, &acting, (at >> 32) as u16, function, at as u16, width, write.is_some()).map_err(Unmade::from),
+                _ => Err(Refused::ConfigUnreachable.into()),
             }
         }
     };
@@ -780,7 +852,8 @@ pub fn access(row: &isa::Row, request: &mut Access) -> Result<(), SyscallError> 
                 request.value = value;
             }
         }
-        Err(refused) => request.refused = refused as u8,
+        Err(Unmade::Refused(refused)) => request.refused = refused as u8,
+        Err(Unmade::Stopping) => return Err(SyscallError::Gone),
     }
     Ok(())
 }

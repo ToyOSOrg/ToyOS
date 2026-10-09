@@ -14,12 +14,31 @@
 //! whether it was idle or busy, or from a lock's spin where its interrupts are
 //! closed ([`serve_here`]), and spins until that round is answered. [`write`]
 //! therefore returns only once the `out` has retired, which is after the
-//! firmware's handler has. A boot processor that answers neither way within
-//! [`DEAF_CPU`] is a panic, as one that answers no TLB shootdown is.
+//! firmware's handler has.
+//!
+//! **That wait has two subjects, and neither's time is inside the other's**
+//! (`kernel::bootwrite`). The boot processor says it has the write before it
+//! makes it: the `out` takes the [`Taken`] that saying so returns. Until then
+//! the asker waits for its kick to be taken, and a boot processor that has
+//! not taken it in [`DEAF_CPU`] is a panic, as one that answers no TLB
+//! shootdown is. From then it waits for the firmware, whose handler no
+//! instruction of this kernel's can end: one that holds the boot processor
+//! [`DEAF_CPU`]'s span is a panic that says the firmware held it
+//! ([`held_too_long`]), the asker's where the asker runs meanwhile and the
+//! boot processor's own once the `out` retires, so whichever CPU asked. What
+//! a handler that outlasts each of this kernel's bounds meets is
+//! `issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`'s.
 //!
 //! The port is this module's alone, so the `out` in [`answer`] is the only
 //! one the kernel can make to it, and [`answer`] reads which CPU it is on
 //! with interrupts closed beside that `out`: no caller's state decides it.
+//! It is counted there too, with the time it held the boot processor
+//! ([`counted`]), whoever asked for it.
+//!
+//! **The `acpi` claim's holder writes no byte here: it asks for one**, and the
+//! declaration says which bytes are never written for it
+//! (`toyos_userbound::Mediated::Command`): those the FADT gives a meaning,
+//! which are this kernel's own commands.
 //!
 //! **None is made once the stop has begun**: the power-off waits out a write
 //! in flight ([`settle`]) and then owns the hardware, and an SMI it did not
@@ -27,15 +46,16 @@
 
 use core::fmt;
 use alloc::string::String;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 
-use toyos_userbound::{Mediated, Ports, Undeclared};
+use toyos_userbound::{KeptCommands, Mediated, Ports, Undeclared};
 
 use super::pio::{self, Slot, TakenBack};
 use super::{apic, cpu, percpu, IrqGuard};
 use crate::shootdown::Shootdown;
 use crate::sync::Lock;
-use crate::time::{Deadline, Duration, DEAF_CPU};
+use crate::time::{Duration, DEAF_CPU};
+use kernel::bootwrite::{self, Turn};
 
 /// The boot processor.
 const BOOT: u32 = 0;
@@ -49,9 +69,18 @@ static WRITING: Lock<()> = Lock::new(());
 static ROUND: Shootdown = Shootdown::new();
 /// What the round in flight writes: stored before the round is issued, read by its answer.
 static ASKED: AtomicU8 = AtomicU8::new(0);
+/// When the boot processor took the round in flight, in nanoseconds since
+/// boot: stored by [`take`] before the `out`, [`UNTAKEN`] until then.
+static TAKEN_NS: AtomicU64 = AtomicU64::new(UNTAKEN);
+/// No time: the clock saturates before it reads this.
+const UNTAKEN: u64 = u64::MAX;
 /// What the last answer read, published by the round's own answer.
 static ON: AtomicU32 = AtomicU32::new(0);
 static HELD_NS: AtomicU64 = AtomicU64::new(0);
+/// Every write made and the nanoseconds they held the boot processor, which
+/// alone writes and reads them.
+static WRITES: AtomicU64 = AtomicU64::new(0);
+static SPENT_NS: AtomicU64 = AtomicU64::new(0);
 static SMIS: [AtomicU64; 2] = [const { AtomicU64::new(UNREAD) }; 2];
 
 /// No SMI count: the register holds 32 bits.
@@ -81,12 +110,19 @@ impl fmt::Display for Written {
     }
 }
 
-/// Declare the port the FADT names. Boot's. The `acpi` claim's holder reads it
-/// and never writes it: a write is a command to the firmware, and [`write`]
-/// makes every one.
-pub fn declare(port: u16) -> Result<(), Undeclared> {
-    PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::ReadOnly)?);
+/// Declare the port the FADT names, and the values it names for it. Boot's.
+/// The `acpi` claim's holder reads it and never writes it: a write is a
+/// command to the firmware, and [`write`] makes every one.
+pub fn declare(port: u16, named: [Option<u8>; 5]) -> Result<(), Undeclared> {
+    PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::Command(KeptCommands(named)))?);
     Ok(())
+}
+
+/// How many writes this CPU has made and the nanoseconds they held it, on
+/// the boot processor of a machine that names the port; `None` on every
+/// other CPU, which makes none.
+pub fn counted() -> Option<(u64, u64)> {
+    (percpu::cpu_id() == BOOT && PORT.get().is_some()).then(|| (WRITES.load(Relaxed), SPENT_NS.load(Relaxed)))
 }
 
 /// Write `value` to `SMI_CMD` on the boot processor and return once it is
@@ -99,17 +135,25 @@ pub fn write(value: u8) -> Option<Written> {
     }
     let asked_from = percpu::cpu_id();
     ASKED.store(value, Relaxed);
+    TAKEN_NS.store(UNTAKEN, Relaxed);
     let generation = ROUND.issue();
     // The boot processor's own ask, unless a kick taken since the issue has answered it already.
     answer();
     if !ROUND.served(BOOT as usize, generation) {
         apic::kick_cpu(BOOT);
-        let by = Deadline::at(crate::clock::now() + Duration::from_nanos(DEAF_CPU.nanos()));
-        while !ROUND.served(BOOT as usize, generation) {
-            assert!(
-                !by.reached(crate::clock::now()),
-                "smi_cmd: the boot processor has not written {value:#04x} for cpu{asked_from} in {DEAF_CPU}: it is not taking interrupts"
-            );
+        let asked_ns = crate::clock::nanos_since_boot();
+        loop {
+            // The clock before what it judges: a write found untaken or unretired was so at the time read.
+            let now_ns = crate::clock::nanos_since_boot();
+            let taken_ns = Some(TAKEN_NS.load(Acquire)).filter(|&at| at != UNTAKEN);
+            match bootwrite::turn(DEAF_CPU.nanos(), asked_ns, taken_ns, ROUND.served(BOOT as usize, generation), now_ns) {
+                Turn::Retired => break,
+                Turn::Wait => {}
+                Turn::Deaf => panic!(
+                    "smi_cmd: the boot processor has not taken cpu{asked_from}'s kick to write {value:#04x} in {DEAF_CPU}: it is not taking interrupts"
+                ),
+                Turn::Outlasted => held_too_long(value, None),
+            }
             core::hint::spin_loop();
             // A caller with interrupts closed owes the boot processor's shootdown an answer while it waits.
             super::tlb::poll();
@@ -150,14 +194,56 @@ fn answer() {
         let value = ASKED.load(Relaxed);
         let smi = || super::counters::read().smi.unwrap_or(UNREAD);
         let before = smi();
-        let from = crate::clock::now();
-        // SAFETY: `SMI_CMD`, declared; the value is one the FADT names for it, by `write`'s caller.
-        unsafe { cpu::outb(port, value) };
-        HELD_NS.store((crate::clock::now() - from).nanos(), Relaxed);
+        let held = out(take(), port, value);
+        if bootwrite::outlasted(DEAF_CPU.nanos(), held) {
+            held_too_long(value, Some(held));
+        }
+        HELD_NS.store(held, Relaxed);
+        // One writer, this CPU with interrupts closed: no update is lost.
+        WRITES.store(WRITES.load(Relaxed) + 1, Relaxed);
+        SPENT_NS.store(SPENT_NS.load(Relaxed) + held, Relaxed);
         SMIS[0].store(before, Relaxed);
         SMIS[1].store(smi(), Relaxed);
         ON.store(percpu::cpu_id(), Relaxed);
     });
+}
+
+/// The boot processor has said it has the round in flight. The `out` is made
+/// with one, so none is made before its asker can read that its kick was
+/// taken.
+struct Taken {
+    at_ns: u64,
+}
+
+fn take() -> Taken {
+    let at_ns = crate::clock::nanos_since_boot();
+    TAKEN_NS.store(at_ns, Release);
+    Taken { at_ns }
+}
+
+/// The one `out` to the port, and the nanoseconds it held this CPU: to after
+/// the firmware's handler, where the write raises an SMI.
+fn out(taken: Taken, port: pio::Port, value: u8) -> u64 {
+    // SAFETY: `SMI_CMD`, declared; the value is one the FADT names for it
+    // or one the mediation's policy passed, by `write`'s caller.
+    unsafe { cpu::outb(port, value) };
+    crate::clock::nanos_since_boot().saturating_sub(taken.at_ns)
+}
+
+/// The firmware has held the boot processor [`DEAF_CPU`]'s span in the
+/// handler of one write: for `Some` nanoseconds where the write has retired,
+/// and still where it has not.
+#[cold]
+#[inline(never)]
+fn held_too_long(value: u8, retired_after_ns: Option<u64>) -> ! {
+    match retired_after_ns {
+        Some(held_ns) => panic!(
+            "smi_cmd: the firmware held the boot processor {held_ns}ns in its handler for the {value:#04x} written to SMI_CMD: the bound is {DEAF_CPU}"
+        ),
+        None => panic!(
+            "smi_cmd: the firmware has held the boot processor in its handler for the {value:#04x} written to SMI_CMD and has not returned: the bound is {DEAF_CPU}"
+        ),
+    }
 }
 
 /// Wait out a write to `SMI_CMD` in flight: the stop has begun, so none follows.

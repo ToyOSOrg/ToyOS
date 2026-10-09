@@ -178,6 +178,8 @@ const FADT_SCI_INT: usize = 46;
 const FADT_SMI_CMD: usize = 48;
 const FADT_ACPI_ENABLE: usize = 52;
 const FADT_ACPI_DISABLE: usize = 53;
+const FADT_S4BIOS_REQ: usize = 54;
+const FADT_PSTATE_CNT: usize = 55;
 const FADT_PM1A_EVT_BLK: usize = 56;
 const FADT_PM1B_EVT_BLK: usize = 60;
 const FADT_PM1B_CNT_BLK: usize = 68;
@@ -187,6 +189,7 @@ const FADT_PM1_EVT_LEN: usize = 88;
 const FADT_PM1_CNT_LEN: usize = 89;
 const FADT_GPE0_BLK_LEN: usize = 92;
 const FADT_GPE1_BLK_LEN: usize = 93;
+const FADT_CST_CNT: usize = 95;
 const FADT_X_PM1A_EVT_BLK: usize = 148;
 const FADT_X_PM1B_EVT_BLK: usize = 160;
 const FADT_X_PM1A_CNT_BLK: usize = 172;
@@ -214,23 +217,72 @@ pub enum PowerButton {
     ControlMethod,
 }
 
-/// The way out of legacy mode and back into it: the port, and the value
-/// written to it for each.
+/// The way out of legacy mode and back into it: the value written to
+/// `SMI_CMD` for each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LegacyMode {
-    pub smi_cmd: u16,
     pub acpi_enable: NonZeroU8,
     pub acpi_disable: NonZeroU8,
+}
+
+/// `SMI_CMD`, and each value Table 5.9 gives a meaning written to it, as the
+/// FADT holds them. The table writes `SMI_CMD` in six of its rows, the
+/// port's own and these five, and names no other value for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SmiCmd {
+    pub port: u16,
+    /// "The value to write to SMI_CMD to disable SMI ownership of the ACPI
+    /// hardware registers. [...] This field is reserved and must be zero on
+    /// systems that do not support Legacy Mode."
+    pub acpi_enable: u8,
+    /// "The value to write to SMI_CMD to re-enable SMI ownership of the ACPI
+    /// hardware registers. [...] This field is reserved and must be zero on
+    /// systems that do not support Legacy Mode."
+    pub acpi_disable: u8,
+    /// "The value to write to SMI_CMD to enter the S4BIOS state. [...] A
+    /// value of zero in S4BIOS_F indicates S4BIOS_REQ is not supported." The
+    /// FACS's flag says whether this names a value, and a zero here does not.
+    pub s4bios_req: u8,
+    /// "If non-zero, this field contains the value OSPM writes to the
+    /// SMI_CMD register to assume processor performance state control
+    /// responsibility."
+    pub pstate_cnt: u8,
+    /// "If non-zero, this field contains the value OSPM writes to the
+    /// SMI_CMD register to indicate OS support for the _CST object and C
+    /// States Changed notification."
+    pub cst_cnt: u8,
+}
+
+impl SmiCmd {
+    /// `None` where `ACPI_ENABLE` or `ACPI_DISABLE` is zero: Table 5.9
+    /// reserves each as zero on a machine without legacy mode, and one that
+    /// names a way in and no way back is not taken in.
+    pub fn legacy(&self) -> Option<LegacyMode> {
+        Some(LegacyMode { acpi_enable: NonZeroU8::new(self.acpi_enable)?, acpi_disable: NonZeroU8::new(self.acpi_disable)? })
+    }
+
+    /// The five values, each `None` where the tables name none: `S4BIOS_REQ`
+    /// where `s4bios`, the FACS's `S4BIOS_F`, is clear, whatever the field
+    /// holds, and each other where its field is zero.
+    pub fn named(&self, s4bios: bool) -> [Option<u8>; 5] {
+        let nonzero = |value: u8| (value != 0).then_some(value);
+        [
+            nonzero(self.acpi_enable),
+            nonzero(self.acpi_disable),
+            s4bios.then_some(self.s4bios_req),
+            nonzero(self.pstate_cnt),
+            nonzero(self.cst_cnt),
+        ]
+    }
 }
 
 /// The fixed hardware an OS serves the SCI through, as the FADT names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FixedHardware {
     pub sci_int: u16,
-    /// `None` where the FADT leaves `SMI_CMD`, `ACPI_ENABLE` or `ACPI_DISABLE`
-    /// zero: Table 5.9 reserves each as zero on a machine without legacy mode,
-    /// and one that names a way in and no way back is not taken in.
-    pub legacy: Option<LegacyMode>,
+    /// `None` where the FADT leaves `SMI_CMD` zero, as Table 5.9 has a
+    /// machine without System Management Mode leave it.
+    pub smi_cmd: Option<SmiCmd>,
     pub pm1a_event: toyos_abi::acpi::Block,
     /// [`toyos_abi::acpi::Block::NONE`] where the machine has no GPE0 block.
     pub gpe0: toyos_abi::acpi::Block,
@@ -363,14 +415,20 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     };
 
     let smi_cmd = u32_at(FADT_SMI_CMD)?;
-    let smi_cmd = u16::try_from(smi_cmd).map_err(|_| FixedRefused::SmiCmd(smi_cmd))?;
-    let legacy = match (smi_cmd, NonZeroU8::new(byte(FADT_ACPI_ENABLE)?), NonZeroU8::new(byte(FADT_ACPI_DISABLE)?)) {
-        (1.., Some(acpi_enable), Some(acpi_disable)) => Some(LegacyMode { smi_cmd, acpi_enable, acpi_disable }),
-        _ => None,
+    let smi_cmd = match u16::try_from(smi_cmd).map_err(|_| FixedRefused::SmiCmd(smi_cmd))? {
+        0 => None,
+        port => Some(SmiCmd {
+            port,
+            acpi_enable: byte(FADT_ACPI_ENABLE)?,
+            acpi_disable: byte(FADT_ACPI_DISABLE)?,
+            s4bios_req: byte(FADT_S4BIOS_REQ)?,
+            pstate_cnt: byte(FADT_PSTATE_CNT)?,
+            cst_cnt: byte(FADT_CST_CNT)?,
+        }),
     };
     Ok(FixedHardware {
         sci_int: fadt.u16_at(FADT_SCI_INT).ok_or(short)?,
-        legacy,
+        smi_cmd,
         pm1a_event: block(Field::Pm1aEvent, pm1_event, pm1_event_len)?,
         gpe0,
         power_button: if flags & PWR_BUTTON == 0 { PowerButton::Fixed } else { PowerButton::ControlMethod },

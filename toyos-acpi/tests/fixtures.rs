@@ -3,15 +3,13 @@
 
 mod common;
 
-use core::num::NonZeroU8;
-
 use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     century_of, definition_blocks, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
     isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line,
-    Century, FixedHardware, IoApicEntry, LegacyMode, Line, MadtEntry, Polarity, PowerButton, Psci, Reset,
+    Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
     MADT_ENTRIES,
 };
@@ -220,11 +218,7 @@ fn the_q35_fadt_names_the_fixed_hardware_its_sci_is_served_through() {
         fixed_hardware(&fadt),
         Ok(FixedHardware {
             sci_int: 9,
-            legacy: Some(LegacyMode {
-                smi_cmd: 0xb2,
-                acpi_enable: NonZeroU8::new(0x02).expect("a command"),
-                acpi_disable: NonZeroU8::new(0x03).expect("a command"),
-            }),
+            smi_cmd: Some(SmiCmd { port: 0xb2, acpi_enable: 0x02, acpi_disable: 0x03, s4bios_req: 0, pstate_cnt: 0, cst_cnt: 0 }),
             pm1a_event: Block { port: 0x600, len: 4 },
             gpe0: Block { port: 0x620, len: 16 },
             power_button: PowerButton::Fixed,
