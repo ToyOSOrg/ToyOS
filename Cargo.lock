@@ -4639,6 +4639,7 @@ dependencies = [
  "gpt",
  "kernel",
  "libc",
+ "libm",
  "serde",
  "serde_json",
  "sha2 0.10.9",

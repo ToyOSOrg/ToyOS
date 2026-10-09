@@ -710,12 +710,12 @@ fn build_and_assemble(
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
+    let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
     if !config.assets.is_empty() {
-        let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
     }
-    if config.programs.contains_key(crate::wallpaper::READER) {
-        root_files.push((crate::wallpaper::PATH.to_string(), crate::wallpaper::rgb()));
+    if assets::wanted(crate::wallpaper::NAME, &programs) {
+        root_files.push((format!("share/{}", crate::wallpaper::NAME), crate::wallpaper::rgb()));
     }
 
     // Extra files (test binaries, shared libs)

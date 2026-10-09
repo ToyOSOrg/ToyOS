@@ -197,6 +197,9 @@ toyos-update = { path = "toyos-update", features = ["sign"] }
 # A throwaway key's seed and every GUID a partition table names, from the
 # operating system.
 getrandom = "0.3"
+# The wallpaper's `powf` and `expf`, in Rust and the same on every host, where
+# `f32`'s own call the host's C library and ROOT's UUID is derived from its bytes.
+libm = "0.2.16"
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }

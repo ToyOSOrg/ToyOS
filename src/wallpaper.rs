@@ -8,10 +8,13 @@
 //! All compositing is in **linear light**, converted to sRGB once per pixel at
 //! the end. Mixing two colours in sRGB mixes two numbers that were never linear
 //! to begin with, which is what sends a naive gradient grey through its middle.
+//!
+//! **The bytes are the same on every host**, because ROOT's UUID is derived
+//! from them: every transcendental is `libm`'s, never the host C library's, and
+//! `the_wallpaper_is_the_same_on_every_host` pins their digest.
 
-/// Where ROOT carries the wallpaper, and the one program that opens it.
-pub const PATH: &str = "share/wallpaper.rgb";
-pub const READER: &str = "compositor";
+/// The wallpaper's name in ROOT's `share/`.
+pub const NAME: &str = "wallpaper.rgb";
 
 /// Drawn at the panel this project targets, the T14's 1920x1080. The
 /// compositor scales whatever it is handed, so this is the size at which it
@@ -144,7 +147,7 @@ const RIDGE_OCTAVES: u32 = 4;
 /// span the screen.
 ///
 /// This is the difference between a sky and a diagram of three ellipses. Both
-/// octaves are slow: anything faster costs JPEG bits and reads as texture.
+/// octaves are slow: anything faster reads as texture.
 const DRIFT: f32 = 0.42;
 const DRIFT_CELLS: f32 = 2.4;
 
@@ -168,7 +171,7 @@ fn srgb_to_linear(c: u8) -> f32 {
     if s <= 0.040_45 {
         s / 12.92
     } else {
-        ((s + 0.055) / 1.055).powf(2.4)
+        libm::powf((s + 0.055) / 1.055, 2.4)
     }
 }
 
@@ -177,7 +180,7 @@ fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 {
         v * 12.92
     } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+        1.055 * libm::powf(v, 1.0 / 2.4) - 0.055
     }
 }
 
@@ -291,7 +294,7 @@ pub fn draw(width: u32, height: u32) -> Vec<u8> {
                 let dx = (u - light.x) / light.rx;
                 let dy = (v - light.y) / light.ry;
                 let warped = (dx * dx + dy * dy) * (1.0 + DRIFT * drift(u, v, light.seed));
-                let fall = (-warped).exp() * light.gain;
+                let fall = libm::expf(-warped) * light.gain;
                 for c in 0..3 {
                     rgb[c] += color[c] * fall;
                 }
@@ -329,7 +332,7 @@ pub fn draw(width: u32, height: u32) -> Vec<u8> {
     out
 }
 
-/// The file ROOT carries at [`PATH`]: the width and the height as
+/// The file ROOT carries as `share/`[`NAME`]: the width and the height as
 /// little-endian `u32`s, then [`draw`]'s RGB triples at that size, unencoded —
 /// a lossy codec here would throw away the dither first.
 pub fn rgb() -> Vec<u8> {
@@ -366,6 +369,15 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// The file that ships is the one every host draws: a host whose floating
+    /// point answers differently reds here rather than naming a different ROOT.
+    #[test]
+    fn the_wallpaper_is_the_same_on_every_host() {
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(rgb()).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(digest, "675f4fbc92985dc5e60b899fd869fa8e574b1147e2b1c9b42808a72bcfff1d91");
     }
 
     /// The file that ships, read the way the compositor reads it, does not band.
