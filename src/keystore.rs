@@ -1,7 +1,11 @@
-//! What every content-addressed product of the host ([`Keyed`]) shares: its
-//! [`Key`], the record each worktree keeps of the key it uses, and the sweep
-//! that removes a key no registered worktree records and nobody is making or
-//! using.
+//! What every content-addressed product of the host ([`Keyed`]) shares: the
+//! store it lives in ([`host`]), its [`Key`], and the sweep that removes a
+//! product nobody has used for [`KEPT`] and nobody is making or using.
+//!
+//! **One store per host, outside every checkout** ([`host`]). Whichever
+//! checkout or clone first needs a product makes it, and every other finds it:
+//! nothing in a store names the checkout that made it, in a record or as the
+//! target of a link. A runner's store is in its checkout (`src/release.rs`).
 //!
 //! **A key hashes what its product's build reads**: its sources, the
 //! configuration its build is given, the tools that run that build and the keys
@@ -10,25 +14,24 @@
 //! another run's cache, is the one this tree's build would make. An input a
 //! build reads and its key does not is a defect of the key.
 //!
-//! A product lives at `<store>/<key>/`, whole once its maker renamed it there;
-//! any other name beginning `<key>.` is one half-made or half-removed. A whole
-//! one is renamed out of the way before anything in it is removed ([`retire`]),
-//! so a sweep that is stopped leaves nothing at `<key>/` but what was made. A
-//! product may be read-only, directories and all: removing one gives its
-//! directories back their write permission first ([`remove`]). A hidden name in
-//! a store is a desktop's (Finder writes `.DS_Store` into any directory it
+//! A product lives at `<store>/<kind>/<key>/`, whole once its maker renamed it
+//! there; any other name beginning `<key>.` is one half-made or half-removed. A
+//! whole one is renamed out of the way before anything in it is removed
+//! ([`retire`]), so a sweep that is stopped leaves nothing at `<key>/` but what
+//! was made. A product may be read-only, directories and all: removing one gives
+//! its directories back their write permission first ([`remove`]). A hidden name
+//! in a store is a desktop's (Finder writes `.DS_Store` into any directory it
 //! shows) and the sweep leaves it; any other name no key owns refuses the sweep.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::buildlock::{self, Guard, Keyed};
-use crate::sysroot::git_out;
 
 /// A product's key: the first 16 hex digits of the SHA-256 of what it is made
 /// from, and no other string, so no name in a store that is not a key is taken
@@ -65,105 +68,63 @@ impl AsRef<Path> for Key {
     }
 }
 
-/// Where `root`'s builds record the key of `kind` they use.
-fn record_path(root: &Path, kind: Keyed) -> PathBuf {
-    root.join(match kind {
-        Keyed::Sysroot => "target/toyos-sysroot-key",
-        Keyed::Freestanding => "target/toyos-freestanding-key",
-        Keyed::Compiler => "target/toyos-compiler-key",
-        Keyed::Llvm => "target/toyos-llvm-key",
-    })
+/// How long a product nobody uses stays in a store.
+const KEPT: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// This host's store: `~/.cache/toyos`. Nothing else in the environment names
+/// another, so no build makes a second toolchain beside the first; a home that
+/// is no absolute path is refused, since its store would be another directory
+/// for every checkout that asks.
+pub fn host() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("HOME is unset, so nothing says where this host keeps its toolchains"));
+    assert!(home.is_absolute(), "HOME is {}, which is no absolute path, and the host's store is under it", home.display());
+    home.join(".cache/toyos")
 }
 
-/// Record that `root` uses `kind`'s `key`: whole or not at all, so a sweep
-/// never reads a record half-written.
-pub fn record(root: &Path, kind: Keyed, key: &Key) {
-    record_by(root, kind, key, |path, key| fs::write(path, key).unwrap_or_else(|e| panic!("write {}: {e}", path.display())));
-}
-
-static TEMPS: AtomicU64 = AtomicU64::new(0);
-
-/// [`record`], writing with `write`, so a test can stop it.
-fn record_by(root: &Path, kind: Keyed, key: &Key, write: impl FnOnce(&Path, &str)) {
-    let path = record_path(root, kind);
-    let dir = path.parent().expect("a file under target/");
-    fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-    // Its own name: concurrent writers of one record never share a temp file.
-    let written = path.with_extension(format!("{}.{}.new", std::process::id(), TEMPS.fetch_add(1, Ordering::Relaxed)));
-    write(&written, key.as_str());
-    fs::rename(&written, &path).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", written.display(), path.display()));
-}
-
-/// Record that `root` uses `kind`'s `key`, whose product is `store/<key>`, and
-/// hold it in use: made by `make` first when `defect` says it is not whole
-/// (`buildlock::keyed_made`), and then `store` swept, so the product one
-/// replaced goes once nobody names it.
-pub fn made(
-    root: &Path,
-    kind: Keyed,
-    store: &Path,
-    key: &Key,
-    defect: impl Fn() -> Option<String>,
-    mut make: impl FnMut(),
-) -> Guard {
-    record(root, kind, key);
+/// `kind`'s `key` in `store`, held in use: made by `make` first when `defect`
+/// says it is not whole (`buildlock::keyed_made`), and then the store swept of
+/// that kind, so what nobody has used for [`KEPT`] goes when something is
+/// placed beside it.
+pub fn made(store: &Path, kind: Keyed, key: &Key, defect: impl Fn() -> Option<String>, mut make: impl FnMut()) -> Guard {
     let mut placed = false;
-    let using = buildlock::keyed_made(root, kind, key, defect, || {
+    let using = buildlock::keyed_made(store, kind, key, defect, || {
         make();
         placed = true;
     });
     if placed {
-        for gone in sweep(root, kind, store) {
-            eprintln!("Removed {} {}: no worktree names it", kind.name(), gone.display());
+        for gone in sweep(store, kind) {
+            eprintln!(
+                "Removed {} {}: nothing used it for {} days, or it was never whole",
+                kind.name(),
+                gone.display(),
+                KEPT.as_secs() / 86_400
+            );
         }
     }
     using
 }
 
-/// Record that `root` uses no `kind` of its own.
-pub fn forget(root: &Path, kind: Keyed) {
-    let path = record_path(root, kind);
-    match fs::remove_file(&path) {
-        Err(e) if e.kind() != ErrorKind::NotFound => panic!("remove {}: {e}", path.display()),
-        _ => {}
-    }
-}
-
-/// The key of `kind` `root` records, if it records one.
-pub fn recorded(root: &Path, kind: Keyed) -> Option<Key> {
-    let path = record_path(root, kind);
-    match fs::read_to_string(&path) {
-        Ok(text) => {
-            Some(Key::parse(text.trim()).unwrap_or_else(|| panic!("{} records {text:?}, which is no key", path.display())))
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => None,
-        Err(e) => panic!("read {}: {e}", path.display()),
-    }
-}
-
-/// Remove from `store` every `kind` no registered worktree of `root` records
-/// and nobody is making or using, and every half-made or half-removed one
-/// nobody is making. Returns what went. A `store` holding a name that is
-/// neither a key's nor hidden is refused before anything goes.
-pub fn sweep(root: &Path, kind: Keyed, store: &Path) -> Vec<PathBuf> {
-    sweep_by(root, kind, store, remove)
+/// Remove from `store` every `kind` nothing has used for [`KEPT`] and nobody is
+/// making or using, and every half-made or half-removed one nobody is making.
+/// Returns what went. A `store` holding a name that is neither a key's nor
+/// hidden is refused before anything goes.
+pub fn sweep(store: &Path, kind: Keyed) -> Vec<PathBuf> {
+    sweep_by(store, kind, remove)
 }
 
 /// [`sweep`], removing with `remove`, so a test can stop it.
-pub(crate) fn sweep_by(root: &Path, kind: Keyed, store: &Path, remove: impl Fn(&Path) + Copy) -> Vec<PathBuf> {
-    let entries = match fs::read_dir(store) {
+pub(crate) fn sweep_by(store: &Path, kind: Keyed, remove: impl Fn(&Path) + Copy) -> Vec<PathBuf> {
+    let dir = kind.store(store);
+    let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return Vec::new(),
-        Err(e) => panic!("read {}: {e}", store.display()),
+        Err(e) => panic!("read {}: {e}", dir.display()),
     };
-    let named: BTreeSet<Key> = git_out(root, &["worktree", "list", "--porcelain"])
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .filter_map(|w| recorded(Path::new(w), kind))
-        .collect();
     let mut by_key: BTreeMap<Key, Vec<String>> = BTreeMap::new();
     for entry in entries {
-        let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", store.display()));
+        let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
         let name = entry.file_name();
         // No key begins with a dot.
         if name.as_encoded_bytes().starts_with(b".") {
@@ -177,7 +138,7 @@ pub(crate) fn sweep_by(root: &Path, kind: Keyed, store: &Path, remove: impl Fn(&
             panic!(
                 "{} holds {name:?}, which is no {} key's and is not hidden: something other than a \
                  build writes there, and nothing in it is swept until that is gone",
-                store.display(),
+                dir.display(),
                 kind.name(),
             );
         };
@@ -185,15 +146,15 @@ pub(crate) fn sweep_by(root: &Path, kind: Keyed, store: &Path, remove: impl Fn(&
     }
     let mut removed = Vec::new();
     for (key, mut names) in by_key {
-        names.retain(|name| name != key.as_str() || !named.contains(&key));
-        if names.is_empty() {
-            continue;
+        let Some(idle) = buildlock::keyed_idle(store, kind, &key) else { continue };
+        // Read under the key's lock: a use that came before it has dated the key.
+        if idle.used_within(KEPT) {
+            names.retain(|name| name != key.as_str());
         }
-        let Some(_idle) = buildlock::keyed_idle(root, kind, &key) else { continue };
         // The whole one last: its `retire` goes where a stopped one's remains were.
         names.sort_by_key(|name| name == key.as_str());
         for name in names {
-            let path = store.join(&name);
+            let path = dir.join(&name);
             if name == key.as_str() {
                 retire_by(&path, remove);
             } else {
@@ -270,59 +231,81 @@ pub(crate) fn writable(dir: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::time::SystemTime;
+
     use toyos_tmpdir::TempDir;
 
     use super::*;
-    use crate::compiler::tests::{git, write};
+    use crate::compiler::tests::write;
 
-    /// A key no registered worktree records goes, read-only or not, and so does
-    /// a half-made or half-removed one; a key a worktree records stays, and so
-    /// does one somebody is using; an unreadable record is refused, never read
-    /// as "names nothing".
+    /// Date the last use of `kind`'s `key` in `store` at `ago` before now.
+    pub(crate) fn last_used(store: &Path, kind: Keyed, key: &Key, ago: Duration) {
+        let lock = buildlock::keyed_lock_path(store, kind, key);
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let lock = fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
+        lock.set_modified(SystemTime::now() - ago).unwrap();
+    }
+
+    /// Longer ago than a store keeps what nobody uses.
+    pub(crate) const LONG_AGO: Duration = Duration::from_secs(KEPT.as_secs() + 3600);
+
+    /// **A product goes once nothing has used it for [`KEPT`] and nobody is
+    /// using it**, read-only or not, and so does a half-made or half-removed
+    /// one however lately its key was used; one used since stays, one somebody
+    /// is using stays however long ago that use began, and one no lock ever
+    /// dated is dated by the sweep that finds it, and stays.
     #[test]
-    fn a_sweep_removes_what_no_worktree_names_and_nobody_uses() {
-        let root = TempDir::new("sweep");
-        git(&root, &["init", "-q"]);
-        write(&root.join("f"), "x\n");
-        git(&root, &["add", "f"]);
-        git(&root, &["commit", "-qm", "init"]);
-        let linked = root.join("linked");
-        git(&root, &["worktree", "add", "-q", "-b", "wt", linked.to_str().unwrap()]);
-
-        let dir = root.join("store");
-        let [named, linked_named, in_use, orphan, gone] =
-            ["named", "linked-named", "in-use", "orphan", "gone"].map(|name| Key::of(name.as_bytes()));
+    fn a_sweep_removes_what_nobody_used_for_the_keep_time_and_nobody_uses() {
+        let store = TempDir::new("sweep");
+        let dir = Keyed::Sysroot.store(&store);
+        let [used, in_use, undated, unused, gone] =
+            ["used", "in-use", "undated", "unused", "gone"].map(|name| Key::of(name.as_bytes()));
         let at = |key: &Key, rest: &str| dir.join(format!("{key}{rest}"));
-        for (key, rest) in [(&named, ""), (&linked_named, ""), (&in_use, ""), (&orphan, ""), (&named, ".partial"), (&gone, ".swept"), (&orphan, ".swept")] {
+        for (key, rest) in [(&used, ""), (&in_use, ""), (&undated, ""), (&unused, ""), (&used, ".partial"), (&gone, ".swept"), (&unused, ".swept")] {
             fs::create_dir_all(at(key, rest).join("sub")).unwrap();
         }
-        for read_only in [at(&orphan, "/sub"), at(&orphan, ""), at(&named, ".partial")] {
+        for read_only in [at(&unused, "/sub"), at(&unused, ""), at(&used, ".partial")] {
             fs::set_permissions(read_only, fs::Permissions::from_mode(0o555)).unwrap();
         }
-        record(&root, Keyed::Sysroot, &named);
-        record(&linked, Keyed::Sysroot, &linked_named);
-        let user = buildlock::tests::sysroot_used_elsewhere(&root, &in_use);
+        last_used(&store, Keyed::Sysroot, &used, Duration::from_secs(KEPT.as_secs() - 3600));
+        last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
+        let user = buildlock::tests::sysroot_used_elsewhere(&store, &in_use);
+        last_used(&store, Keyed::Sysroot, &in_use, LONG_AGO);
 
-        let mut removed = sweep(&root, Keyed::Sysroot, &dir);
+        let mut removed = sweep(&store, Keyed::Sysroot);
         removed.sort();
-        let mut want = [at(&gone, ".swept"), at(&named, ".partial"), at(&orphan, ""), at(&orphan, ".swept")];
+        let mut want = [at(&gone, ".swept"), at(&used, ".partial"), at(&unused, ""), at(&unused, ".swept")];
         want.sort();
         assert_eq!(removed, want);
-        for stays in [&named, &linked_named, &in_use] {
+        for stays in [&used, &in_use, &undated] {
             assert!(dir.join(stays).is_dir(), "{stays} was swept");
         }
         for gone in want {
             assert!(!gone.exists(), "{} was reported and kept", gone.display());
         }
         user.release();
-        assert_eq!(sweep(&root, Keyed::Sysroot, &dir), [dir.join(&in_use)]);
+        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&in_use)]);
+    }
 
-        fs::remove_file(record_path(&linked, Keyed::Sysroot)).unwrap();
-        fs::create_dir(record_path(&linked, Keyed::Sysroot)).unwrap();
-        let unreadable = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&root, Keyed::Sysroot, &dir)));
-        assert!(unreadable.is_err(), "an unreadable record was read as naming nothing");
-        assert!(dir.join(&linked_named).is_dir(), "an unreadable record's key was swept");
+    /// **A use dates its key**: of two products last used longer ago than
+    /// [`KEPT`], the one used again stays and the other goes, and a sweep of
+    /// another kind takes neither.
+    #[test]
+    fn a_product_used_again_is_kept() {
+        let store = TempDir::new("sweep-used");
+        let dir = Keyed::Sysroot.store(&store);
+        let [again, never] = ["used again", "never again"].map(|name| Key::of(name.as_bytes()));
+        for key in [&again, &never] {
+            fs::create_dir_all(dir.join(key)).unwrap();
+            last_used(&store, Keyed::Sysroot, key, LONG_AGO);
+        }
+        assert_eq!(sweep(&store, Keyed::Compiler), Vec::<PathBuf>::new());
+        // The use is another process's, and one sweep decides both products:
+        // none here takes a key whose lock this process has held.
+        buildlock::tests::sysroot_used_elsewhere(&store, &again).release();
+        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&never)], "a product was swept after a use, or one nothing used was kept");
+        assert!(dir.join(&again).is_dir());
     }
 
     /// **A key is the 16 lowercase hex digits [`Key::of`] gives, and no other
@@ -340,16 +323,17 @@ mod tests {
     /// the sweep.**
     #[test]
     fn a_sweep_leaves_hidden_names_and_refuses_names_no_key_owns() {
-        let root = TempDir::new("strangers");
-        git(&root, &["init", "-q"]);
-        let dir = root.join("store");
-        let orphan = dir.join("0123456789abcdef");
+        let store = TempDir::new("strangers");
+        let dir = Keyed::Sysroot.store(&store);
+        let unused = Key::parse("0123456789abcdef").unwrap();
+        let orphan = dir.join(&unused);
         let hidden = [".DS_Store", "._0123456789abcdef"].map(|name| dir.join(name));
         for path in &hidden {
             write(path, "a desktop's");
         }
         fs::create_dir_all(orphan.join("sub")).unwrap();
-        assert_eq!(sweep(&root, Keyed::Sysroot, &dir), std::slice::from_ref(&orphan));
+        last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
+        assert_eq!(sweep(&store, Keyed::Sysroot), std::slice::from_ref(&orphan));
         for path in &hidden {
             assert!(path.is_file(), "{} was swept", path.display());
         }
@@ -357,52 +341,10 @@ mod tests {
         for stranger in ["notes", "0123456789abcde", "0123456789abcdeg", "0123456789abcdef0", "0123456789abcdef copy"] {
             fs::create_dir_all(&orphan).unwrap();
             fs::create_dir(dir.join(stranger)).unwrap();
-            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&root, Keyed::Sysroot, &dir)));
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&store, Keyed::Sysroot)));
             assert!(refused.is_err(), "{stranger:?} was taken for a key");
             assert!(orphan.is_dir() && dir.join(stranger).is_dir(), "a store holding {stranger:?} was swept");
             fs::remove_dir(dir.join(stranger)).unwrap();
-        }
-    }
-
-    /// **A record stopped mid-write leaves the one before it readable**: the
-    /// new key is written beside it and renamed over it whole. A record that
-    /// holds no key is refused, never read as one.
-    #[test]
-    fn a_stopped_record_leaves_the_one_before_it() {
-        let root = TempDir::new("record");
-        let (before, after) = (Key::of(b"before"), Key::of(b"after"));
-        record(&root, Keyed::Llvm, &before);
-        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            record_by(&root, Keyed::Llvm, &after, |path, key| {
-                fs::write(path, &key[..8]).unwrap();
-                panic!("stopped");
-            })
-        }));
-        assert!(stopped.is_err(), "the stand-in write was never asked");
-        assert_eq!(recorded(&root, Keyed::Llvm), Some(before), "a record stopped mid-write was read");
-        record(&root, Keyed::Llvm, &after);
-        assert_eq!(recorded(&root, Keyed::Llvm), Some(after.clone()));
-
-        fs::write(record_path(&root, Keyed::Llvm), &after.as_str()[..8]).unwrap();
-        let refused = std::panic::catch_unwind(|| recorded(&root, Keyed::Llvm));
-        assert!(refused.is_err(), "a record holding no key was read as one");
-    }
-
-    /// Concurrent records of one kind never share a temp file, so none fails
-    /// and the record holds one of the keys written whole.
-    #[test]
-    fn concurrent_records_of_one_kind_all_land() {
-        let root = TempDir::new("race");
-        let keys: Vec<Key> = (0..8u8).map(|i| Key::of(&[i])).collect();
-        for _ in 0..50 {
-            std::thread::scope(|s| {
-                let handles: Vec<_> = keys.iter().map(|key| s.spawn(|| record(&root, Keyed::Llvm, key))).collect();
-                for h in handles {
-                    h.join().expect("a concurrent record panicked");
-                }
-            });
-            let got = recorded(&root, Keyed::Llvm).unwrap();
-            assert!(keys.contains(&got), "the record holds {got:?}, none of the keys written");
         }
     }
 

@@ -140,8 +140,10 @@ impl Rights {
     pub const INVENTORY: Rights = Rights(1 << 12);
     /// On a `SysCap`: read the machine's counters.
     ///
-    /// [`SYS_COUNTERS`] answers, per CPU, its own clock reading and how many
-    /// times firmware took it over, `MSR_SMI_COUNT` where the CPU counts that:
+    /// [`SYS_COUNTERS`] answers, per CPU, its own clock reading, how many
+    /// times firmware took it over, `MSR_SMI_COUNT` where the CPU counts that,
+    /// and the commands the kernel wrote to the firmware with the time they
+    /// held the CPU:
     /// what the machine is doing, not what a program on it does. The counters
     /// that time programs need [`TRACE`](Self::TRACE) beside this.
     /// `inspect` holds it, and `test-runner`.

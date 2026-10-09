@@ -1,7 +1,9 @@
 //! What the kernel decides without touching the machine: the scheduler core
 //! ([`sched`]), the process and thread lifecycle ([`proclife`]), which PCID an
 //! address space is handed ([`pcid`]), what type the range registers give a
-//! range ([`mtrr`]) and what a pipe's ends are told of each other ([`pipe`]).
+//! range ([`mtrr`]), what a pipe's ends are told of each other ([`pipe`]) and
+//! what a CPU waiting on the boot processor's write to `SMI_CMD` decides
+//! ([`bootwrite`]).
 //! The kernel binary links it; the host runs
 //! its tests, because none of it reads a register, a clock or a kernel lock.
 
@@ -12,6 +14,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod bootwrite;
 pub mod mtrr;
 pub mod pcid;
 pub mod pipe;

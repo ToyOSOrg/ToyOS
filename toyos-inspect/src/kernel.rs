@@ -63,28 +63,32 @@ mod tests {
         Record { cpu, hardware_id: cpu * 2, stale, values }
     }
 
-    /// The T14's shape: every counter on every CPU.
+    /// The T14's shape: every counter on every CPU, and the firmware's
+    /// calls on the boot processor, which makes them.
     fn whole(cpu: u32) -> Record {
-        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6)])
+        let (calls, nanos) = if cpu == 0 { (Some(1), Some(15_968)) } else { (None, None) };
+        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls, nanos])
     }
 
     #[test]
     fn every_counter_a_record_carries_is_a_path_the_grammar_accepts() {
         let got = render(&(0..8).map(whole).collect::<Vec<_>>()).unwrap();
-        assert_eq!(got.len(), 8 * (2 + Counter::COUNT));
+        assert_eq!(got.len(), 8 * Counter::COUNT + 2);
         for path in got.keys() {
             check_path(path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
         }
         assert_eq!(got["kernel.cpu.7.smi"], Value::U64(4817));
         assert_eq!(got["kernel.cpu.7.hardware_id"], Value::U64(14));
         assert_eq!(got["kernel.cpu.7.stale"], Value::Bool(false));
+        assert_eq!(got["kernel.cpu.0.firmware_calls"], Value::U64(1));
+        assert!(!got.contains_key("kernel.cpu.7.firmware_calls"));
     }
 
     /// A machine whose CPU counts no SMIs, read on a capability without
     /// `TRACE`: only what the record carries, and no zero in place of the rest.
     #[test]
     fn an_absent_counter_has_no_path() {
-        let got = render(&[record(0, false, [Some(10), None, None, None, None, None, None, None])]).unwrap();
+        let got = render(&[record(0, false, [Some(10), None, None, None, None, None, None, None, None, None])]).unwrap();
         let paths: Vec<&str> = got.keys().map(String::as_str).collect();
         assert_eq!(paths, vec!["kernel.cpu.0.hardware_id", "kernel.cpu.0.stale", "kernel.cpu.0.stamp"]);
     }

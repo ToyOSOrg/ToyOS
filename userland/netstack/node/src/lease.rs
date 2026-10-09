@@ -13,6 +13,8 @@
 //! [ip] reports on no address but the one this module added, and one report at a time: each is
 //! read against the state as it stands.
 
+mod tcp;
+
 use alloc::collections::VecDeque;
 use core::net::Ipv4Addr;
 
@@ -138,6 +140,12 @@ impl Stack {
     pub(crate) fn bind(&mut self, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<(SocketId, Port), toyos_net_udp::Error> {
         let id = self.shard.bind(addr, port, draw)?;
         Ok((id, self.shard.udp_port(id)?))
+    }
+
+    /// Connects a socket to one peer: from here [udp] delivers it that peer's datagrams for the
+    /// address the socket then sends from, and no other.
+    pub(crate) fn connect(&mut self, now: Instant, id: SocketId, peer: Ipv4Addr, port: u16) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_connect(now, id, peer, port)
     }
 
     /// Queues a datagram; accepted means queued, not sent.

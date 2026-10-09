@@ -43,7 +43,9 @@ What the kernel's declarations do not follow:
   where it counts the SMI its own `SMI_CMD` write raises.
 - **A machine whose FADT names no `SMI_CMD`.** Nothing is declared there, so
   the chipset's software-SMI port is a port like any other and the holder
-  writes it; the write is refused by name only where the FADT names the port.
+  writes it; a byte for it is the kernel's to write, on the boot processor
+  and under its bounds, only where the FADT names the port
+  (`issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`).
 
 So a bug in `/system/bin/acpiserver`, or AML it runs, can reach those; the
 kernel bounds where, and not what. The owner's ruling on the server reading
