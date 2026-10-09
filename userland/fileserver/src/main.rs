@@ -13,8 +13,9 @@
 //! **A connection is what its grant says** (`toyos::fs::Grant`): the badge
 //! the supervisor minted its connector with, which the kernel stamped on it and
 //! answers this port's acceptor alone. Every path on it is resolved beneath
-//! the grant's root (`fileserver::resolve`); a write on a read-only volume is
-//! refused before the volume sees it.
+//! the grant's root (`fileserver::resolve`); a request that would change what
+//! it holds, on a read-only grant or a read-only volume, is refused before the
+//! volume sees it (`fileserver::rights`).
 //!
 //! **One share cannot take the server.** Beneath each machine-wide bound —
 //! connections waiting on their hello, connections served, streams — each
@@ -44,6 +45,7 @@ use fileserver::data::{DataVolume, Located, Probed};
 use fileserver::disk::{Claimed, Disk, Ram, Served};
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
+use fileserver::rights;
 use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
@@ -138,6 +140,8 @@ struct Client {
     root: String,
     /// Its grant's share, which it spends.
     share: u64,
+    /// Its grant is read-write and the volume is: what it may change.
+    writes: bool,
     window: Option<SharedMemory>,
     fids: BTreeMap<u64, Fid>,
     next_fid: u64,
@@ -455,6 +459,7 @@ impl Server {
             rx: ipc::FrameRx::new(),
             root: grant.root.to_string(),
             share: grant.share,
+            writes: grant.access == Access::ReadWrite && self.volume.writable(),
             window: None,
             fids: BTreeMap::new(),
             next_fid: 1,
@@ -582,8 +587,8 @@ impl Server {
                 Ok(window) => client.window = Some(window),
                 Err(_) => return Answer::Drop("its window would not map"),
             }
-            let rights = if self.volume.writable() { RIGHT_WRITE } else { 0 };
-            return Answer::Reply(Reply { value: rights, ..Reply::ok() });
+            let granted = if client.writes { RIGHT_WRITE } else { 0 };
+            return Answer::Reply(Reply { value: granted, ..Reply::ok() });
         }
         if self.clients[&id].window.is_none() {
             return Answer::Drop("it asked before it lent a window");
@@ -613,9 +618,7 @@ impl Server {
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
-        let changes = matches!(op, WRITE | TRUNCATE | MKDIR | RMDIR | UNLINK | RENAME | SYMLINK | STREAM)
-            || (op == OPEN && r.flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) != 0);
-        if changes && !self.volume.writable() {
+        if rights::changes(op, r.flags) && !self.clients[&id].writes {
             return Err(SyscallError::PermissionDenied);
         }
         match op {

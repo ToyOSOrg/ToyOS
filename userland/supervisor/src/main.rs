@@ -42,8 +42,15 @@
 //! ([`FILES_BOUND`]).
 //!
 //! **Every program it starts gets `HOME` from its row** (`Program::home`), over
-//! anything a launching caller carried: a service its own `/state/<name>`, made
-//! before it runs, and everything else the session user's home, made at boot.
+//! anything a launching caller carried: a service its own `/state/<name>` and
+//! an installed package its own `Apps/<name>` folder of the session user's
+//! home, each made before it runs, and everything else the session user's
+//! home, made at boot.
+//!
+//! **Every program it starts holds the directories its row's view names**
+//! (`Program::view`), each a grant minted for that start ([`Grants`]): an
+//! installed package its own directory read-only and its own folder
+//! read-write, and every other row the whole tree.
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
@@ -70,9 +77,9 @@ use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
 use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
-use toyos_manifest::{Manifest, Program};
+use toyos_manifest::{Manifest, Program, View};
 use toyos::endow::Endowments;
-use toyos::fs::{Grant, CAPABILITY_PREFIX};
+use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
 use toyos::namespace::{self, Namespace};
@@ -383,9 +390,14 @@ fn main() {
     // process nobody endows a namespace: std resolves through this one, and
     // the stop's syncs through the second.
     let files: &'static Namespace = {
-        let own: Vec<(String, Connector)> = role_acceptors
+        let whole = toyos_manifest::whole_tree();
+        let own: Vec<(String, Connector)> = whole
             .iter()
-            .flat_map(|(role, acceptor)| mint_grants(role, acceptor, authority::SUPERVISOR_SHARE))
+            .filter_map(|view| Some((role_acceptors.get(view.role)?, view)))
+            .map(|(acceptor, view)| {
+                mint(acceptor, authority::SUPERVISOR_SHARE, view)
+                    .unwrap_or_else(|why| panic!("supervisor: no grant of its own: {why}"))
+            })
             .collect();
         let build = || {
             let mut builder = namespace::build();
@@ -825,14 +837,22 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A service's own `HOME`, made before it first runs.
+    /// A service's own `HOME`, or an installed package's and its
+    /// [`toyos_manifest::APP_FOLDERS`], made before it runs.
     fn make_home(&mut self, program: &Program) {
-        if !program.service || is_storage(program) {
-            return;
-        }
+        let folders: &'static [&str] = match (program.service, program.package()) {
+            (true, _) if is_storage(program) => return,
+            (true, _) => &[],
+            (false, Some(_)) => &toyos_manifest::APP_FOLDERS,
+            (false, None) => return,
+        };
         let home = program.home();
         let asked = home.clone();
-        match self.files("a service's home", move || make_dir(&asked)) {
+        let made = self.files("a program's home", move || {
+            make_dir(&asked)?;
+            folders.iter().try_for_each(|folder| make_dir(&format!("{asked}/{folder}")))
+        });
+        match made {
             Ok(Ok(())) => {}
             Ok(Err(e)) => say!("supervisor: {}: {home} could not be made: {e}", program.name),
             Err(why) => say!("supervisor: {}: {home} was not made: {why}", program.name),
@@ -1907,7 +1927,7 @@ fn start<'a>(
         command.endow(&label, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = build_namespace(program, system, connectors, grants.view(program, launcher.1), extras)? {
+    if let Some(ns) = build_namespace(program, system, connectors, grants.view(program, launcher.1)?, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
@@ -2241,7 +2261,7 @@ fn build_namespace(
 /// file-server role's port.
 ///
 /// **Each start is minted grants naming its session's share** (`toyos::fs::Grant`,
-/// [`Session::share`]), one per directory of every role: a service has a
+/// [`Session::share`]), one per directory of its row's view: a service has a
 /// share of its own through every start of it, so the servers count it, every
 /// child it spawns directly and every launch made from it that opens no
 /// session against one share, and a login session's processes against one
@@ -2253,45 +2273,40 @@ struct Grants<'a> {
 
 impl Grants<'_> {
     /// The directory capabilities `program` is endowed for one start in
-    /// `session`, by namespace name.
-    ///
-    /// **Every program sees the whole tree the file servers serve**, which is
-    /// the kernel's old view kept whole until each row declares its own
-    /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2),
-    /// with one exception: a storage row sees none, since a file server
-    /// resolving a path of its own through itself waits for ever. Asked before
-    /// anything is locked, since a storage row's start holds its own kept state.
-    fn view(&self, program: &Program, session: Session) -> Vec<(String, Connector)> {
+    /// `session`, by namespace name: its row's view (`Program::view`), but
+    /// that a storage row sees none, since a file server resolving a path of
+    /// its own through itself waits for ever. Asked before anything is locked,
+    /// since a storage row's start holds its own kept state.
+    fn view(&self, program: &Program, session: Session) -> std::io::Result<Vec<(String, Connector)>> {
         if is_storage(program) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
+        let wanted = program.view();
         let mut view = Vec::new();
         for (role, kept) in &self.roles {
             let kept = kept.lock().expect("supervisor: a service's state is poisoned");
-            if let Some((_, acceptor)) = kept.acceptors.first() {
-                view.extend(mint_grants(role, acceptor, session.share()));
+            let Some((_, acceptor)) = kept.acceptors.first() else { continue };
+            for dir in wanted.iter().filter(|dir| dir.role == *role) {
+                view.push(mint(acceptor, session.share(), dir).map_err(std::io::Error::other)?);
             }
         }
-        view
+        Ok(view)
     }
 }
 
-/// A grant on `acceptor`, the `role`'s port, for each of its directories,
-/// naming `share`: each by the namespace name a program opens it under.
-fn mint_grants(role: &str, acceptor: &Acceptor, share: u64) -> Vec<(String, Connector)> {
-    let dirs = toyos_manifest::role_dirs(role).expect("supervisor: the build refuses a role it does not know");
-    dirs.iter()
-        .map(|dir| {
-            let mut badge = [0u8; MAX_BADGE];
-            let badge = Grant { share, root: dir.root }
-                .encode(&mut badge)
-                .unwrap_or_else(|| panic!("supervisor: {}'s root {:?} is no grant's", dir.dir, dir.root));
-            let connector = acceptor
-                .mint(badge)
-                .unwrap_or_else(|e| panic!("supervisor: no grant on {} for share {share}: {e:?}", dir.dir));
-            (format!("{CAPABILITY_PREFIX}{}", dir.dir), connector)
-        })
-        .collect()
+/// A grant on `acceptor`, `dir`'s role's port, naming `share`, by the
+/// namespace name a program opens it under. A package's name is part of its
+/// directories', so one no grant carries is refused, by name.
+fn mint(acceptor: &Acceptor, share: u64, dir: &View) -> Result<(String, Connector), String> {
+    let access = if dir.write { Access::ReadWrite } else { Access::ReadOnly };
+    let mut badge = [0u8; MAX_BADGE];
+    let badge = Grant { share, access, root: &dir.root }
+        .encode(&mut badge)
+        .ok_or_else(|| format!("{}'s root {:?} is no grant's", dir.dir, dir.root))?;
+    let connector = acceptor
+        .mint(badge)
+        .unwrap_or_else(|e| panic!("supervisor: no grant on {} for share {share}: {e:?}", dir.dir));
+    Ok((format!("{CAPABILITY_PREFIX}{}", dir.dir), connector))
 }
 
 /// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row

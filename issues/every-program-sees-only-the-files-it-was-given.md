@@ -94,6 +94,13 @@ nameable by every program and make confused-deputy bugs structural.
    terminal get the session's view, doom its `/apps` directory, and daemons
    their own state. **Exit**: the machine boots with every program in a
    declared view, and nothing still sees the global tree.
+   The `/apps` slice is built: a grant carries a read-only or read-write
+   access that the file server enforces on every request that would change
+   what it holds, and a package launched from `/apps` is minted its own
+   directory read-only and its own folder of the session's home read-write,
+   and nothing else (`toyos_manifest::Program::view`). Every row the image
+   declares still sees the whole tree read-write, `/apps` included, so a
+   shell and everything it starts can rewrite an installed package.
 3. **Sessions and users.** `issues/a-user-is-a-home-tree-and-a-login-row.md`
    on top of views: a login authority (sshd, and later a local greeter) holds
    a `login` right and asks init's `launcher` for a session, and init builds

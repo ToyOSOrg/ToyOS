@@ -93,9 +93,10 @@ The storage track's users and mount-protocol stages do not block this one.
    project.
 5. The users track's per-user `/home`
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`) decides
-   where a package's own data goes. Until then nothing says where: a
-   committed `/apps/<name>` is written by nothing, and that directory is where
-   a package wrote before the stage-then-commit ruling.
+   where a package's own data goes. Until then it goes in its own folder of
+   the session user's home, `/home/toy/Apps/<name>`, which is its `HOME` and
+   the one part of the home it sees; its own `/apps/<name>` is read-only to
+   it (`toyos_manifest::Program::view`).
 6. **An app's rights are its request ∩ the user's grant ∩ the image's
    ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
    package's manifest *requests* rights; the user *grants* them per user

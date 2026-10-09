@@ -126,6 +126,9 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
+    // not give: the `app_view` machine test runs it on tests/proctreecase.
+    "app_view",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
@@ -316,6 +319,11 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // What an installed package's view holds, and that its own directory is
+    // read-only: the supervisor's grants and the file server's refusals,
+    // neither of which has a host build. Under QEMU and not as a metal row,
+    // so the merge queue's guest suite holds the boundary on every change.
+    "app_view",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3077,6 +3085,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "app_view" => app_view(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3113,6 +3122,20 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
             "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
         ));
     }
+    Ok(())
+}
+
+/// Boot `tests/proctreecase`, whose test-runner holds a launcher listing
+/// `/apps`, and run `app_view` there: it installs itself as a package,
+/// launches it, and the package judges its own view.
+fn app_view() -> Result<(), String> {
+    const JOB: &str = "test_rs_app_view";
+    let case = compile::repo_root().join("tests/proctreecase");
+    let (_, job) = suite_bin(qemu::SUITE_ARCH, "app_view");
+    let mut qemu =
+        QemuInstance::boot_with_options(&case, &[], &[("app_view".to_string(), job)], BootOptions::default());
+    let said = job_said(&mut qemu, JOB)?;
+    eprintln!("{said}");
     Ok(())
 }
 
