@@ -88,7 +88,7 @@ impl<T> SleepLock<T> {
         assert!(
             me.is_none() || self.holder() != me,
             "sleeplock: {} already holds this lock",
-            Holder { word: word_of(me), turn_untaken: false },
+            Holder(word_of(me)),
         );
         let owner = word_of(me);
         if let Some(guard) = self.take(owner) {
@@ -139,27 +139,19 @@ impl<T> SleepLock<T> {
     /// Who holds the lock as of this read, for a message and never a
     /// decision: it may have moved by the time it is said.
     pub fn holder_name(&self) -> Holder {
-        // A ticket issued past `now` with no holder stored is a contender
-        // whose turn was posted and has not run to take it.
-        let turn_untaken = self.ticket.load(Ordering::Relaxed) != self.now.load(Ordering::Relaxed);
-        Holder { word: self.holder.load(Ordering::Relaxed), turn_untaken }
+        Holder(self.holder.load(Ordering::Relaxed))
     }
 }
 
-/// A lock's holder by name: a task, a context with no task, a contender whose
-/// turn came and has not taken it, or nobody.
-pub struct Holder {
-    word: u64,
-    turn_untaken: bool,
-}
+/// A lock's holder by name: a task, a context with no task, or nobody.
+pub struct Holder(u64);
 
 impl core::fmt::Display for Holder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match (self.word, self.turn_untaken) {
-            (FREE, true) => write!(f, "a contender whose turn came and has not taken it"),
-            (FREE, false) => write!(f, "nobody"),
-            (NOT_A_TASK, _) => write!(f, "a context with no task"),
-            (word, _) => write!(f, "{}", TaskId::unpack(word)),
+        match self.0 {
+            FREE => write!(f, "nobody"),
+            NOT_A_TASK => write!(f, "a context with no task"),
+            word => write!(f, "{}", TaskId::unpack(word)),
         }
     }
 }

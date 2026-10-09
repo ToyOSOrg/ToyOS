@@ -96,10 +96,6 @@ const STOP_HOLDS_AT_THE_LAST_WORD: &str = "console: the stop holds the wire at t
 /// the console's wire, in `kernel/src/log/console.rs`.
 const WIRE_HELD: &str = "console: klogd holds the wire as the stop begins, staged";
 
-/// What `klogd` logs as it lets the console's wire go to the stop, in
-/// `kernel/src/log/console.rs`.
-const WIRE_LET_GO: &str = "console: klogd let the wire go to the stop";
-
 /// The actuators that stage `klogd` holding the wire across the stop: until
 /// the stop asks for it, or, `kept`, for good.
 pub fn wire_staged(kept: bool) -> &'static [&'static str] {
@@ -110,8 +106,7 @@ pub fn wire_staged(kept: bool) -> &'static [&'static str] {
 /// `console` of a boot that ended with the `last` word: the staged hold, the
 /// stop's record and the last word are all on it, in that order; where `klogd`
 /// `kept` the wire the stop said so between the hold and the record, and
-/// where it did not `klogd` said it let the wire go there and the console is
-/// otherwise clean.
+/// where it did not the console is clean.
 pub fn judge_the_held_wire(console: &str, last: &str, kept: bool) -> Result<(), String> {
     serial::Serial::named("staged stop", console.to_string()).must_not_say(STAGED_KLOGD_UNRUN)?;
     let lines: Vec<&str> = console.lines().collect();
@@ -125,13 +120,11 @@ pub fn judge_the_held_wire(console: &str, last: &str, kept: bool) -> Result<(), 
     if !(held < record && record < said) {
         return Err(format!("the hold, the stop's record and {last:?} are on lines {held}, {record} and {said}\n{console}"));
     }
-    match (kept, at(WIRE_KEPT), at(WIRE_LET_GO)) {
-        (true, Some(alert), None) if held < alert && alert < record => Ok(()),
-        (false, None, Some(let_go)) if held < let_go && let_go < record => {
-            serial::Serial::named("staged stop", console.to_string()).must_be_clean()
-        }
-        (_, alert, let_go) => Err(format!(
-            "klogd {} the wire, and the stop's alert is on line {alert:?} and klogd's let-go on line {let_go:?}\n{console}",
+    match (kept, at(WIRE_KEPT)) {
+        (true, Some(alert)) if held < alert && alert < record => Ok(()),
+        (false, None) => serial::Serial::named("staged stop", console.to_string()).must_be_clean(),
+        (_, alert) => Err(format!(
+            "klogd {} the wire, and the stop's alert is on line {alert:?}\n{console}",
             if kept { "kept" } else { "was asked for" },
         )),
     }

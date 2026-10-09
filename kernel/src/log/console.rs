@@ -11,12 +11,11 @@
 //! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
 //!
 //! **The stop takes the wire from `klogd` for good** ([`take_for_the_stop`]):
-//! asked, `klogd` lets it go between two writes and never takes it again, any
-//! holder that lets it go once the stop asked posts the stop, and the stop
-//! holds it to the machine's end, so every record the stop commits reaches the
-//! wire before a CPU is taken down. A holder that keeps it through [`LET_GO`]
-//! has the stop write over it, through the registers, from a position the
-//! stop alone walks.
+//! asked, `klogd` lets it go between two writes, posts the stop and never
+//! takes it again, and the stop holds it to the machine's end, so every
+//! record the stop commits reaches the wire before a CPU is taken down. A
+//! holder that keeps it through [`LET_GO`] has the stop write over it, through
+//! the registers, from a position the stop alone walks.
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
@@ -103,9 +102,6 @@ pub fn drain_inline() {
     }
     let Ok(wire) = serial::try_wire() else { return };
     drain_records(&wire, u64::MAX, Yield::Never);
-    // The stop asks only once userland runs, by when the one inline drain is
-    // a backend's arrival, on a thread: the post below is never an `emit`'s.
-    let_wire_go(wire);
 }
 
 /// Whether a drain lets the wire go to the stop that asks for it.
@@ -119,12 +115,12 @@ enum Yield {
 /// The stop's claim on the wire, which `klogd` answers.
 static HANDOFF: Handoff = Handoff::new();
 
-/// Posted by any holder that lets the wire go once the stop has asked for it.
+/// Posted by `klogd` as it lets the wire go once the stop has asked for it.
 static RELEASED: watch::Watch = watch::Watch::new();
 
 /// Let the wire go, and answer whether the stop has asked for it, posting the
-/// stop where it has: whoever held it, the stop's next try finds it free or
-/// this read sees the ask (`log/handoff.rs`).
+/// stop where it has: the stop's next try finds it free or this read sees
+/// the ask (`log/handoff.rs`).
 fn let_wire_go(wire: SleepGuard<'_, ()>) -> bool {
     drop(wire);
     let asked = HANDOFF.asked();
@@ -191,9 +187,12 @@ pub fn take_for_the_stop(parkable: &Parkable) -> StopWire {
     // one the park returns on at once.
     let armed = watch::arm(&RELEASED, 0, WaitClass::Other).expect("console: the stop holds no task to park");
     HANDOFF.ask();
-    // A `klogd` parked idle lets go of nothing until it runs: woken, it takes
-    // the wire behind whoever holds it, sees the ask and lets it go.
-    post_wake();
+    // A shipping `klogd` never parks holding the wire; a staged one does, and
+    // reads the ask only once woken.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_across_the_stop() {
+        post_wake();
+    }
     let deadline = Deadline::at(crate::clock::now() + LET_GO.duration());
     let mut refused = None;
     loop {
