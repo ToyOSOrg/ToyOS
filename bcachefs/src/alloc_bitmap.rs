@@ -101,30 +101,35 @@ impl Runs {
 }
 
 impl BitmapAllocator {
-    /// The allocator of a mounted volume, its free count read off the bitmap:
-    /// the superblock's is the last commit's, and a stop after it leaves the
-    /// bitmap holding fewer.
-    pub fn open(io: &dyn BlockIO, sb: &Superblock) -> Result<Self, FsError> {
-        let mut free_blocks = 0;
-        let mut buf = BlockBuf::zeroed();
-        for i in 0..sb.block_count.div_ceil(BITS_PER_BLOCK) {
-            io.read(BlockNum::new(sb.bitmap_start.raw() + i), &mut buf)?;
-            let bits = (sb.block_count - i * BITS_PER_BLOCK).min(BITS_PER_BLOCK);
-            let (whole, rest) = buf.0[..bits.div_ceil(8) as usize].split_at((bits / 8) as usize);
-            free_blocks += whole.iter().map(|b| b.count_zeros() as u64).sum::<u64>();
-            free_blocks += rest.first().map_or(0, |b| (!b & ((1u8 << (bits % 8)) - 1)).count_ones() as u64);
-        }
-        Ok(Self {
+    /// The allocator of a mounted volume, its free count the last commit's.
+    pub fn open(sb: &Superblock) -> Self {
+        Self {
             bitmap_start: sb.bitmap_start,
             bitmap_blocks: sb.bitmap_blocks,
             total_blocks: sb.block_count,
-            free_blocks,
+            free_blocks: sb.free_blocks,
             next_alloc: sb.next_alloc,
             shadow: true,
             fresh: Runs::default(),
             pending: Vec::new(),
             op: None,
-        })
+        }
+    }
+
+    /// Read the free count off the bitmap: a stop after the last commit
+    /// leaves it holding fewer than the superblock counts.
+    pub fn count_free(&mut self, io: &dyn BlockIO) -> Result<(), FsError> {
+        let mut free_blocks = 0;
+        let mut buf = BlockBuf::zeroed();
+        for i in 0..self.total_blocks.div_ceil(BITS_PER_BLOCK) {
+            io.read(BlockNum::new(self.bitmap_start.raw() + i), &mut buf)?;
+            let bits = (self.total_blocks - i * BITS_PER_BLOCK).min(BITS_PER_BLOCK);
+            let (whole, rest) = buf.0[..bits.div_ceil(8) as usize].split_at((bits / 8) as usize);
+            free_blocks += whole.iter().map(|b| b.count_zeros() as u64).sum::<u64>();
+            free_blocks += rest.first().map_or(0, |b| (!b & ((1u8 << (bits % 8)) - 1)).count_ones() as u64);
+        }
+        self.free_blocks = free_blocks;
+        Ok(())
     }
 
     /// Begin one operation on the tree, which [`Self::succeed`] or

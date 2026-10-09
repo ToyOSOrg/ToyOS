@@ -592,17 +592,28 @@ impl<IO: BlockIO> Formatted<IO> {
 
 // --- Mounted (read operations, available for both ReadOnly and ReadWrite) ---
 
+impl<IO: BlockIO> Mounted<IO, ReadOnly> {
+    /// Open an existing filesystem from disk, to read.
+    pub fn open(io: IO) -> Result<Self, FsError> {
+        Self::read_superblock(io)
+    }
+}
+
+impl<IO: BlockIO> Mounted<IO, ReadWrite> {
+    /// Open an existing filesystem from disk, to change; a mount that only
+    /// reads never asks how much is free.
+    pub fn open(io: IO) -> Result<Self, FsError> {
+        let mut fs = Self::read_superblock(io)?;
+        fs.alloc.count_free(&fs.io)?;
+        Ok(fs)
+    }
+}
+
 impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
-    /// Open an existing filesystem from disk.
-    pub fn open(io: IO) -> Result<Mounted<IO, Mode>, FsError> {
+    fn read_superblock(io: IO) -> Result<Self, FsError> {
         let sb = Superblock::read(&io)?;
-        let alloc = BitmapAllocator::open(&io, &sb)?;
-        Ok(Mounted {
-            io,
-            sb,
-            alloc,
-            _mode: PhantomData,
-        })
+        let alloc = BitmapAllocator::open(&sb);
+        Ok(Mounted { io, sb, alloc, _mode: PhantomData })
     }
 
     /// The device this filesystem was opened over.

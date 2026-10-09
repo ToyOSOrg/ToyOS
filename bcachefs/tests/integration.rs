@@ -1070,9 +1070,31 @@ fn a_volume_full_of_empty_names_still_deletes_and_frees() {
     shrinks_and_deletes_and_takes_again(&mut fs, files);
 }
 
+/// Data grown outside any operation takes no block of the reserve, even
+/// where every free block lies in one run after the file's end, so the entry
+/// that records the run does not grow and draws on the reserve itself.
+#[test]
+fn a_file_grown_past_what_the_volume_spares_leaves_the_reserve() {
+    let mut mkfs = Formatted::format(VecBlockIO::new(128)).expect("format");
+    mkfs.create("f00", b"x", 0).expect("a one-block file");
+    let mut fs = mkfs.mount();
+    let (mut extents, _) = fs.file_extents("f00").expect("file_extents").expect("f00 is on the volume");
+
+    let grown = fs.resolve_or_alloc_block(&mut extents, 128);
+    assert!(matches!(grown, Err(FsError::NoSpace { .. })), "a page past every block of the volume: {grown:?}");
+    assert_eq!(extents.len(), 1, "the run is not contiguous with the file, so this proves nothing: {extents:?}");
+    let blocks = extents[0].block_count as u64;
+    fs.update_metadata("f00", &extents, blocks * 4096, 1).expect("the run recorded");
+    fs.sync().expect("a commit");
+
+    let free = bcachefs::Superblock::read(fs.io()).expect("the superblock").free_blocks;
+    assert!(free >= NODE_RESERVE as u64, "the commit holds {free} blocks free, fewer than the reserve");
+    shrinks_and_deletes_and_takes_again(&mut fs, 1);
+}
+
 /// A volume stopped between two commits holds more blocks used than its
-/// superblock counts free; a mount counts its bitmap, so what the stop leaked
-/// is no block a shrink or a delete is promised.
+/// superblock counts free; a read-write mount counts its bitmap, so what the
+/// stop leaked is no block a shrink or a delete is promised.
 #[test]
 fn a_mount_after_a_stop_counts_the_blocks_its_bitmap_holds() {
     let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format").mount();

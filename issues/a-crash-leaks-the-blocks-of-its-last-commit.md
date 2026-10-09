@@ -14,13 +14,13 @@ used in the bitmap and named by no tree, and the blocks only the older tree
 reached, which a commit that landed was about to free, the same. A block whose
 bit the device refused to clear when it was given up (`BitmapAllocator::give`,
 `succeed`, `fail`) stays marked used the same way, with nothing said. Nothing
-finds them again: a mount counts the bitmap as the device holds it
-(`BitmapAllocator::open`), so the volume is smaller by every such block.
+finds them again: a read-write mount counts the bitmap as the device holds it
+(`BitmapAllocator::count_free`), so the volume is smaller by every such block.
 
 Measured with `bcachefs/tests/crash.rs`'s run (a 512-block volume, a
-directory of 62 names renamed, one 9000-byte file written, then a commit)
+directory of 62 names renamed, 40 one-block files written, then a commit)
 stopped after every write before the first superblock write: the volume mounts
-as it was, with 234 blocks marked used where it had 190.
+as it was, with 284 blocks marked used where it had 190.
 
 ## Exit condition
 
