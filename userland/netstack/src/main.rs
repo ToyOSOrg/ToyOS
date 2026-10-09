@@ -3,9 +3,11 @@ use std::time::{Duration, Instant};
 use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE, Poller};
 use toyos::ipc;
 use toyos::AsHandle;
-use toyos::ipc::{Connection, IpcPayload, RxStep};
+use toyos::ipc::RxStep;
 use toyos::say;
 
+mod card;
+mod client;
 mod device;
 mod dhcp;
 mod i219;
@@ -39,6 +41,9 @@ use toyos_i219::Part;
 use toyos_inspect::Snapshot;
 use virtio_net::VirtioNet;
 
+use card::Card;
+use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
+
 use toyos::net::*;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
@@ -51,144 +56,6 @@ use std::net::Ipv4Addr;
 
 // --- smoltcp Device wrapper ---
 
-/// The NIC this program drives, whichever one the manifest gave it.
-///
-/// **One enum and not a trait object**: there are two of them, both known at
-/// build time, and what a `dyn` would buy is a vtable on the frame path.
-enum Card {
-    Virtio(VirtioNet),
-    Intel(i219::Nic),
-}
-
-impl Card {
-    /// A device this driver cannot bring up is not a machine without a NIC: the
-    /// claim was minted, so something the device said is not what this driver
-    /// understands, and that is loud.
-    fn undrivable(why: impl std::fmt::Display) -> ! {
-        panic!("netstack: the NIC this program was given is not one it can drive — {why}")
-    }
-
-    fn intel(claim: toyos::PciDev, part: Part) -> Self {
-        match i219::Nic::open(claim, part) {
-            Ok(nic) => Self::Intel(nic),
-            Err(why) => Self::undrivable(why),
-        }
-    }
-
-    fn virtio(claim: toyos::PciDev) -> Self {
-        match VirtioNet::open(claim) {
-            Ok(nic) => Self::Virtio(nic),
-            Err(why) => Self::undrivable(why),
-        }
-    }
-
-    fn mac(&self) -> [u8; 6] {
-        match self {
-            Self::Virtio(nic) => nic.mac(),
-            Self::Intel(nic) => nic.mac(),
-        }
-    }
-
-    /// The claim, for the poller: readable means an interrupt has landed.
-    fn claim(&self) -> &toyos::PciDev {
-        match self {
-            Self::Virtio(nic) => nic.claim(),
-            Self::Intel(nic) => nic.claim(),
-        }
-    }
-
-    /// **The record has to be taken, not merely noticed.** A claim reads ready
-    /// while it holds an undrained interrupt, so a pass that saw the token and
-    /// left it would find the same one on the next `wait` and every one after
-    /// it. What the message meant is in the rings, which `iface.poll` reads.
-    /// This is also where a driver with a per-pass budget gets it back.
-    ///
-    /// A claim that refuses the read for anything but `WouldBlock` is the
-    /// kernel saying this function is no longer this process's: a fault at the
-    /// unit is the one that happens, and by the time it is answered the
-    /// function's bus mastering is gone. Every frame from here on is one that
-    /// silently never arrives, so this dies where it can be read — once, for
-    /// whichever driver is running.
-    ///
-    /// Answers the link where the pass found it changed; virtio reports none.
-    fn begin_pass(&self) -> Option<toyos_i219::Link> {
-        let answered = match self {
-            Self::Virtio(nic) => nic.take_interrupt().map(|_| None),
-            Self::Intel(nic) => nic.begin_pass(),
-        };
-        answered
-            .unwrap_or_else(|why| panic!("netstack: this NIC's claim refused an interrupt read: {why:?}"))
-    }
-
-    /// What `inspect` reads about the card: which driver, its address, its
-    /// link, and on the Intel parts what the driver and the MAC counted.
-    ///
-    /// **virtio's link is `unreported`, not `up`**: the device tells netstack
-    /// nothing about one, and netstack serving as though it were up is netstack's
-    /// assumption rather than something it measured.
-    fn inspect(&self, snap: &mut Snapshot) {
-        let m = self.mac();
-        snap.put(
-            "mac",
-            format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]),
-        );
-        let nic = match self {
-            Self::Virtio(_) => {
-                snap.put("driver", "virtio-net");
-                snap.put("link.state", "unreported");
-                return;
-            }
-            Self::Intel(nic) => nic,
-        };
-        snap.put(
-            "driver",
-            match nic.part() {
-                Part::I219 => "i219",
-                Part::E82574 => "82574",
-            },
-        );
-        match nic.link() {
-            toyos_i219::Link::Down => snap.put("link.state", "down"),
-            toyos_i219::Link::Up { speed, full_duplex } => {
-                snap.put("link.state", "up");
-                snap.put(
-                    "link.speed_mbps",
-                    match speed {
-                        toyos_i219::Speed::Mbps10 => 10u32,
-                        toyos_i219::Speed::Mbps100 => 100,
-                        toyos_i219::Speed::Mbps1000 => 1000,
-                    },
-                );
-                snap.put("link.duplex", if full_duplex { "full" } else { "half" });
-            }
-        }
-        let (counters, wire) = nic.counts();
-        snap.put("descriptors.sent", counters.sent);
-        snap.put("descriptors.received", counters.received);
-        snap.put("wire.sent", wire.sent);
-        snap.put("wire.received", wire.received);
-        snap.put("wire.seen", wire.seen);
-        snap.put("errors.missed", wire.missed);
-        snap.put("errors.crc", wire.crc_errors);
-    }
-
-    fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
-        match self {
-            Self::Virtio(nic) => nic.tx(len, fill),
-            Self::Intel(nic) => nic.tx(len, fill),
-        }
-    }
-
-    /// Say what the driver counted, once a pass and after every frame the pass
-    /// sent: a line per dropped frame is itself more frames to send.
-    fn report(&self) {
-        match self {
-            Self::Virtio(nic) => nic.report(),
-            Self::Intel(nic) => nic.report(),
-        }
-    }
-}
-
 /// The driver, as smoltcp's `Device`.
 ///
 /// A thin adapter: every token below borrows the driver rather than a claim
@@ -197,11 +64,24 @@ struct DmaNic {
     nic: Card,
 }
 
+impl DmaNic {
+    /// Whether the card takes a frame now. Where it does not, its claim reads
+    /// ready when it will.
+    fn room(&self) -> bool {
+        self.nic.tx_room() > 0 || self.nic.wake_on_room() > 0
+    }
+}
+
 impl Device for DmaNic {
     type RxToken<'a> = DmaRxToken<'a>;
     type TxToken<'a> = DmaTxToken<'a>;
 
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        // A frame is taken off the receive ring only with room to answer it:
+        // smoltcp takes a transmit token with every frame it receives.
+        if !self.room() {
+            return None;
+        }
         let token = match &self.nic {
             Card::Virtio(nic) => {
                 nic.poll_rx().map(|(index, len)| DmaRxToken::Virtio { nic, index, len })
@@ -212,7 +92,7 @@ impl Device for DmaNic {
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
-        Some(DmaTxToken { nic: &self.nic })
+        self.room().then_some(DmaTxToken { nic: &self.nic })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -489,108 +369,9 @@ fn piped_connection(socket_id: u32, handle: SocketHandle, pipes: DataPipes) -> P
     }
 }
 
-// --- One request, and the client waiting for its answer ---
-
-const RESP_RESULT: u32 = RespType::Result as u32;
-const RESP_ERROR: u32 = RespType::Error as u32;
-
-/// One client's connection, which is also how netstack names it.
-///
-/// netstack answers a connection exactly once and then lets it close, so a handler
-/// owns this for as long as its operation lasts: the synchronous ones drop it
-/// where they answer, and the three asynchronous ones keep it across passes
-/// until what they started finishes. The handle closes with it — which is what
-/// replaced a `mem::forget` on the accepted connection and eight hand-written
-/// `close` calls that had to agree with each other on every path.
-struct Client {
-    conn: Connection,
-}
-
-impl Client {
-    fn result<T: IpcPayload>(&self, payload: &T) {
-        self.answered(self.conn.try_send(RESP_RESULT, payload));
-    }
-
-    fn result_bytes(&self, data: &[u8]) {
-        self.answered(self.conn.try_send_bytes(RESP_RESULT, data));
-    }
-
-    fn done(&self) {
-        self.answered(self.conn.try_signal(RESP_RESULT));
-    }
-
-    fn error(&self, code: u32) {
-        self.answered(self.conn.try_send(RESP_ERROR, &ErrorResponse { code }));
-    }
-
-    fn snapshot(&self, encoded: &[u8]) {
-        self.answered(self.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, encoded));
-    }
-
-    /// Whether this client, waiting for its answer, has left. A connection
-    /// carries one request, so hanging up is the one thing it may say while
-    /// it waits; a client that says more is dropped by name.
-    fn gone(&self) -> bool {
-        let mut byte = [0u8; 1];
-        match self.conn.read_nonblock(&mut byte) {
-            Err(toyos_abi::syscall::SyscallError::WouldBlock) => false,
-            Ok(0) | Err(_) => true,
-            Ok(_) => {
-                say!("netstack: dropping client {} — it spoke again before its answer", self.conn.as_handle().0);
-                true
-            }
-        }
-    }
-
-    /// **The answer goes out in one non-blocking write, and a refusal is not
-    /// retried.** `ipc::send` parks in `sys_write` until the client drains,
-    /// which is a client deciding when the network stack runs again; and
-    /// `TrySendError::Full` can have left part of the frame in the pipe, so
-    /// there is nothing here to retry either. The connection closes either way.
-    /// The log is the only place the machine this runs on gets told that a
-    /// client asked something and was never answered.
-    fn answered(&self, sent: Result<(), ipc::TrySendError>) {
-        if let Err(e) = sent {
-            let why = match e {
-                ipc::TrySendError::Full => {
-                    "its pipe will not take the answer and it is not reading"
-                }
-                ipc::TrySendError::TooLarge => "the answer netstack built is larger than a frame",
-                ipc::TrySendError::Syscall(_) => "its connection is gone",
-            };
-            say!("netstack: dropping client {} — {why}", self.conn.as_handle().0);
-        }
-    }
-}
-
 /// Poll registrations that are not piped connections: the service listener and
 /// the NIC claim.
 const FIXED_POLL_HANDLES: u32 = 2;
-
-/// Connections accepted and not yet carrying a whole request.
-///
-/// The kernel queues 32 unaccepted connections per listener
-/// (`listener::MAX_PENDING_CONNECTIONS`); this is the same allowance one step
-/// further along, for a client that has been accepted and has not yet said what
-/// it wants. Past it netstack refuses by name rather than growing, and
-/// [`HANDSHAKE_TIMEOUT`] is what guarantees the table drains.
-const MAX_PENDING_CONNS: u32 = 32;
-
-/// How long an accepted connection may go without completing its request.
-///
-/// Policy, and generous: every client in the tree sends its request in the
-/// statement after `connect` (`toyos::net`'s `NetstackConn::request`). What this
-/// bounds is the one that never sends it.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The largest request payload netstack keeps.
-///
-/// `MsgType::DnsLookup` is the only request carrying bytes rather than a struct,
-/// and `toyos::net::dns_lookup` frames a hostname into a 256-byte buffer; every
-/// typed request is far smaller, `TcpConnectPipedRequest` at 32 bytes being the
-/// widest. A client may declare anything up to `ipc::MAX_FRAME_LEN` — the excess
-/// is counted down and discarded, never waited for.
-const MAX_KEPT_REQUEST: usize = 256;
 
 /// Registrations one piped connection can make in a batch: its send pipe and
 /// its receive pipe.
@@ -607,42 +388,6 @@ const LOOKUP_POLL_HANDLES: u32 = resolve::MAX_LOOKUPS as u32;
 /// budget below binds first on a machine whose eighth holds fewer connections.
 const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS - LOOKUP_POLL_HANDLES)
     / POLL_HANDLES_PER_PIPED) as u64;
-
-/// One client's inbound framing.
-///
-/// **netstack never reads a client with a blocking read.** That is the whole point
-/// of [`ipc::FrameRx`]: `ipc::recv_header` and `ipc::recv_payload` park the
-/// caller until the peer sends the bytes it promised. Here a peer that stops halfway
-/// through a frame costs a buffer and a deadline instead of the event loop.
-type ClientRx = ipc::FrameRx<MAX_KEPT_REQUEST>;
-
-/// A connection that has been accepted and has not yet said what it wants.
-///
-/// It exists because `accept` and the request frame are two events.
-struct PendingConn {
-    conn: Connection,
-    rx: ClientRx,
-    since: Instant,
-}
-
-/// A whole request, off the connection and in memory.
-///
-/// The payload travels with the frame instead of being read off the connection
-/// during
-/// dispatch: the read side is finished before anything acts on a message, so no
-/// handler below can park on the client that sent it.
-struct Request {
-    client: Client,
-    msg_type: u32,
-    payload: [u8; MAX_KEPT_REQUEST],
-    payload_len: usize,
-}
-
-impl Request {
-    fn payload(&self) -> &[u8] {
-        &self.payload[..self.payload_len]
-    }
-}
 
 /// Payload bytes a UDP socket's receive buffer holds, and therefore the longest
 /// datagram netstack can ever hand back — which is what bounds the buffer
@@ -1760,8 +1505,16 @@ fn main() {
         // delayed ACK — and zero when it has a frame to send now. A piped
         // connection needs nothing else: its peer's bytes wake the NIC, and its
         // client's bytes and room wake the watches below.
-        let smoltcp_due =
-            iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000));
+        //
+        // **None of them while the card has no room.** Each is a frame to send
+        // or to take, the card refuses both, and smoltcp's "now" would be a
+        // pass every time round until it stops; the card's claim begins the
+        // pass that can.
+        let smoltcp_due = if device.room() {
+            iface.poll_delay(now, &socket_set).map_or(u64::MAX, |d| d.total_micros().saturating_mul(1000))
+        } else {
+            u64::MAX
+        };
 
         // A pending UDP receive or connect has no wake of its own.
         let has_pending_async = !daemon.pending_udp_recvs.is_empty()
@@ -1819,6 +1572,8 @@ fn main() {
             Some(left) => timeout.min(left.as_nanos() as u64),
             None => timeout,
         };
+        // A card that never does what it owes sends no interrupt to say so.
+        let timeout = timeout.min(device.nic.pass_due_in().unwrap_or(u64::MAX));
         // A client that connects and then says nothing wakes nothing, so the
         // deadline that removes it has to be a wake in its own right: without
         // this netstack can sit in `wait` forever with `pending` full of clients

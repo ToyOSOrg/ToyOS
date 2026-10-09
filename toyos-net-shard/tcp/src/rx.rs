@@ -338,6 +338,15 @@ impl Rx {
         self.buf.read(out)
     }
 
+    /// Shows `take` the oldest bytes held, as far as they lie in one piece, and lets go of as
+    /// many of them as it answers it took.
+    pub fn read_with(&mut self, take: impl FnOnce(&[u8]) -> usize) -> usize {
+        let (held, _) = self.buf.slices(0, self.buf.len());
+        let n = take(held).min(held.len());
+        self.buf.consume(n);
+        n
+    }
+
     /// `shutdown_read`: what is held is dropped, and later text is dropped as if read.
     pub fn stop_reading(&mut self) {
         self.discard = true;

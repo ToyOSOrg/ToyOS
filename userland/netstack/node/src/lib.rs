@@ -6,7 +6,7 @@
 //!
 //! The node carries out what the client asks and tells it what became of its address. What the
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
-//! its types keep.
+//! its types keep. A client's TCP connection and its two pipes are `streams`'.
 //!
 //! A client's datagram sockets are `datagram`'s, the machine's `<host>.local` name is `name`'s
 //! and the lookups of other machines' names are `resolve`'s: each reads the lease and writes none
@@ -38,6 +38,9 @@ mod datagram;
 mod lease;
 mod name;
 mod resolve;
+mod streams;
+
+pub use streams::{FromClient, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -77,6 +80,7 @@ pub struct Node {
     events: Vec<Event>,
     /// Room for the largest message the client accepts.
     datagram: Vec<u8>,
+    streams: streams::Streams,
 }
 
 impl Node {
@@ -94,6 +98,7 @@ impl Node {
             counters: Counters::default(),
             events: Vec::new(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
+            streams: streams::Streams::default(),
         })
     }
 
@@ -126,12 +131,15 @@ impl Node {
     pub fn receive(&mut self, now: Instant, frame: &[u8], mut draw: impl FnMut() -> u32) {
         self.stack.receive(now, frame);
         self.settle(now, &mut draw);
+        self.bridge(now);
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
     /// Returns how many left.
     pub fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
-        self.stack.transmit(now, credit, sink)
+        let sent = self.stack.transmit(now, credit, sink);
+        self.pass(now, true);
+        sent
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
@@ -149,7 +157,7 @@ impl Node {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         let name = self.name.as_ref().and_then(name::Name::next_deadline);
-        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(name).chain(self.resolver.next_deadline()).min()
+        self.stack.next_deadline().into_iter().chain(self.client.next_deadline()).chain(name).chain(self.resolver.next_deadline()).chain(self.streams.next_deadline()).min()
     }
 
     /// Every deadline at or before `now`; the frames they make due wait for [`Self::transmit`].
@@ -159,6 +167,7 @@ impl Node {
         let out = self.client.timer(now, &mut draw);
         self.carry_out(now, out, None, &mut draw);
         self.settle(now, &mut draw);
+        self.bridge(now);
     }
 
     /// Hands the client what the shard reported and what reached its socket, and carries out

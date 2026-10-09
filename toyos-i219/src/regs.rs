@@ -358,7 +358,8 @@ pub mod extcnf {
 
 /// Interrupt cause bits, shared by `ICR`, `ICS`, `IMS` and `IMC` (§10.2.4.1).
 pub mod cause {
-    /// Transmit Descriptor Written Back (bit 0).
+    /// Transmit Descriptor Written Back (bit 0). §10.2.4.1: "Set when hardware
+    /// processes a descriptor with RS set."
     pub const TXDW: u32 = 1 << 0;
     /// Link Status Change (bit 2) — "set whenever the link status changes
     /// (either from up to down, or from down to up)".

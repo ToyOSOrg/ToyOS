@@ -13,6 +13,8 @@
 //! [ip] reports on no address but the one this module added, and one report at a time: each is
 //! read against the state as it stands.
 
+mod tcp;
+
 use alloc::collections::VecDeque;
 use core::net::Ipv4Addr;
 

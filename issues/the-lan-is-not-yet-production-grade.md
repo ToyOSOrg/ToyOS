@@ -35,6 +35,9 @@ why, and the boot still leases.
 - **1000 Mb/s.** Done: bench run 124 linked at 1000 full.
 - **Link events** arrive by interrupt and are recovered from without a restart:
   cable pulled and replugged, the partner rebooting, a flapping link.
+  Owed for it: a link partner a T14 row commands, so a row can drop the link
+  and raise it under traffic. Nothing has one, and
+  `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` waits on it.
 - **Throughput** is measured against Ubuntu on the same machine and cable, with
   line rate (about 940 Mb/s of TCP) as the target: interrupt moderation (off
   today), ring sizes, checksum and segmentation offload.
