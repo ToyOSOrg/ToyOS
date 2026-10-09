@@ -268,12 +268,21 @@ fn s_lr_017_a_second_timeout() {
     assert_eq!((info.ssthresh, info.cwnd, info.rto), (10_220, 1460, ms(800)));
 }
 
+/// EF's ten segments meet silence: two round trips and the slack on, a loss probe sends the last
+/// one again (RFC 8985 §7.3), and the RTO runs from it.
+fn probed_then_expired(h: &mut H) {
+    ten_out(h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    assert_eq!(h.count(Counter::LossProbe), 1);
+    nothing(&h.at(221));
+    expect(&h.at(222), &["SEQ=1001"]);
+}
+
 #[test]
 fn s_lr_018_no_sack_recovery_before_the_timeout_point() {
     let mut h = fixture_ef();
-    ten_out(&mut h);
-    h.at(200);
-    for (t, end) in [(210, 3897), (211, 5345), (212, 6793)] {
+    probed_then_expired(&mut h);
+    for (t, end) in [(232, 3897), (233, 5345), (234, 6793)] {
         sack_dup(&mut h, t, &[(2449, end)]);
     }
     assert!(!h.info().in_recovery);
@@ -283,9 +292,8 @@ fn s_lr_018_no_sack_recovery_before_the_timeout_point() {
 #[test]
 fn s_lr_019_sacks_after_a_timeout_skip_held_ranges() {
     let mut h = fixture_ef();
-    ten_out(&mut h);
-    expect(&h.at(200), &["SEQ=1001"]);
-    let outs = h.input_full(210, seg(5001).ack(2449).sack(&[(1001, 2449), (3897, 15_481)]));
+    probed_then_expired(&mut h);
+    let outs = h.input_full(232, seg(5001).ack(2449).sack(&[(1001, 2449), (3897, 15_481)]));
     expect(&outs, &["SEQ=2449 LEN=1448"]);
     assert_eq!(h.info().cwnd, 2896);
     assert_eq!(h.count(Counter::DsackRcvd), 1);
@@ -330,4 +338,58 @@ fn s_lr_023_a_lost_fast_retransmission() {
     let info = h.info();
     assert_eq!(info.ssthresh, flight * 7 / 10);
     assert_eq!(info.cwnd, 1460);
+}
+
+/// RFC 8985 §7.3: with data queued past cwnd and the peer's window open, the probe is a segment
+/// of new data, outside cwnd; its ACK infers no loss.
+#[test]
+fn rfc_8985_7_3_the_probe_is_new_data_where_the_window_takes_a_segment() {
+    let mut h = fixture_ef();
+    assert_eq!(h.send(0, 30_000).len(), 10);
+    nothing(&h.at(21));
+    expect(&h.at(22), &["SEQ=15481 LEN=1448"]);
+    let cwnd = h.info().cwnd;
+    h.input_full(30, seg(5001).ack(16_929));
+    assert_eq!((h.count(Counter::LossProbe), h.count(Counter::LossProbeRecovery), h.count(Counter::RetransmitBytes)), (1, 0, 0));
+    assert!(h.info().cwnd >= cwnd);
+}
+
+/// RFC 8985 §7.4: the probe sent the last segment again and its ACK carries no D-SACK, so one copy
+/// was lost: cwnd is reduced as for a loss, once.
+#[test]
+fn rfc_8985_7_4_a_resent_probe_acknowledged_without_a_dsack_repaired_a_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    h.input_full(30, seg(5001).ack(15_481));
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd, info.in_recovery), (10_136, 10_136, false));
+    assert_eq!(h.count(Counter::LossProbeRecovery), 1);
+}
+
+/// RFC 8985 §7.4: the same, but the ACK reports the probe's segment as a duplicate: nothing was
+/// lost, and cwnd stands.
+#[test]
+fn rfc_8985_7_4_a_resent_probe_reported_as_a_duplicate_infers_no_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    let cwnd = h.info().cwnd;
+    h.input_full(30, seg(5001).ack(15_481).sack(&[(14_033, 15_481)]));
+    assert_eq!((h.info().cwnd >= cwnd, h.count(Counter::LossProbeRecovery), h.count(Counter::DsackRcvd)), (true, 0, 1));
+}
+
+/// RFC 8985 §7.2: with one segment out, the probe waits WCDelAckT past two round trips, which is
+/// past the RTO here, so it goes at the RTO's time in the RTO's place, and the RTO runs from it.
+#[test]
+fn rfc_8985_7_2_with_one_segment_out_the_probe_stands_in_for_the_first_rto() {
+    let mut h = fixture_ef();
+    h.send(0, 1448);
+    let rto = h.info().rto.as_millis() as i64;
+    nothing(&h.at(rto - 1));
+    expect(&h.at(rto), &["SEQ=1001 LEN=1448"]);
+    assert_eq!((h.count(Counter::LossProbe), h.count(Counter::Rto)), (1, 0));
+    nothing(&h.at(2 * rto - 1));
+    expect(&h.at(2 * rto), &["SEQ=1001 LEN=1448"]);
+    assert_eq!(h.count(Counter::Rto), 1);
 }

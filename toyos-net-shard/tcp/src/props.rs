@@ -114,7 +114,8 @@ impl Checker {
         }
     }
 
-    /// PROP-01, 04, 05, 06 and 07 on every synchronized connection, and every refusal counted.
+    /// PROP-01, 04, 05, 06 and 07 and `rx`'s capacity invariant on every synchronized connection,
+    /// and every refusal counted.
     fn state(&mut self, node: usize, tcp: &mut Tcp, now: Instant) {
         for (tuple, sync) in tcp.each_sync() {
             let expiries = tcp.counters().get(Counter::Rto);
@@ -134,6 +135,8 @@ impl Checker {
                 assert!(tx.nxt.at_or_before(left), "SND.NXT {:?} past what left, {left:?}", tx.nxt);
             }
             let edge = sync.rx.edge();
+            let promised = sync.rx.unread().saturating_add(usize::try_from(edge.since(sync.rx.next)).unwrap_or(usize::MAX));
+            assert!(promised <= sync.rx.capacity(), "rx: unread + window {promised} past the capacity {}", sync.rx.capacity());
             if let Some(&(acked, offered)) = self.told.get(&(node, tuple)) {
                 let sent = sync.rx.last_ack_sent;
                 assert!(sent.at_or_before(acked), "acknowledged to {sent:?}, past what left, {acked:?}");

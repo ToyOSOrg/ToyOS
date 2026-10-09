@@ -68,6 +68,9 @@ pub struct Info {
     pub max_snd_wnd: u32,
     pub rcv_nxt: Seq,
     pub rcv_edge: Seq,
+    /// The receive buffer's present size, and the receiver's round-trip estimate it grows by.
+    pub rcv_capacity: usize,
+    pub rcv_rtt: Option<Duration>,
     pub srtt: Option<Duration>,
     pub rttvar: Option<Duration>,
     pub rto: Duration,
@@ -1152,6 +1155,8 @@ impl Tcp {
             max_snd_wnd: sync.tx.max_wnd,
             rcv_nxt: sync.rx.next,
             rcv_edge: sync.rx.edge(),
+            rcv_capacity: sync.rx.capacity(),
+            rcv_rtt: sync.rx.rtt(),
             srtt: sync.rtt.srtt(),
             rttvar: sync.rtt.rttvar(),
             rto: sync.rtt.rto(),
