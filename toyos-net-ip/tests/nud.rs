@@ -5,17 +5,26 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_ip::{limits, Advice, Counter, Event, Flow, IfIndex, Nud, Resolution};
-use toyos_net_wire::Port;
+use toyos_net_ip::{limits, Advice, Counter, Event, IfIndex, Nud, Resolution};
 
-fn flow_to(destination: Ipv4Addr) -> Flow {
-    Flow { source: A, source_port: Port::new(5001).unwrap(), destination, destination_port: Port::new(5001).unwrap() }
-}
-
+/// What an echo reply or a UDP datagram carries.
 fn payload(out: &Out) -> Vec<u8> {
     out.ip().unwrap().payload()[8..].to_vec()
 }
 
+/// Nobody is told of a datagram [ip] held: each is [ip]'s own message.
+fn nobody_is_told(h: &H) -> bool {
+    !h.events.iter().any(|e| matches!(e, Event::Unreachable(_)))
+}
+
+fn queued(h: &H, addr: Ipv4Addr) -> Option<usize> {
+    match h.state(addr) {
+        Some(Nud::Incomplete(s)) => Some(s.pending.queued()),
+        _ => None,
+    }
+}
+
+// The datagram [ip] queues is its own: a transport's is not taken, and its request is asked.
 #[test]
 fn s_ip_nud_001_resolution_releases_the_datagram() {
     let mut h = H::fixture_i();
@@ -23,7 +32,9 @@ fn s_ip_nud_001_resolution_releases_the_datagram() {
     let out = h.out();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].frame, hex(V_ARP_REQ));
-    assert!(matches!(h.state(B), Some(Nud::Incomplete(s)) if s.pending.queued() == 1));
+    assert_eq!(queued(&h, B), Some(0), "a transport's datagram waits with its sender");
+    h.echo(B, MAC_B, A, b"hi");
+    assert_eq!((queued(&h, B), h.out().len()), (Some(1), 0));
     h.at(5);
     h.frame(&hex(V_ARP_REPLY));
     assert!(h.is_reachable(B));
@@ -38,6 +49,7 @@ fn s_ip_nud_001_resolution_releases_the_datagram() {
 fn s_ip_nud_002_three_requests_then_failed() {
     let mut h = H::fixture_i();
     h.udp_to(B).unwrap();
+    h.echo(B, MAC_B, A, b"hi");
     let mut out = h.out();
     out.extend(h.run(3_000));
     let times: Vec<u64> = out.iter().filter(|o| o.requests(B)).map(|o| o.at).collect();
@@ -46,7 +58,8 @@ fn s_ip_nud_002_three_requests_then_failed() {
     assert!(matches!(h.state(B), Some(Nud::Failed)));
     assert_eq!(h.count(Counter::NbFailed), 1);
     assert_eq!(h.count(Counter::NbPendingDropped), 1);
-    assert!(h.events.contains(&Event::Unreachable(flow_to(B))));
+    assert!(h.events.contains(&Event::Failed { iface: h.if0, next_hop: B }), "what tells the sender that waited");
+    assert!(nobody_is_told(&h));
     assert!(h.run(10_000).is_empty());
 }
 
@@ -54,27 +67,25 @@ fn s_ip_nud_002_three_requests_then_failed() {
 fn s_ip_nud_003_release_keeps_arrival_order() {
     let mut h = H::fixture_i();
     for data in [b"1", b"2", b"3"] {
-        h.send(A, B, 5001, 5001, data).unwrap();
+        h.echo(B, MAC_B, A, data);
     }
     h.out();
     h.frame(&hex(V_ARP_REPLY));
-    let fourth = h.send(A, B, 5001, 5001, b"4").unwrap().unwrap();
-    let mut out: Vec<Vec<u8>> = h.out().iter().map(payload).collect();
-    out.push(ip_of(&fourth).unwrap().payload()[8..].to_vec());
+    h.echo(B, MAC_B, A, b"4");
+    let out: Vec<Vec<u8>> = h.out().iter().map(payload).collect();
     assert_eq!(out, [b"1", b"2", b"3", b"4"]);
 }
 
 #[test]
 fn s_ip_nud_004_overflow_drops_the_oldest() {
-    let per = limits::nud::PENDING_PER_NEIGHBOUR as u8;
     let mut h = H::fixture_i();
-    for n in 1..=per + 2 {
-        h.send(A, B, 5001, 5001, &[n]).unwrap();
+    for n in 1..=10u8 {
+        h.echo(B, MAC_B, A, &[b'0' + n % 10]);
     }
     h.out();
     h.frame(&hex(V_ARP_REPLY));
     let out: Vec<Vec<u8>> = h.out().iter().map(payload).collect();
-    let expected: Vec<Vec<u8>> = (3..=per + 2).map(|n| vec![n]).collect();
+    let expected: Vec<Vec<u8>> = (3..=10u8).map(|n| vec![b'0' + n % 10]).collect();
     assert_eq!(out, expected);
     assert_eq!(h.count(Counter::NbPendingOverflow), 2);
 }
@@ -84,13 +95,17 @@ fn s_ip_nud_005_the_interface_holds_at_most_64() {
     let mut h = H::fixture_i();
     for n in 0..8u8 {
         for _ in 0..8 {
-            assert_eq!(h.udp_to(Ipv4Addr::new(192, 0, 2, 10 + n)), Ok(None));
+            h.echo(Ipv4Addr::new(192, 0, 2, 10 + n), MAC_X, A, b"hi");
         }
+        assert_eq!(queued(&h, Ipv4Addr::new(192, 0, 2, 10 + n)), Some(8));
     }
-    assert_eq!(h.udp_to(Ipv4Addr::new(192, 0, 2, 30)), Err(Counter::NbPendingFull));
+    assert_eq!(h.count(Counter::NbPendingFull), 0);
+    h.echo(Ipv4Addr::new(192, 0, 2, 30), MAC_X, A, b"hi");
     assert_eq!(h.count(Counter::NbPendingFull), 1);
     assert!(h.state(Ipv4Addr::new(192, 0, 2, 30)).is_none());
-    assert!(h.events.contains(&Event::Unreachable(flow_to(Ipv4Addr::new(192, 0, 2, 30)))));
+    // The bound is on what [ip] holds: a transport's datagram for a ninth is asked for.
+    assert_eq!(h.udp_to(Ipv4Addr::new(192, 0, 2, 30)), Ok(None));
+    assert_eq!((queued(&h, Ipv4Addr::new(192, 0, 2, 30)), h.count(Counter::NbPendingFull)), (Some(0), 1));
 }
 
 #[test]
@@ -477,29 +492,27 @@ fn s_ip_nud_022_a_send_a_full_table_refused_is_told_of_room() {
 fn s_ip_nud_023_link_down_drops_the_table() {
     let mut h = H::fixture_i();
     for _ in 0..2 {
-        h.udp_to(B).unwrap();
+        h.echo(B, MAC_B, A, b"hi");
     }
-    h.udp_to(DNS).unwrap();
+    h.echo(DNS, MAC_DNS, A, b"hi");
     h.out();
     h.ip.link_down(h.clock(), h.if0).unwrap();
     h.collect();
     assert!(h.state(B).is_none() && h.state(DNS).is_none());
-    let told = h.events.iter().filter(|e| matches!(e, Event::Unreachable(_))).count();
-    assert_eq!(told, 3);
     assert_eq!(h.count(Counter::NbPendingDropped), 3);
+    assert!(nobody_is_told(&h));
     h.ip.link_up(h.clock(), h.if0).unwrap();
     assert!(h.state(B).is_none() && h.state(DNS).is_none());
 
     let mut h = H::fixture_i();
-    h.udp_to(B).unwrap();
+    h.echo(B, MAC_B, A, b"hi");
     h.out();
     h.frame(&hex(V_ARP_REPLY));
     h.ip.link_down(h.clock(), h.if0).unwrap();
     h.collect();
     assert_eq!(h.count(Counter::NbPendingDropped), 1, "released, never sent");
-    assert!(h.events.contains(&Event::Unreachable(flow_to(B))));
     h.ip.link_up(h.clock(), h.if0).unwrap();
-    assert!(h.out().iter().all(|o| o.ip().is_none_or(|ip| ip.protocol() != toyos_net_wire::ipv4::Protocol::Udp)));
+    assert!(h.out().iter().all(|o| o.ip().is_none_or(|ip| ip.protocol() != toyos_net_wire::ipv4::Protocol::Icmp)));
 }
 
 #[test]
@@ -594,7 +607,7 @@ fn s_ip_nud_027_prop_reachable_time_is_drawn_every_two_hours() {
 fn b_in_a_full_table(reachable: bool) -> H {
     let mut h = wide();
     for data in [b"1", b"2"] {
-        assert_eq!(h.send(WIDE_A, neighbour(0), 5001, 5001, data), Ok(None));
+        h.echo(neighbour(0), wide_mac(neighbour(0)), WIDE_A, data);
     }
     h.out();
     for n in 1..limits::nud::TABLE_MAX as u32 {
@@ -612,7 +625,6 @@ fn b_in_a_full_table(reachable: bool) -> H {
 #[test]
 fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     let b = neighbour(0);
-    let flow = Flow { source: WIDE_A, source_port: Port::new(5001).unwrap(), destination: b, destination_port: Port::new(5001).unwrap() };
     // The other 511 STALE; then REACHABLE, twice: for a later entry at B's address, and for the
     // interface's bound.
     for arm in 0..3 {
@@ -637,7 +649,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
         }
         assert!(h.state(b).is_none());
         assert_eq!(h.count(Counter::NbPendingEvicted), 2);
-        assert_eq!(h.events.iter().filter(|e| **e == Event::Unreachable(flow)).count(), 2);
+        assert!(nobody_is_told(&h));
         for t in [1_511, 2_511, 3_511] {
             h.ip.fire(H::instant(t));
         }
@@ -647,7 +659,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
             // for its own, behind a defence queued first.
             h.at(3_511);
             h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, WIDE_A, MacAddr::ZERO, WIDE_A)));
-            assert_eq!(h.send(WIDE_A, b, 5001, 5001, b"3"), Ok(None));
+            h.echo(b, wide_mac(b), WIDE_A, b"3");
             h.frame(&eth(MAC_A, wide_mac(b), 0x0806, &arp_packet(2, wide_mac(b), b, MAC_A, WIDE_A)));
             let out = h.out();
             assert_eq!(out.len(), limits::CONTROL_QUEUE + 2);
@@ -663,12 +675,13 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
                 h.ip.fire(H::instant(t));
             }
             h.at(46_000);
-            let mut accepted = 0;
-            while h.send(WIDE_A, neighbour(10_000 + accepted / 8), 5001, 5001, b"y") == Ok(None) {
-                accepted += 1;
+            let asker = |n: u32| neighbour(10_000 + n / 8);
+            for n in 0..=limits::nud::PENDING_TOTAL as u32 {
+                h.echo(asker(n), wide_mac(asker(n)), WIDE_A, b"y");
             }
             assert_eq!(h.count(Counter::NbPendingFull), 1);
-            assert_eq!(accepted as usize, limits::nud::PENDING_TOTAL);
+            let accepted: usize = (0..limits::nud::PENDING_TOTAL as u32).step_by(8).map(|n| queued(&h, asker(n)).unwrap()).sum();
+            assert_eq!(accepted, limits::nud::PENDING_TOTAL);
         }
     }
 
@@ -702,7 +715,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     h.run(3_000);
     assert!(matches!(h.ip.neighbour(if0, x), Some(Nud::Failed)));
     for data in [b"1", b"2"] {
-        assert_eq!(h.send(a1, x, 5001, 5001, data), Ok(None));
+        let _ = h.ip.receive(h.clock(), if1, &eth(MAC_A1, MAC_X, 0x0800, &echo_request(x, a1, data)));
     }
     h.out();
     let _ = h.ip.receive(h.clock(), if1, &eth(MAC_A1, MAC_X, 0x0806, &arp_packet(2, MAC_X, x, MAC_A1, a1)));
@@ -718,7 +731,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
 fn b_holds_two_behind_a_full_queue() -> H {
     let mut h = H::fixture_i();
     for data in [b"1", b"2"] {
-        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
+        h.echo(B, MAC_B, A, data);
     }
     h.out();
     h.fill_control_queue(h.if0, h.clock(), A);
@@ -770,7 +783,7 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
     // at B's address sends its own request, behind a reply queued first.
     let mut h = H::fixture_i();
     for data in [b"1", b"2"] {
-        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
+        h.echo(B, MAC_B, A, data);
     }
     h.out();
     h.at(5);
@@ -899,17 +912,13 @@ fn rfc_4861_7_2_2_a_silent_next_hop_holds_up_no_other() {
     let mut h = H::fixture_i();
     let behind_r = |n: u8| Ipv4Addr::new(198, 51, 100, 1 + n);
     for n in 0..=per {
-        assert_eq!(h.send(A, behind_r(n), 5001, 5001, &[b'r', n]), Ok(None));
+        h.echo(behind_r(n), MAC_R, A, &[b'r', n]);
     }
     assert_eq!(h.count(Counter::NbPendingOverflow), 1, "one more than R's queue holds");
     for n in 0..per {
-        assert_eq!(h.send(A, B, 5001, 5001, &[b'b', n]), Ok(None));
+        h.echo(B, MAC_B, A, &[b'b', n]);
     }
     assert_eq!(h.count(Counter::NbPendingOverflow), 1, "B's datagrams wait in B's queue, and R's full one drops none of them");
-    let queued = |h: &H, addr| match h.state(addr) {
-        Some(Nud::Incomplete(s)) => Some(s.pending.queued()),
-        _ => None,
-    };
     assert_eq!((queued(&h, R), queued(&h, B)), (Some(usize::from(per)), Some(usize::from(per))));
     let asked = h.out();
     assert!(asked.len() == 2 && asked[0].requests(R) && asked[1].requests(B), "one request each, and no datagram");
@@ -925,9 +934,7 @@ fn rfc_4861_7_2_2_a_silent_next_hop_holds_up_no_other() {
     let later = h.run(3_000);
     assert!(later.iter().all(|o| o.requests(R)), "nothing but R's own requests leaves as R fails");
     assert!(matches!(h.state(R), Some(Nud::Failed)));
-    assert_eq!(h.count(Counter::NbPendingDropped), u64::from(per));
-    let told: Vec<Event> = h.events.iter().filter(|e| matches!(e, Event::Unreachable(_))).copied().collect();
-    let behind: Vec<Event> = (1..=per).map(|n| Event::Unreachable(flow_to(behind_r(n)))).collect();
-    assert_eq!(told, behind, "only the flows routed by R are told, the oldest having given its place");
+    assert_eq!(h.count(Counter::NbPendingDropped), u64::from(per), "R's, and none of B's");
+    assert!(nobody_is_told(&h));
     assert!(matches!(h.send(A, B, 5001, 5001, b"still"), Ok(Some(frame)) if destination_of(&frame) == MAC_B));
 }

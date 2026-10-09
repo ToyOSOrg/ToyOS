@@ -221,7 +221,7 @@ impl Net {
     fn pump(&mut self) {
         for _ in 0..100_000 {
             let mut frames = Vec::new();
-            self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()));
+            self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
             if frames.is_empty() {
                 return;
             }

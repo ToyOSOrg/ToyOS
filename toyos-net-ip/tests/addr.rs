@@ -488,10 +488,9 @@ fn rfc_3927_2_6_2_a_datagram_to_a_link_local_host_is_resolved_and_sent_to_it() {
     h.frame(&eth(MacAddr::BROADCAST, MAC_L, 0x0806, &arp_packet(2, MAC_L, LINK_LOCAL, MAC_A, A)));
     assert!(h.is_reachable(LINK_LOCAL));
     assert_eq!(h.count(Counter::ArpSenderOffLink), 0);
-    let out = h.out();
-    assert_eq!(out.len(), 1);
-    assert_eq!((out[0].to(), out[0].ip().unwrap().destination()), (MAC_L, LINK_LOCAL));
-    assert!(matches!(h.udp_to(LINK_LOCAL), Ok(Some(frame)) if destination_of(&frame) == MAC_L));
+    let frame = h.udp_to(LINK_LOCAL).unwrap().expect("its link address is known");
+    assert_eq!((destination_of(&frame), ip_of(&frame).unwrap().destination()), (MAC_L, LINK_LOCAL));
+    assert!(h.out().is_empty(), "no frame is the router's");
 }
 
 // RFC 3927 §2.6.2 excludes 169.254.255.255, "the IPv4 Link-Local subnet broadcast address", from
