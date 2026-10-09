@@ -11,8 +11,8 @@
 //!   so no new address would say the name is in doubt (§8). The responder probes for it again.
 //! - Every message that has arrived is handed over before the responder is asked what it owes: a
 //!   conflicting response received as a probing ends takes the name before it is claimed (§8.1).
-//! - What the name is owed later, a probe, an announcement (§8.3) or an answer §6 held back, is a
-//!   deadline of the node's ([`Name::next_deadline`]).
+//! - What the name is owed later, a probe, a lost name's next among them, an announcement (§8.3)
+//!   or an answer §6 held back, is a deadline of the node's ([`Name::next_deadline`]).
 //! - Each probing the responder starts spends one draw, the delay before its first probe (§8.1).
 //! - What became of the name, claimed or lost, is a line of [`Node::drain_events`].
 //! - Every message leaves with TTL 255 (§11).

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint};
-use toyos_mdns::{Event, Host, Link, Source, To, GROUP, PORT};
+use toyos_mdns::{Event, Host, Link, Source, To, GROUP, PORT, RETRY_MS};
 
 /// A message is a few hundred bytes; this holds a handful of them between two
 /// passes, and one past it is dropped by the socket, which is what its
@@ -104,7 +104,10 @@ impl Responder {
 fn said(host: &str, event: Option<Event>) {
     match event {
         Some(Event::Claimed) => crate::say!("netstack: mDNS: no host answered for {host}.local; this machine answers as it"),
-        Some(Event::Lost) => crate::say!("netstack: mDNS: another host answered for {host}.local; this machine answers to no name"),
+        Some(Event::Lost) => crate::say!(
+            "netstack: mDNS: another host answered for {host}.local; this machine answers to no name and asks for {host}.local again every {} s",
+            RETRY_MS / 1000
+        ),
         None => {}
     }
 }

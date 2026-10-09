@@ -526,12 +526,11 @@ fn rfc6762_8_1_a_conflicting_response_under_the_probe_takes_the_name_and_nothing
                 continue;
             }
             assert_eq!(r.said(), [Event::Lost], "{what}, after {probes} probes");
-            assert_eq!((r.said(), r.owed_at()), (vec![], None), "said once, and nothing is owed");
-            assert_eq!(run(&mut r, LINK, 3_600_000, 0), [], "{what}: no probe and no announcement");
-            assert_eq!(r.on(Some(LINK), 3_600_000, undrawn), None);
-            assert!(!answers(&mut r, 3_600_000), "{what}: and no answer");
+            assert_eq!((r.said(), r.owed_at()), (vec![], Some(now + 60_000)), "said once, and nothing is owed for a minute");
+            assert_eq!(run(&mut r, LINK, now + 59_999, 0), [], "{what}: no probe and no announcement");
+            assert!(!answers(&mut r, now + 59_999), "{what}: and no answer");
             for class in [1, 0x8001] {
-                assert_eq!(r.heard(&query(0, NAME, 255, class), PEER, 3_600_000), None);
+                assert_eq!(r.heard(&query(0, NAME, 255, class), PEER, now + 59_999), None);
             }
         }
     }
@@ -597,9 +596,9 @@ fn rfc6762_9_a_held_name_another_host_answers_for_under_the_new_probe_is_lost() 
     assert_eq!(r.heard(&says(&MOVED), PEER, 50_000), None);
     assert_eq!(run(&mut r, LINK, 50_100, 0), [(50_000, probe_for(ADDR))]);
     assert_eq!(r.heard(&says(&MOVED), PEER, 50_100), None, "the holder defends");
-    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], None));
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
-    assert!(!answers(&mut r, 3_600_000));
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], Some(110_100)));
+    assert_eq!(run(&mut r, LINK, 110_099, 0), []);
+    assert!(!answers(&mut r, 110_099));
 }
 
 /// RFC 6762 §6: "In the special case of answering probe queries, because of
@@ -707,8 +706,8 @@ fn rfc6762_8_1_a_conflicting_response_received_as_the_last_250_ms_end_takes_the_
     r.r.on(Some(LINK), 1_750);
     assert_eq!(r.heard(&says(&MOVED), PEER, 1_750), None);
     assert_eq!(r.said(), [Event::Lost]);
-    assert_eq!(r.r.owed(1_750, undrawn), (None, None), "and nothing is announced");
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
+    assert_eq!(r.r.owed(1_750, || 0), (None, None), "and nothing is announced");
+    assert_eq!(run(&mut r, LINK, 61_749, 0), []);
 }
 
 /// RFC 6762 §8: "Whenever a Multicast DNS responder starts up, wakes up from
@@ -784,7 +783,7 @@ fn a_flapping_link_restarts_the_probe_and_nothing_is_announced_until_one_runs_wh
 /// A storm of forged answers, one a millisecond for ten seconds, at a held
 /// name: the first resets it to probing (§9), the next after its first probe
 /// takes it (§8.1), and the other 9,998 are read by a responder that holds no
-/// name and sends nothing.
+/// name and sends nothing for a minute.
 #[test]
 fn a_storm_of_forged_answers_costs_one_probe_and_the_name() {
     let mut r = held(10_000);
@@ -794,8 +793,8 @@ fn a_storm_of_forged_answers_costs_one_probe_and_the_name() {
         assert_eq!(r.heard(&says(&MOVED), PEER, 50_000 + ms), None);
     }
     assert_eq!(sent, [(50_000, probe_for(ADDR))]);
-    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], None));
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], Some(110_001)));
+    assert_eq!(run(&mut r, LINK, 110_000, 0), []);
 }
 
 /// Forged answers, one a millisecond for a minute, that spare every probe:
@@ -902,9 +901,147 @@ fn an_address_after_none_is_probed_for_and_a_new_one_under_a_held_name_is_announ
     assert_eq!(r.on(Some(moved), 1_250, undrawn), Some(probe_for(MOVED)), "a probe proposes the address held as it leaves");
     assert_eq!(r.heard(&says(&ADDR), PEER, 1_300), None, "and the address given up is another's");
     assert_eq!(r.said(), [Event::Lost]);
-    assert_eq!((r.on(Some(LINK), 2_000, undrawn), r.owed_at()), (None, None), "a lost name is not claimed by a new address");
+    assert_eq!((r.on(Some(LINK), 2_000, || 0), r.owed_at()), (None, Some(61_300)), "a lost name is not probed for on a new address");
     assert_eq!(r.on(None, 3_000, undrawn), None);
     assert_eq!(r.on(Some(LINK), 12_000, || 0), Some(probe_for(ADDR)), "but by one after none");
+}
+
+/// A responder that lost its name at 1,100, to a response under the first
+/// probe of its start-up; the retry's delay is not yet drawn.
+fn lost() -> Machine {
+    let mut r = probing(LINK);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 1_100), None);
+    assert_eq!(r.said(), [Event::Lost]);
+    r
+}
+
+/// RFC 6762 §9: "the loser MUST cease using the name"; §8.1 lets a failed
+/// probe attempt be tried again after five seconds and asks for none. A lost
+/// name is probed for again a minute after it was lost, behind a delay drawn
+/// as any probing's is (§8.1), and until then nothing is sent or answered.
+#[test]
+fn a_lost_name_is_probed_for_again_a_minute_after_the_loss_and_not_before() {
+    for (draw, delay) in [(0, 0), (40, 40), (250, 250), (1_000, 247)] {
+        let mut r = lost();
+        assert_eq!(r.on(Some(LINK), 1_100, || draw), None, "draw {draw}");
+        assert_eq!(r.owed_at(), Some(61_100 + delay), "a minute, then the drawn delay");
+        for now in 1_101..61_100 + delay {
+            assert_eq!(r.on(Some(LINK), now, undrawn), None, "draw {draw}: nothing at {now}");
+        }
+        assert!(!answers(&mut r, 61_099 + delay), "the name is nobody's here meanwhile");
+        assert_eq!(r.on(Some(LINK), 61_100 + delay, undrawn), Some(probe_for(ADDR)), "draw {draw}");
+        assert_eq!(r.said(), [], "a probe is no claim");
+    }
+    let moved = Link { addr: MOVED, prefix: 24 };
+    let mut r = lost();
+    assert_eq!(r.on(Some(moved), 30_000, || 0), None, "a new address under a lost name");
+    assert_eq!(run(&mut r, moved, 61_100, 0), [(61_100, probe_for(MOVED))], "is the one the retry proposes");
+}
+
+/// The host that holds the name answers the retry's probe (§8.1), early or
+/// late in the probing: the name is lost again, a minute from that answer is
+/// waited again, and the owner, told once that the name is lost, is told
+/// nothing more.
+#[test]
+fn a_retry_the_holder_answers_loses_again_and_the_next_is_a_minute_after_it() {
+    let mut r = lost();
+    assert_eq!(run(&mut r, LINK, 61_100, 0), [(61_100, probe_for(ADDR))]);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 61_130), None, "the holder defends");
+    assert_eq!((r.said(), r.owed_at()), (vec![], Some(121_130)), "lost as before, and said once");
+    assert_eq!(run(&mut r, LINK, 121_129, 0), [], "nothing for a minute");
+    assert!(!answers(&mut r, 121_129));
+
+    assert_eq!(run(&mut r, LINK, 121_849, 9), claim_of(ADDR, 121_139)[..3], "the next retry, three probes unanswered so far");
+    assert_eq!(r.heard(&says(&MOVED), PEER, 121_849), None, "an answer in the last 250 ms");
+    assert_eq!((r.said(), r.owed_at()), (vec![], Some(181_849)));
+    assert_eq!(run(&mut r, LINK, 181_848, 0), [], "no announcement, and nothing for a minute");
+    assert_eq!(run(&mut r, LINK, 181_849, 0), [(181_849, probe_for(ADDR))]);
+    assert_eq!(r.said(), []);
+}
+
+/// The host that held the name has left: the retry's probing runs
+/// unanswered, and the name is claimed and announced as at start-up (§8.1,
+/// §8.3). A name claimed is one that can be lost, and said lost, again.
+#[test]
+fn a_retry_no_host_answers_claims_and_announces_the_name() {
+    let mut r = lost();
+    assert_eq!(run(&mut r, LINK, 3_600_000, 25), claim_of(ADDR, 61_125), "three probes, two announcements, and nothing after");
+    assert_eq!(r.said(), [Event::Claimed]);
+    assert!(answers(&mut r, 3_600_000));
+
+    assert_eq!(r.heard(&says(&MOVED), PEER, 4_000_000), None);
+    assert_eq!(run(&mut r, LINK, 4_000_000, 0), [(4_000_000, probe_for(ADDR))], "§9: a held name is probed for at once");
+    assert_eq!(r.heard(&says(&MOVED), PEER, 4_000_100), None);
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], Some(4_060_100)), "lost anew, and said");
+}
+
+/// Forged messages, each a millisecond for five minutes, at a host that
+/// holds no name: a conflicting response, a probe that wins every tiebreak
+/// and a query. Between two probings no probe is out and none is read; the
+/// response that follows a retry's first probe takes the name again. The
+/// forger buys one probe a minute and the drawn delay, no announcement, and
+/// no word to the owner.
+#[test]
+fn a_storm_of_forged_conflicts_at_a_lost_name_costs_one_probe_a_minute() {
+    let forged = [says(&MOVED), probe_of(1, &[(NAME, 1, 1, &MOVED)]), query(0, NAME, 255, 1)];
+    let mut r = lost();
+    let mut sent = Vec::new();
+    for now in 1_101..301_101 {
+        sent.extend(run(&mut r, LINK, now, 7));
+        for message in &forged {
+            assert_eq!(r.heard(message, PEER, now), None);
+        }
+    }
+    let probes: Vec<_> = (0..4).map(|nth| (61_107 + nth * 60_007, probe_for(ADDR))).collect();
+    assert_eq!(sent, probes, "four probes in the five minutes, each a minute and its delay after the one before");
+    assert_eq!(r.said(), [], "lost was said before the storm, and is not said again");
+    assert_eq!(run(&mut r, LINK, 3_600_000, 7), claim_of(ADDR, 301_135), "the forger stops, and the next retry claims the name");
+    assert_eq!(r.said(), [Event::Claimed]);
+}
+
+/// RFC 6762 §8.2 has the loser of a tiebreak wait a second and probe again,
+/// which forged probes turn into a probe in five seconds (§8.1) at a host
+/// that holds no name for as long as they are sent. A lost name defers to a
+/// later probe as it does to an answer, for a minute: one probe a minute,
+/// and the name when the forger stops.
+#[test]
+fn forged_probes_that_win_every_tiebreak_at_a_lost_name_cost_one_probe_a_minute() {
+    let later = probe_of(1, &[(NAME, 1, 1, &MOVED)]);
+    let mut r = lost();
+    let mut sent = Vec::new();
+    for now in 1_101..301_101 {
+        sent.extend(run(&mut r, LINK, now, 7));
+        assert_eq!(r.heard(&later, PEER, now), None);
+    }
+    let probes: Vec<_> = (0..4).map(|nth| (61_107 + nth * 60_000, probe_for(ADDR))).collect();
+    assert_eq!(sent, probes, "four probes in the five minutes, a minute apart");
+    assert_eq!(r.said(), []);
+    assert_eq!(run(&mut r, LINK, 3_600_000, 7), claim_of(ADDR, 301_107), "the forger stops, and the next retry claims the name");
+    assert_eq!(r.said(), [Event::Claimed]);
+}
+
+/// RFC 6762 §8: a link's return is probed on at once, under a lost name as
+/// under any. It takes the place of the retry that was owed: one probing,
+/// and none a minute after the loss. A holder that answers it is deferred to
+/// for a minute from that answer.
+#[test]
+fn a_links_return_under_a_lost_name_probes_at_once_in_place_of_the_retry() {
+    let mut r = lost();
+    assert_eq!(r.on(Some(LINK), 1_100, || 0), None);
+    assert_eq!(r.owed_at(), Some(61_100), "the retry");
+    r.link_returned(30_000);
+    assert_eq!(r.owed_at(), Some(30_000), "at once");
+    assert_eq!(run(&mut r, LINK, 3_600_000, 3), claim_of(ADDR, 30_003), "one probing, and no second at 61,100");
+    assert_eq!(r.said(), [Event::Claimed]);
+
+    let mut r = lost();
+    assert_eq!(r.on(Some(LINK), 1_100, || 0), None);
+    r.link_returned(30_000);
+    assert_eq!(run(&mut r, LINK, 30_000, 0), [(30_000, probe_for(ADDR))]);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 30_050), None, "the holder is still there");
+    assert_eq!((r.said(), r.owed_at()), (vec![], Some(90_050)), "a minute from this loss, and not from the first");
+    assert_eq!(run(&mut r, LINK, 90_049, 0), [], "no probe at 61,100");
+    assert_eq!(run(&mut r, LINK, 90_050, 0), [(90_050, probe_for(ADDR))]);
 }
 
 /// RFC 6762 §11: a query whose source is not on this link is ignored; a

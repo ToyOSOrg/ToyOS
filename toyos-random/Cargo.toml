@@ -1,0 +1,7 @@
+[package]
+name = "toyos-random"
+description = "The kernel's random generator, ChaCha20 with its key replaced at every draw, and the judgment of the bytes that may key it, which the loader makes of firmware's too; pure."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
