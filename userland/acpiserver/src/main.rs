@@ -330,6 +330,6 @@ impl Server {
         }
         self.logged = self.counted;
         let counts: Vec<String> = self.counts.iter().map(|(q, n)| format!("{q:#04x} x{n}")).collect();
-        println!("acpiserver: {} SCIs; embedded controller queries taken: {}", self.scis, counts.join(", "));
+        println!("acpiserver: {} SCIs; {}{}", self.scis, acpiserver_api::QUERIES_COUNTED, counts.join(", "));
     }
 }

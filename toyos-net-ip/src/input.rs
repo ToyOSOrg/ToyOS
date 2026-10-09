@@ -14,7 +14,7 @@ use toyos_net_wire::udp::UdpDatagram;
 use toyos_net_wire::Instant;
 
 use crate::counters::Counter;
-use crate::iface::Interface;
+use crate::iface::{link_local_edge, Interface};
 use crate::{arp, igmp, Arrival, Cast, Delivery, IfIndex, Ip, Peer};
 
 const IPV6: u16 = 0x86DD;
@@ -84,7 +84,7 @@ fn admit(ifaces: &[Interface], i: &Interface, link: MacClass, packet: &Ipv4Packe
         return Err(Counter::IpNotForUs);
     };
     let unspecified_igmp = source == Ipv4Addr::UNSPECIFIED && packet.protocol() == Protocol::Igmp;
-    if !unspecified_igmp && (!is_host(source) || i.usable().any(|a| a.cidr.is_edge(source))) {
+    if !unspecified_igmp && (!is_host(source) || link_local_edge(source) || i.usable().any(|a| a.cidr.is_edge(source))) {
         return Err(Counter::IpInvalidSource);
     }
     if ifaces.iter().any(|j| j.owns(source)) {

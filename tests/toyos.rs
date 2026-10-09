@@ -161,8 +161,9 @@ const RUST_SKIP: &[&str] = &[
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/acpicase.
     "acpi_release",
-    // It holds the boot open to near the runner's bound, and asserts nothing:
-    // the `acpi_server_events` metal row runs it.
+    // It waits for the ACPI server's count of its embedded controller's
+    // queries, and no guest's machine has that controller: the
+    // `acpi_server_events` metal row runs it.
     "acpi_hold",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
@@ -260,6 +261,10 @@ const MACHINE_TESTS: &[&str] = &[
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
     "netstack_socket_churn",
+    // What libc's socket calls ask of netstack, read back from a peer that
+    // answers: the calls are libc's requests on netstack's port, netstack has
+    // no host build, and the T14's peer is the bench's network.
+    "libc_sockets",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -472,7 +477,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES_HELD,
             judge: |b| acpi_events_on_metal(b[0]),
         },
     ),
@@ -482,7 +487,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The same boot as `acpi_server_events`.
         "acpi_tables_loaded",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES_HELD,
             judge: |b| acpi_tables_on_metal(b[0]),
         },
     ),
@@ -919,6 +924,13 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         claims::RECLAIM,
     ],
 )];
+
+/// The same boot, ended on the hold: the count it waits for comes thirty
+/// seconds after the server arms, and a job behind it would wait that out too.
+const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_acpi_hold"),
+    ..metal::once("testcases", "tests/testcases", &[], &[])
+}];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -1669,6 +1681,9 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
     );
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, job, said)?;
+    // The kernel's record `one_clock` reads beside the supervisor's line: it
+    // reaches the PL011 by the kernel's road, and the job's end by `logkeeper`'s.
+    await_marker(&mut qemu, &mut serial, bootlog::LOGKEEPER_SPAWN, "the kernel's record of logkeeper's spawn")?;
     // The one console that carries the loader's, the kernel's and a program's
     // lines on a CPU that states its counter's rate: the T14's metal rows
     // judge the same on x86-64, and no machine of this architecture has one.
@@ -1677,13 +1692,14 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
 
 /// What `acpi_mediated` says, an arm a line, once the kernel answered each as
 /// its policy says.
-const ACPI_MEDIATED_SAID: [&str; 9] = [
+const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: an unbound claim was refused its access, the lock and the power-off's sleep type",
     "acpi: RAM was refused both ways as UsableMemory",
     "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
     "acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused UnlistedCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
-    "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written",
+    "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
+    "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
     "by its address and through ECAM, and every write to configuration space was refused ConfigWrite",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
@@ -1701,6 +1717,13 @@ const ACPI_MEDIATED_SAID: [&str; 9] = [
 /// from that, so its verdict is its last line, the kernel's and QEMU's; a
 /// probe that ends instead is one whose arm failed. On `cpus` CPUs: the
 /// second one's range registers are read where there is one.
+///
+/// And the probe's calls into the firmware, the first write to `SMI_CMD`
+/// this kernel makes on a guest, whose firmware hands it over in ACPI mode:
+/// the kernel says the first call of each byte, five of them, each written
+/// on the boot processor by that CPU's own reading beside the `out`, and
+/// where there is a second CPU one at least asked from it, the probe having
+/// asked three from a thread that read itself there.
 fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
@@ -1742,6 +1765,22 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     }
     for line in ACPI_MEDIATED_SAID {
         eprintln!("  [acpi] {}", said.must_say(line)?.trim());
+    }
+    for reading in ["acpi: firmware calls of ", " firmware calls were made before call "] {
+        eprintln!("  [acpi] {}", said.must_say(reading)?.trim());
+    }
+    let calls: Vec<&str> = said.text().lines().filter(|l| l.contains("acpi: firmware call 0x") && l.contains(" written to SMI_CMD ")).collect();
+    if calls.len() != 5 {
+        return Err(format!("the kernel said {} first firmware calls where the probe made calls of five bytes: {calls:#?}", calls.len()));
+    }
+    let mut crossed = 0;
+    for line in &calls {
+        smi_cmd_writer(line)?;
+        crossed += usize::from(number_between(line, ", asked from cpu", "; the write held cpu")? != 0);
+        eprintln!("  [acpi] {}", line.trim());
+    }
+    if cpus > 1 && crossed == 0 {
+        return Err(format!("no firmware call was asked from another CPU than the boot processor, so none crossed to it: {calls:#?}"));
     }
     // The shutdown refused by the kernel's own name for it, before anything
     // was stopped: the probe ran on and said every line above.
@@ -1960,12 +1999,17 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     let mut want = vec![format!("SMP: {VIRT_CPUS} of {VIRT_CPUS} MADT CPUs online")];
     for cpu in 1..VIRT_CPUS {
         want.push(format!("SMP: cpu{cpu} mpidr={cpu:#x} online"));
-        want.push(format!("CPU {cpu}: joining scheduler"));
     }
     for want in want {
         if !serial.contains(&want) {
             return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
         }
+    }
+    // Waited for: a CPU says this once the machine is released, so it reaches
+    // the PL011 by the kernel's road beside the job's end on `logkeeper`'s.
+    for cpu in 1..VIRT_CPUS {
+        let joined = format!("CPU {cpu}: joining scheduler");
+        await_marker(&mut qemu, &mut serial, &joined, &format!("cpu{cpu} to join the scheduler"))?;
     }
     let entered = format!("as declared; entered at EL{el}");
     for cpu in 0..VIRT_CPUS {
@@ -2196,13 +2240,14 @@ fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String
             ..Default::default()
         },
     );
-    let mut rest = String::new();
-    await_marker(&mut qemu, &mut rest, "===TEST_END reboot ", "the job reboot to end")?;
-    let console = format!("{}\n{rest}", qemu.boot_log());
-    for said in [REBOOT_REFUSED, "===TEST_END reboot exit=1==="] {
-        if !console.contains(said) {
-            return Err(format!("{said:?} not on the PL011\n{console}"));
-        }
+    let mut console = virt_console(&qemu);
+    // A wait each: the job's end is test-runner's line and the refusal the
+    // kernel's record, and the two reach the PL011 by different roads.
+    await_marker(&mut qemu, &mut console, "===TEST_END reboot ", "the job reboot to end")?;
+    await_marker(&mut qemu, &mut console, REBOOT_REFUSED, "the kernel's refusal of the reboot")
+        .map_err(|why| format!("{why}\n{console}"))?;
+    if !console.contains("===TEST_END reboot exit=1===") {
+        return Err(format!("the job reboot did not end with exit 1\n{console}"));
     }
     if console.contains(bootlog::REBOOTING) {
         return Err(format!("a machine with no reset began one\n{console}"));
@@ -2882,22 +2927,14 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
-    const LEASED: &str = "netstack: DHCP: lease ";
     let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
     let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
     // Ends with the process: a guest that never dials leaves it in `accept`.
     thread::spawn(move || server.incoming().for_each(drop));
-    // A second that holds what it accepts and reads none of it, for as long
-    // as the process lives.
-    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
-    let holding = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
-    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    let holding = holding_server()?;
 
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/netcase");
-    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], BootOptions::default());
-    let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
     let result =
         qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
@@ -2912,12 +2949,129 @@ fn netstack_socket_churn() -> Result<(), String> {
     Ok(())
 }
 
+/// A host server that holds each connection it accepts and reads none of it,
+/// for as long as the process lives: its port. A guest that never dials
+/// leaves it in `accept`.
+fn holding_server() -> Result<u16, String> {
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
+    let port = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
+    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
+    Ok(port)
+}
+
+/// Boot `tests/netcase` with these binaries staged, to netstack's lease: its
+/// jobs name their peer by an address.
+fn boot_netcase(
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    options: BootOptions,
+) -> Result<QemuInstance, String> {
+    const LEASED: &str = "netstack: DHCP: lease ";
+    let case = compile::repo_root().join("tests/netcase");
+    let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    Ok(qemu)
+}
+
+/// Have the guest's network carry what dials a loopback port of QEMU's
+/// choosing to each of `guest_ports`: those host ports, in that order.
+fn forwards_into(qemu: &QemuInstance, guest_ports: [u16; 2]) -> Result<[u16; 2], String> {
+    const FORWARD: &str = "TCP[HOST_FORWARD]";
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    for port in guest_ports {
+        // `net0` is the NIC's backend in `common::qemu`'s argv.
+        let said = monitor.human(&format!("hostfwd_add net0 tcp:127.0.0.1:0-:{port}"));
+        if !said.trim().is_empty() {
+            return Err(format!("QEMU forwards nothing to the guest's port {port}: {said}"));
+        }
+    }
+    // A row is the protocol, a descriptor, the host's address and port, then
+    // the guest's.
+    let table = monitor.human("info usernet");
+    let mut host_ports = [0u16; 2];
+    for (host, guest) in host_ports.iter_mut().zip(guest_ports) {
+        *host = table
+            .lines()
+            .map(|row| row.split_whitespace().collect::<Vec<_>>())
+            .find(|row| row.first() == Some(&FORWARD) && row.get(5) == Some(&guest.to_string().as_str()))
+            .and_then(|row| row[3].parse().ok())
+            .ok_or_else(|| format!("QEMU names no host port forwarded to the guest's {guest}:\n{table}"))?;
+    }
+    Ok(host_ports)
+}
+
+/// libc's sockets as a C program uses them, on one boot of `tests/netcase`:
+/// each of its C cases dials a host server that holds what it accepts, or
+/// sends to one that answers each datagram with itself, at the address the
+/// guest's network gives the host; and once `nodelay_kept` says its two
+/// listeners wait, the host dials each through a port QEMU forwards. A case's
+/// own comparisons are its verdict.
+fn libc_sockets() -> Result<(), String> {
+    const HOST: &str = "10.0.2.2";
+    /// The ports `nodelay_kept` listens on in the guest, which nothing else
+    /// on its boot binds.
+    const LISTENERS: [u16; 2] = [7001, 7002];
+    /// `nodelay_kept.c`'s `WAITING`.
+    const WAITING: &str = "nodelay_kept: both listeners wait for a peer";
+    let holding = holding_server()?;
+    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
+    let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
+    // Ends with the process, as the holding server does.
+    thread::spawn(move || {
+        let mut datagram = [0u8; 64];
+        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
+            echo.send_to(&datagram[..len], from).expect("answer a datagram");
+        }
+    });
+
+    // The address first: every case names its peer by one.
+    let [held, clear] = LISTENERS;
+    let cases = [
+        ("addr_order", holding.to_string()),
+        ("nodelay_kept", format!("{holding} {held} {clear}")),
+        ("sendto_unbound", answering.to_string()),
+    ];
+    let case = compile::repo_root().join("tests/netcase");
+    let bins: Vec<(String, Vec<u8>)> = cases
+        .iter()
+        .map(|(name, _)| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
+        .collect();
+    let mut qemu = boot_netcase(&bins, &[], BootOptions { qmp: true, ..Default::default() })?;
+    let forwarded = forwards_into(&qemu, LISTENERS)?;
+    // Held to the test's end: a peer gone before the case's `accept` fails its hand-over.
+    let mut dialled = Vec::new();
+    for (name, ports) in cases {
+        let result =
+            qemu.run_test_hooked(&format!("test_c_{name} {HOST} {ports}"), Duration::from_secs(120), WAITING, |_| {
+                dialled.extend(forwarded.map(|port| std::net::TcpStream::connect(("127.0.0.1", port))));
+            });
+        if let Some(Err(e)) = dialled.iter().find(|dial| dial.is_err()) {
+            return Err(format!("{name}: the host could not dial a port QEMU forwards to the guest: {e}"));
+        }
+        if qemu::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("  [libc] {name} ended {:?} and said:\n{}", result.exit_code, result.stdout);
+        }
+        if let Some(why) = &result.error {
+            return Err(format!("{name}: {why}\nthe case said:\n{}", result.stdout));
+        }
+        if result.exit_code != Some(0) {
+            return Err(format!("{name} ended {:?}:\n{}", result.exit_code, result.stdout));
+        }
+        if !result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{name}: ok"))) {
+            return Err(format!("{name} never said it was done:\n{}", result.stdout));
+        }
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
+        "libc_sockets" => libc_sockets(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
@@ -3778,8 +3932,11 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// edge's included because a line stamped in it may follow the read: the
 /// second is the idle machine's. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
-/// kernel's one write to `SMI_CMD`, and from there to `spin`, at least
-/// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves. Across the spin every
+/// kernel's write of the enable to `SMI_CMD`, which the boot processor
+/// counted with the time it held it, and no other CPU counts one; and from
+/// there to `spin`, at least [`SMI_SPAN_NS`] apart, every CPU's SMI count
+/// moves by the commands the kernel wrote to `SMI_CMD` in that span and by
+/// nothing else: every firmware interrupt is one ToyOS asked for. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback"); and every CPU's busy frequency reached the lowest
@@ -3885,23 +4042,39 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("idle0 and spin are {} ns apart, short of {SMI_SPAN_NS}: lengthen the spin", at2 - at0));
     }
     let delta = |a: &Read, b: &Read, cpu: usize, name: &str| b[&cpu][name] - a[&cpu][name];
-    // The boot's one write to `SMI_CMD`, and what the CPU that made it read after it.
+    // The enable's write to `SMI_CMD`, and what the CPU that made it read after it.
     let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE ")?;
     let writer = smi_cmd_writer(enabled)?;
     let after = number_between(enabled, " before the write and ", " after")?;
     if idle0[&writer]["smi"] < after {
-        return Err(format!("idle0 read cpu{writer}'s SMI count below what it read after the ACPI enable ({after}): it read before the boot's last write to SMI_CMD"));
+        return Err(format!("idle0 read cpu{writer}'s SMI count below what it read after the ACPI enable ({after}): it read before that write to SMI_CMD"));
     }
     if let Ok(left) = kernel.must_say("acpi: legacy mode again") {
         return Err(format!("the machine left ACPI mode inside the boot: {left}"));
     }
+    // The boot processor writes every command and alone counts them: the
+    // enable is among those idle0 read, and where it is the only one, the
+    // time they held that CPU is the time the kernel's line gives it.
+    if let Some(cpu) = (0..cpus).find(|&cpu| idle0[&cpu].contains_key("firmware_calls") != (cpu == writer)) {
+        return Err(format!("cpu{cpu} counts firmware calls or the boot processor does not: {idle0:?}"));
+    }
+    let (calls, nanos) = (idle0[&writer]["firmware_calls"], idle0[&writer]["firmware_nanos"]);
+    let held = number_between(enabled, "; the write held cpu0 ", "ns, its SMI count ")?;
+    if calls == 0 || nanos < held || (calls == 1 && nanos != held) {
+        return Err(format!("idle0 read {calls} firmware calls that held cpu{writer} {nanos} ns, after an enable that held it {held} ns: {enabled}"));
+    }
+    let asked = delta(idle0, spin, writer, "firmware_calls");
     let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
-    if smis.iter().any(|&n| n != 0) {
-        return Err(format!("in ACPI mode the SMI count moved by {smis:?} over {} ns", at2 - at0));
+    if smis.iter().any(|&n| n != asked) {
+        return Err(format!(
+            "in ACPI mode the SMI count moved by {smis:?} over {} ns, in which the kernel wrote {asked} commands to SMI_CMD",
+            at2 - at0
+        ));
     }
     let firsts: Vec<u64> = (0..cpus).map(|cpu| idle0[&cpu]["smi"]).collect();
     eprintln!("  [counters] {}", enabled.trim());
     eprintln!("  [counters] idle0's SMI count per cpu {firsts:?}, the writer's after the enable {after} (a reading)");
+    eprintln!("  [counters] idle0 read {calls} firmware call(s) that held cpu{writer} {nanos} ns, the enable's {held} ns among them");
     let tsc_mhz = delta(idle0, spin, 0, "stamp") as f64 * 1e3 / (at2 - at0) as f64;
     let ratio = |a: &Read, b: &Read, cpu: usize, top: &str, bottom: &str| {
         delta(a, b, cpu, top) as f64 / delta(a, b, cpu, bottom) as f64
@@ -3936,7 +4109,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
-        "  [counters] {cpus} cpus, SMI flat on each over {} ms; TSC {tsc_mhz:.0} MHz",
+        "  [counters] {cpus} cpus, the SMI count on each moved by {asked} over {} ms, the commands the kernel wrote to SMI_CMD in it; TSC {tsc_mhz:.0} MHz",
         (at2 - at0) / 1_000_000
     );
     for (cpu, busy) in busy.iter().enumerate() {
@@ -3986,7 +4159,7 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the server died: {fired}"));
     }
     let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
-    let counts = lines.iter().rfind(|l| l.contains("embedded controller queries taken: "));
+    let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
     };

@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use toyos_cpuvuln::CounterFacts;
 
 use super::{cpu, percpu};
-use crate::counters::Hardware;
+use crate::counters::{Firmware, Hardware};
 use crate::scheduler::MAX_CPUS;
 
 const MSR_SMI_COUNT: u32 = 0x34;
@@ -43,5 +43,6 @@ pub fn read() -> Hardware {
         aperf: msr(APERF_MPERF, IA32_APERF),
         mperf: msr(APERF_MPERF, IA32_MPERF),
         envelope: super::control_regs::envelope(),
+        firmware: super::smi_cmd::counted().map(|(calls, nanos)| Firmware { calls, nanos }),
     }
 }

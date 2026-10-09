@@ -13,13 +13,10 @@ limited. The crate is shared for `Elided`, which `toyos-symbols` uses; what
 one program alone uses belongs in that program's package
 (`.claude/agents/reviewer.md`, "Fit").
 
-Not moved where it was found: PR #773 is open over `userland/logkeeper/src`,
-and the module moves into the tree that leaves.
-
 Owner: `userland/logkeeper`.
 
 ## Exit condition
 
-Once #773 has landed: `limit.rs` is a module of `userland/logkeeper` with its
+`limit.rs` is a module of `userland/logkeeper` with its
 host tests, `toyos-elide` holds `Elided` and what serves it, its header and
 `description` say so, and `rg 'toyos_elide::limit'` finds nothing.

@@ -865,6 +865,18 @@ impl Sync {
         }
     }
 
+    /// [`Self::recv`] for a reader that may take less than it is shown.
+    pub fn recv_with(&mut self, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, Error> {
+        if self.rx.unread() == 0 {
+            return if self.rx.closed { Ok(Received::End) } else { Err(Error::WouldBlock) };
+        }
+        let n = self.rx.read_with(take);
+        if n > 0 {
+            self.rx.after_read(self.smss());
+        }
+        Ok(Received::Data(n))
+    }
+
     pub fn shutdown_write(&mut self, now: Instant) {
         if self.tx.fin.is_some() {
             return;

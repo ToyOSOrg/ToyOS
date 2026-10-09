@@ -10,8 +10,9 @@
 //! not be read whole, and says nothing about it but its index.
 //!
 //! Every counter counts up from boot, so the difference of two reads is exact;
-//! the power envelope's registers ([`Counter::HwpRequest`] and those after it)
-//! count nothing and are what the CPU held when it read them.
+//! the power envelope's registers ([`Counter::HwpRequest`],
+//! [`Counter::HwpRequestPkg`] and [`Counter::EnergyPerfBias`]) count nothing
+//! and are what the CPU held when it read them.
 //!
 //! [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
 
@@ -40,10 +41,19 @@ pub enum Counter {
     HwpRequestPkg,
     /// Its energy/performance bias (`IA32_ENERGY_PERF_BIAS`), beside it.
     EnergyPerfBias,
+    /// Commands the kernel wrote to the firmware on this CPU (the FADT's
+    /// `SMI_CMD`), whoever asked: its own to enter and leave ACPI mode, and
+    /// each call it made for the `acpi` claim's holder. Held by the CPU that
+    /// writes them, the boot processor, on a machine that names the port.
+    FirmwareCalls,
+    /// Nanoseconds those writes held that CPU, each from before the write to
+    /// its return: the firmware's handler, where a write raises an interrupt
+    /// to it.
+    FirmwareNanos,
 }
 
 impl Counter {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 10;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -53,6 +63,8 @@ impl Counter {
         Self::HwpRequest,
         Self::HwpRequestPkg,
         Self::EnergyPerfBias,
+        Self::FirmwareCalls,
+        Self::FirmwareNanos,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -65,13 +77,15 @@ impl Counter {
             Self::HwpRequest => "hwp_request",
             Self::HwpRequestPkg => "hwp_request_pkg",
             Self::EnergyPerfBias => "energy_perf_bias",
+            Self::FirmwareCalls => "firmware_calls",
+            Self::FirmwareNanos => "firmware_nanos",
         }
     }
 
     /// The rights a `SysCap` carries for this counter to be answered.
     pub const fn needs(self) -> Rights {
         match self {
-            Self::Stamp | Self::Smi => Rights::COUNTERS,
+            Self::Stamp | Self::Smi | Self::FirmwareCalls | Self::FirmwareNanos => Rights::COUNTERS,
             Self::Aperf
             | Self::Mperf
             | Self::Kicks
@@ -179,8 +193,8 @@ mod tests {
     #[test]
     fn every_shape_of_record_reads_back_as_written() {
         for r in [
-            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0)]),
-            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None]),
+            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936)]),
+            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None]),
             record(true, [None; Counter::COUNT]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));
@@ -190,7 +204,7 @@ mod tests {
     /// Absent is not zero: a zero that is there reads back there.
     #[test]
     fn a_present_zero_is_not_an_absent_counter() {
-        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None]);
+        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None, None, None]);
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Smi), Some(0));
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Aperf), None);
     }
@@ -207,20 +221,21 @@ mod tests {
 
     #[test]
     fn a_word_under_an_absent_counter_is_refused() {
-        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None]).encode();
+        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None, None, None]).encode();
         raw.0[16 + 8 * Counter::Mperf as usize] = 1;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Absent(Counter::Mperf)));
     }
 
     /// The counters that time programs and the power envelope are the trace
-    /// right's, and the two that are neither are readable on `COUNTERS` alone.
+    /// right's, and the four that are neither, the CPU's stamp and what its
+    /// firmware took of it, are readable on `COUNTERS` alone.
     #[test]
     fn what_times_a_program_or_is_power_needs_the_trace_right() {
         for counter in Counter::ALL {
             assert!(counter.needs().contains(Rights::COUNTERS), "{counter:?}");
             assert_eq!(
                 counter.needs().contains(Rights::TRACE),
-                !matches!(counter, Counter::Stamp | Counter::Smi),
+                !matches!(counter, Counter::Stamp | Counter::Smi | Counter::FirmwareCalls | Counter::FirmwareNanos),
                 "{counter:?}"
             );
         }

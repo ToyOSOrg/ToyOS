@@ -21,7 +21,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-use toyos_wallclock::{classify, Class, UNDATED_STEM};
+use toyos_logstream::LOG_CONTINUES;
+use toyos_wallclock::{classify, Class, Part, UNDATED_STEM};
 
 /// Where the logs go.
 ///
@@ -44,8 +45,7 @@ pub const EARLIER_BOOTS: usize = MAX_LOG_FILES / 2;
 
 /// How many continuation files one boot may produce before this gives up.
 ///
-/// The part number is four digits wide and a fifth would sort *before* the
-/// fourth, putting retention in the wrong order.
+/// The part number is four digits wide (`toyos_wallclock::Part`).
 pub const MAX_LOG_PARTS: u32 = 9999;
 
 /// How large one file may get before the next part starts.
@@ -55,28 +55,16 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 /// what `/system/bin/console` reads off USB before it paints anything.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
-/// The name of one file in this boot's sequence.
-///
-/// The first part carries the bare stem, because that is what nearly every boot
-/// ever writes and a `_0001` on it would be noise on every stick. A
-/// continuation takes `_` rather than any other separator for one reason: it is
-/// the only legal character that sorts *after* `.`, so `<stem>.log` still comes
-/// before `<stem>_0002.log` and retention deletes a boot's parts in the order
-/// they were written.
+/// Where one file of this boot's sequence is: `toyos_wallclock::Part` is its
+/// name.
 pub fn path(stem: &str, part: u32) -> String {
-    match part {
-        1 => format!("{DIR}/{stem}.log"),
-        n => format!("{DIR}/{stem}_{n:04}.log"),
-    }
+    format!("{DIR}/{}", Part { stem, part })
 }
 
 /// A path of this program's as its boot's stem and its part number.
 fn stem_and_part(path: &str) -> Option<(&str, u32)> {
-    let name = path.rsplit('/').next()?.strip_suffix(".log")?;
-    match name.split_once('_') {
-        Some((stem, part)) => Some((stem, part.parse().ok()?)),
-        None => Some((name, 1)),
-    }
+    let (_, Part { stem, part }) = Part::parse(path.rsplit('/').next()?)?;
+    Some((stem, part))
 }
 
 /// Every file on `/log` that this program wrote, oldest first.
@@ -270,7 +258,7 @@ impl Volume {
         self.size = 0;
         let next = self.path();
         self.file = create(&next)?;
-        say(format!("logkeeper: {full} reached {bytes} bytes and this boot continues in {next}"));
+        say(format!("logkeeper: {full} reached {bytes}{LOG_CONTINUES}{next}"));
         Ok(())
     }
 }
@@ -294,8 +282,8 @@ mod tests {
     /// A volume under the bound loses nothing.
     #[test]
     fn nothing_goes_while_there_is_room() {
-        let existing: Vec<String> = (0..10).flat_map(|b| boot(&format!("2026-09-0{b}"), 1)).collect();
-        assert!(retire(&existing, "2026-09-26").is_empty());
+        let existing: Vec<String> = (0..10).flat_map(|b| boot(&format!("2026-09-0{b}-000000"), 1)).collect();
+        assert!(retire(&existing, "2026-09-26-000000").is_empty());
     }
 
     /// **The flood this floor exists for.** A boot that has written eight
@@ -304,13 +292,13 @@ mod tests {
     #[test]
     fn a_flooding_boot_costs_its_own_middle_and_nobody_elses_start() {
         let mut existing: Vec<String> =
-            (0..8).flat_map(|b| boot(&format!("2026-09-1{b}"), 1)).collect();
-        existing.extend(boot("2026-09-26", 8));
+            (0..8).flat_map(|b| boot(&format!("2026-09-1{b}-000000"), 1)).collect();
+        existing.extend(boot("2026-09-26-000000", 8));
         assert_eq!(existing.len(), 16);
-        let going = retire(&existing, "2026-09-26");
-        assert_eq!(going, [path("2026-09-26", 2)]);
+        let going = retire(&existing, "2026-09-26-000000");
+        assert_eq!(going, [path("2026-09-26-000000", 2)]);
         for earlier in 0..8 {
-            assert!(!going.contains(&path(&format!("2026-09-1{earlier}"), 1)));
+            assert!(!going.contains(&path(&format!("2026-09-1{earlier}-000000"), 1)));
         }
     }
 
@@ -320,39 +308,28 @@ mod tests {
     fn whole_old_boots_go_first_then_earlier_continuations() {
         let mut existing: Vec<String> = Vec::new();
         for b in 0..10 {
-            existing.extend(boot(&format!("2026-08-{:02}", 10 + b), 1));
+            existing.extend(boot(&format!("2026-08-{:02}-000000", 10 + b), 1));
         }
-        existing.extend(boot("2026-09-01", 3));
-        existing.extend(boot("2026-09-26", 3));
+        existing.extend(boot("2026-09-01-000000", 3));
+        existing.extend(boot("2026-09-26-000000", 3));
         assert_eq!(existing.len(), 16);
         // Eleven earlier boots, eight kept: the three oldest may go whole, and
         // the oldest alone makes the room one new part needs.
-        assert_eq!(retire(&existing, "2026-09-26"), [path("2026-08-10", 1)]);
+        assert_eq!(retire(&existing, "2026-09-26-000000"), [path("2026-08-10-000000", 1)]);
 
         let mut existing: Vec<String> =
-            (0..8).flat_map(|b| boot(&format!("2026-08-{:02}", 10 + b), 1)).collect();
-        existing.extend(boot("2026-09-01", 5));
-        existing.extend(boot("2026-09-26", 3));
+            (0..8).flat_map(|b| boot(&format!("2026-08-{:02}-000000", 10 + b), 1)).collect();
+        existing.extend(boot("2026-09-01-000000", 5));
+        existing.extend(boot("2026-09-26-000000", 3));
         assert_eq!(existing.len(), 16);
-        assert_eq!(retire(&existing, "2026-09-26"), [path("2026-08-10", 1)]);
+        assert_eq!(retire(&existing, "2026-09-26-000000"), [path("2026-08-10-000000", 1)]);
 
         let mut existing: Vec<String> =
-            (0..7).flat_map(|b| boot(&format!("2026-08-{:02}", 10 + b), 1)).collect();
-        existing.extend(boot("2026-09-01", 6));
-        existing.extend(boot("2026-09-26", 3));
+            (0..7).flat_map(|b| boot(&format!("2026-08-{:02}-000000", 10 + b), 1)).collect();
+        existing.extend(boot("2026-09-01-000000", 6));
+        existing.extend(boot("2026-09-26-000000", 3));
         assert_eq!(existing.len(), 16);
-        assert_eq!(retire(&existing, "2026-09-26"), [path("2026-09-01", 2)]);
+        assert_eq!(retire(&existing, "2026-09-26-000000"), [path("2026-09-01-000000", 2)]);
     }
 
-    /// Names that are not this program's are none of its business; a name
-    /// that parses carries its stem and part.
-    #[test]
-    fn a_part_is_its_stem_and_number() {
-        assert_eq!(stem_and_part("/log/2026-09-26-10-00-00.log"), Some(("2026-09-26-10-00-00", 1)));
-        assert_eq!(
-            stem_and_part("/log/2026-09-26-10-00-00_0007.log"),
-            Some(("2026-09-26-10-00-00", 7))
-        );
-        assert_eq!(stem_and_part("/log/loader.txt"), None);
-    }
 }

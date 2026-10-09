@@ -23,6 +23,7 @@ typedef unsigned int socklen_t;
 #define SOL_SOCKET  1
 #define SO_REUSEADDR 2
 #define SO_ERROR     4
+#define SO_BROADCAST 6
 #define SO_KEEPALIVE 9
 #define SO_RCVTIMEO  20
 #define SO_SNDTIMEO  21
