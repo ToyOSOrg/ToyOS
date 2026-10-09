@@ -11,10 +11,10 @@ never ended in `nightly.yml`'s `portability-macos`, the one job that runs the
 host suite on macOS, from the first nightly that had the test (#749): the
 compiler that job installed, `rustc 1.99.0 (b940084d7 2026-09-28)`, LLVM
 23.1.1, compiles the test's function to one instruction, a branch to itself.
-The job is pinned to 1.98.1 for it. The fault is LLVM's and is not this
-compiler's alone:
-`issues/the-forks-compiler-drops-the-exit-of-an-inclusive-range-loop-on-aarch64.md`
-has its cause, its reproducer and the compilers that have it.
+The job is pinned to 1.98.1 for it. The fault is LLVM's ScalarEvolution's,
+on every target, and is not this compiler's alone:
+`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`
+has its cause, its reproducers and the compilers that have it.
 
 ## What the runner showed
 
@@ -99,9 +99,11 @@ that shape written by hand it makes the same endless loop. The pin keeps one
 test of one job green. It is no statement that 1.98.1 compiles the rest of the
 host suite right, and nothing measured says either way.
 
-**No stable is coming that the job can go back to.** Every nightly from
-`nightly-2026-07-10` through `nightly-2026-10-08`, the newest there was, hangs
-the table's second row.
+**No stable is known to be coming that the job can go back to.** Five
+nightlies were run, of 10, 13 and 22 July, 25 September and 8 October 2026,
+the last the newest there was, and each hangs the table's second row; none
+between them was run. Upstream's LLVM has a report of the fault open and has
+merged no fix.
 
 `guest.yml`, and so `guest / suite` and the nightly's `tcg / suite`, and
 `nightly.yml`'s `portability-linux` install `stable` and log its version:
@@ -131,4 +133,5 @@ At each stable release he reruns the table's second row under it.
 **Exit**: `portability-macos` installs `stable` again and is green in a
 nightly on `main`, which takes a stable rustc under which the table's second
 row exits 0 on Apple silicon. None exists; one arrives when upstream's LLVM
-compiles the loop right.
+has the fault fixed, or when `core` gives the range's loop another shape
+again, which is how 1.98.1 passes today and fixes nothing.
