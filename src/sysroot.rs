@@ -767,7 +767,7 @@ fn build(root: &Path, store: &Path, compiler: &Compiler, fork: &Path, keys: &Key
         }
         let miscompiles = dir.with_extension("miscompile");
         crate::miscompile::refuse(partial, &miscompiles);
-        let _ = fs::remove_dir_all(&miscompiles);
+        keystore::remove(&miscompiles);
         let libc_target = dir.with_extension("libc-target");
         for arch in Arch::ALL {
             crate::libc::build(root, partial, &libc_target, arch);

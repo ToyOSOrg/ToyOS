@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-10-08
 ---
 
-# rustc 1.99.0 makes an endless loop of `a_port_answers_as_its_declaration_says` on Apple silicon
+# The nightly's macOS job pins rustc 1.98.1 for a hang its test no longer shows, and the host's rustc still has the fault
 
 `toyos-userbound/tests/firmware.rs`'s `a_port_answers_as_its_declaration_says`
 never ended in `nightly.yml`'s `portability-macos`, the one job that runs the
