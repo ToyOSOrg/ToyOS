@@ -2,6 +2,8 @@
 extern crate toyos_build;
 
 mod common;
+#[path = "toyos-rust-tests/src/stream_ends.rs"]
+mod stream_ends;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -143,6 +145,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host that dials its listeners when it says they wait:
     // `libc_sockets` runs it on `tests/netcase`.
     "nodelay_accepted",
+    // It needs a host peer that ends each stream as the stream asks:
+    // `libc_sockets` runs it on `tests/netcase`.
+    "stream_ends_std",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -303,8 +308,10 @@ const MACHINE_TESTS: &[&str] = &[
     "netstack_lookup",
     "netstack_lookup_e1000e",
     // What libc's and std's socket calls ask of netstack, read back from a
-    // peer that answers: the calls are requests on netstack's port, netstack
-    // has no host build, and the T14's peer is the bench's network.
+    // peer that answers, and each way a stream ends as libc and std read it:
+    // the calls are requests on netstack's port, an end is what netstack, the
+    // kernel's pipes and the library read together, netstack has no host
+    // build, and the T14's bench has no peer that answers or resets on cue.
     "libc_sockets",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
@@ -3182,6 +3189,66 @@ fn holding_server() -> Result<u16, String> {
     Ok(port)
 }
 
+/// The peer `stream_ends` dials, for as long as the process lives: its port.
+/// Each connection's first byte names how it ends, and each end waits on what
+/// the client did before it.
+fn ending_server() -> Result<u16, String> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    /// A close that sends a reset (RFC 9293 §3.10.4's ABORT): a zero linger.
+    fn reset(stream: std::net::TcpStream) {
+        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+        // SAFETY: a live socket, and an option of the size its type says.
+        let set = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "a zero linger: {}", std::io::Error::last_os_error());
+    }
+    fn serve(mut stream: std::net::TcpStream) {
+        let mut what = [0u8; 1];
+        if stream.read_exact(&mut what).is_err() {
+            return;
+        }
+        match what[0] {
+            stream_ends::PEER_FIN_FIRST => {}
+            stream_ends::RESET_MID_STREAM => {
+                let ahead: Vec<u8> = (0..stream_ends::AHEAD).map(stream_ends::pattern).collect();
+                if stream.write_all(&ahead).is_ok() && stream.read_exact(&mut what).is_ok() {
+                    reset(stream);
+                }
+            }
+            stream_ends::RESET_AFTER_HALF_CLOSE => {
+                if stream.read_to_end(&mut Vec::new()).is_ok() {
+                    reset(stream);
+                }
+            }
+            stream_ends::BOTH_CLOSE => {
+                let _ = stream.write_all(b"bye");
+            }
+            stream_ends::SHUT_FIRST => {
+                if stream.write_all(b".").is_ok() && stream.read_to_end(&mut Vec::new()).is_ok() {
+                    let _ = stream.write_all(b"late");
+                }
+            }
+            _ => {}
+        }
+    }
+    let peer = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the ending peer: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the ending peer's port: {e}"))?.port();
+    thread::spawn(move || {
+        for stream in peer.incoming().flatten() {
+            thread::spawn(move || serve(stream));
+        }
+    });
+    Ok(port)
+}
+
 /// A host server that answers each datagram with itself, for as long as the
 /// process lives: its port.
 fn answering_server() -> Result<u16, String> {
@@ -3247,31 +3314,39 @@ fn forwards_into<const N: usize>(qemu: &QemuInstance, guest_ports: [u16; N]) -> 
 /// one boot of `tests/netcase`: each job dials a host server that holds what
 /// it accepts, or sends to one that answers each datagram with itself, at the
 /// address the guest's network gives the host; and each time a job says its
-/// listeners wait, the host dials them through the ports QEMU forwards. A
-/// job's own comparisons are its verdict.
+/// listeners wait, the host dials them through the ports QEMU forwards; and
+/// `stream_ends` in C and in std dial a host peer that ends each stream as
+/// its first byte names, std's report first read on this host's TCP. A job's
+/// own comparisons are its verdict.
 fn libc_sockets() -> Result<(), String> {
     const HOST: &str = "10.0.2.2";
     /// The ports `nodelay_kept` and then `nodelay_accepted` listen on in the
     /// guest, which nothing else on its boot binds.
     const LISTENERS: [u16; 4] = [7001, 7002, 7003, 7004];
-    const RUST_JOB: &str = "nodelay_accepted";
-    let (holding, answering) = (holding_server()?, answering_server()?);
+    const RUST_JOBS: [&str; 2] = ["nodelay_accepted", "stream_ends_std"];
+    let (holding, answering, ending) = (holding_server()?, answering_server()?, ending_server()?);
+    // The oracle: the report std's job owes is this host's TCP's.
+    let mut host = Vec::new();
+    stream_ends::run("127.0.0.1", ending, |line| host.push(line));
+    if host != stream_ends::EXPECTED {
+        return Err(format!("this host's TCP reports\n{}\nand not\n{}", host.join("\n"), stream_ends::EXPECTED.join("\n")));
+    }
 
     let case = compile::repo_root().join("tests/netcase");
-    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound"]
+    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound", "stream_ends"]
         .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
         .into();
-    let rust_bin =
-        qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), RUST_JOB);
-    let mut qemu =
-        boot_netcase(&c_bins, &[(RUST_JOB.to_string(), rust_bin)], BootOptions { qmp: true, ..Default::default() })?;
+    let rust_bins: Vec<(String, Vec<u8>)> = RUST_JOBS
+        .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), job)))
+        .into();
+    let mut qemu = boot_netcase(&c_bins, &rust_bins, BootOptions { qmp: true, ..Default::default() })?;
     let [held, clear, std_port, pipe_port] = LISTENERS;
     let [to_held, to_clear, to_std, to_pipe] = forwards_into(&qemu, LISTENERS)?;
     /// Each line a job says its listeners wait in, the constants of its
     /// source, and the forwarded ports the host dials when it does.
     type Waits<'a> = &'a [(&'a str, &'a [u16])];
     // The address first: every job names its peer by one.
-    let jobs: [(&str, String, Waits); 4] = [
+    let jobs: [(&str, String, Waits); 6] = [
         ("test_c_addr_order", holding.to_string(), &[]),
         (
             "test_c_nodelay_kept",
@@ -3290,6 +3365,8 @@ fn libc_sockets() -> Result<(), String> {
                 ("nodelay_accepted: the listener waits for a second peer", &[to_pipe]),
             ],
         ),
+        ("test_c_stream_ends", ending.to_string(), &[]),
+        ("test_rs_stream_ends_std", ending.to_string(), &[]),
     ];
     // Held to the test's end: a peer gone before a job's `accept` is a
     // connection its listener no longer holds.
