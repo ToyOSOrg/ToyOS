@@ -68,9 +68,11 @@ fn s_net_002_newreno_when_one_side_has_no_sack() {
     }
 }
 
+/// At netstack's buffer: at 65,535 the window, not cwnd, bounds the sender, and each round's
+/// window reopens on one update ACK, which this loss takes every second round.
 #[test]
 fn s_net_005_lost_acks() {
-    let mut net = Net::new(10);
+    let mut net = Net::buffered(10, BUFFER);
     net.connections(1, 80, [MIB, 0]);
     let mut acks = 0;
     net.impair = Box::new(move |_, o| {
@@ -302,4 +304,106 @@ fn s_ls_012_a_syn_flood() {
     expect(&h.input(64_000, seg(5000).syn().mss(1460)), &["CTL=SYN,ACK"]);
     h.input(64_010, seg(5001).ack(1001));
     assert!(h.tcp.accept(listener).unwrap().is_some());
+}
+
+/// The buffer netstack gives each connection each way: 4 MiB, window scale 7.
+const BUFFER: u32 = 4 << 20;
+
+/// What one node saw of its connection over a whole transfer.
+#[derive(Debug, Default)]
+struct Peaks {
+    /// SND.NXT − SND.UNA.
+    flight: u32,
+    /// RCV.WND as offered: the right edge less RCV.NXT.
+    window: u32,
+    unread: usize,
+    /// (snd_shift, rcv_shift), once established.
+    shifts: Option<(u8, u8)>,
+}
+
+/// Steps `net` a millisecond at a time for at most `limit_ms` or until it finishes, reading each
+/// node's connection after every step.
+fn watch(net: &mut Net, limit_ms: u64) -> [Peaks; 2] {
+    let mut peaks = [Peaks::default(), Peaks::default()];
+    let end = net.now + ns(limit_ms);
+    while !net.finished() && net.now < end {
+        net.advance(1);
+        for i in 0..net.apps.len() {
+            let (node, id) = (net.apps[i].node, net.apps[i].id);
+            let Some(info) = net.nodes[node].tcp.info(id) else { continue };
+            let p = &mut peaks[node];
+            p.flight = p.flight.max(info.snd_nxt.since(info.snd_una));
+            p.window = p.window.max(info.rcv_edge.since(info.rcv_nxt));
+            p.unread = p.unread.max(info.unread);
+            assert_eq!(*p.shifts.get_or_insert((info.snd_shift, info.rcv_shift)), (info.snd_shift, info.rcv_shift));
+        }
+    }
+    peaks
+}
+
+/// RFC 7323 §2: both SYNs carry Window Scale, so each end offers its buffer at shift 7, and over
+/// a gigabit link with a 20 ms round trip a reader that keeps up grows its window to the whole
+/// 4 MiB, and each way the sender keeps more than 65,535 bytes in flight; every byte arrives.
+/// With one data segment in 3,000 dropped, out-of-order text is held across the buffer's growth
+/// and the flight still passes 65,535.
+#[test]
+fn rfc_7323_2_a_scaled_window_carries_more_than_64_kib_in_flight_each_way() {
+    for drop in [None, Some(3000)] {
+        let mut net = Net::buffered(20, BUFFER);
+        for node in &mut net.nodes {
+            node.credit_per_ms = Some(125_000);
+        }
+        net.connections(1, 80, [32 * MIB, 32 * MIB]);
+        if let Some(n) = drop {
+            let (mut impair, _) = every_nth(n);
+            net.impair = Box::new(move |from, o| impair(from, o));
+        }
+        let peaks = watch(&mut net, 600_000);
+        assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
+        net.assert_exact();
+        for (node, p) in peaks.iter().enumerate() {
+            assert_eq!(p.shifts, Some((7, 7)), "node {node}");
+            assert!(p.flight > 65_535, "node {node}, drop {drop:?}: {p:?}");
+            assert!(drop.is_some() || p.window == BUFFER, "node {node}: {p:?}");
+        }
+    }
+}
+
+/// RFC 7323 §2.2: a peer whose SYN carries no Window Scale gets an unscaled window, however large
+/// the buffer behind it, and none of its windows is read scaled: neither end has more than 65,535
+/// bytes in flight, and every byte arrives.
+#[test]
+fn rfc_7323_2_2_no_scaling_unless_both_syns_offer_it() {
+    let mut net = Net::buffered(20, BUFFER);
+    net.rewrite = Some(Box::new(bare_syn));
+    net.connections(1, 80, [4 * MIB, 4 * MIB]);
+    let peaks = watch(&mut net, 600_000);
+    assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
+    net.assert_exact();
+    for (node, p) in peaks.iter().enumerate() {
+        assert_eq!(p.shifts, Some((0, 0)), "node {node}");
+        assert!(p.flight <= 65_535 && p.window <= 65_535, "node {node}: {p:?}");
+    }
+}
+
+/// A receive buffer grows only by what its reader takes: a peer that sends into a connection
+/// nobody reads for ten seconds finds 65,535 bytes of room and no more, and once the reader reads
+/// the buffer grows and every byte arrives.
+#[test]
+fn a_receive_buffer_nobody_reads_never_grows() {
+    let mut net = Net::buffered(20, BUFFER);
+    net.connections(1, 80, [16 * MIB, 0]);
+    net.run(100, |n| n.apps.len() == 2);
+    let reader = net.apps.iter().position(|a| a.node == 1).unwrap();
+    net.apps[reader].reading = false;
+    net.apps[reader].read_limit = Some(0);
+    let held = watch(&mut net, 10_000);
+    assert!(held[1].unread <= 65_535 && held[1].window <= 65_535, "{:?}", held[1]);
+    assert!(held[0].flight <= 65_535, "{:?}", held[0]);
+    net.apps[reader].read_limit = None;
+    net.apps[reader].reading = true;
+    let read = watch(&mut net, 600_000);
+    assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
+    net.assert_exact();
+    assert!(read[1].window > 65_535, "{:?}", read[1]);
 }

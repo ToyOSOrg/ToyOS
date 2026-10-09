@@ -250,7 +250,8 @@ impl Run {
             judged: 0,
             sacked: [Vec::new(), Vec::new()],
         }));
-        let mut net = Net::new(10);
+        // Odd seeds run at netstack's buffer, which grows and is scaled.
+        let mut net = Net::buffered(10, if seed.is_multiple_of(2) { 65_535 } else { 4 << 20 });
         net.keep_streams = true;
         net.impair = link(Rng::new(seed ^ 0xaaaa), s);
         let shared = Rc::clone(&checker);

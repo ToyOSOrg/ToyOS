@@ -81,26 +81,28 @@ pub const HOSTNAME: &str = "toyos-t14";
 /// boot and a lease that lands later is applied like any other.
 const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
-/// Payload bytes each direction of a connection buffers in the stack, before
-/// the window closes on the peer or the client's pipe stops being read.
-const TCP_BUFFER: u32 = 65_535;
+/// The most payload each direction of a connection buffers in the stack, and
+/// so the most a window offers: gigabit for a round trip up to 33 ms, at
+/// window scale 7. Storage is taken as text is held, and the receive side
+/// grows to this only as its reader keeps up (`toyos-net-tcp`'s `rx`).
+const TCP_BUFFER: u32 = 4 << 20;
 
 /// A kernel pipe is one 2 MiB page (`kernel/src/pipe.rs`). The client
 /// allocates it, and netstack holding its far end is what keeps it alive.
 const PIPE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// What one place can make this machine hold, at the largest of the three
-/// things a place is (`toyos-net-node`'s `places`): a listener, whose peers
-/// fill its queue of `LISTEN_READY` finished connections with a receive
-/// buffer of text each, and its wake pipe. A stream is its two pipes and two
-/// buffers, a datagram socket its two pipes and two queues, and both are
-/// less.
+/// things a place is (`toyos-net-node`'s `places`): a stream, its two pipes
+/// and two buffers; a listener, whose peers fill its queue of `LISTEN_READY`
+/// finished connections with an initial receive buffer of text each, nobody
+/// reading them to grow one, and its wake pipe; a datagram socket, its two
+/// pipes and two queues.
 const PLACE_BYTES: u64 = {
-    let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * TCP_BUFFER as u64 + PIPE_BYTES;
     let stream = 2 * PIPE_BYTES + 2 * TCP_BUFFER as u64;
+    let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL as u64 + PIPE_BYTES;
     let datagram = 2 * PIPE_BYTES + (toyos_net_udp::limits::RX_BYTES + toyos_net_udp::limits::TX_BYTES) as u64;
-    assert!(listener >= stream && listener >= datagram);
-    listener
+    assert!(stream >= listener && stream >= datagram);
+    stream
 };
 
 /// Share of physical memory netstack lets its clients' places tie up.

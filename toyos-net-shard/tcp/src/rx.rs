@@ -4,6 +4,13 @@
 //! `unread + (edge − next) ≤ capacity` always holds, so every byte the peer may send has room. The
 //! edge never retreats (RFC 7323 §2.4), bytes already stored are never overwritten, and bytes once
 //! reported in a SACK block are kept until delivered: this receiver never reneges.
+//!
+//! **The capacity grows only by what the user reads.** It starts at
+//! [`limits::RECEIVE_BUFFER_INITIAL`](crate::limits::RECEIVE_BUFFER_INITIAL) and, once a round
+//! trip has passed, rises to twice what the user read per round trip, up to the configured
+//! buffer: enough that a reader keeping up never waits on the window while the sender's rate
+//! doubles. Text nobody reads grows nothing, so a peer alone cannot make a connection hold more
+//! than the initial capacity, and a connection whose round trip is unknown keeps it.
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -65,16 +72,25 @@ pub struct Rx {
     /// The window, in bytes, the last segment sent offered.
     pub last_window: u32,
     pub last_ack_sent: Seq,
+    /// The most the capacity grows to.
+    max: usize,
+    /// When the current measurement began, and what the user has read since.
+    round: (Instant, usize),
 }
 
 impl Rx {
-    /// `next` is IRS + 1; the SYN or SYN-ACK offered `window`, unscaled.
-    pub fn new(next: Seq, capacity: usize, shift: u8, window: u32) -> Self {
+    /// `next` is IRS + 1; the SYN or SYN-ACK offered `window`, unscaled; the capacity grows to
+    /// `max`, or to the most a window field at `shift` offers if that is less: an edge past it
+    /// would be one the peer was never told of.
+    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant) -> Self {
+        let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
+        let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
+        let max = max.min(offerable);
         Self {
             next,
             edge: next.add(window),
             shift,
-            buf: Ring::new(capacity),
+            buf: Ring::new(max.min(initial)),
             ranges: Vec::new(),
             stamp: 0,
             fin: None,
@@ -88,6 +104,8 @@ impl Rx {
             trigger: None,
             last_window: window,
             last_ack_sent: next,
+            max,
+            round: (now, 0),
         }
     }
 
@@ -252,6 +270,11 @@ impl Rx {
     /// The right edge and window field a segment built now carries; [`Self::advertise`] commits them.
     pub fn offer(&self, mss: u32) -> (Seq, u16) {
         let edge = self.candidate(mss).unwrap_or(self.edge);
+        // A window the shift would round to zero is offered as one unit where the buffer has the
+        // room, as Linux does: else a sender owing the text of a hole waits on a window not shut.
+        let unit = 1u32.checked_shl(u32::from(self.shift)).unwrap_or(u32::MAX);
+        let window = edge.since(self.next);
+        let edge = if window > 0 && window < unit && unit <= self.free() { self.next.add(unit) } else { edge };
         let field = (edge.since(self.next) >> self.shift).min(u32::from(u16::MAX));
         (edge, u16::try_from(field).unwrap_or(u16::MAX))
     }
@@ -266,11 +289,15 @@ impl Rx {
         if !self.ranges.is_empty() {
             return None;
         }
-        let free = u32::try_from(self.buf.capacity().saturating_sub(self.buf.len())).unwrap_or(u32::MAX);
         let mask = u32::MAX.checked_shl(u32::from(self.shift)).unwrap_or(0);
-        let candidate = self.next.add(free & mask);
+        let candidate = self.next.add(self.free() & mask);
         let threshold = self.threshold(mss);
         (candidate.after(self.edge) && candidate.since(self.edge) >= threshold).then_some(candidate)
+    }
+
+    /// Room for text the user has not read.
+    fn free(&self) -> u32 {
+        u32::try_from(self.buf.capacity().saturating_sub(self.buf.len())).unwrap_or(u32::MAX)
     }
 
     fn threshold(&self, mss: u32) -> u32 {
@@ -354,11 +381,24 @@ impl Rx {
         self.buf.consume(n);
     }
 
-    /// After the user read: a window update is owed when the window offered was below the
-    /// threshold and the edge would now move by at least it (RFC 9293 §3.8.6.2.2).
-    pub fn after_read(&mut self, mss: u32) {
-        if self.candidate(mss).is_some() && self.last_window < self.threshold(mss) {
-            self.ack_now = true;
+    /// After the user read `n` bytes: the capacity grows by the module's rule, and a window update
+    /// is owed when the window offered was below the threshold and the edge would now move by at
+    /// least it (RFC 9293 §3.8.6.2.2).
+    pub fn after_read(&mut self, n: usize, now: Instant, rtt: Option<Duration>, mss: u32) {
+        let (began, read) = self.round;
+        let read = read.saturating_add(n);
+        self.round = (began, read);
+        if let Some(rtt) = rtt.filter(|&rtt| now.since(began) >= rtt) {
+            let read = u128::try_from(read).unwrap_or(u128::MAX);
+            let per_rtt = read.saturating_mul(rtt.as_nanos()).checked_div(now.since(began).as_nanos()).unwrap_or(0);
+            let want = usize::try_from(per_rtt.saturating_mul(2)).unwrap_or(usize::MAX);
+            self.buf.grow(want.min(self.max));
+            self.round = (now, 0);
+        }
+        if let Some(candidate) = self.candidate(mss) {
+            if self.last_window < self.threshold(mss) || candidate.since(self.next) >= self.window().saturating_mul(2) {
+                self.ack_now = true;
+            }
         }
     }
 }

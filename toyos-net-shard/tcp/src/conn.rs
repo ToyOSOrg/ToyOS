@@ -380,7 +380,7 @@ impl Sync {
         let mut sync = Self {
             phase,
             tx,
-            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered),
+            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now),
             rtt,
             cc: Cc::new(smss, p.handshake_timeouts),
             peer_mss: u32::from(n.peer_mss),
@@ -851,10 +851,10 @@ impl Sync {
         Ok(n)
     }
 
-    pub fn recv(&mut self, out: &mut [u8]) -> Result<Received, Error> {
+    pub fn recv(&mut self, out: &mut [u8], now: Instant) -> Result<Received, Error> {
         let n = self.rx.read(out);
         if n > 0 {
-            self.rx.after_read(self.smss());
+            self.rx.after_read(n, now, self.rtt.srtt(), self.smss());
             Ok(Received::Data(n))
         } else if self.rx.closed {
             Ok(Received::End)
@@ -866,13 +866,13 @@ impl Sync {
     }
 
     /// [`Self::recv`] for a reader that may take less than it is shown.
-    pub fn recv_with(&mut self, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, Error> {
+    pub fn recv_with(&mut self, take: impl FnOnce(&[u8]) -> usize, now: Instant) -> Result<Received, Error> {
         if self.rx.unread() == 0 {
             return if self.rx.closed { Ok(Received::End) } else { Err(Error::WouldBlock) };
         }
         let n = self.rx.read_with(take);
         if n > 0 {
-            self.rx.after_read(self.smss());
+            self.rx.after_read(n, now, self.rtt.srtt(), self.smss());
         }
         Ok(Received::Data(n))
     }
