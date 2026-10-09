@@ -278,10 +278,13 @@ fn granted(red: &mut Vec<String>) {
     fs::create_dir_all(GAMES).expect("make the folder the package is granted");
     fs::write(ROM, b"a ROM's bytes").expect("put a ROM in it");
 
-    let outside = Command::new("/system/bin/grants").args(["add", "appview", GAMES]).output().expect("launch grants");
-    match (outside.status.code(), String::from_utf8_lossy(&outside.stdout)) {
-        (Some(1), said) if said.contains("only a login session may ask for grants") => println!("  grants in the machine's session: refused"),
-        _ => red.push(format!("grants in the machine's session was answered {outside:?}")),
+    match Command::new("/system/bin/grants").args(["add", "appview", GAMES]).output() {
+        Ok(out) if out.status.code() == Some(1)
+            && String::from_utf8_lossy(&out.stdout).contains("only a login session may ask for grants") =>
+        {
+            println!("  grants in the machine's session: refused")
+        }
+        other => red.push(format!("grants in the machine's session was answered {other:?}")),
     }
     let apps = in_login(&format!("/system/bin/grants add appview {HOME}"));
     match String::from_utf8_lossy(&apps.stdout) {
