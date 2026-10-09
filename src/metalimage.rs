@@ -5,7 +5,8 @@
 //! no serial port has nothing at the other end to type a job — so the
 //! stdin path every `tests/*case` but `jobcase` leaves the runner on parks
 //! forever, and the loop refuses after `metal::return_secs`. What ends a boot
-//! is `[programs.test-runner] args`: one binary name per job, then `reboot`.
+//! is `[programs.test-runner] args`: the list's bound, one binary name per
+//! job, then `reboot`.
 //!
 //! So a metal image is a committed boot config with that one field derived onto
 //! it. The derivation is here, pure, because what it changes about the config
@@ -21,6 +22,9 @@ use toml::Value;
 /// The runner's manifest key, and the job that hands the machine back.
 const RUNNER: &str = "test-runner";
 const REBOOT: &str = "reboot";
+/// The runner's own word for what its whole list gets, in milliseconds
+/// (`userland/test-runner`), and its first argument.
+const BOUND: &str = "--bound-ms=";
 const TOYBOX: &str = "toybox";
 const REBOOT_LINK: &str = "bin/reboot";
 const TOYBOX_PATH: &str = "/system/bin/toybox";
@@ -53,11 +57,13 @@ impl std::fmt::Display for Underived {
 
 /// The committed config with the batch's job list derived onto it.
 ///
-/// `jobs` are the words the runner takes, in order; `reboot` is appended here
-/// rather than by every caller, because a list that did not end in one is a
-/// boot the loop waits 360 s for and then refuses.
+/// `jobs` are the words the runner takes, in order, and `bound_ms` what it
+/// gives the whole list; `reboot` is appended here rather than by every
+/// caller, because a list that did not end in one is a boot the loop waits
+/// out and then refuses.
 pub fn derive(
     config: &str,
+    bound_ms: u64,
     jobs: &[&str],
     extra_links: &[(String, String)],
 ) -> Result<String, Underived> {
@@ -91,7 +97,8 @@ pub fn derive(
         .get_mut(RUNNER)
         .and_then(Value::as_table_mut)
         .ok_or_else(|| Underived::Toml(format!("`programs.{RUNNER}` is not a table")))?;
-    let mut args: Vec<Value> = jobs.iter().map(|j| Value::String((*j).to_string())).collect();
+    let mut args = vec![Value::String(format!("{BOUND}{bound_ms}"))];
+    args.extend(jobs.iter().map(|j| Value::String((*j).to_string())));
     args.push(Value::String(REBOOT.to_string()));
     runner.insert("args".to_string(), Value::Array(args));
 
@@ -138,11 +145,12 @@ mod tests {
     fn derived(dir: &str, jobs: &[&str]) -> String {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join("system.toml");
         let text = std::fs::read_to_string(&at).expect("a committed boot config");
-        derive(&text, jobs, &[]).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
+        derive(&text, 133_100, jobs, &[]).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
     }
 
     /// The whole point of the derivation, on every config it is asked of: the
-    /// runner ends the boot, and it holds the connector the last job needs.
+    /// runner is told its list's bound before any job, it ends the boot, and
+    /// it holds the connector the last job needs.
     #[test]
     fn every_derived_config_ends_its_own_boot() {
         for dir in CONFIGS {
@@ -151,7 +159,7 @@ mod tests {
             let runner = &parsed["programs"][RUNNER];
             let args: Vec<&str> =
                 runner["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-            assert_eq!(args, ["test_rs_mkdir_cap", REBOOT], "{dir}");
+            assert_eq!(args, ["--bound-ms=133100", "test_rs_mkdir_cap", REBOOT], "{dir}");
             let receives: Vec<&str> = runner["receives"]
                 .as_array()
                 .unwrap()
@@ -195,13 +203,13 @@ mod tests {
     /// producing an image that parks the machine for 360 s.
     #[test]
     fn a_config_with_no_runner_is_refused_by_name() {
-        let refusal = derive("[boot]\nstart = [\"logkeeper\"]\n", &[], &[]).unwrap_err();
+        let refusal = derive("[boot]\nstart = [\"logkeeper\"]\n", 60_000, &[], &[]).unwrap_err();
         assert_eq!(refusal, Underived::NoRunner("does not start `test-runner`".to_string()));
         let said = refusal.to_string();
         assert!(said.contains("parks on a console nothing is on"), "{said}");
 
         let refusal =
-            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logkeeper]\n", &[], &[]).unwrap_err();
+            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logkeeper]\n", 60_000, &[], &[]).unwrap_err();
         assert!(matches!(refusal, Underived::NoRunner(_)), "{refusal:?}");
     }
 }

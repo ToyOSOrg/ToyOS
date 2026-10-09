@@ -203,9 +203,9 @@ mod tests {
     /// A boot word is `--metal`'s alone, and never one of the filters.
     #[test]
     fn a_boot_word_names_a_metal_boot_and_nothing_else() {
-        let line = owned(&["--metal", "boot:shared-2", "control_regs", "boot:ccorpus"]);
+        let line = owned(&["--metal", "boot:shared-debug", "control_regs", "boot:ccorpus"]);
         let parsed = parse(&line).unwrap();
-        assert_eq!((parsed.filters, parsed.boots), (vec!["control_regs"], vec!["shared-2", "ccorpus"]));
+        assert_eq!((parsed.filters, parsed.boots), (vec!["control_regs"], vec!["shared-debug", "ccorpus"]));
         let refusal = parse_owned(&["boot:shared"]).unwrap_err();
         assert!(refusal.contains("add --metal"), "{refusal}");
         let refusal = metal_owned(&["--metal", "boot:"]).unwrap_err();

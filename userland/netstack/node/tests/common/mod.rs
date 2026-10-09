@@ -335,7 +335,7 @@ impl Wire {
         loop {
             let from = self.sent.len();
             let (sent, mac) = (&mut self.sent, self.mac);
-            self.node.transmit(self.now, usize::MAX, |frame| sent.push(outside(frame, mac)));
+            self.node.transmit(self.now, usize::MAX, |frame| sent.push(outside(frame, mac)), draw(&mut self.draws));
             if self.sent.len() == from {
                 return;
             }

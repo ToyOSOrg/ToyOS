@@ -92,7 +92,7 @@ fn s_ip_nbr_008_a_known_router_moving() {
 
     // A datagram released to R that still waits for room leaves to the MAC R holds then.
     let mut h = H::fixture_i();
-    assert_eq!(h.send(A, R, 5001, 5001, b"1"), Ok(None));
+    h.echo(R, MAC_R, A, b"1");
     h.out();
     h.fill_control_queue(h.if0, h.clock(), A);
     h.frame(&request(MAC_R, R, A));
@@ -201,7 +201,7 @@ fn s_ip_nbr_013_a_probe_is_answered_and_not_cached() {
 #[test]
 fn s_ip_nbr_014_a_reply_for_another_target_asserts() {
     let mut h = H::fixture_i();
-    h.udp_to(REMOTE).unwrap();
+    h.echo(REMOTE, MAC_R, A, b"hi");
     h.out();
     h.frame(&eth(MAC_A, MAC_R, 0x0806, &arp_packet(2, MAC_R, R, MAC_A, ip4(192, 0, 2, 7))));
     assert!(h.is_stale(R));
