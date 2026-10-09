@@ -325,7 +325,7 @@ const LIMITED_WAIT_MS: u64 = 5_000;
 /// it, twelve times fewer than §8.1's five seconds would ask of it, and a
 /// name whose holder has left is back within the minute and the second a
 /// probing takes. §8.1's five seconds after a failed attempt are inside it.
-const RETRY_MS: u64 = 60_000;
+pub const RETRY_MS: u64 = 60_000;
 
 /// §6: a record is multicast on an interface at most once a second.
 const GROUP_EVERY_MS: u64 = 1_000;
