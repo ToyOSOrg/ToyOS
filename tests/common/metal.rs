@@ -56,9 +56,10 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// The job this boot ends on, before `reboot`: [`batches`] puts it after
-    /// every job any arm on the boot names and every member riding it, so none
-    /// can land behind it, and refuses two arms that name different ones.
+    /// The job this boot's rows end on: [`batches`] puts it after every job any
+    /// arm on the boot names, so no row's can land behind it, and refuses two
+    /// arms that name different ones. The members riding the boot run behind
+    /// it: it is a row's job, and a row's jobs have the machine first.
     pub last: Option<&'static str>,
 }
 
@@ -97,12 +98,8 @@ pub struct SharedBoot {
     pub params: &'static [&'static str],
     /// The kernel build, empty for the one an image ships.
     pub features: &'static [&'static str],
-    /// What each member adds to the bound the runner gives the boot's whole
-    /// list (`toyos_tco::list_bound_ms`), in milliseconds.
-    pub member_ms: u64,
-    /// What the runner spawns, in order — the whole binary name, `test_rs_`
-    /// prefix and all, because that is what the kernel records it under.
-    pub jobs: Vec<String>,
+    /// What the runner spawns behind the rows' jobs, in order.
+    pub members: Vec<Member>,
     /// Files this boot needs on ROOT beside the binaries: a corpus's committed
     /// expectations, which the guest compares against because on this machine
     /// no host can read what a case printed.
@@ -112,10 +109,21 @@ pub struct SharedBoot {
     pub links: Vec<(String, String)>,
 }
 
+/// One discovered member of a [`SharedBoot`].
+#[derive(Clone)]
+pub struct Member {
+    /// The whole binary name, `test_rs_` prefix and all, because that is what
+    /// the kernel records it under.
+    pub job: String,
+    /// What it adds to the bound the runner gives its boot's whole list
+    /// (`toyos_tco::list_bound_ms`), in milliseconds.
+    pub adds_ms: u64,
+}
+
 impl SharedBoot {
     /// What the members add to their boot's list bound.
     fn members_ms(&self) -> u64 {
-        self.jobs.len() as u64 * self.member_ms
+        self.members.iter().map(|member| member.adds_ms).sum()
     }
 
     /// This boot with the members `named` and none else, or `None` where that
@@ -123,15 +131,15 @@ impl SharedBoot {
     /// name**: the C corpus stages a binary and an expectation per case, and a
     /// stick is written over `ssh`.
     fn keeping(&self, named: impl Fn(&str) -> bool) -> Option<SharedBoot> {
-        let jobs: Vec<String> = self.jobs.iter().filter(|job| named(job)).cloned().collect();
+        let members: Vec<Member> = self.members.iter().filter(|member| named(&member.job)).cloned().collect();
         let mine = |path: &str| {
             let last = path.rsplit('/').next().unwrap_or(path);
             let case = last.strip_prefix("test_c_").unwrap_or(last);
-            jobs.iter().any(|job| job == case)
+            members.iter().any(|member| member.job == case)
         };
         let files = self.files.iter().filter(|(path, _)| mine(path)).cloned().collect();
         let links = self.links.iter().filter(|(from, _)| mine(from)).cloned().collect();
-        (!jobs.is_empty()).then(|| SharedBoot { jobs, files, links, ..self.clone() })
+        (!members.is_empty()).then(|| SharedBoot { members, files, links, ..self.clone() })
     }
 }
 
@@ -155,7 +163,7 @@ pub fn select(
         job.strip_prefix("test_rs_").unwrap_or(job)
     }
     let all = names.is_empty() && boots.is_empty();
-    let jobs = || shared.iter().flat_map(|boot| &boot.jobs).map(|job| bare(job));
+    let jobs = || shared.iter().flat_map(|boot| &boot.members).map(|member| bare(&member.job));
     if let Some(dead) = names.iter().find(|word| {
         !rows.iter().any(|(name, _)| name.contains(**word)) && !jobs().any(|job| job.contains(**word))
     }) {
@@ -431,6 +439,24 @@ impl Readback {
             })
     }
 
+    /// How long the runner had each job running, between the job's own two
+    /// markers on the log's clock; a job with no such pair has no entry.
+    fn jobs_ms(&self) -> BTreeMap<&str, u64> {
+        let mut started: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut took = BTreeMap::new();
+        for line in self.log.lines() {
+            let Some(at) = toyos_logstream::parse(line).and_then(|parsed| parsed.ms) else { continue };
+            if let Some(job) = line.split("===TEST_START ").nth(1).and_then(|rest| rest.strip_suffix("===")) {
+                started.insert(job, at);
+            } else if let Some(job) = line.split("===TEST_END ").nth(1).and_then(|rest| rest.split(' ').next()) {
+                if let Some(from) = started.get(job) {
+                    took.insert(job, at.saturating_sub(*from));
+                }
+            }
+        }
+        took
+    }
+
     /// One number measured on this boot. It is its measurer's, the row whose
     /// judge called this or the boot itself for what [`judge_readbacks`] reads
     /// off every boot, and is judged against this machine's record once every
@@ -581,6 +607,10 @@ pub fn at(dir: &Path, label: &str) -> PathBuf {
 /// **A boot's rows' jobs run before its members**, so a row that measures has
 /// the machine its jobs alone would give it, and what the members write to the
 /// log lands behind every row's.
+///
+/// **Two jobs of one boot the kernel records under one name are refused**
+/// ([`bootlog::recorded_name`]): the second one's verdict would be read off
+/// the first one's exit.
 pub fn batches(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
@@ -604,6 +634,12 @@ pub fn batches(
             }
         }
     }
+    for batch in out.values_mut() {
+        if let Some(last) = batch.last {
+            batch.jobs.retain(|job| job != last);
+            batch.jobs.push(last.to_string());
+        }
+    }
     let mut ridden: BTreeSet<&str> = BTreeSet::new();
     for boot in shared {
         if !ridden.insert(&boot.boot) {
@@ -611,15 +647,21 @@ pub fn batches(
         }
         let who = format!("the shared boot {:?}", boot.boot);
         let batch = ride(&mut out, &who, &boot.boot, boot.config, boot.params, boot.features)?;
-        batch.add(boot.jobs.iter().cloned());
+        batch.add(boot.members.iter().map(|member| member.job.clone()));
         batch.members_ms += boot.members_ms();
         batch.files.extend(boot.files.iter().cloned());
         batch.links.extend(boot.links.iter().cloned());
     }
-    for batch in out.values_mut() {
-        if let Some(last) = batch.last {
-            batch.jobs.retain(|job| job != last);
-            batch.jobs.push(last.to_string());
+    for (label, batch) in &out {
+        let mut recorded: BTreeMap<String, &str> = BTreeMap::new();
+        for job in &batch.jobs {
+            if let Some(other) = recorded.insert(bootlog::recorded_name(job), job) {
+                return Err(format!(
+                    "the boot {label:?} runs {other} and {job}, and the kernel records both as {:?}: one \
+                     boot's log cannot tell their verdicts apart",
+                    bootlog::recorded_name(job)
+                ));
+            }
         }
     }
     Ok(out)
@@ -893,7 +935,7 @@ pub fn run(
     eprintln!(
         "[metal] {} registration(s) and {} shared member(s) over {} boot(s)",
         runs.len(),
-        shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
+        shared.iter().map(|b| b.members.len()).sum::<usize>(),
         batches.len(),
     );
 
@@ -1140,10 +1182,10 @@ pub fn judge_readbacks(
     }
     let mut members = 0usize;
     for boot in shared {
-        eprintln!("\n[metal] {}: {} member(s)", boot.boot, boot.jobs.len());
+        eprintln!("\n[metal] {}: {} member(s)", boot.boot, boot.members.len());
         let back = readbacks.get(&boot.boot).expect("every shared boot was batched");
         let mut ran = 0usize;
-        for job in &boot.jobs {
+        for Member { job, .. } in &boot.members {
             members += 1;
             let verdict = match back {
                 Err(why) => Err(why.clone()),
@@ -1163,18 +1205,33 @@ pub fn judge_readbacks(
             }
         }
         if let (Ok(back), true) = (back, ran > 0) {
-            if let (Some(complete), Some(last)) = (back.complete_record_ms(), back.last_record_ms()) {
-                let each = last.saturating_sub(complete) / ran as u64;
-                eprintln!("  {} ms per member over the {ran} that ran", each);
-                // On the clock the runner counts its bound on, the kernel's
-                // own, whose reading `Boot: complete` states beside its stamp.
-                if let Some(boot_ms) = back.boot_ms {
-                    eprintln!(
-                        "  its last record came {} ms into a list bound of {} ms",
-                        (last + boot_ms).saturating_sub(complete),
-                        toyos_tco::list_bound_ms(boot.members_ms())
-                    );
-                }
+            // Each member between its own markers: the rows' jobs share the
+            // list. One cut inside its run has no pair and is named, not
+            // summed as nothing.
+            let jobs = back.jobs_ms();
+            let (timed, unpaired): (Vec<&Member>, Vec<&Member>) =
+                boot.members.iter().partition(|member| jobs.contains_key(member.job.as_str()));
+            let took: u64 = timed.iter().map(|member| jobs[member.job.as_str()]).sum();
+            eprintln!(
+                "  its members took {took} ms of the {} ms they add to the list's bound, summed over the {} of \
+                 {} with both markers",
+                boot.members_ms(),
+                timed.len(),
+                boot.members.len()
+            );
+            if let Some(first) = unpaired.first() {
+                eprintln!("  {} without a start and an end marker, the first {}", unpaired.len(), first.job);
+            }
+            // On the clock the runner counts its bound on, the kernel's own,
+            // whose reading `Boot: complete` states beside its stamp.
+            if let (Some(complete), Some(last), Some(boot_ms)) =
+                (back.complete_record_ms(), back.last_record_ms(), back.boot_ms)
+            {
+                eprintln!(
+                    "  its last record came {} ms into a list bound of {} ms",
+                    (last + boot_ms).saturating_sub(complete),
+                    toyos_tco::list_bound_ms(boot.members_ms())
+                );
             }
         }
     }

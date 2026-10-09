@@ -177,9 +177,10 @@ const RUST_SKIP: &[&str] = &[
 /// The shared boot's last members, in this order: each fills a bound of its
 /// own process — tens of thousands of mappings, thousands of threads, a
 /// thousand 2 MiB images — and its exit gives all of it back. Behind every
-/// discovered member, so none of those runs after one of these. **This is
-/// their one declaration**: [`discover_rust_tests`] leaves them to it, so a
-/// name taken off this list is a discovered member again.
+/// discovered member and every corpus case, so nothing but the reboot runs
+/// after one of these. **This is their one declaration**:
+/// [`discover_rust_tests`] leaves them to it, so a name taken off this list is
+/// a discovered member again.
 const LAST_MEMBERS: &[&str] = &["abuse_mmap_regions", "abuse_thread_table", "abuse_dlopen_ledger"];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -515,12 +516,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // `SYS_DEBUG` holds each other CPU's shootdown acknowledgement back,
-        // so the kernel that carries it; the verdict is the guest's own exit.
+        // so the kernel that carries it; the verdict is the guest's own exit,
+        // and every wait it asserts is a floor, which no load shortens.
         "tlb_shootdown_waits",
         metal::Metal {
             arms: &[metal::Arm {
-                features: toyos_build::build::TEST_KERNEL,
-                ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_tlb_shootdown_waits"])
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
         },
@@ -532,8 +534,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         "trace_record_cost",
         metal::Metal {
             arms: &[metal::Arm {
-                features: toyos_build::build::TEST_KERNEL,
-                ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_trace_flood"])
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &["test_rs_trace_flood"])
             }],
             judge: |b| {
                 b[0].job_passed("test_rs_trace_flood")?;
@@ -906,8 +908,8 @@ const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
     &["test_rs_isa_grant", "test_rs_isa_lines"],
 )];
 
-/// The boot most of the first tranche rides: the plain `tests/testcases` shape
-/// with a job list that ends it.
+/// The boot most rows ride, and every shipping-kernel member behind them
+/// ([`shared_metal`]): the plain `tests/testcases` shape.
 const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/testcases",
@@ -924,8 +926,10 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     ],
 )];
 
-/// The same boot, ended on the hold: the count it waits for comes thirty
-/// seconds after the server arms, and a job behind it would wait that out too.
+/// The same boot, its rows ended on the hold: the count it waits for comes
+/// thirty seconds after the server arms, and a row's job behind it would wait
+/// that out too. The members run behind it: the hold gives up at a time since
+/// boot, which a list of members before it would spend.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/testcases", &[], &[])
@@ -1025,37 +1029,29 @@ const SELFTESTS: &[metal::Arm] = &[metal::Arm {
     ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &[])
 }];
 
-/// The boots every discovered Rust binary rides on the T14: the shipping
-/// kernel's, with [`LAST_MEMBERS`] behind them, and [`ACTUATOR_TESTS`] on the
-/// kernel that carries `SYS_DEBUG`, armed with [`SELFTEST_PARAMS`].
-fn shared_metal() -> Vec<metal::SharedBoot> {
-    let (debug, mut shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
+/// The two boots every discovered member rides on the T14, each behind its
+/// rows' jobs: `testcases`, the shipping kernel's, carries every discovered
+/// Rust binary, then the C corpus, then [`LAST_MEMBERS`]; `shared-debug`
+/// carries [`ACTUATOR_TESTS`] on the kernel that has `SYS_DEBUG`, armed with
+/// [`SELFTEST_PARAMS`]. A second boot rather than one image for the whole
+/// set: what those need is a syscall number the rest must not have.
+fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
+    let rust = |names: Vec<String>| {
+        names.into_iter().map(|n| metal::Member { job: format!("test_rs_{n}"), adds_ms: toyos_tco::RUST_MEMBER_MS })
+    };
+    let (debug, shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
         .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
-    shipping.extend(LAST_MEMBERS.iter().map(ToString::to_string));
+    let corpus = c_corpus_metal(c_bins);
+    let last = rust(LAST_MEMBERS.iter().map(ToString::to_string).collect());
     vec![
-        metal::SharedBoot {
-            boot: "shared".to_string(),
-            config: "tests/testcases",
-            params: &[],
-            features: &[],
-            member_ms: toyos_tco::RUST_MEMBER_MS,
-            jobs: shipping.iter().map(|n| format!("test_rs_{n}")).collect(),
-            files: Vec::new(),
-            links: Vec::new(),
-        },
-        // The same list's other half, on the kernel that carries `SYS_DEBUG`.
-        // A second boot rather than a second image for the whole set: what
-        // these need is a syscall number the rest must not have, and a boot
-        // where every binary could call it would stop being the shipping
-        // machine for the other seventy.
+        metal::SharedBoot { members: rust(shipping).chain(corpus.members.clone()).chain(last).collect(), ..corpus },
         metal::SharedBoot {
             boot: "shared-debug".to_string(),
             config: "tests/testcases",
             params: SELFTEST_PARAMS,
             features: ACTUATOR_KERNEL,
-            member_ms: toyos_tco::RUST_MEMBER_MS,
-            jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
+            members: rust(debug).collect(),
             files: Vec::new(),
             links: Vec::new(),
         },
@@ -1075,8 +1071,8 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
     &["test_rs_cyclictest", "test_rs_sched_stress"],
 )];
 
-/// The C corpus on the T14: one boot, one job per case, each judged in the
-/// guest.
+/// The C corpus's part of the `testcases` boot, which [`shared_metal`] puts
+/// the Rust members around: one job per case, each judged in the guest.
 ///
 /// **Every case in the corpus `return 0`s unconditionally**, so a bare
 /// exit-code verdict would be vacuous — the comparison is the whole point. It
@@ -1090,40 +1086,19 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// job list of a hundred and nineteen `ccheck`s would leave one name and a
 /// hundred and nineteen records told apart only by position.
 fn c_corpus_metal(c_bins: &[(String, Vec<u8>)]) -> metal::SharedBoot {
-    let mut jobs = Vec::new();
+    let mut members = Vec::new();
     let mut files = Vec::new();
     let mut links = Vec::new();
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for (case, data) in c_bins {
         // A case with no committed expectation is one nothing could judge, and
         // shipping it would be a job that passes by comparing nothing.
         let Some(expected) = c_expectation(case) else { continue };
-        // **The kernel truncates a process name**, so two cases whose names
-        // agree that far would land under one record. Refused rather than
-        // reported, because the second one's verdict would be read as the
-        // first's.
-        let recorded = bootlog::recorded_name(case);
-        if let Some(other) = seen.insert(recorded.clone(), case.clone()) {
-            panic!(
-                "the C cases {other:?} and {case:?} are both recorded as {recorded:?}, so one \
-                 boot's log cannot tell their verdicts apart"
-            );
-        }
         files.push((format!("expect/{case}"), expected.into_bytes()));
         files.push((format!("bin/test_c_{case}"), data.clone()));
         links.push((format!("bin/{case}"), format!("/system/bin/{CCHECK}")));
-        jobs.push(case.clone());
+        members.push(metal::Member { job: case.clone(), adds_ms: toyos_tco::C_MEMBER_MS });
     }
-    metal::SharedBoot {
-        boot: "ccorpus".to_string(),
-        config: "tests/testcases",
-        params: &[],
-        features: &[],
-        member_ms: toyos_tco::C_MEMBER_MS,
-        jobs,
-        files,
-        links,
-    }
+    metal::SharedBoot { boot: "testcases".to_string(), config: "tests/testcases", params: &[], features: &[], members, files, links }
 }
 
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
@@ -5352,8 +5327,7 @@ fn main() {
 
     if let Some(mode) = parsed.metal {
         let (c_bins, rust_bins) = build_shared_bins();
-        let mut boots = shared_metal();
-        boots.push(c_corpus_metal(&c_bins));
+        let boots = shared_metal(&c_bins);
         let (selected, boots) = match metal::select(filters, &parsed.boots, METAL, &boots) {
             Ok(selection) => selection,
             Err(refusal) => {
