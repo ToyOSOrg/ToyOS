@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::buildlock::{Guard, Held, Keyed};
+use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::compiler::LLVM;
 use crate::keystore::{self, Key};
 use crate::sysroot::{clone_tree, git_bytes, git_out, gitlink};
@@ -261,18 +261,35 @@ pub fn resolve(root: &Path, store: &Path, fork: &Path) -> Llvm {
 /// LLVM the store lacks is made with that lock held exclusively, so no other
 /// build of the worktree runs in `fork` beside bootstrap's.
 pub fn resolve_held(root: &Path, store: &Path, fork: &Path, lock: &mut Held) -> Llvm {
-    choose_held(store, fork, lock, |fork| build_in_fork(root, fork))
+    choose_held(store, fork, lock, defect, |fork| build_in_fork(root, fork))
 }
 
-/// [`resolve_held`] with the build passed in, as [`choose`] takes it.
-fn choose_held(store: &Path, fork: &Path, lock: &mut Held, build: impl Fn(&Path) -> PathBuf) -> Llvm {
-    let mut made = None;
-    let lacking = || defect(&Keyed::Llvm.store(store).join(key(fork))).map(drop);
-    lock.act_if("make the host's LLVM", lacking, |()| made = Some(choose(store, fork, &build)));
-    let unbuilt = |_: &Path| -> PathBuf {
-        panic!("the LLVM {} names left the store while this build held its worktree lock shared, which builds none", fork.display())
-    };
-    made.unwrap_or_else(|| choose(store, fork, unbuilt))
+/// [`resolve_held`] with the build passed in, as [`choose`] takes it, and what
+/// decides whether the stored LLVM is whole, so a test can sweep the store
+/// once it has answered.
+fn choose_held(
+    store: &Path,
+    fork: &Path,
+    lock: &mut Held,
+    whole: impl Fn(&Path) -> Option<String>,
+    build: impl Fn(&Path) -> PathBuf,
+) -> Llvm {
+    let key = key(fork);
+    let dir = Keyed::Llvm.store(store).join(&key);
+    loop {
+        // Decided under the key's use, which no sweep takes from under it.
+        let using = buildlock::keyed_using(store, Keyed::Llvm, &key);
+        if whole(&dir).is_none() {
+            return Llvm { dir, _using: using };
+        }
+        // The worktree lock orders before the key's.
+        drop(using);
+        let mut made = None;
+        lock.act_if("make the host's LLVM", || whole(&dir).map(drop), |()| made = Some(choose(store, fork, &build)));
+        if let Some(made) = made {
+            return made;
+        }
+    }
 }
 
 /// [`resolve`] with the build that makes an LLVM passed in, so a test can stand
@@ -1148,15 +1165,41 @@ mod tests {
             assert!(buildlock::tests::keeps_out_shared(&a), "an LLVM was built in {} beside shared holders", fork.display());
             fake_build(fork)
         };
-        let made = choose_held(&store, &a.join("rust"), &mut lock, alone);
+        let made = choose_held(&store, &a.join("rust"), &mut lock, defect, alone);
         assert_eq!(makes.get(), 1);
         assert_eq!(defect(&made.dir), None);
 
         let other = buildlock::tests::shared_elsewhere(&b);
         let mut lock = buildlock::shared(&b, "the test's build");
         let never = |_: &Path| -> PathBuf { panic!("an LLVM the store holds was made again") };
-        assert_eq!(choose_held(&store, &b.join("rust"), &mut lock, never).dir, made.dir);
+        assert_eq!(choose_held(&store, &b.join("rust"), &mut lock, defect, never).dir, made.dir);
         other.release();
+    }
+
+    /// **A sweep that lands once a held build has found its LLVM whole fails no
+    /// build**: the stored LLVM, unused for the keep time, is swept by a
+    /// placement elsewhere right after it is found whole, and the build goes on
+    /// with a whole LLVM.
+    #[test]
+    fn a_sweep_after_the_llvm_is_found_whole_fails_no_build() {
+        let scratch = Scratch::new("llvm-held-swept");
+        let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
+        let fork = a.join("rust");
+        drop(choose(&store, &fork, fake_build));
+        let unused = key(&fork);
+        let swept = Cell::new(None);
+        let then_swept = |dir: &Path| {
+            let found = defect(dir);
+            if swept.get().is_none() {
+                last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
+                swept.set(Some(keystore::sweep(&store, Keyed::Llvm).len()));
+            }
+            found
+        };
+        let mut lock = buildlock::shared(&a, "the test's build");
+        let llvm = choose_held(&store, &fork, &mut lock, then_swept, fake_build);
+        assert_eq!(defect(&llvm.dir), None, "the build went on with an LLVM that is not whole");
+        assert!(swept.get().is_some(), "the stand-in sweep never ran");
     }
 
     /// **A sweep takes an LLVM only once nothing has used it for the store's

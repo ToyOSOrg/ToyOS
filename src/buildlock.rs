@@ -221,7 +221,7 @@ fn keyed_building(store: &Path, kind: Keyed, key: &Key) -> Guard {
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it; and dated now,
 /// which a sweep reads as its last use.
-fn keyed_using(store: &Path, kind: Keyed, key: &Key) -> Guard {
+pub(crate) fn keyed_using(store: &Path, kind: Keyed, key: &Key) -> Guard {
     let path = keyed_lock_path(store, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
