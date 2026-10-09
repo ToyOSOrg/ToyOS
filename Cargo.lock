@@ -4664,7 +4664,6 @@ dependencies = [
  "toyos-wallclock",
  "toyos-xhci",
  "ureq",
- "uuid",
 ]
 
 [[package]]

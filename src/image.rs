@@ -237,9 +237,9 @@ pub fn create_boot_image(
     // kernel. The kernel is given the partition by name; nothing anywhere goes
     // looking for one by type or by format. Every slot partition is named the
     // same way, by the slot table.
-    let (log_guid, esp_guid, table_guid) = (new_guid(), new_guid(), new_guid());
-    let a = (new_guid(), new_guid());
-    let b = second.map(|room| (new_guid(), new_guid(), room));
+    let (log_guid, esp_guid, table_guid) = (crate::gptwrite::random_guid(), crate::gptwrite::random_guid(), crate::gptwrite::random_guid());
+    let a = (crate::gptwrite::random_guid(), crate::gptwrite::random_guid());
+    let b = second.map(|room| (crate::gptwrite::random_guid(), crate::gptwrite::random_guid(), room));
 
     let s = sections(kernel_bytes, root_bytes, params, signing);
     // Room for a kernel twice this one's size beside it, so an update can
@@ -641,11 +641,6 @@ fn create_log_volume() -> Vec<u8> {
     volume
 }
 
-/// A partition's or a disk's GUID, drawn once.
-fn new_guid() -> Guid {
-    Guid(uuid::Uuid::new_v4().to_bytes_le())
-}
-
 /// Lay a table on the disk at `path`, already `len` bytes long, carrying one
 /// TOYOS-DATA partition, stamp the designation at its first block, and answer
 /// where it landed. The table and the stamp are all this writes, so a sparse
@@ -664,7 +659,7 @@ pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
         .write(true)
         .open(path)
         .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
-    let starts = lay(&mut file, len, &[data_row(new_guid(), data_bytes)]);
+    let starts = lay(&mut file, len, &[data_row(crate::gptwrite::random_guid(), data_bytes)]);
     write_at(&mut file, starts[0], &designation(data_bytes / SECTOR as u64), "DATA partition's designation");
     (starts[0], data_bytes)
 }
@@ -713,7 +708,7 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         .collect();
 
     let (mut rows, volumes): (Vec<Row>, Vec<&[u8]>) = carried.into_iter().unzip();
-    rows.insert(0, data_row(new_guid(), data_bytes));
+    rows.insert(0, data_row(crate::gptwrite::random_guid(), data_bytes));
     let total = disk_bytes(rows.iter().map(|row| row.len));
 
     let mut file = std::fs::OpenOptions::new()
@@ -845,7 +840,7 @@ fn lay(disk: &mut (impl Write + Seek), total: u64, rows: &[Row]) -> Vec<u64> {
             name: &row.name,
         })
         .collect();
-    let table = crate::gptwrite::table(total / lba, new_guid(), &entries);
+    let table = crate::gptwrite::table(total / lba, crate::gptwrite::random_guid(), &entries);
     write_at(disk, 0, &table.primary, "partition table");
     write_at(disk, total - table.backup.len() as u64, &table.backup, "backup partition table");
     starts
@@ -1012,7 +1007,7 @@ mod tests {
         let key = key();
         let s = sections(b"kernel", &tiny_root(), "", signing(&key));
         for (what, volume) in [
-            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", new_guid())),
+            ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", crate::gptwrite::random_guid())),
             ("slot volume", create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
             ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
@@ -1099,7 +1094,7 @@ mod tests {
     #[test]
     fn the_esp_and_a_slot_carry_what_the_bootloader_looks_for() {
         assert_eq!(
-            files_of(create_esp_volume(Arch::X86_64, b"bootloader", new_guid())),
+            files_of(create_esp_volume(Arch::X86_64, b"bootloader", crate::gptwrite::random_guid())),
             ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
         let key = key();

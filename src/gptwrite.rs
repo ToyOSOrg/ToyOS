@@ -105,6 +105,17 @@ fn protective_mbr(lbas: u64) -> Vec<u8> {
     block
 }
 
+/// A version 4 GUID from the operating system's random source, in the
+/// on-disk order: the version is the high nibble of byte 7, the third field
+/// being little-endian, and the variant the top two bits of byte 8.
+pub(crate) fn random_guid() -> Guid {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system's random source");
+    bytes[7] = (bytes[7] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    Guid(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,15 +203,23 @@ mod tests {
         }
     }
 
+    /// RFC 9562's version and variant, where the canonical text shows them.
+    #[test]
+    fn a_random_guid_is_version_4_of_the_rfc_variant() {
+        let text = random_guid().to_string();
+        assert_eq!(&text[14..15], "4", "{text}");
+        assert!(matches!(&text[19..20], "8" | "9" | "A" | "B"), "{text}");
+    }
+
     /// `toyos-gpt`, the parser the loader and the kernel read with, finds
     /// every partition at its blocks under its type, from the primary and,
     /// with the primary torn, from the backup.
     #[test]
     fn toyos_gpt_reads_it_from_either_copy() {
         let total: u64 = 128 << 20;
-        let uniques: Vec<Guid> = ROWS.iter().map(|_| Guid(uuid::Uuid::new_v4().to_bytes_le())).collect();
+        let uniques: Vec<Guid> = ROWS.iter().map(|_| random_guid()).collect();
         let entries = entries(&uniques);
-        let disk = disk_of(total, &table(total / LBA, Guid(uuid::Uuid::new_v4().to_bytes_le()), &entries));
+        let disk = disk_of(total, &table(total / LBA, random_guid(), &entries));
         let mut torn = disk.clone();
         torn[LBA as usize + 30] ^= 1;
         for image in [&disk, &torn] {

@@ -2688,13 +2688,13 @@ mod tests {
             .zip(parts)
             .map(|(i, (name, kind))| crate::gptwrite::Entry {
                 kind: *kind,
-                unique: toyos_gpt::Guid(uuid::Uuid::new_v4().to_bytes_le()),
+                unique: crate::gptwrite::random_guid(),
                 first_lba: i * ALIGN,
                 last_lba: i * ALIGN + 511,
                 name,
             })
             .collect();
-        let table = crate::gptwrite::table(TOTAL / u64::from(LBA), toyos_gpt::Guid(uuid::Uuid::new_v4().to_bytes_le()), &entries);
+        let table = crate::gptwrite::table(TOTAL / u64::from(LBA), crate::gptwrite::random_guid(), &entries);
         let mut out = vec![0u8; TOTAL as usize];
         out[..table.primary.len()].copy_from_slice(&table.primary);
         let back = out.len() - table.backup.len();
