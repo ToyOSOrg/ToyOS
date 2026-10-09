@@ -117,10 +117,25 @@ jobs:
       # Homebrew keeps one QEMU; `cargo run` notes it if it is not the declared one.
       - run: |
           brew install qemu cmake
+      # 1.98.1 and not `stable`: 1.99.0 compiles a host test into an endless loop
+      # here (issues/rustc-1-99-0-makes-an-endless-loop-of-a-port-test-on-apple-silicon.md).
       - run: |
           curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
-          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain 1.98.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo run -- --build-only
       # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
-      - run: cargo run -- --ci host
+      # The driver ends a cargo that goes silent and names it (src/ci.rs's
+      # `heard`); this is for a step that hangs while it talks, and is the
+      # limit `host` above runs under.
+      - timeout-minutes: 90
+        run: cargo run -- --ci host
+      # Where macOS reports a process a signal ended with a core, every
+      # thread's stack in it: what the driver's SIGQUIT leaves of a silent step.
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-crash-reports
+          path: ~/Library/Logs/DiagnosticReports
+          if-no-files-found: warn
+          retention-days: 7
