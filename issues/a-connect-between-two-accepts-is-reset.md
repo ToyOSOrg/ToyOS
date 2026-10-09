@@ -32,5 +32,13 @@ metal harness's swapping boots, which that row was the one user of, and
 `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the commit
 that restores those.
 
+netstack's listener is the node's now, whose queue is [tcp]'s: a connect
+that arrives while another waits to be accepted is queued
+(`a_connect_between_two_accepts_is_queued_not_reset`,
+`userland/netstack/node/tests/listeners.rs`), and in a guest two host peers
+that dial before any accept are both accepted (`netstack_streams`, which on
+smoltcp ended `the listener was woken for 1 of two peers`). What is left of the
+exit is `lan_swap`.
+
 **Exit**: a listener that queues a connect arriving between two accepts, and
 `lan_swap` restored and green.

@@ -26,6 +26,13 @@ The network track owns it: netd leaves smoltcp in stage 5 of
 `issues/the-loader-does-only-what-must-precede-the-handover.md`
 waits on it.
 
+netstack runs `toyos-dhcp` now (`userland/netstack/node`): an unanswered
+DISCOVER is sent again on RFC 2131 §4.1's schedule, and a link that comes up
+with no lease starts the exchange over
+(`a_link_that_returns_with_no_lease_starts_discovery_over_at_once`,
+`userland/netstack/node/tests/lease.rs`). Every reading above is of the
+smoltcp client; none has been taken on the T14 since.
+
 **Exit**: netd logs each DISCOVER it sends and each OFFER it receives, and a
 T14 boot's log shows what became of the DISCOVER sent as the link came up; on
 every boot of a T14 run an unanswered DISCOVER is sent again within RFC 2131

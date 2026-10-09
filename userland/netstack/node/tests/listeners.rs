@@ -463,10 +463,7 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
     assert_eq!((wakes(&owner), client.borrow().dropped), (1, 0));
 }
 
-// The recorded failure of `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md`:
-// one SYN and nothing more, and the stack this one replaces answered the next peer's SYN with a
-// reset for as long as the first handshake hung, which was for good. Here the next peer is
-// answered at once, and the first handshake is given up within [tcp]'s bound, after which its
+// One SYN and nothing more: the next peer is answered at once, and the first handshake is given up within [tcp]'s bound, after which its
 // late ACK meets LISTEN: RFC 9293 §3.10.7.2, second check, <SEQ=SEG.ACK><CTL=RST>.
 #[test]
 fn a_handshake_nobody_finishes_leaves_the_port_open_and_is_given_up() {
@@ -913,8 +910,7 @@ fn a_listener_holds_the_option_its_listen_named_from_its_first_connection() {
 // A handshake its peer resets before it ends (RFC 9293 §3.10.7.4, first check, in SYN-RECEIVED)
 // leaves nothing of its options behind: the listener's option changed while it was in progress,
 // and the next connection begins with what the listener holds when its own SYN arrives. Both
-// ways round, since the stack this one replaces keeps the reset handshake's option for the next
-// connection (`issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`).
+// ways round.
 #[test]
 fn a_handshake_reset_before_it_ends_leaves_the_next_connection_its_listeners_option() {
     for held in [true, false] {

@@ -14,14 +14,12 @@ the probing step"; this one has not, and each announcement and each multicast
 answer carries the cache-flush bit (§10.2), which tells every cache on the link
 to drop any other record of the name.
 
-Every machine this tree boots is named `toyos-t14` (`dhcp::HOSTNAME`,
-`userland/netstack/src/dhcp.rs`), so two of them on one network both answer for
+Every machine this tree boots is named `toyos-t14` (`HOSTNAME`,
+`userland/netstack/src/main.rs`), so two of them on one network both answer for
 that name, each flushes the other's record, and a resolver reaches whichever
 spoke last.
 
-The record is announced, unprobed, on every new address (the responder that
-ships, called by `userland/netstack/src/mdns.rs`) and, in `toyos-net-node`,
-which ships in nothing yet, also on every return of the link under a held lease
+The record is announced, unprobed, on every new address (`userland/netstack/node/src/name.rs`) and on every return of the link under a held lease
 (`Responder::link_returned`): §8 asks for both steps there, probing first, and
 only the announcing is built. What a returning link multiplies is the
 occasions: each one is two more multicasts of the unprobed record, a second

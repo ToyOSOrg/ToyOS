@@ -2976,9 +2976,8 @@ fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
 /// Megabytes out to the host kernel's TCP and back unchanged, and two host
 /// peers that dial the guest's listener before it accepts either, both
 /// accepted, answered and read their stream's end: through netstack on
-/// `profile`'s card. The host
-/// server here sends back what it reads; the guest's comparisons and each
-/// peer's answer are the verdict.
+/// `profile`'s card. The host server here sends back what it reads; the
+/// guest's comparisons and each peer's answer are the verdict.
 fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
     use std::io::Read;
     const JOB: &str = "netstack_streams";

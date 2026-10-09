@@ -2,10 +2,13 @@
 //! kernel's, behind QEMU's user network.
 //!
 //! argv[1] is the port of the harness's host server, which sends back every
-//! byte it reads. The job writes [`BULK`] bytes of a sequence to it while it
-//! reads them back, and compares each: more than a pipe and both of the
-//! stack's buffers hold, so a byte lost, repeated or moved where either side
-//! made the other wait shows as the first that differs.
+//! byte it reads. The job writes [`BULK`] bytes of a sequence to it and shuts
+//! its sending half down at once, while it reads them back, and compares each:
+//! more than a pipe and both of the stack's buffers hold, so a byte lost,
+//! repeated or moved where either side made the other wait shows as the first
+//! that differs. It reads the bytes it sent and not the stream's end, which
+//! std reads as a reset behind a shutdown
+//! (`issues/a-netstack-client-cannot-tell-a-reset-from-the-peers-fin.md`).
 //!
 //! argv[2] is a port the job listens on. It says so and takes no connection
 //! until its listener's pipe has given up two wakes: the harness dials twice,
@@ -14,7 +17,7 @@
 //! each peer reads as its stream's end.
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 use toyos::poller::{Poller, READABLE};
@@ -50,6 +53,8 @@ fn bulk(port: u16) {
             writing.write_all(&chunk[..len]).unwrap_or_else(|e| panic!("writing byte {sent} of the bulk: {e}"));
             sent += len;
         }
+        // At once: what the pipe still holds is the stack's to send first.
+        writing.shutdown(Shutdown::Write).expect("shutting the sending half");
     });
     let mut read = 0;
     let mut chunk = [0u8; 8192];
