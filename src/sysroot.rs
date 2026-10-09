@@ -98,7 +98,7 @@ const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp,
                       CMake's description of ToyOS per target, refused unless a C program naming \
                       each library links against it, and its C++ runtime built under n2 from the \
                       runtimes' sources of the compiler's LLVM, the freestanding libraries cloned \
-                      from their key's; 14";
+                      from their key's; 15";
 
 /// Whose sources a guest target's libraries compile.
 #[derive(Clone, Copy, PartialEq, Eq)]

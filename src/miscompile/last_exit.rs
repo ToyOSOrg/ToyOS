@@ -2,7 +2,7 @@
 //! its loop ends.
 #![no_std]
 
-type Port = u16;
+type Port = u128;
 
 #[derive(Clone, Copy)]
 pub enum Mediated {
