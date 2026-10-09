@@ -108,22 +108,6 @@ impl Profile {
     }
 }
 
-/// Where a machine's image is.
-enum Medium {
-    /// A USB stick on the xHCI, which the kernel drives, and DATA on an NVMe
-    /// disk of its own, `target/nvme.img`.
-    Stick,
-    /// The machine's one NVMe disk, [`DISK`]: the image installed around the
-    /// DATA that file already holds, so `/home` outlives a rebuild.
-    Disk,
-}
-
-/// The disk of every machine that boots off one, whichever image it runs.
-const DISK: &str = "target/disk.img";
-
-/// The DATA partition a [`DISK`] is made with.
-const DATA_BYTES: u64 = 1024 * 1024 * 1024;
-
 pub struct Options {
     pub arch: Arch,
     pub debug: bool,
@@ -139,19 +123,6 @@ pub struct Options {
     /// Passed rather than hardcoded so a diag build cannot launch the ordinary
     /// image and read the wrong screen.
     pub image: PathBuf,
-}
-
-impl Options {
-    fn medium(&self) -> Medium {
-        match (self.profile, self.arch) {
-            // The T14 boots from a stick, and its shape is this profile's.
-            (Profile::Metal, _) => Medium::Stick,
-            // No process on `virt` is handed a controller, so a disk there
-            // would serve nothing its stick does not.
-            (Profile::Virtio | Profile::Gop, Arch::Aarch64) => Medium::Stick,
-            (Profile::Virtio | Profile::Gop, Arch::X86_64) => Medium::Disk,
-        }
-    }
 }
 
 pub fn launch(opts: &Options) {
@@ -205,29 +176,19 @@ pub fn launch(opts: &Options) {
     // the unit never sees it, whatever the tables say.
     let platform = if shape.iommu { ",iommu_platform=on" } else { "" };
 
-    qemu.arg("-device").arg("nec-usb-xhci,id=xhci");
-    match opts.medium() {
-        Medium::Stick => qemu
-            .arg("-drive")
-            .arg(format!("if=none,id=stick,format=raw,file={}", opts.image.display()))
-            .arg("-device")
-            .arg("usb-storage,bus=xhci.0,drive=stick,bootindex=0")
-            .arg("-drive")
-            .arg("if=none,id=nvme0,format=raw,file=target/nvme.img")
-            .arg("-device")
-            .arg("nvme,serial=deadbeef,drive=nvme0,msix-exclusive-bar=on"),
-        Medium::Disk => {
-            let image = std::fs::read(&opts.image)
-                .unwrap_or_else(|e| panic!("read {} to install it: {e}", opts.image.display()));
-            toyos_build::image::install(&image, std::path::Path::new(DISK), DATA_BYTES);
-            qemu.arg("-drive")
-                .arg(format!("if=none,id=disk,format=raw,file={DISK}"))
-                .arg("-device")
-                .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
-                .arg("-device")
-                .arg("nvme-ns,drive=disk,bootindex=0,bus=nvme0ctl,logical_block_size=512,physical_block_size=512")
-        }
-    };
+    qemu.arg("-device")
+        .arg("nec-usb-xhci,id=xhci")
+        .arg("-drive")
+        .arg(format!(
+            "if=none,id=stick,format=raw,file={}",
+            opts.image.display()
+        ))
+        .arg("-device")
+        .arg("usb-storage,bus=xhci.0,drive=stick,bootindex=0")
+        .arg("-drive")
+        .arg("if=none,id=nvme0,format=raw,file=target/nvme.img")
+        .arg("-device")
+        .arg("nvme,serial=deadbeef,drive=nvme0,msix-exclusive-bar=on");
 
     if shape.usb_hid {
         qemu.arg("-device")

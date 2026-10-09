@@ -19,9 +19,8 @@ on this machine, USB input unavailable` and, stamped 1501 ms later (`2.917`
 and `4.418` on the test's first run), `usb-storage: 0 disk(s) on this machine
 and none carries the boot partition after 1500 ms of looking`. Those boots
 report `kernel to Boot: complete 1741 ms`. And on `bar_map_again`'s, a
-`Headless` machine whose xHCI carries a keyboard and no disk, which is the
-shape `cargo run` boots on x86-64: `usb-storage: 0 device(s)` at `6.126` and
-the same line at `7.628`.
+`Headless` machine whose xHCI carries a keyboard and no disk: `usb-storage: 0
+device(s)` at `6.126` and the same line at `7.628`.
 
 The kernel already knows the outcome it waits for is impossible on a machine
 with no xHCI controller, and it is told nothing about which bus the boot

@@ -724,11 +724,11 @@ fn designate(device: &mut gpt::DiskDeviceObject<'_>, at: u64, bytes: u64) {
 /// on the file at `disk`: DATA, `data_bytes` of it, and after it every
 /// partition of the image under the name, type and GUID the image gave it.
 ///
-/// **A disk that already holds that DATA partition keeps it**, its bytes and
-/// its GUID, and the image is replaced around it; any other file is made anew
-/// and its DATA designated. DATA comes first so that no image's size moves it.
-/// Only the tables, the stamp and the image's blocks that are not zero are
-/// written, so the file costs the host what the image does.
+/// **The file is one this call makes**: a path that already names anything is
+/// refused, so nothing that was there is written over. DATA comes first so
+/// that no image's size moves it. Only the tables, the stamp and the image's
+/// blocks that are not zero are written, so the file costs the host what the
+/// image does.
 pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
     use gpt::disk::LogicalBlockSize::Lb512;
     let mut listed = [None; 16];
@@ -759,31 +759,20 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         })
         .collect();
 
-    let kept = data_on(disk, data_bytes);
     let (mut rows, volumes): (Vec<Row>, Vec<&[u8]>) = carried.into_iter().unzip();
-    rows.insert(0, data_row(kept.unwrap_or_else(uuid::Uuid::new_v4), data_bytes));
+    rows.insert(0, data_row(uuid::Uuid::new_v4(), data_bytes));
     let total = disk_bytes(rows.iter().map(|row| row.len));
 
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(kept.is_none())
+        .create_new(true)
         .open(disk)
-        .unwrap_or_else(|e| panic!("open {} to install on it: {e}", disk.display()));
-    // Cut to DATA's end and grown again, with the old table's megabyte
-    // cleared: everything but DATA reads zero from here.
-    let data_end = PARTITION_ALIGN as u64 + data_bytes;
-    file.set_len(data_end)
-        .and_then(|()| file.set_len(total))
-        .and_then(|()| file.write_all(&vec![0u8; PARTITION_ALIGN]))
-        .unwrap_or_else(|e| panic!("clear {} around its DATA: {e}", disk.display()));
+        .unwrap_or_else(|e| panic!("{} is not installed on, being no file this install made: {e}", disk.display()));
+    file.set_len(total).unwrap_or_else(|e| panic!("size {} to {total} bytes: {e}", disk.display()));
 
     let (mut device, starts) = lay(Box::new(file), total, &rows);
-    assert_eq!(starts[0], PARTITION_ALIGN as u64, "DATA is not the disk's first partition");
-    if kept.is_none() {
-        designate(&mut device, starts[0], data_bytes);
-    }
+    designate(&mut device, starts[0], data_bytes);
     for ((row, volume), start) in rows[1..].iter().zip(volumes).zip(&starts[1..]) {
         for (i, block) in volume.chunks(PARTITION_ALIGN).enumerate().filter(|(_, block)| block.iter().any(|byte| *byte != 0)) {
             let at = start + (i * PARTITION_ALIGN) as u64;
@@ -794,15 +783,6 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
         }
     }
     device.flush().unwrap_or_else(|e| panic!("flush {}: {e}", disk.display()));
-}
-
-/// The unique GUID of the DATA partition [`install`] put on the file at
-/// `disk`, where it holds one of `data_bytes`: the one an install keeps.
-fn data_on(disk: &Path, data_bytes: u64) -> Option<uuid::Uuid> {
-    let mut file = std::fs::File::open(disk).ok()?;
-    let part = only_partition(&mut FileSectors(&mut file), toyos_gpt::Guid::TOYOS_DATA).ok()?;
-    let (start, len) = (part.first_lba() * u64::from(LBA), part.lba_count().get() * u64::from(LBA));
-    (start == PARTITION_ALIGN as u64 && len == data_bytes).then(|| uuid::Uuid::from_bytes_le(part.unique_guid().0))
 }
 
 /// Block 0 of a volume: the magic and its block count.
@@ -1298,72 +1278,36 @@ mod tests {
         }
     }
 
-    /// The one DATA partition on `disk`: its GUID, its extent and its first block.
-    fn data_of(disk: &mut std::fs::File) -> (toyos_gpt::Guid, u64, u64, Vec<u8>) {
-        let part = only_partition(&mut FileSectors(disk), toyos_gpt::Guid::TOYOS_DATA).expect("one DATA partition");
-        let (start, bytes) = partition_extent(disk, part.unique_guid().0).expect("DATA's extent");
-        let mut first = vec![0u8; SECTOR];
-        disk.seek(SeekFrom::Start(start)).and_then(|_| disk.read_exact(&mut first)).expect("read DATA");
-        (part.unique_guid(), start, bytes, first)
-    }
-
-    /// An install puts a designated DATA first and the image after it; a
-    /// second install, of an image of another size, puts that image's bytes
-    /// where the first's were written over, and leaves DATA where it was,
-    /// under its GUID, holding what was written to it; and a DATA of another
-    /// size is a disk made anew.
+    /// An install puts a designated DATA first and the image after it, on a
+    /// file it makes; a path that names a file already is refused, and that
+    /// file is left as it was.
     #[test]
-    fn an_install_replaces_the_image_around_the_data_it_keeps() {
+    fn an_install_makes_its_disk_and_refuses_one_that_exists() {
         const DATA: u64 = 4 << 20;
         let key = key();
-        let root = tiny_root();
+        let image = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &tiny_root(), "", signing(&key), None);
         let dir = toyos_tmpdir::TempDir::new("image-install");
         let path = dir.join("disk.img");
-        let open = || std::fs::OpenOptions::new().read(true).write(true).open(&path).expect("open the disk");
 
-        let first = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root, "", signing(&key), None);
-        install(&first, &path, DATA);
-        let mut disk = open();
-        carries_every_partition_of(&mut disk, &first);
-        let (guid, start, bytes, stamp) = data_of(&mut disk);
-        assert_eq!((start, bytes), (PARTITION_ALIGN as u64, DATA));
-        assert_eq!(stamp, designation(DATA / SECTOR as u64));
-
-        // What a volume's format does to the stamp, a block at DATA's end, and
-        // what a boot writes where its image's log partition holds nothing.
-        let written = vec![0xA5u8; SECTOR];
-        let (log_at, log_bytes) = partition_extent(&mut disk, only(&first, toyos_gpt::Guid::MICROSOFT_BASIC).0).expect("the log");
-        for at in [start, start + bytes - SECTOR as u64, log_at + log_bytes - SECTOR as u64] {
-            disk.seek(SeekFrom::Start(at)).and_then(|_| disk.write_all(&written)).expect("write the disk");
-        }
-        drop(disk);
-
-        let second = create_boot_image(
-            Arch::X86_64,
-            b"a longer kernel",
-            b"bootloader",
-            &root,
-            "",
-            signing(&key),
-            Some(SecondSlot { root_bytes: 8 << 20 }),
+        install(&image, &path, DATA);
+        let mut disk = std::fs::File::open(&path).expect("open the disk");
+        carries_every_partition_of(&mut disk, &image);
+        let data = only_partition(&mut FileSectors(&mut disk), toyos_gpt::Guid::TOYOS_DATA).expect("one DATA partition");
+        assert_eq!(
+            (data.first_lba() * u64::from(LBA), data.lba_count().get() * u64::from(LBA)),
+            (PARTITION_ALIGN as u64, DATA)
         );
-        assert_ne!(first.len(), second.len());
-        install(&second, &path, DATA);
-        let mut disk = open();
-        carries_every_partition_of(&mut disk, &second);
-        assert_eq!(data_of(&mut disk), (guid, start, bytes, written.clone()));
-        let mut last = vec![0u8; SECTOR];
-        disk.seek(SeekFrom::Start(start + bytes - SECTOR as u64)).and_then(|_| disk.read_exact(&mut last)).expect("read DATA");
-        assert_eq!(last, written);
-        let gone = only(&first, toyos_gpt::Guid::EFI_SYSTEM);
-        assert!(partition_extent(&mut disk, gone.0).is_err(), "the first image's ESP is still in the table");
+        let mut stamp = [0u8; SECTOR];
+        disk.seek(SeekFrom::Start(PARTITION_ALIGN as u64)).and_then(|_| disk.read_exact(&mut stamp)).expect("read DATA");
+        assert_eq!(stamp, designation(DATA / SECTOR as u64));
         drop(disk);
 
-        install(&second, &path, 2 * DATA);
-        let (remade, start, bytes, stamp) = data_of(&mut open());
-        assert_ne!(remade, guid);
-        assert_eq!((start, bytes), (PARTITION_ALIGN as u64, 2 * DATA));
-        assert_eq!(stamp, designation(2 * DATA / SECTOR as u64));
+        let theirs = dir.join("theirs.img");
+        std::fs::write(&theirs, b"somebody's").expect("write a file");
+        let refused = std::panic::catch_unwind(|| install(&image, &theirs, DATA)).expect_err("an install on a file that exists");
+        let said = refused.downcast_ref::<String>().expect("a refusal in words");
+        assert!(said.contains("theirs.img"), "the refusal names no path: {said}");
+        assert_eq!(std::fs::read(&theirs).expect("read it back"), b"somebody's");
     }
 
     /// **One ordering of one set is one image.** The judge below compares
