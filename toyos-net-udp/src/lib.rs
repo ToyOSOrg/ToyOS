@@ -8,9 +8,16 @@
 //! datagrams: a send past it is refused and the caller keeps its datagram. What closed sockets
 //! had accepted is held to `limits::CLOSED_DATAGRAMS` together and is one [`Sender`] beside the
 //! sockets, so closing never starves another socket. The caller's round over senders decides
-//! whose datagram leaves next: a datagram leaves only when [`Udp::serve`] hands it to the caller
-//! and is built then. What [`Udp::drain_eligible`] and [`Udp::drain_gone`] report is held until
-//! the caller drains it, a socket closed while offered included.
+//! whose datagram leaves next: a datagram leaves only when [`Udp::serve`] offers it to the caller
+//! and the caller takes it, and is built then. What [`Udp::drain_eligible`] and
+//! [`Udp::drain_gone`] report is held until the caller drains it, a socket closed while offered
+//! included.
+//!
+//! **A datagram waits for its next hop where it was accepted.** One the caller answers
+//! [`Offer::Waits`] stays in its sender's queue, under that queue's bound, and is passed over
+//! until [`Udp::wake`] names the hop: the sender's datagrams to other hops leave meanwhile, and
+//! those to one hop leave in the order they were accepted. One whose hop [`Udp::fail`] names is
+//! dropped, counted, and reported to a connected socket; nothing is kept for another try.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call
 //! returns; one of legacy or insecure input is also a [`Refusal`] naming the socket and the peer.
@@ -75,6 +82,7 @@ toyos_net_wire::counters! {
     RxDiscardedOnClose = "udp.rx-discarded-on-close";
     TxDiscardedOnClose = "udp.tx-discarded-on-close";
     Tx = "udp.tx";
+    TxUnreachable = "udp.tx-unreachable";
     IcmpErrorDelivered = "udp.icmp-error-delivered";
     IcmpErrorSoft = "udp.icmp-error-soft";
     IcmpErrorUnconnected = "udp.icmp-error-unconnected";
@@ -86,7 +94,10 @@ pub mod limits {
     pub const RX_DATAGRAMS: usize = 16;
     pub const RX_BYTES: usize = 65_536;
     pub const TX_DATAGRAMS: usize = 16;
+    /// Bytes of a socket's accepted datagrams that have not left: no send counts them, since
+    /// TX_DATAGRAMS of MAX_PAYLOAD fit.
     pub const TX_BYTES: usize = 65_536;
+    const _: () = assert!(TX_DATAGRAMS.saturating_mul(MAX_PAYLOAD) <= TX_BYTES);
     /// Datagrams closed sockets had accepted and that have not left: one socket's queue, whose
     /// bytes MAX_PAYLOAD bounds.
     pub const CLOSED_DATAGRAMS: usize = TX_DATAGRAMS;
@@ -122,7 +133,8 @@ pub enum SocketError {
     Refused,
     /// An ICMP error said the way to the peer is administratively prohibited.
     Prohibited,
-    /// [ip] found no link address for the next hop of a datagram it held: nothing left.
+    /// A datagram the socket had accepted is gone: [ip] refused it as it left, or gave up the
+    /// next hop it waited for.
     NextHopFailed,
 }
 
@@ -184,6 +196,8 @@ struct Stored {
 #[derive(Debug)]
 struct Queued {
     source: Ipv4Addr,
+    /// The port of the socket that accepted it.
+    source_port: Port,
     destination: Ipv4Addr,
     port: Port,
     ttl: Ttl,
@@ -191,6 +205,24 @@ struct Queued {
     /// leaves is decided by this, not by what the socket holds then.
     broadcast: bool,
     payload: Vec<u8>,
+    /// The next hop whose link address it waits for: not offered until [`Udp::wake`] names it.
+    waits: Option<Ipv4Addr>,
+}
+
+impl Queued {
+    fn out(&self) -> UdpOut<'_> {
+        UdpOut {
+            source: self.source,
+            destination: self.destination,
+            ttl: self.ttl,
+            broadcast: self.broadcast,
+            datagram: UdpBuilder { source: self.source_port, destination: self.port, data: &self.payload },
+        }
+    }
+
+    fn flow(&self) -> Flow {
+        Flow { source: self.source, source_port: self.source_port, destination: self.destination, destination_port: self.port }
+    }
 }
 
 #[derive(Debug)]
@@ -203,7 +235,6 @@ struct Socket {
     rx_bytes: usize,
     rx_full: u64,
     tx: VecDeque<Queued>,
-    tx_bytes: usize,
     /// In `eligible` or the caller's round.
     offered: bool,
     pending: Option<SocketError>,
@@ -227,14 +258,26 @@ pub enum Sender {
     Closed,
 }
 
+/// What the caller did with a datagram [`Udp::serve`] offered it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// It left [udp]: in a frame, or refused by [ip], which counted it and told its flow.
+    Taken,
+    /// The link address of this next hop is being asked for: the datagram stays with its sender
+    /// until [`Udp::wake`] or [`Udp::fail`] names the hop.
+    Waits(Ipv4Addr),
+}
+
 /// What [`Udp::serve`] handed the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Served {
-    /// A datagram, and another waits behind it.
+    /// A datagram, and another may be offered behind it.
     More,
-    /// The sender's last datagram: it leaves the round, and is offered again once it has another.
+    /// The last datagram the sender may be offered: it leaves the round, and is offered again
+    /// once it has another or one of its own is woken.
     Last,
-    /// Nothing: the sender has no datagram, or names a socket since closed.
+    /// Nothing: the sender has no datagram that waits for no next hop, or names a socket since
+    /// closed.
     Nothing,
 }
 
@@ -251,7 +294,7 @@ pub struct Udp {
     closed_offered: bool,
     /// Datagrams closed sockets had accepted: they still leave, at most
     /// `limits::CLOSED_DATAGRAMS` of them.
-    closed: VecDeque<(Port, Queued)>,
+    closed: VecDeque<Queued>,
     counters: Counters,
     refusals: Vec<Refusal>,
 }
@@ -349,7 +392,6 @@ impl Udp {
             rx_bytes: 0,
             rx_full: 0,
             tx: VecDeque::new(),
-            tx_bytes: 0,
             offered: false,
             pending: None,
             ttl: Ttl::DEFAULT,
@@ -525,13 +567,11 @@ impl Udp {
             Err(refusal) => return self.refuse(route_refusal(refusal), me, peer),
         };
         let socket = self.socket(id)?;
-        let bytes = socket.tx_bytes.saturating_add(payload.len());
-        if socket.tx.len() >= limits::TX_DATAGRAMS || bytes > limits::TX_BYTES {
+        if socket.tx.len() >= limits::TX_DATAGRAMS {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
-        socket.tx.push_back(Queued { source, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec() });
-        socket.tx_bytes = bytes;
+        socket.tx.push_back(Queued { source, source_port: local_port, destination, port, ttl, broadcast: broadcast_permitted, payload: payload.to_vec(), waits: None });
         if !core::mem::replace(&mut socket.offered, true) {
             self.eligible.push(Sender::Socket(id));
         }
@@ -581,7 +621,7 @@ impl Udp {
         if socket.offered {
             self.gone.push(Sender::Socket(id));
         }
-        self.closed.extend(socket.tx.into_iter().take(room).map(|q| (socket.port, q)));
+        self.closed.extend(socket.tx.into_iter().take(room));
         if !self.closed.is_empty() && !core::mem::replace(&mut self.closed_offered, true) {
             self.eligible.push(Sender::Closed);
         }
@@ -676,7 +716,8 @@ impl Udp {
         self.count(Counter::IcmpErrorDelivered);
     }
 
-    /// [ip] could not reach the next hop of a datagram this crate handed it.
+    /// A datagram of `flow` this crate had accepted will not leave: [ip] refused it as it left,
+    /// or gave up the next hop it waited for.
     pub fn unreachable(&mut self, flow: &Flow) {
         if let Some(socket) = self.connected(flow) {
             socket.pending = Some(SocketError::NextHopFailed);
@@ -700,42 +741,85 @@ impl Udp {
         self.gone.drain(..)
     }
 
-    /// The oldest datagram of `sender`, built as `sink` takes it; whether it leaves the stack then
-    /// or waits in [ip] for its next hop is the caller's.
-    pub fn serve(&mut self, sender: Sender, sink: impl FnOnce(&UdpOut<'_>)) -> Served {
-        let (port, queued, last) = match sender {
-            Sender::Closed => {
-                let Some((port, queued)) = self.closed.pop_front() else {
-                    self.closed_offered = false;
-                    return Served::Nothing;
-                };
-                let last = self.closed.is_empty();
-                self.closed_offered = !last;
-                (port, queued, last)
-            }
+    /// Offers `sender`'s datagrams in the order it accepted them, those waiting for a next hop
+    /// aside, until `offer` takes one: each is built as `offer` reads it. One `offer` answers
+    /// [`Offer::Waits`] for stays and waits.
+    pub fn serve(&mut self, sender: Sender, mut offer: impl FnMut(&UdpOut<'_>) -> Offer) -> Served {
+        let (queue, offered) = match sender {
+            Sender::Closed => (&mut self.closed, &mut self.closed_offered),
             Sender::Socket(id) => {
                 let Ok(socket) = self.socket(id) else { return Served::Nothing };
-                let Some(queued) = socket.tx.pop_front() else {
-                    socket.offered = false;
-                    return Served::Nothing;
-                };
-                socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
-                socket.offered = !socket.tx.is_empty();
-                (socket.port, queued, !socket.offered)
+                (&mut socket.tx, &mut socket.offered)
             }
         };
-        self.count(Counter::Tx);
-        sink(&UdpOut {
-            source: queued.source,
-            destination: queued.destination,
-            ttl: queued.ttl,
-            broadcast: queued.broadcast,
-            datagram: UdpBuilder { source: port, destination: queued.port, data: &queued.payload },
-        });
-        if last {
-            Served::Last
-        } else {
-            Served::More
+        let mut taken = None;
+        for (at, queued) in queue.iter_mut().enumerate().filter(|(_, queued)| queued.waits.is_none()) {
+            match offer(&queued.out()) {
+                Offer::Taken => {
+                    taken = Some(at);
+                    break;
+                }
+                Offer::Waits(next_hop) => queued.waits = Some(next_hop),
+            }
         }
+        let taken = taken.and_then(|at| queue.remove(at)).is_some();
+        let more = taken && queue.iter().any(|queued| queued.waits.is_none());
+        *offered = more;
+        self.counters.add(Counter::Tx, u64::from(taken));
+        match (taken, more) {
+            (true, true) => Served::More,
+            (true, false) => Served::Last,
+            (false, _) => Served::Nothing,
+        }
+    }
+
+    /// [ip] gave `next_hop` up: every datagram that waited for it is dropped and counted, and
+    /// the connected socket it left from is told.
+    pub fn fail(&mut self, next_hop: Ipv4Addr) {
+        let mut lost = Vec::new();
+        let queues = self.slots.iter_mut().filter_map(|slot| slot.socket.as_mut()).map(|socket| &mut socket.tx).chain([&mut self.closed]);
+        for queue in queues {
+            queue.retain(|queued| {
+                let waited = queued.waits == Some(next_hop);
+                if waited {
+                    lost.push(queued.flow());
+                }
+                !waited
+            });
+        }
+        self.counters.add(Counter::TxUnreachable, u64::try_from(lost.len()).unwrap_or(u64::MAX));
+        for flow in &lost {
+            self.unreachable(flow);
+        }
+    }
+
+    /// `next_hop`'s link address is known: the datagrams that wait for it are offered again.
+    pub fn wake(&mut self, next_hop: Ipv4Addr) {
+        self.rouse(|waits| waits == next_hop);
+    }
+
+    /// The routes changed: every waiting datagram's next hop is asked for again.
+    pub fn wake_all(&mut self) {
+        self.rouse(|_| true);
+    }
+
+    /// Ends the wait of every datagram whose next hop `woken` names, and offers its sender.
+    fn rouse(&mut self, woken: impl Fn(Ipv4Addr) -> bool) {
+        let Self { slots, closed, closed_offered, eligible, .. } = self;
+        let mut rouse = |queue: &mut VecDeque<Queued>, offered: &mut bool, sender: Sender| {
+            let mut any = false;
+            for queued in queue.iter_mut().filter(|queued| queued.waits.is_some_and(&woken)) {
+                queued.waits = None;
+                any = true;
+            }
+            if any && !core::mem::replace(offered, true) {
+                eligible.push(sender);
+            }
+        };
+        for (index, slot) in slots.iter_mut().enumerate() {
+            let (Some(socket), Ok(index)) = (&mut slot.socket, u32::try_from(index)) else { continue };
+            rouse(&mut socket.tx, &mut socket.offered, Sender::Socket(SocketId { index, generation: slot.generation }));
+        }
+        rouse(closed, closed_offered, Sender::Closed);
     }
 }

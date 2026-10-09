@@ -293,3 +293,28 @@ fn a_closed_socket_frees_its_port_and_what_it_accepted_still_leaves() {
     assert_eq!(lan.node.udp_recv_from(id, &mut out), Err(Refused::NotConnected));
     assert_eq!(lan.node.udp_recv_from(again, &mut out).map(|got| got.map(|datagram| datagram.len)), Ok(Some(4)));
 }
+
+// RFC 1122 §2.3.2.1 and RFC 4861 §7.2.2 have address resolution give up after its requests. A
+// client's datagram for a host of the link nobody answers for waits in its own socket while [ip]
+// asks, and is dropped and counted when [ip] gives the host up. The client's socket is not
+// connected and is told nothing: its next receive finds no datagram and no error, and its next
+// send is accepted.
+#[test]
+fn a_clients_datagram_for_a_host_nobody_answers_for_is_dropped_and_the_client_is_told_nothing() {
+    const NOBODY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 9);
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    lan.node.udp_send_to(lan.now, id, NOBODY, 7, b"anyone").unwrap();
+    lan.node.udp_send_to(lan.now, id, B, 7, b"b").unwrap();
+    lan.pump();
+    let payloads: Vec<&[u8]> = lan.datagrams().iter().map(|(_, udp)| udp.payload.as_slice()).collect();
+    assert_eq!(payloads, [&b"b"[..]], "the datagram behind the waiting one left");
+
+    let sent = lan.now;
+    assert!(lan.run_until(Duration::from_secs(10), |lan| lan.counted(Counter::TxUnreachable) == 1), "the datagram is dropped");
+    assert_eq!(lan.now, sent.after(Duration::from_secs(3)), "when [ip] gave the host up");
+    assert_eq!(lan.datagrams().len(), 1);
+    assert_eq!(lan.node.udp_recv_from(id, &mut [0u8; 8]), Ok(None));
+    assert_eq!(lan.node.udp_send_to(lan.now, id, B, 7, b"again"), Ok(()));
+}

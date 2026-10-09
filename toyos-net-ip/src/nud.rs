@@ -7,7 +7,8 @@
 //!
 //! Each state carries exactly its own fields: a MAC only where one is known, a waiting request
 //! only in a state that sends one, and a pending queue that takes datagrams in INCOMPLETE and only
-//! drains in every state resolution leads to.
+//! drains in every state resolution leads to. The datagrams are [ip]'s own ICMP messages: a
+//! transport's waits with its sender.
 //! Resolution moves INCOMPLETE's queue into the resolved state and gives each datagram a turn in
 //! the control queue, where it leaves to the MAC of that moment. While its queue holds any, an
 //! entry does not idle out and is evicted only after every other candidate. A send the
@@ -29,7 +30,7 @@ use crate::limits::nud::{
     PENDING_PER_NEIGHBOUR, RETRANS, TABLE_MAX, UNICAST_SOLICIT,
 };
 use crate::timers::Timer;
-use crate::{route, Event, Flow, Peer};
+use crate::{route, Event, Peer};
 
 #[derive(Debug)]
 pub enum Nud {
@@ -43,12 +44,11 @@ pub enum Nud {
     Failed,
 }
 
-/// A frame [ip] built and holds for its next hop, and who is told if it never leaves.
+/// One of [ip]'s own ICMP messages, framed and held for its next hop.
 #[derive(Debug)]
 pub struct Held {
     pub(crate) frame: Vec<u8>,
     pub(crate) kind: FrameKind,
-    pub(crate) flow: Option<Flow>,
 }
 
 /// INCOMPLETE's pending queue: the only one that takes datagrams.
@@ -343,9 +343,7 @@ fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     }
     let turns = cx.control.purge_entry(cx.iface, addr);
     i.held = i.held.saturating_sub(turns);
-    for held in n.state.take_released().0 {
-        drop_held(cx, held, Counter::NbPendingEvicted);
-    }
+    dropped(cx, Counter::NbPendingEvicted, n.state.take_released().0.len());
 }
 
 fn insert(i: &mut Interface, addr: Ipv4Addr, state: Nud, now: Instant, hint: Option<Ipv4Addr>) {
@@ -491,21 +489,16 @@ fn probe(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, at: Instant) {
     }
 }
 
-/// A held datagram that will never leave: counted, and its sender told.
-fn drop_held(cx: &mut Cx<'_>, held: Held, counter: Counter) {
-    cx.log.count(counter);
-    if let Some(flow) = held.flow {
-        cx.log.event(Event::Unreachable(flow));
-    }
+/// Held datagrams that will never leave. Each is [ip]'s own message, so nobody is told.
+fn dropped(cx: &mut Cx<'_>, counter: Counter, held: usize) {
+    cx.log.counters.add(counter, u64::try_from(held).unwrap_or(u64::MAX));
 }
 
 /// INCOMPLETE gave up: every held datagram is dropped.
 fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, pending: Pending) {
     let now = cx.now;
-    for held in pending.0 {
-        i.held = i.held.saturating_sub(1);
-        drop_held(cx, held, Counter::NbPendingDropped);
-    }
+    i.held = i.held.saturating_sub(pending.0.len());
+    dropped(cx, Counter::NbPendingDropped, pending.0.len());
     cx.log.count(Counter::NbFailed);
     cx.log.event(Event::Failed { iface: cx.iface, next_hop: addr });
     cx.timers.arm(timer(cx, addr), now.after(FAILED_HOLD));
@@ -626,9 +619,7 @@ pub(crate) fn flush(i: &mut Interface, cx: &mut Cx<'_>) {
             Nud::Incomplete(s) => s.pending.0,
             mut state => state.take_released().0,
         };
-        for held in held {
-            drop_held(cx, held, Counter::NbPendingDropped);
-        }
+        dropped(cx, Counter::NbPendingDropped, held.len());
     }
     cx.control.purge(cx.iface);
     i.held = 0;

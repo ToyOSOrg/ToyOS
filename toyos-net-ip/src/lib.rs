@@ -9,7 +9,8 @@
 //! **Pull egress.** [ip]'s own frames — ARP, IGMP, ICMP, and datagrams released by resolution —
 //! wait in one FIFO that [`Ip::transmit`] drains with the credit the device offers, and a frame's
 //! timers start when it leaves. A datagram a transport hands [`Ip::send_udp`] is written straight
-//! into the device's buffer, or waits here for its next hop; a full ring never drops one.
+//! into the device's buffer, or is not taken while its next hop is asked for: it waits with its
+//! sender, and only [ip]'s own messages wait here.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`]; one of legacy or insecure input
 //! is also an [`Event::Refused`] naming the rule and the peer, which the shell logs through
@@ -108,7 +109,7 @@ pub mod limits {
         pub const FAILED_HOLD: Duration = Duration::from_secs(20);
         pub const LOCKTIME: Duration = Duration::from_secs(1);
         pub const IDLE_LIFETIME: Duration = Duration::from_secs(600);
-        pub const PENDING_PER_NEIGHBOUR: usize = 16;
+        pub const PENDING_PER_NEIGHBOUR: usize = 8;
         pub const PENDING_TOTAL: usize = 64;
         pub const TABLE_MAX: usize = 512;
     }
@@ -290,7 +291,7 @@ pub enum Event {
     /// A neighbour table that refused a send for want of room can take an entry: a flow
     /// told "host unreachable" for it may ask again.
     Room { iface: IfIndex },
-    /// A UDP datagram [ip] took could not reach its next hop.
+    /// [ip] refused a UDP datagram handed to [`Ip::send_udp`].
     Unreachable(Flow),
 }
 

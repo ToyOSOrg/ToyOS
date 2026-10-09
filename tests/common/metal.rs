@@ -17,7 +17,6 @@ use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -58,8 +57,8 @@ pub struct Arm {
     /// owner flashes.
     pub features: &'static [&'static str],
     /// The job this boot ends on, before `reboot`: [`batches`] puts it after
-    /// every job any arm on the boot names, so none can land behind it, and
-    /// refuses two arms that name different ones.
+    /// every job any arm on the boot names and every member riding it, so none
+    /// can land behind it, and refuses two arms that name different ones.
     pub last: Option<&'static str>,
 }
 
@@ -86,17 +85,21 @@ pub const fn once(
 /// exit record for it. So they are a boot with a list rather than a row each,
 /// and each member is still reported under its own name.
 ///
-/// A chunk rides one flash. A member that takes the machine down takes every
-/// member after it *in its chunk* with it, and that is the honest price: on the
-/// T14 there is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
+/// The members ride one flash. A member that takes the machine down takes
+/// every member after it with it, and that is the honest price: on the T14
+/// there is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
 #[derive(Clone)]
 pub struct SharedBoot {
+    /// The boot the members ride. A row whose arm names it rides it too, on
+    /// the same terms two arms share one, and its jobs run before any member.
     pub boot: String,
     pub config: &'static str,
     pub params: &'static [&'static str],
     /// The kernel build, empty for the one an image ships.
     pub features: &'static [&'static str],
-    pub members: NonZeroUsize,
+    /// What each member adds to the bound the runner gives the boot's whole
+    /// list (`toyos_tco::list_bound_ms`), in milliseconds.
+    pub member_ms: u64,
     /// What the runner spawns, in order — the whole binary name, `test_rs_`
     /// prefix and all, because that is what the kernel records it under.
     pub jobs: Vec<String>,
@@ -109,63 +112,36 @@ pub struct SharedBoot {
     pub links: Vec<(String, String)>,
 }
 
-/// How many members allowed `allowance_ms` each one shared boot holds: the
-/// runner's [`toyos_tco::JOB_BOUND_MS`] less a tenth of it, shared among them.
-pub const fn members_fitting(allowance_ms: u64) -> NonZeroUsize {
-    let members = (toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10) / allowance_ms;
-    NonZeroUsize::new(members as usize).expect("a chunk holds a member")
-}
-
-/// The name of one chunk of a boot that had to be cut in two.
-fn chunk_name(boot: &str, index: usize) -> String {
-    if index == 0 {
-        boot.to_string()
-    } else {
-        format!("{boot}-{}", index + 1)
+impl SharedBoot {
+    /// What the members add to their boot's list bound.
+    fn members_ms(&self) -> u64 {
+        self.jobs.len() as u64 * self.member_ms
     }
-}
 
-/// **A chunk carries only the files and links its own members name.** The C
-/// corpus stages a binary and an expectation per case; putting all of both on
-/// every chunk would double a flash that is already written over `ssh`.
-fn sized(shared: &[SharedBoot]) -> Vec<SharedBoot> {
-    let mut out = Vec::new();
-    for boot in shared {
-        for (index, jobs) in boot.jobs.chunks(boot.members.get()).enumerate() {
-            let named: BTreeSet<&str> = jobs.iter().map(String::as_str).collect();
-            let mine = |path: &str| {
-                let last = path.rsplit('/').next().unwrap_or(path);
-                named.contains(last)
-                    || last.strip_prefix("test_c_").is_some_and(|c| named.contains(c))
-            };
-            out.push(SharedBoot {
-                boot: chunk_name(&boot.boot, index),
-                config: boot.config,
-                params: boot.params,
-                features: boot.features,
-                members: boot.members,
-                jobs: jobs.to_vec(),
-                files: boot
-                    .files
-                    .iter()
-                    .filter(|(path, _)| mine(path))
-                    .cloned()
-                    .collect(),
-                links: boot.links.iter().filter(|(from, _)| mine(from)).cloned().collect(),
-            });
-        }
+    /// This boot with the members `named` and none else, or `None` where that
+    /// is none of them. **It carries only the files and links its own members
+    /// name**: the C corpus stages a binary and an expectation per case, and a
+    /// stick is written over `ssh`.
+    fn keeping(&self, named: impl Fn(&str) -> bool) -> Option<SharedBoot> {
+        let jobs: Vec<String> = self.jobs.iter().filter(|job| named(job)).cloned().collect();
+        let mine = |path: &str| {
+            let last = path.rsplit('/').next().unwrap_or(path);
+            let case = last.strip_prefix("test_c_").unwrap_or(last);
+            jobs.iter().any(|job| job == case)
+        };
+        let files = self.files.iter().filter(|(path, _)| mine(path)).cloned().collect();
+        let links = self.links.iter().filter(|(from, _)| mine(from)).cloned().collect();
+        (!jobs.is_empty()).then(|| SharedBoot { jobs, files, links, ..self.clone() })
     }
-    out
 }
 
 /// The rows and the shared boots a run takes.
 pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
 
 /// What a run's words take of the profile: every row and shared member a
-/// `names` word is part of, chunked as they come, and every boot a `boots`
-/// word names, whole — its shared members as the whole profile chunks them,
-/// and every row with an arm on it, which brings that row's other boots. No
-/// word at all takes everything.
+/// `names` word is part of, and every boot a `boots` word names, whole — all
+/// its shared members, and every row with an arm on it, which brings that
+/// row's other boots. No word at all takes everything.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
 pub fn select(
@@ -185,25 +161,17 @@ pub fn select(
     }) {
         return Err(format!("{dead:?} is part of no metal registration's name and no shared member's"));
     }
-    let whole = sized(shared);
     let arms = || rows.iter().flat_map(|(_, decl)| decl.arms).map(|arm| arm.boot);
-    let known: BTreeSet<&str> = whole.iter().map(|boot| boot.boot.as_str()).chain(arms()).collect();
+    let known: BTreeSet<&str> = shared.iter().map(|boot| boot.boot.as_str()).chain(arms()).collect();
     if let Some(dead) = boots.iter().find(|boot| !known.contains(**boot)) {
         return Err(format!("boot:{dead} names no boot of the metal profile, whose boots are {known:?}"));
     }
 
     let named = |name: &str| all || names.iter().any(|word| name.contains(word));
-    let mut taken: Vec<SharedBoot> =
-        whole.iter().filter(|boot| boots.contains(&boot.boot.as_str())).cloned().collect();
-    let by_name: Vec<SharedBoot> = shared
+    let taken: Vec<SharedBoot> = shared
         .iter()
-        .cloned()
-        .map(|mut boot| {
-            boot.jobs.retain(|job| named(bare(job)));
-            boot
-        })
+        .filter_map(|boot| boot.keeping(|job| boots.contains(&boot.boot.as_str()) || named(bare(job))))
         .collect();
-    taken.extend(sized(&by_name));
     let rows = rows
         .iter()
         .filter(|(name, decl)| named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
@@ -542,6 +510,8 @@ pub struct Batch {
     features: &'static [&'static str],
     /// What the runner spawns, in order.
     pub jobs: Vec<String>,
+    /// What the members riding it add to the bound of its list.
+    members_ms: u64,
     last: Option<&'static str>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
@@ -555,6 +525,46 @@ impl Batch {
             }
         }
     }
+
+    /// The bound the runner gives this boot's whole list, in milliseconds.
+    pub fn bound_ms(&self) -> u64 {
+        toyos_tco::list_bound_ms(self.members_ms)
+    }
+
+    /// The bound the kernel gives this whole boot, in milliseconds.
+    pub fn deadline_ms(&self) -> u64 {
+        toyos_build::metal::bound_for(&self.params, self.bound_ms())
+    }
+}
+
+/// The batch of the boot `boot`, which `who` rides as `(config, params,
+/// features)`: a new one, or the one an earlier rider made where the two agree.
+fn ride<'a>(
+    out: &'a mut BTreeMap<String, Batch>,
+    who: &str,
+    boot: &str,
+    config: &'static str,
+    params: &'static [&'static str],
+    features: &'static [&'static str],
+) -> Result<&'a mut Batch, String> {
+    let batch = out.entry(boot.to_string()).or_insert_with(|| Batch {
+        config,
+        params: params.to_vec(),
+        features,
+        jobs: Vec::new(),
+        members_ms: 0,
+        last: None,
+        files: Vec::new(),
+        links: Vec::new(),
+    });
+    if batch.config != config || batch.params != params || batch.features != features {
+        return Err(format!(
+            "{who} rides the boot {boot:?} as ({config}, {params:?}, {features:?}) and another rides \
+             it as ({}, {:?}, {:?}); one boot is one image",
+            batch.config, batch.params, batch.features
+        ));
+    }
+    Ok(batch)
 }
 
 /// Where a batch's derived config, its image and its readback live.
@@ -562,63 +572,24 @@ pub fn at(dir: &Path, label: &str) -> PathBuf {
     dir.join(label)
 }
 
-/// The boots `tests` need, keyed by the name their arms give them.
+/// The boots `tests` and `shared` need, keyed by the name their arms give them.
 ///
-/// **Two arms naming one boot are refused where they disagree about it**: an
+/// **Two riders naming one boot are refused where they disagree about it**: an
 /// image is one config armed one way, and a silent winner would give one of the
-/// two tests a machine it did not ask for.
+/// two a machine it did not ask for.
+///
+/// **A boot's rows' jobs run before its members**, so a row that measures has
+/// the machine its jobs alone would give it, and what the members write to the
+/// log lands behind every row's.
 pub fn batches(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
 ) -> Result<BTreeMap<String, Batch>, String> {
     let mut out: BTreeMap<String, Batch> = BTreeMap::new();
-    // First, so a registration naming a shared boot rides it rather than
-    // minting a second one under the same name with a different list.
-    for boot in shared {
-        let was = out.insert(
-            boot.boot.clone(),
-            Batch {
-                config: boot.config,
-                params: boot.params.to_vec(),
-                features: boot.features,
-                jobs: boot.jobs.clone(),
-                last: None,
-                files: boot.files.clone(),
-                links: boot.links.clone(),
-            },
-        );
-        if was.is_some() {
-            return Err(format!("two shared boots are both named {:?}", boot.boot));
-        }
-    }
     for (name, decl) in tests {
         let Metal { arms, .. } = decl;
         for arm in *arms {
-            let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
-                config: arm.config,
-                params: arm.params.to_vec(),
-                features: arm.features,
-                jobs: Vec::new(),
-                last: None,
-                files: Vec::new(),
-                links: Vec::new(),
-            });
-            if batch.config != arm.config
-                || batch.params != arm.params
-                || batch.features != arm.features
-            {
-                return Err(format!(
-                    "{name} rides the boot {:?} as ({}, {:?}, {:?}) and another row rides it as \
-                     ({}, {:?}, {:?}); one boot is one image",
-                    arm.boot,
-                    arm.config,
-                    arm.params,
-                    arm.features,
-                    batch.config,
-                    batch.params,
-                    batch.features
-                ));
-            }
+            let batch = ride(&mut out, name, arm.boot, arm.config, arm.params, arm.features)?;
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
             match (batch.last, arm.last) {
                 (Some(was), Some(now)) if was != now => {
@@ -632,6 +603,18 @@ pub fn batches(
                 (Some(_), _) => {}
             }
         }
+    }
+    let mut ridden: BTreeSet<&str> = BTreeSet::new();
+    for boot in shared {
+        if !ridden.insert(&boot.boot) {
+            return Err(format!("two shared boots are both named {:?}", boot.boot));
+        }
+        let who = format!("the shared boot {:?}", boot.boot);
+        let batch = ride(&mut out, &who, &boot.boot, boot.config, boot.params, boot.features)?;
+        batch.add(boot.jobs.iter().cloned());
+        batch.members_ms += boot.members_ms();
+        batch.files.extend(boot.files.iter().cloned());
+        batch.links.extend(boot.links.iter().cloned());
     }
     for batch in out.values_mut() {
         if let Some(last) = batch.last {
@@ -687,7 +670,7 @@ fn build(
     let text = std::fs::read_to_string(&committed)
         .map_err(|e| format!("{}: {e}", committed.display()))?;
     let jobs: Vec<&str> = batch.jobs.iter().map(String::as_str).collect();
-    let derived = metalimage::derive(&text, &jobs, &batch.links)
+    let derived = metalimage::derive(&text, batch.bound_ms(), &jobs, &batch.links)
         .map_err(|why| format!("{}: {why}", committed.display()))?;
     // **The job list is in the file name, not only in the file.**
     // `build_test_image` memoizes ROOT on the config's *path*, so two runs whose
@@ -756,7 +739,9 @@ fn build(
     // chipset watchdog does not count on this PCH, the runner's own bound
     // reboots through the shutdown syscall the wedge may be inside, and the
     // loop then waits `metal::return_secs` and needs a hand on the power
-    // button. Armed after the kernel build is decided above, because a
+    // button. Derived from the bound the runner was just given, so the kernel
+    // never ends a list its runner would still have ended itself.
+    // Armed after the kernel build is decided above, because a
     // parameter carrying a value is not an actuator and must not pull the test
     // kernel in behind it.
     if let Some(own) = batch.params.iter().find(|p| p.starts_with(toyos_tco::DEADLINE_PARAM))
@@ -769,11 +754,7 @@ fn build(
              field on an arm"
         ));
     }
-    let deadline = format!(
-        "{}{}",
-        toyos_tco::DEADLINE_PARAM,
-        toyos_build::metal::bound_for(&batch.params)
-    );
+    let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, batch.deadline_ms());
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
     let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
@@ -919,7 +900,13 @@ pub fn run(
     let (dir, offline): (PathBuf, bool) = match &mode {
         MetalMode::List => {
             for (label, batch) in &batches {
-                println!("{label}: {} job(s) — {:?}", batch.jobs.len(), batch.jobs);
+                println!(
+                    "{label}: {} job(s), a list bound of {} ms and a boot deadline of {} ms — {:?}",
+                    batch.jobs.len(),
+                    batch.bound_ms(),
+                    batch.deadline_ms(),
+                    batch.jobs
+                );
             }
             return Verdict::Green;
         }
@@ -941,9 +928,12 @@ pub fn run(
             match build(&root, dir, label, batch, rust_bins, quiet) {
                 Ok(image) => {
                     eprintln!(
-                        "[metal] {label}: {} job(s), armed with {:?} — {}",
+                        "[metal] {label}: {} job(s) under a list bound of {} ms, armed with {:?} and \
+                         a boot deadline of {} ms — {}",
                         batch.jobs.len(),
+                        batch.bound_ms(),
                         batch.params,
+                        batch.deadline_ms(),
                         image.display()
                     );
                     images.insert(label.as_str(), image);
@@ -1176,6 +1166,15 @@ pub fn judge_readbacks(
             if let (Some(complete), Some(last)) = (back.complete_record_ms(), back.last_record_ms()) {
                 let each = last.saturating_sub(complete) / ran as u64;
                 eprintln!("  {} ms per member over the {ran} that ran", each);
+                // On the clock the runner counts its bound on, the kernel's
+                // own, whose reading `Boot: complete` states beside its stamp.
+                if let Some(boot_ms) = back.boot_ms {
+                    eprintln!(
+                        "  its last record came {} ms into a list bound of {} ms",
+                        (last + boot_ms).saturating_sub(complete),
+                        toyos_tco::list_bound_ms(boot.members_ms())
+                    );
+                }
             }
         }
     }
