@@ -685,7 +685,8 @@ impl Sockets {
             match event {
                 Event::Stack { refusal, suppressed: 0 } => say!("netstack: refused {refusal:?}"),
                 Event::Stack { refusal, suppressed } => say!("netstack: refused {refusal:?}, and {suppressed} more by its rule"),
-                Event::Dhcp(refusal) => say!("netstack: DHCP: refused {refusal:?}"),
+                Event::Dhcp { refusal, suppressed: 0 } => say!("netstack: DHCP: refused {refusal:?}"),
+                Event::Dhcp { refusal, suppressed } => say!("netstack: DHCP: refused {refusal:?}, and {suppressed} more by its rule"),
                 Event::Name(toyos_mdns::Event::Claimed) => {
                     say!("netstack: mDNS: no host answered for {HOSTNAME}.local; this machine answers as it")
                 }

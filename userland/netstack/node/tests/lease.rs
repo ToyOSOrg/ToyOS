@@ -153,7 +153,7 @@ fn a_nak_takes_address_route_and_resolvers_in_one_step() {
     assert_eq!((wire.node.lease(), wire.address(A), wire.gateways()), (None, None, vec![]));
     assert!(matches!(wire.sent.last(), Some(Seen::Dhcp { source, .. }) if source.is_unspecified()), "{:?}", wire.sent.last());
     assert_ne!(xid(wire.last(DISCOVER)), id, "a new exchange");
-    let refused = Event::Dhcp(toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::Nak, peer: toyos_dhcp::Peer::From(R) });
+    let refused = Event::Dhcp { refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::Nak, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
     assert!(wire.node.drain_events().any(|event| event == refused));
     assert!(!wire.answers_arp_for(A));
 }
@@ -370,7 +370,7 @@ fn a_conflict_under_the_probe_declines_and_holds_nothing() {
     assert_eq!((wire.node.lease(), wire.address(A)), (None, None));
     let events: Vec<Event> = wire.node.drain_events().collect();
     let stack = |event: &Event| matches!(event, Event::Stack { refusal: Refusal::Ip(refusal), .. } if refusal.rule == toyos_net_ip::Counter::AcdConflict);
-    let dhcp = |event: &Event| matches!(event, Event::Dhcp(refusal) if refusal.rule == toyos_dhcp::Counter::Declined);
+    let dhcp = |event: &Event| matches!(event, Event::Dhcp { refusal, .. } if refusal.rule == toyos_dhcp::Counter::Declined);
     assert!(events.iter().any(stack) && events.iter().any(dhcp), "{events:?}");
 
     assert!(wire.run_until(Duration::from_secs(11), |wire| wire.dhcp().last().is_some_and(|(kind, _)| *kind == DISCOVER)), "discovery starts over");
@@ -471,9 +471,30 @@ fn a_reply_without_the_cookie_is_refused_by_name() {
     bootp[236..240].fill(0);
     wire.deliver(&from_server(MAC, A, &bootp));
     wire.last(DISCOVER);
-    let refused = Event::Dhcp(toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::BootpReply, peer: toyos_dhcp::Peer::From(R) });
+    let refused = Event::Dhcp { refusal: toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::BootpReply, peer: toyos_dhcp::Peer::From(R) }, suppressed: 0 };
     assert!(wire.node.drain_events().any(|event| event == refused));
     assert_eq!(wire.node.drain_events().count(), 0, "drained");
+}
+
+/// Any host on the link can send replies the client refuses, one a frame: the log takes one line
+/// a rule in any 10 s, and the next line carries how many it did not.
+#[test]
+fn a_hundred_refused_replies_are_one_line_and_a_count() {
+    let mut wire = Wire::new();
+    wire.link(true);
+    let id = xid(wire.last(DISCOVER));
+    let mut bootp = message_of(OFFER, id, &terms(HOUR, Some(R)));
+    bootp[236..240].fill(0);
+    let refusal = toyos_dhcp::Refusal { rule: toyos_dhcp::Counter::BootpReply, peer: toyos_dhcp::Peer::From(R) };
+    for _ in 0..100 {
+        wire.deliver(&from_server(MAC, A, &bootp));
+    }
+    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { refusal, suppressed: 0 }]);
+    assert_eq!(wire.node.dhcp().counters().get(toyos_dhcp::Counter::BootpReply), 100, "each one counted");
+
+    wire.now = wire.now.after(toyos_net_wire::REFUSAL_LOG_INTERVAL);
+    wire.deliver(&from_server(MAC, A, &bootp));
+    assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { refusal, suppressed: 99 }]);
 }
 
 /// The node waiting for the ACK of its REQUEST, and that ACK's frame.

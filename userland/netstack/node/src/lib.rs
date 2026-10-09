@@ -17,7 +17,8 @@
 //! **Untrusted input.** A received frame is never read here: every byte goes through
 //! `toyos-net-wire`'s parsers inside the shard, and a DHCP payload through the client's. What
 //! either refuses is counted where it was refused and, where it is a log line, comes out of
-//! [`Node::drain_events`].
+//! [`Node::drain_events`], at most one a rule in any 10 s with a count of the rest: a peer's
+//! frames never write the log faster than that.
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
 //! exchange draws its transaction id first. The name draws after it, the delay of each probing it
@@ -73,7 +74,8 @@ toyos_net_wire::counters! {
 pub enum Event {
     /// A refusal of the stack's, and how many of its rule it stands for beyond itself.
     Stack { refusal: toyos_net_shard::Refusal, suppressed: u64 },
-    Dhcp(toyos_dhcp::Refusal),
+    /// A refusal of the client's, and how many of its rule it stands for beyond itself.
+    Dhcp { refusal: toyos_dhcp::Refusal, suppressed: u64 },
     /// What became of the machine's name.
     Name(toyos_mdns::Event),
 }
@@ -88,6 +90,9 @@ pub struct Node {
     resolver: resolve::Resolver,
     counters: Counters,
     events: Vec<Event>,
+    /// The client's refusals pass through it as the stack's pass through the shard's: one line a
+    /// rule in any 10 s, carrying how many were not.
+    dhcp_log: toyos_dhcp::RefusalLog,
     /// Room for the largest message the client accepts.
     datagram: Vec<u8>,
     streams: streams::Streams,
@@ -115,6 +120,7 @@ impl Node {
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
             events: Vec::new(),
+            dhcp_log: toyos_dhcp::RefusalLog::default(),
             datagram: vec![0; usize::from(toyos_dhcp::limits::MAX_MESSAGE)],
             streams: streams::Streams::default(),
             listeners: listeners::Listeners::default(),
@@ -143,7 +149,7 @@ impl Node {
 
     /// Log lines since the last call.
     pub fn drain_events(&mut self) -> impl Iterator<Item = Event> + '_ {
-        self.events.drain(..).chain(self.client.drain_refusals().map(Event::Dhcp))
+        self.events.drain(..)
     }
 
     // ---- the device ----
@@ -163,7 +169,7 @@ impl Node {
         loop {
             sent = sent.saturating_add(self.stack.transmit(now, credit.saturating_sub(sent), &mut sink));
             // A datagram [ip] refused as it left is a line of this opportunity.
-            self.log();
+            self.log(now);
             let asked = self.resolver.pass(now, &mut self.stack, &mut self.counters, &mut draw);
             if !asked || sent >= credit {
                 break;
@@ -208,7 +214,7 @@ impl Node {
     /// carried on, against the lease as that left it.
     fn settle(&mut self, now: Instant, draw: &mut impl FnMut() -> u32) {
         loop {
-            self.log();
+            self.log(now);
             let (out, verified) = if let Some(report) = self.stack.report() {
                 match report {
                     Report::Verified(verified) => (self.client.verified(now, &mut *draw), Some(verified)),
@@ -226,11 +232,16 @@ impl Node {
         self.resolver.pass(now, &mut self.stack, &mut self.counters, draw);
     }
 
-    /// The stack's log lines so far, into [`Self::drain_events`]: the one way a line leaves the
-    /// stack.
-    fn log(&mut self) {
+    /// The stack's and the client's log lines so far, into [`Self::drain_events`]: the one way a
+    /// line leaves either.
+    fn log(&mut self, now: Instant) {
         let events = &mut self.events;
         self.stack.refusals(|refusal, suppressed| events.push(Event::Stack { refusal, suppressed }));
+        for refusal in self.client.drain_refusals() {
+            if let Some(suppressed) = self.dhcp_log.admit(now, refusal.rule) {
+                events.push(Event::Dhcp { refusal, suppressed });
+            }
+        }
     }
 
     /// What one call of the client's asked for: the lease first, so a message leaves from the
