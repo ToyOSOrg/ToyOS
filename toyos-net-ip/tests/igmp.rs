@@ -547,6 +547,7 @@ fn s_ip_mod_002_ordinary_refusals_are_not_logged() {
     let mut expected = [
         "ip.source-route",
         "ip.fragment",
+        "ip.broadcast-not-permitted",
         "icmp.redirect",
         "icmp.timestamp-request",
         "icmp.source-quench",

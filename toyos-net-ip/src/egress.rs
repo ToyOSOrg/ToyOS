@@ -25,7 +25,7 @@ use crate::iface::Cx;
 use crate::limits::{nud::PENDING_TOTAL, CONTROL_QUEUE, ECHO_REPLIES};
 use crate::nud::{self, Held, Link, Nud};
 use crate::route::{NextHop, Route, Source};
-use crate::{acd, igmp, Event, Flow, IfIndex, Ip, MTU};
+use crate::{acd, igmp, Event, Flow, IfIndex, Ip, Peer, MTU};
 
 /// The largest frame [ip] builds.
 pub const FRAME: usize = toyos_net_wire::ethernet::HEADER_LEN + MTU;
@@ -168,6 +168,9 @@ pub struct UdpOut<'a> {
     pub source: Ipv4Addr,
     pub destination: Ipv4Addr,
     pub ttl: Ttl,
+    /// Whether its socket held the broadcast permission when it accepted the datagram: one
+    /// without it never leaves in a link broadcast, whatever the prefixes have become since.
+    pub broadcast: bool,
     pub datagram: UdpBuilder<'a>,
 }
 
@@ -284,8 +287,9 @@ impl Ip {
     }
 
     /// A UDP datagram at a transmit opportunity: written into `frame` when its link
-    /// destination is known, or held here for its next hop, which spends no credit. A refusal is
-    /// counted and the datagram's flow is told it is unreachable.
+    /// destination is known, or held here for its next hop, which spends no credit. The route is
+    /// the one of this moment, so a link broadcast is refused a datagram that does not carry the
+    /// permission. A refusal is counted and the datagram's flow is told it is unreachable.
     pub fn send_udp(&mut self, now: Instant, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
         let now = self.clock(now);
         let flow = Flow {
@@ -304,7 +308,7 @@ impl Ip {
                 options: &[],
                 payload: out.datagram,
             };
-            self.datagram(now, &route, &builder, FrameKind::Datagram, Some(flow), Some(frame))
+            self.datagram(now, &route, &builder, FrameKind::Datagram, out.broadcast, Some((flow, frame)))
         });
         if sent.is_err() {
             self.log.event(Event::Unreachable(flow));
@@ -313,19 +317,21 @@ impl Ip {
     }
 
     /// Sends one of [ip]'s own ICMP messages along `route`, into the control queue or held for
-    /// its next hop.
+    /// its next hop, and never in a link broadcast.
     pub(crate) fn own<P: Payload>(&mut self, now: Instant, route: &Route, builder: &Ipv4Builder<'_, P>, kind: FrameKind) {
-        let _ = self.datagram(now, route, builder, kind, None, None);
+        let _ = self.datagram(now, route, builder, kind, false, None);
     }
 
+    /// The one place a datagram's link destination is chosen: the link's broadcast address only
+    /// with `broadcast`, and a transport's datagram comes with its flow and its frame.
     fn datagram<P: Payload>(
         &mut self,
         now: Instant,
         route: &Route,
         builder: &Ipv4Builder<'_, P>,
         kind: FrameKind,
-        flow: Option<Flow>,
-        out: Option<&mut [u8; FRAME]>,
+        broadcast: bool,
+        transport: Option<(Flow, &mut [u8; FRAME])>,
     ) -> Result<Sent, Counter> {
         if builder.length().map_or(true, |len| len > MTU) {
             self.log.count(Counter::IpExceedsMtu);
@@ -333,6 +339,10 @@ impl Ip {
         }
         let Some((i, mut cx)) = self.split(now, route.iface) else { return Err(Counter::UnknownInterface) };
         let (destination, hold) = match route.next_hop {
+            NextHop::Broadcast if !broadcast => {
+                cx.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(builder.destination));
+                return Err(Counter::IpBroadcastNotPermitted);
+            }
             NextHop::Broadcast => (MacAddr::BROADCAST, None),
             NextHop::Multicast(group) => (MacAddr::multicast(group), None),
             NextHop::Neighbour(addr) => {
@@ -349,6 +359,7 @@ impl Ip {
             }
         };
         let mac = i.mac;
+        let (flow, out) = transport.unzip();
         if let Some(addr) = hold {
             let frame = build_vec(mac, destination, builder).ok_or(Counter::IpExceedsMtu)?;
             nud::hold(i, &mut cx, addr, Held { frame, kind, flow });

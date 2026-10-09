@@ -39,9 +39,8 @@ enum State {
 /// Proof that [ip] finished conflict detection for the address under probe.
 pub(crate) struct Verified(Ipv4Addr);
 
-/// What the shard said, one event at a time.
+/// What [ip] said became of an address, one event at a time.
 pub(crate) enum Report {
-    Refused { refusal: Refusal, suppressed: u64 },
     Verified(Verified),
     /// Another host holds the address, at this MAC: [ip] removed it, and the state is
     /// `Unaddressed`.
@@ -56,7 +55,15 @@ pub(crate) struct Stack {
     /// The DHCP client's socket.
     socket: SocketId,
     state: State,
-    inbox: VecDeque<Event>,
+    /// What [ip] reported of an address and [`Stack::report`] has not read: never a log line.
+    inbox: VecDeque<Fate>,
+}
+
+/// [ip]'s report on the address this module added.
+enum Fate {
+    Verified(Ipv4Addr),
+    /// Removed by [ip]: for the host at this MAC, or with none, for a link that went down.
+    Taken(Ipv4Addr, Option<MacAddr>),
 }
 
 /// [ip] refuses nothing about the one interface and the one address this module gave it.
@@ -161,6 +168,10 @@ impl Stack {
         self.shard.udp_close(now, id)
     }
 
+    pub(crate) fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_set_broadcast(id, permitted)
+    }
+
     pub(crate) fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), toyos_net_udp::Error> {
         self.shard.udp_set_ttl(id, unicast, multicast)
     }
@@ -171,24 +182,33 @@ impl Stack {
 
     // ---- the lease ----
 
-    /// The shard's next event, read against the state.
-    pub(crate) fn report(&mut self) -> Option<Report> {
-        if self.inbox.is_empty() {
-            self.inbox.extend(self.shard.drain_events());
+    /// Takes what the shard has reported: each log line goes to `line`, ahead of the reports
+    /// before it since none is read against the state, and each report on the address waits its
+    /// turn for [`Self::report`].
+    pub(crate) fn refusals(&mut self, mut line: impl FnMut(Refusal, u64)) {
+        for event in self.shard.drain_events() {
+            self.inbox.push_back(match event {
+                Event::Refused { refusal, suppressed } => {
+                    line(refusal, suppressed);
+                    continue;
+                }
+                Event::Verified(addr) => Fate::Verified(addr),
+                Event::Conflict { addr, mac } | Event::Lost { addr, mac } => Fate::Taken(addr, Some(mac)),
+                Event::NotVerified(addr) => Fate::Taken(addr, None),
+            });
         }
+    }
+
+    /// The next report [`Self::refusals`] took, read against the state.
+    pub(crate) fn report(&mut self) -> Option<Report> {
         Some(match self.inbox.pop_front()? {
-            Event::Refused { refusal, suppressed } => Report::Refused { refusal, suppressed },
-            Event::Verified(addr) => match self.state {
+            Fate::Verified(addr) => match self.state {
                 State::Probing(address) if address == addr => Report::Verified(Verified(addr)),
                 _ => unreachable!("[ip] verified {addr}, which is not under probe"),
             },
-            Event::Conflict { addr, mac } | Event::Lost { addr, mac } => {
+            Fate::Taken(addr, by) => {
                 self.taken(addr);
-                Report::Conflict(mac)
-            }
-            Event::NotVerified(addr) => {
-                self.taken(addr);
-                Report::NotVerified
+                by.map_or(Report::NotVerified, Report::Conflict)
             }
         })
     }
@@ -253,5 +273,52 @@ impl Stack {
             lease.router = None;
         }
         refused
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use toyos_net_shard::Secrets;
+    use toyos_net_udp::Counter;
+    use toyos_net_wire::ethernet::IndividualMac;
+
+    use super::*;
+
+    const A: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+    // No id, and no call of the node's reaches it: [ip] reports an address only at a frame, a
+    // deadline or a link change, each of which ends in the node's pass. The order is `Stack`'s to
+    // keep all the same: a log line taken while the verification of the address under probe
+    // waits takes nothing else, and the verification is still the next report.
+    #[test]
+    fn the_log_lines_are_taken_and_the_report_before_them_keeps_its_turn() {
+        let secrets = Secrets {
+            ip: [1; 16],
+            resets: [2; 16],
+            tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
+        };
+        let Some(mac) = IndividualMac::new(MacAddr([2, 0, 0, 0, 0, 0x0a])) else { unreachable!("an individual address") };
+        let mut now = Instant::from_millis(3_600_000);
+        let Ok(mut stack) = Stack::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }) else { unreachable!("a configuration [tcp] takes") };
+        stack.link(now, true);
+        assert_eq!(stack.probe(now, A, 24), Ok(()));
+        while stack.shard.ip().address(stack.shard.iface(), A) == Some(toyos_net_ip::AddrState::Tentative) {
+            stack.transmit(now, usize::MAX, |_| {});
+            let Some(next) = stack.next_deadline() else { unreachable!("conflict detection is still running") };
+            now = next;
+            stack.fire(now);
+        }
+        let Ok((socket, _)) = stack.bind(Ipv4Addr::UNSPECIFIED, Port::new(4_000), || 0) else { unreachable!("a free port") };
+        assert_eq!(stack.send_to(now, socket, Ipv4Addr::UNSPECIFIED, 7, b"x"), Err(toyos_net_udp::Error::Refused(Counter::SendUnspecifiedDestination)));
+
+        let mut lines = Vec::new();
+        stack.refusals(|refusal, _| lines.push(refusal));
+        assert!(matches!(lines.as_slice(), [Refusal::Udp(refusal)] if refusal.rule == Counter::SendUnspecifiedDestination), "{lines:?}");
+        assert!(matches!(stack.report(), Some(Report::Verified(Verified(A)))), "the verification is still to be read");
+        assert!(stack.report().is_none());
+        stack.refusals(|refusal, _| lines.push(refusal));
+        assert_eq!((lines.len(), stack.report().is_none()), (1, true), "each was handed over once");
     }
 }

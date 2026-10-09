@@ -276,6 +276,27 @@ fn s_ip_rte_009_subnet_broadcast_needs_no_arp() {
     assert!(h.out().is_empty());
 }
 
+// US-21 at the route that is taken: a datagram whose socket did not hold the broadcast permission
+// when it accepted it leaves in no link broadcast, to the limited address or to a held prefix's
+// directed one, and is counted, logged against its destination and reported to its flow. No
+// request is sent for either. The same datagram to a host leaves.
+#[test]
+fn s_udp_us_021_ip_no_link_broadcast_without_the_datagrams_permission() {
+    let mut h = H::fixture_i();
+    let rule = Counter::IpBroadcastNotPermitted;
+    for (n, destination) in [(1, ip4(255, 255, 255, 255)), (2, ip4(192, 0, 2, 255))] {
+        assert_eq!(h.send_as(A, destination, 5001, 5001, b"hi", Ttl::DEFAULT, false), Err(rule), "{destination}");
+        assert_eq!(h.count(rule), n);
+        let refusal = toyos_net_ip::Refusal { rule, iface: h.if0, peer: toyos_net_ip::Peer::Ip(destination) };
+        let port = toyos_net_wire::Port::new(5001).unwrap();
+        let flow = toyos_net_ip::Flow { source: A, source_port: port, destination, destination_port: port };
+        assert_eq!(h.events.split_off(0), [toyos_net_ip::Event::Refused(refusal), toyos_net_ip::Event::Unreachable(flow)]);
+    }
+    assert!(h.out().is_empty(), "nothing left, and nothing was asked");
+    assert_eq!(h.send_as(A, B, 5001, 5001, b"hi", Ttl::DEFAULT, false), Ok(None), "a host's datagram waits for its link address");
+    assert_eq!(h.count(rule), 2);
+}
+
 #[test]
 fn s_ip_rte_010_the_source_of_the_next_hops_prefix() {
     let mut h = H::raw();
