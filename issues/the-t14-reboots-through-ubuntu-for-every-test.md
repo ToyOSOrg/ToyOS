@@ -49,12 +49,13 @@ blocked on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`.
 parameter line and the shipping kernel. The session image is `tests/testcases`
 with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
 deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
-under the same 120 s `boot-deadline=`. A session holds 74.8 s of members, priced at
+under a `boot-deadline=` derived as a metal boot's is: twice its list's bound
+(`toyos_tco::wedge_bound_ms`), which is `toyos_tco::JOB_BOUND_MS` and
 `toyos_tco::RUST_MEMBER_MS` a Rust member, `toyos_tco::C_MEMBER_MS` a C case
-and a list at twice its slowest on the T14: the bound less a tenth, less a
-lease as late as 19.1 s
-(`issues/most-t14-leases-land-one-dhcp-retry-late.md`), less one
-per-job bound. Every judge reads the stick as today but `syscall_cost`, which
+(`issues/a-shared-members-allowance-sets-the-kernels-deadline-at-several-times-the-work.md`).
+A session's bound owes, beside its members, a lease as late as 19.1 s
+(`issues/most-t14-leases-land-one-dhcp-retry-late.md`) and one per-job
+bound. Every judge reads the stick as today but `syscall_cost`, which
 reads the window. `loader_watchdog_arms`' control arm rides a session,
 `mkdir_cap` and `readdir_bound` remove what they made, and `audio_idle_suspend`
 waits for soundd's `inspect` to read `suspended`

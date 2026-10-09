@@ -117,8 +117,8 @@ pub const JOB_BOUND_MS: u64 = 60_000;
 /// What one member of a metal shared boot adds to its list's bound, in
 /// milliseconds: a Rust test, and a C corpus case. A share of the list's and
 /// no bound of the member's own: nothing ends one member.
-pub const RUST_MEMBER_MS: u64 = 860;
-pub const C_MEMBER_MS: u64 = 260;
+pub const RUST_MEMBER_MS: u64 = 300;
+pub const C_MEMBER_MS: u64 = 100;
 
 /// The bound the runner gives a metal boot's whole list, in milliseconds:
 /// [`JOB_BOUND_MS`] for the jobs its rows name, and what its members add.
@@ -150,25 +150,22 @@ pub const fn wedge_bound_ms(list_ms: u64) -> u64 {
     list_ms * 2
 }
 
-/// [`wedge_bound_ms`] of a list with no member on it.
-pub const WEDGE_BOUND_MS: u64 = wedge_bound_ms(JOB_BOUND_MS);
-
 /// The kernel's bound has to outlast the one that ends a single job, or a slow
 /// test is a reset where it should have been a verdict.
-const _: () = assert!(WEDGE_BOUND_MS > JOB_BOUND_MS);
+const _: () = assert!(wedge_bound_ms(JOB_BOUND_MS) > JOB_BOUND_MS);
 
 /// The bound a boot that stages its own wedge carries instead of
-/// [`WEDGE_BOUND_MS`], in milliseconds: it ends the machine seconds after the
-/// wedge rather than at the bound every other boot keeps for a wedge nobody
-/// staged. Its half is the lockup detector's bound, which still outlasts the
-/// lockup probe's own reach to its lock.
+/// [`wedge_bound_ms`] of its list, in milliseconds: it ends the machine seconds
+/// after the wedge rather than at the bound every other boot keeps for a wedge
+/// nobody staged. Its half is the lockup detector's bound, which still outlasts
+/// the lockup probe's own reach to its lock.
 pub const STAGED_BOUND_MS: u64 = 10_000;
 
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.
 ///
 /// **Half the bound this boot gave itself, and derived rather than chosen.**
-/// [`WEDGE_BOUND_MS`] is twice [`JOB_BOUND_MS`] because a job the runner is
+/// [`wedge_bound_ms`] is twice the list's bound because a job the runner is
 /// still inside is not a wedge; that argument does not apply here, since a CPU
 /// that takes no interrupt runs no job — no scheduler pass reaches it. So the
 /// stronger evidence gets the earlier bound: a machine that has hard-locked one
@@ -185,11 +182,11 @@ pub const fn hard_lockup_bound_ms(deadline_ms: u64) -> u64 {
 
 /// [`hard_lockup_bound_ms`] of the bound a metal image carries, which is the one
 /// a T14 boot runs under.
-pub const HARD_LOCKUP_BOUND_MS: u64 = hard_lockup_bound_ms(WEDGE_BOUND_MS);
+pub const HARD_LOCKUP_BOUND_MS: u64 = hard_lockup_bound_ms(wedge_bound_ms(JOB_BOUND_MS));
 
 /// The detector has to fire before the deadline it is derived from, or a
 /// hard-locked machine is reported as an ordinary wedge and the CPU is unnamed.
-const _: () = assert!(HARD_LOCKUP_BOUND_MS < WEDGE_BOUND_MS);
+const _: () = assert!(HARD_LOCKUP_BOUND_MS < wedge_bound_ms(JOB_BOUND_MS));
 
 /// How often an armed CPU samples itself against [`hard_lockup_bound_ms`], in
 /// nanoseconds of unhalted time, and so how late past that bound a stuck CPU
@@ -200,11 +197,11 @@ const _: () = assert!(HARD_LOCKUP_BOUND_MS < WEDGE_BOUND_MS);
 /// period of the bound. It is also the period the report's ages are quoted at.
 pub const HARD_LOCKUP_SAMPLE_NS: u64 = 1_000_000_000;
 
-/// The boot parameter that arms [`WEDGE_BOUND_MS`], with the bound in
-/// milliseconds after it. A value and not a flag, because the bound is the one
-/// thing about this mechanism a boot can legitimately differ on — a negative
-/// control wants a short one, and a boot the loop waits longer for wants its
-/// own.
+/// The boot parameter that arms the kernel's bound ([`wedge_bound_ms`]), with
+/// the bound in milliseconds after it. A value and not a flag, because the
+/// bound is the one thing about this mechanism a boot can legitimately differ
+/// on — a negative control wants a short one, and a boot the loop waits longer
+/// for wants its own.
 pub const DEADLINE_PARAM: &str = "boot-deadline=";
 
 /// The bound `cmdline` arms, or `None` where it names none.
@@ -336,7 +333,7 @@ mod tests {
     /// arm two numbers that could disagree.
     #[test]
     fn the_lockup_bound_follows_the_deadline_the_boot_named() {
-        assert_eq!(hard_lockup_bound_ms(WEDGE_BOUND_MS), 60_000);
+        assert_eq!(hard_lockup_bound_ms(wedge_bound_ms(JOB_BOUND_MS)), 60_000);
         assert_eq!(hard_lockup_bound_ms(20_000), 10_000);
         // A bound of one millisecond leaves none: the detector arms nothing
         // rather than firing on the first sample, which the kernel checks.

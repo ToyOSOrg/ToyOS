@@ -143,10 +143,6 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // [`METAL_MEMBERS`]: the T14's shared boot runs them, and no guest's.
-    "abuse_mmap_regions",
-    "abuse_thread_table",
-    "abuse_dlopen_ledger",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundserver_log_stall` metal rows run these.
@@ -175,11 +171,13 @@ const RUST_SKIP: &[&str] = &[
     "bar_map_again",
 ];
 
-/// Members of the T14's shared boot that no guest's shared boot runs: each
-/// fills a bound of its own process — tens of thousands of mappings, thousands
-/// of threads, a thousand 2 MiB images — and its exit gives all of it back.
-/// Behind every discovered member, so none of those runs after one of these.
-const METAL_MEMBERS: &[&str] = &["abuse_mmap_regions", "abuse_thread_table", "abuse_dlopen_ledger"];
+/// The shared boot's last members, in this order: each fills a bound of its
+/// own process — tens of thousands of mappings, thousands of threads, a
+/// thousand 2 MiB images — and its exit gives all of it back. Behind every
+/// discovered member, so none of those runs after one of these. **This is
+/// their one declaration**: [`discover_rust_tests`] leaves them to it, so a
+/// name taken off this list is a discovered member again.
+const LAST_MEMBERS: &[&str] = &["abuse_mmap_regions", "abuse_thread_table", "abuse_dlopen_ledger"];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
 /// on purpose.
@@ -1019,13 +1017,13 @@ const SELFTESTS: &[metal::Arm] = &[metal::Arm {
 }];
 
 /// The boots every discovered Rust binary rides on the T14: the shipping
-/// kernel's, with [`METAL_MEMBERS`] behind them, and [`ACTUATOR_TESTS`] on the
+/// kernel's, with [`LAST_MEMBERS`] behind them, and [`ACTUATOR_TESTS`] on the
 /// kernel that carries `SYS_DEBUG`, armed with [`SELFTEST_PARAMS`].
 fn shared_metal() -> Vec<metal::SharedBoot> {
     let (debug, mut shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
         .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
-    shipping.extend(METAL_MEMBERS.iter().map(ToString::to_string));
+    shipping.extend(LAST_MEMBERS.iter().map(ToString::to_string));
     vec![
         metal::SharedBoot {
             boot: "shared".to_string(),
@@ -1341,7 +1339,8 @@ fn discover_c_tests() -> Vec<String> {
     names
 }
 
-/// Discover the Rust test binaries: every one but the [`RUST_SKIP`] helpers.
+/// Discover the Rust test binaries: every one but the [`RUST_SKIP`] helpers
+/// and the [`LAST_MEMBERS`], which [`shared_metal`] places itself.
 ///
 /// **A name that arrives this way is registered by nothing but its file.**
 /// `tests/toyos-rust-tests/src/bin/<name>.rs` is the whole declaration — no row
@@ -1353,7 +1352,8 @@ fn discover_rust_tests() -> Vec<String> {
         .filter_map(|e| {
             let path = e.ok()?.path();
             let name = path.file_stem()?.to_str()?.to_string();
-            (path.extension()? == "rs" && !RUST_SKIP.contains(&name.as_str())).then_some(name)
+            let placed = RUST_SKIP.contains(&name.as_str()) || LAST_MEMBERS.contains(&name.as_str());
+            (path.extension()? == "rs" && !placed).then_some(name)
         })
         .collect();
     names.sort();
@@ -5122,9 +5122,9 @@ fn declared<'a>() -> impl Iterator<Item = &'a str> {
 }
 
 /// What the shared boots answer for: every discovered Rust binary, the T14's
-/// [`METAL_MEMBERS`] and every corpus case.
+/// [`LAST_MEMBERS`] and every corpus case.
 fn shared_names() -> Vec<String> {
-    let metal = METAL_MEMBERS.iter().map(ToString::to_string);
+    let metal = LAST_MEMBERS.iter().map(ToString::to_string);
     discover_rust_tests().into_iter().chain(metal).chain(discover_c_tests()).collect()
 }
 

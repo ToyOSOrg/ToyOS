@@ -2049,8 +2049,8 @@ mod tests {
         // And with the bound, both go through — the wedge because it is paired.
         // The gate answers with the bound the image carries, which is what the
         // loop waits it out by.
-        assert_eq!(judge_arms(&armed(&[&bound])), Ok(toyos_tco::WEDGE_BOUND_MS));
-        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(toyos_tco::WEDGE_BOUND_MS));
+        assert_eq!(judge_arms(&armed(&[&bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
         let longer = format!("{}271360", toyos_tco::DEADLINE_PARAM);
         assert_eq!(judge_arms(&armed(&["watchdog", &longer])), Ok(271_360));
         // A bound nothing can read is no bound.
@@ -2083,12 +2083,12 @@ mod tests {
         // And it is exactly what `tests/common/metal.rs` arms every image with:
         // the same two constants, so a change to either moves both.
         assert!(bound.starts_with(toyos_tco::DEADLINE_PARAM));
-        assert_eq!(judge_arms(&[bound]), Ok(toyos_tco::WEDGE_BOUND_MS));
+        assert_eq!(judge_arms(&[bound]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
     }
     /// What every metal image is armed with, spelled the way `tests/common/metal.rs`
     /// spells it.
     fn alloc_deadline() -> String {
-        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS)
+        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS))
     }
 
     /// **`--install-sudoers` is an action and not a mode.** It installed the
@@ -2166,7 +2166,7 @@ mod tests {
         let bound = alloc_deadline();
         for arm in WEDGE_ARMS {
             assert!(flashable(arm), "{arm} reaches no stick");
-            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::WEDGE_BOUND_MS), "{arm}");
+            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
             assert_eq!(bound_for(&[arm], 135_680), toyos_tco::STAGED_BOUND_MS, "{arm}");
             // And with no bound behind it, the sharpest refusal names it as the

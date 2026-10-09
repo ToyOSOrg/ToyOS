@@ -105,8 +105,9 @@ Each was an issue of its own and is true of `809c33c0c`'s code, so it comes
 back with it:
 
 - A swap on the T14 lives inside a metal boot's bound: every metal image
-  carries `boot-deadline=` (`toyos_tco::WEDGE_BOUND_MS`) and a runner whose
-  list ends in `reboot` (`toyos_tco::JOB_BOUND_MS`), so the loop the owner
+  carries `boot-deadline=` (`toyos_tco::wedge_bound_ms` of its list's bound)
+  and a runner whose list ends in `reboot` under that bound
+  (`toyos_tco::list_bound_ms`), so the loop the owner
   asked for — netstack rebuilt on the host and swapped in, over and over —
   has the span from the first lease to the runner's bound, and then a flash.
   Owed: a boot staged for the swap loop whose hold is not the runner's, and a
