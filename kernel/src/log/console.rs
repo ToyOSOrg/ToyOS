@@ -558,6 +558,12 @@ extern "C" fn body(_arg: u64) -> ! {
         let armed = watch::arm(handle.watch(), 0, WaitClass::Other).expect("klogd runs as a task");
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
+            // The registration above forgot the staging's wake if it came
+            // while this thread ran: the staging's own word is the recheck.
+            #[cfg(feature = "boot-actuators")]
+            if staged::pending() {
+                return true;
+            }
             // Under the lock `queue` stores under, ahead of the fence its wake takes.
             DRAINED.any_pending() || QUEUE.lock().len > 0
         }) {
@@ -679,6 +685,13 @@ mod staged {
         for id in ready.iter().flatten() {
             crate::log!("console: ready behind the staged klogd's wait: {id}");
         }
+    }
+
+    /// Whether the stop has staged a hold `klogd` has not yet taken: stored
+    /// before the stage's wake, so `klogd`'s park, which a wake made before its
+    /// registration does not end, reads it after registering.
+    pub fn pending() -> bool {
+        STAGED.load(Ordering::Acquire) != NONE
     }
 
     /// `klogd`'s, inside its hold of the wire: a staged hold parks here, the
