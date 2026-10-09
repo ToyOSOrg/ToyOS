@@ -12,6 +12,8 @@ pub mod irqcensus;
 /// The `isa` claim's rows on the T14.
 pub mod isa;
 pub mod metal;
+/// The T14 on its own cable: its router and the internet.
+pub mod outbound;
 pub mod power;
 pub mod qemu;
 pub mod screen;

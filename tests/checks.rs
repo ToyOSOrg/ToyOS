@@ -18,6 +18,8 @@ mod checks {
     mod clock_checks;
     #[path = "metal.rs"]
     mod metal_checks;
+    #[path = "outbound.rs"]
+    mod outbound_checks;
     #[path = "qemu.rs"]
     mod qemu_checks;
     #[path = "screen.rs"]
@@ -854,6 +856,21 @@ mod checks {
     #[test]
     fn metal_domains_end_below_the_host_bridges() {
         claims_checks::domains_end_below_the_windows();
+    }
+
+    #[test]
+    fn metal_outbound_rows_are_red_by_their_cause() {
+        outbound_checks::each_verdict_names_its_cause();
+    }
+
+    #[test]
+    fn metal_outbound_line_holds_no_address() {
+        outbound_checks::no_line_holds_an_address();
+    }
+
+    #[test]
+    fn metal_outbound_resolver_stands_where_the_lease_puts_it() {
+        outbound_checks::a_resolver_stands_where_the_lease_puts_it();
     }
 
     #[test]
