@@ -286,7 +286,7 @@ fn s_udp_us_048_an_error_for_no_socket() {
 fn s_udp_us_049_hard_and_soft() {
     let (mut u, id) = connected_to_dns();
     u.datagram(&with_code(13));
-    assert_eq!(u.udp.recv(id, &mut [0; 8]), Err(Error::Failed(SocketError::Unreachable)));
+    assert_eq!(u.udp.recv(id, &mut [0; 8]), Err(Error::Failed(SocketError::Prohibited)));
     u.datagram(&with_code(1));
     let time_exceeded = edit(hex(V_ICMP_PU_A_OUT), |ip| {
         ip[20] = 11;

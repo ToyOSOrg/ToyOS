@@ -113,11 +113,17 @@ pub enum Binding {
     Connected { local: Ipv4Addr, peer: Ipv4Addr, peer_port: Port },
 }
 
-/// An error the network reported against a connected socket: its next call returns it once.
+/// An error against a connected socket's datagrams: its next call returns it once. Two are what
+/// an ICMP message said, which anyone who knows the socket's addresses and ports can send; one
+/// is [ip]'s own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocketError {
+    /// An ICMP error said the peer refuses the protocol or the port.
     Refused,
-    Unreachable,
+    /// An ICMP error said the way to the peer is administratively prohibited.
+    Prohibited,
+    /// [ip] found no link address for the next hop of a datagram it held: nothing left.
+    NextHopFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,7 +669,7 @@ impl Udp {
         };
         let pending = match class {
             ErrorClass::Refused => SocketError::Refused,
-            ErrorClass::Prohibited => SocketError::Unreachable,
+            ErrorClass::Prohibited => SocketError::Prohibited,
             ErrorClass::PathMtu | ErrorClass::Soft => return self.count(Counter::IcmpErrorSoft),
         };
         socket.pending = Some(pending);
@@ -673,7 +679,7 @@ impl Udp {
     /// [ip] could not reach the next hop of a datagram this crate handed it.
     pub fn unreachable(&mut self, flow: &Flow) {
         if let Some(socket) = self.connected(flow) {
-            socket.pending = Some(SocketError::Unreachable);
+            socket.pending = Some(SocketError::NextHopFailed);
         }
     }
 

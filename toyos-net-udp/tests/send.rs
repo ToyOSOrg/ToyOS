@@ -277,7 +277,7 @@ fn s_udp_us_027_a_failed_next_hop_is_reported_once() {
     u.udp.send(&mut u.ip, id, b"q").unwrap();
     u.run(3_000);
     assert_eq!(u.ip_count(toyos_net_ip::Counter::NbPendingDropped), 1);
-    assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::Unreachable)));
+    assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Ok(None));
 }
 

@@ -431,8 +431,12 @@ pub enum Failure {
     NoSuchName,
     /// The name exists and has no `A` record (RFC 2308 §2.2).
     NoAddress,
-    /// Every query went unanswered for [`WAIT_MS`].
+    /// No server answered, and a query that may have reached one was given
+    /// its [`WAIT_MS`].
     TimedOut,
+    /// No query reached a server ([`Lookup::on_unreached`]) and none is left
+    /// to send at once: there is no answer to wait for.
+    Unreachable,
     /// The answer did not fit a UDP reply (TC).
     Truncated,
     /// Every server that answered could not answer, the last with this RCODE.
@@ -478,21 +482,49 @@ struct Sent {
 /// any query this lookup sent for the name now asked is read, so an answer
 /// late past its query's wait still ends the lookup; it is read only on the
 /// query's own port, with the query's ID, from the server the query went to.
+///
+/// **A wait is for an answer that can come.** When the newest query is
+/// answered with a failure, or known or said not to have reached its server,
+/// the next server is asked at once: RFC 1035 §4.2.1's interval of two to
+/// five seconds is between repetitions of a query that may have been lost on
+/// its way, and the same section has the other servers tried first. **The
+/// interval is each server's**: one that has not answered is sent no second
+/// query inside [`WAIT_MS`] of its last, or of the caller's last knowledge
+/// that it was not reached, whatever is said of that query and whatever
+/// another server answers; a server is its address, however often the list
+/// names it. Where the next server cannot be asked yet, the lookup waits
+/// until it can while any answer is still read, and ends at once only with
+/// none.
+///
+/// **What the caller knows and what it was told are two calls.** A query the
+/// caller itself knows never reached its server ([`Lookup::on_unreached`]) is
+/// let go, and a lookup with no query left whose answer is read ends with
+/// [`Failure::Unreachable`]. A report from the network
+/// ([`Lookup::on_report`]) is anyone's word (RFC 8085 §5.2): it lets no query
+/// go and ends nothing, so the answer to a query reported so is still read.
 #[derive(Debug)]
 pub struct Lookup {
     /// The name now asked: the one given, or the last alias followed.
     name: Name,
     /// Aliases followed so far, counted against [`MAX_ALIASES`].
     aliases: usize,
-    servers: Vec<[u8; 4]>,
+    /// Each server, and when it may be asked again: [`WAIT_MS`] after its
+    /// last query or after it was last known not to be reached, and at once
+    /// when it has answered any query, an older one's late failure included.
+    /// An address named twice is one server: every place it has carries the
+    /// same time.
+    servers: Vec<([u8; 4], u64)>,
     /// Queries sent for `name`, oldest first; one answered with a server
-    /// failure is taken out. [`Lookup::waiting`] is this list.
+    /// failure, or known not to have reached its server, is taken out.
+    /// [`Lookup::waiting`] is this list, which holds a query while the
+    /// lookup lasts.
     sent: Vec<Sent>,
     /// The [`Asked`] the next query gets: none is given twice in a lookup.
     next: u32,
     /// Queries sent for `name`, answered or not.
     asked: usize,
-    /// When the newest query is given up on.
+    /// When the newest query is given up on; or, where it is not waited for
+    /// and the next server may not be asked yet, that server's turn.
     due: u64,
     /// The RCODE of the last server failure, which is what a lookup that runs
     /// out of queries reports if any server answered at all.
@@ -509,7 +541,7 @@ impl Lookup {
         let mut lookup = Self {
             name,
             aliases: 0,
-            servers: servers.to_vec(),
+            servers: servers.iter().map(|server| (*server, now)).collect(),
             sent: Vec::new(),
             next: 0,
             asked: 0,
@@ -531,28 +563,74 @@ impl Lookup {
         self.sent.iter().map(|s| s.asked)
     }
 
-    /// The next query for `name`, or the end where every one has been sent.
+    /// The next server's query, if it may be asked at `now`; or the wait for
+    /// the answers still read, until it may or the last query's wait is
+    /// over; or the end.
     fn ask(&mut self, now: u64, id: impl FnOnce() -> u16) -> Step {
-        if self.asked == ROUNDS * self.servers.len() {
-            return Step::Done(Err(match self.failed {
-                Some(rcode) => Failure::ServerFailed(rcode),
-                None => Failure::TimedOut,
-            }));
+        let turn = self.asked % self.servers.len();
+        let (to, free) = self.servers[turn];
+        let spent = self.asked == ROUNDS * self.servers.len();
+        if !spent && now >= free {
+            self.free(to, now + WAIT_MS);
+            self.asked += 1;
+            let asked = Asked(self.next);
+            self.next += 1;
+            let id = id();
+            self.sent.push(Sent { asked, id, to });
+            self.due = now + WAIT_MS;
+            return Step::Ask { asked, to, query: query(id, &self.name) };
         }
-        let to = self.servers[self.asked % self.servers.len()];
-        self.asked += 1;
-        let asked = Asked(self.next);
-        self.next += 1;
-        let id = id();
-        self.sent.push(Sent { asked, id, to });
-        self.due = now + WAIT_MS;
-        Step::Ask { asked, to, query: query(id, &self.name) }
+        if self.sent.is_empty() || (spent && now >= self.due) {
+            // With no query left, each was answered with a failure or never
+            // reached its server.
+            let silence = if self.sent.is_empty() { Failure::Unreachable } else { Failure::TimedOut };
+            return Step::Done(Err(self.failed.map_or(silence, Failure::ServerFailed)));
+        }
+        if !spent {
+            // The newest query is not waited for: the next server's turn is.
+            self.due = free;
+        }
+        Step::Wait
+    }
+
+    /// `server` may next be asked at `at`.
+    fn free(&mut self, server: [u8; 4], at: u64) {
+        for (_, free) in self.servers.iter_mut().filter(|(addr, _)| *addr == server) {
+            *free = at;
+        }
     }
 
     /// The time is `now`: the newest query has had its [`WAIT_MS`] where it
     /// is due. `id` draws the ID of the query this sends.
     pub fn on_time(&mut self, now: u64, id: impl FnOnce() -> u16) -> Step {
         if now < self.due {
+            return Step::Wait;
+        }
+        self.ask(now, id)
+    }
+
+    /// The caller knows at `now`, of its own knowledge, that the query
+    /// `asked` did not reach its server: it was never sent. Its answer is
+    /// read no more. `id` draws the ID of the query this sends.
+    pub fn on_unreached(&mut self, asked: Asked, now: u64, id: impl FnOnce() -> u16) -> Step {
+        let Some(which) = self.sent.iter().position(|s| s.asked == asked) else {
+            return Step::Wait;
+        };
+        let unreached = self.sent.remove(which);
+        self.free(unreached.to, now + WAIT_MS);
+        // A newer query still waits for its own answer.
+        if which < self.sent.len() {
+            return Step::Wait;
+        }
+        self.ask(now, id)
+    }
+
+    /// The network said at `now` that the query `asked` did not reach its
+    /// server. Its answer is still read. `id` draws the ID of the query this
+    /// sends.
+    pub fn on_report(&mut self, asked: Asked, now: u64, id: impl FnOnce() -> u16) -> Step {
+        // A newer query still waits for its own answer.
+        if self.sent.last().is_none_or(|s| s.asked != asked) {
             return Step::Wait;
         }
         self.ask(now, id)
@@ -585,6 +663,9 @@ impl Lookup {
             Verdict::ServerFailed(rcode) => {
                 self.failed = Some(rcode);
                 self.sent.remove(which);
+                // It answered: its interval, which is for a query that may
+                // have been lost, is over.
+                self.free(from, now);
                 // The next server is asked now, unless a newer query is still
                 // waiting for its own answer.
                 if which == self.sent.len() {
@@ -605,6 +686,9 @@ impl Lookup {
                     self.sent.clear();
                     self.asked = 0;
                     self.failed = None;
+                    for (_, free) in &mut self.servers {
+                        *free = now;
+                    }
                     self.ask(now, id)
                 }
             },
