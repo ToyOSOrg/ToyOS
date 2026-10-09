@@ -38,8 +38,8 @@ fn decoded(fadt: &[u8], at: u64, structure: &[u8]) -> Result<Facs, FacsRefused> 
 fn the_wide_address_wins_where_it_is_not_zero_and_the_narrow_one_serves_where_it_is() {
     assert!(QEMU_FADT[8] >= 2 && QEMU_FADT.len() >= X_FIRMWARE_CTRL + 8, "the fixture is a revision with X_FIRMWARE_CTRL");
     let structure = a_facs(64);
-    assert_eq!(decoded(&fadt_naming(0x1000, 0x2_0000_0040), 0x2_0000_0040, &structure), Ok(Facs { base: 0x2_0000_0040, len: 64 }));
-    assert_eq!(decoded(&fadt_naming(0x1000, 0), 0x1000, &structure), Ok(Facs { base: 0x1000, len: 64 }));
+    assert_eq!(decoded(&fadt_naming(0x1000, 0x2_0000_0040), 0x2_0000_0040, &structure), Ok(Facs { base: 0x2_0000_0040, len: 64, s4bios: false }));
+    assert_eq!(decoded(&fadt_naming(0x1000, 0), 0x1000, &structure), Ok(Facs { base: 0x1000, len: 64, s4bios: false }));
     // The narrow address is not read where the wide one names another place.
     assert_eq!(decoded(&fadt_naming(0x1000, 0x2_0000_0040), 0x1000, &structure), Err(FacsRefused::Unmapped(0x2_0000_0040)));
     assert_eq!(decoded(&fadt_naming(0, 0), 0x1000, &structure), Err(FacsRefused::Absent));
@@ -56,6 +56,24 @@ fn a_structure_that_is_no_facs_is_refused_by_name() {
     assert_eq!(decoded(&fadt, 0x1000, &a_facs(64)[..63]), Err(FacsRefused::Unmapped(0x1000)));
 }
 
+/// Table 5.14: `S4BIOS_F` is bit 0 of the dword at 20, and no other bit of
+/// the structure is read as it.
+#[test]
+fn s4bios_f_is_bit_zero_of_the_flags() {
+    let fadt = fadt_naming(0x1000, 0);
+    let flagged = |at: usize, byte: u8| {
+        let mut structure = a_facs(64);
+        structure[at] = byte;
+        decoded(&fadt, 0x1000, &structure).expect("a FACS").s4bios
+    };
+    assert!(flagged(20, 1));
+    assert!(flagged(20, 0xFF));
+    assert!(!flagged(20, 0xFE), "the flags' other bits");
+    for at in [16, 19, 21, 23, 24, 36] {
+        assert!(!flagged(at, 0xFF), "the byte at {at}");
+    }
+}
+
 /// §5.2.10 aligns the FACS on a 64-byte boundary: every base that is not on
 /// one is refused, by either address field, and the boundary itself is not.
 #[test]
@@ -67,7 +85,7 @@ fn a_facs_off_its_sixty_four_byte_boundary_is_refused() {
         assert_eq!(decoded(&fadt_naming(0x1000, wide), wide, &a_facs(64)), Err(FacsRefused::Misaligned(wide)), "wide, {off} off");
     }
     for at in [0x40u32, 0x1000, 0x1040, 0xFFFF_FFC0] {
-        assert_eq!(decoded(&fadt_naming(at, 0), u64::from(at), &a_facs(64)), Ok(Facs { base: u64::from(at), len: 64 }), "{at:#x}");
+        assert_eq!(decoded(&fadt_naming(at, 0), u64::from(at), &a_facs(64)), Ok(Facs { base: u64::from(at), len: 64, s4bios: false }), "{at:#x}");
     }
 }
 

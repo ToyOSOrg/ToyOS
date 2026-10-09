@@ -1188,7 +1188,7 @@ struct Doc {
 pub fn judge(root: &Path) -> Result<String, String> {
     // Cargo names every manifest by its canonical path.
     let root = &std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let shipped = crate::build::shipped(root)?;
+    let shipped = crate::build::shipped(root);
     let mut report = Report::default();
 
     let mut roots: Vec<(PathBuf, Features)> = shipped.crates.into_iter().collect();

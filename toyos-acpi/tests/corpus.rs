@@ -14,7 +14,7 @@ use toyos_abi::acpi::Block;
 use toyos_acpi::{
     definition_blocks, dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
-    EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
+    EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN,
 };
@@ -832,14 +832,58 @@ fn fixed_hardware_reads_whichever_form_names_a_block() {
     .expect("no GPE0 block");
     assert_eq!(no_gpe.gpe0, Block::NONE);
     let command = |b: u8| core::num::NonZeroU8::new(b).expect("a command");
-    let legacy = LegacyMode { smi_cmd: 0xb2, acpi_enable: command(2), acpi_disable: command(3) };
-    assert_eq!(fixed(|_| {}).map(|f| f.legacy), Ok(Some(legacy)));
-    // No port, no way in, or a way in and no way back.
-    for zeroed in [48..52, 52..53, 53..54] {
-        assert_eq!(fixed(|t| t[zeroed.clone()].fill(0)).map(|f| f.legacy), Ok(None), "{zeroed:?}");
+    let named = SmiCmd { port: 0xb2, acpi_enable: 2, acpi_disable: 3, s4bios_req: 0, pstate_cnt: 0, cst_cnt: 0 };
+    assert_eq!(fixed(|_| {}).map(|f| f.smi_cmd), Ok(Some(named)));
+    assert_eq!(named.legacy(), Some(LegacyMode { acpi_enable: command(2), acpi_disable: command(3) }));
+    // No port is no `SMI_CMD`; a port with no way in, or a way in and no way
+    // back, is one with no legacy mode to leave.
+    assert_eq!(fixed(|t| t[48..52].fill(0)).map(|f| f.smi_cmd), Ok(None));
+    for zeroed in [52, 53] {
+        let smi_cmd = fixed(|t| t[zeroed] = 0).expect("a FADT").smi_cmd.expect("a port");
+        assert_eq!((smi_cmd.port, smi_cmd.legacy()), (0xb2, None), "{zeroed}");
     }
     let method = fixed(|t| t[112] = 1 << 4).expect("a control-method button");
     assert_eq!(method.power_button, PowerButton::ControlMethod);
+}
+
+/// Every value Table 5.9 gives a meaning written to `SMI_CMD`, each from its
+/// own byte, and the bytes either side of them read as none: `ACPI_ENABLE`
+/// at 52, `ACPI_DISABLE` at 53, `S4BIOS_REQ` at 54, `PSTATE_CNT` at 55 and
+/// `CST_CNT` at 95. A zero names no value in four of them, as the table says
+/// of each; `S4BIOS_REQ` names its byte, zero too, exactly where the FACS's
+/// `S4BIOS_F` is set.
+#[test]
+fn the_values_the_fadt_names_for_smi_cmd_are_each_read_from_their_own_byte() {
+    let all = fixed(|t| {
+        t[51..57].copy_from_slice(&[0, 0xa0, 0xa1, 0xa2, 0xa3, 0]);
+        t[94..97].copy_from_slice(&[0x77, 0xa4, 0x77]);
+    })
+    .expect("a FADT naming all five")
+    .smi_cmd
+    .expect("a port");
+    assert_eq!(all, SmiCmd { port: 0xb2, acpi_enable: 0xa0, acpi_disable: 0xa1, s4bios_req: 0xa2, pstate_cnt: 0xa3, cst_cnt: 0xa4 });
+    assert_eq!(all.named(true), [Some(0xa0), Some(0xa1), Some(0xa2), Some(0xa3), Some(0xa4)]);
+    assert_eq!(all.named(false), [Some(0xa0), Some(0xa1), None, Some(0xa3), Some(0xa4)]);
+    for (at, named) in [(52, 0), (53, 1), (54, 2), (55, 3), (95, 4)] {
+        let one = fixed(|t| {
+            t[52..56].fill(0);
+            t[95] = 0;
+            t[at] = 0x5a;
+        })
+        .expect("a FADT naming one")
+        .smi_cmd
+        .expect("a port");
+        let mut want = [None; 5];
+        want[named] = Some(0x5a);
+        // With the flag set `S4BIOS_REQ` names the byte it holds, a zero where it holds one.
+        let mut flagged = want;
+        flagged[2] = Some(if named == 2 { 0x5a } else { 0 });
+        assert_eq!(one.named(true), flagged, "the byte at {at}, S4BIOS_F set");
+        if named == 2 {
+            want[2] = None;
+        }
+        assert_eq!(one.named(false), want, "the byte at {at}, S4BIOS_F clear");
+    }
 }
 
 /// A FADT before revision 2 has no `X_` fields, so the bytes past 116 are not
