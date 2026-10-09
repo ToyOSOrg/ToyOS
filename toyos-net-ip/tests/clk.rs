@@ -118,7 +118,7 @@ fn trace(secret: [u8; 16], seed: u64) -> Trace {
                     destination: toyos_net_wire::Port::new(5001).unwrap(),
                     data: b"x",
                 };
-                let out = toyos_net_ip::UdpOut { source: A, destination, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, datagram };
+                let out = toyos_net_ip::UdpOut { source: A, destination, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, datagram };
                 if let Ok(toyos_net_ip::Sent::Frame(n)) = ip.send_udp(at, &out, &mut frame) {
                     frames.push((now, frame[..n].to_vec()));
                 }
@@ -223,7 +223,7 @@ fn s_ip_clk_010_a_deadline_saturates() {
         destination: toyos_net_wire::Port::new(5001).unwrap(),
         data: b"hi",
     };
-    let out = toyos_net_ip::UdpOut { source: A, destination: B, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, datagram };
+    let out = toyos_net_ip::UdpOut { source: A, destination: B, ttl: toyos_net_wire::ipv4::Ttl::DEFAULT, broadcast: false, datagram };
     assert_eq!(h.ip.send_udp(late, &out, &mut frame), Ok(toyos_net_ip::Sent::Held));
     assert_eq!(h.ip.transmit(late, usize::MAX, |_, _| {}), 1);
     assert!(matches!(h.state(B), Some(Nud::Incomplete(_))));

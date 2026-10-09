@@ -6,8 +6,13 @@
 //! - The record is the held lease's: its address and prefix are what the responder is told, and
 //!   it is told there is none from the moment the lease goes. Nothing is announced or answered
 //!   for an address still under probe.
+//! - A link that comes back under a held lease is the responder's to hear of: the lease outlives
+//!   the link, so no new address would tell it (§8).
 //! - What the record is owed later, the second announcement (§8.3) or an answer §6 held back,
 //!   is a deadline of the node's ([`Name::next_deadline`]).
+//! - An announcement that falls due with the link down is [udp]'s to refuse and is counted
+//!   unsent, and the responder is not told: the link's return owes both announcements again
+//!   (§8), and holding the unsent one a multicast only ever delays the first of them (§6).
 //! - Every response leaves with TTL 255 (§11).
 //! - An answer goes where the responder says: to the group on its port, or to the asker's own
 //!   address and port. One [udp] refuses is counted and dropped: the asker asks again.
@@ -57,6 +62,11 @@ impl Name {
         stack.set_ttl(socket, ttl, ttl)?;
         stack.join(now, group);
         Ok(Self { socket, record: Responder::new(host), query: vec![0; toyos_net_udp::limits::MAX_PAYLOAD] })
+    }
+
+    /// The link came back: the record of a lease that outlived it is owed to the group again.
+    pub(crate) fn link_returned(&mut self, now: Instant) {
+        self.record.link_returned(millis(now));
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {

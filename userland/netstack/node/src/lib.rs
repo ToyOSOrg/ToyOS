@@ -153,15 +153,21 @@ impl Node {
     /// Returns how many left.
     pub fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
         let sent = self.stack.transmit(now, credit, sink);
+        // A datagram [ip] refused as it left is a line of this opportunity.
+        self.log();
         self.pass(now, true);
         sent
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
-    /// lease stays; up, the client verifies a lease it holds and otherwise starts over.
+    /// lease stays; up, the client verifies a lease it holds and otherwise starts over, and the
+    /// machine's name is announced again for a lease that stayed.
     pub fn link(&mut self, now: Instant, up: bool, mut draw: impl FnMut() -> u32) {
         self.stack.link(now, up);
         if up {
+            if let Some(name) = &mut self.name {
+                name.link_returned(now);
+            }
             let out = self.client.link_up(now, &mut draw);
             self.carry_out(now, out, None, &mut draw);
         }
@@ -190,12 +196,9 @@ impl Node {
     /// carried on, against the lease as that left it.
     fn settle(&mut self, now: Instant, draw: &mut impl FnMut() -> u32) {
         loop {
+            self.log();
             let (out, verified) = if let Some(report) = self.stack.report() {
                 match report {
-                    Report::Refused { refusal, suppressed } => {
-                        self.events.push(Event::Stack { refusal, suppressed });
-                        continue;
-                    }
                     Report::Verified(verified) => (self.client.verified(now, &mut *draw), Some(verified)),
                     Report::Conflict(mac) => (self.client.conflict(now, mac, &mut *draw), None),
                     Report::NotVerified => (self.client.not_verified(now, &mut *draw), None),
@@ -209,6 +212,13 @@ impl Node {
         }
         self.serve_name(now);
         self.resolver.pass(now, &mut self.stack, &mut self.counters, draw);
+    }
+
+    /// The stack's log lines so far, into [`Self::drain_events`]: the one way a line leaves the
+    /// stack.
+    fn log(&mut self) {
+        let events = &mut self.events;
+        self.stack.refusals(|refusal, suppressed| events.push(Event::Stack { refusal, suppressed }));
     }
 
     /// What one call of the client's asked for: the lease first, so a message leaves from the
