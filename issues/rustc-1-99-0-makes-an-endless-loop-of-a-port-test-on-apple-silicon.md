@@ -12,9 +12,12 @@ host suite on macOS, from the first nightly that had the test (#749): the
 compiler that job installed, `rustc 1.99.0 (b940084d7 2026-09-28)`, LLVM
 23.1.1, compiles the test's function to one instruction, a branch to itself.
 The job is pinned to 1.98.1 for it. The fault is LLVM's ScalarEvolution's,
-on every target, and is not this compiler's alone:
-`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`
-has its cause, its reproducers and the compilers that have it.
+on every target, and is not this compiler's alone: it copies an increment's
+no-wrap flag onto its phi's recurrence, where it holds only if the wrapped
+increment is observed, and `indvars` folds the loop's last exit to `false`.
+The fork's LLVM no longer does, and `src/miscompile.rs` holds a reproducer
+every sysroot's compiler must compile right; the host's `rustc` is upstream's
+and still does.
 
 ## What the runner showed
 
@@ -103,9 +106,9 @@ host suite right, and nothing measured says either way.
 nightlies were run, of 10, 13 and 22 July, 25 September and 8 October 2026,
 the last the newest there was, and each hangs the table's second row; none
 between them was run. Upstream's LLVM has merged no fix. That its open report
-llvm/llvm-project#175729 is of this fault is the reading of
-`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`,
-which lists it under "Not established".
+llvm/llvm-project#175729 is of this fault is a reading, not upstream's word:
+the same fold on the same code path, and the fork's compiler with that report's
+proposed fix (llvm/llvm-project#118959) compiles this test right, 24 passed.
 
 `guest.yml`, and so `guest / suite` and the nightly's `tcg / suite`, and
 `nightly.yml`'s `portability-linux` install `stable` and log its version:

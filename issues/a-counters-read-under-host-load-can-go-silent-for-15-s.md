@@ -136,11 +136,15 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
-Not known of any of them: whether the fork compiler's fault reaches
-`test_rs_counters_read` or the kernel under it.
-`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`
-has LLVM's ScalarEvolution deleting a loop's exit on both architectures, and
-records every function but the ones it names as not measured.
+The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
+`src/miscompile.rs` now refuses a sysroot for) is not their cause.
+`tests/virtsmpcase`'s image was built and `virt_el1_smp` run with the fixed
+compiler and with the fault switched back on
+(`-C llvm-args=-scev-unconditional-preinc-nowrap-flags`), and every function
+compared in IR and in object code: `counters_read`, `test-runner`, `supervisor`,
+`logkeeper`, `toybox`, `kernelprobe` and the loader are byte-identical between
+the two, and the kernel differs in seven functions of `rustc_demangle`'s `v0`
+printer, a loop peeled or not, which a counters read does not call.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
