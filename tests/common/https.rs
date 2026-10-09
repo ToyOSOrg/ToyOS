@@ -74,8 +74,8 @@ pub enum Seen {
     Accepted,
     /// A handshake that completed and a request answered with the whole body.
     Served { version: Option<rustls::ProtocolVersion>, path: String, user_agents: Vec<String> },
-    /// A handshake the server could not complete, and why.
-    Failed(rustls::Error),
+    /// A handshake the server could not complete.
+    Failed,
 }
 
 /// A server on a loopback port of its own, answering each connection in turn
@@ -127,9 +127,8 @@ impl Server {
 fn serve(config: &Arc<rustls::ServerConfig>, mut tcp: TcpStream, body: &[u8]) -> Seen {
     let mut conn = rustls::ServerConnection::new(config.clone()).expect("a server connection");
     while conn.is_handshaking() {
-        if let Err(e) = conn.complete_io(&mut tcp) {
-            let why = e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()).cloned();
-            return Seen::Failed(why.unwrap_or_else(|| rustls::Error::General(e.to_string())));
+        if conn.complete_io(&mut tcp).is_err() {
+            return Seen::Failed;
         }
     }
     let version = conn.protocol_version();

@@ -3138,7 +3138,7 @@ fn https_fetch() -> Result<(), String> {
         }
     }
     for (what, server, _, _) in &fetches {
-        if let Some(seen) = server.more().into_iter().find(|seen| !matches!(seen, Seen::Failed(_))) {
+        if let Some(seen) = server.more().into_iter().find(|seen| !matches!(seen, Seen::Failed)) {
             return Err(format!("{what} saw more than the one connection it was asked for: {seen:?}"));
         }
     }
