@@ -1,0 +1,17 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-acpi and
+# toyos-dma: it is pure, it has no dependencies, and its tests run on the host.
+#
+# What lives here is every word an SMMUv3 and its driver exchange. The unit
+# decides which memory a device reaches, so a field one bit off is an isolation
+# hole no boot shows: a stream that should abort translates, or two domains
+# share a tag. Each encoding is held on the host to the specification's own
+# field positions, and the kernel's `arch::aarch64` unit is left the registers
+# and the memory.
+
+[package]
+name = "toyos-smmu"
+description = "The SMMUv3's encodings: stream table entries, context descriptors, commands, event records, register fields and the stage 1 table plan, pure, forbid(unsafe_code)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
