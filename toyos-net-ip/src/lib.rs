@@ -108,7 +108,7 @@ pub mod limits {
         pub const FAILED_HOLD: Duration = Duration::from_secs(20);
         pub const LOCKTIME: Duration = Duration::from_secs(1);
         pub const IDLE_LIFETIME: Duration = Duration::from_secs(600);
-        pub const PENDING_PER_NEIGHBOUR: usize = 16;
+        pub const PENDING_PER_NEIGHBOUR: usize = 8;
         pub const PENDING_TOTAL: usize = 64;
         pub const TABLE_MAX: usize = 512;
     }

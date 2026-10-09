@@ -7,8 +7,8 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
-use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, Sent, FRAME};
-use toyos_net_udp::{Counter, Sender, Served, SocketId, Udp, Verdict};
+use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, NextHop, Nud, Resolution, Sent, Source, UdpOut, FRAME};
+use toyos_net_udp::{Counter, Offer, Sender, Served, SocketId, Udp, Verdict};
 use toyos_net_wire::ethernet::{Frame, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Packet, MulticastAddr};
 use toyos_net_wire::Port;
@@ -165,6 +165,8 @@ pub struct U {
     ip_base: Vec<(toyos_net_ip::Counter, u64)>,
     /// The senders `out_with` takes turns among, one datagram a turn.
     round: VecDeque<Sender>,
+    /// [ip]'s routing generation when the waiting datagrams last asked.
+    routes: u64,
 }
 
 impl U {
@@ -191,7 +193,7 @@ impl U {
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         ip.join(Instant::from_nanos(0), if0, MulticastAddr::new(MDNS).unwrap()).unwrap();
         Self::setup_until(&mut ip, Self::instant(0));
-        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new() };
+        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new(), routes: 0 };
         u.rebase();
         u
     }
@@ -215,7 +217,7 @@ impl U {
             let _ = ip.receive(t, if0, &eth(MAC_A, m, 0x0806, &arp(2, m, addr, MAC_A, A)));
         }
         Self::setup_until(&mut ip, Self::instant(0));
-        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new() };
+        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new(), routes: 0 };
         u.rebase();
         u
     }
@@ -269,23 +271,52 @@ impl U {
         self.frame(&eth(MAC_A, MAC_B, 0x0800, ip))
     }
 
+    /// What [ip] reported, routed as the shard routes it.
     fn news(&mut self) {
         let events: Vec<Event> = self.ip.drain_events().collect();
         for event in &events {
-            if let Event::Unreachable(flow) = event {
-                self.udp.unreachable(flow);
+            match event {
+                Event::Unreachable(flow) => self.udp.unreachable(flow),
+                Event::Resolved { next_hop, .. } => self.udp.wake(*next_hop),
+                Event::Failed { next_hop, .. } => self.udp.fail(*next_hop),
+                _ => {}
             }
+        }
+        if self.ip.generation() != self.routes {
+            self.routes = self.ip.generation();
+            self.udp.wake_all();
         }
         self.events.extend(events);
     }
 
+    /// The hop question the shard asks before [ip] is handed `out`: `None` is a datagram that
+    /// may leave now.
+    fn hop(ip: &mut Ip, now: Instant, out: &UdpOut<'_>) -> Option<Offer> {
+        let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
+        let Ok(route) = ip.route(out.destination, source, None) else { return Some(Offer::Unreachable) };
+        let NextHop::Neighbour(next_hop) = route.next_hop else { return None };
+        let answer = match ip.neighbour(route.iface, next_hop) {
+            Some(Nud::Failed) => Resolution::Failed,
+            Some(Nud::Incomplete(_)) => Resolution::Pending,
+            Some(entry) => Resolution::Resolved(entry.mac().expect("every other state holds a link address")),
+            None => ip.resolve(now, route.iface, next_hop, route.source),
+        };
+        match answer {
+            Resolution::Resolved(_) => None,
+            Resolution::Pending => Some(Offer::Waits(next_hop)),
+            Resolution::Failed => Some(Offer::Unreachable),
+        }
+    }
+
     /// A transmit opportunity with room for `credit` frames, composed as the shard composes it:
     /// [ip]'s frames first, then UDP's, a datagram per sender in turn, then what UDP's datagrams
-    /// asked [ip] for. A datagram [ip] holds for its next hop spends no frame.
+    /// asked [ip] for. A datagram that waits for its next hop spends no frame and is never
+    /// [ip]'s.
     pub fn out_with(&mut self, credit: usize) -> Vec<Vec<u8>> {
         let now = self.clock();
         let mut frames = Vec::new();
         let mut spent = self.ip.transmit(now, credit, |_, f| frames.push(f.to_vec()));
+        self.news();
         let Self { ip, udp, round, .. } = self;
         for gone in udp.drain_gone() {
             round.retain(|s| *s != gone);
@@ -295,11 +326,19 @@ impl U {
             let Some(sender) = round.pop_front() else { break };
             let mut framed = false;
             let served = udp.serve(sender, |out| {
-                let mut buf = [0u8; FRAME];
-                if let Ok(Sent::Frame(n)) = ip.send_udp(now, out, &mut buf) {
-                    frames.push(buf[..n].to_vec());
-                    framed = true;
+                if let Some(answer) = Self::hop(ip, now, out) {
+                    return answer;
                 }
+                let mut buf = [0u8; FRAME];
+                match ip.send_udp(now, out, &mut buf) {
+                    Ok(Sent::Frame(n)) => {
+                        frames.push(buf[..n].to_vec());
+                        framed = true;
+                    }
+                    Ok(Sent::Held) => panic!("[ip] held a datagram of a sender's"),
+                    Err(_) => {}
+                }
+                Offer::Taken
             });
             spent += usize::from(framed);
             if served == Served::More {

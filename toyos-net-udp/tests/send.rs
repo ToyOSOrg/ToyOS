@@ -5,6 +5,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
+use toyos_net_ip::Nud;
 use toyos_net_udp::{limits, Binding, Counter, Error, Refusal, SocketError, Verdict};
 use toyos_net_wire::ethernet::MacAddr;
 use toyos_net_wire::ipv4::Ttl;
@@ -19,6 +20,33 @@ fn refused(counter: Counter) -> Result<(), Error> {
 
 fn udp_frames(frames: &[Vec<u8>]) -> Vec<Vec<u8>> {
     frames.iter().filter(|f| ip_of(f).is_some_and(|ip| ip.protocol() == toyos_net_wire::ipv4::Protocol::Udp)).cloned().collect()
+}
+
+/// A host of the link nothing has resolved, and the address it answers ARP from.
+const FAR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 77);
+const MAC_FAR: MacAddr = MacAddr([2, 0, 0, 0, 0, 0x77]);
+
+/// FAR's ARP reply to A.
+fn far_answers() -> Vec<u8> {
+    let mut a = vec![0, 1, 8, 0, 6, 4, 0, 2];
+    a.extend_from_slice(&MAC_FAR.0);
+    a.extend_from_slice(&FAR.octets());
+    a.extend_from_slice(&MAC_A.0);
+    a.extend_from_slice(&A.octets());
+    eth(MAC_A, MAC_FAR, 0x0806, &a)
+}
+
+/// The UDP datagrams among `frames`, each by its destination and payload.
+fn datagrams(frames: &[Vec<u8>]) -> Vec<(Ipv4Addr, Vec<u8>)> {
+    udp_frames(frames).iter().map(|f| ip_of(f).unwrap()).map(|ip| (ip.destination(), ip.payload()[8..].to_vec())).collect()
+}
+
+/// How many datagrams [ip] holds for FAR while it asks for its link address.
+fn held_by_ip(u: &U) -> Option<usize> {
+    match u.ip.neighbour(u.if0, FAR) {
+        Some(Nud::Incomplete(asking)) => Some(asking.pending.queued()),
+        _ => None,
+    }
 }
 
 #[test]
@@ -275,10 +303,147 @@ fn s_udp_us_027_a_failed_next_hop_is_reported_once() {
     let far = ip4(192, 0, 2, 77);
     u.udp.connect(&mut u.ip, id, far, 53).unwrap();
     u.udp.send(&mut u.ip, id, b"q").unwrap();
+    u.run(2_999);
+    assert_eq!((u.count(Counter::TxUnreachable), u.udp.recv(id, &mut [0; 64])), (0, Ok(None)), "the hop is still asked for");
     u.run(3_000);
-    assert_eq!(u.ip_count(toyos_net_ip::Counter::NbPendingDropped), 1);
+    assert_eq!((u.ip_count(toyos_net_ip::Counter::NbFailed), u.count(Counter::TxUnreachable)), (1, 1), "[ip] gave the hop up, and the datagram that waited for it is dropped and counted");
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Ok(None));
+}
+
+// US-27 for the socket that is not connected: its datagram is a counted drop and
+// it is told nothing. Nothing is kept for another try: the host answering once [ip] asks for it
+// again brings out no datagram of before.
+#[test]
+fn s_udp_us_027_an_unconnected_socket_is_told_nothing_and_nothing_is_kept_for_another_try() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    u.udp.send_to(&mut u.ip, id, FAR, 53, b"1").unwrap();
+    let closed = u.bind(ANY, 50_002).unwrap();
+    u.udp.send_to(&mut u.ip, closed, FAR, 53, b"2").unwrap();
+    u.out();
+    u.udp.close(closed).unwrap();
+    assert!(datagrams(&u.run(3_000)).is_empty());
+    assert_eq!(u.count(Counter::TxUnreachable), 2, "the socket's and the closed socket's");
+    assert_eq!(u.udp.recv(id, &mut [0; 64]), Ok(None));
+
+    // Past the hold-down [ip] asks again for a new datagram, and the host answers.
+    u.run(30_000);
+    u.udp.send_to(&mut u.ip, id, FAR, 53, b"3").unwrap();
+    u.out();
+    u.frame(&far_answers());
+    assert_eq!(datagrams(&u.out()), [(FAR, b"3".to_vec())]);
+}
+
+// US-27, for a datagram accepted while [ip] holds its next hop failed (NUD-14): it never
+// waited, and is dropped at its turn, counted, and reported to its connected socket once.
+#[test]
+fn s_udp_us_027_a_datagram_for_a_hop_ip_has_given_up_is_dropped_at_its_turn() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    u.udp.connect(&mut u.ip, id, FAR, 53).unwrap();
+    u.udp.send(&mut u.ip, id, b"q").unwrap();
+    u.run(3_000);
+    assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
+    assert_eq!(u.udp.send(&mut u.ip, id, b"again"), Ok(()));
+    assert_eq!((u.out(), u.count(Counter::TxUnreachable)), (vec![], 2), "no request and no datagram");
+    assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
+    assert_eq!(u.udp.recv(id, &mut [0; 64]), Ok(None));
+    assert_eq!((u.ip_count(toyos_net_ip::Counter::NbPendingDropped), u.ip_count(toyos_net_ip::Counter::NbFailedRefused)), (0, 0), "[ip] was handed neither");
+}
+
+// US-26 as built: a datagram whose next hop is unresolved stays in its socket's queue, and
+// [ip]'s queue for that next hop holds none of it.
+#[test]
+fn s_udp_us_026_a_datagram_waits_for_its_next_hop_in_its_socket_and_never_in_ip() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    for n in 0..3u8 {
+        u.udp.send_to(&mut u.ip, id, FAR, 53, &[n]).unwrap();
+    }
+    let out = u.out();
+    assert!(out.len() == 1 && is_arp_request_for(&out[0], FAR), "one request, and no datagram");
+    assert_eq!(held_by_ip(&u), Some(0));
+    assert_eq!(u.out(), Vec::<Vec<u8>>::new(), "a waiting datagram asks for nothing again");
+    u.frame(&far_answers());
+    assert_eq!(datagrams(&u.out()), [(FAR, vec![0]), (FAR, vec![1]), (FAR, vec![2])]);
+    assert_eq!(u.ip_count(toyos_net_ip::Counter::NbPendingOverflow), 0);
+}
+
+// US-26's order: datagrams leave in FIFO order per socket, which for a socket some of whose
+// datagrams wait is the order it accepted them in for each next hop. One accepted for the hop
+// after its link address is known does not pass those that waited for it.
+#[test]
+fn s_udp_us_026_datagrams_to_one_next_hop_leave_in_the_order_they_were_accepted() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    for (destination, data) in [(FAR, b"f1"), (DNS, b"d1"), (FAR, b"f2"), (B, b"b1"), (DNS, b"d2"), (FAR, b"f3")] {
+        u.udp.send_to(&mut u.ip, id, destination, 53, data).unwrap();
+    }
+    assert_eq!(datagrams(&u.out()), [(DNS, b"d1".to_vec()), (B, b"b1".to_vec()), (DNS, b"d2".to_vec())]);
+    u.frame(&far_answers());
+    u.udp.send_to(&mut u.ip, id, FAR, 53, b"f4").unwrap();
+    u.udp.send_to(&mut u.ip, id, DNS, 53, b"d3").unwrap();
+    assert_eq!(
+        datagrams(&u.out()),
+        [(FAR, b"f1".to_vec()), (FAR, b"f2".to_vec()), (FAR, b"f3".to_vec()), (FAR, b"f4".to_vec()), (DNS, b"d3".to_vec())]
+    );
+}
+
+// US-25: what waits is bounded by the queue it waits in, `limits::TX_DATAGRAMS` a socket,
+// and a send past it is refused in the call, whatever its destination. Nothing waits anywhere
+// else: [ip] holds none, and every one accepted leaves once the next hop answers.
+#[test]
+fn s_udp_us_025_what_waits_for_a_next_hop_is_bounded_by_its_sockets_queue() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    for n in 0..limits::TX_DATAGRAMS {
+        u.udp.send_to(&mut u.ip, id, FAR, 53, &[n as u8]).unwrap();
+    }
+    u.out();
+    for destination in [FAR, DNS] {
+        assert_eq!(u.udp.send_to(&mut u.ip, id, destination, 53, b"x"), refused(Counter::TxQueueFull), "{destination}");
+    }
+    assert_eq!((held_by_ip(&u), u.ip_count(toyos_net_ip::Counter::NbPendingOverflow)), (Some(0), 0));
+    u.frame(&far_answers());
+    let expected: Vec<(Ipv4Addr, Vec<u8>)> = (0..limits::TX_DATAGRAMS).map(|n| (FAR, vec![n as u8])).collect();
+    assert_eq!(datagrams(&u.out()), expected);
+    assert_eq!(u.udp.send_to(&mut u.ip, id, DNS, 53, b"x"), Ok(()));
+}
+
+// US-53 with US-26: the closed sender mixes sockets, so its datagrams wait each for its own
+// next hop too. One that waits holds back no other closed socket's, and leaves when its hop
+// answers.
+#[test]
+fn s_udp_us_053_a_closed_sockets_datagram_waits_for_its_next_hop_and_holds_back_no_other() {
+    let mut u = U::uf();
+    let first = u.bind(ANY, 50_001).unwrap();
+    u.udp.send_to(&mut u.ip, first, FAR, 53, b"far").unwrap();
+    u.udp.close(first).unwrap();
+    let second = u.bind(ANY, 50_002).unwrap();
+    u.udp.send_to(&mut u.ip, second, DNS, 53, b"near").unwrap();
+    u.udp.close(second).unwrap();
+    let out = u.out();
+    assert_eq!(datagrams(&out), [(DNS, b"near".to_vec())]);
+    assert!(out.iter().any(|f| is_arp_request_for(f, FAR)));
+    u.frame(&far_answers());
+    assert_eq!(datagrams(&u.out()), [(FAR, b"far".to_vec())]);
+    assert_eq!(u.count(Counter::TxDiscardedOnClose), 0);
+}
+
+// A waiting datagram's next hop is the route's of the moment it leaves: when the routes change
+// it is asked again, and with no route left it is dropped and counted (US-24: the address
+// it was accepted from is no longer assigned).
+#[test]
+fn s_udp_us_024_a_waiting_datagram_whose_route_goes_is_dropped() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    u.udp.send_to(&mut u.ip, id, FAR, 53, b"1").unwrap();
+    u.out();
+    u.ip.remove_address(u.clock(), u.if0, A).unwrap();
+    assert_eq!((datagrams(&u.out()), u.count(Counter::TxUnreachable)), (vec![], 1));
+    u.frame(&far_answers());
+    assert_eq!(datagrams(&u.out()), vec![]);
 }
 
 fn acquisition() -> (U, toyos_net_udp::SocketId) {

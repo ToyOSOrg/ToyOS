@@ -66,15 +66,14 @@ fn s_ip_nud_003_release_keeps_arrival_order() {
 
 #[test]
 fn s_ip_nud_004_overflow_drops_the_oldest() {
-    let per = limits::nud::PENDING_PER_NEIGHBOUR as u8;
     let mut h = H::fixture_i();
-    for n in 1..=per + 2 {
-        h.send(A, B, 5001, 5001, &[n]).unwrap();
+    for n in 1..=10u8 {
+        h.send(A, B, 5001, 5001, &[b'0' + n % 10]).unwrap();
     }
     h.out();
     h.frame(&hex(V_ARP_REPLY));
     let out: Vec<Vec<u8>> = h.out().iter().map(payload).collect();
-    let expected: Vec<Vec<u8>> = (3..=per + 2).map(|n| vec![n]).collect();
+    let expected: Vec<Vec<u8>> = (3..=10u8).map(|n| vec![b'0' + n % 10]).collect();
     assert_eq!(out, expected);
     assert_eq!(h.count(Counter::NbPendingOverflow), 2);
 }

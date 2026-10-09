@@ -17,7 +17,7 @@ use common::{arp, from_server, message, message_of, sum, terms, xid, A, ACK, DNS
 use lan::{udp, Lan, Seen, Udp, B};
 use toyos_dns::{Failure, Name, MAX_LOOKUPS, ROUNDS, WAIT_MS};
 use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved};
-use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST};
+use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST, TX_DATAGRAMS};
 use toyos_net_udp::Counter as Rule;
 use toyos_net_wire::{Instant, Port};
 
@@ -810,9 +810,9 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
 // RFC 4861 §7.2.2: "While waiting for address resolution to complete, the sender MUST, for each
 // neighbor, retain a small queue of packets waiting for address resolution to complete. ... Once
 // address resolution completes, the node transmits any queued packets." Every lookup the node
-// holds is started at a resolver whose link address is not yet known, and hands [ip] one query:
-// each waits in that queue, and each is on the wire, in the order the lookups were started, once
-// the resolver answers ARP.
+// holds is started at a resolver whose link address is not yet known: each query waits in its
+// own socket, [ip] holds none of them, and each is on the wire, in the order the lookups were
+// started, once the resolver answers ARP.
 #[test]
 fn a_burst_at_a_resolver_not_yet_resolved_is_on_the_wire_once_the_resolver_answers_arp() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
@@ -823,6 +823,12 @@ fn a_burst_at_a_resolver_not_yet_resolved_is_on_the_wire_once_the_resolver_answe
         net.resolve(asked).unwrap();
     }
     assert!(net.queried.is_empty(), "the premise: nothing has left");
+    assert_eq!(net.lan.opportunity(), 1, "the request for the resolver, and no query");
+    let held = match net.lan.node.shard().ip().neighbour(net.lan.node.shard().iface(), ANSWERS) {
+        Some(toyos_net_ip::Nud::Incomplete(asking)) => Some(asking.pending.queued()),
+        _ => None,
+    };
+    assert_eq!(held, Some(0), "[ip] asks for the resolver and holds no query");
     net.pass();
     assert_eq!(ip(&net), Some(Some(toyos_net_wire::ethernet::MacAddr(MAC_S))), "the premise: the resolver answered ARP");
     let left: Vec<&str> = net.queried.iter().map(|query| query.name.as_str()).collect();
@@ -831,25 +837,28 @@ fn a_burst_at_a_resolver_not_yet_resolved_is_on_the_wire_once_the_resolver_answe
     assert_eq!(net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbPendingOverflow), 0);
 }
 
-// The queue is the next hop's and not the resolver's: RFC 4861 §7.2.2, "When a queue overflows,
-// the new arrival SHOULD replace the oldest entry." One datagram a client sends to the resolver's
-// address behind the burst takes the oldest query's place, and that lookup asks again when its
-// wait ends. The track records this against [udp] (`issues/toyos-has-its-own-network-stack.md`).
+// A wait is its sender's: the datagrams a client sends to the resolver's address behind the burst
+// wait in the client's own socket, to that socket's bound, and take no query's place. Every query
+// is on the wire once the resolver answers ARP, and every datagram of the client's after them.
 #[test]
-fn a_clients_datagram_behind_the_burst_takes_the_oldest_querys_place_in_ips_queue() {
+fn a_clients_datagrams_behind_the_burst_wait_in_their_own_socket_and_take_no_querys_place() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
     let names: Vec<String> = (0..MAX_LOOKUPS).map(|n| format!("n{n}.example")).collect();
     for asked in &names {
         net.resolve(asked).unwrap();
     }
     let (client, _) = net.lan.node.udp_bind(ANY, None, || 0x3000).unwrap();
-    net.lan.node.udp_send_to(net.lan.now, client, ANSWERS, 9, b"behind the burst").unwrap();
+    let behind: Vec<Vec<u8>> = (0..TX_DATAGRAMS).map(|n| format!("behind the burst {n}").into_bytes()).collect();
+    for datagram in &behind {
+        net.lan.node.udp_send_to(net.lan.now, client, ANSWERS, 9, datagram).unwrap();
+    }
+    assert_eq!(net.lan.node.udp_send_to(net.lan.now, client, ANSWERS, 9, b"one more"), Err(Refused::ResourceExhausted), "the wait is the socket's queue");
     net.pass();
-    assert_eq!(net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbPendingOverflow), 1, "the premise: [ip]'s queue for the resolver overflowed by one");
     let left: Vec<&str> = net.queried.iter().map(|query| query.name.as_str()).collect();
-    assert_eq!(left, names[1..], "every query but the oldest");
-    net.until(WAIT_MS);
-    assert_eq!(net.queried.iter().filter(|query| query.name == names[0]).map(|query| net.ms_of(query.at)).collect::<Vec<_>>(), [WAIT_MS], "the oldest lookup's second query, a wait later");
+    assert_eq!(left, names, "every query of the burst, once");
+    let clients: Vec<Vec<u8>> = net.lan.datagrams().into_iter().filter(|(_, udp)| udp.port == 9).map(|(_, udp)| udp.payload.clone()).collect();
+    assert_eq!(clients, behind, "and every datagram of the client's, in its order");
+    assert_eq!((net.ms(), net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbPendingOverflow)), (0, 0));
 }
 
 // RFC 1035 §4.2.1: each resolver is asked ROUNDS times, WAIT_MS apart. A wait is a deadline of
@@ -928,7 +937,7 @@ fn a_recorded_reply_of_a_public_resolver_answers_the_nodes_query() {
 // RFC 1122 §2.3.2.1 and RFC 4861 §7.2.2 have address resolution give up after its requests, and
 // RFC 1122 §4.1.3.3 has the socket a datagram left from told. The lease's one resolver never
 // answers ARP: [ip] gives up at its third request's end, 3 s in, and reports the two queries it
-// held, the first and the one asked when the first one's wait ended. Each is counted, and the
+// waited, the first and the one asked when the first one's wait ended. Each is counted, and the
 // lookup ends there by name, at [ip]'s first word of its resolver, with no third query: RFC 1035
 // §4.2.1 repeats a query after an interval, to a server that may have missed it. This is [ip]'s
 // own knowledge and no datagram's word, so it ends the lookup where an ICMP error does not.
@@ -940,29 +949,54 @@ fn a_query_the_network_reports_unreachable_is_counted_and_ends_a_lookup_with_no_
     assert_eq!(net.ms(), 3_000, "the lookup outlived [ip]'s report of its one resolver");
     assert!(net.queried.is_empty(), "the premise: no query reached the wire: {:?}", net.queried);
     let ip = net.lan.node.shard().ip().counters();
-    assert_eq!((ip.get(toyos_net_ip::Counter::NbFailed), ip.get(toyos_net_ip::Counter::NbPendingDropped)), (1, 2), "the premise: [ip] gave the resolver up once, holding two queries");
+    assert_eq!((ip.get(toyos_net_ip::Counter::NbFailed), net.lan.counted(Rule::TxUnreachable)), (1, 2), "the premise: [ip] gave the resolver up once, and the two queries that waited for it were dropped");
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), 2);
     assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 0);
     let requests: Vec<u64> = net.lan.sent.iter().filter(|(_, seen)| matches!(seen, Seen::Arp { request: true, target, .. } if *target == SILENT)).map(|(at, _)| net.ms_of(*at)).collect();
     assert_eq!(requests, [0, 1_000, 2_000], "the premise: [ip] asked for the resolver three times, a second apart");
 }
 
-// [ip] holds a next hop it gave up on as failed for a while, and refuses a datagram to it at the
-// transmit opportunity that would have carried it, where no call of the resolver's is in
-// progress: the node reads the report at its next wake, which is the end of the query's wait.
-// The track records this against the node (`issues/toyos-has-its-own-network-stack.md`).
+// [ip] holds a next hop it gave up on as failed for a while. A query for it is accepted, and is
+// dropped at the transmit opportunity that would have carried it: the node reads that in the
+// same opportunity, and the lookup ends at the 4 s it started.
 #[test]
-fn a_query_ip_refuses_at_its_transmit_opportunity_is_read_at_the_nodes_next_wake() {
+fn a_query_for_a_resolver_ip_has_given_up_ends_its_lookup_in_the_opportunity_that_would_have_carried_it() {
     let mut net = Net::leased(&[SILENT], Some(R));
     let first = net.resolve("www.example").unwrap();
     assert_eq!(net.run(first, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::Unreachable))));
     net.until(4_000);
+    let dropped = net.lan.counted(Rule::TxUnreachable);
     let id = net.resolve("other.example").unwrap();
-    net.pass();
-    assert_eq!(net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbFailedRefused), 1, "the premise: [ip] refused the query on a failed neighbour, at 4 s");
-    assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::Unreachable))));
-    assert_eq!(net.ms(), 4_000 + WAIT_MS);
+    assert_eq!(net.lan.node.take_resolved(), NONE, "the premise: the query was accepted");
+    assert_eq!(net.lan.opportunity(), 0);
+    assert_eq!(net.lan.counted(Rule::TxUnreachable), dropped + 1, "the premise: the query was dropped at its turn, at 4 s");
+    assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::Failed(Failure::Unreachable)) }]);
+    assert_eq!(net.ms(), 4_000);
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), 3);
+}
+
+// And the query asked in its place leaves in that opportunity: RFC 1035 §4.2.1, "The client
+// should try other servers and server addresses before repeating a query to a specific address of
+// a server." The first resolver is one [ip] has given up; the second has answered before. One
+// transmit opportunity drops the query for the first and carries the query for the second.
+#[test]
+fn the_query_asked_in_a_dropped_querys_place_leaves_in_the_same_opportunity() {
+    let mut net = Net::leased(&[SILENT, ANSWERS], Some(R));
+    net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
+    net.zone.push(("other.example", 0, Says::Address(ADDRESS)));
+    let first = net.resolve("www.example").unwrap();
+    assert_eq!(net.run(first, 10 * WAIT_MS), Some(Ok(vec![ADDRESS])));
+    net.until(3_000);
+    let shard = net.lan.node.shard();
+    assert!(matches!(shard.ip().neighbour(shard.iface(), SILENT), Some(toyos_net_ip::Nud::Failed)), "the premise: [ip] gave the first resolver up");
+    let asked = net.queried.len();
+
+    let id = net.resolve("other.example").unwrap();
+    assert_eq!(net.lan.opportunity(), 1, "one frame: the query for the second resolver");
+    let Some((_, Seen::Udp(query))) = net.lan.sent.last() else { panic!("{:?}", net.lan.sent.last()) };
+    assert_eq!((query.to, query.destination, query.port, asked_name(&query.payload).as_str()), (MAC_S, ANSWERS, 53, "other.example"));
+    assert_eq!(net.run(id, 10 * WAIT_MS), Some(Ok(vec![ADDRESS])));
+    assert_eq!((net.ms(), net.queried.len()), (3_000, asked + 1));
 }
 
 /// A lookup in flight as the lease's first renewal leaves: the net, the lookup and the renewal's

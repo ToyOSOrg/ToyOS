@@ -403,7 +403,7 @@ impl Net {
     /// the opportunity is over. Returns how many frames left.
     fn opportunity(&mut self) -> usize {
         let mut frames = Vec::new();
-        self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()));
+        self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
         for frame in &frames {
             for answer in self.hears(frame) {
                 self.node.receive(self.now, &answer, draw(&mut self.draws));
