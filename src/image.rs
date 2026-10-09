@@ -700,7 +700,7 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
                 [Guid::EFI_SYSTEM, Guid::MICROSOFT_BASIC, Guid::TOYOS_SLOTS, Guid::TOYOS_BOOT, Guid::TOYOS_ROOT].contains(&kind),
                 "partition {guid} is of type {kind}, which no boot image carries"
             );
-            let name = name_of(image, part.index());
+            let name = name_of(&part);
             let at = part.first_lba() as usize * LBA as usize;
             let bytes = &image[at..at + part.lba_count().get() as usize * LBA as usize];
             (Row { what: format!("installed {name}"), name, kind, guid, len: bytes.len() as u64 }, bytes)
@@ -728,17 +728,9 @@ pub fn install(image: &[u8], disk: &Path, data_bytes: u64) {
     }
 }
 
-/// The name `image`'s table gives its entry `index`, which `toyos-gpt` does
-/// not read: the header at block 1 places the array and sizes its entries,
-/// and a name is the UTF-16 units from byte 56 of one, up to the first zero.
-fn name_of(image: &[u8], index: u32) -> String {
-    let field = |at: usize, len: usize| &image[LBA as usize + at..][..len];
-    let array = u64::from_le_bytes(field(72, 8).try_into().expect("eight bytes")) as usize * LBA as usize;
-    let size = u32::from_le_bytes(field(84, 4).try_into().expect("four bytes")) as usize;
-    let entry = &image[array + index as usize * size..][..size];
-    let units: Vec<u16> =
-        entry[56..128].chunks(2).map(|unit| u16::from_le_bytes([unit[0], unit[1]])).take_while(|unit| *unit != 0).collect();
-    String::from_utf16(&units).unwrap_or_else(|e| panic!("partition {index}'s name is no UTF-16: {e}"))
+/// The name a table this build wrote gives `part`.
+fn name_of(part: &toyos_gpt::Partition) -> String {
+    String::from_utf16(part.name()).unwrap_or_else(|e| panic!("partition {}'s name is no UTF-16: {e}", part.unique_guid()))
 }
 
 /// Block 0 of a volume: the magic and its block count.
@@ -1155,8 +1147,6 @@ mod tests {
     /// its bytes, found by the reader the kernel and `diskserver` use: the
     /// names, in the image's order.
     fn carries_every_partition_of(disk: &mut std::fs::File, image: &[u8]) -> Vec<String> {
-        let mut table = vec![0u8; 34 * LBA as usize];
-        disk.seek(SeekFrom::Start(0)).and_then(|_| disk.read_exact(&mut table)).expect("the disk's table");
         let mut names = Vec::new();
         let mut listed = [None; 16];
         toyos_gpt::list(&mut ImageSectors(image), &mut listed).expect("the image's table");
@@ -1173,8 +1163,8 @@ mod tests {
                 .and_then(|_| disk.read_exact(&mut installed))
                 .expect("read it back");
             assert!(installed == image[at..at + len], "{} was installed as other bytes", part.unique_guid());
-            assert_eq!(name_of(&table, on_disk.index()), name_of(image, part.index()), "{}", part.unique_guid());
-            names.push(name_of(image, part.index()));
+            assert_eq!(name_of(&on_disk), name_of(&part), "{}", part.unique_guid());
+            names.push(name_of(&part));
         }
         names
     }
