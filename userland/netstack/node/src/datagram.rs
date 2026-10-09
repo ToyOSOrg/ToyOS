@@ -17,6 +17,13 @@
 //! accepted for a host leaves in no link broadcast, whatever prefix a server has renewed the
 //! address with since, and is dropped, counted `ip.broadcast-not-permitted` and logged instead.
 //!
+//! **A datagram waits for its next hop in its own socket**, among the `limits::TX_DATAGRAMS` it
+//! has accepted: while [ip] asks for a link address the socket's datagrams to other next hops
+//! leave, and a send past the queue is answered [`Refused::ResourceExhausted`] whatever its
+//! destination. One whose next hop [ip] gives up, or that has no way out when its turn comes, is
+//! dropped and counted `udp.tx-unreachable`, and the client is told nothing: its socket is not
+//! connected.
+//!
 //! A refusal [udp] logs is in [`Node::drain_events`] when the send that met it returns, and one
 //! [ip] logs as a datagram leaves when that [`Node::transmit`] returns; no other call of a
 //! client's meets one.
@@ -100,6 +107,7 @@ fn refused(error: Error) -> Refused {
         | Counter::RxDiscardedOnClose
         | Counter::TxDiscardedOnClose
         | Counter::Tx
+        | Counter::TxUnreachable
         | Counter::IcmpErrorDelivered
         | Counter::IcmpErrorSoft
         | Counter::IcmpErrorUnconnected

@@ -146,12 +146,6 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // Each fills a bound of its own process — tens of thousands of mappings,
-    // thousands of threads, a thousand 2 MiB images — which no shared member's
-    // allowance is sized for: the `process_bound_*` metal rows run them.
-    "abuse_mmap_regions",
-    "abuse_thread_table",
-    "abuse_dlopen_ledger",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundserver_log_stall` metal rows run these.
@@ -179,6 +173,14 @@ const RUST_SKIP: &[&str] = &[
     // runs it.
     "bar_map_again",
 ];
+
+/// The shared boot's last members, in this order: each fills a bound of its
+/// own process — tens of thousands of mappings, thousands of threads, a
+/// thousand 2 MiB images — and its exit gives all of it back. Behind every
+/// discovered member, so none of those runs after one of these. **This is
+/// their one declaration**: [`discover_rust_tests`] leaves them to it, so a
+/// name taken off this list is a discovered member again.
+const LAST_MEMBERS: &[&str] = &["abuse_mmap_regions", "abuse_thread_table", "abuse_dlopen_ledger"];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
 /// on purpose.
@@ -382,18 +384,6 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES_READDIR,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
         },
-    ),
-    (
-        "process_bound_regions",
-        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_mmap_regions") },
-    ),
-    (
-        "process_bound_threads",
-        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_thread_table") },
-    ),
-    (
-        "process_bound_libraries",
-        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_dlopen_ledger") },
     ),
     (
         "wake_storm_cost",
@@ -958,15 +948,6 @@ const TESTCASES_MKDIR: &[metal::Arm] =
 const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
-/// One boot for the three, which can share it: each fills a bound of its own
-/// process, and its exit gives all of it back.
-const BOUNDS: &[metal::Arm] = &[metal::once(
-    "testcases-bounds",
-    "tests/testcases",
-    &[],
-    &["test_rs_abuse_mmap_regions", "test_rs_abuse_thread_table", "test_rs_abuse_dlopen_ledger"],
-)];
-
 /// The shipping kernel with the windows' instrument and nothing else, so what
 /// it reads is that kernel under the herd. Three exits, a report each:
 /// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
@@ -1052,19 +1033,20 @@ const SELFTESTS: &[metal::Arm] = &[metal::Arm {
 }];
 
 /// The boots every discovered Rust binary rides on the T14: the shipping
-/// kernel's, and [`ACTUATOR_TESTS`] on the kernel that carries `SYS_DEBUG`,
-/// armed with [`SELFTEST_PARAMS`].
+/// kernel's, with [`LAST_MEMBERS`] behind them, and [`ACTUATOR_TESTS`] on the
+/// kernel that carries `SYS_DEBUG`, armed with [`SELFTEST_PARAMS`].
 fn shared_metal() -> Vec<metal::SharedBoot> {
-    let (debug, shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
+    let (debug, mut shipping): (Vec<String>, Vec<String>) = discover_rust_tests()
         .into_iter()
         .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
+    shipping.extend(LAST_MEMBERS.iter().map(ToString::to_string));
     vec![
         metal::SharedBoot {
             boot: "shared".to_string(),
             config: "tests/testcases",
             params: &[],
             features: &[],
-            members: const { metal::members_fitting(toyos_tco::RUST_MEMBER_MS) },
+            member_ms: toyos_tco::RUST_MEMBER_MS,
             jobs: shipping.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
@@ -1079,7 +1061,7 @@ fn shared_metal() -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: SELFTEST_PARAMS,
             features: ACTUATOR_KERNEL,
-            members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
+            member_ms: toyos_tco::RUST_MEMBER_MS,
             jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
@@ -1144,7 +1126,7 @@ fn c_corpus_metal(c_bins: &[(String, Vec<u8>)]) -> metal::SharedBoot {
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: const { metal::members_fitting(toyos_tco::C_MEMBER_MS) },
+        member_ms: toyos_tco::C_MEMBER_MS,
         jobs,
         files,
         links,
@@ -1373,7 +1355,8 @@ fn discover_c_tests() -> Vec<String> {
     names
 }
 
-/// Discover the Rust test binaries: every one but the [`RUST_SKIP`] helpers.
+/// Discover the Rust test binaries: every one but the [`RUST_SKIP`] helpers
+/// and the [`LAST_MEMBERS`], which [`shared_metal`] places itself.
 ///
 /// **A name that arrives this way is registered by nothing but its file.**
 /// `tests/toyos-rust-tests/src/bin/<name>.rs` is the whole declaration — no row
@@ -1385,7 +1368,8 @@ fn discover_rust_tests() -> Vec<String> {
         .filter_map(|e| {
             let path = e.ok()?.path();
             let name = path.file_stem()?.to_str()?.to_string();
-            (path.extension()? == "rs" && !RUST_SKIP.contains(&name.as_str())).then_some(name)
+            let placed = RUST_SKIP.contains(&name.as_str()) || LAST_MEMBERS.contains(&name.as_str());
+            (path.extension()? == "rs" && !placed).then_some(name)
         })
         .collect();
     names.sort();
@@ -3072,18 +3056,23 @@ fn holding_server() -> Result<u16, String> {
     Ok(port)
 }
 
-/// Boot `tests/netcase` with these binaries staged, to netstack's lease: its
-/// jobs name their peer by an address.
+/// Boot `tests/netcase` with these binaries staged, to netstack's lease, since
+/// its jobs name their peer by an address, and then to the claim of its name:
+/// a responder whose probing never ends leaves the machine nameless, and
+/// nothing else on a boot reads the name.
 fn boot_netcase(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
     const LEASED: &str = "netstack: DHCP: lease ";
+    /// `userland/netstack/src/mdns.rs`'s line for a probing no host answered.
+    const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
     await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
     Ok(qemu)
 }
 
@@ -5272,10 +5261,11 @@ fn declared<'a>() -> impl Iterator<Item = &'a str> {
     MACHINE_TESTS.iter().copied().chain(SCREEN_TESTS.iter().map(|(n, _)| *n))
 }
 
-/// What the shared boots answer for: every discovered Rust binary and every
-/// corpus case.
+/// What the shared boots answer for: every discovered Rust binary, the T14's
+/// [`LAST_MEMBERS`] and every corpus case.
 fn shared_names() -> Vec<String> {
-    discover_rust_tests().into_iter().chain(discover_c_tests()).collect()
+    let metal = LAST_MEMBERS.iter().map(ToString::to_string);
+    discover_rust_tests().into_iter().chain(metal).chain(discover_c_tests()).collect()
 }
 
 /// Every name this suite can produce a verdict for, on either machine: the

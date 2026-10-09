@@ -20,8 +20,9 @@
 //! [`Node::drain_events`].
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
-//! exchange draws its transaction id first. The lookups in flight draw after it: an id and then a
-//! port for each query they send, and nothing else.
+//! exchange draws its transaction id first. The name draws after it, the delay of each probing it
+//! starts. The lookups in flight draw after both, and alone in [`Node::transmit`], which serves no
+//! name: an id and then a port for each query they send, and nothing else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -73,6 +74,8 @@ pub enum Event {
     /// A refusal of the stack's, and how many of its rule it stands for beyond itself.
     Stack { refusal: toyos_net_shard::Refusal, suppressed: u64 },
     Dhcp(toyos_dhcp::Refusal),
+    /// What became of the machine's name.
+    Name(toyos_mdns::Event),
 }
 
 pub struct Node {
@@ -80,6 +83,8 @@ pub struct Node {
     client: Client,
     /// The responder for the machine's name, once [`Self::answer_as`] started it.
     name: Option<name::Name>,
+    /// The link as [`Self::link`] last reported it.
+    up: bool,
     resolver: resolve::Resolver,
     counters: Counters,
     events: Vec<Event>,
@@ -106,6 +111,7 @@ impl Node {
             stack,
             client,
             name: None,
+            up: false,
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
             events: Vec::new(),
@@ -150,24 +156,30 @@ impl Node {
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
-    /// Returns how many left.
-    pub fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
-        let sent = self.stack.transmit(now, credit, sink);
-        // A datagram [ip] refused as it left is a line of this opportunity.
-        self.log();
+    /// Returns how many left. A lookup's query that found no way out as its turn came is read
+    /// here, and the query asked in its place leaves in this opportunity while credit lasts.
+    pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&[u8]), mut draw: impl FnMut() -> u32) -> usize {
+        let mut sent = 0usize;
+        loop {
+            sent = sent.saturating_add(self.stack.transmit(now, credit.saturating_sub(sent), &mut sink));
+            // A datagram [ip] refused as it left is a line of this opportunity.
+            self.log();
+            let asked = self.resolver.pass(now, &mut self.stack, &mut self.counters, &mut draw);
+            if !asked || sent >= credit {
+                break;
+            }
+        }
         self.pass(now, true);
         sent
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
-    /// lease stays; up, the client verifies a lease it holds and otherwise starts over, and the
-    /// machine's name is announced again for a lease that stayed.
+    /// lease stays and the machine's name has no link; up, the client verifies a lease it holds
+    /// and otherwise starts over, and the name of a lease that stayed is probed for again.
     pub fn link(&mut self, now: Instant, up: bool, mut draw: impl FnMut() -> u32) {
         self.stack.link(now, up);
+        self.up = up;
         if up {
-            if let Some(name) = &mut self.name {
-                name.link_returned(now);
-            }
             let out = self.client.link_up(now, &mut draw);
             self.carry_out(now, out, None, &mut draw);
         }
@@ -210,7 +222,7 @@ impl Node {
             };
             self.carry_out(now, out, verified, draw);
         }
-        self.serve_name(now);
+        self.serve_name(now, draw);
         self.resolver.pass(now, &mut self.stack, &mut self.counters, draw);
     }
 

@@ -282,6 +282,7 @@ pub fn framed(t: &Transmission) -> Vec<u8> {
             Ok(Sent::Frame(n)) => frame = buf[..n].to_vec(),
             other => panic!("{other:?}"),
         }
+        toyos_net_udp::Offer::Taken
     });
     assert_eq!(sent, toyos_net_udp::Served::Last, "the one datagram queued");
     frame

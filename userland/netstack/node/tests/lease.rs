@@ -114,6 +114,37 @@ fn expiry_takes_address_route_and_resolvers_in_one_step() {
     assert!(!wire.answers_arp_for(A));
 }
 
+// The DHCP client's socket has no rule of its own for a next hop. Its renewal is a unicast
+// datagram to the server (RFC 2131 §4.4.5), accepted and kept in the client's socket while [ip]
+// asks for a server nobody answers for, and dropped and counted when [ip] gives the server up:
+// the client is told nothing, keeps its lease and asks again on its own clock. Its rebinding
+// request is a broadcast (§4.4.5), which has no next hop to wait for and leaves.
+#[test]
+fn a_renewal_for_a_server_nobody_answers_for_waits_and_is_dropped_and_the_client_is_told_nothing() {
+    const SERVER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 67);
+    let mut options = terms(600, Some(R));
+    options.retain(|(code, _)| *code != 54);
+    options.push((54, SERVER.octets().to_vec()));
+    let mut wire = Wire::leased(&options);
+    let held = wire.sent.len();
+    let asks = |wire: &Wire| wire.sent[held..].iter().filter(|seen| matches!(seen, Seen::Arp { request: true, target, .. } if *target == SERVER)).count();
+    let dropped = |wire: &Wire| wire.node.shard().udp_counters().get(toyos_net_udp::Counter::TxUnreachable);
+
+    assert!(wire.run_until(Duration::from_secs(400), |wire| asks(wire) == 1), "the renewal's next hop is asked for");
+    let renewed = wire.now;
+    assert_eq!((dropped(&wire), wire.node.counters().get(Counter::DhcpUnsent)), (0, 0), "the renewal was accepted and waits");
+    assert!(wire.run_until(Duration::from_secs(10), |wire| dropped(wire) == 1), "the renewal is dropped");
+    assert_eq!((wire.now, asks(&wire)), (renewed.after(Duration::from_secs(3)), 3), "when [ip] gave the server up");
+    assert!(wire.sent[held..].iter().all(|seen| seen.dhcp().is_none()), "no renewal left");
+    assert!(wire.node.lease().is_some(), "the lease is held, and nothing reached the client");
+
+    assert!(wire.run_until(Duration::from_secs(400), |wire| wire.sent[held..].iter().any(|seen| seen.dhcp().is_some())), "the client asks on");
+    assert!(dropped(&wire) > 1, "a renewal again first, on the client's clock");
+    let Some(Seen::Dhcp { to, source, destination, message }) = wire.sent.last() else { panic!("{:?}", wire.sent.last()) };
+    assert_eq!((*to, *source, *destination, option(message, 53)), (BROADCAST, A, Ipv4Addr::BROADCAST, Some(&[REQUEST][..])), "the rebinding request");
+    assert!(wire.node.lease().is_some());
+}
+
 #[test]
 fn a_nak_takes_address_route_and_resolvers_in_one_step() {
     let mut wire = Wire::leased(&terms(600, Some(R)));
