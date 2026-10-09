@@ -76,8 +76,8 @@ const H512: [u64; 8] = [
 /// §4.1.2's functions.
 fn compress256(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes(bytes.try_into().expect("chunks of four"));
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
     for t in 16..64 {
         let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
@@ -114,8 +114,8 @@ fn compress256(state: &mut [u32; 8], block: &[u8; 64]) {
 /// §4.1.3's functions.
 fn compress512(state: &mut [u64; 8], block: &[u8; 128]) {
     let mut w = [0u64; 80];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(8)) {
-        *word = u64::from_be_bytes(bytes.try_into().expect("chunks of eight"));
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<8>().0) {
+        *word = u64::from_be_bytes(*bytes);
     }
     for t in 16..80 {
         let s0 = w[t - 15].rotate_right(1) ^ w[t - 15].rotate_right(8) ^ (w[t - 15] >> 7);
@@ -193,11 +193,10 @@ macro_rules! hash {
                     $compress(&mut self.state, &self.block);
                     self.filled = 0;
                 }
-                let mut blocks = bytes.chunks_exact($block);
-                for block in &mut blocks {
-                    $compress(&mut self.state, block.try_into().expect("an exact chunk"));
+                let (blocks, rest) = bytes.as_chunks::<$block>();
+                for block in blocks {
+                    $compress(&mut self.state, block);
                 }
-                let rest = blocks.remainder();
                 self.block[..rest.len()].copy_from_slice(rest);
                 self.filled = rest.len();
             }
@@ -217,8 +216,8 @@ macro_rules! hash {
                 self.absorb(&pad[..($block - $length - 1 + $block - self.filled) % $block + 1]);
                 self.absorb(length);
                 let mut out = [0u8; $out];
-                for (bytes, word) in out.chunks_exact_mut(size_of::<$word>()).zip(self.state) {
-                    bytes.copy_from_slice(&word.to_be_bytes());
+                for (bytes, word) in out.as_chunks_mut::<{ size_of::<$word>() }>().0.iter_mut().zip(self.state) {
+                    *bytes = word.to_be_bytes();
                 }
                 out
             }

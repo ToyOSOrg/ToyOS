@@ -13,7 +13,10 @@ fn rsp(name: &str) -> String {
 }
 
 fn unhex(text: &str) -> Vec<u8> {
-    assert!(text.len() % 2 == 0, "{text:?} is not whole bytes of hex");
+    assert!(
+        text.len().is_multiple_of(2),
+        "{text:?} is not whole bytes of hex"
+    );
     (0..text.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))

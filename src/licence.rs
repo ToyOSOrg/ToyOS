@@ -64,6 +64,7 @@ pub const ALLOWED: &[&str] = &[
     "Zlib",
     "0BSD",
     "CC0-1.0",
+    "NIST-PD",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "BSL-1.0",
