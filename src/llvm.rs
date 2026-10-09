@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::buildlock::{Guard, Keyed};
+use crate::buildlock::{Guard, Held, Keyed};
 use crate::compiler::LLVM;
 use crate::keystore::{self, Key};
 use crate::sysroot::{clone_tree, git_bytes, git_out, gitlink};
@@ -255,6 +255,24 @@ fn on_path(name: &str) -> PathBuf {
 /// returned value lives.
 pub fn resolve(root: &Path, store: &Path, fork: &Path) -> Llvm {
     choose(store, fork, |fork| build_in_fork(root, fork))
+}
+
+/// [`resolve`] for a build holding its worktree's lock shared as `lock`: an
+/// LLVM the store lacks is made with that lock held exclusively, so no other
+/// build of the worktree runs in `fork` beside bootstrap's.
+pub fn resolve_held(root: &Path, store: &Path, fork: &Path, lock: &mut Held) -> Llvm {
+    choose_held(store, fork, lock, |fork| build_in_fork(root, fork))
+}
+
+/// [`resolve_held`] with the build passed in, as [`choose`] takes it.
+fn choose_held(store: &Path, fork: &Path, lock: &mut Held, build: impl Fn(&Path) -> PathBuf) -> Llvm {
+    let mut made = None;
+    let lacking = || defect(&Keyed::Llvm.store(store).join(key(fork))).map(drop);
+    lock.act_if("make the host's LLVM", lacking, |()| made = Some(choose(store, fork, &build)));
+    let unbuilt = |_: &Path| -> PathBuf {
+        panic!("the LLVM {} names left the store while this build held its worktree lock shared, which builds none", fork.display())
+    };
+    made.unwrap_or_else(|| choose(store, fork, unbuilt))
 }
 
 /// [`resolve`] with the build that makes an LLVM passed in, so a test can stand
@@ -1113,6 +1131,32 @@ mod tests {
         maker.release();
         let never = |_: &Path| -> PathBuf { panic!("an LLVM another process made was made here too") };
         assert_eq!(defect(&choose(&store, &b.join("rust"), never).dir), None);
+    }
+
+    /// **An LLVM is made only with the worktree lock exclusive, and one the
+    /// store holds is found under the shared lock**: while `a`'s is made, a
+    /// shared acquirer of `a`'s lock is kept out; `b`, whose worktree another
+    /// build holds shared, finds that LLVM without waiting for it to finish.
+    #[test]
+    fn an_llvm_is_made_only_with_the_worktree_lock_exclusive() {
+        let scratch = Scratch::new("llvm-held");
+        let (_primary, store, [_same, a, b]) = estate_built(&scratch);
+        let mut lock = buildlock::shared(&a, "the test's build");
+        let makes = Cell::new(0);
+        let alone = |fork: &Path| {
+            makes.set(makes.get() + 1);
+            assert!(buildlock::tests::keeps_out_shared(&a), "an LLVM was built in {} beside shared holders", fork.display());
+            fake_build(fork)
+        };
+        let made = choose_held(&store, &a.join("rust"), &mut lock, alone);
+        assert_eq!(makes.get(), 1);
+        assert_eq!(defect(&made.dir), None);
+
+        let other = buildlock::tests::shared_elsewhere(&b);
+        let mut lock = buildlock::shared(&b, "the test's build");
+        let never = |_: &Path| -> PathBuf { panic!("an LLVM the store holds was made again") };
+        assert_eq!(choose_held(&store, &b.join("rust"), &mut lock, never).dir, made.dir);
+        other.release();
     }
 
     /// **A sweep takes an LLVM only once nothing has used it for the store's

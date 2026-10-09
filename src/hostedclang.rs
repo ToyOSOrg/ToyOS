@@ -101,9 +101,7 @@ pub fn dispatch(root: &Path) {
     let sysroot = crate::toolchain::ensure(root, &mut lock);
     let fork = crate::sysroot::fork_checkout(root, &mut lock);
     let store = keystore::host();
-    // Inside the worktree lock, which keeps every build in `fork` but an
-    // LLVM's, whose key's lock serialises them, out.
-    let llvm = crate::llvm::resolve(root, &store, &fork);
+    let llvm = crate::llvm::resolve_held(root, &store, &fork, &mut lock);
     let hosted = resolve(&store, &fork, &llvm.dir, sysroot.dir(), &crate::n2::ninja(root));
     for (_, kept) in BINARIES {
         let binary = hosted.dir.join("bin").join(kept);
