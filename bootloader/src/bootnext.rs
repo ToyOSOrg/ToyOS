@@ -15,12 +15,7 @@
 //! that booted us from a removable-media fallback path has no entry of ours at
 //! all and must be told so rather than have one guessed at.
 
-use uefi::prelude::*;
-use uefi::proto::device_path::media::PartitionSignature;
-use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
-use uefi::proto::loaded_image::LoadedImage;
-use uefi::table::runtime::{VariableAttributes, VariableVendor};
-use uefi::CStr16;
+use crate::efi::{cstr16, CStr16, DevicePath, Handle, HardDrive, LoadedImage, SystemTable, VariableAttributes, GLOBAL_VARIABLE};
 
 /// The head of every line this module writes.
 const HEAD: &str = "Boot chain:";
@@ -39,7 +34,7 @@ const LOAD_OPTION_HEAD: usize = 6;
 /// A refusal is not a failure of the boot: the kernel still runs and still seals
 /// its page. What is lost is the *next* boot, so the line says exactly that
 /// rather than reporting a variable write.
-pub fn point_at_us(handle: Handle, system_table: &SystemTable<Boot>) {
+pub fn point_at_us(handle: Handle, system_table: &SystemTable) {
     let Some(ours) = our_partition(handle, system_table) else {
         return println!(
             "{HEAD} firmware did not load this image off a GPT partition, so there is no entry \
@@ -54,7 +49,7 @@ pub fn point_at_us(handle: Handle, system_table: &SystemTable<Boot>) {
     };
     let write = system_table.runtime_services().set_variable(
         cstr16!("BootNext"),
-        &VariableVendor::GLOBAL_VARIABLE,
+        &GLOBAL_VARIABLE,
         // Non-volatile, because it has to survive the reset that is the whole point.
         VariableAttributes::NON_VOLATILE
             | VariableAttributes::BOOTSERVICE_ACCESS
@@ -71,24 +66,21 @@ pub fn point_at_us(handle: Handle, system_table: &SystemTable<Boot>) {
 }
 
 /// The GPT partition GUID of the volume firmware loaded this image from.
-fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<[u8; 16]> {
+fn our_partition(handle: Handle, system_table: &SystemTable) -> Option<[u8; 16]> {
     let bs = system_table.boot_services();
-    let image = crate::protocol::exclusive::<LoadedImage>(bs, handle).ok()?;
+    let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = crate::protocol::exclusive::<DevicePath>(bs, device).ok()?;
-    hard_drive_guid(path.node_iter())
+    let path = bs.exclusive::<DevicePath>(device).ok()?;
+    hard_drive_guid(path.nodes())
 }
 
 /// The GPT signature of the first HARDDRIVE node in a device path, or `None`
 /// where the path has none — a network boot, or a disk with no GPT.
-fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a uefi::proto::device_path::DevicePathNode>) -> Option<[u8; 16]> {
-    for node in nodes {
-        if node.full_type() != (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE) {
-            continue;
-        }
-        let hd = <&uefi::proto::device_path::media::HardDrive>::try_from(node).ok()?;
-        if let PartitionSignature::Guid(guid) = hd.partition_signature() {
-            return Some(guid.to_bytes());
+fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a [u8]>) -> Option<[u8; 16]> {
+    for node in nodes.filter(|node| (node[0], node[1]) == HardDrive::TYPE) {
+        let hd = HardDrive::parse(node)?;
+        if hd.signature_type == HardDrive::GUID_SIGNATURE {
+            return Some(hd.signature);
         }
     }
     None
@@ -98,17 +90,16 @@ fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a uefi::proto::device_path:
 ///
 /// Every entry is read rather than only those in `BootOrder`: an entry the owner
 /// has moved out of the order is still ours and still the one to come back to.
-fn entry_for(system_table: &SystemTable<Boot>, ours: &[u8; 16]) -> Option<u16> {
+fn entry_for(system_table: &SystemTable, ours: &[u8; 16]) -> Option<u16> {
     let rt = system_table.runtime_services();
     let keys = rt.variable_keys().ok()?;
     let mut found: Option<u16> = None;
-    for key in keys {
-        if key.vendor != VariableVendor::GLOBAL_VARIABLE {
+    for (name, vendor) in keys {
+        if vendor != GLOBAL_VARIABLE {
             continue;
         }
-        let Ok(name) = key.name() else { continue };
-        let Some(number) = entry_number(name) else { continue };
-        let Ok((bytes, _)) = rt.get_variable_boxed(name, &key.vendor) else { continue };
+        let Some(number) = entry_number(&name) else { continue };
+        let Ok((bytes, _)) = rt.get_variable(&name, &vendor) else { continue };
         if !load_option_names(&bytes, ours) {
             continue;
         }
@@ -121,7 +112,7 @@ fn entry_for(system_table: &SystemTable<Boot>, ours: &[u8; 16]) -> Option<u16> {
 
 /// `Boot0003` is entry 3; anything else here is some other global variable.
 fn entry_number(name: &CStr16) -> Option<u16> {
-    let mut chars = name.iter().map(|c| char::from(*c));
+    let mut chars = name.units().iter().map(|&unit| char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER));
     for want in ENTRY_PREFIX.chars() {
         if chars.next()? != want {
             return None;
@@ -162,7 +153,7 @@ fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
         // A node shorter than its own header, or longer than what is left, ends
         // the walk: neither can be stepped over.
         let Some(this) = path.get(..len).filter(|_| len >= NODE_HEADER) else { return false };
-        if this[0] == MEDIA_HARD_DRIVE.0 && this[1] == MEDIA_HARD_DRIVE.1 {
+        if (this[0], this[1]) == HardDrive::TYPE {
             if let Some(guid) = gpt_signature(this) {
                 return guid == *ours;
             }
@@ -175,18 +166,8 @@ fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
 /// A device path node's type, subtype and length (UEFI 2.10 §10.2).
 const NODE_HEADER: usize = 4;
 
-/// The MEDIA/HARD_DRIVE node this looks for, as the two bytes it is on the wire.
-const MEDIA_HARD_DRIVE: (u8, u8) = (4, 1);
-
-/// A HARD_DRIVE node's GPT signature, or `None` where it names an MBR one or
-/// the node is short (UEFI 2.10 §10.3.6: the signature is sixteen bytes at
-/// offset 24, and `SignatureType` 2 is the GPT one).
+/// A HARD_DRIVE node's GUID signature, or `None` where it carries another or
+/// is not the length §10.3.5.1 gives it.
 fn gpt_signature(node: &[u8]) -> Option<[u8; 16]> {
-    const SIGNATURE: usize = 24;
-    const SIGNATURE_TYPE: usize = 41;
-    const GPT: u8 = 2;
-    if node.get(SIGNATURE_TYPE) != Some(&GPT) {
-        return None;
-    }
-    node.get(SIGNATURE..SIGNATURE + 16)?.try_into().ok()
+    HardDrive::parse(node).filter(|hd| hd.signature_type == HardDrive::GUID_SIGNATURE).map(|hd| hd.signature)
 }

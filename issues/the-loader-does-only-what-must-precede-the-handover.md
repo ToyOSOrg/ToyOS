@@ -13,7 +13,9 @@ The owner's bounds:
 - the kernel calls no UEFI service, and every UEFI call ToyOS makes is the
   loader's, before `ExitBootServices` (root `CLAUDE.md`);
 - the anti-rollback floor counts a signed security version, raised only by a
-  release that fixes a security hole.
+  release that fixes a security hole;
+- the loader calls UEFI through its own bindings (`bootloader/src/efi/`),
+  never the `uefi` crate's (the owner's ruling on the dependency audit).
 
 PR #539 does not land. Its pieces:
 
@@ -145,11 +147,8 @@ Each stage lands on its own, in this order.
    (`fwvars::live` in `tests/common/fwvars.rs`): each floor's name and its
    UEFI 2.10 §8.2 attributes.
 
-4. **The loader on current `uefi`, sound, with a typed handover.**
-   - `uefi` and `uefi-raw` move to their current releases, and `uefi-services`
-     goes. The unsafe `BlockIO` media cast in `rootimage.rs` goes with the old
-     layout.
-   - The loader's own `#[panic_handler]` writes `loader: panicked at
+4. **The loader sound, with a typed handover.**
+   - The loader's `#[panic_handler]` writes `loader: panicked at
      <file>:<line>: <message>` through `loaderlog`, then powers the machine
      off. It never resets: a panic with a fixed cause would reset into itself.
      The refused-floor site stops writing its reason to `loader.log` before
@@ -181,11 +180,11 @@ Each stage lands on its own, in this order.
      change.
    - `toyos-update`'s slot table takes `toyos-gpt`'s CRC32 and loses its own.
 
-   **Exit**: `bootloader/Cargo.toml` names no `uefi-services`.
-   `loader_panic_powers_off` plants this key's floor in 9 bytes. It finds the
+   **Exit**: `loader_panic_powers_off` plants this key's floor in 9 bytes. It finds the
    handler's `loader: panicked at bootloader/src/` line in `loader.log`, which
    no other code writes, and QEMU reports `guest-shutdown`. It fails under
-   `uefi::helpers`' handler, which writes no `loader.log`.
+   the handler `bootloader/src/efi/mod.rs` holds before this stage, which
+   writes no `loader.log`.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
    words before any `black box:` record. Moving `layout` after
