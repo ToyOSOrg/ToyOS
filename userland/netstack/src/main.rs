@@ -582,6 +582,7 @@ impl Netstack {
             Some(MsgType::UdpClose) => self.handle_udp_close(&req, socket_set),
             Some(MsgType::DnsLookup) => self.handle_dns_lookup(req, socket_set),
             Some(MsgType::TcpSetOption) => self.handle_tcp_set_option(&req, socket_set),
+            Some(MsgType::TcpListenerSetOption) => self.handle_tcp_listener_set_option(&req, socket_set),
             Some(MsgType::UdpSetOption) => self.handle_udp_set_option(&req),
             Some(MsgType::TcpConnectPiped) => self.handle_tcp_connect_piped(req, socket_set, iface),
             Some(MsgType::TcpBindPiped) => self.handle_tcp_bind_piped(&req, socket_set),
@@ -870,6 +871,24 @@ impl Netstack {
         }
     }
 
+    fn handle_tcp_listener_set_option(&mut self, msg: &Request, socket_set: &mut SocketSet<'_>) {
+        let Ok(req) = ipc::decode_payload::<SocketOptionRequest>(msg.payload()) else {
+            msg.client.error(ERR_INVALID_INPUT);
+            return;
+        };
+        let Some(listener) = self.piped_listeners.get_mut(&req.socket_id) else {
+            msg.client.error(ERR_NOT_CONNECTED);
+            return;
+        };
+        match req.option {
+            OPT_NODELAY => {
+                listener.listening.set_nodelay(socket_set.get_mut::<tcp::Socket>(listener.handle), req.value != 0);
+                msg.client.done();
+            }
+            _ => msg.client.error(ERR_INVALID_INPUT),
+        }
+    }
+
     /// smoltcp sends to a broadcast address for every socket, so the
     /// permission has nothing here to switch.
     fn handle_udp_set_option(&self, msg: &Request) {
@@ -989,20 +1008,17 @@ impl Netstack {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-        if socket.listen(port).is_err() {
-            msg.client.error(ERR_ADDR_IN_USE);
-            return;
-        }
+        let listening = listen::Listening::new(port, req.options.nodelay());
+        // Before the socket is in the set, so before a SYN can reach it. A
+        // fresh socket and a port that is not zero: neither refusal `listen`
+        // has can be this one.
+        listening.open(&mut socket);
 
         let handle = socket_set.add(socket);
         let socket_id = self.alloc_id();
         self.sockets.insert(socket_id, SocketKind::TcpListener(handle));
 
-        self.piped_listeners.insert(socket_id, PipedListener {
-            handle,
-            notify_write,
-            listening: listen::Listening::new(port),
-        });
+        self.piped_listeners.insert(socket_id, PipedListener { handle, notify_write, listening });
 
         msg.client.result(&TcpBindResponse {
             socket_id,
@@ -1043,7 +1059,9 @@ impl Netstack {
             }
         };
 
-        let remote = socket_set.get_mut::<tcp::Socket>(old_handle).remote_endpoint().unwrap();
+        let accepted = socket_set.get_mut::<tcp::Socket>(old_handle);
+        let remote = accepted.remote_endpoint().unwrap();
+        let options = TcpOptions::new(!accepted.nagle_enabled());
         let remote_addr = match remote.addr {
             IpAddress::Ipv4(a) => a.octets(),
         };
@@ -1057,24 +1075,20 @@ impl Netstack {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let mut new_listener = tcp::Socket::new(rx_buf, tx_buf);
-        // A fresh socket on the port an established one holds: neither refusal
-        // `listen` has (port 0, a socket not closed) can be this one.
-        new_listener
-            .listen(local_port)
-            .unwrap_or_else(|e| panic!("netstack: a fresh socket refused to listen on {local_port}: {e:?}"));
-        let new_handle = socket_set.add(new_listener);
-        self.sockets.insert(req.socket_id, SocketKind::TcpListener(new_handle));
-
-        self.piped_listeners
+        let listener = self
+            .piped_listeners
             .get_mut(&req.socket_id)
-            .expect("looked up above; nothing between there and here removes a piped_listeners entry")
-            .handle = new_handle;
+            .expect("looked up above; nothing between there and here removes a piped_listeners entry");
+        listener.listening.open(&mut new_listener);
+        listener.handle = socket_set.add(new_listener);
+        self.sockets.insert(req.socket_id, SocketKind::TcpListener(listener.handle));
 
         msg.client.result(&TcpAcceptPipedResponse {
             socket_id: stream_id,
             remote_addr,
             remote_port: remote.port,
             local_port,
+            options,
         });
     }
 

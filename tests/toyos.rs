@@ -134,6 +134,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a NIC in front of netstack and a host server behind it:
     // `netstack_socket_churn` runs it on `tests/netcase`.
     "netstack_socket_churn",
+    // It needs a host that dials its listeners when it says they wait:
+    // `libc_sockets` runs it on `tests/netcase`.
+    "nodelay_accepted",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -261,9 +264,9 @@ const MACHINE_TESTS: &[&str] = &[
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
     "netstack_socket_churn",
-    // What libc's socket calls ask of netstack, read back from a peer that
-    // answers: the calls are libc's requests on netstack's port, netstack has
-    // no host build, and the T14's peer is the bench's network.
+    // What libc's and std's socket calls ask of netstack, read back from a
+    // peer that answers: the calls are requests on netstack's port, netstack
+    // has no host build, and the T14's peer is the bench's network.
     "libc_sockets",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
@@ -2981,7 +2984,7 @@ fn boot_netcase(
 
 /// Have the guest's network carry what dials a loopback port of QEMU's
 /// choosing to each of `guest_ports`: those host ports, in that order.
-fn forwards_into(qemu: &QemuInstance, guest_ports: [u16; 2]) -> Result<[u16; 2], String> {
+fn forwards_into<const N: usize>(qemu: &QemuInstance, guest_ports: [u16; N]) -> Result<[u16; N], String> {
     const FORWARD: &str = "TCP[HOST_FORWARD]";
     let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
     for port in guest_ports {
@@ -2994,7 +2997,7 @@ fn forwards_into(qemu: &QemuInstance, guest_ports: [u16; 2]) -> Result<[u16; 2],
     // A row is the protocol, a descriptor, the host's address and port, then
     // the guest's.
     let table = monitor.human("info usernet");
-    let mut host_ports = [0u16; 2];
+    let mut host_ports = [0u16; N];
     for (host, guest) in host_ports.iter_mut().zip(guest_ports) {
         *host = table
             .lines()
@@ -3006,19 +3009,18 @@ fn forwards_into(qemu: &QemuInstance, guest_ports: [u16; 2]) -> Result<[u16; 2],
     Ok(host_ports)
 }
 
-/// libc's sockets as a C program uses them, on one boot of `tests/netcase`:
-/// each of its C cases dials a host server that holds what it accepts, or
-/// sends to one that answers each datagram with itself, at the address the
-/// guest's network gives the host; and once `nodelay_kept` says its two
-/// listeners wait, the host dials each through a port QEMU forwards. A case's
-/// own comparisons are its verdict.
+/// libc's sockets as a C program uses them and std's as a Rust one does, on
+/// one boot of `tests/netcase`: each job dials a host server that holds what
+/// it accepts, or sends to one that answers each datagram with itself, at the
+/// address the guest's network gives the host; and each time a job says its
+/// listeners wait, the host dials them through the ports QEMU forwards. A
+/// job's own comparisons are its verdict.
 fn libc_sockets() -> Result<(), String> {
     const HOST: &str = "10.0.2.2";
-    /// The ports `nodelay_kept` listens on in the guest, which nothing else
-    /// on its boot binds.
-    const LISTENERS: [u16; 2] = [7001, 7002];
-    /// `nodelay_kept.c`'s `WAITING`.
-    const WAITING: &str = "nodelay_kept: both listeners wait for a peer";
+    /// The ports `nodelay_kept` and then `nodelay_accepted` listen on in the
+    /// guest, which nothing else on its boot binds.
+    const LISTENERS: [u16; 4] = [7001, 7002, 7003, 7004];
+    const RUST_JOB: &str = "nodelay_accepted";
     let holding = holding_server()?;
     let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
     let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
@@ -3030,27 +3032,50 @@ fn libc_sockets() -> Result<(), String> {
         }
     });
 
-    // The address first: every case names its peer by one.
-    let [held, clear] = LISTENERS;
-    let cases = [
-        ("addr_order", holding.to_string()),
-        ("nodelay_kept", format!("{holding} {held} {clear}")),
-        ("sendto_unbound", answering.to_string()),
-    ];
     let case = compile::repo_root().join("tests/netcase");
-    let bins: Vec<(String, Vec<u8>)> = cases
-        .iter()
-        .map(|(name, _)| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
-        .collect();
-    let mut qemu = boot_netcase(&bins, &[], BootOptions { qmp: true, ..Default::default() })?;
-    let forwarded = forwards_into(&qemu, LISTENERS)?;
-    // Held to the test's end: a peer gone before the case's `accept` fails its hand-over.
+    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound"]
+        .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
+        .into();
+    let rust_bin =
+        qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), RUST_JOB);
+    let mut qemu =
+        boot_netcase(&c_bins, &[(RUST_JOB.to_string(), rust_bin)], BootOptions { qmp: true, ..Default::default() })?;
+    let [held, clear, std_port, pipe_port] = LISTENERS;
+    let [to_held, to_clear, to_std, to_pipe] = forwards_into(&qemu, LISTENERS)?;
+    /// Each line a job says its listeners wait in, the constants of its
+    /// source, and the forwarded ports the host dials when it does.
+    type Waits<'a> = &'a [(&'a str, &'a [u16])];
+    // The address first: every job names its peer by one.
+    let jobs: [(&str, String, Waits); 4] = [
+        ("test_c_addr_order", holding.to_string(), &[]),
+        (
+            "test_c_nodelay_kept",
+            format!("{holding} {held} {clear}"),
+            &[
+                ("nodelay_kept: both listeners wait for a peer", &[to_held, to_clear]),
+                ("nodelay_kept: both listeners wait for a second peer", &[to_held, to_clear]),
+            ],
+        ),
+        ("test_c_sendto_unbound", answering.to_string(), &[]),
+        (
+            "test_rs_nodelay_accepted",
+            format!("{holding} {std_port} {pipe_port}"),
+            &[
+                ("nodelay_accepted: both listeners wait for a peer", &[to_std, to_pipe]),
+                ("nodelay_accepted: the listener waits for a second peer", &[to_pipe]),
+            ],
+        ),
+    ];
+    // Held to the test's end: a peer gone before a job's `accept` is a
+    // connection its listener no longer holds.
     let mut dialled = Vec::new();
-    for (name, ports) in cases {
-        let result =
-            qemu.run_test_hooked(&format!("test_c_{name} {HOST} {ports}"), Duration::from_secs(120), WAITING, |_| {
-                dialled.extend(forwarded.map(|port| std::net::TcpStream::connect(("127.0.0.1", port))));
-            });
+    for (job, ports, waits) in jobs {
+        let name = job.trim_start_matches("test_c_").trim_start_matches("test_rs_");
+        let result = qemu.run_test_paced(&format!("{job} {HOST} {ports}"), Duration::from_secs(120), |_, line| {
+            for (_, dial) in waits.iter().filter(|(waiting, _)| line.trim_end().ends_with(waiting)) {
+                dialled.extend(dial.iter().map(|&port| std::net::TcpStream::connect(("127.0.0.1", port))));
+            }
+        });
         if let Some(Err(e)) = dialled.iter().find(|dial| dial.is_err()) {
             return Err(format!("{name}: the host could not dial a port QEMU forwards to the guest: {e}"));
         }
@@ -3058,7 +3083,7 @@ fn libc_sockets() -> Result<(), String> {
             eprintln!("  [libc] {name} ended {:?} and said:\n{}", result.exit_code, result.stdout);
         }
         if let Some(why) = &result.error {
-            return Err(format!("{name}: {why}\nthe case said:\n{}", result.stdout));
+            return Err(format!("{name}: {why}\nthe job said:\n{}", result.stdout));
         }
         if result.exit_code != Some(0) {
             return Err(format!("{name} ended {:?}:\n{}", result.exit_code, result.stdout));

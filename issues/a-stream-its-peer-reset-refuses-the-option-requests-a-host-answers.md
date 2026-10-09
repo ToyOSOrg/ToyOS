@@ -30,16 +30,16 @@ request is not the fix: a client that dies sends none, and netstack, having
 closed its pipe ends, has nothing left that says the client is gone.
 
 libc's `connect` asks the same request of a connection it has just been
-answered, to hand over a `TCP_NODELAY` set before it, and its `accept` of one
-it has just been given, to hand over its listener's: a peer that resets
-between netstack's answer and that request makes either fail `ENOTCONN`, with
-the connection closed, which no host's `connect` or `accept` answers.
+answered, to hand over a `TCP_NODELAY` set before it: a peer that resets
+between netstack's answer and that request makes it fail `ENOTCONN`, with the
+connection closed, which no host's `connect` answers. Its `accept` asks
+nothing after its answer, which carries the connection's option.
 
 **Exit condition**: a guest test on `tests/netcase` whose peer resets a stream
 the client still holds, and `nodelay()` on it answers `Ok`, with
 `netstack_socket_churn` still green; and the two compromises above ended: the
 option request on a stream its peer reset is answered by netstack, and a libc
-`connect` and a libc `accept` whose peer resets before the hand-over answer as
-the host does, each held by a test that can be red.
+`connect` whose peer resets before the hand-over answers as the host does,
+held by a test that can be red.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`.
