@@ -35,7 +35,7 @@ pub use fadt::{
     FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK,
 };
 use fadt::FADT_DSDT;
-pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3, IORT_NEEDED};
+pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3};
 pub use madt::{
     isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,

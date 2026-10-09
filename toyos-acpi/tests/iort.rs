@@ -299,7 +299,7 @@ fn a_node_revision_whose_layout_was_not_read_is_refused() {
     for (kind, node, known, unknown) in [
         (0u8, its(0), &[1u8][..], &[0u8, 2][..]),
         (2, root_complex(0, &[]), &[3, 4], &[2, 5]),
-        (4, smmu(&[]), &[4, 5], &[3, 6]),
+        (4, smmu_with(5, 0, WIRED, 0, &[]), &[4, 5], &[3, 6]),
     ] {
         for &revision in known {
             assert_eq!(revised(node.clone(), revision), None, "type {kind} revision {revision}");
@@ -450,9 +450,99 @@ fn a_single_mapping_that_is_not_its_smmus_own_is_refused() {
     let own = smmu_with(5, INDEX_VALID, WIRED, 0, &[[0, 0, 0x30, ITS_AT, 1]]);
     assert_eq!(refusal(&behind(own.clone())), None);
     assert_eq!(onward(&behind(own)), None);
-    // An index past the array names no entry: every mapping there is routes.
+    // An index past the array names no entry, and is no reading that routes.
     let past = behind(smmu_with(5, INDEX_VALID, WIRED, 1, &[[0, 0xff, 0x100, ITS_AT, 0]]));
-    assert_eq!(onward(&past), Some(ItsDevice { its: 7, device: 0x108 }));
+    assert_eq!(refusal(&past), Some(IortRefused::OwnMapping { at: 72, index: 1, count: 1 }));
+}
+
+#[test]
+fn an_smmus_own_mapping_index_at_or_past_its_id_array_is_refused() {
+    let one = [[0, 0xff, 0x100, ITS_AT, 0]];
+    for index in [1, 2, u32::MAX] {
+        let past = behind(smmu_with(5, INDEX_VALID, WIRED, index, &one));
+        assert_eq!(refusal(&past), Some(IortRefused::OwnMapping { at: 72, index, count: 1 }), "index {index}");
+    }
+    assert_eq!(
+        refusal(&behind(smmu_with(5, INDEX_VALID, WIRED, 0, &[]))),
+        Some(IortRefused::OwnMapping { at: 72, index: 0, count: 0 })
+    );
+    // Revision 4 reads the index wherever a control interrupt has no GSIV.
+    let unwired = [106, 0, 109, 108];
+    assert_eq!(
+        refusal(&behind(smmu_with(4, 0, unwired, 1, &one))),
+        Some(IortRefused::OwnMapping { at: 72, index: 1, count: 1 })
+    );
+    // Where the node says the field is ignored, no value of it is refused.
+    for (revision, flags, gsivs) in [(5, 0, WIRED), (5, 0, [0; 4]), (4, INDEX_VALID, WIRED)] {
+        let ignored = behind(smmu_with(revision, flags, gsivs, 1, &one));
+        assert_eq!(onward(&ignored), Some(ItsDevice { its: 7, device: 0x108 }), "revision {revision}");
+    }
+}
+
+/// Requesters `0x00..=0x0f` to streams `0x10..=0x1f` of the SMMUv3 at `SMMU_AT`.
+const FIRST: [u32; 5] = [0, 0xf, 0x10, SMMU_AT, 0];
+
+fn alone(stream: u32) -> Result<Route, IortRefused> {
+    Ok(Route::Translated { smmu: plain_smmu(), stream, its: None })
+}
+
+fn shared(stream: u32, at: u32) -> Result<Route, IortRefused> {
+    Err(IortRefused::SharedStream { stream, at: at as usize })
+}
+
+#[test]
+fn a_stream_another_mapping_puts_out_to_the_same_smmu_is_refused() {
+    // Two RID ranges of one root complex onto `0x18..=0x1f`, and a third onto the streams after.
+    let t = three(&[FIRST, [0x100, 0xf, 0x18, SMMU_AT, 0], [0x200, 0xf, 0x28, SMMU_AT, 0]], &[]);
+    assert_eq!(route(&t, 0, 0x7), alone(0x17));
+    assert_eq!(route(&t, 0, 0x8), shared(0x18, ROOT_AT));
+    assert_eq!(route(&t, 0, 0xf), shared(0x1f, ROOT_AT));
+    assert_eq!(route(&t, 0, 0x100), shared(0x18, ROOT_AT));
+    assert_eq!(route(&t, 0, 0x107), shared(0x1f, ROOT_AT));
+    assert_eq!(route(&t, 0, 0x108), alone(0x20));
+    assert_eq!(route(&t, 0, 0x200), alone(0x28));
+
+    // Two segments onto the same streams of one unit.
+    const SECOND: u32 = ROOT_AT + 56;
+    let segments = table(5, &[its(7), smmu(&[]), root_complex(0, &[FIRST]), root_complex(1, &[FIRST])]);
+    assert_eq!(route(&segments, 0, 8), shared(0x18, SECOND));
+    assert_eq!(route(&segments, 1, 8), shared(0x18, ROOT_AT));
+
+    // The same stream numbers of another unit are another unit's streams.
+    let units = table(
+        5,
+        &[its(7), smmu(&[]), root_complex(0, &[FIRST]), smmu(&[]), root_complex(1, &[[0, 0xf, 0x10, SECOND, 0]])],
+    );
+    assert_eq!(route(&units, 0, 8), alone(0x18));
+    assert_eq!(route(&units, 1, 8), alone(0x18));
+
+    // A node of a type not decoded is a requester too: a named component's single mapping
+    // puts out its base alone, whatever its span.
+    let named = |reference| node(1, 4, &[0; 12], &[[0, 0xf, 0x18, reference, 1]]);
+    let t = table(5, &[its(7), smmu(&[]), root_complex(0, &[FIRST]), named(SMMU_AT)]);
+    assert_eq!(route(&t, 0, 8), shared(0x18, SECOND));
+    assert_eq!(route(&t, 0, 7), alone(0x17));
+    assert_eq!(route(&t, 0, 9), alone(0x19));
+    // To an ITS, `0x18` is a DeviceID and no stream.
+    assert_eq!(route(&table(5, &[its(7), smmu(&[]), root_complex(0, &[FIRST]), named(ITS_AT)]), 0, 8), alone(0x18));
+}
+
+/// [`Iort::check`] places only the ID arrays of the types it decodes; a stream
+/// is judged alone only once every other node's array is read where its
+/// header puts it.
+#[test]
+fn a_stream_is_not_judged_alone_past_an_id_array_out_of_its_node() {
+    const NAMED: usize = (ROOT_AT + 56) as usize;
+    let at = |offset: u32, count: u32| {
+        let mut named = node(1, 4, &[0; 12], &[[0, 0, 0x30, ITS_AT, 1]]);
+        named[8..12].copy_from_slice(&count.to_le_bytes());
+        named[12..16].copy_from_slice(&offset.to_le_bytes());
+        route(&table(5, &[its(7), smmu(&[]), root_complex(0, &[FIRST]), named, its(9)]), 0, 8)
+    };
+    assert_eq!(at(28, 1), alone(0x18));
+    assert_eq!(at(28, 2), Err(IortRefused::Mappings { at: NAMED, count: 2, offset: 28 }));
+    assert_eq!(at(0, 1), Err(IortRefused::Mappings { at: NAMED, count: 1, offset: 0 }));
+    assert_eq!(at(12, 1), Err(IortRefused::Mappings { at: NAMED, count: 1, offset: 12 }));
 }
 
 /// `virt`'s four GSIVs: every control interrupt wired.
@@ -636,4 +726,24 @@ fn opening_a_table_and_routing_a_requester_each_read_it_a_bounded_number_of_time
     let routed = reads.replace(0);
     assert!(routed <= bytes.len() / 8, "routing through {} bytes read {routed}", bytes.len());
     assert_eq!(opened.route(ROOTS, 0), Ok(Route::Unmapped));
+
+    // Every mapping to one SMMUv3, each onto streams of its own: a stream is
+    // judged alone by one more walk of the nodes and their mappings.
+    let mut nodes: Vec<Vec<u8>> = vec![smmu(&[])];
+    nodes.extend((0..ROOTS).map(|segment| {
+        let mappings: Vec<[u32; 5]> =
+            (0..40).map(|i| [i * 16, 15, (segment * 40 + i) * 16, 48, 0]).collect();
+        root_complex(segment, &mappings)
+    }));
+    let bytes = table(5, &nodes);
+    let regions: &[(u64, &[u8])] = &[(0x800, &head), (0x1000, &root), (TABLE_AT, &bytes)];
+    let opened = iort(Counted { machine: Machine { regions }, reads: &reads }, 0x800).expect("a table of 500 nodes");
+    reads.set(0);
+    let stream = ((ROOTS - 1) * 40 + 39) * 16 + 15;
+    assert_eq!(
+        opened.route(ROOTS - 1, 39 * 16 + 15),
+        Ok(Route::Translated { smmu: plain_smmu(), stream, its: None })
+    );
+    let routed = reads.get();
+    assert!(routed <= 2 * bytes.len(), "routing through {} bytes read {routed}", bytes.len());
 }

@@ -28,10 +28,9 @@ the two registers' offsets are `kernel/src/arch/aarch64/irqchip.rs`'s: one
 register's fields have two crates. `toyos_its::TRANSLATION_FRAME` and
 `toyos_gicv3::FRAME` are both the GIC's 64 KiB frame.
 
-**Owner.** The ARM desktop gate's next two stages, on
-`issues/toyos-runs-on-arm64.md`'s stage 6: the SMMUv3 unit, which writes
-these tables from `kernel/src/arch/aarch64/` beside `paging.rs`, owns the
-descriptor; the ITS, which edits `irqchip.rs` and reads `GICR_TYPER` for
+**Owner.** `issues/toyos-runs-on-arm64.md`'s stage 6: the SMMUv3 unit, which
+writes these tables from `kernel/src/arch/aarch64/` beside `paging.rs`, owns
+the descriptor; the ITS, which edits `irqchip.rs` and reads `GICR_TYPER` for
 every CPU, owns the redistributor.
 
 **Exit.** Each bit and the level index has one declaration that the kernel's

@@ -21,7 +21,7 @@ use crate::{find_table, Phys, Table, TableError, SDT_HEADER_LEN, SDT_REVISION};
 /// 40, one reserved word, and the node array no earlier than that.
 const NODE_COUNT: usize = SDT_HEADER_LEN;
 const NODE_ARRAY: usize = SDT_HEADER_LEN + 4;
-pub const IORT_NEEDED: usize = SDT_HEADER_LEN + 12;
+const IORT_NEEDED: usize = SDT_HEADER_LEN + 12;
 
 /// The table revisions decoded: 5 is issue E.d's, 6 issues E.e's and E.f's and
 /// 7 issue E.g's. Each carries a revision in every node, which is what a
@@ -91,8 +91,15 @@ pub enum IortRefused {
     /// may hold: issue E.g fixes the count at 1, and nothing here routes to
     /// a group.
     ItsGroup { at: usize, count: u32 },
+    /// An SMMUv3 whose node says it has a DeviceID mapping of its own names
+    /// no entry of its ID array: Table 13's index is into that array.
+    OwnMapping { at: usize, index: u32, count: u32 },
     /// Two mappings claim this ID, which the table must route one way.
     Overlap { id: u32 },
+    /// The requester's StreamID is put out to its SMMUv3 by another mapping
+    /// too, of the node at `at`: another requester's transactions arrive
+    /// under it, and a domain attached to the stream would be theirs as well.
+    SharedStream { stream: u32, at: usize },
 }
 
 impl From<TableError> for IortRefused {
@@ -136,10 +143,10 @@ pub struct ItsDevice {
 /// Where one requester's transactions go.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
-    /// Through this SMMUv3 under `stream`; `its` is where the SMMU's own node
-    /// maps that stream on to, and `None` where it maps it nowhere. The
-    /// unit's own DeviceID (Table 13, `DeviceID mapping index`) is no
-    /// stream's.
+    /// Through this SMMUv3 under `stream`, which no other mapping of the table
+    /// puts out to that unit; `its` is where the SMMU's own node maps that
+    /// stream on to, and `None` where it maps it nowhere. The unit's own
+    /// DeviceID (Table 13, `DeviceID mapping index`) is no stream's.
     Translated { smmu: Smmuv3, stream: u32, its: Option<ItsDevice> },
     /// Straight to an ITS, past every SMMU.
     Untranslated(ItsDevice),
@@ -225,7 +232,7 @@ impl<P: Phys> Iort<P> {
                 }
             }
         }
-        let Some((root, (mapping, id))) = hit else {
+        let Some((root, (index, mapping, id))) = hit else {
             return Ok(Route::Unmapped);
         };
         match self.output(root, mapping)? {
@@ -239,11 +246,12 @@ impl<P: Phys> Iort<P> {
                 }
                 let its = match onward {
                     None => None,
-                    Some((mapping, device)) => match self.output(unit, mapping)? {
+                    Some((_, mapping, device)) => match self.output(unit, mapping)? {
                         (_, Node::Its { id: its }) => Some(ItsDevice { its, device }),
                         _ => return Err(IortRefused::Output { at: unit.at, reference: mapping.reference }),
                     },
                 };
+                self.alone(unit, (root.at, index), id)?;
                 Ok(Route::Translated { smmu, stream: id, its })
             }
             _ => Err(IortRefused::Output { at: root.at, reference: mapping.reference }),
@@ -271,13 +279,39 @@ impl<P: Phys> Iort<P> {
         }
     }
 
-    /// The mappings of `raw` that hold `id`, each with the ID it puts out.
-    fn hits(&self, raw: Raw, id: u32) -> impl Iterator<Item = (Mapping, u32)> + '_ {
+    /// The mappings of `raw` that hold `id`, each with its index and the ID
+    /// it puts out.
+    fn hits(&self, raw: Raw, id: u32) -> impl Iterator<Item = (u32, Mapping, u32)> + '_ {
         let own = self.own(raw);
         (0..raw.mappings).filter(move |index| Some(*index) != own).filter_map(move |index| {
             let mapping = self.mapping(raw, index)?;
-            Some((mapping, mapping.maps(id)?))
+            Some((index, mapping, mapping.maps(id)?))
         })
+    }
+
+    /// Refuses `stream` of the SMMUv3 `unit` where any mapping but `by` —
+    /// mapping `by.1` of the node at `by.0` — puts it out to that unit,
+    /// whatever its node's type: one walk of the nodes and their mappings.
+    fn alone(&self, unit: Raw, by: (usize, u32), stream: u32) -> Result<(), IortRefused> {
+        for raw in self.raw_nodes() {
+            let raw = raw?;
+            let Raw { at, mappings: count, array: offset, .. } = raw;
+            // [`Iort::check`] placed the arrays of the types it decodes; a
+            // type it does not is held to Table 4's header and its own length.
+            let end = u64::from(offset) + u64::from(count) * MAPPING as u64;
+            if count != 0 && ((offset as usize) < NODE_HEADER || end > raw.len as u64) {
+                return Err(IortRefused::Mappings { at, count, offset });
+            }
+            for index in (0..count).filter(|index| (at, *index) != by) {
+                let mapping = self.mapping(raw, index).ok_or(IortRefused::Mappings { at, count, offset })?;
+                let last = if mapping.single { 0 } else { mapping.span };
+                let reaches = stream >= mapping.output && stream - mapping.output <= last;
+                if reaches && mapping.reference as usize == unit.at {
+                    return Err(IortRefused::SharedStream { stream, at });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Walks by each node's own length, which [`Iort::raw`] bounds below by
@@ -400,6 +434,9 @@ impl<P: Phys> Iort<P> {
             return Err(IortRefused::Mappings { at, count, offset });
         }
         let own = self.own(raw);
+        if let Some(index) = own.filter(|index| *index >= count) {
+            return Err(IortRefused::OwnMapping { at, index, count });
+        }
         for index in (0..count).filter(|index| Some(*index) != own) {
             let mapping = self.mapping(raw, index).ok_or(IortRefused::Mappings { at, count, offset })?;
             if mapping.single {
