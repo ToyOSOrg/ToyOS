@@ -366,6 +366,8 @@ fn main() {
     const TOKEN_PENDING_BASE: u64 = 0x1_0000;
 
     let mut pending: Vec<PendingConn> = Vec::new();
+    // Accepts the kernel refused since the last it did not.
+    let mut accept_refused: u64 = 0;
 
     loop {
         // First, because it is what makes the interrupt taken and what gives
@@ -434,6 +436,7 @@ fn main() {
                 ready.push(token);
             }
         });
+        sockets.bridge(&mut node, clock());
 
         // On a pass that found nothing ready too: otherwise a silent client
         // is only ever timed out by some other client's traffic.
@@ -449,8 +452,27 @@ fn main() {
         // Accept and the request are two events. Nothing is read here: a client
         // that connects and then says nothing costs a slot and a deadline, not
         // the network stack.
-        if ready.contains(&TOKEN_ACCEPTOR) {
-            let conn = acceptor.accept().expect("accept failed");
+        // A connection the kernel would not hand over is gone from its
+        // queue, and its client told: the first of a run is named, and the
+        // next accept says how many followed it.
+        let accepted = match ready.contains(&TOKEN_ACCEPTOR).then(|| acceptor.accept()) {
+            Some(Err(why)) => {
+                if accept_refused == 0 {
+                    say!("netstack: the kernel refused a client's connection: {why:?}");
+                }
+                accept_refused = accept_refused.saturating_add(1);
+                None
+            }
+            Some(Ok(conn)) => {
+                if accept_refused > 1 {
+                    say!("netstack: accepting again, after {accept_refused} connections the kernel refused");
+                }
+                accept_refused = 0;
+                Some(conn)
+            }
+            None => None,
+        };
+        if let Some(conn) = accepted {
             if pending.len() >= MAX_PENDING_CONNS as usize {
                 say!(
                     "netstack: refusing client {} — {MAX_PENDING_CONNS} connections are already \

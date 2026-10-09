@@ -13,7 +13,9 @@
 //! that names nothing, or a socket of another kind, is refused
 //! `ERR_NOT_CONNECTED`, a payload that is not the request's struct, a port of
 //! zero and a name that is none `ERR_INVALID_INPUT`, and a length is a bound
-//! on a read and never an allocation's size past what one frame carries.
+//! on a read and never an allocation's size past what one frame carries. A
+//! request that waits holds its client's connection, so what waits is
+//! bounded: one receive a socket, a second refused `ERR_RESOURCE_EXHAUSTED`.
 //! Nothing a client sends panics netstack.
 //!
 //! **An id is a number any client can name**
@@ -92,7 +94,6 @@ struct Ends {
 /// A client waiting for a datagram to reach its socket.
 struct Receiving {
     client: Client,
-    socket_id: u32,
     max_len: u32,
 }
 
@@ -106,9 +107,14 @@ pub struct Sockets {
     /// told.
     connecting: BTreeMap<StreamId, (Client, u32)>,
     lookups: Vec<(LookupId, Client, toyos_dns::Name)>,
-    receiving: Vec<Receiving>,
+    /// At most one receive waits on a socket, so a client's requests alone
+    /// hold no more of netstack's handles than its sockets do.
+    receiving: BTreeMap<u32, Receiving>,
     /// The places the node was given.
     places: usize,
+    /// A stream's pipe was answered ready in this wake: one pass over the
+    /// streams follows the wake, however many answers it carried.
+    bridge: bool,
 }
 
 /// The two ends a connect or an accept moves, each split into the node's half
@@ -155,7 +161,8 @@ fn connect_refused(refusal: ConnectRefused) -> u32 {
 
 /// A handshake that ended without a connection. The pipe ABI has a word for a
 /// peer's refusal, its reset and its silence, and none for an ICMP error's:
-/// those are named in the log and answered `ERR_OTHER`.
+/// those are named in the log and answered `ERR_OTHER`
+/// (`issues/the-pipe-abi-has-no-word-for-an-unreachable-host-or-a-lookup-to-try-again.md`).
 fn connect_failed(failure: Failure) -> u32 {
     match failure {
         Failure::Refused => ERR_CONNECTION_REFUSED,
@@ -206,8 +213,9 @@ impl Sockets {
             by_stream: BTreeMap::new(),
             connecting: BTreeMap::new(),
             lookups: Vec::new(),
-            receiving: Vec::new(),
+            receiving: BTreeMap::new(),
             places,
+            bridge: false,
         }
     }
 
@@ -307,8 +315,9 @@ impl Sockets {
             return;
         };
         let known = match req.how {
-            // The receiving half alone.
-            0 => node.nodelay(id).is_some(),
+            // The receiving half alone: std keeps its state, and the id names
+            // a stream.
+            0 => true,
             1 | 2 => node.shutdown_write(now, id),
             _ => {
                 msg.client.error(ERR_INVALID_INPUT);
@@ -514,9 +523,17 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let waiting = Receiving { client: msg.client, socket_id: req.socket_id, max_len: req.max_len };
-        if let Some(waiting) = self.deliver(node, now, waiting) {
-            self.receiving.push(waiting);
+        // A waiting client that hung up holds the socket's one wait for nobody.
+        if let Some(waiting) = self.receiving.remove(&req.socket_id) {
+            if !waiting.client.gone() {
+                self.receiving.insert(req.socket_id, waiting);
+                msg.client.error(ERR_RESOURCE_EXHAUSTED);
+                return;
+            }
+        }
+        let waiting = Receiving { client: msg.client, max_len: req.max_len };
+        if let Some(waiting) = self.deliver(node, now, req.socket_id, waiting) {
+            self.receiving.insert(req.socket_id, waiting);
         }
     }
 
@@ -527,8 +544,8 @@ impl Sockets {
     /// The answer names a length, and a write takes what the pipe has room
     /// for and cannot be taken back: a client reading that length out of a
     /// pipe holding part of this datagram would splice the next one onto it.
-    fn deliver(&mut self, node: &mut Node, now: Instant, waiting: Receiving) -> Option<Receiving> {
-        let Some(socket) = self.datagram(waiting.socket_id) else {
+    fn deliver(&mut self, node: &mut Node, now: Instant, socket_id: u32, waiting: Receiving) -> Option<Receiving> {
+        let Some(socket) = self.datagram(socket_id) else {
             waiting.client.error(ERR_NOT_CONNECTED);
             return None;
         };
@@ -554,11 +571,10 @@ impl Sockets {
             return None;
         }
         say!(
-            "netstack: ending UDP socket {} — its receive pipe answered {wrote:?} to a {}-byte datagram",
-            waiting.socket_id,
+            "netstack: ending UDP socket {socket_id} — its receive pipe answered {wrote:?} to a {}-byte datagram",
             datagram.len
         );
-        if let Some(Socket::Datagram(socket)) = self.ids.remove(&waiting.socket_id) {
+        if let Some(Socket::Datagram(socket)) = self.ids.remove(&socket_id) {
             self.end_datagram(node, now, socket);
         }
         waiting.client.error(ERR_CONNECTION_RESET);
@@ -610,9 +626,9 @@ impl Sockets {
     /// the clients that waited for it, and the table entries of what the node
     /// let go.
     pub fn settle(&mut self, node: &mut Node, now: Instant) {
-        for waiting in std::mem::take(&mut self.receiving) {
-            if let Some(waiting) = self.deliver(node, now, waiting) {
-                self.receiving.push(waiting);
+        for (socket_id, waiting) in std::mem::take(&mut self.receiving) {
+            if let Some(waiting) = self.deliver(node, now, socket_id, waiting) {
+                self.receiving.insert(socket_id, waiting);
             }
         }
 
@@ -652,7 +668,8 @@ impl Sockets {
                 Err(Ended::Failed(Dns::TimedOut)) => client.error(ERR_TIMED_OUT),
                 // No query found a way out, or the lease the lookup asked
                 // under went: this machine is on no network that answers the
-                // name, which a lease clears.
+                // name, which a lease clears. Neither is that word's (see
+                // `connect_failed`).
                 Err(Ended::Failed(Dns::Unreachable) | Ended::LeaseChanged) => client.error(ERR_NOT_CONNECTED),
                 Err(Ended::Failed(why @ (Dns::Truncated | Dns::ServerFailed(_) | Dns::TooManyAliases))) => {
                     say!("netstack: a lookup of {name} ended without an answer: {why:?}");
@@ -767,7 +784,7 @@ impl Sockets {
                         node.pipe_broken(now, ends.stream, end);
                     }
                     Ok(met) if met & OTHER_END_GONE != 0 => node.pipe_gone(now, ends.stream, end),
-                    Ok(_) => node.bridge(now),
+                    Ok(_) => self.bridge = true,
                 }
             }
             TOKEN_LISTENER => {
@@ -806,6 +823,13 @@ impl Sockets {
             _ => return false,
         }
         true
+    }
+
+    /// The pass over the streams the last wake's answers asked for, once.
+    pub fn bridge(&mut self, node: &mut Node, now: Instant) {
+        if std::mem::take(&mut self.bridge) {
+            node.bridge(now);
+        }
     }
 
     /// The socket table as `inspect` reads it: counts, and no endpoint,

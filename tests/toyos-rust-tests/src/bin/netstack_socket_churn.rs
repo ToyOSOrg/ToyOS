@@ -25,7 +25,8 @@
 //!
 //! argv[3] is the port of a third, which answers each datagram with itself. A
 //! receive is asked of netstack before any datagram has been sent, so it waits
-//! there, and is answered by the datagram the server sends back.
+//! there, and is answered by the datagram the server sends back; a second
+//! receive on that socket while the first waits is refused.
 //!
 //! Last, connects to the holding server until netstack refuses one: it holds
 //! as many places as it said it has, and the connect past them is answered
@@ -107,6 +108,8 @@ fn a_receive_that_waits_is_answered(port: u16) {
     // netstack reads its clients' requests in the order they connected, so
     // this answer says the receive above is waiting there.
     count("net.sockets.udp");
+    let second = toyos::net::udp_recv_from(socket.socket_id, 64);
+    assert_eq!(second.err(), Some(NetError::ResourceExhausted), "a second receive on a socket whose first waits");
     assert_eq!(socket.tx.write_nonblock(SAID), Ok(SAID.len()), "a datagram into the socket's send pipe");
     toyos::net::udp_send_to(socket.socket_id, HOST, port, SAID.len() as u16)
         .unwrap_or_else(|e| panic!("sending to the answering server: {e:?}"));
