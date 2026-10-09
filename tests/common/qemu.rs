@@ -685,6 +685,11 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
+    /// [`Profile::Headless`] with QEMU's `e1000e` for its NIC, the 82574L
+    /// `toyos-i219` drives beside the T14's I219: the one guest in which
+    /// netstack runs its Intel driver, a ring of fifteen frames and a wake
+    /// for transmit room.
+    HeadlessE1000e,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
@@ -731,6 +736,7 @@ impl Profile {
             Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
+            | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
             | Self::Metal => Arch::X86_64,
         }
@@ -815,6 +821,8 @@ impl Virtio {
 enum Nic {
     Absent,
     Virtio,
+    /// QEMU's model of the 82574L.
+    E1000e,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -937,6 +945,7 @@ impl Profile {
                 rng: false,
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
+            Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
         }
     }
@@ -2185,6 +2194,9 @@ fn qemu_command(
             qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
+        }
+        Nic::E1000e => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("e1000e,netdev=net0");
         }
     }
     if shape.virtio.present() {

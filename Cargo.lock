@@ -3212,12 +3212,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
-name = "managed"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3362,14 +3356,20 @@ dependencies = [
 name = "netstack"
 version = "0.0.0"
 dependencies = [
- "smoltcp",
  "toyos",
  "toyos-abi",
  "toyos-device-memory",
+ "toyos-dhcp",
  "toyos-dns",
  "toyos-i219",
  "toyos-inspect",
  "toyos-mdns",
+ "toyos-net-ip",
+ "toyos-net-node",
+ "toyos-net-shard",
+ "toyos-net-tcp",
+ "toyos-net-udp",
+ "toyos-net-wire",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -5213,20 +5213,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "smoltcp"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad095989c1533c1c266d9b1e8d70a1329dd3723c3edac6d03bbd67e7bf6f4bb"
-dependencies = [
- "bitflags 1.3.2",
- "byteorder",
- "cfg-if",
- "defmt 0.3.100",
- "heapless",
- "managed",
 ]
 
 [[package]]
