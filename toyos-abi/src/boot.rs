@@ -1,5 +1,6 @@
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+// No `Debug`: one `{:?}` of these would print the loader's seed.
+#[derive(Clone, Copy)]
 pub struct KernelArgs {
     pub memory_map_addr: u64,
     pub memory_map_size: u64,

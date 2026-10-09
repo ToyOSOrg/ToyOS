@@ -258,7 +258,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_el1_smp", qemu::Profile::VirtTcg),
     ("virt_failed_ap_leaves_no_hole", qemu::Profile::Virt),
     ("virt_fatal_halts_the_others_first", qemu::Profile::Virt),
-    ("virt_reboot", qemu::Profile::Virt),
+    // Emulated at EL2: its last word comes through the same stop, and it is
+    // the one test of `SYSTEM_RESET` through the SMC conduit.
+    ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer

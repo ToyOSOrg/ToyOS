@@ -162,6 +162,31 @@ fn bytes_of_another_length_are_no_seed() {
     assert_eq!(Seed::judge(&long).err(), Some(Refusal::Length(33)));
 }
 
+/// The place a seed was handed in holds zeros once it is taken, on every arm:
+/// accepted, refused for its bytes, refused for its length, and none handed.
+#[test]
+fn a_taken_seed_leaves_zeros_where_it_was_handed() {
+    /// What is handed, its length, and the judgment the take owes it.
+    type Arm = ([u8; SEED_LEN], u64, Option<Result<(), Refusal>>);
+    let judged = |taken: &Option<Result<Seed, Refusal>>| taken.as_ref().map(|seed| seed.as_ref().map(|_| ()).map_err(|why| *why));
+    let arms: [Arm; 5] = [
+        (seed_bytes(4), 32, Some(Ok(()))),
+        ([0xab; SEED_LEN], 32, Some(Err(Refusal::Constant))),
+        (seed_bytes(5), 16, Some(Err(Refusal::Length(16)))),
+        (seed_bytes(6), 33, Some(Err(Refusal::Length(33)))),
+        (seed_bytes(7), 0, None),
+    ];
+    for (handed, len, want) in arms {
+        let (mut bytes, mut at) = (handed, len);
+        let taken = Seed::take(&mut bytes, &mut at);
+        assert_eq!(judged(&taken), want, "{len} bytes handed");
+        assert_eq!((bytes, at), ([0; SEED_LEN], 0), "{len} bytes handed");
+        if let Some(Ok(seed)) = taken {
+            assert_eq!(seed.0, handed, "the seed taken is the bytes handed");
+        }
+    }
+}
+
 /// The construction, block by block: the key is the mix block of the unkeyed
 /// constant XOR the seed; a draw's block under it gives the next key and the
 /// stream's; the stream is ChaCha20 under its own key from block 0.

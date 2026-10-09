@@ -294,22 +294,34 @@ Each stage names its exit; "measured" means a number from a run.
    answers from a virtio-rng (`kernel/src/random.rs`); `virt_el2_drop`,
    `virt_smp` and `virt_jobs_at_el2`, one boot of the job case with the timer
    and FP jobs in it, stay emulated at EL2, which HVF gives no guest, and
-   three more stay emulated until
+   `virt_reboot` and three more stay emulated at EL2 until
    `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`
    is fixed. Each judges an event, never a rate: no QEMU test measures time.
+   **Accepted with the move to HVF:** `virt_user_mode`, `virt_irq_storm`,
+   `virt_timer_floor`, `virt_failed_ap_leaves_no_hole` and
+   `virt_fatal_halts_the_others_first` no longer boot entered at EL2. The
+   entry's drop from EL2 stays judged by `virt_el2_drop`, `virt_smp` and
+   `virt_jobs_at_el2`, and PSCI through the SMC conduit by `virt_smp`
+   (`CPU_ON`, `CPU_OFF`, `SYSTEM_OFF`) and `virt_reboot` (`SYSTEM_RESET`);
+   what those five judge after the entry is the same kernel at EL1 either way.
    Owed before the exit holds: the interrupts-off window against x86's, a
    measurement only metal can make, with no instrument on either arch yet; the
    instruction-cache maintenance before a mapping is executable
    (`cache::make_executable`), the break-before-make ordering of a live
    entry's replacement, and the TLB flush before a reclaimed ASID is issued
-   again, which QEMU's TCG cannot fail on. Under HVF since the entropy stage:
+   again, which QEMU's TCG cannot fail on. Under HVF since the entropy stage
    every program the `virt_` tests run at EL0 is mapped executable through
-   `cache::make_executable`, and whatever those tests reach of a live entry's
-   replacement runs there too, with no test red; that is no proof of either,
-   since a stale instruction or a TLB conflict is not certain to show in one
-   boot, and which tests replace a live entry is not measured. No test issues
-   enough address spaces to reclaim an ASID, so that flush has still run on
-   no oracle that can fail it. And the three deletions shown red. They are shown red on a machine whose
+   `cache::make_executable`, with no test red, which is no proof: a stale
+   instruction is not certain to show in one boot. Each of the three closes
+   on a guest test under HVF that is red with its step deleted, and stays
+   owed with that test until one is: for `make_executable`, a program that
+   runs code it wrote over code it ran at the same address, on a host whose
+   `CTR_EL0.DIC` the test reads and says clear; for break-before-make, two
+   CPUs, one reading a page whose live entry the other replaces with
+   another frame's, every read the old frame's value or the new one's; for
+   the ASID flush, a test kernel whose ASIDs an actuator bounds to two, and
+   three processes each reading back its own frame at one address. And the
+   three deletions shown red. They are shown red on a machine whose
    firmware leaves the registers otherwise, or by a loader that writes the
    opposite values before the handoff. The ITS moves to stage 6: a claimed
    function is its only consumer the small-kernel track leaves, and it needs that
@@ -343,7 +355,8 @@ Each stage names its exit; "measured" means a number from a run.
    in each of 131 boots of the entropy stage's measurement, all eight online
    and scheduling every time, and `virt_failed_ap_leaves_no_hole` and
    `virt_fatal_halts_the_others_first` start theirs under HVF in the suite;
-   nothing shows the clean deleted red.
+   it stays owed until `virt_el1_smp` under HVF is shown red with the clean
+   deleted.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the

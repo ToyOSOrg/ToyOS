@@ -81,6 +81,21 @@ impl Seed {
         }
         Ok(Seed(*bytes))
     }
+
+    /// The seed another program handed over as `len` of `bytes`, judged, with
+    /// both zero when this returns whatever the judgment: `None` where `len` is
+    /// zero, which hands nothing and is no refusal.
+    pub fn take(bytes: &mut [u8; SEED_LEN], len: &mut u64) -> Option<Result<Seed, Refusal>> {
+        let handed = usize::try_from(*len).unwrap_or(usize::MAX);
+        let taken = match bytes.get(..handed) {
+            Some([]) => None,
+            Some(handed) => Some(Seed::judge(handed)),
+            None => Some(Err(Refusal::Length(handed))),
+        };
+        wipe(bytes);
+        wipe(core::slice::from_mut(len));
+        taken
+    }
 }
 
 impl Drop for Seed {

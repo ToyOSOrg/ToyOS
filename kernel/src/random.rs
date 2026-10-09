@@ -59,14 +59,11 @@ pub fn key(loader: &mut KernelArgs, copy: &mut KernelArgs) {
         Err(why) => log!("random: {name} is not mixed: {why}"),
     };
 
-    match usize::try_from(copy.loader_seed_len).ok().and_then(|len| copy.loader_seed.get(..len)) {
-        Some([]) => log!("random: {LOADER} is not mixed: the loader handed none"),
-        Some(bytes) => mix(LOADER, Seed::judge(bytes)),
-        None => mix(LOADER, Err(Refusal::Length(copy.loader_seed_len as usize))),
-    }
-    for args in [loader, copy] {
-        wipe(&mut args.loader_seed);
-        args.loader_seed_len = 0;
+    // The loader's own arguments hold the same bytes: taken only to zero them.
+    drop(Seed::take(&mut loader.loader_seed, &mut loader.loader_seed_len));
+    match Seed::take(&mut copy.loader_seed, &mut copy.loader_seed_len) {
+        None => log!("random: {LOADER} is not mixed: the loader handed none"),
+        Some(seed) => mix(LOADER, seed),
     }
 
     for source in entropy::SOURCES {

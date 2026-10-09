@@ -2232,8 +2232,8 @@ fn qemu_command(
     }
     if let Some(trace) = &options.psci_trace {
         assert!(
-            arch == Arch::Aarch64 && accel != Accel::Kvm,
-            "a PSCI trace is QEMU's `arm_psci_call`, and under KVM the host's kernel answers PSCI"
+            arch == Arch::Aarch64 && accel == Accel::Tcg,
+            "a PSCI trace is TCG's `arm_psci_call`, and this profile's PSCI is not QEMU's TCG"
         );
         qemu.arg("-trace").arg("arm_psci_call").arg("-D").arg(trace);
     }
