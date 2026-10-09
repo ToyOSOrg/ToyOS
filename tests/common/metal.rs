@@ -211,6 +211,9 @@ pub struct Readback {
     pub stick_secs: u64,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
+    /// Where the loop's wall time went, or why the boot file names no phases:
+    /// a readback written before the loop timed them.
+    phases: Result<toyos_build::metal::Phases, String>,
     /// What was measured on this boot and no owner has taken yet
     /// ([`Self::taken`]).
     numbers: RefCell<BTreeMap<String, u64>>,
@@ -235,6 +238,7 @@ impl Readback {
             stick_secs,
             machine: toyos_build::metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
+            phases: toyos_build::metal::phases(boot),
             numbers: RefCell::new(BTreeMap::new()),
         })
     }
@@ -1107,6 +1111,10 @@ pub fn judge_readbacks(
             back.back_secs,
             back.stick_secs
         );
+        match &back.phases {
+            Ok(phases) => eprintln!("    phases: {phases}"),
+            Err(why) => eprintln!("    phases: its boot file {why}"),
+        }
         let panel = back.panel();
         if let Some(panel) = panel {
             eprintln!(
