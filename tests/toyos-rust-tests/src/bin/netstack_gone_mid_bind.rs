@@ -53,7 +53,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::endow::EndowError;
 use toyos::net::{
-    MsgType, NetError, NetstackConn, SocketCloseRequest, TcpBindPipedRequest, TcpBindResponse,
+    MsgType, NetError, NetstackConn, SocketCloseRequest, TcpBindPipedRequest, TcpBindResponse, TcpOptions,
 };
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
@@ -203,7 +203,7 @@ fn mid_flight(request: Request) -> ! {
                 .request_with_handles(
                     [netstack_notify.into()],
                     MsgType::TcpBindPiped,
-                    &TcpBindPipedRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0 },
+                    &TcpBindPipedRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0, options: TcpOptions::new(false) },
                 )
                 .and_then(|pending| pending.response::<TcpBindResponse>().map(|_| ()))
                 .expect_err("a bind into a port whose acceptor is gone was answered");

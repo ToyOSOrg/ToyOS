@@ -1502,40 +1502,14 @@ impl QemuInstance {
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
-        self.run_test_hooked(name, timeout, "", |_| {})
-    }
-
-    /// `run_test`, with `action` run once the guest prints `ready_line`.
-    ///
-    /// The hook is inside the read loop because that is the only place the
-    /// two facts meet: the guest is holding the keyboard claim, and the host has
-    /// not injected yet. A sleep would be a guess in both directions.
-    pub fn run_test_hooked(
-        &mut self,
-        name: &str,
-        timeout: Duration,
-        ready_line: &str,
-        action: impl FnOnce(&Path),
-    ) -> TestResult {
-        let mut action = Some(action);
-        self.run_test_paced(name, timeout, |socket, line| {
-            if ready_line.is_empty() || !line.contains(ready_line) {
-                return;
-            }
-            if let Some(action) = action.take() {
-                action(socket.expect("run_test_hooked needs BootOptions { qmp: true }"));
-            }
-        })
+        self.run_test_paced(name, timeout, |_, _| {})
     }
 
     /// `run_test`, with `step` run on every console line the guest prints.
     ///
-    /// [`Self::run_test_hooked`] injects a whole sequence in one call and holds
-    /// the reader while it does, so the host runs at its own speed and what
-    /// reaches the guest is whatever survived the queues in between — a packet
-    /// the guest was never given reads exactly like one it lost. A step driven
-    /// by the guest's own output can stay behind it, which is how an injection
-    /// test costs a slow guest wall-clock instead of a verdict.
+    /// A step driven by the guest's own output can stay behind it, which is
+    /// how an injection test costs a slow guest wall-clock instead of a
+    /// verdict.
     pub fn run_test_paced(
         &mut self,
         name: &str,

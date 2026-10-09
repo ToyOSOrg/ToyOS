@@ -106,7 +106,7 @@ impl Net {
             wire,
             sockets,
             listener,
-            listening: Listening::new(PORT),
+            listening: Listening::new(PORT, false),
             sent: Vec::new(),
             now: Instant::from_millis(0),
             arp: true,
