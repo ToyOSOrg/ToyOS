@@ -149,10 +149,6 @@ impl Node {
         true
     }
 
-    pub fn listener_nodelay(&self, id: ListenerId) -> Option<bool> {
-        self.listeners.live.get(&id).map(|listener| listener.options.nodelay)
-    }
-
     /// The owner's accept: the oldest connection waiting at `id` becomes a stream on `pipes`,
     /// and what it already received moves at once.
     pub fn accept(&mut self, now: Instant, id: ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {

@@ -383,12 +383,10 @@ impl Net {
         answer.map(|accepted| (accepted, client))
     }
 
-    /// An accept that takes `peer`'s connection, which the answer and the node say the same
-    /// option of.
+    /// An accept that takes `peer`'s connection.
     fn accepts(&mut self, id: ListenerId, peer: Peer) -> (StreamId, Client) {
         let (accepted, client) = self.accept(id).expect("a connection and a place");
         assert_eq!((accepted.remote, accepted.local), (peer.endpoint(), Port::new(SSH).unwrap()));
-        assert_eq!(Some(accepted.nodelay), self.node.nodelay(accepted.id), "the accept's answer and the stream it made");
         (accepted.id, client)
     }
 
@@ -463,10 +461,7 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
     assert_eq!((wakes(&owner), client.borrow().dropped), (1, 0));
 }
 
-// The recorded failure of `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md`:
-// one SYN and nothing more, and the stack this one replaces answered the next peer's SYN with a
-// reset for as long as the first handshake hung, which was for good. Here the next peer is
-// answered at once, and the first handshake is given up within [tcp]'s bound, after which its
+// One SYN and nothing more: the next peer is answered at once, and the first handshake is given up within [tcp]'s bound, after which its
 // late ACK meets LISTEN: RFC 9293 §3.10.7.2, second check, <SEQ=SEG.ACK><CTL=RST>.
 #[test]
 fn a_handshake_nobody_finishes_leaves_the_port_open_and_is_given_up() {
@@ -852,15 +847,14 @@ fn a_datagram_socket_holds_a_place_and_a_bind_without_one_makes_nothing() {
 fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     let mut net = Net::new();
     let (id, _owner) = net.listen(SSH);
-    assert_eq!(net.node.listener_nodelay(id), Some(false));
     // One connection begins before the option is set and one after; both are accepted after.
     net.handshake(P1);
     assert!(net.node.set_listener_nodelay(id, true));
     net.handshake(P2);
-    assert_eq!(net.node.listener_nodelay(id), Some(true));
-    let (first, a) = net.accepts(id, P1);
-    let (second, b) = net.accepts(id, P2);
-    assert_eq!((net.node.nodelay(first), net.node.nodelay(second)), (Some(false), Some(true)));
+    let (first, a) = net.accept(id).unwrap();
+    let (second, b) = net.accept(id).unwrap();
+    assert_eq!((first.remote, first.nodelay, second.remote, second.nodelay), (P1.endpoint(), false, P2.endpoint(), true));
+    let (first, second) = (first.id, second.id);
     for client in [&a, &b] {
         net.says(client, b"a");
         net.says(client, b"b");
@@ -875,18 +869,17 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     assert!(net.node.set_nodelay(net.now, first, true));
     net.pump();
     assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "and the first stream's second waits no longer");
-    assert_eq!((net.node.nodelay(first), net.node.nodelay(second), net.node.listener_nodelay(id)), (Some(true), Some(false), Some(true)));
 
     assert!(net.node.set_listener_nodelay(id, false));
     net.handshake(P3);
-    let (third, c) = net.accepts(id, P3);
-    assert_eq!((net.node.nodelay(third), net.node.nodelay(first)), (Some(false), Some(true)));
+    let (third, c) = net.accept(id).unwrap();
+    assert_eq!((third.remote, third.nodelay), (P3.endpoint(), false));
     net.says(&c, b"a");
     net.says(&c, b"b");
     assert_eq!(net.texts(P3), [b"a".to_vec()]);
 
     assert!(net.node.close_listener(net.now, id));
-    assert_eq!((net.node.set_listener_nodelay(id, true), net.node.listener_nodelay(id)), (false, None));
+    assert!(!net.node.set_listener_nodelay(id, true), "a closed listener's id names nothing");
 }
 
 // A listen names its listener's option, so no SYN reaches the port between the passive open and
@@ -896,10 +889,9 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
 fn a_listener_holds_the_option_its_listen_named_from_its_first_connection() {
     let mut net = Net::new();
     let (id, _owner) = net.listen_with(SSH, true);
-    assert_eq!(net.node.listener_nodelay(id), Some(true));
     net.handshake(P1);
     let (accepted, client) = net.accept(id).unwrap();
-    assert_eq!((accepted.nodelay, net.node.nodelay(accepted.id)), (true, Some(true)));
+    assert!(accepted.nodelay);
     net.says(&client, b"a");
     net.says(&client, b"b");
     assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
@@ -907,14 +899,13 @@ fn a_listener_holds_the_option_its_listen_named_from_its_first_connection() {
     assert!(net.node.set_listener_nodelay(id, false));
     net.handshake(P2);
     let (accepted, _client) = net.accept(id).unwrap();
-    assert_eq!((accepted.nodelay, net.node.listener_nodelay(id)), (false, Some(false)), "a listen's option is the listener's to change");
+    assert!(!accepted.nodelay, "a listen's option is the listener's to change");
 }
 
 // A handshake its peer resets before it ends (RFC 9293 §3.10.7.4, first check, in SYN-RECEIVED)
 // leaves nothing of its options behind: the listener's option changed while it was in progress,
 // and the next connection begins with what the listener holds when its own SYN arrives. Both
-// ways round, since the stack this one replaces keeps the reset handshake's option for the next
-// connection (`issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`).
+// ways round.
 #[test]
 fn a_handshake_reset_before_it_ends_leaves_the_next_connection_its_listeners_option() {
     for held in [true, false] {
@@ -927,7 +918,6 @@ fn a_handshake_reset_before_it_ends_leaves_the_next_connection_its_listeners_opt
         net.handshake(P2);
         let (accepted, _client) = net.accept(id).unwrap();
         assert_eq!((accepted.remote, accepted.nodelay), (P2.endpoint(), !held), "the listener held {held} at the reset handshake's SYN");
-        assert_eq!((net.node.nodelay(accepted.id), net.node.listener_nodelay(id)), (Some(!held), Some(!held)));
 
         // And a set while the reset handshake was in progress, taken back before the next SYN.
         net.syn(P3);
@@ -952,8 +942,7 @@ impl ToClient for BrokenEnd {
 
 // The accept's own pass moves what the connection already received, and a pipe that refuses it
 // for good ends the stream there (RFC 9293 §3.10.7.4's reset is the peer's notice). The answer
-// still says what the stream was handed over with, where `Node::nodelay` of its id has no stream
-// left to answer for.
+// still says what the stream was handed over with, though no stream is left to answer for it.
 #[test]
 fn an_accept_answers_the_option_of_a_stream_its_own_pass_let_go() {
     let mut net = Net::new();
@@ -965,7 +954,7 @@ fn an_accept_answers_the_option_of_a_stream_its_own_pass_let_go() {
     net.pump();
     assert!(net.last(P1).rst, "{:?}", net.heard);
     assert_eq!((accepted.remote, accepted.nodelay), (P1.endpoint(), true));
-    assert_eq!((net.node.nodelay(accepted.id), net.node.streams(), client.borrow().dropped), (None, 0, 2));
+    assert_eq!((net.node.streams(), client.borrow().dropped), (0, 2));
 }
 
 // `streams` counts a stream its client can see no more by its peer's address, and lets an
@@ -1024,12 +1013,11 @@ fn a_request_for_a_stream_that_was_cut_names_nothing() {
     net.node.close(net.now, cut);
     assert!(!net.node.shutdown_write(net.now, cut));
     assert!(!net.node.set_nodelay(net.now, cut, true));
-    assert_eq!(net.node.nodelay(cut), None);
     net.node.pipe_gone(net.now, cut, PipeEnd::FromClient);
     net.node.pipe_broken(net.now, cut, PipeEnd::FromClient);
     net.pump();
     assert_eq!((net.node.streams(), net.node.held(), other.borrow().dropped, wakes(&owner)), (1, 2, 0, 2), "the stream in its place stands");
-    assert_eq!((net.node.nodelay(next), net.heard.len(), net.events()), (Some(false), said, vec![]));
+    assert_eq!((net.heard.len(), net.events()), (said, vec![]));
 }
 
 // The track's exit for the bound across peer addresses. `streams` lets each address keep
