@@ -244,8 +244,8 @@ rust-lang/llvm-project, Apache-2.0 WITH LLVM-exception like upstream's; the
 toolchain release carries the clang, `lld` and LLVM tools built from it.
 
 
-/system/etc/ssl/cert.pem — the Mozilla root program, CDLA-Permissive-2.0
-------------------------------------------------------------------------
+licenses/CDLA-Permissive-2.0-webpki-root-certs.txt — the Mozilla roots, CDLA-Permissive-2.0
+-------------------------------------------------------------------------------------------
 
 Every image carries the authorities of Mozilla's root program as the
 `webpki-root-certs` crate publishes them, a derived work of the CCADB's data,

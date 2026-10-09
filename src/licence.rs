@@ -556,8 +556,8 @@ const PROSE: &[(&str, &str)] = &[
         "every crate, fork or not, is judged by the crate half of this gate",
     ),
     (
-        "/system/etc/ssl/cert.pem — the Mozilla root program, CDLA-Permissive-2.0",
-        "the build writes it out of a crate, judged with the text beside it by `judge_trust_roots`",
+        "licenses/CDLA-Permissive-2.0-webpki-root-certs.txt — the Mozilla roots, CDLA-Permissive-2.0",
+        "the roots the build writes out of a crate are judged, with this text beside them, by `judge_trust_roots`",
     ),
 ];
 
