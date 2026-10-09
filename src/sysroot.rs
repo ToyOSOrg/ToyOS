@@ -92,12 +92,13 @@ const SOURCES: &str = "SOURCES";
 /// What changes how a key's sources become its libraries and its sysroot and
 /// is none of them, nor std's configuration ([`std_config`]), which the
 /// freestanding key reads whole. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp, libtoyos_c merged, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp, refused where its \
+                      compiler miscompiles what `src/miscompile.rs` holds, libtoyos_c merged, \
                       a C sysroot of libc's staticlib, the empty libraries beside it, headers and \
                       CMake's description of ToyOS per target, refused unless a C program naming \
                       each library links against it, and its C++ runtime built under n2 from the \
                       runtimes' sources of the compiler's LLVM, the freestanding libraries cloned \
-                      from their key's; 13";
+                      from their key's; 14";
 
 /// Whose sources a guest target's libraries compile.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -764,6 +765,9 @@ fn build(root: &Path, store: &Path, compiler: &Compiler, fork: &Path, keys: &Key
                 }
             }
         }
+        let miscompiles = dir.with_extension("miscompile");
+        crate::miscompile::refuse(partial, &miscompiles);
+        let _ = fs::remove_dir_all(&miscompiles);
         let libc_target = dir.with_extension("libc-target");
         for arch in Arch::ALL {
             crate::libc::build(root, partial, &libc_target, arch);
