@@ -6,9 +6,8 @@
 //! its sending half down at once, while it reads them back, and compares each:
 //! more than a pipe and both of the stack's buffers hold, so a byte lost,
 //! repeated or moved where either side made the other wait shows as the first
-//! that differs. It reads the bytes it sent and not the stream's end, which
-//! std reads as a reset behind a shutdown
-//! (`issues/a-netstack-client-cannot-tell-a-reset-from-the-peers-fin.md`).
+//! that differs. After the last byte it reads the stream's end: the server's
+//! FIN, which std reads as an end and not a reset behind the shutdown.
 //!
 //! argv[2] is a port the job listens on. It says so and takes no connection
 //! until its listener's pipe has given up two wakes: the harness dials twice,
@@ -67,7 +66,11 @@ fn bulk(port: u16) {
         read += len;
     }
     writer.join().expect("the writer");
-    println!("netstack_streams: {BULK} bytes went out and came back as sent");
+    match reading.read(&mut chunk) {
+        Ok(0) => {}
+        ended => panic!("the read after the bulk's last byte answered {ended:?} and not the stream's end"),
+    }
+    println!("netstack_streams: {BULK} bytes went out and came back as sent, then the stream's end");
 }
 
 fn two_peers(port: u16) {
