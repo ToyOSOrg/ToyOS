@@ -872,8 +872,8 @@ mod checks {
     }
 
     #[test]
-    fn metal_boot_with_a_failure_of_its_own_adds_no_row() {
-        metal_checks::a_boot_with_a_failure_of_its_own_adds_no_row();
+    fn metal_number_fails_with_its_owner_alone() {
+        metal_checks::a_number_fails_with_its_owner_alone();
     }
 
     #[test]
@@ -882,8 +882,8 @@ mod checks {
     }
 
     #[test]
-    fn metal_name_two_boots_measured_is_refused() {
-        metal_checks::a_name_two_boots_measured_is_refused();
+    fn metal_name_two_owners_measured_is_refused() {
+        metal_checks::a_name_two_owners_measured_is_refused();
     }
 
     #[test]
@@ -897,8 +897,8 @@ mod checks {
     }
 
     #[test]
-    fn metal_failing_shared_member_fails_its_boot() {
-        metal_checks::a_failing_shared_member_fails_its_boot();
+    fn metal_failing_shared_member_fails_itself_alone() {
+        metal_checks::a_failing_shared_member_fails_itself_alone();
     }
 
     #[test]
