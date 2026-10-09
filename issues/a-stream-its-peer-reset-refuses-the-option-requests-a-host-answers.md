@@ -30,9 +30,10 @@ request is not the fix: a client that dies sends none, and netstack, having
 closed its pipe ends, has nothing left that says the client is gone.
 
 libc's `connect` asks the same request of a connection it has just been
-answered, to hand over a `TCP_NODELAY` set before it: a peer that resets
-between netstack's answer and that request makes `connect` fail `ENOTCONN`,
-which no host's `connect` answers.
+answered, to hand over a `TCP_NODELAY` set before it, and its `accept` of one
+it has just been given, to hand over its listener's: a peer that resets
+between netstack's answer and that request makes either fail `ENOTCONN`, with
+the connection closed, which no host's `connect` or `accept` answers.
 
 **Exit condition**: a guest test on `tests/netcase` whose peer resets a stream
 the client still holds, and `nodelay()` on it answers `Ok`, with

@@ -45,7 +45,7 @@ What the node does not yet meet:
 - `toyos_dns::Lookup::on_datagram` still takes a reply's source address and port, which the node's connected sockets have already matched and the node hands it from its own record of the query: the two parameters are read only by netd's resolver on smoltcp. Exit, at the move: they go with that resolver.
 - `node.address-refused` has no test: `toyos-dhcp` accepts no address or prefix [ip] refuses, by the same `toyos-net-wire` checks in both, so the refusal cannot be reached from the wire. Exit: the client hands [ip] a type that carries the check, and the counter goes.
 
-The listener defects are this track's: `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept.
+The listener defects are this track's: `issues/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept; and `issues/a-listening-sockets-tcp-nodelay-is-refused-and-an-accepted-streams-is-answered-from-a-guess.md`, whose exit waits on the pipe ABI giving a listener its option, which the node has (`Node::set_listener_nodelay`) and nothing ships.
 
 Owed from the stage 3 specifications: by stage 5, the scenario for netd's mapping of UDP's refusals onto the pipe ABI, and `dhcp.renew-unroutable`, which netd counts where `toyos-net-udp` refuses the renewal `udp.no-route`; by IP hardening, the scenarios for fragment reassembly and path MTU discovery.
 

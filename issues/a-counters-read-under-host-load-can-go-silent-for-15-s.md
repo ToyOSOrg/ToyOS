@@ -102,11 +102,12 @@ starts no netstack.
   named for that run was not kept; the run's log, outside the tree, is the
   only copy.
 
-Two earlier stalls of `virt_mask_windows` have no console of the guest, so
+Two other stalls of `virt_mask_windows` have no console of the guest, so
 the step each stopped in is not read from it:
 
 - **`wt/toyos-move-abi` at `94fd25e71`.** `FAIL virt_mask_windows: STALLED:
-  waiting for the boot's last word — it went quiet`, with nothing in what the
+  waiting for the boot's last word — it went quiet`, ten minutes after the
+  two at `68cf1f870` by the two runs' logs, with nothing in what the
   guest said while it was waited on, `STALL virt_mask_windows (38s)`; the
   whole suite at `--jobs 4`, 34 of 36, workers 1794 s building against 703 s
   testing. Load 59.30 69.33 70.48 when the suite began and 85.73 69.02 67.23
@@ -135,10 +136,11 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
-Not known of any of them: the fork compiler miscompiles, for AArch64, an
-inclusive range that ends at its integer type's maximum (LLVM's
-ScalarEvolution), and whether that reaches `test_rs_counters_read` is being
-measured by a per-function census on another branch.
+Not known of any of them: whether the fork compiler's fault reaches
+`test_rs_counters_read` or the kernel under it.
+`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`
+has LLVM's ScalarEvolution deleting a loop's exit on both architectures, and
+records every function but the ones it names as not measured.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`

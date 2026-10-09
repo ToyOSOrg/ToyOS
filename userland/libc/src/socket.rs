@@ -64,7 +64,7 @@ struct SocketEntry {
     // What netstack holds for the socket, which `getsockopt` answers from. A
     // socket netstack does not hold yet keeps each for the call that makes it
     // there to hand over: `broadcast` for a datagram socket's bind, `nodelay`
-    // for a stream's `connect`.
+    // for a stream's `connect` and for each connection a listener accepts.
     nodelay: bool,
     broadcast: bool,
 }
@@ -290,6 +290,9 @@ pub unsafe extern "C" fn accept(
     };
     let listener_id = TcpSocketId(entry.netstack_id);
     let notify_fd = entry.notify_fd;
+    // A set after `bind` is refused, so this is the option the listener held
+    // when any connection to it began.
+    let nodelay = entry.nodelay;
 
     // Block until a connection arrives (read 1 byte from notify pipe)
     let mut notify_byte = [0u8; 1];
@@ -299,6 +302,14 @@ pub unsafe extern "C" fn accept(
         Ok(a) => a,
         Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
     };
+    if nodelay {
+        if let Err(e) = toyos::net::tcp_set_option(accepted.socket_id, OPT_NODELAY, 1) {
+            // `accepted`'s pipe ends close where it drops.
+            let _ = toyos::net::tcp_close(accepted.socket_id);
+            set_errno(net_err_to_errno(e));
+            return -1;
+        }
+    }
 
     if !addr.is_null() && !addrlen.is_null() {
         fill_sockaddr(addr, addrlen, accepted.remote_addr, accepted.remote_port);
@@ -315,7 +326,7 @@ pub unsafe extern "C" fn accept(
         rx_fd: accepted.rx.into_raw().0 as i32,
         tx_fd: accepted.tx.into_raw().0 as i32,
         notify_fd: 0,
-        nodelay: false,
+        nodelay,
         broadcast: false,
     };
     let new_fd = alloc_socket(new_entry);

@@ -13,14 +13,17 @@ value their own side stored. So a setter that stores the value and sends
 nothing is seen by no test. Measured on libc's `connect`, which hands over a
 `TCP_NODELAY` set before the connection existed: with the hand-over deleted,
 the guest case that sets the option before `connect` and reads it after
-(`tests/netcase/nodelay_kept.c`, the `libc_sockets` test) stays green. The
+(`tests/netcase/nodelay_kept.c`, the `libc_sockets` test) stays green. And on
+its `accept`, which hands over the one its listener held at `bind`: with that
+request deleted and the value still stored, the same case's read of the
+accepted socket stays green. The
 only effect of the option is when a small write leaves the machine, which a
 QEMU test may not time.
 
 **Exit**: a test reads what the stack holds for a stream's Nagle switch, on
 the node under a host test of its option call or through a guest's wire, and
-turns red when libc's `connect` or std's `set_nodelay` stores the value and
-sends no request.
+turns red when libc's `connect` or `accept` or std's `set_nodelay` stores the
+value and sends no request.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`, with
 the reset-stream option test of

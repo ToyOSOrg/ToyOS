@@ -1,8 +1,11 @@
 /* A TCP_NODELAY set on a stream socket before connect is kept and holds for
-   the connection, and one cleared stays cleared. A listener's set is refused:
-   netstack has no option for one to hand the connections it accepts, where a
-   host keeps it and they begin with it. argv: the address and the port of a
-   host that accepts and holds each connection. */
+   the connection, and one cleared stays cleared. One set before bind is the
+   listener's, and each connection it accepts begins with it. A listener's set
+   after bind is refused: netstack has no option for a listener, where a host
+   takes the set and gives it to the connections that begin afterwards. argv:
+   the address and the port of a host that accepts and holds each connection,
+   then the two ports to listen on, which that host dials once WAITING is
+   said. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -11,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+
+#define WAITING "nodelay_kept: both listeners wait for a peer"
 
 static int wrong;
 
@@ -28,7 +33,7 @@ static int nodelay(int fd) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) return 2;
+    if (argc != 5) return 2;
     struct sockaddr_in peer;
     int on = 1, off = 0;
 
@@ -57,9 +62,26 @@ int main(int argc, char **argv) {
     struct sockaddr_in any;
     memset(&any, 0, sizeof any);
     any.sin_family = AF_INET;
+    int held = socket(AF_INET, SOCK_STREAM, 0);
+    said("set on a third socket before bind", setsockopt(held, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), 0);
+    any.sin_port = htons((uint16_t)atoi(argv[3]));
+    said("bind it", bind(held, (struct sockaddr *)&any, sizeof any), 0);
+    said("listen on it", listen(held, 1), 0);
+    said("read from that listener", nodelay(held), 1);
     int l = socket(AF_INET, SOCK_STREAM, 0);
-    said("bind a third socket", bind(l, (struct sockaddr *)&any, sizeof any), 0);
+    any.sin_port = htons((uint16_t)atoi(argv[4]));
+    said("bind a fourth socket", bind(l, (struct sockaddr *)&any, sizeof any), 0);
     said("listen on it", listen(l, 1), 0);
+
+    printf("%s\n", WAITING);
+    fflush(stdout);
+    int with = accept(held, NULL, NULL);
+    said("accept from the listener that held the option", with >= 0, 1);
+    said("read from its connection", nodelay(with), 1);
+    int without = accept(l, NULL, NULL);
+    said("accept from the listener that held none", without >= 0, 1);
+    said("read from its connection", nodelay(without), 0);
+
     errno = 0;
     said("set on the listener", setsockopt(l, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), -1);
     said("which is refused as not connected", errno == ENOTCONN, 1);
