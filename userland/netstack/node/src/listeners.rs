@@ -25,8 +25,10 @@
 //!
 //! **A stream starts with the options its connection has**, and those are its listener's as
 //! they were when its SYN arrived: [tcp] hands them over then (LS-10), the node reads them
-//! back at the accept, and an option set on the listener afterwards reaches the connections
-//! that begin afterwards. A host does the same with `TCP_NODELAY` set on a listening socket
+//! back at the accept and answers them with the stream, and an option set on the listener
+//! afterwards reaches the connections that begin afterwards. A listener holds what its listen
+//! named before any SYN can reach its port: the node takes no frame between the passive open
+//! and the options. A host does the same with `TCP_NODELAY` set on a listening socket
 //! (`tests/host.rs` asks the host the tests run on).
 
 use alloc::boxed::Box;
@@ -68,6 +70,10 @@ pub struct Accepted {
     pub id: StreamId,
     pub remote: Endpoint,
     pub local: Port,
+    /// Whether Nagle's algorithm is off for the stream as it is handed over: what
+    /// [`Node::nodelay`] answers for as long as the node holds the stream, which may be no
+    /// longer than this accept's own pass.
+    pub nodelay: bool,
 }
 
 /// Why an accept took no connection. Whatever waits still waits, and the pipe ends are dropped.
@@ -103,9 +109,11 @@ pub(crate) struct Listeners {
 
 impl Node {
     /// A passive open at `addr`, 0.0.0.0 meaning every address the interface holds or comes to
-    /// hold, on `port` or on a port chosen from `draw`'s candidates. Answers the listener and
-    /// its port. Refused, nothing was made and `owner` is dropped.
-    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, owner: Box<dyn Wake>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
+    /// hold, on `port` or on a port chosen from `draw`'s candidates, with `nodelay` as
+    /// [`Node::set_listener_nodelay`] would set it, for every connection of the listener's
+    /// from its first. Answers the listener and its port. Refused, nothing was made and
+    /// `owner` is dropped.
+    pub fn listen(&mut self, addr: Ipv4Addr, port: Option<Port>, nodelay: bool, owner: Box<dyn Wake>, mut draw: impl FnMut() -> u32) -> Result<(ListenerId, Port), ListenRefused> {
         if self.room() == 0 {
             return Err(ListenRefused::Full);
         }
@@ -125,7 +133,9 @@ impl Node {
         };
         let id = ListenerId(self.listeners.next);
         self.listeners.next = self.listeners.next.saturating_add(1);
-        self.listeners.live.insert(id, Listener { bound, port, owner, unspent: 0, options: Options::default() });
+        let options = Options { nodelay, ..Options::default() };
+        self.stack.tcp_set_listener_options(bound, options);
+        self.listeners.live.insert(id, Listener { bound, port, owner, unspent: 0, options });
         Ok((id, port))
     }
 
@@ -162,7 +172,7 @@ impl Node {
         let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
         // The peer's address is what `streams` counts a stream its client can see no more by.
         let id = self.streams.accepted(conn, tuple.remote.addr, options, pipes);
-        Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port })
+        Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port, nodelay: options.nodelay })
     }
 
     /// The owner lets go of the listener: netstack calls it for a close, and when the kernel

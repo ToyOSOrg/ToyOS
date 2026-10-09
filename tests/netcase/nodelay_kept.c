@@ -1,13 +1,12 @@
 /* A TCP_NODELAY set on a stream socket before connect is kept and holds for
-   the connection, and one cleared stays cleared. One set before bind is the
-   listener's, and each connection it accepts begins with it. A listener's set
-   after bind is refused: netstack has no option for a listener, where a host
-   takes the set and gives it to the connections that begin afterwards. argv:
-   the address and the port of a host that accepts and holds each connection,
-   then the two ports to listen on, which that host dials once WAITING is
-   said. */
+   the connection, and one cleared stays cleared. A listener's is the option
+   of each connection that begins while it holds it, set before bind or after:
+   a connection accepted before a set or a clear keeps what it has, and the
+   next one dialled has what the listener holds then. argv: the address and
+   the port of a host that accepts and holds each connection, then the two
+   ports to listen on, which that host dials once at WAITING and once more at
+   AGAIN. */
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -16,6 +15,7 @@
 #include <sys/socket.h>
 
 #define WAITING "nodelay_kept: both listeners wait for a peer"
+#define AGAIN "nodelay_kept: both listeners wait for a second peer"
 
 static int wrong;
 
@@ -72,6 +72,7 @@ int main(int argc, char **argv) {
     any.sin_port = htons((uint16_t)atoi(argv[4]));
     said("bind a fourth socket", bind(l, (struct sockaddr *)&any, sizeof any), 0);
     said("listen on it", listen(l, 1), 0);
+    said("read from that listener", nodelay(l), 0);
 
     printf("%s\n", WAITING);
     fflush(stdout);
@@ -82,10 +83,21 @@ int main(int argc, char **argv) {
     said("accept from the listener that held none", without >= 0, 1);
     said("read from its connection", nodelay(without), 0);
 
-    errno = 0;
-    said("set on the listener", setsockopt(l, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), -1);
-    said("which is refused as not connected", errno == ENOTCONN, 1);
-    said("read from the listener", nodelay(l), 0);
+    said("set on the listener that held none", setsockopt(l, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on), 0);
+    said("read from the listener", nodelay(l), 1);
+    said("read from the connection it accepted before", nodelay(without), 0);
+    said("cleared on the listener that held the option", setsockopt(held, IPPROTO_TCP, TCP_NODELAY, &off, sizeof off), 0);
+    said("read from the listener", nodelay(held), 0);
+    said("read from the connection it accepted before", nodelay(with), 1);
+
+    printf("%s\n", AGAIN);
+    fflush(stdout);
+    int set = accept(l, NULL, NULL);
+    said("accept from the listener after its set", set >= 0, 1);
+    said("read from its connection", nodelay(set), 1);
+    int cleared = accept(held, NULL, NULL);
+    said("accept from the listener after its clear", cleared >= 0, 1);
+    said("read from its connection", nodelay(cleared), 0);
 
     if (wrong) {
         printf("nodelay_kept: %d wrong\n", wrong);
