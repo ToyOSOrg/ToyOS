@@ -3006,25 +3006,51 @@ fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
     let options = BootOptions { qmp: true, profile, ..Default::default() };
     let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], options)?;
     let [to_listener] = forwards_into(&qemu, [LISTENER])?;
-    // Each peer says its own byte as soon as it has dialled.
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    // The connections QEMU's user network has taken off the forwarded port
+    // and is carrying to the guest's listener: every row of its table that
+    // names the guest's port, but the forward's own.
+    let mut carried = move || {
+        let table = monitor.human("info usernet");
+        table
+            .lines()
+            .map(|row| row.split_whitespace().collect::<Vec<_>>())
+            .filter(|row| row.first().is_some_and(|kind| kind.starts_with("TCP[") && *kind != "TCP[HOST_FORWARD]"))
+            .filter(|row| [3, 5].iter().any(|&at| row.get(at) == Some(&LISTENER.to_string().as_str())))
+            .count()
+    };
+    // Each peer says its own byte as soon as it has dialled, and the next
+    // dials once QEMU carries this one: its forward queues one connection,
+    // and resets a dial that arrives while one is queued.
+    let mut dial = |said: u8| -> Result<std::net::TcpStream, String> {
+        let before = carried();
+        let mut peer = std::net::TcpStream::connect(("127.0.0.1", to_listener)).map_err(|e| e.to_string())?;
+        peer.write_all(&[said]).map_err(|e| e.to_string())?;
+        peer.set_read_timeout(Some(ANSWERED)).map_err(|e| e.to_string())?;
+        let dialled = Instant::now();
+        while carried() == before {
+            if dialled.elapsed() > ANSWERED {
+                return Err(format!("QEMU's user network took no connection off its forward in {ANSWERED:?}"));
+            }
+        }
+        Ok(peer)
+    };
     let mut peers = Vec::new();
     let result =
         qemu.run_test_paced(&format!("test_rs_{JOB} {port} {LISTENER}"), Duration::from_secs(240), |_, line| {
             if line.trim_end().ends_with(WAITS) {
-                peers.extend(b"12".iter().map(|&said| {
-                    let mut peer = std::net::TcpStream::connect(("127.0.0.1", to_listener))?;
-                    peer.write_all(&[said])?;
-                    peer.set_read_timeout(Some(ANSWERED))?;
-                    Ok::<_, std::io::Error>((said, peer))
-                }));
+                peers.extend(b"12".iter().map(|&said| dial(said).map(|peer| (said, peer))));
             }
         });
+    // A dial that failed first: it is why the job's wakes did not come.
+    let peers: Vec<_> = peers.into_iter().collect::<Result<_, _>>().map_err(|e| {
+        format!("the host could not dial the guest's listener: {e}\nthe job said:\n{}", result.stdout)
+    })?;
     job_ok(JOB, &result)?;
     if peers.len() != 2 {
         return Err(format!("the job never said its listener waits:\n{}", result.stdout));
     }
-    for peer in peers {
-        let (said, mut peer) = peer.map_err(|e| format!("the host could not dial the guest's listener: {e}"))?;
+    for (said, mut peer) in peers {
         let mut answer = [0u8; 1];
         peer.read_exact(&mut answer).map_err(|e| format!("the peer that said {:?} was not answered: {e}", said as char))?;
         if answer[0] != said {
