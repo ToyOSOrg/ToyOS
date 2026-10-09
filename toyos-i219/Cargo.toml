@@ -1,14 +1,15 @@
 # A member of the host workspace (root `Cargo.toml`), like toyos-hda, toyos-pci
-# and toyos-dma: it is pure, it has no dependencies, and its tests run on the
-# host with no guest and no QEMU.
+# and toyos-dma: it is pure, and its tests run on the host with no guest and no
+# QEMU.
 #
 # What lives here is every decision the I219 driver makes — the descriptor
 # rings, the interrupt causes, the link — against four traits netstack implements
-# one instruction deep. The device is on the far side of a trust boundary, so
-# the numbers it writes into a descriptor have to be driven with values no
-# working card would send far more often than a boot allows; and the machine
-# that matters cannot be booted by a test at all, so the specification is the
-# oracle and `stub.rs` is what it is written into.
+# one instruction deep, two of them the boundary every userland driver shares.
+# The device is on the far side of a trust boundary, so the numbers it writes
+# into a descriptor have to be driven with values no working card would send
+# far more often than a boot allows; and the machine that matters cannot be
+# booted by a test at all, so the specification is the oracle and `stub.rs` is
+# what it is written into.
 
 [package]
 name = "toyos-i219"
@@ -17,3 +18,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[dependencies]
+# `Registers` and `DmaBuffers`: the boundary every userland driver is written
+# against, and the order of its two barriers.
+toyos-device-memory = { path = "../toyos-device-memory" }

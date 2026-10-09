@@ -1,0 +1,18 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-i219 and
+# toyos-virtio, the two driver crates written against it: it is pure and has
+# no dependencies.
+#
+# What lives here is two traits and their contract: the memory a userland
+# driver and its device both reach, which is the whole of what a driver's
+# decisions are separated from the instructions that carry them out by. A
+# driver crate is generic over them and host-tested against a model of its
+# device; the program that holds the claim implements them once, for every
+# driver it runs.
+
+[package]
+name = "toyos-device-memory"
+description = "The memory a userland driver and its device share, as the boundary a driver crate is written against: a register window, a DMA grant and the two barriers that order a store against the device, pure."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
