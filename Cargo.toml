@@ -155,7 +155,6 @@ license = "MIT OR Apache-2.0"
 default-run = "toyos-build"
 
 [dependencies]
-fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
 libc = "0.2"
@@ -216,6 +215,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+# The FAT implementation `src/fatformat.rs` is judged against, byte for byte.
+fatfs = "0.3.6"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }

@@ -456,8 +456,8 @@ const PARTITION_ALIGN: usize = 1024 * 1024;
 
 /// The smallest volume there is a FAT32 for.
 ///
-/// FAT32 *is* the format with at least 65,525 clusters, and `fatfs` gives a
-/// volume this size 512-byte clusters — so the data area alone is 33.5 MiB
+/// FAT32 *is* the format with at least 65,525 clusters, and [`crate::fatformat`]
+/// gives a volume this size 512-byte clusters — so the data area alone is 33.5 MiB
 /// before the two FATs and the reserved sectors. Measured at exactly this size:
 /// the format succeeds and `fsck_msdos` reports 68,551 free clusters.
 const FAT32_MIN_BYTES: usize = 34 * 1024 * 1024;
@@ -466,7 +466,7 @@ const FAT32_MIN_BYTES: usize = 34 * 1024 * 1024;
 ///
 /// The `64/63` beside this at the one call site is headroom for the two FAT
 /// copies, which cost a byte of table per 64 bytes of volume at the 512-byte
-/// clusters `fatfs` gives a small one — the worst case, so a volume whose
+/// clusters [`crate::fatformat`] gives a small one — the worst case, so a volume whose
 /// clusters are larger is over-provisioned rather than under. A flat slack
 /// leaves a guest whatever the rounding did, and an fsync that fails while the
 /// host-side volume reports megabytes free is the symptom of getting it wrong.
@@ -479,7 +479,7 @@ fn align_up(n: usize, to: usize) -> usize {
 /// A FAT volume label: eleven bytes of space-padded OEM text.
 ///
 /// Without one every host calls the volume `NO NAME`, which is what the ESP
-/// showed as. `format_volume` writes it into both places the format keeps it,
+/// showed as. The format writes it into both places the format keeps it,
 /// the BPB field and a `VOLUME_ID` entry in the root directory, and the mount
 /// on macOS is named from it — measured, `/Volumes/TOYOS-LOG`.
 fn fat_label(text: &str) -> [u8; 11] {
@@ -495,15 +495,7 @@ fn fat_label(text: &str) -> [u8; 11] {
 
 /// An empty FAT32 volume of `bytes`, under `label`.
 fn format_fat32(bytes: usize, label: &str) -> Vec<u8> {
-    let mut volume = vec![0u8; bytes];
-    fatfs::format_volume(
-        Cursor::new(&mut volume),
-        fatfs::FormatVolumeOptions::new()
-            .fat_type(fatfs::FatType::Fat32)
-            .volume_label(fat_label(label)),
-    )
-    .unwrap_or_else(|e| panic!("failed to format the {label} volume: {e}"));
-    volume
+    crate::fatformat::format(bytes, fat_label(label))
 }
 
 /// The volume being built, as [`toyos_fat32`] sees it.
@@ -512,7 +504,7 @@ fn format_fat32(bytes: usize, label: &str) -> Vec<u8> {
 /// volume is a `Vec` in this process. The kernel's adapter is where the
 /// read-modify-write against 4 KiB device blocks lives, and `toyos-fat32`'s own
 /// host suite is where that shape is exercised.
-struct VolumeIo<'a>(&'a mut [u8]);
+pub(crate) struct VolumeIo<'a>(pub(crate) &'a mut [u8]);
 
 impl VolumeIo<'_> {
     fn range(&self, offset: u64, len: usize) -> Result<core::ops::Range<usize>, IoError> {
@@ -563,17 +555,11 @@ fn build_time() -> FatTime {
 /// Write `files` onto a formatted volume, creating the directories they name,
 /// and leave the free-cluster count recorded.
 ///
-/// Written with **our** FAT32 driver rather than with the crate that formatted
-/// the volume: `fatfs`'s `create_dir` writes a long-name entry ahead of each
-/// `.` and `..`, which the format requires to be a subdirectory's first two
-/// entries, and gives `..` the root's cluster number where the format requires
-/// zero — neither reachable through that crate's API. `toyos-fat32` is also the
-/// driver the kernel appends `kernel.log` with and the one its own host suite
-/// runs the volume checker against, so "the image we build is clean" is a claim
-/// about the writer that is judged. `fatfs` keeps the format call, where an
-/// empty volume has no subdirectory for either bug to live in.
+/// Written with `toyos-fat32`, the driver the kernel appends `kernel.log` with
+/// and the one its own host suite runs the volume checker against, so "the image
+/// we build is clean" is a claim about the writer that is judged.
 ///
-/// `format_volume` leaves FSInfo's free-cluster field 0xFFFFFFFF, which FAT32
+/// The format leaves FSInfo's free-cluster field 0xFFFFFFFF, which FAT32
 /// defines as "unknown" and every host reports free space from; `free_bytes`
 /// counts the FAT when the volume arrived without a hint and `sync` writes it.
 fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
@@ -1365,7 +1351,7 @@ mod tests {
     /// readers that did not write it: `toyos-gpt` finds the partition by type
     /// where the `gpt` crate placed it, `bcachefs`'s mount-and-read path lists
     /// what its format-and-write path put there, and `toyos-fat32` reads the
-    /// boot parameter off the ESP that `fatfs` formatted.
+    /// boot parameter off the ESP.
     ///
     /// Every name, size, content hash and symlink target against the list
     /// handed to [`create_root_image`] — a listing that merely parsed would
