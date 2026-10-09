@@ -30,4 +30,4 @@ wrong reason and nothing acts on it.
 above, std and libc map them as named, and netstack answers each ending in its
 own word.
 
-**Owner**: whoever next changes the pipe ABI (`toyos/src/net.rs`).
+**Owner**: the network track, `issues/toyos-has-its-own-network-stack.md`.

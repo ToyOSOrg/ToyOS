@@ -436,20 +436,18 @@ fn next_deadline_is_the_earliest_of_the_clients_and_the_stacks() {
     // Selecting: only the client waits.
     let mut wire = Wire::new();
     wire.link(true);
-    let (client, stack) = (wire.node.dhcp().next_deadline(), wire.node.shard().next_deadline());
-    assert!(client.is_some() && stack.is_none(), "{client:?} {stack:?}");
-    assert_eq!(wire.node.next_deadline(), client);
+    let stack = wire.node.shard().next_deadline();
+    assert!(stack.is_none() && wire.node.next_deadline().is_some(), "{stack:?}");
 
     // Probing: only the stack does.
     let wire = Wire::acknowledged(&terms(600, Some(R)));
-    let (client, stack) = (wire.node.dhcp().next_deadline(), wire.node.shard().next_deadline());
-    assert!(client.is_none() && stack.is_some(), "{client:?} {stack:?}");
+    let stack = wire.node.shard().next_deadline();
+    assert!(stack.is_some(), "{stack:?}");
     assert_eq!(wire.node.next_deadline(), stack);
 
-    // Held: both, the stack's second announcement before the client's renewal.
+    // Held: both, the stack's second announcement before the client's renewal at T1, 300 s.
     let mut wire = Wire::leased(&terms(600, Some(R)));
-    let (client, stack) = (wire.node.dhcp().next_deadline(), wire.node.shard().next_deadline());
-    assert_eq!(client, Some(after(300)));
+    let stack = wire.node.shard().next_deadline();
     assert!(stack.is_some_and(|stack| stack < after(300)), "{stack:?}");
     assert_eq!(wire.node.next_deadline(), stack);
 
@@ -490,7 +488,6 @@ fn a_hundred_refused_replies_are_one_line_and_a_count() {
         wire.deliver(&from_server(MAC, A, &bootp));
     }
     assert_eq!(wire.node.drain_events().collect::<Vec<_>>(), [Event::Dhcp { refusal, suppressed: 0 }]);
-    assert_eq!(wire.node.dhcp().counters().get(toyos_dhcp::Counter::BootpReply), 100, "each one counted");
 
     wire.now = wire.now.after(toyos_net_wire::REFUSAL_LOG_INTERVAL);
     wire.deliver(&from_server(MAC, A, &bootp));

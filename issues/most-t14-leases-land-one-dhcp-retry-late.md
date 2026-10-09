@@ -31,7 +31,10 @@ DISCOVER is sent again on RFC 2131 §4.1's schedule, and a link that comes up
 with no lease starts the exchange over
 (`a_link_that_returns_with_no_lease_starts_discovery_over_at_once`,
 `userland/netstack/node/tests/lease.rs`). Every reading above is of the
-smoltcp client; none has been taken on the T14 since.
+smoltcp client. On this one, four T14 boots of pull request #801's
+measurement branches took their leases 3,419, 7,206, 8,172 and 8,397 ms after
+netstack came up; netstack logs no DISCOVER and no OFFER, so what became of
+the first DISCOVER of each is unread.
 
 **Exit**: netd logs each DISCOVER it sends and each OFFER it receives, and a
 T14 boot's log shows what became of the DISCOVER sent as the link came up; on

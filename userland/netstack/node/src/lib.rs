@@ -133,10 +133,6 @@ impl Node {
         self.stack.shard()
     }
 
-    pub fn dhcp(&self) -> &Client {
-        &self.client
-    }
-
     pub fn counters(&self) -> &Counters {
         &self.counters
     }

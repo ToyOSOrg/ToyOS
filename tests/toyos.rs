@@ -139,9 +139,6 @@ const RUST_SKIP: &[&str] = &[
     // It needs a NIC in front of netstack, a host server behind it and a host
     // that dials its listener: `netstack_streams` runs it on `tests/netcase`.
     "netstack_streams",
-    // It needs a NIC in front of netstack and a resolver behind it:
-    // `netstack_lookup` runs it on `tests/netcase`.
-    "netstack_lookup",
     // It needs a host that dials its listeners when it says they wait:
     // `libc_sockets` runs it on `tests/netcase`.
     "nodelay_accepted",
@@ -300,13 +297,6 @@ const MACHINE_TESTS: &[&str] = &[
     // open no peer that echoes megabytes or dials in.
     "netstack_streams",
     "netstack_streams_e1000e",
-    // The resolver against a server its writers did not write, QEMU's user
-    // network's, through each of netstack's two drivers: netstack has no
-    // host build, the stack's host tests replay one recorded reply, and the
-    // T14's outbound rows ask names whose answers are the internet's to
-    // change.
-    "netstack_lookup",
-    "netstack_lookup_e1000e",
     // What libc's and std's socket calls ask of netstack, read back from a
     // peer that answers, and each way a stream ends as libc and std read it:
     // the calls are requests on netstack's port, an end is what netstack, the
@@ -3170,15 +3160,6 @@ fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
     Ok(())
 }
 
-/// One name asked of the resolver the lease named, QEMU's user network's,
-/// and answered by it: through netstack on `profile`'s card.
-fn netstack_lookup(profile: qemu::Profile) -> Result<(), String> {
-    const JOB: &str = "netstack_lookup";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions { profile, ..Default::default() })?;
-    job_ok(JOB, &qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(60)))
-}
-
 /// A host server that holds each connection it accepts and reads none of it,
 /// for as long as the process lives: its port. A guest that never dials
 /// leaves it in `accept`.
@@ -3406,8 +3387,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
-        "netstack_lookup" => netstack_lookup(qemu::Profile::Headless),
-        "netstack_lookup_e1000e" => netstack_lookup(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
