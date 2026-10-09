@@ -71,6 +71,11 @@ pub trait Registers {
 /// - **[`Self::observe`] after the load that said the device was done.** A
 ///   driver loads the word by which the device hands memory back, calls
 ///   `observe`, and only then loads what that word covers.
+///
+/// **Neither orders a store against a later load of what the device wrote in
+/// answer** — an index stored, then the device's suppression word loaded to
+/// decide whether to notify it. No driver here makes that pair; the first
+/// that does adds a method for it and does not reach for `publish`.
 pub trait DmaBuffers {
     /// Bytes in the grant.
     fn bytes(&self) -> usize;
