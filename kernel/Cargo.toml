@@ -498,6 +498,7 @@ toyos-tsc = { path = "../toyos-tsc" }
 toyos-ps2 = { path = "ps2" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 toyos-quiesce = { path = "../toyos-quiesce" }
+toyos-random = { path = "../toyos-random" }
 toyos-symbols = { path = "../toyos-symbols" }
 toyos-untrusted = { path = "../toyos-untrusted" }
 toyos-userbound = { path = "../toyos-userbound" }

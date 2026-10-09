@@ -215,6 +215,13 @@ pub fn launch(opts: &Options) {
         };
     }
 
+    // Firmware's alone: edk2's driver puts `EFI_RNG_PROTOCOL` behind it for the
+    // loader's seed. `virt` needs it because a guest under HVF has no RNDR; a
+    // q35's firmware answers the protocol from RDRAND.
+    if arch == Arch::Aarch64 {
+        qemu.arg("-device").arg("virtio-rng-pci");
+    }
+
     if shape.virtio {
         qemu.arg("-netdev")
             .arg("user,id=net0,hostfwd=tcp::2222-:22")
