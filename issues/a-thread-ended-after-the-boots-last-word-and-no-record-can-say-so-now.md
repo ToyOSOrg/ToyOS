@@ -34,10 +34,10 @@ Owner: the stop path, `kernel/src/quiesce.rs`.
 
 ## Exit condition
 
-- The stop says how many threads ended between its `stop:` record and the
-  reset, in a record the next loader pass prints, and `stopped_boot` reds on
-  one that is not zero.
 - `quiesce_wakes_on_the_last_park`, deleted with the commits
   `issues/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md`
-  names, is back and green beside other guests on a loaded host with that
-  check in it.
+  names, is back, and with it `stopped_boot`, which the tree no longer has.
+- The stop says how many threads ended between its `stop:` record and the
+  reset, in a record the next loader pass prints; `stopped_boot` reds on one
+  that is not zero, and the test is green beside other guests on a loaded
+  host with that check in it.

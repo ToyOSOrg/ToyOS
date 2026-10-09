@@ -877,6 +877,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_boot_that_lost_parts_of_its_log_judges_no_row() {
+        metal_checks::a_boot_that_lost_parts_of_its_log_judges_no_row();
+    }
+
+    #[test]
     fn metal_name_two_boots_measured_is_refused() {
         metal_checks::a_name_two_boots_measured_is_refused();
     }
@@ -894,6 +899,11 @@ mod checks {
     #[test]
     fn metal_failing_shared_member_fails_its_boot() {
         metal_checks::a_failing_shared_member_fails_its_boot();
+    }
+
+    #[test]
+    fn metal_boots_last_job_is_behind_every_other() {
+        metal_checks::a_boots_last_job_is_behind_every_other();
     }
 
     #[test]

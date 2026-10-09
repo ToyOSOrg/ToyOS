@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "acpiserver-api"
+version = "0.1.0"
+
+[[package]]
 name = "alsa"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -715,6 +719,7 @@ dependencies = [
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
+ "acpiserver-api",
  "cpal",
  "inspect",
  "libloading",

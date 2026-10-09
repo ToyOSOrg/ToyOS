@@ -6,14 +6,17 @@
 
 mod common;
 
+use std::cell::Cell;
 use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::time::Duration;
 
 use common::*;
+use etherparse::{PacketBuilder, TcpOptionElement};
 use toyos_net_ip::AddrState;
-use toyos_net_node::{Counter, Event};
+use toyos_net_node::{Counter, Event, ListenRefused, Wake, WriteRefusal};
 use toyos_net_shard::Refusal;
-use toyos_net_wire::Instant;
+use toyos_net_wire::{Instant, Port};
 
 const START: Instant = Instant::from_millis(3_600_000);
 const HOUR: u32 = 3_600;
@@ -182,6 +185,134 @@ fn a_second_conflict_takes_a_held_lease_and_declines_it() {
     let decline = wire.last(DECLINE);
     assert_eq!((option(decline, 50), option(decline, 54)), (Some(&A.octets()[..]), Some(&R.octets()[..])));
     assert!(!wire.answers_arp_for(A));
+}
+
+/// What a listener's owner saw of its wake pipe: the wakes written, and whether the node dropped
+/// its end, at which the owner reads the end.
+#[derive(Default)]
+struct Told {
+    wakes: Cell<usize>,
+    dropped: Cell<bool>,
+}
+
+struct Owner(Rc<Told>);
+
+impl Wake for Owner {
+    fn wake(&mut self) -> Result<(), WriteRefusal> {
+        self.0.wakes.set(self.0.wakes.get() + 1);
+        Ok(())
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.0.dropped.set(true);
+    }
+}
+
+fn listen(wire: &mut Wire, addr: Ipv4Addr, port: u16) -> Result<Rc<Told>, ListenRefused> {
+    let told = Rc::new(Told::default());
+    wire.node.listen(addr, Port::new(port), Box::new(Owner(told.clone())), || panic!("a named port draws nothing")).map(|_| told)
+}
+
+/// Where the peer of the listeners is, at `MAC_B`.
+const PEER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+/// The peer's initial sequence number.
+const ISS: u32 = 5000;
+
+/// A segment from the peer's port 40001 to the node's port `to`, built by `etherparse`: a SYN
+/// with an MSS option, or the ACK of `ack`.
+fn from_peer(to: u16, ack: Option<u32>) -> Vec<u8> {
+    let step = PacketBuilder::ethernet2(MAC_B, MAC).ipv4(PEER.octets(), A.octets(), 64);
+    let step = match ack {
+        None => step.tcp(40_001, to, ISS, 65_535).syn().options(&[TcpOptionElement::MaximumSegmentSize(1460)]).unwrap(),
+        Some(ack) => step.tcp(40_001, to, ISS + 1, 65_535).ack(ack),
+    };
+    let mut frame = Vec::new();
+    step.write(&mut frame, &[]).unwrap();
+    frame
+}
+
+/// The peer's SYN to the node's port `to`, the node's ARP request for the peer answered if it
+/// makes one. Returns what the node sent for it.
+fn syn(wire: &mut Wire, to: u16) -> Vec<Seen> {
+    let from = wire.sent.len();
+    wire.deliver(&from_peer(to, None));
+    if wire.sent[from..].iter().any(|seen| matches!(seen, Seen::Arp { request: true, target, .. } if *target == PEER)) {
+        wire.deliver(&arp(MAC, false, MAC_B, PEER, A));
+    }
+    wire.sent[from..].to_vec()
+}
+
+type Loss = fn(&mut Wire);
+
+/// The three ways a held address goes: the server refuses its renewal, the lease runs out, and
+/// another host defends the address twice inside [ip]'s defend interval (RFC 5227 §2.4 (b)).
+fn losses() -> [(&'static str, Loss); 3] {
+    fn nak(wire: &mut Wire) {
+        let id = renewing(wire);
+        wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, id, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
+    }
+    fn expiry(wire: &mut Wire) {
+        assert!(wire.run_until(Duration::from_secs(700), |wire| wire.node.lease().is_none()), "the lease runs out");
+    }
+    fn conflict(wire: &mut Wire) {
+        let conflict = arp(BROADCAST, false, MAC_B, A, A);
+        wire.fire(wire.now.after(Duration::from_secs(100)));
+        wire.deliver(&conflict);
+        wire.fire(wire.now.after(Duration::from_secs(5)));
+        wire.deliver(&conflict);
+    }
+    [("a NAK", nak), ("expiry", expiry), ("a conflict", conflict)]
+}
+
+// What takes the machine's address is the wire's doing, not a program's: a NAK, a server that
+// is away, two ARP frames. So a listener that named the address stands through its loss as a
+// datagram socket bound to it does, with its port and its place and its owner told nothing:
+// [ip] takes no segment for an address it does not hold, and [tcp] hands the listener the next
+// SYN once the address is the machine's again. A renewal and a link that went and came back
+// are no loss at all.
+#[test]
+fn a_listener_stands_while_its_address_is_lost_and_answers_when_it_is_back() {
+    for (how, lose) in losses() {
+        let mut wire = Wire::leased(&terms(600, Some(R)));
+        let named = listen(&mut wire, A, 22).expect("the held address");
+        let any = listen(&mut wire, Ipv4Addr::UNSPECIFIED, 23).expect("every address");
+        let stand = |wire: &mut Wire, when: &str| {
+            assert_eq!((wire.node.listeners(), wire.node.held(), wire.node.drain_ended_listeners().count()), (2, 2, 0), "{how}, {when}");
+            assert_eq!((named.dropped.get(), any.dropped.get(), named.wakes.get(), any.wakes.get()), (false, false, 0, 0), "{how}, {when}");
+        };
+
+        let id = renewing(&mut wire);
+        wire.deliver(&from_server(MAC, A, &message_of(ACK, id, &terms(600, Some(R)))));
+        wire.link(false);
+        stand(&mut wire, "the link down");
+        wire.link(true);
+        let id = xid(wire.last(REQUEST));
+        wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms(600, Some(R)))));
+        assert_eq!(wire.node.lease().map(|lease| lease.address), Some(A), "{how}");
+        stand(&mut wire, "renewed, and the link back");
+
+        lose(&mut wire);
+        assert_eq!((wire.node.lease(), wire.address(A)), (None, None), "{how}");
+        stand(&mut wire, "the address lost");
+        assert_eq!(syn(&mut wire, 22), [], "{how}: a SYN to an address the machine does not hold");
+        stand(&mut wire, "a SYN to the lost address");
+        assert_eq!(listen(&mut wire, A, 24).err(), Some(ListenRefused::NotLocal), "{how}");
+
+        assert!(wire.run_until(Duration::from_secs(60), |wire| wire.dhcp().last().is_some_and(|(kind, _)| *kind == DISCOVER)), "{how}: discovery starts over");
+        let id = xid(wire.last(DISCOVER));
+        wire.deliver(&from_server(MAC, A, &message_of(OFFER, id, &terms(600, Some(R)))));
+        wire.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, id, &terms(600, Some(R)))));
+        assert!(wire.run_until(Duration::from_secs(10), |wire| wire.node.lease().is_some()), "{how}: the address is held again");
+        stand(&mut wire, "the address back");
+
+        let answer = syn(&mut wire, 22);
+        let Some(Seen::Tcp(synack)) = answer.last() else { panic!("{how}: {answer:?}") };
+        assert!(synack.syn && (synack.from_port, synack.ack) == (22, Some(ISS + 1)), "{how}: {synack:?}");
+        wire.deliver(&from_peer(22, Some(synack.seq.wrapping_add(1))));
+        assert_eq!((named.wakes.get(), any.wakes.get(), wire.node.listeners(), wire.node.held()), (1, 0, 2, 2), "{how}");
+    }
 }
 
 #[test]

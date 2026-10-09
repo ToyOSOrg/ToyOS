@@ -161,8 +161,9 @@ const RUST_SKIP: &[&str] = &[
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/acpicase.
     "acpi_release",
-    // It holds the boot open to near the runner's bound, and asserts nothing:
-    // the `acpi_server_events` metal row runs it.
+    // It waits for the ACPI server's count of its embedded controller's
+    // queries, and no guest's machine has that controller: the
+    // `acpi_server_events` metal row runs it.
     "acpi_hold",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
@@ -476,7 +477,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES_HELD,
             judge: |b| acpi_events_on_metal(b[0]),
         },
     ),
@@ -486,7 +487,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The same boot as `acpi_server_events`.
         "acpi_tables_loaded",
         metal::Metal {
-            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            arms: TESTCASES_HELD,
             judge: |b| acpi_tables_on_metal(b[0]),
         },
     ),
@@ -923,6 +924,13 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         claims::RECLAIM,
     ],
 )];
+
+/// The same boot, ended on the hold: the count it waits for comes thirty
+/// seconds after the server arms, and a job behind it would wait that out too.
+const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_acpi_hold"),
+    ..metal::once("testcases", "tests/testcases", &[], &[])
+}];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
@@ -4099,7 +4107,7 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the server died: {fired}"));
     }
     let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
-    let counts = lines.iter().rfind(|l| l.contains("embedded controller queries taken: "));
+    let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
     };
