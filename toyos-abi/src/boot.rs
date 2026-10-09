@@ -108,7 +108,17 @@ pub struct KernelArgs {
     pub loader_entry_counter: u64,
     pub loader_handoff_counter: u64,
     pub root_read_ticks: u64,
+    /// What firmware's `EFI_RNG_PROTOCOL` gave the loader for the kernel's
+    /// random generator, and how many of these bytes it is: [`SEED_LEN`], or
+    /// zero where firmware has no such protocol or gave nothing usable, which
+    /// is a machine and not an error. Secret: the kernel zeroes both fields
+    /// once it has read them, and neither side prints a byte of them.
+    pub loader_seed: [u8; SEED_LEN],
+    pub loader_seed_len: u64,
 }
+
+/// The bytes of [`KernelArgs::loader_seed`].
+pub const SEED_LEN: usize = 32;
 
 /// [`KernelArgs::layout`] for the struct this file declares: the struct's own
 /// size folded in. Never within -1440..=1440 as an `i32`: a loader older than
@@ -225,7 +235,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, loader_entry_counter) == 1248);
     assert!(offset_of!(KernelArgs, loader_handoff_counter) == 1256);
     assert!(offset_of!(KernelArgs, root_read_ticks) == 1264);
-    assert!(size_of::<KernelArgs>() == 1272);
+    assert!(offset_of!(KernelArgs, loader_seed) == 1272);
+    assert!(offset_of!(KernelArgs, loader_seed_len) == 1304);
+    assert!(size_of::<KernelArgs>() == 1312);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -320,6 +332,8 @@ mod tests {
         loader_entry_counter: 0,
         loader_handoff_counter: 0,
         root_read_ticks: 0,
+        loader_seed: [0; SEED_LEN],
+        loader_seed_len: 0,
     };
 
     #[test]

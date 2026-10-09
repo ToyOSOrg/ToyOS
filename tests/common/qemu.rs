@@ -694,10 +694,16 @@ pub enum Profile {
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
-    /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
-    /// IOMMU. The machine the AArch64 port reaches its console on, and the only
-    /// profile that is not a q35.
+    /// stick on an xHCI, the PL011, a virtio-rng for firmware's
+    /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
+    /// machine the AArch64 port runs on, under HVF on an Apple host and
+    /// emulated at EL1 elsewhere, and the only profile that is not a q35.
     Virt,
+    /// [`Profile::Virt`] with no virtio-rng, on a CPU with no RNDR: the host's
+    /// under HVF, and `cortex-a72` where it is emulated. Firmware then has no
+    /// `EFI_RNG_PROTOCOL`, so the kernel's generator has nothing to be keyed
+    /// from.
+    VirtNoRng,
     /// [`Profile::Virt`] with EL2 (`virtualization=on`), emulated on `-cpu max`:
     /// firmware then hands the loader the CPU at EL2, and the kernel's entry
     /// has to drop from it. HVF gives a guest EL1 only.
@@ -707,18 +713,13 @@ pub enum Profile {
     /// register name is EL1's own, so the loader's EL2 arm alone turns EL2's
     /// MMU off.
     VirtEl2NoVhe,
-    /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
-    /// hands the loader the CPU at EL1, as HVF does, and QEMU's FADT names
-    /// PSCI's conduit `HVC`; unlike HVF's, the CPU has RNDR for the kernel's
-    /// hash seed.
-    VirtTcg,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::Metal => Arch::X86_64,
@@ -728,7 +729,7 @@ impl Profile {
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
@@ -737,6 +738,7 @@ impl Profile {
     fn cpu(self) -> &'static str {
         match self {
             Self::VirtEl2NoVhe => "cortex-a72",
+            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72",
             _ => self.arch().cpu(self.accel()),
         }
     }
@@ -839,6 +841,12 @@ struct Shape {
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
     iommu: Option<Iommu>,
+    /// A virtio-rng, which is firmware's alone: edk2's driver puts
+    /// `EFI_RNG_PROTOCOL` behind it for the loader's seed, and the kernel
+    /// drives no such device. `virt` has it because an HVF guest's CPU has no
+    /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
+    /// the protocol from RDRAND without one.
+    rng: bool,
 }
 
 /// The boot stick's device id: the removal the owner's machine dies on is the
@@ -858,7 +866,8 @@ pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtEl2NoVhe => Self::Virt.shape(),
+            Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -868,6 +877,7 @@ impl Profile {
                 usb: &[],
                 nvme_bytes: 0,
                 iommu: None,
+                rng: true,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -878,6 +888,7 @@ impl Profile {
                 usb: &["usb-kbd,bus=xhci.0"],
                 nvme_bytes: NVME_SMALL,
                 iommu: Some(IOMMU_DEFAULT),
+                rng: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -892,6 +903,7 @@ impl Profile {
                 usb: &[],
                 nvme_bytes: NVME_SMALL,
                 iommu: Some(IOMMU_DEFAULT),
+                rng: false,
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
         }
@@ -2117,6 +2129,9 @@ fn qemu_command(
     for dev in shape.usb {
         qemu.arg("-device").arg(*dev);
     }
+    if shape.rng {
+        qemu.arg("-device").arg("virtio-rng-pci");
+    }
 
     // The NIC before the virtio block, so a profile that has one and not the
     // other still creates it after the unit and before everything else.
@@ -2174,8 +2189,8 @@ fn qemu_command(
     }
     if let Some(trace) = &options.psci_trace {
         assert!(
-            arch == Arch::Aarch64 && accel == Accel::Tcg,
-            "a PSCI trace is TCG's `arm_psci_call`, and this profile's PSCI is not QEMU's TCG"
+            arch == Arch::Aarch64 && accel != Accel::Kvm,
+            "a PSCI trace is QEMU's `arm_psci_call`, and under KVM the host's kernel answers PSCI"
         );
         qemu.arg("-trace").arg("arm_psci_call").arg("-D").arg(trace);
     }

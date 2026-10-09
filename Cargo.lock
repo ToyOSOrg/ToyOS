@@ -381,6 +381,7 @@ dependencies = [
  "toyos-bootmap",
  "toyos-elf",
  "toyos-gpt",
+ "toyos-random",
  "toyos-rootimage",
  "toyos-tco",
  "toyos-tsc",
@@ -3051,6 +3052,7 @@ dependencies = [
  "toyos-pci",
  "toyos-ps2",
  "toyos-quiesce",
+ "toyos-random",
  "toyos-rootimage",
  "toyos-symbols",
  "toyos-tco",
@@ -5993,6 +5995,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-quiesce"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-random"
 version = "0.1.0"
 
 [[package]]

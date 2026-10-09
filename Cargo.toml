@@ -56,6 +56,7 @@ members = [
     "toyos-net-wire",
     "toyos-osrelease",
     "toyos-quiesce",
+    "toyos-random",
     "toyos-rootimage",
     "toyos-swap",
     "toyos-symbols",
