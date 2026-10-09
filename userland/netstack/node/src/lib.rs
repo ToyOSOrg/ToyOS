@@ -20,8 +20,9 @@
 //! [`Node::drain_events`].
 //!
 //! **Draws.** Each `draw` is handed to the client, whose order is its own: a call that starts an
-//! exchange draws its transaction id first. The lookups in flight draw after it: an id and then a
-//! port for each query they send, and nothing else.
+//! exchange draws its transaction id first. The name draws after it, the delay of each probing it
+//! starts. The lookups in flight draw after both: an id and then a port for each query they send,
+//! and nothing else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -210,7 +211,7 @@ impl Node {
             };
             self.carry_out(now, out, verified, draw);
         }
-        self.serve_name(now);
+        self.serve_name(now, draw);
         self.resolver.pass(now, &mut self.stack, &mut self.counters, draw);
     }
 

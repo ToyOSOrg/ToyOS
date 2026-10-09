@@ -8,7 +8,62 @@
 //! `ANY`; every other question is somebody else's and gets silence, which is
 //! what RFC 6762 §6 asks of a responder that has no answer.
 //!
-//! Where the answer goes follows the question (§5.4, §6.7):
+//! **The name is claimed before it is used** (§8: "Probing (Section 8.1) and
+//! Announcing (Section 8.3)"), on every address that comes after none and
+//! whenever the caller says its link came back ([`Responder::link_returned`]):
+//!
+//! - §8.1: after a delay the caller draws, uniform in 0 to 250 ms, three
+//!   probes 250 ms apart, each the question `ANY` for the name with the
+//!   unicast-response bit and the proposed record in the Authority Section;
+//!   250 ms after the third the name is held, and only then is the record
+//!   announced (§8.3) or answered with. A new address under a held name is
+//!   announced and not probed for (§8.4).
+//! - §8.1: "if any conflicting Multicast DNS response is received, then the
+//!   probing host MUST defer to the existing host": the name is lost
+//!   ([`Event::Lost`]). A response conflicts when it carries, in any section, a
+//!   record of this name of any type other than this record itself (§9:
+//!   "resource records with identical rdata are never considered
+//!   inconsistent"); one "received *before* the first probe packet is sent MUST
+//!   be silently ignored".
+//! - §8.2: another host's probe for the name heard under ours is compared
+//!   with ours, class, then type, then data as unsigned bytes, "and the
+//!   lexicographically later data wins": the earlier "defers to the winning
+//!   host by waiting one second, and then begins probing for this record
+//!   again".
+//! - §9: a conflicting response to a held name means it "MUST immediately
+//!   reset its conflicted unique record to probing state", and what the probe
+//!   then hears decides it. A held name is defended by answering: another
+//!   host's probe for it is a question like any other, multicast as soon as
+//!   250 ms after the record's last multicast (§6) or unicast at once.
+//!
+//! **A lost name is not replaced.** §9 recommends a responder change its name
+//! and probe again; this one holds none, says so to its owner and waits for
+//! the link to return or an address after none. The name was moved in by the
+//! owner, who also asks the network to record it with the lease: a responder
+//! that picked another would answer to a name nothing else on the machine
+//! knows, that no storage keeps for the next boot (§9's third step), and that
+//! any host on the link could move again by answering for it.
+//!
+//! **What a peer can make this responder do.** Every byte read is a peer's,
+//! from a source on this link (§11); none is trusted, and none is kept.
+//!
+//! - It keeps nothing a message brought: its state is its fixed fields and
+//!   the times of its last [`CONFLICTS`] conflicts.
+//! - One conflict costs at most three probes and two announcements.
+//! - §8.1: "If fifteen conflicts occur within any ten-second period, then the
+//!   host MUST wait at least five seconds before each successive additional
+//!   probe attempt", for as long as conflicts keep coming less than ten
+//!   seconds apart.
+//! - Between two events that are no message read here, the link's return or
+//!   an address after none, a name is contested [`CONFLICTS`] times at most:
+//!   the conflict that makes it so loses the name ([`Lost::Contested`]), so
+//!   no peer keeps this responder probing, and the most its messages have
+//!   cost is that many rounds of three probes and two announcements.
+//! - A lost name sends nothing and reads nothing until one of those two
+//!   events. An address after none is whoever leases this machine its address
+//!   to cause, which decides what the record says anyway.
+//!
+//! Where an answer goes follows the question (§5.4, §6.7):
 //!
 //! - a query from port 5353 is a full responder's: the answer is multicast to
 //!   the group, unless it set the unicast-response bit, which asks for it back
@@ -17,18 +72,21 @@
 //!   back to its address and port, carrying its ID and its question, with no
 //!   cache-flush bit and a TTL of at most ten seconds.
 //!
-//! A query whose source is not on this link is ignored (§11), and the record
-//! is multicast at most once a second (§6) — announcements included — with a
-//! query inside that second answered when it ends ([`Responder`]).
+//! A message whose source is not on this link is ignored (§11), as is one
+//! with an opcode or a response code other than zero (§18.3, §18.11), and the
+//! record is multicast at most once a second (§6) — announcements included —
+//! with a query inside that second answered when it ends ([`Responder`]).
 //!
-//! **Not implemented, and so not claimed:** probing for the name before using
-//! it (§8.1) and defending it against another host's (§9). Two machines named
-//! alike both answer, and a resolver may see either.
+//! **Not implemented, and so not claimed:** §6's rule that a unicast response
+//! is read only within two seconds of a question that asked for one. The
+//! caller does not say how a message was addressed, so a response is read
+//! however it came; a host that can send one can multicast it too.
 //!
-//! A question is read off the wire by `toyos-dns`, the reader a resolver's
+//! A message is read off the wire by `toyos-dns`, the reader a resolver's
 //! reply is read by.
 //!
-//! Pure: `core` and `alloc`, no `unsafe`, no I/O.
+//! Pure: `core` and `alloc`, no `unsafe`, no I/O, no clock and no randomness
+//! of its own.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -38,7 +96,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod tests;
+
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 use toyos_dns::{name_at, u16_at, Name};
 
@@ -59,6 +121,10 @@ pub const TTL: u32 = 120;
 /// §6.7: an answer to a legacy resolver carries a TTL of at most ten seconds.
 pub const LEGACY_TTL: u32 = 10;
 
+/// §8.1: "If fifteen conflicts occur within any ten-second period". It is
+/// also how often a name is contested before it is given up.
+pub const CONFLICTS: usize = 15;
+
 /// The domain every name here is under (§3).
 const LOCAL: &[u8] = b"local";
 
@@ -69,13 +135,18 @@ const CLASS_IN: u16 = 1;
 const UNICAST_RESPONSE: u16 = 0x8000;
 /// The top bit of an answer's class: every cached record of this name is
 /// replaced by this one (§10.2). Set on every multicast answer, because this
-/// responder is the only owner of the name it answers for.
+/// responder answers only with a name it holds.
 const CACHE_FLUSH: u16 = 0x8000;
 /// `QR` and `AA`: a response, authoritative (§18.2, §18.4).
 const RESPONSE_FLAGS: u16 = 0x8400;
-/// §18.3: the opcode of any query this answers is zero.
+/// §18.3, §18.11: the opcode and the response code of any message read here
+/// are zero.
 const OPCODE_MASK: u16 = 0x7800;
+const RCODE_MASK: u16 = 0x000f;
 const QR: u16 = 0x8000;
+
+/// A message's header (RFC 1035 §4.1.1): its sections begin behind it.
+const HEADER: usize = 12;
 
 /// The longest label (RFC 1035 §2.3.4).
 const MAX_LABEL: usize = 63;
@@ -124,7 +195,7 @@ impl<'a> Host<'a> {
         out.push(0);
     }
 
-    /// Whether `name`, as a question spelled it, is this host's, whatever the
+    /// Whether `name`, as a message spelled it, is this host's, whatever the
     /// case of its letters.
     fn is(&self, name: &Name) -> bool {
         let mut ours = Vec::with_capacity(self.0.len() + LOCAL.len() + 3);
@@ -133,16 +204,30 @@ impl<'a> Host<'a> {
     }
 }
 
-/// The unsolicited answer a responder sends when its address is new (§8.3).
-pub fn announcement(host: Host, addr: [u8; 4]) -> Vec<u8> {
-    let mut out = header(0, RESPONSE_FLAGS, 0, 1);
+/// The unsolicited answer a responder sends for a name it has claimed (§8.3).
+fn announcement(host: Host, addr: [u8; 4]) -> Vec<u8> {
+    let mut out = header(0, RESPONSE_FLAGS, [0, 1, 0]);
     answer_record(&mut out, host, addr, CLASS_IN | CACHE_FLUSH, TTL);
     out
 }
 
-/// Where a query came from: the source address and port of its packet.
+/// §8.1: "All probe queries SHOULD be done using the desired resource record
+/// name and class (usually class 1, "Internet"), and query type "ANY" (255)",
+/// "as "QU" questions with the unicast-response bit set". §8.2: "each host
+/// populates the query message's Authority Section with the record or records
+/// with the rdata that it would be proposing to use".
+fn probe(host: Host, addr: [u8; 4]) -> Vec<u8> {
+    let mut out = header(0, 0, [1, 0, 1]);
+    host.put_name(&mut out);
+    out.extend_from_slice(&TYPE_ANY.to_be_bytes());
+    out.extend_from_slice(&(CLASS_IN | UNICAST_RESPONSE).to_be_bytes());
+    answer_record(&mut out, host, addr, CLASS_IN, TTL);
+    out
+}
+
+/// Where a message came from: the source address and port of its packet.
 #[derive(Clone, Copy, Debug)]
-pub struct Asker {
+pub struct Source {
     pub addr: [u8; 4],
     pub port: u16,
 }
@@ -156,7 +241,7 @@ pub struct Link {
 }
 
 impl Link {
-    /// Whether a query from `addr` is not from off this link, which is what
+    /// Whether a message from `addr` is not from off this link, which is what
     /// §11 refuses: in this subnet, or link-local (RFC 3927). A loopback
     /// source is off every link (RFC 1122 §3.2.1.3: a host silently discards
     /// a datagram carrying one), so it is refused wherever it arrived.
@@ -167,27 +252,149 @@ impl Link {
     }
 }
 
+/// What became of the name, for its owner's log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// Probing ended with no host answering: the name is this host's, and is
+    /// announced and answered with from here on.
+    Claimed,
+    /// The name is not this host's, and nothing is announced or answered
+    /// until the link returns or an address comes after none.
+    Lost(Lost),
+}
+
+/// Why the name was lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lost {
+    /// §8.1: another host answered for the name under the probe.
+    Answered,
+    /// The name was contested [`CONFLICTS`] times since the link last
+    /// returned or an address came after none.
+    Contested,
+}
+
+/// §8.1: "the host should first wait for a short random delay time, uniformly
+/// distributed in the range 0-250 ms."
+const PROBE_DELAY_MS: u32 = 250;
+
+/// §8.1: "250 ms after the first query, the host should send a second; then,
+/// 250 ms after that, a third. If, by 250 ms after the third probe, no
+/// conflicting Multicast DNS responses have been received, the host may move
+/// to the next step, announcing."
+const PROBE_EVERY_MS: u64 = 250;
+const PROBES: u8 = 3;
+
+/// §8.2: the loser of a simultaneous probe "defers to the winning host by
+/// waiting one second, and then begins probing for this record again."
+const DEFER_MS: u64 = 1_000;
+
+/// §8.1: fifteen conflicts "within any ten-second period", and then "at least
+/// five seconds before each successive additional probe attempt."
+const CONFLICT_WINDOW_MS: u64 = 10_000;
+const LIMITED_WAIT_MS: u64 = 5_000;
+
 /// §6: a record is multicast on an interface at most once a second.
 const GROUP_EVERY_MS: u64 = 1_000;
+
+/// §6: "when responding via multicast to a probe, a Multicast DNS responder
+/// is only required to delay its transmission as necessary to ensure an
+/// interval of at least 250 ms since the last time the record was multicast
+/// on that interface."
+const PROBE_ANSWER_EVERY_MS: u64 = 250;
 
 /// §8.3: "The Multicast DNS responder MUST send at least two unsolicited
 /// responses, one second apart."
 const ANNOUNCE_AGAIN_MS: u64 = 1_000;
 
+/// Whose the name is, read only while an address is held.
+#[derive(Clone, Copy, Debug)]
+enum Claim {
+    /// Probing is owed since `since_ms`: the next [`Responder::on`] draws its
+    /// delay.
+    Owed { since_ms: u64 },
+    /// `sent` probes have left; at `at_ms` the next does, or after the third
+    /// the name is held. A message conflicts only once `sent` is not zero.
+    Probing { sent: u8, at_ms: u64 },
+    Held,
+    Lost,
+}
+
+/// The conflicts over the name.
+#[derive(Debug)]
+struct Contest {
+    /// The times of the last [`CONFLICTS`] conflicts, the oldest at `next`.
+    times: [u64; CONFLICTS],
+    next: usize,
+    /// How many of `times` came each within [`CONFLICT_WINDOW_MS`] of the one
+    /// before, up to now.
+    counted: usize,
+    last_ms: Option<u64>,
+    /// [`CONFLICTS`] of them have fallen within one window.
+    limited: bool,
+    /// The conflicts since the link returned or an address came after none.
+    since_return: usize,
+}
+
+impl Contest {
+    const fn new() -> Self {
+        Self { times: [0; CONFLICTS], next: 0, counted: 0, last_ms: None, limited: false, since_return: 0 }
+    }
+
+    /// A conflict at `now_ms`. Returns whether the name has now been contested
+    /// [`CONFLICTS`] times since the link returned or an address came after none.
+    fn conflict(&mut self, now_ms: u64) -> bool {
+        if !self.running(now_ms) {
+            (self.counted, self.limited) = (0, false);
+        }
+        self.last_ms = Some(now_ms);
+        self.times[self.next] = now_ms;
+        self.next = (self.next + 1) % CONFLICTS;
+        self.counted = (self.counted + 1).min(CONFLICTS);
+        if self.counted == CONFLICTS && now_ms.saturating_sub(self.times[self.next]) <= CONFLICT_WINDOW_MS {
+            self.limited = true;
+        }
+        self.since_return = (self.since_return + 1).min(CONFLICTS);
+        self.since_return == CONFLICTS
+    }
+
+    /// Whether a conflict at `now_ms` would be one more of this contest.
+    fn running(&self, now_ms: u64) -> bool {
+        self.last_ms.is_some_and(|last| now_ms.saturating_sub(last) <= CONFLICT_WINDOW_MS)
+    }
+
+    /// What §8.1's limit puts before a probe attempt scheduled at `now_ms`.
+    fn wait_ms(&self, now_ms: u64) -> u64 {
+        if self.limited && self.running(now_ms) {
+            LIMITED_WAIT_MS
+        } else {
+            0
+        }
+    }
+}
+
 /// This host's one record on its link, on the caller's monotonic clock in
-/// milliseconds: announced on every new address and whenever the link comes
-/// back ([`Responder::link_returned`]), each time twice a second apart (§8,
-/// §8.3), answered to whoever asks, and multicast at most once a second (§6),
-/// so no host can turn the queries it sends into a multicast to every host on
-/// the link at its own rate. A query §6 holds back is answered when the second
-/// ends, not dropped: the caller wakes at [`Responder::owed_at`].
+/// milliseconds: probed for on every address after none and whenever the link
+/// comes back ([`Responder::link_returned`]), then announced twice a second
+/// apart (§8, §8.3), answered to whoever asks, and multicast at most once a
+/// second (§6), so no host can turn the queries it sends into a multicast to
+/// every host on the link at its own rate. A query §6 holds back is answered
+/// when the second ends, not dropped: the caller wakes at
+/// [`Responder::owed_at`], for that and for every probe.
+///
+/// A message counts as sent once [`Responder::on`] has handed it over. A
+/// caller whose link was down for it says so by [`Responder::link_returned`]
+/// when the link is back, which probes again.
 #[derive(Debug)]
 pub struct Responder<'a> {
     host: Host<'a>,
-    /// The link the record was last announced on.
+    /// The link the address is held on.
     link: Option<Link>,
+    claim: Claim,
+    contest: Contest,
+    /// The latest change of the claim nobody took.
+    event: Option<Event>,
     last_group_ms: Option<u64>,
-    /// When the record is next owed to the group: an announcement, or an
+    /// When a held record is next owed to the group: an announcement, or an
     /// answer §6 delayed. One multicast of the record answers every query it
     /// held.
     owed_ms: Option<u64>,
@@ -198,25 +405,55 @@ pub struct Responder<'a> {
 
 impl<'a> Responder<'a> {
     pub const fn new(host: Host<'a>) -> Self {
-        Self { host, link: None, last_group_ms: None, owed_ms: None, again: false }
+        Self {
+            host,
+            link: None,
+            claim: Claim::Lost,
+            contest: Contest::new(),
+            event: None,
+            last_group_ms: None,
+            owed_ms: None,
+            again: false,
+        }
     }
 
     /// This host is on `link` at `now_ms`, or on none while it holds no
-    /// address: the multicast the record is owed now, if any — an
-    /// announcement of a new address or of a link that came back, its
-    /// second, or an answer §6 delayed.
-    pub fn on(&mut self, link: Option<Link>, now_ms: u64) -> Option<Vec<u8>> {
+    /// address: the multicast owed now, if any — a probe, an announcement of
+    /// a name just claimed or of a new address under a held one (§8.4), its
+    /// second, or an answer §6 delayed. `delay` is drawn once when this call
+    /// starts probing, and not otherwise.
+    pub fn on(&mut self, link: Option<Link>, now_ms: u64, delay: impl FnOnce() -> u32) -> Option<Vec<u8>> {
         let Some(link) = link else {
             self.link = None;
             self.owed_ms = None;
             return None;
         };
-        if self.link.is_none_or(|was| was.addr != link.addr) {
-            self.owed_ms = Some(now_ms);
+        match self.link.replace(link) {
+            None => self.begin(now_ms),
+            Some(was) if was.addr != link.addr && matches!(self.claim, Claim::Held) => {
+                self.owed_ms = Some(now_ms);
+                self.again = true;
+            }
+            Some(_) => {}
+        }
+        if let Claim::Owed { .. } = self.claim {
+            let wait = u64::from(delay() % (PROBE_DELAY_MS + 1)) + self.contest.wait_ms(now_ms);
+            self.claim = Claim::Probing { sent: 0, at_ms: now_ms.saturating_add(wait) };
+        }
+        if let Claim::Probing { sent, at_ms } = self.claim {
+            if now_ms < at_ms {
+                return None;
+            }
+            if sent < PROBES {
+                self.claim = Claim::Probing { sent: sent + 1, at_ms: now_ms.saturating_add(PROBE_EVERY_MS) };
+                return Some(probe(self.host, link.addr));
+            }
+            self.claim = Claim::Held;
+            self.event = Some(Event::Claimed);
+            self.owed_ms = Some(self.group_free_ms(now_ms, GROUP_EVERY_MS));
             self.again = true;
         }
-        self.link = Some(link);
-        if !self.owed_ms.is_some_and(|at| now_ms >= at) {
+        if !matches!(self.claim, Claim::Held) || !self.owed_ms.is_some_and(|at| now_ms >= at) {
             return None;
         }
         self.owed_ms = core::mem::take(&mut self.again).then(|| now_ms.saturating_add(ANNOUNCE_AGAIN_MS));
@@ -224,65 +461,141 @@ impl<'a> Responder<'a> {
         Some(announcement(self.host, link.addr))
     }
 
-    /// The link this host's address is on came back at `now_ms`: its
-    /// connectivity may have changed, so the record is announced again as a
-    /// new address's is (§8), the first time as soon as §6 lets the record
-    /// be multicast. With no address held nothing is owed: the one that
-    /// comes is new.
+    /// The link this host's address is on came back at `now_ms`, or the
+    /// caller has another reason to think its connectivity changed (§8): the
+    /// name is probed for again, whoever held it, and announced only if that
+    /// probe goes unanswered. With no address held nothing is owed: the one
+    /// that comes is probed on.
     pub fn link_returned(&mut self, now_ms: u64) {
         if self.link.is_some() {
-            self.owed_ms = Some(self.group_free_ms(now_ms));
-            self.again = true;
+            self.begin(now_ms);
         }
     }
 
-    /// When §6 next lets the record be multicast: `now_ms`, or the end of
-    /// the second its last multicast began.
-    fn group_free_ms(&self, now_ms: u64) -> u64 {
-        self.last_group_ms.map_or(now_ms, |last| last.saturating_add(GROUP_EVERY_MS)).max(now_ms)
+    /// Probing is owed for a reason that is no message read here.
+    fn begin(&mut self, now_ms: u64) {
+        self.contest.since_return = 0;
+        self.release(Claim::Owed { since_ms: now_ms });
     }
 
-    /// When the record is next owed to the group, on the caller's clock.
+    /// The name is no longer held: nothing of the record is owed.
+    fn release(&mut self, claim: Claim) {
+        self.claim = claim;
+        self.owed_ms = None;
+        self.again = false;
+    }
+
+    fn lose(&mut self, why: Lost) {
+        self.release(Claim::Lost);
+        self.event = Some(Event::Lost(why));
+    }
+
+    /// When the record was last multicast plus `every_ms`, or `now_ms` if
+    /// that is later: when §6 next lets it be multicast.
+    fn group_free_ms(&self, now_ms: u64, every_ms: u64) -> u64 {
+        self.last_group_ms.map_or(now_ms, |last| last.saturating_add(every_ms)).max(now_ms)
+    }
+
+    /// When [`Self::on`] is next owed a call, on the caller's clock.
     pub fn owed_at(&self) -> Option<u64> {
-        self.owed_ms
+        self.link?;
+        match self.claim {
+            Claim::Owed { since_ms } => Some(since_ms),
+            Claim::Probing { at_ms, .. } => Some(at_ms),
+            Claim::Held => self.owed_ms,
+            Claim::Lost => None,
+        }
     }
 
-    /// The answer `query`, from `asker`, is owed now, or `None` where it asks
-    /// nothing this host answers — no address held, a source off the link, a
-    /// response, a query with a nonzero opcode, a question for another name or
-    /// type, or bytes that are not a message at all — or where §6 delays it
-    /// to [`Responder::owed_at`].
-    pub fn answer(&mut self, query: &[u8], asker: Asker, now_ms: u64) -> Option<Answer> {
+    /// The latest of what became of the name since the last call.
+    pub fn take_event(&mut self) -> Option<Event> {
+        self.event.take()
+    }
+
+    /// `message` arrived from `from` at `now_ms`: the answer it is owed now,
+    /// if it is a query for a held name; a response or another host's probe
+    /// is read for what it says of the name and answered nothing. `None` too
+    /// where it asks nothing this host answers — no address held, a source
+    /// off the link, an opcode or a response code other than zero, a question
+    /// for another name or type, or bytes that are not a message at all — or
+    /// where §6 delays the answer to [`Responder::owed_at`].
+    pub fn heard(&mut self, message: &[u8], from: Source, now_ms: u64) -> Option<Answer> {
         let link = self.link?;
-        if !link.holds(asker.addr) {
+        if !link.holds(from.addr) {
             return None;
         }
-        let host = self.host;
-        let id = u16_at(query, 0).ok()?;
-        let flags = u16_at(query, 2).ok()?;
-        if flags & (QR | OPCODE_MASK) != 0 {
+        let id = u16_at(message, 0).ok()?;
+        let flags = u16_at(message, 2).ok()?;
+        if flags & (OPCODE_MASK | RCODE_MASK) != 0 {
             return None;
         }
-        let questions = u16_at(query, 4).ok()?;
-        let mut at = 12;
-        let mut asked = None;
-        for _ in 0..questions {
-            let (name, after) = name_at(query, at).ok()?;
-            let kind = u16_at(query, after).ok()?;
-            let class = u16_at(query, after + 2).ok()?;
-            at = after + 4;
-            if host.is(&name)
-                && matches!(kind, TYPE_A | TYPE_ANY)
-                && class & !UNICAST_RESPONSE == CLASS_IN
-            {
-                asked = Some(class & UNICAST_RESPONSE != 0);
-                break;
+        if flags & QR != 0 {
+            self.response(message, from, link, now_ms);
+            return None;
+        }
+        match self.claim {
+            Claim::Held => self.answer(message, id, from, link, now_ms),
+            Claim::Probing { sent, .. } if sent > 0 => {
+                self.rival(message, link, now_ms);
+                None
             }
+            Claim::Owed { .. } | Claim::Probing { .. } | Claim::Lost => None,
         }
-        let unicast = asked?;
-        if asker.port != PORT {
+    }
+
+    /// A response: §6 has one from a port other than 5353 silently ignored,
+    /// and one that conflicts takes a name under probe (§8.1) and sends a
+    /// held one back to probing (§9).
+    fn response(&mut self, message: &[u8], from: Source, link: Link, now_ms: u64) {
+        let probing = match self.claim {
+            Claim::Probing { sent, .. } if sent > 0 => true,
+            Claim::Held => false,
+            Claim::Owed { .. } | Claim::Probing { .. } | Claim::Lost => return,
+        };
+        if from.port != PORT || !conflicts(message, self.host, link.addr).unwrap_or(false) {
+            return;
+        }
+        let over = self.contest.conflict(now_ms);
+        if probing {
+            self.lose(Lost::Answered);
+        } else if over {
+            self.lose(Lost::Contested);
+        } else {
+            self.release(Claim::Owed { since_ms: now_ms });
+        }
+    }
+
+    /// A query heard under this host's probe: §8.2's comparison if it is
+    /// another host's probe for the name.
+    fn rival(&mut self, query: &[u8], link: Link, now_ms: u64) {
+        let Some((kind, _)) = asked(query, self.host) else { return };
+        let Some((theirs, more)) = proposed(query, self.host, kind) else { return };
+        // §8.2.1: equal as far as this host's one record goes, "the list with
+        // records remaining is deemed to have won"; with none remaining "there
+        // is, in fact, no conflict."
+        let later = match theirs.cmp(&(CLASS_IN, TYPE_A, &link.addr[..])) {
+            Ordering::Greater => true,
+            Ordering::Equal => more,
+            Ordering::Less => false,
+        };
+        if !later {
+            return;
+        }
+        if self.contest.conflict(now_ms) {
+            self.lose(Lost::Contested);
+        } else {
+            let wait = DEFER_MS + self.contest.wait_ms(now_ms);
+            self.release(Claim::Probing { sent: 0, at_ms: now_ms.saturating_add(wait) });
+        }
+    }
+
+    /// A query for a held name.
+    fn answer(&mut self, query: &[u8], id: u16, from: Source, link: Link, now_ms: u64) -> Option<Answer> {
+        let host = self.host;
+        let (kind, unicast) = asked(query, host)?;
+        if from.port != PORT {
             // §6.7: the asker's ID and question, and a record no cache keeps long.
-            let mut out = header(id, RESPONSE_FLAGS, 1, 1);
+            let mut out = header(id, RESPONSE_FLAGS, [1, 1, 0]);
             host.put_name(&mut out);
             out.extend_from_slice(&TYPE_A.to_be_bytes());
             out.extend_from_slice(&CLASS_IN.to_be_bytes());
@@ -290,22 +603,121 @@ impl<'a> Responder<'a> {
             return Some(Answer { to: To::Asker, bytes: out });
         }
         if !unicast {
-            let free_ms = self.group_free_ms(now_ms);
+            // §6: "A probe query can be distinguished from a normal query by
+            // the fact that a probe query contains a proposed record in the
+            // Authority Section that answers the question".
+            let every_ms = if proposed(query, host, kind).is_some() { PROBE_ANSWER_EVERY_MS } else { GROUP_EVERY_MS };
+            let free_ms = self.group_free_ms(now_ms, every_ms);
             if now_ms < free_ms {
-                self.owed_ms = Some(free_ms);
+                self.owed_ms = Some(self.owed_ms.map_or(free_ms, |owed| owed.min(free_ms)));
                 return None;
             }
             self.last_group_ms = Some(now_ms);
         }
-        let mut out = header(0, RESPONSE_FLAGS, 0, 1);
-        answer_record(&mut out, host, link.addr, CLASS_IN | CACHE_FLUSH, TTL);
-        Some(Answer { to: if unicast { To::Asker } else { To::Group }, bytes: out })
+        Some(Answer { to: if unicast { To::Asker } else { To::Group }, bytes: announcement(host, link.addr) })
     }
 }
 
-fn header(id: u16, flags: u16, questions: u16, answers: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
-    for word in [id, flags, questions, answers, 0, 0] {
+/// The first question of `query` this host's record answers: its type, and
+/// whether it asks for a unicast response (§5.4).
+fn asked(query: &[u8], host: Host) -> Option<(u16, bool)> {
+    let mut at = HEADER;
+    for _ in 0..u16_at(query, 4).ok()? {
+        let (name, after) = name_at(query, at).ok()?;
+        let kind = u16_at(query, after).ok()?;
+        let class = u16_at(query, after + 2).ok()?;
+        at = after + 4;
+        if host.is(&name) && matches!(kind, TYPE_A | TYPE_ANY) && class & !UNICAST_RESPONSE == CLASS_IN {
+            return Some((kind, class & UNICAST_RESPONSE != 0));
+        }
+    }
+    None
+}
+
+/// One resource record (RFC 1035 §4.1.3) and where the bytes after it begin.
+struct Record<'m> {
+    name: Name,
+    kind: u16,
+    class: u16,
+    data: &'m [u8],
+    end: usize,
+}
+
+fn record_at(message: &[u8], at: usize) -> Option<Record<'_>> {
+    let (name, after) = name_at(message, at).ok()?;
+    let kind = u16_at(message, after).ok()?;
+    let class = u16_at(message, after + 2).ok()?;
+    let end = after + 10 + usize::from(u16_at(message, after + 8).ok()?);
+    Some(Record { name, kind, class, data: message.get(after + 10..end)?, end })
+}
+
+/// Where the records of `message` begin: behind its questions.
+fn records_at(message: &[u8]) -> Option<usize> {
+    let mut at = HEADER;
+    for _ in 0..u16_at(message, 4).ok()? {
+        at = name_at(message, at).ok()?.1 + 4;
+    }
+    Some(at)
+}
+
+/// Whether `response` carries, in any of its three record sections (§9), a
+/// record of `host`'s name other than its `A` record for `addr`. `None` where
+/// it stops being a message before one is found.
+fn conflicts(response: &[u8], host: Host, addr: [u8; 4]) -> Option<bool> {
+    let mut at = records_at(response)?;
+    let records = [6, 8, 10].into_iter().map(|count| u16_at(response, count).map(u32::from));
+    for _ in 0..records.sum::<Result<u32, _>>().ok()? {
+        let record = record_at(response, at)?;
+        at = record.end;
+        let ours = record.kind == TYPE_A && record.class & !CACHE_FLUSH == CLASS_IN && record.data == addr;
+        if host.is(&record.name) && !ours {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// A record as §8.2 orders it: "first comparing the record class (excluding
+/// the cache-flush bit described in Section 10.2), then the record type, then
+/// raw comparison of the binary content of the rdata", its bytes "as
+/// eight-bit UNSIGNED values", the shorter of two that agree the earlier.
+///
+/// The data is compared as the message carries it, and §8.2 has a name in it
+/// uncompressed first: none is, because data is reached only between two
+/// records of one class and type, this host's is its `A` record, and an
+/// address holds no name.
+type Proposed<'m> = (u16, u16, &'m [u8]);
+
+/// The records `query` proposes in its Authority Section for `host`'s name
+/// that answer a question of type `kind`: the first of them as §8.2.1 sorts
+/// them, and whether there is another. `None` where it proposes none, which
+/// is what makes a query no probe (§6), or is no message that far.
+fn proposed<'m>(query: &'m [u8], host: Host, kind: u16) -> Option<(Proposed<'m>, bool)> {
+    let mut at = records_at(query)?;
+    for _ in 0..u16_at(query, 6).ok()? {
+        at = record_at(query, at)?.end;
+    }
+    let mut first: Option<Proposed> = None;
+    let mut more = false;
+    for _ in 0..u16_at(query, 8).ok()? {
+        let record = record_at(query, at)?;
+        at = record.end;
+        if host.is(&record.name) && (kind == TYPE_ANY || kind == record.kind) {
+            let theirs = (record.class & !CACHE_FLUSH, record.kind, record.data);
+            more = first.is_some();
+            if first.is_none_or(|first| theirs < first) {
+                first = Some(theirs);
+            }
+        }
+    }
+    first.map(|first| (first, more))
+}
+
+/// A header (RFC 1035 §4.1.1) with `counts` questions, answers and authority
+/// records, and no additional one.
+fn header(id: u16, flags: u16, counts: [u16; 3]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96);
+    for word in [id, flags, counts[0], counts[1], counts[2], 0] {
         out.extend_from_slice(&word.to_be_bytes());
     }
     out
@@ -318,271 +730,4 @@ fn answer_record(out: &mut Vec<u8>, host: Host, addr: [u8; 4], class: u16, ttl: 
     out.extend_from_slice(&ttl.to_be_bytes());
     out.extend_from_slice(&4u16.to_be_bytes());
     out.extend_from_slice(&addr);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::vec;
-
-    const ADDR: [u8; 4] = [192, 168, 1, 49];
-
-    fn host() -> Host<'static> {
-        Host::new("toyos-t14").expect("a label")
-    }
-
-    const LINK: Link = Link { addr: ADDR, prefix: 24 };
-    const NEIGHBOUR: [u8; 4] = [192, 168, 1, 7];
-
-    /// A responder that announced [`LINK`]'s address at 0.
-    fn announced() -> Responder<'static> {
-        let mut r = Responder::new(host());
-        assert!(r.on(Some(LINK), 0).is_some(), "a new address is announced");
-        r
-    }
-
-    /// One query from a neighbour on the link, long after the announcement.
-    fn ask(query: &[u8], port: u16) -> Option<Answer> {
-        announced().answer(query, Asker { addr: NEIGHBOUR, port }, 10_000)
-    }
-
-    /// A query as RFC 1035 §4.1 lays one out, spelled byte by byte here rather
-    /// than by this crate's own writer.
-    fn query(id: u16, name: &[&str], kind: u16, class: u16) -> Vec<u8> {
-        let mut q = vec![(id >> 8) as u8, id as u8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-        for label in name {
-            q.push(label.len() as u8);
-            q.extend_from_slice(label.as_bytes());
-        }
-        q.push(0);
-        q.extend_from_slice(&kind.to_be_bytes());
-        q.extend_from_slice(&class.to_be_bytes());
-        q
-    }
-
-    /// The answer a multicast query is owed, byte for byte: RFC 6762's header
-    /// (§18: ID zero, `QR|AA`, no question), one `A` record with the
-    /// cache-flush bit and a 120 s TTL.
-    #[test]
-    fn a_query_for_this_name_is_answered_to_the_group() {
-        let got = ask(&query(0, &["toyos-t14", "local"], 1, 1), PORT)
-            .expect("an answer");
-        assert_eq!(got.to, To::Group);
-        let mut want = vec![0, 0, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0];
-        want.extend_from_slice(b"\x09toyos-t14\x05local\x00");
-        want.extend_from_slice(&[0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 1, 49]);
-        assert_eq!(got.bytes, want);
-        assert_eq!(announcement(host(), ADDR), want, "the announcement is the same answer, unasked");
-    }
-
-    #[test]
-    fn a_name_is_matched_whatever_its_case_and_any_asks_for_it_too() {
-        let q = query(0, &["ToyOS-T14", "LOCAL"], 255, 1);
-        assert!(ask(&q, PORT).is_some());
-    }
-
-    #[test]
-    fn the_unicast_bit_sends_the_answer_back_to_the_asker() {
-        let got = ask(&query(0, &["toyos-t14", "local"], 1, 0x8001), PORT)
-            .expect("an answer");
-        assert_eq!(got.to, To::Asker);
-    }
-
-    /// §6.7: a resolver that is not a responder gets its ID, its question and
-    /// a short TTL, and no cache-flush bit.
-    #[test]
-    fn a_legacy_resolver_gets_its_id_its_question_and_a_short_ttl() {
-        let got = ask(&query(0xBEEF, &["toyos-t14", "local"], 1, 1), 53_000)
-            .expect("an answer");
-        assert_eq!(got.to, To::Asker);
-        let mut want = vec![0xBE, 0xEF, 0x84, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
-        want.extend_from_slice(b"\x09toyos-t14\x05local\x00\x00\x01\x00\x01");
-        want.extend_from_slice(b"\x09toyos-t14\x05local\x00");
-        want.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 10, 0, 4, 192, 168, 1, 49]);
-        assert_eq!(got.bytes, want);
-    }
-
-    #[test]
-    fn a_question_that_is_not_this_hosts_is_not_answered() {
-        for (name, kind, class) in [
-            (&["other", "local"][..], 1, 1),
-            (&["toyos-t14", "lan"][..], 1, 1),
-            (&["toyos-t14"][..], 1, 1),
-            (&["toyos-t14", "local", "x"][..], 1, 1),
-            (&["toyos-t14", "local"][..], 28, 1),
-            (&["toyos-t14", "local"][..], 1, 3),
-        ] {
-            assert_eq!(ask(&query(0, name, kind, class), PORT), None, "{name:?}");
-        }
-        let mut response = query(0, &["toyos-t14", "local"], 1, 1);
-        response[2] = 0x84;
-        assert_eq!(ask(&response, PORT), None, "a response is not a question");
-        let mut opcode = query(0, &["toyos-t14", "local"], 1, 1);
-        opcode[2] = 0x08;
-        assert_eq!(ask(&opcode, PORT), None, "a nonzero opcode is not a query");
-    }
-
-    /// A second question may name the first's labels by pointer (RFC 1035
-    /// §4.1.4), as a responder asking several things at once does.
-    #[test]
-    fn a_question_spelled_by_a_pointer_is_read() {
-        let mut q = query(0, &["other", "local"], 1, 1);
-        q[5] = 2;
-        // `toyos-t14`, then a pointer to `local` at offset 12 + 6.
-        q.extend_from_slice(b"\x09toyos-t14\xC0\x12\x00\x01\x00\x01");
-        assert_eq!(ask(&q, PORT).map(|a| a.to), Some(To::Group));
-    }
-
-    /// Nothing a peer sends can hold the parser: a short message, a label past
-    /// the end, a pointer forwards or to itself are each no question.
-    #[test]
-    fn a_malformed_message_is_no_question() {
-        let whole = query(0, &["toyos-t14", "local"], 1, 1);
-        for cut in 0..whole.len() {
-            assert_eq!(ask(&whole[..cut], PORT), None, "cut at {cut}");
-        }
-        let mut forward = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-        forward.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1]);
-        assert_eq!(ask(&forward, PORT), None, "a pointer to itself");
-        let mut ahead = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-        ahead.extend_from_slice(&[0xC0, 20, 0, 1, 0, 1, 0, 0]);
-        assert_eq!(ask(&ahead, PORT), None, "a pointer forwards");
-        let mut reserved = vec![0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
-        reserved.extend_from_slice(&[0x40, 0, 0, 1, 0, 1]);
-        assert_eq!(ask(&reserved, PORT), None, "a reserved label type");
-    }
-
-    /// RFC 6762 §6: "a Multicast DNS responder MUST NOT (except in the one
-    /// special case of answering probe queries) multicast a record on a given
-    /// interface until at least one second has elapsed since the last time that
-    /// record was multicast on that particular interface." An announcement is a
-    /// multicast of the record too. A query inside the second is answered when
-    /// it ends, by one multicast of the record, and not before or never.
-    #[test]
-    fn the_record_is_multicast_at_most_once_a_second_and_a_query_inside_it_waits() {
-        let q = query(0, &["toyos-t14", "local"], 1, 1);
-        let from = Asker { addr: NEIGHBOUR, port: PORT };
-        let mut r = Responder::new(host());
-        let record = r.on(Some(LINK), 20_000).expect("a new address is announced");
-        assert_eq!(r.owed_at(), Some(21_000), "§8.3: the second announcement");
-        assert_eq!(r.answer(&q, from, 20_500), None, "the record was announced 500 ms ago");
-        let legacy = Asker { addr: NEIGHBOUR, port: 53_000 };
-        assert_eq!(
-            r.answer(&q, legacy, 20_500).map(|a| a.to),
-            Some(To::Asker),
-            "a unicast answer is no multicast of the record"
-        );
-        assert_eq!(r.on(Some(LINK), 20_999), None);
-        assert_eq!(r.on(Some(LINK), 21_000).as_ref(), Some(&record), "announced again, which answers the query");
-        assert_eq!(r.owed_at(), None);
-
-        assert_eq!(r.answer(&q, from, 21_400), None, "the record was multicast 400 ms ago");
-        assert_eq!(r.answer(&q, from, 21_600), None);
-        assert_eq!(r.owed_at(), Some(22_000), "both queries are owed one multicast when the second ends");
-        assert_eq!(r.on(Some(LINK), 21_999), None);
-        assert_eq!(r.on(Some(LINK), 22_000).as_ref(), Some(&record));
-        assert_eq!(r.on(Some(LINK), 22_001), None, "owed once");
-
-        let later = r.answer(&q, from, 23_000).map(|a| a.to);
-        assert_eq!(later, Some(To::Group), "a second has passed");
-        assert_eq!(r.answer(&q, from, 23_999), None);
-        assert_eq!(r.owed_at(), Some(24_000));
-    }
-
-    /// Nothing is answered without an address; an address after none, or a
-    /// different one, is new and announced at once with what it is.
-    #[test]
-    fn an_address_is_announced_when_new_and_none_is_answered_for() {
-        let q = query(0, &["toyos-t14", "local"], 1, 1);
-        let from = Asker { addr: NEIGHBOUR, port: 53_000 };
-        let mut r = Responder::new(host());
-        assert_eq!(r.answer(&q, from, 0), None, "no address yet");
-        assert!(r.on(Some(LINK), 0).is_some());
-        assert_eq!(r.on(Some(LINK), 500), None);
-        assert_eq!(r.on(None, 600), None);
-        assert_eq!(r.owed_at(), None, "nothing is owed for an address no longer held");
-        assert_eq!(r.answer(&q, from, 600), None, "no address any more");
-        assert!(r.on(Some(LINK), 700).is_some(), "an address after none is new");
-        let moved = Link { addr: [192, 168, 1, 50], prefix: 24 };
-        let announced = r.on(Some(moved), 800).expect("a different address is new");
-        assert_eq!(announced[announced.len() - 4..], [192, 168, 1, 50]);
-    }
-
-    /// RFC 6762 §8: "Whenever a Multicast DNS responder starts up, wakes up
-    /// from sleep, receives an indication of a network interface "Link Change"
-    /// event, or has any other reason to believe that its network connectivity
-    /// may have changed in some relevant way, it MUST perform the two startup
-    /// steps below: Probing (Section 8.1) and Announcing (Section 8.3)." §8.3:
-    /// "at least two unsolicited responses, one second apart." §6 still holds:
-    /// a link back inside the second of the record's last multicast is
-    /// announced when that second ends. With no address there is no record,
-    /// and the address that comes is announced as new, twice and not four
-    /// times.
-    #[test]
-    fn a_link_that_returns_is_announced_twice_a_second_apart_and_no_sooner_than_a_second_after_the_last_multicast() {
-        let mut r = announced();
-        let record = r.on(Some(LINK), 1_000).expect("the first address's second announcement");
-        assert_eq!((r.on(Some(LINK), 60_000), r.owed_at()), (None, None), "nothing is owed a link that stayed");
-
-        r.link_returned(60_000);
-        assert_eq!(r.owed_at(), Some(60_000));
-        assert_eq!(r.on(Some(LINK), 60_000).as_ref(), Some(&record), "announced as the link returns");
-        assert_eq!(r.owed_at(), Some(61_000), "§8.3: and a second later");
-        assert_eq!(r.on(Some(LINK), 60_999), None);
-        assert_eq!(r.on(Some(LINK), 61_000).as_ref(), Some(&record));
-        assert_eq!((r.on(Some(LINK), 62_000), r.owed_at()), (None, None), "twice");
-
-        r.link_returned(61_300);
-        assert_eq!(r.owed_at(), Some(62_000), "§6: the record was multicast 300 ms ago");
-        assert_eq!(r.on(Some(LINK), 61_300), None);
-        assert_eq!(r.on(Some(LINK), 62_000).as_ref(), Some(&record));
-        assert_eq!(r.owed_at(), Some(63_000));
-        assert_eq!(r.on(Some(LINK), 63_000).as_ref(), Some(&record));
-        assert_eq!(r.owed_at(), None);
-
-        r.link_returned(70_000);
-        assert_eq!(r.on(None, 70_000), None, "the address went with the link's return");
-        assert_eq!(r.owed_at(), None);
-        assert!(r.on(Some(LINK), 71_000).is_some(), "an address after none is new");
-        assert_eq!(r.owed_at(), Some(72_000));
-        assert!(r.on(Some(LINK), 72_000).is_some());
-        assert_eq!((r.on(Some(LINK), 73_000), r.owed_at()), (None, None), "its two announcements and no third");
-
-        let mut unaddressed = Responder::new(host());
-        unaddressed.link_returned(5_000);
-        assert_eq!(unaddressed.owed_at(), None, "no address, no record to announce");
-        assert!(unaddressed.on(Some(LINK), 9_000).is_some());
-        assert_eq!(unaddressed.owed_at(), Some(10_000));
-    }
-
-    /// RFC 6762 §11: a query whose source is not on this link is ignored; a
-    /// link-local source (RFC 3927) is on every link. RFC 1122 §3.2.1.3: a
-    /// loopback source is never on a wire, and a datagram carrying one is
-    /// silently discarded.
-    #[test]
-    fn a_query_from_off_the_link_is_not_answered() {
-        let q = query(0, &["toyos-t14", "local"], 1, 1);
-        for addr in [[10, 0, 0, 7], [192, 168, 2, 7], [8, 8, 8, 8], [127, 0, 0, 1], [127, 1, 2, 3]] {
-            for port in [PORT, 53_000] {
-                assert_eq!(announced().answer(&q, Asker { addr, port }, 10_000), None, "{addr:?}:{port}");
-            }
-        }
-        for addr in [[192, 168, 1, 254], [169, 254, 3, 4]] {
-            let asked = announced().answer(&q, Asker { addr, port: PORT }, 10_000);
-            assert!(asked.is_some(), "{addr:?}");
-        }
-    }
-
-    #[test]
-    fn a_host_name_is_one_label() {
-        assert!(Host::new("toyos-t14").is_ok());
-        for bad in ["", "a.b", "-a", "a-", "a b", "é", &"a".repeat(64)] {
-            assert!(Host::new(bad).is_err(), "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn the_group_address_maps_to_its_ethernet_address() {
-        assert_eq!(GROUP_MAC, [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
-    }
 }
