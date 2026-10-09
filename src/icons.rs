@@ -15,8 +15,8 @@
 //! round-capped and round-joined, which makes it exactly the points within half
 //! its width of its path, the region drawn here.
 //!
-//! The pixels are the ones resvg drew these icons with before the build drew
-//! them, because the desktop's look is not this file's to change: a pixel
+//! The pixels follow resvg's, which drew these icons before the build did,
+//! because the desktop's look is not this file's to change: a pixel
 //! samples four rows of four points, a sample worth 16 of 255; a fill is
 //! nonzero, its arcs become cubics as `kurbo` splits them and each cubic, cut
 //! where it turns in y, becomes `2^shift` chords by tiny-skia's count; and each
@@ -760,9 +760,8 @@ mod tests {
         assert!((area(&ring) - want).abs() < want * 5e-3, "ring: {} of {want}", area(&ring));
     }
 
-    /// The committed icons draw to the pixels that were compared with resvg's,
-    /// which no reading of this file can see: a change that moves one is
-    /// compared with resvg again before this digest moves with it.
+    /// The committed icons draw to the pixels the owner accepted against
+    /// resvg's, which no reading of this file can see.
     #[test]
     fn the_icons_are_the_pixels_compared_with_resvg() {
         use sha2::{Digest, Sha256};
@@ -773,7 +772,13 @@ mod tests {
             digest.update(rasterize(stem, &svg));
         }
         let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "bc246dcfb81736e4aef449383ea3c666e38122ca47d0b2a2dfead9302653929e", "the icons' pixels moved");
+        assert_eq!(
+            hex,
+            "bc246dcfb81736e4aef449383ea3c666e38122ca47d0b2a2dfead9302653929e",
+            "the icons' pixels moved: draw them against resvg 0.47 out of tree with the differential \
+             posted on pull request #814, and ask the owner again on any visible change before \
+             pinning the new digest"
+        );
     }
 
     /// A contour wound against its outer one is a hole; one wound with it is not.
