@@ -105,15 +105,16 @@ fn an_rsa_key_is_refused_by_name() {
     }
 }
 
-/// Every method but `publickey` is refused by its name; `none`, the client's
-/// question of what may continue, is answered without counting.
+/// Every method but `publickey` is refused by its name; `none` as the first
+/// request, the client's question of what may continue, is answered without
+/// counting, and every later one is a failure.
 #[test]
 fn every_other_method_is_refused_by_name() {
     let mut c = with_service();
     c.send(&request(USER, "none", &[])).unwrap();
     assert_eq!(c.recv(), [failure()]);
     assert_eq!(c.events, []);
-    for method in ["password", "keyboard-interactive", "hostbased", "gssapi-with-mic"] {
+    for method in ["none", "password", "keyboard-interactive", "hostbased", "gssapi-with-mic"] {
         c.send(&request(USER, method, &[0, 0, 0, 0])).unwrap();
         assert_eq!(c.recv(), [failure()]);
         assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Method(method.into()))));
@@ -169,17 +170,24 @@ fn a_signature_over_anything_else_is_refused() {
     assert!(!authenticated(&c));
 }
 
-/// **Six failures end the session**, with the reason RFC 4250 names.
+/// **Six failures end the session**, with the reason RFC 4250 names, and the
+/// driver is told of the sixth as of the others. A `none` after the first
+/// request counts, so asking it again holds no session open.
 #[test]
 fn six_failures_end_the_session() {
-    let mut c = with_service();
-    for _ in 0..5 {
-        c.send(&request(USER, "password", &[0, 0, 0, 0, 0])).unwrap();
+    for method in ["password", "none"] {
+        let mut c = with_service();
+        c.send(&request(USER, "none", &[])).unwrap();
         assert_eq!(c.recv(), [failure()]);
+        for _ in 0..5 {
+            c.send(&request(USER, method, &[0, 0, 0, 0, 0])).unwrap();
+            assert_eq!(c.recv(), [failure()]);
+        }
+        assert_eq!(c.send(&request(USER, method, &[0, 0, 0, 0, 0])), Err(Refusal::TooManyAttempts));
+        assert_eq!(disconnect(&c.recv()), (14, "too many failed authentication attempts".into()));
+        assert_eq!(c.events, vec![Event::Declined(Declined::Method(method.into())); 6]);
+        assert_eq!(c.send(&request(USER, "none", &[])), Err(Refusal::Ended));
     }
-    assert_eq!(c.send(&request(USER, "password", &[0, 0, 0, 0, 0])), Err(Refusal::TooManyAttempts));
-    assert_eq!(disconnect(&c.recv()), (14, "too many failed authentication attempts".into()));
-    assert_eq!(c.send(&request(USER, "none", &[])), Err(Refusal::Ended));
 }
 
 /// **Nothing but authentication before it**: a channel, a global request or
@@ -442,28 +450,63 @@ fn the_windows_bound_both_sides() {
     assert_eq!(c.recv(), [want]);
 }
 
-/// The client's CLOSE closes the channel, frees its number and ends every
-/// send on it; the driver's exit closes it from this side.
+/// **A closed channel's id names nothing again**: the client's CLOSE frees
+/// the channel's place, and the channel opened in it is another, so an id the
+/// driver still holds reaches no program but its own, and the client cannot
+/// name the old number either. The driver's exit closes a channel from this
+/// side, and a request on it after that tells the driver nothing.
 #[test]
 fn a_closed_channel_is_gone() {
     let mut c = logged_in();
-    let ours = open(&mut c, 7, 1 << 20, 32 * 1024);
-    let channel = exec(&mut c, ours);
+    let old_number = open(&mut c, 7, 1 << 20, 32 * 1024);
+    let old = exec(&mut c, old_number);
     c.recv();
-    c.send(&[97, 0, 0, 0, 0]).unwrap();
+    let mut data = vec![94];
+    data.extend_from_slice(&old_number.to_be_bytes());
+    string(&mut data, b"x");
+    c.send(&data).unwrap();
+    c.send(&[[97u8].as_slice(), &old_number.to_be_bytes()].concat()).unwrap();
     assert_eq!(c.recv(), [vec![97, 0, 0, 0, 7]]);
-    assert_eq!(c.events.pop(), Some(Event::Closed { channel }));
-    assert_eq!(c.server.send(channel, b"x"), Err(Gone));
-    assert_eq!(open(&mut c, 8, 1 << 20, 32 * 1024), ours, "the number is free again");
-    let channel = exec(&mut c, ours);
+    assert_eq!(c.events, [Event::Data { channel: old, data: b"x".to_vec() }, Event::Closed { channel: old }]);
+    c.events.clear();
+
+    let number = open(&mut c, 8, 1 << 20, 32 * 1024);
+    let channel = exec(&mut c, number);
     c.recv();
+    assert_ne!((number, channel), (old_number, old));
+    assert_eq!(c.server.send(old, b"x"), Err(Gone));
+    assert_eq!(c.server.send_stderr(old, b"x"), Err(Gone));
+    assert_eq!(c.server.consumed(old, 1), Err(Gone));
+    assert_eq!(c.server.exit(old, 3), Err(Gone));
+    assert_eq!(c.recv(), Vec::<Vec<u8>>::new(), "nothing reached the channel opened in the old one's place");
+    assert_eq!(c.server.send(channel, b"y"), Ok(1));
+    c.recv();
+
     c.server.exit(channel, 3).unwrap();
     let sent = c.recv();
     assert_eq!(sent.iter().map(|p| p[0]).collect::<Vec<_>>(), [98, 96, 97]);
     assert_eq!(c.server.exit(channel, 3), Err(Gone));
-    c.send(&[97, 0, 0, 0, 0]).unwrap();
+    c.send(&[[97u8].as_slice(), &number.to_be_bytes()].concat()).unwrap();
     assert_eq!(c.recv(), Vec::<Vec<u8>>::new(), "the client's CLOSE answers the server's");
     assert_eq!(c.events, []);
+    assert_eq!(c.send(&data), Err(Refusal::Malformed("a channel this session does not hold")));
+
+    // A channel the driver ended before its exec runs nothing.
+    let mut c = logged_in();
+    let number = open(&mut c, 9, 1 << 20, 32 * 1024);
+    let mut data = vec![94];
+    data.extend_from_slice(&number.to_be_bytes());
+    string(&mut data, b"x");
+    c.send(&data).unwrap();
+    let Some(Event::Data { channel, .. }) = c.events.pop() else { panic!("{:?}", c.events) };
+    c.server.exit(channel, 127).unwrap();
+    c.recv();
+    let mut command = Vec::new();
+    string(&mut command, b"true");
+    c.send(&channel_request(number, "exec", true, &command)).unwrap();
+    c.send(&channel_request(number, "env", true, &[])).unwrap();
+    assert_eq!(c.recv(), Vec::<Vec<u8>>::new());
+    assert_eq!(c.events, [], "a request on a channel the driver ended is not the driver's");
 }
 
 /// **A re-exchange holds the session's output**: what the driver sends after

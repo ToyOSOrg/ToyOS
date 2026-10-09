@@ -73,8 +73,10 @@ pub(crate) struct Transport<R> {
     host: HostKey,
     /// The client's identification line, once read.
     client_version: Option<Vec<u8>>,
-    /// The client's bytes not yet read.
+    /// The client's bytes; those before `read` are read, and dropped only at
+    /// the next input, so one input of many packets moves its bytes once.
     inbound: Vec<u8>,
+    read: usize,
     recv_seq: u32,
     send_seq: u32,
     opening: Option<Box<OpeningKey>>,
@@ -97,6 +99,7 @@ impl<R: SecureRandom> Transport<R> {
             host,
             client_version: None,
             inbound: Vec::new(),
+            read: 0,
             recv_seq: 0,
             send_seq: 0,
             opening: None,
@@ -113,6 +116,8 @@ impl<R: SecureRandom> Transport<R> {
     }
 
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        self.inbound.drain(..self.read);
+        self.read = 0;
         self.inbound.extend_from_slice(bytes);
     }
 
@@ -216,16 +221,18 @@ impl<R: SecureRandom> Transport<R> {
     /// The client's identification line, without its CR LF, once all of it
     /// has come.
     fn read_version(&mut self) -> Result<Option<Vec<u8>>, Refusal> {
-        let Some(end) = self.inbound.windows(2).position(|w| w == b"\r\n") else {
-            if self.inbound.len() >= VERSION_CAP {
-                return Err(Refusal::TooLong { field: "identification line", len: self.inbound.len(), cap: VERSION_CAP });
+        let unread = &self.inbound[self.read..];
+        let Some(end) = unread.windows(2).position(|w| w == b"\r\n") else {
+            if unread.len() >= VERSION_CAP {
+                return Err(Refusal::TooLong { field: "identification line", len: unread.len(), cap: VERSION_CAP });
             }
             return Ok(None);
         };
         if end + 2 > VERSION_CAP {
             return Err(Refusal::TooLong { field: "identification line", len: end + 2, cap: VERSION_CAP });
         }
-        let line: Vec<u8> = self.inbound.drain(..end + 2).take(end).collect();
+        let line = unread[..end].to_vec();
+        self.read += end + 2;
         if !line.starts_with(b"SSH-2.0-") {
             return Err(Refusal::Malformed("an identification line that is not SSH-2.0"));
         }
@@ -238,7 +245,8 @@ impl<R: SecureRandom> Transport<R> {
     /// The next packet's payload, once all of it has come and its tag has
     /// verified.
     fn read_packet(&mut self) -> Result<Option<Vec<u8>>, Refusal> {
-        let Some(&head) = self.inbound.first_chunk::<4>() else { return Ok(None) };
+        let unread = &self.inbound[self.read..];
+        let Some(&head) = unread.first_chunk::<4>() else { return Ok(None) };
         let length = match &self.opening {
             None => head,
             Some(key) => key.decrypt_packet_length(self.recv_seq, head),
@@ -257,10 +265,9 @@ impl<R: SecureRandom> Transport<R> {
             (false, None) => return Err(Refusal::Malformed("a packet_length that is short or not a multiple of the block")),
         }
         let total = 4 + len + tag;
-        if self.inbound.len() < total {
-            return Ok(None);
-        }
-        let mut packet: Vec<u8> = self.inbound.drain(..total).collect();
+        let Some(packet) = unread.get(..total) else { return Ok(None) };
+        let mut packet = packet.to_vec();
+        self.read += total;
         let body: &[u8] = match &self.opening {
             None => packet.get(4..).unwrap_or_default(),
             Some(key) => {

@@ -98,7 +98,8 @@ pub enum Declined {
     Signature { user: String },
     /// A channel type other than `session`.
     ChannelType(String),
-    /// A channel open past the most a session holds, OpenSSH's `MaxSessions`.
+    /// A channel open past the most a session holds, OpenSSH's `MaxSessions`,
+    /// or past the 2^32 numbers it gives.
     ChannelLimit,
     /// A channel request other than one `exec`.
     Request(String),
@@ -182,18 +183,18 @@ impl<A: Authorizer, R: SecureRandom> Server<A, R> {
             };
             let mut out = Vec::new();
             let mut events = Vec::new();
-            match &mut self.phase {
-                Phase::PreAuth(pre) => {
-                    if let Some(verified) = pre.handle(&payload, &session_id, &mut self.authorizer, &mut out, &mut events)? {
-                        self.transport.authenticated();
-                        events.push(Event::Authenticated { user: verified.user().to_string() });
-                        self.phase = Phase::Authenticated(Box::new(Session::new(verified)));
-                    }
-                }
-                Phase::Authenticated(session) => session.handle(&payload, &mut out, &mut events)?,
-                Phase::Ended => return Err(Refusal::Ended),
-            }
+            let verified = match &mut self.phase {
+                Phase::PreAuth(pre) => pre.handle(&payload, &session_id, &mut self.authorizer, &mut out, &mut events),
+                Phase::Authenticated(session) => session.handle(&payload, &mut out, &mut events).map(|()| None),
+                Phase::Ended => Err(Refusal::Ended),
+            };
+            // What was refused on the way to a refusal is the driver's too.
             self.events.extend(events);
+            if let Some(verified) = verified? {
+                self.transport.authenticated();
+                self.events.push_back(Event::Authenticated { user: verified.user().to_string() });
+                self.phase = Phase::Authenticated(Box::new(Session::new(verified)));
+            }
             self.flush(out)?;
         }
         Ok(())

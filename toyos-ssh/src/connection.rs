@@ -3,8 +3,12 @@
 //! `exec`, and the windows that bound what each side may send.
 //!
 //! **A [`ChannelId`] exists only here**, made when a channel opens, so a
-//! channel event cannot be written outside an authenticated [`Session`]. A
-//! message naming a channel the session does not hold ends the session. Every
+//! channel event cannot be written outside an authenticated [`Session`]. It is
+//! the server's number for the channel, and no number is given twice in a
+//! session, so an id the driver still holds after [`Event::Closed`] is
+//! [`Gone`] and never names a channel opened later. A message naming a channel
+//! the session does not hold ends the session. A channel the server has closed
+//! tells the driver nothing more. Every
 //! other channel type, every other channel request and every global request is
 //! refused by name.
 //!
@@ -30,11 +34,14 @@ const COMMAND_CAP: usize = 32 * 1024;
 const OPEN_ADMINISTRATIVELY_PROHIBITED: u32 = 1;
 const OPEN_RESOURCE_SHORTAGE: u32 = 4;
 
-/// A channel of this session, named by the server's own number for it.
+/// A channel of this session, named by the server's own number for it, which
+/// names no other channel of the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChannelId(u32);
 
 struct Channel {
+    /// The server's number for it.
+    number: u32,
     /// The client's number for it.
     peer: u32,
     /// What the server may still send, and in packets of at most `send_max`.
@@ -55,12 +62,14 @@ struct Channel {
 /// An authenticated session's channels.
 pub(crate) struct Session {
     channels: [Option<Channel>; MAX_CHANNELS],
+    /// The number the next channel opened is given.
+    next: Option<u32>,
 }
 
 impl Session {
     /// The connection layer, which only a verified signature opens.
     pub(crate) fn new(_proof: Verified) -> Self {
-        Self { channels: Default::default() }
+        Self { channels: Default::default(), next: Some(0) }
     }
 
     /// One message of the connection layer.
@@ -84,12 +93,12 @@ impl Session {
             | msg::CHANNEL_EOF
             | msg::CHANNEL_CLOSE
             | msg::CHANNEL_REQUEST) => {
-                let number = r.u32("recipient channel")?;
-                let id = ChannelId(number);
-                let channel = self
+                let id = ChannelId(r.u32("recipient channel")?);
+                let (slot, channel) = self
                     .channels
-                    .get_mut(number as usize)
-                    .and_then(Option::as_mut)
+                    .iter_mut()
+                    .enumerate()
+                    .find_map(|(slot, c)| c.as_mut().filter(|c| c.number == id.0).map(|c| (slot, c)))
                     .ok_or(Refusal::Malformed("a channel this session does not hold"))?;
                 match message {
                     msg::CHANNEL_WINDOW_ADJUST => {
@@ -128,11 +137,14 @@ impl Session {
                             out.push(to_peer(msg::CHANNEL_CLOSE, channel.peer));
                             events.push(Event::Closed { channel: id });
                         }
-                        self.channels[number as usize] = None;
+                        self.channels[slot] = None;
                     }
                     _ => {
                         let request = r.name("request type")?;
                         let want_reply = r.boolean("want reply")?;
+                        if channel.closing {
+                            return Ok(());
+                        }
                         let reply = if request == "exec" && !channel.command {
                             let command = r.string("command", COMMAND_CAP)?;
                             r.end("CHANNEL_REQUEST exec")?;
@@ -143,7 +155,7 @@ impl Session {
                             events.push(Event::Declined(Declined::Request(request.to_string())));
                             msg::CHANNEL_FAILURE
                         };
-                        if want_reply && !channel.closing {
+                        if want_reply {
                             out.push(to_peer(reply, channel.peer));
                         }
                     }
@@ -172,12 +184,14 @@ impl Session {
             return Ok(());
         }
         r.end("CHANNEL_OPEN session")?;
-        let Some(number) = self.channels.iter().position(Option::is_none) else {
+        let (Some(slot), Some(number)) = (self.channels.iter().position(Option::is_none), self.next) else {
             events.push(Event::Declined(Declined::ChannelLimit));
             out.push(refuse(OPEN_RESOURCE_SHORTAGE, "every channel this session may hold is open"));
             return Ok(());
         };
-        self.channels[number] = Some(Channel {
+        self.next = number.checked_add(1);
+        self.channels[slot] = Some(Channel {
+            number,
             peer,
             send_window: window,
             send_max: max.min(MAX_PACKET),
@@ -188,7 +202,6 @@ impl Session {
             eof: false,
             closing: false,
         });
-        let number = u32::try_from(number).expect("a channel number under MAX_CHANNELS");
         let mut confirmation = to_peer(msg::CHANNEL_OPEN_CONFIRMATION, peer);
         put_u32(&mut confirmation, number);
         put_u32(&mut confirmation, WINDOW);
@@ -198,10 +211,7 @@ impl Session {
     }
 
     fn live(&mut self, id: ChannelId) -> Result<&mut Channel, Gone> {
-        match self.channels.get_mut(id.0 as usize).and_then(Option::as_mut) {
-            Some(channel) if !channel.closing => Ok(channel),
-            _ => Err(Gone),
-        }
+        self.channels.iter_mut().flatten().find(|c| c.number == id.0 && !c.closing).ok_or(Gone)
     }
 
     /// Send as much of `data` as the client's window takes, as standard output

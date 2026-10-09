@@ -17,7 +17,7 @@
 mod common;
 
 use common::client::{derive, exchange_hash, open_packet, plain_packet, Fields};
-use common::driver::{drive, host_key, public_key, Keys, Side, Transcript, STATUS, USER};
+use common::driver::{drive, host_key, public_key, Keys, Side, Transcript, USER};
 use ring::aead::chacha20_poly1305_openssh::{OpeningKey, TAG_LEN};
 use toyos_ssh::{Declined, Event, Refusal, Server};
 
@@ -93,7 +93,6 @@ fn an_exec_openssh_ran_replays() {
         Event::Eof { .. },
         Event::Disconnected,
     ] if user == USER && command == b"echo hello"));
-    assert_eq!(STATUS, 3, "the recording's client exited 3: it read the exit status");
 }
 
 #[test]

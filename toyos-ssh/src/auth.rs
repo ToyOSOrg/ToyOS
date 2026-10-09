@@ -12,6 +12,11 @@
 //! the client is never asked to sign with it; a signed request asks the
 //! authorizer again. Every other method and every other key algorithm — RSA
 //! among them — is refused by name. [`ATTEMPTS`] failures end the session.
+//!
+//! **`none` is free only as the first request**, the client's question of what
+//! may continue, as OpenSSH answers it; every later one is a failure. An offer
+//! answered `PK_OK` is no failure, so a session that only offers is bounded by
+//! the driver's login deadline, not here.
 
 use ring::signature::{UnparsedPublicKey, ED25519};
 
@@ -31,6 +36,8 @@ const BLOB_CAP: usize = 16 * 1024;
 /// Authentication not yet done.
 pub(crate) struct PreAuth {
     service: bool,
+    /// A `USERAUTH_REQUEST` was read.
+    asked: bool,
     failures: u32,
 }
 
@@ -47,7 +54,7 @@ impl Verified {
 
 impl PreAuth {
     pub(crate) fn new() -> Self {
-        Self { service: false, failures: 0 }
+        Self { service: false, asked: false, failures: 0 }
     }
 
     /// One message of the authentication layer.
@@ -90,8 +97,9 @@ impl PreAuth {
         if r.text("service name", 64)? != CONNECTION {
             return Err(Refusal::Malformed("authentication for a service other than ssh-connection"));
         }
+        let first = !std::mem::replace(&mut self.asked, true);
         let declined = match r.name("method name")? {
-            "none" => {
+            "none" if first => {
                 r.end("USERAUTH_REQUEST none")?;
                 out.push(failure());
                 return Ok(None);
