@@ -195,13 +195,16 @@ fn numbers(value: &str) -> Vec<f64> {
     std::iter::from_fn(|| data.number()).collect()
 }
 
-/// An SVG's elements, each as its name, its attributes and whether it opens.
+/// An SVG element: its name, its attributes and whether it opens.
+type Tag<'a> = (&'a str, Vec<(&'a str, &'a str)>, bool);
+
+/// An SVG's elements, one [`Tag`] at a time.
 struct Tags<'a> {
     rest: &'a str,
 }
 
 impl<'a> Tags<'a> {
-    fn next(&mut self) -> Option<(&'a str, Vec<(&'a str, &'a str)>, bool)> {
+    fn next(&mut self) -> Option<Tag<'a>> {
         self.rest = self.rest.trim_start();
         if self.rest.is_empty() {
             return None;
@@ -372,7 +375,7 @@ impl Path {
         let den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
         let k = (num / den).abs().sqrt() * if large == sweep { -1.0 } else { 1.0 };
         let (cx1, cy1) = (k * rx * y1 / ry, -k * ry * x1 / rx);
-        let centre = (cos * cx1 - sin * cy1 + (p0.0 + p.0) / 2.0, sin * cx1 + cos * cy1 + (p0.1 + p.1) / 2.0);
+        let centre = (cos * cx1 - sin * cy1 + f64::midpoint(p0.0, p.0), sin * cx1 + cos * cy1 + f64::midpoint(p0.1, p.1));
         let start = ((y1 - cy1) / ry).atan2((x1 - cx1) / rx);
         let tau = std::f64::consts::TAU;
         let mut delta = (((-y1 - cy1) / ry).atan2((-x1 - cx1) / rx) - start) % tau;
@@ -519,10 +522,11 @@ fn stroked(c: &[Point; 4], r: f64) -> Vec<Point> {
         let s = ((o1.0 - o0.0) * d1.1 - (o1.1 - o0.1) * d1.0) / cross;
         let q = (o0.0 + d0.0 * s, o0.1 + d0.1 * s);
         let mid = ((o0.0 + 2.0 * q.0 + o1.0) / 4.0, (o0.1 + 2.0 * q.1 + o1.1) / 4.0);
-        let want = offset((t0 + t1) / 2.0);
+        let half = f64::midpoint(t0, t1);
+        let want = offset(half);
         if (mid.0 - want.0).hypot(mid.1 - want.1) > 0.25 {
-            pieces.push(((t0 + t1) / 2.0, t1));
-            pieces.push((t0, (t0 + t1) / 2.0));
+            pieces.push((half, t1));
+            pieces.push((t0, half));
             continue;
         }
         let bend = |a: f64, b: f64, c: f64| (2 * dot6(b) - dot6(a) - dot6(c)) >> 2;
