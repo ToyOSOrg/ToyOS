@@ -175,10 +175,11 @@ const GROUP_EVERY_MS: u64 = 1_000;
 const ANNOUNCE_AGAIN_MS: u64 = 1_000;
 
 /// This host's one record on its link, on the caller's monotonic clock in
-/// milliseconds: announced on every new address and a second later (§8.3),
-/// answered to whoever asks, and multicast at most once a second (§6), so no
-/// host can turn the queries it sends into a multicast to every host on the
-/// link at its own rate. A query §6 holds back is answered when the second
+/// milliseconds: announced on every new address and whenever the link comes
+/// back ([`Responder::link_returned`]), each time twice a second apart (§8,
+/// §8.3), answered to whoever asks, and multicast at most once a second (§6),
+/// so no host can turn the queries it sends into a multicast to every host on
+/// the link at its own rate. A query §6 holds back is answered when the second
 /// ends, not dropped: the caller wakes at [`Responder::owed_at`].
 #[derive(Debug)]
 pub struct Responder<'a> {
@@ -186,37 +187,59 @@ pub struct Responder<'a> {
     /// The link the record was last announced on.
     link: Option<Link>,
     last_group_ms: Option<u64>,
-    /// When the record is next owed to the group: the second announcement,
-    /// or an answer §6 delayed. One multicast of the record answers every
-    /// query it held.
+    /// When the record is next owed to the group: an announcement, or an
+    /// answer §6 delayed. One multicast of the record answers every query it
+    /// held.
     owed_ms: Option<u64>,
+    /// The multicast owed at `owed_ms` is the first of §8.3's two: the second
+    /// is owed a second after it.
+    again: bool,
 }
 
 impl<'a> Responder<'a> {
     pub const fn new(host: Host<'a>) -> Self {
-        Self { host, link: None, last_group_ms: None, owed_ms: None }
+        Self { host, link: None, last_group_ms: None, owed_ms: None, again: false }
     }
 
     /// This host is on `link` at `now_ms`, or on none while it holds no
-    /// address: the multicast the record is owed now, if any — a new
-    /// address's announcement, its second, or an answer §6 delayed.
+    /// address: the multicast the record is owed now, if any — an
+    /// announcement of a new address or of a link that came back, its
+    /// second, or an answer §6 delayed.
     pub fn on(&mut self, link: Option<Link>, now_ms: u64) -> Option<Vec<u8>> {
         let Some(link) = link else {
             self.link = None;
             self.owed_ms = None;
             return None;
         };
-        let new = self.link.is_none_or(|was| was.addr != link.addr);
+        if self.link.is_none_or(|was| was.addr != link.addr) {
+            self.owed_ms = Some(now_ms);
+            self.again = true;
+        }
         self.link = Some(link);
-        if new {
-            self.owed_ms = Some(now_ms.saturating_add(ANNOUNCE_AGAIN_MS));
-        } else if self.owed_ms.is_some_and(|at| now_ms >= at) {
-            self.owed_ms = None;
-        } else {
+        if !self.owed_ms.is_some_and(|at| now_ms >= at) {
             return None;
         }
+        self.owed_ms = core::mem::take(&mut self.again).then(|| now_ms.saturating_add(ANNOUNCE_AGAIN_MS));
         self.last_group_ms = Some(now_ms);
         Some(announcement(self.host, link.addr))
+    }
+
+    /// The link this host's address is on came back at `now_ms`: its
+    /// connectivity may have changed, so the record is announced again as a
+    /// new address's is (§8), the first time as soon as §6 lets the record
+    /// be multicast. With no address held nothing is owed: the one that
+    /// comes is new.
+    pub fn link_returned(&mut self, now_ms: u64) {
+        if self.link.is_some() {
+            self.owed_ms = Some(self.group_free_ms(now_ms));
+            self.again = true;
+        }
+    }
+
+    /// When §6 next lets the record be multicast: `now_ms`, or the end of
+    /// the second its last multicast began.
+    fn group_free_ms(&self, now_ms: u64) -> u64 {
+        self.last_group_ms.map_or(now_ms, |last| last.saturating_add(GROUP_EVERY_MS)).max(now_ms)
     }
 
     /// When the record is next owed to the group, on the caller's clock.
@@ -267,7 +290,7 @@ impl<'a> Responder<'a> {
             return Some(Answer { to: To::Asker, bytes: out });
         }
         if !unicast {
-            let free_ms = self.last_group_ms.map_or(now_ms, |last| last.saturating_add(GROUP_EVERY_MS));
+            let free_ms = self.group_free_ms(now_ms);
             if now_ms < free_ms {
                 self.owed_ms = Some(free_ms);
                 return None;
@@ -483,6 +506,53 @@ mod tests {
         let moved = Link { addr: [192, 168, 1, 50], prefix: 24 };
         let announced = r.on(Some(moved), 800).expect("a different address is new");
         assert_eq!(announced[announced.len() - 4..], [192, 168, 1, 50]);
+    }
+
+    /// RFC 6762 §8: "Whenever a Multicast DNS responder starts up, wakes up
+    /// from sleep, receives an indication of a network interface "Link Change"
+    /// event, or has any other reason to believe that its network connectivity
+    /// may have changed in some relevant way, it MUST perform the two startup
+    /// steps below: Probing (Section 8.1) and Announcing (Section 8.3)." §8.3:
+    /// "at least two unsolicited responses, one second apart." §6 still holds:
+    /// a link back inside the second of the record's last multicast is
+    /// announced when that second ends. With no address there is no record,
+    /// and the address that comes is announced as new, twice and not four
+    /// times.
+    #[test]
+    fn a_link_that_returns_is_announced_twice_a_second_apart_and_no_sooner_than_a_second_after_the_last_multicast() {
+        let mut r = announced();
+        let record = r.on(Some(LINK), 1_000).expect("the first address's second announcement");
+        assert_eq!((r.on(Some(LINK), 60_000), r.owed_at()), (None, None), "nothing is owed a link that stayed");
+
+        r.link_returned(60_000);
+        assert_eq!(r.owed_at(), Some(60_000));
+        assert_eq!(r.on(Some(LINK), 60_000).as_ref(), Some(&record), "announced as the link returns");
+        assert_eq!(r.owed_at(), Some(61_000), "§8.3: and a second later");
+        assert_eq!(r.on(Some(LINK), 60_999), None);
+        assert_eq!(r.on(Some(LINK), 61_000).as_ref(), Some(&record));
+        assert_eq!((r.on(Some(LINK), 62_000), r.owed_at()), (None, None), "twice");
+
+        r.link_returned(61_300);
+        assert_eq!(r.owed_at(), Some(62_000), "§6: the record was multicast 300 ms ago");
+        assert_eq!(r.on(Some(LINK), 61_300), None);
+        assert_eq!(r.on(Some(LINK), 62_000).as_ref(), Some(&record));
+        assert_eq!(r.owed_at(), Some(63_000));
+        assert_eq!(r.on(Some(LINK), 63_000).as_ref(), Some(&record));
+        assert_eq!(r.owed_at(), None);
+
+        r.link_returned(70_000);
+        assert_eq!(r.on(None, 70_000), None, "the address went with the link's return");
+        assert_eq!(r.owed_at(), None);
+        assert!(r.on(Some(LINK), 71_000).is_some(), "an address after none is new");
+        assert_eq!(r.owed_at(), Some(72_000));
+        assert!(r.on(Some(LINK), 72_000).is_some());
+        assert_eq!((r.on(Some(LINK), 73_000), r.owed_at()), (None, None), "its two announcements and no third");
+
+        let mut unaddressed = Responder::new(host());
+        unaddressed.link_returned(5_000);
+        assert_eq!(unaddressed.owed_at(), None, "no address, no record to announce");
+        assert!(unaddressed.on(Some(LINK), 9_000).is_some());
+        assert_eq!(unaddressed.owed_at(), Some(10_000));
     }
 
     /// RFC 6762 §11: a query whose source is not on this link is ignored; a

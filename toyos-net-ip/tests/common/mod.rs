@@ -716,15 +716,22 @@ c0 00 02 01 13 88 13 89 00 20 7b b4 30 31 32 33
 34 35 36 37";
 
 impl H {
-    /// A UDP datagram handed to [ip] now: the frame when it left at once, `None` when held.
+    /// A UDP datagram handed to [ip] now, from a socket that holds the broadcast permission: the
+    /// frame when it left at once, `None` when held.
     pub fn send(&mut self, source: Ipv4Addr, destination: Ipv4Addr, sport: u16, dport: u16, data: &[u8]) -> Result<Option<Vec<u8>>, Counter> {
         self.send_ttl(source, destination, sport, dport, data, Ttl::DEFAULT)
     }
 
     pub fn send_ttl(&mut self, source: Ipv4Addr, destination: Ipv4Addr, sport: u16, dport: u16, data: &[u8], ttl: Ttl) -> Result<Option<Vec<u8>>, Counter> {
+        self.send_as(source, destination, sport, dport, data, ttl, true)
+    }
+
+    /// [`Self::send_ttl`] for a socket that holds the broadcast permission, or does not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_as(&mut self, source: Ipv4Addr, destination: Ipv4Addr, sport: u16, dport: u16, data: &[u8], ttl: Ttl, broadcast: bool) -> Result<Option<Vec<u8>>, Counter> {
         let mut frame = [0u8; FRAME];
         let datagram = UdpBuilder { source: Port::new(sport).unwrap(), destination: Port::new(dport).unwrap(), data };
-        let out = UdpOut { source, destination, ttl, datagram };
+        let out = UdpOut { source, destination, ttl, broadcast, datagram };
         let sent = self.ip.send_udp(self.clock(), &out, &mut frame);
         self.collect();
         sent.map(|s| match s {

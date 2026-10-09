@@ -614,3 +614,22 @@ fn s_icmp_046_no_error_to_a_source_that_is_no_host() {
     }
     assert_eq!(h.count(Counter::IpInvalidSource), 4);
 }
+
+// An error of [ip]'s own is routed when it is generated, which is after its datagram was admitted:
+// a prefix that becomes usable in between can make the datagram's source its directed broadcast.
+// The error then leaves in no link broadcast: it is counted and logged against that address.
+#[test]
+fn an_error_whose_next_hop_became_a_broadcast_is_refused_and_counted() {
+    let mut h = H::fixture_i();
+    let source = ip4(192, 0, 2, 127);
+    let Some(Delivery::Udp(arrival, _)) = h.datagram(&hi_from(source)) else { panic!("a host's datagram is admitted") };
+    h.ip.add_address(h.clock(), h.if0, ip4(192, 0, 2, 3), 25).unwrap();
+    h.run(3_000);
+    assert_eq!(h.ip.address(h.if0, ip4(192, 0, 2, 3)), Some(toyos_net_ip::AddrState::Assigned));
+    h.rebase();
+    h.ip.port_unreachable(h.clock(), &arrival);
+    let rule = Counter::IpBroadcastNotPermitted;
+    assert_eq!(h.out().iter().map(Out::to).collect::<Vec<_>>(), [], "nothing left");
+    assert_eq!((h.count(rule), h.count(Counter::IcmpErrorSuppressed), h.count(Counter::IcmpErrorsSent)), (1, 0, 0));
+    assert_eq!(h.refusals(rule), [toyos_net_ip::Refusal { rule, iface: h.if0, peer: Peer::Ip(source) }]);
+}

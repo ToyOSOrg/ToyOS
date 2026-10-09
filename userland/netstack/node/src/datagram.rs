@@ -11,8 +11,15 @@
 //! is its two queues, `limits::RX_DATAGRAMS` received and `limits::TX_DATAGRAMS` accepted. A bind
 //! with no place left is answered [`Refused::ResourceExhausted`] with nothing made.
 //!
-//! A refusal [udp] logs comes out of [`Node::drain_events`] after the node's next `receive`,
-//! `fire` or `link`.
+//! **A send to a broadcast address needs the socket's permission** ([`Node::udp_set_broadcast`],
+//! POSIX's `SO_BROADCAST`), which a socket is bound without: one sent without it is answered
+//! [`Refused::PermissionDenied`]. The permission a datagram was accepted under goes with it: one
+//! accepted for a host leaves in no link broadcast, whatever prefix a server has renewed the
+//! address with since, and is dropped, counted `ip.broadcast-not-permitted` and logged instead.
+//!
+//! A refusal [udp] logs is in [`Node::drain_events`] when the send that met it returns, and one
+//! [ip] logs as a datagram leaves when that [`Node::transmit`] returns; no other call of a
+//! client's meets one.
 
 use core::net::Ipv4Addr;
 
@@ -36,6 +43,9 @@ pub enum Refused {
     /// The call names what no datagram of this socket may carry: an address that is not this
     /// machine's to bind, a destination nothing is sent to, port 0, more than one frame holds.
     InvalidInput,
+    /// The call was well formed and the socket lacks the permission it needs: a datagram to a
+    /// broadcast address.
+    PermissionDenied,
     /// The socket holds all it may until some of it has left, or the node holds all it has
     /// places for: the same call succeeds later.
     ResourceExhausted,
@@ -69,8 +79,8 @@ fn refused(error: Error) -> Refused {
         | Counter::SendInvalidDestination
         | Counter::SendPortZero
         | Counter::SendUnspecifiedDestination
-        | Counter::BroadcastNotPermitted
         | Counter::ExceedsMtu => Refused::InvalidInput,
+        Counter::BroadcastNotPermitted => Refused::PermissionDenied,
         Counter::TxQueueFull => Refused::ResourceExhausted,
         Counter::ConnectUnspecified
         | Counter::ConnectGroup
@@ -111,9 +121,17 @@ impl Node {
         Ok((DatagramId(id), port))
     }
 
+    /// Whether the socket's datagrams may go to a broadcast address, the limited one or the
+    /// directed one of a prefix the machine holds, from here on.
+    pub fn udp_set_broadcast(&mut self, id: DatagramId, permitted: bool) -> Result<(), Refused> {
+        self.stack.set_broadcast(id.0, permitted).map_err(refused)
+    }
+
     /// Queues `payload` for `destination:port`; it leaves in a later [`Node::transmit`].
     pub fn udp_send_to(&mut self, now: Instant, id: DatagramId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Refused> {
-        self.stack.send_to(now, id.0, destination, port, payload).map_err(refused)
+        let sent = self.stack.send_to(now, id.0, destination, port, payload).map_err(refused);
+        self.log();
+        sent
     }
 
     /// The oldest datagram that reached the socket, in `out`, or `None` when none waits. One
