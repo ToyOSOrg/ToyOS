@@ -46,7 +46,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   is one instance).
 - **C on AArch64 goes through clang**, whose driver knows
   `aarch64-unknown-toyos` (`issues/toyos-builds-itself.md`); doomgeneric
-  compiles for it. Doom and the C corpus stay x86-only until userland runs on
+  compiles and links for it, and `doom` is on an AArch64 ROOT, built and
+  never run. The C corpus stays x86-only until userland runs on
   ARM.
 - **Randomness** comes from RNDR where the CPU has it, and from virtio-rng
   under QEMU/HVF, behind one `sys_random` source.
@@ -320,8 +321,10 @@ Each stage names its exit; "measured" means a number from a run.
    SAFETY (`kernel/src/sched/driver.rs:49`) already assumes.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
-   built for `aarch64-unknown-toyos`. C programs stay x86-only until this
-   stage runs one. **Exit**: the desktop comes up on virtio-gpu; `ssh`
+   built for `aarch64-unknown-toyos`. Every program of `system.toml` builds
+   for it; no windowed one has run there, `calc`, `snake` and `doom` among
+   them, and no C program has until this stage runs one, `doom` the first.
+   **Exit**: the desktop comes up on virtio-gpu and runs the three; `ssh`
    works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 
