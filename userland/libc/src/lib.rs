@@ -10,6 +10,7 @@ mod elfsym;
 mod errno;
 mod fdreq;
 mod fparts;
+mod inaddr;
 mod link;
 mod linkreq;
 mod listing;

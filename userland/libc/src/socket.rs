@@ -7,26 +7,16 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errno::{EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
+use crate::errno::{
+    EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT, ENOSPC,
+    ENOTCONN, EOPNOTSUPP, ETIMEDOUT,
+};
+use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::sockopt::{self, Kept};
 
 // C types matching POSIX
 
 type SocklenT = u32;
-
-#[repr(C)]
-struct SockaddrIn {
-    sin_family: u16,
-    sin_port: u16,   // network byte order (big-endian)
-    sin_addr: InAddr,
-    sin_zero: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct InAddr {
-    s_addr: u32, // network byte order
-}
 
 #[repr(C)]
 pub struct Sockaddr {
@@ -46,7 +36,6 @@ pub struct Addrinfo {
     ai_next: *mut Addrinfo,
 }
 
-const AF_INET: i32 = 2;
 const AF_UNSPEC: i32 = 0;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
@@ -73,8 +62,9 @@ struct SocketEntry {
     tx_fd: i32,         // write end of tx pipe (client→netstack)
     notify_fd: i32,     // read end of listener notify pipe
     // What netstack holds for the socket, which `getsockopt` answers from. A
-    // datagram socket netstack does not hold yet keeps `broadcast` for `bind`
-    // to hand over.
+    // socket netstack does not hold yet keeps each for the call that makes it
+    // there to hand over: `broadcast` for a datagram socket's bind, `nodelay`
+    // for a stream's `connect` and for each connection a listener accepts.
     nodelay: bool,
     broadcast: bool,
 }
@@ -127,13 +117,7 @@ unsafe fn parse_sockaddr(addr: *const Sockaddr, len: SocklenT) -> Option<([u8; 4
     if addr.is_null() || (len as usize) < core::mem::size_of::<SockaddrIn>() {
         return None;
     }
-    let sin = &*(addr as *const SockaddrIn);
-    if sin.sin_family != AF_INET as u16 {
-        return None;
-    }
-    let port = u16::from_be(sin.sin_port);
-    let ip = sin.sin_addr.s_addr.to_be_bytes(); // s_addr is network order
-    Some((ip, port))
+    (*(addr as *const SockaddrIn)).endpoint()
 }
 
 /// Fill a sockaddr_in from ip + port.
@@ -141,12 +125,26 @@ unsafe fn fill_sockaddr(addr: *mut Sockaddr, addrlen: *mut SocklenT, ip: [u8; 4]
     if addr.is_null() || addrlen.is_null() {
         return;
     }
-    let sin = &mut *(addr as *mut SockaddrIn);
-    sin.sin_family = AF_INET as u16;
-    sin.sin_port = port.to_be();
-    sin.sin_addr.s_addr = u32::from_be_bytes(ip);
-    sin.sin_zero = [0; 8];
-    *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+    SockaddrIn::new(ip, port).answer(addr as *mut u8, addrlen);
+}
+
+/// Bind a datagram socket netstack does not hold yet, handing over a
+/// `SO_BROADCAST` set before it existed there.
+fn bind_datagram(entry: &mut SocketEntry, ip: [u8; 4], port: u16) -> Result<(), NetError> {
+    let bound = toyos::net::udp_bind(ip, port)?;
+    if entry.broadcast {
+        if let Err(e) = toyos::net::udp_set_option(bound.socket_id, OPT_BROADCAST, 1) {
+            // `bound`'s pipe ends close where it drops.
+            let _ = toyos::net::udp_close(bound.socket_id);
+            return Err(e);
+        }
+    }
+    entry.netstack_id = bound.socket_id.0;
+    entry.local_port = bound.bound_port;
+    entry.bound = true;
+    entry.tx_fd = bound.tx.into_raw().0 as i32;
+    entry.rx_fd = bound.rx.into_raw().0 as i32;
+    Ok(())
 }
 
 // BSD socket API
@@ -207,6 +205,14 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 Ok(c) => c,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
+            if entry.nodelay {
+                if let Err(e) = toyos::net::tcp_set_option(conn.socket_id, OPT_NODELAY, 1) {
+                    // `conn`'s pipe ends close where it drops.
+                    let _ = toyos::net::tcp_close(conn.socket_id);
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
+            }
             entry.netstack_id = conn.socket_id.0;
             entry.local_port = conn.local_port;
             entry.remote_addr = ip;
@@ -253,23 +259,10 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
             0
         }
         SocketKind::Udp => {
-            let bound = match toyos::net::udp_bind(ip, port) {
-                Ok(b) => b,
-                Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
-            };
-            if entry.broadcast {
-                if let Err(e) = toyos::net::udp_set_option(bound.socket_id, OPT_BROADCAST, 1) {
-                    // `bound`'s pipe ends close where it drops.
-                    let _ = toyos::net::udp_close(bound.socket_id);
-                    set_errno(net_err_to_errno(e));
-                    return -1;
-                }
+            if let Err(e) = bind_datagram(entry, ip, port) {
+                set_errno(net_err_to_errno(e));
+                return -1;
             }
-            entry.netstack_id = bound.socket_id.0;
-            entry.local_port = bound.bound_port;
-            entry.bound = true;
-            entry.tx_fd = bound.tx.into_raw().0 as i32;
-            entry.rx_fd = bound.rx.into_raw().0 as i32;
             0
         }
     }
@@ -297,6 +290,9 @@ pub unsafe extern "C" fn accept(
     };
     let listener_id = TcpSocketId(entry.netstack_id);
     let notify_fd = entry.notify_fd;
+    // A set after `bind` is refused, so this is the option the listener held
+    // when any connection to it began.
+    let nodelay = entry.nodelay;
 
     // Block until a connection arrives (read 1 byte from notify pipe)
     let mut notify_byte = [0u8; 1];
@@ -306,6 +302,14 @@ pub unsafe extern "C" fn accept(
         Ok(a) => a,
         Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
     };
+    if nodelay {
+        if let Err(e) = toyos::net::tcp_set_option(accepted.socket_id, OPT_NODELAY, 1) {
+            // `accepted`'s pipe ends close where it drops.
+            let _ = toyos::net::tcp_close(accepted.socket_id);
+            set_errno(net_err_to_errno(e));
+            return -1;
+        }
+    }
 
     if !addr.is_null() && !addrlen.is_null() {
         fill_sockaddr(addr, addrlen, accepted.remote_addr, accepted.remote_port);
@@ -322,7 +326,7 @@ pub unsafe extern "C" fn accept(
         rx_fd: accepted.rx.into_raw().0 as i32,
         tx_fd: accepted.tx.into_raw().0 as i32,
         notify_fd: 0,
-        nodelay: false,
+        nodelay,
         broadcast: false,
     };
     let new_fd = alloc_socket(new_entry);
@@ -363,7 +367,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
                 return -1;
             }
             sendto(fd, buf, len, _flags,
-                &make_sockaddr_in(entry.remote_addr, entry.remote_port) as *const SockaddrIn as *const Sockaddr,
+                &SockaddrIn::new(entry.remote_addr, entry.remote_port) as *const SockaddrIn as *const Sockaddr,
                 core::mem::size_of::<SockaddrIn>() as SocklenT)
         }
     }
@@ -413,7 +417,7 @@ pub unsafe extern "C" fn sendto(
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
-    let entry = match slot.as_ref() {
+    let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
     };
@@ -428,6 +432,14 @@ pub unsafe extern "C" fn sendto(
                 Some(v) => v,
                 None => { set_errno(EINVAL); return -1; }
             };
+            // POSIX: a socket not yet bound is bound at its first send, to a
+            // port the stack chooses.
+            if entry.netstack_id == 0 {
+                if let Err(e) = bind_datagram(entry, [0; 4], 0) {
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
+            }
             // Write data to tx pipe
             let data = core::slice::from_raw_parts(buf, len);
             if let Err(_) = syscall::write(RawHandle(entry.tx_fd as u32), data) {
@@ -550,6 +562,8 @@ fn option_errno(refusal: sockopt::Refusal) -> i32 {
     match refusal {
         sockopt::Refusal::Short => EINVAL,
         sockopt::Refusal::Fault => EFAULT,
+        sockopt::Refusal::NoSuchOption => ENOPROTOOPT,
+        sockopt::Refusal::NotSupported => EOPNOTSUPP,
     }
 }
 
@@ -571,20 +585,28 @@ pub unsafe extern "C" fn setsockopt(
     };
 
     // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
-    let Some(option) = sockopt::kept(level, optname) else { return 0 };
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), true) {
+        Ok(Some(option)) => option,
+        Ok(None) => return 0,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
     let on = match sockopt::switch(optval, optlen) {
         Ok(on) => on,
         Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
     };
     match option {
-        Kept::NoDelay if entry.netstack_id != 0 => {
-            if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, on as u32) {
-                set_errno(net_err_to_errno(e));
-                return -1;
+        Kept::NoDelay => {
+            // netstack holds a connection from `connect` or `accept`, and a
+            // listener from `bind`, whose id names no connection: it refuses
+            // a listener's set, and nothing is kept for one.
+            if entry.netstack_id != 0 {
+                if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, on as u32) {
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
             }
             entry.nodelay = on;
         }
-        Kept::NoDelay => {}
         Kept::Broadcast => {
             // Only a datagram is ever sent to a broadcast address, and netstack
             // holds a datagram socket from its `bind`.
@@ -617,7 +639,11 @@ pub unsafe extern "C" fn getsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
-    let value = match sockopt::kept(level, optname) {
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), false) {
+        Ok(option) => option,
+        Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
+    };
+    let value = match option {
         Some(Kept::NoDelay) => entry.nodelay as i32,
         Some(Kept::Broadcast) => entry.broadcast as i32,
         // Every other option reads 0, `SO_ERROR` among them.
@@ -689,7 +715,7 @@ pub unsafe extern "C" fn getaddrinfo(
     let name = core::slice::from_raw_parts(node, name_len);
 
     // Try parsing as IPv4 literal first
-    if let Some(ip) = parse_ipv4(name) {
+    if let Some(ip) = inaddr::dotted_quad(name) {
         return build_addrinfo_result(res, &[(ip, 0)]);
     }
 
@@ -726,10 +752,7 @@ unsafe fn build_addrinfo_result(res: *mut *mut Addrinfo, addrs: &[([u8; 4], u16)
             return -1;
         }
 
-        (*sa).sin_family = AF_INET as u16;
-        (*sa).sin_port = port.to_be();
-        (*sa).sin_addr.s_addr = u32::from_be_bytes(ip);
-        (*sa).sin_zero = [0; 8];
+        sa.write(SockaddrIn::new(ip, port));
 
         (*ai).ai_flags = 0;
         (*ai).ai_family = AF_INET;
@@ -763,21 +786,25 @@ pub unsafe extern "C" fn gai_strerror(_errcode: i32) -> *const u8 {
     b"DNS lookup failed\0".as_ptr()
 }
 
-// inet_pton / inet_ntop / htons / ntohs / htonl / ntohl
+// inet_pton / inet_ntop / inet_addr / htons / ntohs / htonl / ntohl
 
 #[no_mangle]
 pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
-    if af != AF_INET || src.is_null() || dst.is_null() {
-        return 0;
-    }
-    let len = super::string::strlen(src);
-    let s = core::slice::from_raw_parts(src, len);
-    match parse_ipv4(s) {
-        Some(ip) => {
+    let text = core::slice::from_raw_parts(src, super::string::strlen(src));
+    match inaddr::pton(af, text) {
+        Ok(Some(ip)) => {
             ptr::copy_nonoverlapping(ip.as_ptr(), dst, 4);
             1
         }
-        None => 0,
+        Ok(None) => 0,
+        Err(refusal) => { set_errno(address_errno(refusal)); -1 }
+    }
+}
+
+fn address_errno(refusal: inaddr::Refusal) -> i32 {
+    match refusal {
+        inaddr::Refusal::Family => EAFNOSUPPORT,
+        inaddr::Refusal::Room => ENOSPC,
     }
 }
 
@@ -788,48 +815,9 @@ pub unsafe extern "C" fn inet_ntop(
     dst: *mut u8,
     size: SocklenT,
 ) -> *const u8 {
-    if af != AF_INET || src.is_null() || dst.is_null() || size < 16 {
-        return ptr::null();
-    }
-    let a = *src;
-    let b = *src.add(1);
-    let c = *src.add(2);
-    let d = *src.add(3);
-    let mut buf = [0u8; 16];
-    let n = fmt_ip4(&mut buf, a, b, c, d);
-    if n as u32 >= size {
-        return ptr::null();
-    }
-    ptr::copy_nonoverlapping(buf.as_ptr(), dst, n + 1);
-    dst as *const u8
-}
-
-fn fmt_ip4(buf: &mut [u8; 16], a: u8, b: u8, c: u8, d: u8) -> usize {
-    let mut pos = 0;
-    for (i, octet) in [a, b, c, d].iter().enumerate() {
-        if i > 0 {
-            buf[pos] = b'.';
-            pos += 1;
-        }
-        pos += fmt_u8(&mut buf[pos..], *octet);
-    }
-    buf[pos] = 0;
-    pos
-}
-
-fn fmt_u8(buf: &mut [u8], val: u8) -> usize {
-    if val >= 100 {
-        buf[0] = b'0' + val / 100;
-        buf[1] = b'0' + (val / 10) % 10;
-        buf[2] = b'0' + val % 10;
-        3
-    } else if val >= 10 {
-        buf[0] = b'0' + val / 10;
-        buf[1] = b'0' + val % 10;
-        2
-    } else {
-        buf[0] = b'0' + val;
-        1
+    match inaddr::ntop(af, src, dst, size) {
+        Ok(()) => dst as *const u8,
+        Err(refusal) => { set_errno(address_errno(refusal)); ptr::null() }
     }
 }
 
@@ -853,58 +841,10 @@ pub unsafe extern "C" fn ntohl(netlong: u32) -> u32 {
     u32::from_be(netlong)
 }
 
+/// `INADDR_NONE` for a text that is no address, which is also what
+/// 255.255.255.255 reads as.
 #[no_mangle]
 pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
-    if cp.is_null() {
-        return u32::MAX; // INADDR_NONE
-    }
-    let len = super::string::strlen(cp);
-    let s = core::slice::from_raw_parts(cp, len);
-    match parse_ipv4(s) {
-        Some(ip) => u32::from_be_bytes(ip),
-        None => u32::MAX,
-    }
-}
-
-// Helpers
-
-fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
-    let mut octets = [0u8; 4];
-    let mut octet_idx = 0;
-    let mut val: u16 = 0;
-    let mut has_digit = false;
-
-    for &c in s {
-        if c >= b'0' && c <= b'9' {
-            val = val * 10 + (c - b'0') as u16;
-            if val > 255 {
-                return None;
-            }
-            has_digit = true;
-        } else if c == b'.' {
-            if !has_digit || octet_idx >= 3 {
-                return None;
-            }
-            octets[octet_idx] = val as u8;
-            octet_idx += 1;
-            val = 0;
-            has_digit = false;
-        } else {
-            return None;
-        }
-    }
-    if !has_digit || octet_idx != 3 {
-        return None;
-    }
-    octets[3] = val as u8;
-    Some(octets)
-}
-
-fn make_sockaddr_in(ip: [u8; 4], port: u16) -> SockaddrIn {
-    SockaddrIn {
-        sin_family: AF_INET as u16,
-        sin_port: port.to_be(),
-        sin_addr: InAddr { s_addr: u32::from_be_bytes(ip) },
-        sin_zero: [0; 8],
-    }
+    let text = core::slice::from_raw_parts(cp, super::string::strlen(cp));
+    inaddr::numbers_and_dots(text).map_or(u32::MAX, u32::from_ne_bytes)
 }

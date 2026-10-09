@@ -17,17 +17,26 @@ connection waits to be accepted: a connect returns before the listener's end
 is established, so the answer rests on that event and not on the order
 loopback delivers in. A red there prints the host's name and both answers.
 
-ToyOS as it ships does neither half:
+ToyOS as it ships does neither half for an option set on a socket that
+listens:
 
-- netstack answers `TcpSetOption` and `TcpGetOption` `ERR_NOT_CONNECTED` for
+- netstack answers `TcpSetOption` `ERR_NOT_CONNECTED` for
   any id that is not a stream (`handle_tcp_set_option`,
   `userland/netstack/src/main.rs`), and libc's `setsockopt` sends a listening
   socket's id there (`userland/libc/src/socket.rs`), so a C program that sets
-  the option on its listener is refused.
+  the option on its listener is refused, -1 and `ENOTCONN`, and the listener
+  keeps what it held. libc holds a listener from `bind`. One set before that
+  it keeps, and `accept` hands it to netstack for each connection, as
+  `connect` does: with every later set refused it is the option the listener
+  held when any connection began. `tests/netcase/nodelay_kept.c` holds the
+  refusal, and the accepted socket's read for a listener that held the option
+  at `bind` and for one that did not; its three lines on the refused set are
+  the ones this file's exit turns to the host's answers.
 - std builds every `TcpStream`, an accepted one included, with
   `nodelay: false` and answers `nodelay()` from that field without asking
   netstack (`sdk/std/sys/net/connection.rs`). Nothing can make that false
-  today, since no accepted connection has the option. Once a listener's
+  today: std has no setter for a listener, and what libc's `accept` hands
+  over is for a socket of libc's. Once a listener's
   option reaches the connections it accepts, it is false for each of them.
 
 The node (`userland/netstack/node/src/listeners.rs`) has the calls,
