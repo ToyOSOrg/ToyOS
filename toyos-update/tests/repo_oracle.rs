@@ -40,6 +40,14 @@ fn refresh(root: &[u8], timestamp: &[u8], targets: &[u8]) -> Result<repo::Fresh,
     repo::refresh(&mut mirror, Held { root, timestamp: None, targets: None }, None, NOW)
 }
 
+/// The refusal, and never a print of what was accepted.
+fn refused(result: Result<repo::Fresh, Refused>) -> Refused {
+    match result {
+        Ok(_) => panic!("the client accepted a bent repository"),
+        Err(why) => why,
+    }
+}
+
 #[test]
 fn a_repository_ssh_keygen_signed_is_accepted_and_a_bent_one_is_not() {
     let fresh = refresh(ROOT, TIMESTAMP, TARGETS).expect("the repository OpenSSH signed");
@@ -59,17 +67,17 @@ fn a_repository_ssh_keygen_signed_is_accepted_and_a_bent_one_is_not() {
     };
     let at = |doc: &[u8], text: &str| doc.windows(text.len()).position(|w| w == text.as_bytes()).unwrap() + text.len() - 1;
 
-    let timestamp = refresh(ROOT, &bend(TIMESTAMP, at(TIMESTAMP, "expires 2026-10-16")), TARGETS);
+    let timestamp = refused(refresh(ROOT, &bend(TIMESTAMP, at(TIMESTAMP, "expires 2026-10-16")), TARGETS));
     assert!(
-        matches!(timestamp, Err(Refused::Threshold { role: Role::Timestamp, first: Some(SigRefused::Signature), .. })),
-        "{timestamp:?}"
+        matches!(timestamp, Refused::Threshold { role: Role::Timestamp, first: Some(SigRefused::Signature), .. }),
+        "{timestamp}"
     );
-    let signature = refresh(ROOT, &bend(TIMESTAMP, TIMESTAMP.len() - 10), TARGETS);
-    assert!(matches!(signature, Err(Refused::Threshold { role: Role::Timestamp, .. })), "{signature:?}");
+    let signature = refused(refresh(ROOT, &bend(TIMESTAMP, TIMESTAMP.len() - 10), TARGETS));
+    assert!(matches!(signature, Refused::Threshold { role: Role::Timestamp, .. }), "{signature}");
 
     // A targets bent is no longer the SHA-256 the timestamp names.
-    let targets = refresh(ROOT, TIMESTAMP, &bend(TARGETS, at(TARGETS, "sequence 1")));
-    assert_eq!(targets.unwrap_err(), Refused::TargetsDigest { version: 1 });
+    let targets = refused(refresh(ROOT, TIMESTAMP, &bend(TARGETS, at(TARGETS, "sequence 1"))));
+    assert_eq!(targets, Refused::TargetsDigest { version: 1 });
 
     struct Next(Vec<u8>);
     impl Mirror for Next {
@@ -78,9 +86,14 @@ fn a_repository_ssh_keygen_signed_is_accepted_and_a_bent_one_is_not() {
         }
     }
     let as_two = String::from_utf8(ROOT.to_vec()).unwrap().replacen("toyos-repo root 1", "toyos-repo root 2", 1);
-    let walked = repo::refresh(&mut Next(as_two.into_bytes()), Held { root: ROOT, timestamp: None, targets: None }, None, NOW);
+    let walked = refused(repo::refresh(
+        &mut Next(as_two.into_bytes()),
+        Held { root: ROOT, timestamp: None, targets: None },
+        None,
+        NOW,
+    ));
     assert!(
-        matches!(walked, Err(Refused::Threshold { role: Role::Root, version: 2, root: 1, first: Some(SigRefused::Signature), .. })),
-        "{walked:?}"
+        matches!(walked, Refused::Threshold { role: Role::Root, version: 2, root: 1, first: Some(SigRefused::Signature), .. }),
+        "{walked}"
     );
 }

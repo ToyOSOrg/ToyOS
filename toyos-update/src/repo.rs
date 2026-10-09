@@ -531,7 +531,6 @@ impl<'a> Held<'a> {
 
 /// What a [`refresh`] accepted: the three documents' bytes, for the machine to
 /// hold, and the targets.
-#[derive(Debug)]
 pub struct Fresh {
     pub root: Vec<u8>,
     pub timestamp: Vec<u8>,
@@ -1221,8 +1220,12 @@ mod tests {
         }
     }
 
+    /// The refusal, and never a print of what was accepted.
     fn refused(result: Result<Fresh, Refused>) -> Refused {
-        result.expect_err("the client accepted what it must refuse")
+        match result {
+            Ok(_) => panic!("the client accepted what it must refuse"),
+            Err(why) => why,
+        }
     }
 
     #[test]
