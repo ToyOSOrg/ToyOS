@@ -85,7 +85,10 @@ Each stage lands on its own, in this order.
 
 2. **One boot disk.**
    - `toyos_update::entry::partition` is the one HARDDRIVE rule, taken by
-     `boot_partition`, `rootimage::boot_disk` and `bootnext.rs`.
+     `boot_partition`, `rootimage::boot_disk` and `bootnext.rs`. The loader's
+     two decoders go into it: `efi::HardDrive::parse` (`efi/proto.rs`), which
+     reads firmware-built paths, and `bootnext::gpt_signature`, which reads a
+     load option's.
    - Every volume the loader opens (the slot's FAT partition, the log
      partition and the attempts file on it) is found on the boot disk, where
      exactly one match is taken. `loaderlog::volume_handle`'s machine-wide
@@ -96,7 +99,8 @@ Each stage lands on its own, in this order.
      one `Disk::open` and slot-table read, and one file reader.
      `load_file_bytes`, `MAX_ESP_FILE` and the unsound `alloc_uninit` go.
 
-   **Exit**: `a_path_names_the_partition_of_its_one_hard_drive_node` and
+   **Exit**: `rg 'fn gpt_signature|fn parse' bootloader/src/{bootnext.rs,efi/proto.rs}`
+   finds nothing. `a_path_names_the_partition_of_its_one_hard_drive_node` and
    `a_partitions_disk_is_the_path_before_its_hard_drive_node` pass on the host,
    and fail under two mutations: cutting the disk before the path's last node,
    and taking a second HARDDRIVE node. `root_named_twice` plants a twin whose
@@ -151,6 +155,9 @@ Each stage lands on its own, in this order.
    - The loader's `#[panic_handler]` writes `loader: panicked at
      <file>:<line>: <message>` through `loaderlog`, then powers the machine
      off. It never resets: a panic with a fixed cause would reset into itself.
+     From `EXITING` on (the first `ExitBootServices` call) it skips `loaderlog`
+     and goes straight to `ResetSystem`'s shutdown, since UEFI 2.10 §7.4.6
+     forbids the File protocol from that call on as it forbids the console.
      The refused-floor site stops writing its reason to `loader.log` before
      its `panic!`: the handler writes it.
    - `alloc_kernel_memory` stops building a `Vec<u8>` over a 2 MiB-aligned
