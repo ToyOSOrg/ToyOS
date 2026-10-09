@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # `run_test` and its ceiling verdict serve only `--debug`'s `run`
 
-`QemuInstance::run_test`, `run_test_hooked` and `run_test_paced`
+`QemuInstance::run_test` and `run_test_paced`
 (`tests/common/qemu.rs`), and `ceiling_verdict`, the verdict their read loop
 ends a wait on, have one caller: interactive debug mode's `run <test>`
 (`tests/toyos.rs`, `qemu.run_test(test_name, Duration::from_secs(60))`). Every
@@ -18,8 +18,9 @@ path.
 
 ## Measured
 
-`git grep -c 'run_test(\|run_test_hooked(\|run_test_paced(' <rev> -- tests/toyos.rs tests/common`
-counts 40 lines in `tests/toyos.rs` and 34 across sixteen other `tests/common`
+`git grep -c 'run_test(\|run_test_hooked(\|run_test_paced(' <rev> -- tests/toyos.rs tests/common`,
+over the three functions those revisions had (`run_test_hooked` is deleted
+since), counts 40 lines in `tests/toyos.rs` and 34 across sixteen other `tests/common`
 modules at `06788146b^`, and one in `tests/toyos.rs`, the debug loop's, at
 `06788146b`, the commit that cut the guest suite; the five in
 `tests/common/qemu.rs` are the three functions' own.
@@ -32,5 +33,5 @@ first cut left them that one caller.
 ## What would close it
 
 `--debug`'s `run` reads its test through a wait the suite uses, and
-`run_test`, `run_test_hooked`, `run_test_paced`, `ceiling_verdict` and the
+`run_test`, `run_test_paced`, `ceiling_verdict` and the
 checks and readers that exist for them are deleted.
