@@ -3000,6 +3000,7 @@ mod tests {
         "tests/images/acpicase.toml",
         "tests/images/blockgrantcase.toml",
         "tests/images/consentcase.toml",
+        "tests/images/downloadcase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
