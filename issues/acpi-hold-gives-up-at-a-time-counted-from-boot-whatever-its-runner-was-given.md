@@ -36,5 +36,5 @@ The harness: `tests/toyos-rust-tests/src/bin/acpi_hold.rs`, and
 ## Exit
 
 The hold is bounded from its own start, or by the bound its runner was given,
-and a job added before it cannot red `acpi_server_events` over a line the log
+which the runner hands each job of a list in `toyos_tco::LIST_BOUND_ENV`, and a job added before it cannot red `acpi_server_events` over a line the log
 holds.
