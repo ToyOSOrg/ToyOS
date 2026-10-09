@@ -14,7 +14,8 @@ Two things follow.
 
 **What the hold is given shrinks with every job before it.** It is the last of
 its boot's rows' jobs. On the T14 at `accbd79dd` it started 43 161 ms in, with
-10.8 s left. A rows' job that adds 10.8 s to that list leaves it nothing:
+10.8 s left; on the merged `testcases` at `2c7e1be1a`, 43 095 ms in, with
+10.9 s left. A rows' job that adds 10.8 s to that list leaves it nothing:
 `served_log::Log::until` then panics before it reads a line, with `the log did
 not show … within 0ns`, and `acpi_server_events` reds over a count line that
 was written some 20 s earlier and is in the log. The red names the server's

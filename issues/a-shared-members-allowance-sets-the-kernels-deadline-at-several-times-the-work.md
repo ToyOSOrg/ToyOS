@@ -71,29 +71,30 @@ above took on `shared` and `ccorpus` ride `testcases` behind its rows' jobs,
 and those two boots are gone. A clamp is no answer: a ceiling under the
 derived bound ends a healthy list.
 
-## The merged list, summed from the boots it was
+## The merged list
 
-No machine has run the merged `testcases`. Each part between its own markers,
-over three readings of the boot that carried it: `testcases` at `9e70cd2e3`,
-`473efea22` and `accbd79dd`, `shared` and `ccorpus` at `eff8b20ee`,
-`d6d008e88` and `49e12f23b`.
+The T14 ran the merged `testcases` once, at `2c7e1be1a`, armed 200 200 and
+100 100 ms by the kernel's own lines; each part between its own markers, the
+kernel's clock counted from its `Boot: complete (1135ms)` line. Beside it, the
+sum of the three boots it was, three readings each: `testcases` at
+`9e70cd2e3`, `473efea22` and `accbd79dd`, `shared` and `ccorpus` at
+`eff8b20ee`, `d6d008e88` and `49e12f23b`.
 
-| part | least | most | its share of the bound |
+| part | merged, `2c7e1be1a` | its parts apart | its share of the bound |
 |---|---|---|---|
-| the boot, to its first job | 1 190 ms | 1 196 ms | |
-| the rows' ten jobs | 41 913 ms | 41 983 ms | 60 000 ms |
-| the 88 Rust members | 7 068 ms | 7 115 ms | 26 400 ms |
-| the 137 C cases | 1 667 ms | 2 183 ms | 13 700 ms |
-| the list's last record | 51 838 ms | 52 477 ms | 100 100 ms |
+| the boot, to its first job | 1 191 ms | 1 190 to 1 196 ms | |
+| the rows' ten jobs | 41 924 ms | 41 913 to 41 983 ms | 60 000 ms |
+| the 225 members | 9 253 ms | 8 735 to 9 298 ms | 40 100 ms |
+| the list's last record | 52 352 ms | 51 838 to 52 477 ms | 100 100 ms |
 
 **The two shares are wide by different factors, and the rows' is the
-tighter.** The members take 8 735 to 9 298 ms of the 40 100 ms they add: the
-allowances stand at about 4.3 times their work. The rows' jobs end 43 103 to
-43 173 ms into the kernel's clock, of the 60 000 ms `toyos_tco::JOB_BOUND_MS`
+tighter.** The members took 9 253 ms of the 40 100 ms they add: the
+allowances stand at about 4.3 times their work. The rows' jobs ended
+43 115 ms into the kernel's clock, of the 60 000 ms `toyos_tco::JOB_BOUND_MS`
 gives them: about 1.4 times theirs, `counters_metal` alone 32.7 s of it. That
 constant is the same for a boot of no job and for this boot of ten, and no
-allowance widens it. By the same sum the list's last record leaves 47.6 s of
-its bound, and nothing reads that margin.
+allowance widens it. The list's last record left 47.7 s of its bound, and
+nothing reads that margin.
 
 **A late expiry adds to the longer bound.**
 `issues/a-120000-ms-boot-deadline-fired-132859-ms-late-on-the-t14.md` is open:
