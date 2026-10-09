@@ -88,18 +88,10 @@ pub fn madt_entries<P: Phys>(madt: &Table<P>) -> MadtEntries<P> {
     }
 }
 
-/// One structure the list holds whole: its type, its declared length and
-/// where its first byte is.
-#[derive(Clone, Copy)]
-struct Structure<P> {
-    phys: P,
-    base: u64,
-    entry_type: u8,
-    declared: usize,
-}
+impl<P: Phys> Iterator for MadtEntries<P> {
+    type Item = Result<MadtEntry, MadtHalt>;
 
-impl<P: Phys> MadtEntries<P> {
-    fn structure(&mut self) -> Option<Result<Structure<P>, MadtHalt>> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.halted || self.offset + ENTRY_HEADER_LEN > self.list_len {
             return None;
         }
@@ -116,81 +108,10 @@ impl<P: Phys> MadtEntries<P> {
             }));
         }
         self.offset += declared;
-        Some(Ok(Structure { phys: self.table.phys(), base: self.table.base() + at as u64, entry_type, declared }))
-    }
-}
 
-impl<P: Phys> Iterator for MadtEntries<P> {
-    type Item = Result<MadtEntry, MadtHalt>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(self.structure()?.map(Structure::decode))
-    }
-}
-
-/// The SPIs a GICv2m frame raises, where its structure names them itself.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct SpiRange {
-    pub base: u16,
-    pub count: u16,
-}
-
-/// MADT type 0xD (ACPI 6.5 §5.2.12.16, "GIC MSI Frame Structure"): a GICv2m
-/// frame, whose doorbell takes the SPI to raise from the data written to it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct MsiFrame {
-    pub id: u32,
-    pub base: u64,
-    /// `None` where the flags' `SPI Count/Base Select` is clear and both are
-    /// the frame's own `MSI_TYPER`'s to say.
-    pub spis: Option<SpiRange>,
-}
-
-/// What a machine's functions write their message-signalled interrupts to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MsiController {
-    /// MADT type 0xF: an ITS, which looks an event up by its writer's DeviceID.
-    Its { id: u32, base: u64 },
-    Frame(MsiFrame),
-}
-
-/// Every MSI controller a validated MADT names, in its order: the walk
-/// [`madt_entries`] makes, ending on the same [`MadtHalt`].
-pub fn msi_controllers<P: Phys>(madt: &Table<P>) -> impl Iterator<Item = Result<MsiController, MadtHalt>> {
-    let mut entries = madt_entries(madt);
-    core::iter::from_fn(move || {
-        loop {
-            let structure = match entries.structure()? {
-                Ok(structure) => structure,
-                Err(halt) => return Some(Err(halt)),
-            };
-            if let Some(frame) = structure.msi_frame() {
-                return Some(Ok(MsiController::Frame(frame)));
-            }
-            if let MadtEntry::Its { id, base } = structure.decode() {
-                return Some(Ok(MsiController::Its { id, base }));
-            }
-        }
-    })
-}
-
-impl<P: Phys> Structure<P> {
-    /// ACPI 6.5 §5.2.12.16: GIC MSI Frame ID (4..8), Physical Base Address
-    /// (8..16), Flags (16..20) whose bit 0 is `SPI Count/Base Select`, SPI
-    /// Count (20..22), SPI Base (22..24).
-    fn msi_frame(self) -> Option<MsiFrame> {
-        let Self { phys, base, entry_type, declared } = self;
-        (entry_type == 0xD && declared >= 24).then(|| MsiFrame {
-            id: u32le(phys, base + 4),
-            base: u64le(phys, base + 8),
-            spis: (u32le(phys, base + 16) & 1 != 0)
-                .then(|| SpiRange { count: u16le(phys, base + 20), base: u16le(phys, base + 22) }),
-        })
-    }
-
-    fn decode(self) -> MadtEntry {
-        let Self { phys, base, entry_type, declared } = self;
-        match (entry_type, declared) {
+        let phys = self.table.phys();
+        let base = self.table.base() + at as u64;
+        Some(Ok(match (entry_type, declared) {
             // Table 5.21: ACPI Processor UID (2), APIC ID (3), Flags (4..8).
             (0, 8..) => MadtEntry::LocalApic {
                 apic_id: u32::from(phys.byte(base + 3)),
@@ -229,7 +150,7 @@ impl<P: Phys> Structure<P> {
             // Table 5.44: GIC ITS ID (4..8), Physical Base Address (8..16).
             (0xF, 20..) => MadtEntry::Its { id: u32le(phys, base + 4), base: u64le(phys, base + 8) },
             _ => MadtEntry::Other(entry_type),
-        }
+        }))
     }
 }
 

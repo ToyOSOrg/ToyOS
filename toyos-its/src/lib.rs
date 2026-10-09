@@ -13,7 +13,8 @@
 //! Only physical LPIs through flat tables are spelled: no vPE, no indirect
 //! table. What an ITS reports about itself is a device's word and is refused
 //! by name where the driver could not act on it; nothing here panics on a
-//! register's value.
+//! register's value. An event, a collection and an LPI are each a type made
+//! from what the ITS, its tables and the distributor say there is of them.
 //!
 //! `no_std`, no allocation, no `unsafe`.
 
@@ -23,34 +24,17 @@
 pub mod command;
 pub mod lpi;
 
-/// A physical address the ITS or a redistributor is given, aligned to
-/// `1 << ALIGN` bytes and below 2^48: inside every address field written
-/// here, whichever page size the table it names is read in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Phys<const ALIGN: u32>(u64);
+use toyos_phys::Phys;
 
-impl<const ALIGN: u32> Phys<ALIGN> {
-    pub const fn new(address: u64) -> Option<Self> {
-        if address >> 48 == 0 && address & ((1 << ALIGN) - 1) == 0 {
-            Some(Self(address))
-        } else {
-            None
-        }
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// Offsets in the ITS's control frame (§12.18).
+/// Offsets in the ITS's control frame (§12.18, Table 12-33).
 pub const GITS_CTLR: usize = 0x0000;
 pub const GITS_TYPER: usize = 0x0008;
 pub const GITS_CBASER: usize = 0x0080;
 pub const GITS_CWRITER: usize = 0x0088;
 pub const GITS_CREADR: usize = 0x0090;
 
-/// `GITS_BASER<n>`, n = 0 to 7: one per table the ITS may ask memory for.
+/// `GITS_BASER<n>`, n = 0 to 7 (§12.19.1): one per table the ITS may ask
+/// memory for.
 pub const fn gits_baser(n: usize) -> Option<usize> {
     if n < 8 {
         Some(0x0100 + 8 * n)
@@ -59,16 +43,15 @@ pub const fn gits_baser(n: usize) -> Option<usize> {
     }
 }
 
-/// The translation frame is the second 64 KiB frame, and `GITS_TRANSLATER`
-/// is at 0x0040 of it: a function's message is one 32-bit write of its
-/// EventID there, and the bus says which device wrote it.
+/// The translation frame is the second 64 KiB frame (§12.18), and
+/// `GITS_TRANSLATER` is at 0x0040 of it (Table 12-34): a function's message
+/// is one 32-bit write of its EventID there, and the bus says which device
+/// wrote it.
 pub const TRANSLATION_FRAME: u64 = 0x1_0000;
 pub const GITS_TRANSLATER: u64 = 0x0040;
 
-/// `GITS_CTLR` (§12.19.4): `Enabled` [0]; `Quiescent` [31] reads set once a
-/// disabled ITS has nothing in progress.
+/// `GITS_CTLR.Enabled` [0] (§12.19.4).
 pub const CTLR_ENABLED: u32 = 1 << 0;
-pub const CTLR_QUIESCENT: u32 = 1 << 31;
 
 /// What an ITS lacks that the driver needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,14 +63,20 @@ pub enum Lacks {
 /// An ITS as its type register describes it (§12.19.13).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Its {
-    /// `ID_bits` [12:8] plus one: the widest EventID.
-    pub event_bits: u8,
-    /// `Devbits` [17:13] plus one: the widest DeviceID.
+    /// `Devbits` [17:13] plus one: the widest DeviceID, and so how many
+    /// entries a flat device table holds.
     pub device_bits: u8,
+    /// `ID_bits` [12:8] plus one: the widest EventID.
+    event_bits: u8,
     /// `ITT_entry_size` [7:4] plus one: bytes of one translation table entry.
-    pub itt_entry_bytes: u8,
+    itt_entry_bytes: u8,
     /// `HCC` [31:24]: collections the ITS holds without a collection table.
-    pub collections_held: u8,
+    held: u8,
+    /// `CCT` [2]: those count beside a collection table's.
+    cumulative: bool,
+    /// The width of an ICID: 16 bits where `CIL` [36] is clear, else
+    /// `CIDbits` [35:32] plus one.
+    collection_bits: u8,
     /// `PTA` [19]: a collection's target is its redistributor's address
     /// rather than its processor number.
     physical_targets: bool,
@@ -98,10 +87,12 @@ pub const fn probe(typer: u64) -> Result<Its, Lacks> {
         return Err(Lacks::PhysicalLpis);
     }
     Ok(Its {
-        event_bits: (typer >> 8 & 0x1F) as u8 + 1,
         device_bits: (typer >> 13 & 0x1F) as u8 + 1,
+        event_bits: (typer >> 8 & 0x1F) as u8 + 1,
         itt_entry_bytes: (typer >> 4 & 0xF) as u8 + 1,
-        collections_held: (typer >> 24) as u8,
+        held: (typer >> 24) as u8,
+        cumulative: typer & 1 << 2 != 0,
+        collection_bits: if typer & 1 << 36 == 0 { 16 } else { (typer >> 32 & 0xF) as u8 + 1 },
         physical_targets: typer & 1 << 19 != 0,
     })
 }
@@ -110,6 +101,40 @@ pub const fn probe(typer: u64) -> Result<Its, Lacks> {
 /// it: made by [`Its::events`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EventBits(u8);
+
+/// An EventID inside the translation table it was made for:
+/// [`EventBits::event`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Event(u32);
+
+impl EventBits {
+    /// `id` as an event of a device whose table holds this many.
+    pub const fn event(self, id: u32) -> Option<Event> {
+        if (id as u64) >> self.0 == 0 {
+            Some(Event(id))
+        } else {
+            None
+        }
+    }
+}
+
+/// How many collections an ITS has: made by [`Its::collections`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Collections(u32);
+
+/// A collection the ITS has, by its ICID: [`Collections::collection`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Collection(u16);
+
+impl Collections {
+    pub const fn collection(self, id: u16) -> Option<Collection> {
+        if (id as u32) < self.0 {
+            Some(Collection(id))
+        } else {
+            None
+        }
+    }
+}
 
 /// The redistributor a collection's interrupts go to, in the form this ITS
 /// takes it (`RDbase`, §5.3.1): made by [`Its::target`].
@@ -131,6 +156,17 @@ impl Its {
     /// aligned address.
     pub const fn itt_bytes(&self, events: EventBits) -> u64 {
         (self.itt_entry_bytes as u64) << events.0
+    }
+
+    /// The collections this ITS has once its collection table holds
+    /// `in_table` entries, none where no `GITS_BASER<n>` backs one (§5.2.2,
+    /// §5.3.1): the table's, those the ITS holds itself where it has no
+    /// table or counts them beside it, and no more than an ICID numbers.
+    pub const fn collections(&self, in_table: u64) -> Collections {
+        let held = if in_table == 0 || self.cumulative { self.held as u64 } else { 0 };
+        let numbered = 1u64 << self.collection_bits;
+        let total = held.saturating_add(in_table);
+        Collections(if total < numbered { total } else { numbered } as u32)
     }
 
     /// The redistributor at `frame` whose `GICR_TYPER.Processor_Number` is
@@ -171,11 +207,19 @@ impl PageSize {
     }
 }
 
-/// `GITS_BASER<n>` as read (§12.19.1): the table it backs, the bytes of one
-/// entry (`Entry_Size` [52:48] plus one) and the page size it holds — which
-/// an ITS may fix, so it is read back after [`baser`] is written.
-pub const fn table(baser: u64) -> (Table, u8, PageSize) {
-    let kind = match baser >> 56 & 0b111 {
+/// `GITS_BASER<n>` as read (§12.19.1): the table it backs and the page size
+/// it holds — which an ITS may fix, so it is read back after
+/// [`Backing::baser`] is written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Backing {
+    pub table: Table,
+    pub page: PageSize,
+    /// `Entry_Size` [52:48] plus one: the bytes of one entry.
+    entry_bytes: u8,
+}
+
+pub const fn table(baser: u64) -> Backing {
+    let table = match baser >> 56 & 0b111 {
         0b000 => Table::Unimplemented,
         0b001 => Table::Devices,
         0b100 => Table::Collections,
@@ -187,7 +231,7 @@ pub const fn table(baser: u64) -> (Table, u8, PageSize) {
         // `0b11` is reserved and treated as `0b10`.
         _ => PageSize::K64,
     };
-    (kind, (baser >> 48 & 0x1F) as u8 + 1, page)
+    Backing { table, page, entry_bytes: (baser >> 48 & 0x1F) as u8 + 1 }
 }
 
 /// `InnerCache` `0b111`, read-allocate write-allocate write-back, with
@@ -196,25 +240,46 @@ pub const fn table(baser: u64) -> (Table, u8, PageSize) {
 const CACHED: u64 = 0b111 << 59 | 0b01 << 10;
 const VALID: u64 = 1 << 63;
 
-/// `GITS_BASER<n>` for a flat table of `pages` pages of `page` at `at`:
-/// `Valid` [63], `Indirect` [62] clear, `Physical_Address` [47:12],
-/// `Page_Size` [9:8], `Size` [7:0] the pages minus one. `None` for no page or
-/// more than the 256 the field counts.
-pub const fn baser(at: Phys<16>, page: PageSize, pages: u16) -> Option<u64> {
-    if pages == 0 || pages > 256 {
-        return None;
+impl Backing {
+    /// The entries a flat table of `pages` of its pages holds.
+    pub const fn entries(self, pages: u16) -> u64 {
+        pages as u64 * self.page.bytes() / self.entry_bytes as u64
     }
-    let size = match page {
-        PageSize::K4 => 0b00,
-        PageSize::K16 => 0b01,
-        PageSize::K64 => 0b10,
-    };
-    Some(VALID | CACHED | at.get() | size << 8 | (pages - 1) as u64)
+
+    /// The fewest pages that hold `entries`. `None` for none, or more than
+    /// the 256 `Size` counts.
+    pub const fn pages(self, entries: u64) -> Option<u16> {
+        let Some(bytes) = entries.checked_mul(self.entry_bytes as u64) else {
+            return None;
+        };
+        let pages = bytes.div_ceil(self.page.bytes());
+        if pages >= 1 && pages <= 256 {
+            Some(pages as u16)
+        } else {
+            None
+        }
+    }
+
+    /// `GITS_BASER<n>` for a flat table of `pages` of its pages at `at`:
+    /// `Valid` [63], `Indirect` [62] clear, `Physical_Address` [47:12],
+    /// `Page_Size` [9:8], `Size` [7:0] the pages minus one. `None` for no
+    /// page or more than the 256 the field counts.
+    pub const fn baser(self, at: Phys<16>, pages: u16) -> Option<u64> {
+        if pages == 0 || pages > 256 {
+            return None;
+        }
+        let size = match self.page {
+            PageSize::K4 => 0b00,
+            PageSize::K16 => 0b01,
+            PageSize::K64 => 0b10,
+        };
+        Some(VALID | CACHED | at.get() | size << 8 | (pages - 1) as u64)
+    }
 }
 
 /// The ITS's command queue: `pages` 4 KiB pages of 32-byte commands
 /// (§5.2.8). `GITS_CWRITER` and `GITS_CREADR` each hold a byte offset into
-/// it, `Offset` [19:5].
+/// it, `Offset` [19:5], which is all of either that names a command.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CommandQueue {
     bytes: u32,
@@ -246,19 +311,20 @@ impl CommandQueue {
         (register & 0xF_FFE0) as u32 % self.bytes
     }
 
-    /// The offset after `offset`, wrapping at the queue's end.
-    pub const fn after(self, offset: u32) -> u32 {
-        (self.offset(offset as u64) + 32) % self.bytes
+    /// What `GITS_CWRITER` is written with once the command at its offset is
+    /// in memory: the offset after, wrapping at the queue's end.
+    pub const fn after(self, cwriter: u64) -> u64 {
+        ((self.offset(cwriter) + 32) % self.bytes) as u64
     }
 
-    /// The ITS has read every command: the two offsets are equal.
-    pub const fn is_empty(self, writer: u32, reader: u32) -> bool {
-        writer == reader
+    /// The ITS has read every command: the two registers' offsets are equal.
+    pub const fn is_empty(self, cwriter: u64, creadr: u64) -> bool {
+        self.offset(cwriter) == self.offset(creadr)
     }
 
-    /// One more command would make the writer equal the reader, which reads
-    /// as empty: the queue holds one command fewer than its bytes do.
-    pub const fn is_full(self, writer: u32, reader: u32) -> bool {
-        self.after(writer) == reader
+    /// One more command would make the writer's offset the reader's, which
+    /// reads as empty: the queue holds one command fewer than its bytes do.
+    pub const fn is_full(self, cwriter: u64, creadr: u64) -> bool {
+        self.after(cwriter) == self.offset(creadr) as u64
     }
 }

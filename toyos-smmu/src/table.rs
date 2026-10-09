@@ -1,23 +1,28 @@
 //! The stage 1 tables a context descriptor names: VMSAv8-64 with the 4 KiB
 //! granule over a 48-bit input, four levels of 512 descriptors (Arm ARM,
-//! DDI 0487 M.d, §D8.3.1), and the plan of one mapping in them.
+//! DDI 0487 M.d, §D8.3.1), and the plan of one mapping in them. The
+//! descriptors are [`toyos_bootmap::aarch64`]'s, which the loader's tables are
+//! written with, under the bits that make a leaf a device's and no CPU's.
 //!
 //! A device's memory is mapped by 2 MiB blocks at level 2. The page an ITS
 //! takes a message on is the one 4 KiB page at level 3: a block there would
 //! hand the device every register that shares its 2 MiB.
 
-use crate::Phys;
+use toyos_bootmap::aarch64::{block, page, table, MAIR, PXN};
+use toyos_bootmap::Cache;
+use toyos_phys::Phys;
+
+use crate::unit::Unit;
 
 /// The width of a device address these tables translate.
 pub const INPUT_BITS: u32 = 48;
 /// Levels 0 to 3, each indexed by nine bits of the address.
 pub const LEVELS: usize = 4;
 
-/// `CD.MAIR0`: attribute 0 is Device-nGnRE (`0x04`), which the message page
-/// is mapped with, and attribute 1 Normal write-back memory (`0xFF`).
-pub const MAIR0: u32 = 0x04 | 0xFF << 8;
-const ATTR_DEVICE: u64 = 0 << 2;
-const ATTR_MEMORY: u64 = 1 << 2;
+/// `CD.MAIR0`, attributes 0 to 3 of the `MAIR` the descriptors' `AttrIndx`
+/// names: a [`Cache::Device`] leaf's is Device-nGnRE and a [`Cache::Memory`]
+/// leaf's Normal write-back.
+pub const MAIR0: u32 = MAIR as u32;
 
 /// Table D8-50 and Table D8-52: bit [0] valid; bit [1] set for a table
 /// descriptor and a level 3 page, clear for a block.
@@ -29,18 +34,15 @@ const TABLE_OR_PAGE: u64 = 1 << 1;
 const AP_UNPRIVILEGED: u64 = 1 << 6;
 /// `AP[2]`, bit [7]: read-only.
 const AP_READ_ONLY: u64 = 1 << 7;
-/// `SH`, bits [9:8]: inner shareable.
-const INNER_SHAREABLE: u64 = 0b11 << 8;
-/// The access flag, bit [10]: clear, the first access faults.
-const AF: u64 = 1 << 10;
 /// `nG`, bit [11]: the translation is its context's alone. A leaf without it
 /// is global, cached for every ASID of the regime and so for every domain,
 /// and no invalidation by ASID removes it.
 const NOT_GLOBAL: u64 = 1 << 11;
-/// `PXN` [53] and `UXN` [54]: never executable.
-const NEVER_EXECUTED: u64 = 1 << 53 | 1 << 54;
 
-const LEAF: u64 = VALID | AP_UNPRIVILEGED | AF | NOT_GLOBAL | NEVER_EXECUTED;
+/// What a device's leaf adds to the loader's: unprivileged, its context's
+/// alone, and executable at no level — the loader's memory is executable at
+/// EL1, which no device's access is.
+const DEVICES: u64 = AP_UNPRIVILEGED | NOT_GLOBAL | PXN;
 
 /// What a device may do to memory mapped for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,9 +61,14 @@ pub enum Leaf {
 }
 
 /// The descriptor naming the next table down, at levels 0 to 2. Its
-/// hierarchical fields stay clear: the leaf alone decides the access.
-pub const fn next(table: Phys<12>) -> u64 {
-    table.get() | TABLE_OR_PAGE | VALID
+/// hierarchical fields stay clear: the leaf alone decides the access. `None`
+/// where the table is past the unit's output size.
+pub const fn next(at: Phys<12>, unit: &Unit) -> Option<u64> {
+    if unit.reaches(at.get(), 4096) {
+        Some(table(at.get()))
+    } else {
+        None
+    }
 }
 
 /// One mapping, planned: the index to follow in each table from the root,
@@ -84,19 +91,20 @@ impl Path {
 }
 
 /// The path to `leaf` at the device address `at`. `None` where `at` is past
-/// the input or not aligned to what the leaf maps.
-pub const fn plan(at: u64, leaf: Leaf) -> Option<Path> {
-    let (tables, size, descriptor) = match leaf {
-        Leaf::Memory(block, access) => {
+/// the input or not aligned to what the leaf maps, or what the leaf maps is
+/// past the unit's output size.
+pub const fn plan(at: u64, leaf: Leaf, unit: &Unit) -> Option<Path> {
+    let (tables, size, output, descriptor) = match leaf {
+        Leaf::Memory(memory, access) => {
             let access = match access {
                 Access::Read => AP_READ_ONLY,
                 Access::ReadWrite => 0,
             };
-            (3, 1u64 << 21, block.get() | LEAF | ATTR_MEMORY | INNER_SHAREABLE | access)
+            (3, 1u64 << 21, memory.get(), block(memory.get(), Cache::Memory) | DEVICES | access)
         }
-        Leaf::Doorbell(page) => (4, 1u64 << 12, page.get() | LEAF | TABLE_OR_PAGE | ATTR_DEVICE),
+        Leaf::Doorbell(register) => (4, 1u64 << 12, register.get(), page(register.get(), Cache::Device) | DEVICES),
     };
-    if at >> INPUT_BITS != 0 || at & (size - 1) != 0 {
+    if at >> INPUT_BITS != 0 || at & (size - 1) != 0 || !unit.reaches(output, size) {
         return None;
     }
     const fn index(at: u64, level: u32) -> usize {
@@ -122,7 +130,7 @@ pub const fn entry(descriptor: u64, level: usize) -> Entry {
     if descriptor & VALID == 0 {
         Entry::Invalid
     } else if level < LEVELS - 1 && descriptor & TABLE_OR_PAGE != 0 {
-        Entry::Table(Phys(descriptor & 0x0000_FFFF_FFFF_F000))
+        Entry::Table(Phys::of(descriptor))
     } else {
         Entry::Mapped
     }

@@ -1,6 +1,5 @@
 # A member of the host workspace (root `Cargo.toml`), like toyos-acpi and
-# toyos-smmu: it is pure, it has no dependencies, and its tests run on the
-# host.
+# toyos-smmu: it is pure and its tests run on the host.
 #
 # What lives here is every word a GICv3 ITS and its driver exchange, and the
 # two tables a redistributor reads an LPI's configuration and pending state
@@ -15,3 +14,6 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[dependencies]
+toyos-phys = { path = "../toyos-phys" }

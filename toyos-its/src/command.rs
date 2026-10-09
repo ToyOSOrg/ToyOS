@@ -1,8 +1,10 @@
 //! The ITS's commands (§5.3): 32 bytes each, four little-endian
 //! doublewords, the command number in bits [7:0] of the first.
 
+use toyos_phys::Phys;
+
 use crate::lpi::Lpi;
-use crate::{EventBits, Phys, Target};
+use crate::{Collection, Event, EventBits, Target};
 
 /// One command.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -14,14 +16,14 @@ pub enum Command {
     /// ignored.
     UnmapDevice { device: u32 },
     /// `MAPC` with `V` set (§5.3.9): `collection`'s interrupts go to `target`.
-    MapCollection { collection: u16, target: Target },
+    MapCollection { collection: Collection, target: Target },
     /// `MAPTI` (§5.3.12): `device`'s `event` is `lpi`, in `collection`.
-    MapEvent { device: u32, event: u32, lpi: Lpi, collection: u16 },
+    MapEvent { device: u32, event: Event, lpi: Lpi, collection: Collection },
     /// `INV` (§5.3.6): reread the configuration of `device`'s `event`'s LPI.
-    Reconfigure { device: u32, event: u32 },
+    Reconfigure { device: u32, event: Event },
     /// `DISCARD` (§5.3.4): `device`'s `event` is no interrupt, and any
     /// pending one is dropped.
-    Discard { device: u32, event: u32 },
+    Discard { device: u32, event: Event },
     /// `SYNC` (§5.3.15): every command before it has taken effect at
     /// `target` before the next is read.
     Sync(Target),
@@ -43,13 +45,13 @@ impl Command {
             }
             Self::UnmapDevice { device: id } => [device(0x08, id), 0, 0, 0],
             // RDbase [51:16] and ICID [15:0] of doubleword 2.
-            Self::MapCollection { collection, target } => [0x09, 0, V | target.0 << 16 | collection as u64, 0],
+            Self::MapCollection { collection, target } => [0x09, 0, V | target.0 << 16 | collection.0 as u64, 0],
             // pINTID [63:32] of doubleword 1; ICID [15:0] of doubleword 2.
             Self::MapEvent { device: id, event, lpi, collection } => {
-                [device(0x0A, id), (lpi.intid() as u64) << 32 | event as u64, collection as u64, 0]
+                [device(0x0A, id), (lpi.intid() as u64) << 32 | event.0 as u64, collection.0 as u64, 0]
             }
-            Self::Reconfigure { device: id, event } => [device(0x0C, id), event as u64, 0, 0],
-            Self::Discard { device: id, event } => [device(0x0F, id), event as u64, 0, 0],
+            Self::Reconfigure { device: id, event } => [device(0x0C, id), event.0 as u64, 0, 0],
+            Self::Discard { device: id, event } => [device(0x0F, id), event.0 as u64, 0, 0],
             Self::Sync(target) => [0x05, 0, target.0 << 16, 0],
         }
     }

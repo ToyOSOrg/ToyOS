@@ -2,12 +2,14 @@
 //! each, eight little-endian doublewords, a field's bit `n` being bit
 //! `n % 64` of doubleword `n / 64`.
 
-use crate::unit::Unit;
-use crate::{Asid, Phys};
+use toyos_phys::Phys;
 
-/// A stream table entry.
+use crate::unit::Unit;
+use crate::Asid;
+
+/// A stream table entry: [`Ste::ABORT`] or [`Ste::stage1`], and no other.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Ste(pub [u64; 8]);
+pub struct Ste([u64; 8]);
 
 /// `V`, bit [0].
 const STE_V: u64 = 1 << 0;
@@ -30,16 +32,25 @@ impl Ste {
     /// at `context`: `S1ContextPtr` [55:6], `S1CDMax` [63:59] zero so a
     /// transaction carrying a SubstreamID is aborted, `STRW` [95:94] zero for
     /// the Non-secure EL1 regime, `EATS` [93:92] zero so ATS is refused, and
-    /// no stage 2 field.
-    pub const fn stage1(context: Phys<6>, unit: &Unit) -> Self {
+    /// no stage 2 field. `None` where the descriptor is past the unit's
+    /// output size.
+    pub const fn stage1(context: Phys<6>, unit: &Unit) -> Option<Self> {
+        if !unit.reaches(context.get(), 64) {
+            return None;
+        }
         let stall = if unit.stall_disable() { STE_S1STALLD } else { 0 };
-        Self([STE_V | STE_STAGE1 | context.get(), STE_CD_CACHED | stall, 0, 0, 0, 0, 0, 0])
+        Some(Self([STE_V | STE_STAGE1 | context.get(), STE_CD_CACHED | stall, 0, 0, 0, 0, 0, 0]))
+    }
+
+    /// The entry's eight doublewords, as the stream table holds them.
+    pub const fn words(&self) -> [u64; 8] {
+        self.0
     }
 }
 
-/// A context descriptor.
+/// A context descriptor: [`Cd::new`]'s, and no other.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Cd(pub [u64; 8]);
+pub struct Cd([u64; 8]);
 
 /// `T0SZ`, bits [5:0]: a 48-bit input, walked from level 0.
 const CD_T0SZ: u64 = 64 - crate::table::INPUT_BITS as u64;
@@ -66,8 +77,12 @@ impl Cd {
     /// [34:32] from the unit's output size, `ASID` [63:48], `TTB0` [119:68]
     /// holding the root's bits [55:4], and `MAIR0` [223:192] the attributes
     /// [`crate::table`]'s leaves index. `AFFD` [35] stays clear, and every
-    /// leaf written sets its access flag.
-    pub const fn new(root: Phys<12>, asid: Asid, unit: &Unit) -> Self {
+    /// leaf written sets its access flag. `None` where the root table is
+    /// past the unit's output size.
+    pub const fn new(root: Phys<12>, asid: Asid, unit: &Unit) -> Option<Self> {
+        if !unit.reaches(root.get(), 4096) {
+            return None;
+        }
         let word0 = CD_T0SZ
             | CD_WALK
             | CD_EPD1
@@ -77,6 +92,11 @@ impl Cd {
             | CD_FAULTS
             | CD_ASET
             | (asid.get() as u64) << 48;
-        Self([word0, root.get(), 0, crate::table::MAIR0 as u64, 0, 0, 0, 0])
+        Some(Self([word0, root.get(), 0, crate::table::MAIR0 as u64, 0, 0, 0, 0]))
+    }
+
+    /// The descriptor's eight doublewords.
+    pub const fn words(&self) -> [u64; 8] {
+        self.0
     }
 }

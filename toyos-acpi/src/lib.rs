@@ -37,8 +37,8 @@ pub use fadt::{
 use fadt::FADT_DSDT;
 pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3, IORT_NEEDED};
 pub use madt::{
-    isa_line, madt_entries, msi_controllers, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
-    MsiController, MsiFrame, Polarity, SourceOverride, SpiRange, Trigger, MADT_ENTRIES,
+    isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
+    Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
 pub use resource::{memory_windows, ResourceError, MAX_LIST_BYTES};

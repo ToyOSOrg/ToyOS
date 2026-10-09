@@ -2,9 +2,13 @@
 //! — which requester reaches which SMMUv3 under which StreamID, and which
 //! DeviceID its messages carry to which ITS.
 //!
-//! [`iort`] answers a table every node of which it has walked: a node, a
-//! mapping array or an output reference the table cannot hold is its refusal,
-//! and so is a revision whose layout was not read against the specification.
+//! [`iort`] answers a table every node of which it has walked: a node or a
+//! mapping array the table cannot hold is its refusal, and so is a revision
+//! whose layout was not read against the specification. An output reference
+//! is followed, and judged, by the [`Iort::route`] that needs it: opening the
+//! table and routing one requester each read it a bounded number of times,
+//! whatever its nodes and mappings say.
+//!
 //! Only the three node types that route a PCI function are decoded — the ITS,
 //! the root complex and the SMMUv3; any other is answered by its type alone,
 //! for its caller to rule on, and is refused as the output of a mapping.
@@ -19,8 +23,8 @@ const NODE_COUNT: usize = SDT_HEADER_LEN;
 const NODE_ARRAY: usize = SDT_HEADER_LEN + 4;
 pub const IORT_NEEDED: usize = SDT_HEADER_LEN + 12;
 
-/// The table revisions decoded: QEMU's `virt` publishes 5 and issue E.g is 7.
-/// Every issue from E.b carries a revision in each node, which is what a
+/// The table revisions decoded: 5 is issue E.d's, 6 issues E.e's and E.f's and
+/// 7 issue E.g's. Each carries a revision in every node, which is what a
 /// node's own layout is judged by.
 const REVISIONS: core::ops::RangeInclusive<u8> = 5..=7;
 
@@ -31,7 +35,7 @@ const NODE_HEADER: usize = 16;
 /// reference, flags — five words.
 const MAPPING: usize = 20;
 /// Table 6: bit 0, "apply the output base regardless of the input IDs".
-const SINGLE: u32 = 1;
+const SINGLE: u32 = 1 << 0;
 
 const ITS: u8 = 0;
 const ROOT_COMPLEX: u8 = 2;
@@ -50,9 +54,12 @@ const RC_SEGMENT: usize = 28;
 const SMMU_BASE: usize = 16;
 const SMMU_FLAGS: usize = 24;
 const SMMU_GSIVS: usize = 44;
+const SMMU_INDEX: usize = 64;
 const SMMU_LEN: usize = 68;
 /// Table 14, bit 0: `COHACC override`.
-const SMMU_COHACC: u32 = 1;
+const SMMU_COHACC: u32 = 1 << 0;
+/// Table 14, bit 4, from node revision 5: `DeviceID mapping index valid`.
+const SMMU_INDEXED: u32 = 1 << 4;
 
 /// Why an IORT cannot be used. `at` is a node's offset in the table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -72,15 +79,17 @@ pub enum IortRefused {
     Mappings { at: usize, count: u32, offset: u32 },
     /// A mapping's input or output range runs past the 32-bit ID space.
     Range { at: usize, base: u32, last: u32 },
-    /// A mapping's output reference names no node, or a node its source may
-    /// not output to: a root complex outputs to an SMMUv3 or an ITS, an
-    /// SMMUv3 to an ITS.
+    /// The mapping a requester is routed by names no node with its output
+    /// reference, or a node its source may not output to: a root complex
+    /// outputs to an SMMUv3 or an ITS, an SMMUv3 to an ITS.
     Output { at: usize, reference: u32 },
-    /// A root complex mapping with the single-mapping flag, which no table
-    /// read here carries.
+    /// A mapping with the single-mapping flag that is not its SMMUv3's own.
+    /// Table 6 allows one in a root complex and in an SMMUv3, where it puts
+    /// every input ID out as one; nothing here routes that.
     SingleMapping { at: usize },
-    /// An ITS group of other than one ITS: deprecated by issue E.g, which
-    /// fixes the count at 1.
+    /// An ITS group of other than one ITS, which a table of revision 5 or 6
+    /// may hold: issue E.g fixes the count at 1, and nothing here routes to
+    /// a group.
     ItsGroup { at: usize, count: u32 },
     /// Two mappings claim this ID, which the table must route one way.
     Overlap { id: u32 },
@@ -96,11 +105,11 @@ impl From<TableError> for IortRefused {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Smmuv3 {
     pub base: u64,
-    /// Table 14's `COHACC override`: what `SMMU_IDR0.COHACC` is read as.
-    pub coherent: bool,
-    /// The four wired interrupts; `None` where the node gives no GSIV.
+    /// Table 14's `COHACC override`: set, the unit reads its tables and
+    /// queues coherently whatever its `SMMU_IDR0.COHACC` says.
+    pub coherent_override: bool,
+    /// The wired interrupts; `None` where the node gives no GSIV.
     pub event: Option<NonZeroU32>,
-    pub pri: Option<NonZeroU32>,
     pub gerror: Option<NonZeroU32>,
     pub sync: Option<NonZeroU32>,
 }
@@ -128,7 +137,9 @@ pub struct ItsDevice {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
     /// Through this SMMUv3 under `stream`; `its` is where the SMMU's own node
-    /// maps that stream on to, and `None` where it maps it nowhere.
+    /// maps that stream on to, and `None` where it maps it nowhere. The
+    /// unit's own DeviceID (Table 13, `DeviceID mapping index`) is no
+    /// stream's.
     Translated { smmu: Smmuv3, stream: u32, its: Option<ItsDevice> },
     /// Straight to an ITS, past every SMMU.
     Untranslated(ItsDevice),
@@ -160,7 +171,7 @@ struct Mapping {
 impl Mapping {
     fn maps(&self, id: u32) -> Option<u32> {
         // `output + span` was checked not to wrap when the table was opened.
-        (!self.single && id >= self.input && id - self.input <= self.span).then(|| self.output + (id - self.input))
+        (id >= self.input && id - self.input <= self.span).then(|| self.output + (id - self.input))
     }
 }
 
@@ -201,41 +212,70 @@ impl<P: Phys> Iort<P> {
 
     /// Where the PCI function `rid` of `segment` is routed.
     pub fn route(&self, segment: u32, rid: u16) -> Result<Route, IortRefused> {
-        let mut route = None;
+        let rid = u32::from(rid);
+        let mut hit = None;
         for raw in self.raw_nodes() {
             let raw = raw?;
             if self.decode(raw)? != (Node::RootComplex { segment }) {
                 continue;
             }
-            for (mapping, id) in self.hits(raw, u32::from(rid)) {
-                let hop = match self.output(raw, mapping)? {
-                    (_, Node::Its { id: its }) => Route::Untranslated(ItsDevice { its, device: id }),
-                    (smmu_raw, Node::Smmuv3(smmu)) => {
-                        let mut its = None;
-                        for (onward, device) in self.hits(smmu_raw, id) {
-                            let (_, Node::Its { id: to }) = self.output(smmu_raw, onward)? else {
-                                return Err(IortRefused::Output { at: smmu_raw.at, reference: onward.reference });
-                            };
-                            if its.replace(ItsDevice { its: to, device }).is_some() {
-                                return Err(IortRefused::Overlap { id });
-                            }
-                        }
-                        Route::Translated { smmu, stream: id, its }
-                    }
-                    _ => return Err(IortRefused::Output { at: raw.at, reference: mapping.reference }),
-                };
-                if route.replace(hop).is_some() {
-                    return Err(IortRefused::Overlap { id: u32::from(rid) });
+            for found in self.hits(raw, rid) {
+                if hit.replace((raw, found)).is_some() {
+                    return Err(IortRefused::Overlap { id: rid });
                 }
             }
         }
-        Ok(route.unwrap_or(Route::Unmapped))
+        let Some((root, (mapping, id))) = hit else {
+            return Ok(Route::Unmapped);
+        };
+        match self.output(root, mapping)? {
+            (_, Node::Its { id: its }) => Ok(Route::Untranslated(ItsDevice { its, device: id })),
+            (unit, Node::Smmuv3(smmu)) => {
+                let mut onward = None;
+                for found in self.hits(unit, id) {
+                    if onward.replace(found).is_some() {
+                        return Err(IortRefused::Overlap { id });
+                    }
+                }
+                let its = match onward {
+                    None => None,
+                    Some((mapping, device)) => match self.output(unit, mapping)? {
+                        (_, Node::Its { id: its }) => Some(ItsDevice { its, device }),
+                        _ => return Err(IortRefused::Output { at: unit.at, reference: mapping.reference }),
+                    },
+                };
+                Ok(Route::Translated { smmu, stream: id, its })
+            }
+            _ => Err(IortRefused::Output { at: root.at, reference: mapping.reference }),
+        }
+    }
+
+    /// The index of the mapping that is an SMMUv3's own DeviceID (Table 13,
+    /// offset 64), where its node says it has one: by the flag from node
+    /// revision 5, and before it wherever a control interrupt has no GSIV.
+    /// The entry's input base and length are not read.
+    fn own(&self, raw: Raw) -> Option<u32> {
+        let t = &self.table;
+        if raw.kind != SMMUV3 {
+            return None;
+        }
+        let indexed = if raw.revision >= 5 {
+            t.u32_at(raw.at + SMMU_FLAGS)? & SMMU_INDEXED != 0
+        } else {
+            (0..4).any(|i| t.u32_at(raw.at + SMMU_GSIVS + 4 * i) == Some(0))
+        };
+        if indexed {
+            t.u32_at(raw.at + SMMU_INDEX)
+        } else {
+            None
+        }
     }
 
     /// The mappings of `raw` that hold `id`, each with the ID it puts out.
     fn hits(&self, raw: Raw, id: u32) -> impl Iterator<Item = (Mapping, u32)> + '_ {
-        (0..raw.mappings).filter_map(move |i| {
-            let mapping = self.mapping(raw, i)?;
+        let own = self.own(raw);
+        (0..raw.mappings).filter(move |index| Some(*index) != own).filter_map(move |index| {
+            let mapping = self.mapping(raw, index)?;
             Some((mapping, mapping.maps(id)?))
         })
     }
@@ -290,7 +330,7 @@ impl<P: Phys> Iort<P> {
         })
     }
 
-    /// The node a mapping of `from` outputs to.
+    /// The node a mapping of `from` outputs to: one walk of the nodes.
     fn output(&self, from: Raw, mapping: Mapping) -> Result<(Raw, Node), IortRefused> {
         let refused = IortRefused::Output { at: from.at, reference: mapping.reference };
         for raw in self.raw_nodes() {
@@ -328,12 +368,12 @@ impl<P: Phys> Iort<P> {
             }
             SMMUV3 => {
                 revised(4..=5)?;
+                // Event, PRI, GERR, sync: the PRI queue is not used, and its GSIV not answered.
                 let gsiv = |i: usize| t.u32_at(at + SMMU_GSIVS + 4 * i).map(NonZeroU32::new).ok_or(short);
                 Node::Smmuv3(Smmuv3 {
                     base: t.u64_at(at + SMMU_BASE).ok_or(short)?,
-                    coherent: t.u32_at(at + SMMU_FLAGS).ok_or(short)? & SMMU_COHACC != 0,
+                    coherent_override: t.u32_at(at + SMMU_FLAGS).ok_or(short)? & SMMU_COHACC != 0,
                     event: gsiv(0)?,
-                    pri: gsiv(1)?,
                     gerror: gsiv(2)?,
                     sync: gsiv(3)?,
                 })
@@ -342,7 +382,7 @@ impl<P: Phys> Iort<P> {
         })
     }
 
-    /// One node's fields, its ID array's place and every mapping in it.
+    /// One node's fields, its ID array's place and every mapping's own words.
     fn check(&self, raw: Raw) -> Result<(), IortRefused> {
         let node = self.decode(raw)?;
         // Where the node's own fields end, which its ID array may not lie over.
@@ -359,23 +399,16 @@ impl<P: Phys> Iort<P> {
         if count != 0 && (misplaced || matches!(node, Node::Its { .. })) {
             return Err(IortRefused::Mappings { at, count, offset });
         }
-        for index in 0..count {
+        let own = self.own(raw);
+        for index in (0..count).filter(|index| Some(*index) != own) {
             let mapping = self.mapping(raw, index).ok_or(IortRefused::Mappings { at, count, offset })?;
-            let from_root = matches!(node, Node::RootComplex { .. });
-            if mapping.single && from_root {
+            if mapping.single {
                 return Err(IortRefused::SingleMapping { at });
             }
-            if !mapping.single {
-                for base in [mapping.input, mapping.output] {
-                    if base.checked_add(mapping.span).is_none() {
-                        return Err(IortRefused::Range { at, base, last: mapping.span });
-                    }
+            for base in [mapping.input, mapping.output] {
+                if base.checked_add(mapping.span).is_none() {
+                    return Err(IortRefused::Range { at, base, last: mapping.span });
                 }
-            }
-            match self.output(raw, mapping)?.1 {
-                Node::Its { .. } => {}
-                Node::Smmuv3(_) if from_root => {}
-                _ => return Err(IortRefused::Output { at, reference: mapping.reference }),
             }
         }
         Ok(())

@@ -1,15 +1,16 @@
-//! The IORT and the MADT's MSI controllers: QEMU `virt`'s own tables in both
-//! of its GIC modes, decoded against what was read off their bytes by hand
-//! with DEN 0049 E.g and ACPI 6.5 open, and every refusal over crafted ones.
+//! The IORT: QEMU `virt`'s own tables in both of its GIC modes, decoded
+//! against what was read off their bytes by hand with DEN 0049 open, and
+//! every refusal over crafted ones.
 
 mod common;
 
+use core::cell::Cell;
 use core::num::NonZeroU32;
 
-use common::{declare_len, entry, madt, reseal, rsdp, sdt, xsdt, Machine};
+use common::{declare_len, reseal, rsdp, sdt, xsdt, Machine};
 use toyos_acpi::{
-    find_table, iort, madt_entries, msi_controllers, IortRefused, ItsDevice, MadtEntry, MadtHalt, MsiController,
-    MsiFrame, Node, Route, Smmuv3, SpiRange, TableError, MADT_ENTRIES,
+    find_table, iort, madt_entries, IortRefused, ItsDevice, MadtEntry, Node, Phys, Route, Smmuv3, TableError,
+    MADT_ENTRIES,
 };
 
 const RSDP: u64 = 0x4cb4_3018;
@@ -35,14 +36,15 @@ const ITS: &[(u64, &[u8])] = &[
 ];
 
 /// The node both modes publish: `arm-smmuv3` at `0x09050000`, `COHACC
-/// override` set, and the GSIVs in the node's order — event, PRI, GERR, sync —
-/// of which GERR is the higher of the last two.
+/// override` set, and the GSIVs in the node's order — event 106, PRI 107,
+/// GERR 109, sync 108 — of which GERR is the higher of the last two. Every
+/// one is wired, so the revision 4 node's DeviceID mapping index is ignored
+/// and its one mapping in the ITS boot routes streams.
 fn virt_smmu() -> Smmuv3 {
     Smmuv3 {
         base: 0x0905_0000,
-        coherent: true,
+        coherent_override: true,
         event: NonZeroU32::new(106),
-        pri: NonZeroU32::new(107),
         gerror: NonZeroU32::new(109),
         sync: NonZeroU32::new(108),
     }
@@ -90,31 +92,24 @@ fn the_its_boot_routes_bus_zero_through_the_smmu_to_the_its_and_the_rest_past_it
     assert_eq!(table.route(1, 0x08), Ok(Route::Unmapped));
 }
 
-fn controllers(regions: &[(u64, &[u8])]) -> Vec<Result<MsiController, MadtHalt>> {
+fn madt_of(regions: &[(u64, &[u8])]) -> Vec<MadtEntry> {
     let table = find_table(Machine { regions }, RSDP, b"APIC", MADT_ENTRIES).expect("MADT");
-    msi_controllers(&table).collect()
-}
-
-/// `arm-gicv2m` at `0x08020000`, 64 SPIs from 80, named by the structure.
-#[test]
-fn the_hardware_gic_boot_names_a_v2m_frame_and_no_its() {
-    assert_eq!(
-        controllers(HWGIC),
-        [Ok(MsiController::Frame(MsiFrame {
-            id: 0,
-            base: 0x0802_0000,
-            spis: Some(SpiRange { base: 80, count: 64 }),
-        }))]
-    );
-    // The entry walk a kernel already makes still answers it by its type alone.
-    let table = find_table(Machine { regions: HWGIC }, RSDP, b"APIC", MADT_ENTRIES).expect("MADT");
-    assert_eq!(madt_entries(&table).last(), Some(Ok(MadtEntry::Other(0xD))));
+    madt_entries(&table).map(|entry| entry.expect("a structure the list holds whole")).collect()
 }
 
 /// `arm-gicv3-its` at `0x08080000`, under the id the IORT's ITS node carries.
 #[test]
-fn the_its_boot_names_the_its_the_iort_routes_to() {
-    assert_eq!(controllers(ITS), [Ok(MsiController::Its { id: 0, base: 0x0808_0000 })]);
+fn the_its_boots_madt_names_the_its_the_iort_routes_to() {
+    let its: Vec<_> = madt_of(ITS).into_iter().filter(|entry| matches!(entry, MadtEntry::Its { .. })).collect();
+    assert_eq!(its, [MadtEntry::Its { id: 0, base: 0x0808_0000 }]);
+}
+
+/// It ends in a GIC MSI Frame structure, type 0xD, which is no ITS.
+#[test]
+fn the_hardware_gic_boots_madt_names_no_its() {
+    let entries = madt_of(HWGIC);
+    assert!(!entries.iter().any(|entry| matches!(entry, MadtEntry::Its { .. })));
+    assert_eq!(entries.last(), Some(&MadtEntry::Other(0xD)));
 }
 
 // --- crafted tables -------------------------------------------------------
@@ -147,11 +142,23 @@ fn root_complex(segment: u32, mappings: &[[u32; 5]]) -> Vec<u8> {
     node(2, 3, &fields, mappings)
 }
 
-/// A revision 4 SMMUv3 at `base` with no flag and no GSIV: 52 bytes of fields.
-fn smmu(base: u64, mappings: &[[u32; 5]]) -> Vec<u8> {
+/// An SMMUv3 node of `revision` at `0x0905_0000`, 52 bytes of fields: Table
+/// 13's flags (24), its event, PRI, GERR and sync GSIVs (44..60) and its
+/// DeviceID mapping index (64).
+fn smmu_with(revision: u8, flags: u32, gsivs: [u32; 4], index: u32, mappings: &[[u32; 5]]) -> Vec<u8> {
     let mut fields = vec![0u8; 52];
-    fields[..8].copy_from_slice(&base.to_le_bytes());
-    node(4, 4, &fields, mappings)
+    fields[..8].copy_from_slice(&0x0905_0000u64.to_le_bytes());
+    fields[8..12].copy_from_slice(&flags.to_le_bytes());
+    for (i, gsiv) in gsivs.iter().enumerate() {
+        fields[28 + 4 * i..32 + 4 * i].copy_from_slice(&gsiv.to_le_bytes());
+    }
+    fields[48..52].copy_from_slice(&index.to_le_bytes());
+    node(4, revision, &fields, mappings)
+}
+
+/// A revision 5 SMMUv3 with no flag and no GSIV: none of its mappings is its own.
+fn smmu(mappings: &[[u32; 5]]) -> Vec<u8> {
+    smmu_with(5, 0, [0; 4], 0, mappings)
 }
 
 /// An IORT of `revision` over `nodes`, its array straight after the header.
@@ -174,7 +181,7 @@ const ROOT_AFTER_ONE: u32 = ROOT_AT + 20;
 /// The ITS boot's shape with every number chosen: requesters `0x100..=0x1ff`
 /// to streams `0x1000..`, streams `0x1000..=0x10ff` to DeviceIDs `0x20000..`.
 fn three(root: &[[u32; 5]], onward: &[[u32; 5]]) -> Vec<u8> {
-    table(5, &[its(7), smmu(0x0905_0000, onward), root_complex(0, root)])
+    table(5, &[its(7), smmu(onward), root_complex(0, root)])
 }
 
 fn judged<T>(bytes: &[u8], ask: impl FnOnce(&toyos_acpi::Iort<Machine<'_>>) -> T) -> Result<T, IortRefused> {
@@ -193,7 +200,7 @@ fn route(bytes: &[u8], segment: u32, rid: u16) -> Result<Route, IortRefused> {
 }
 
 fn plain_smmu() -> Smmuv3 {
-    Smmuv3 { base: 0x0905_0000, coherent: false, event: None, pri: None, gerror: None, sync: None }
+    Smmuv3 { base: 0x0905_0000, coherent_override: false, event: None, gerror: None, sync: None }
 }
 
 #[test]
@@ -277,7 +284,7 @@ fn a_node_longer_than_the_table_or_shorter_than_its_type_is_refused() {
     }
 
     // An SMMUv3 node cut before its DeviceID mapping index, with bytes after it to read.
-    let mut cut = table(5, &[smmu(0, &[]), its(0)]);
+    let mut cut = table(5, &[smmu(&[]), its(0)]);
     cut[49..51].copy_from_slice(&64u16.to_le_bytes());
     reseal(&mut cut);
     assert_eq!(refusal(&cut), Some(IortRefused::Node { at: 48, declared: 64 }));
@@ -292,7 +299,7 @@ fn a_node_revision_whose_layout_was_not_read_is_refused() {
     for (kind, node, known, unknown) in [
         (0u8, its(0), &[1u8][..], &[0u8, 2][..]),
         (2, root_complex(0, &[]), &[3, 4], &[2, 5]),
-        (4, smmu(0, &[]), &[4, 5], &[3, 6]),
+        (4, smmu(&[]), &[4, 5], &[3, 6]),
     ] {
         for &revision in known {
             assert_eq!(revised(node.clone(), revision), None, "type {kind} revision {revision}");
@@ -376,34 +383,37 @@ fn a_mapping_whose_range_leaves_the_id_space_is_refused() {
 }
 
 #[test]
-fn an_output_reference_that_names_no_node_is_refused() {
+fn a_route_through_an_output_reference_that_names_no_node_is_refused() {
     // Zero, the table's own header, the middle of a node, one past the last node.
     for reference in [0, 36, SMMU_AT + 4, ROOT_AT + 56, u32::MAX] {
-        assert_eq!(
-            refusal(&three(&[[0, 0xff, 0, reference, 0]], &[])),
-            Some(IortRefused::Output { at: 140, reference }),
-            "reference {reference}"
-        );
+        let t = three(&[[0, 0xff, 0, reference, 0]], &[]);
+        assert_eq!(route(&t, 0, 8), Err(IortRefused::Output { at: 140, reference }), "reference {reference}");
+        // A requester the mapping does not hold never follows it.
+        assert_eq!(route(&t, 0, 0x100), Ok(Route::Unmapped), "reference {reference}");
     }
+    // The SMMUv3's onward mapping is followed by the stream it holds.
+    let t = three(&[[0, 0x1ff, 0, SMMU_AT, 0]], &[[0, 0xff, 0, ITS_AT + 4, 0]]);
+    assert_eq!(route(&t, 0, 8), Err(IortRefused::Output { at: 72, reference: ITS_AT + 4 }));
+    assert_eq!(route(&t, 0, 0x100), Ok(Route::Translated { smmu: plain_smmu(), stream: 0x100, its: None }));
 }
 
 #[test]
-fn an_output_reference_to_a_node_its_source_may_not_reach_is_refused() {
+fn a_route_through_an_output_reference_to_a_node_its_source_may_not_reach_is_refused() {
     // A root complex to a root complex — itself.
     assert_eq!(
-        refusal(&three(&[[0, 0xff, 0, ROOT_AT, 0]], &[])),
-        Some(IortRefused::Output { at: 140, reference: ROOT_AT })
+        route(&three(&[[0, 0xff, 0, ROOT_AT, 0]], &[]), 0, 8),
+        Err(IortRefused::Output { at: 140, reference: ROOT_AT })
     );
     // An SMMUv3 to an SMMUv3 — itself — and to a root complex.
     for reference in [SMMU_AT, ROOT_AFTER_ONE] {
         assert_eq!(
-            refusal(&three(&[], &[[0, 0xff, 0, reference, 0]])),
-            Some(IortRefused::Output { at: 72, reference })
+            route(&three(&[[0, 0xff, 0, SMMU_AT, 0]], &[[0, 0xff, 0, reference, 0]]), 0, 8),
+            Err(IortRefused::Output { at: 72, reference })
         );
     }
     // A root complex to a node type not decoded: an SMMUv1 or v2.
     let old = table(5, &[node(3, 3, &[0u8; 44], &[]), root_complex(0, &[[0, 0xff, 0, 48, 0]])]);
-    assert_eq!(refusal(&old), Some(IortRefused::Output { at: 108, reference: 48 }));
+    assert_eq!(route(&old, 0, 8), Err(IortRefused::Output { at: 108, reference: 48 }));
 }
 
 #[test]
@@ -430,22 +440,82 @@ fn a_node_type_not_decoded_is_answered_by_its_type_and_refuses_nothing() {
 }
 
 #[test]
-fn a_single_mapping_is_the_smmus_own_message_and_never_a_root_complexs() {
-    assert_eq!(
-        refusal(&three(&[[0, 0xff, 0, SMMU_AT, 1]], &[])),
-        Some(IortRefused::SingleMapping { at: 140 })
-    );
-    // On the SMMUv3 it names the DeviceID of the unit's own interrupts: its
-    // input fields are ignored, so it routes no stream and its range is not judged.
-    let own = three(&[[0, 0xff, 0, SMMU_AT, 0]], &[[0, 0, 0x30, ITS_AT, 1]]);
-    assert_eq!(route(&own, 0, 0), Ok(Route::Translated { smmu: plain_smmu(), stream: 0, its: None }));
-    let wide = three(&[[0, 0xff, 0, SMMU_AT, 0]], &[[0xffff_ffff, 0xffff_ffff, 0x30, ITS_AT, 1]]);
+fn a_single_mapping_that_is_not_its_smmus_own_is_refused() {
+    // Table 6 has it put every input ID out as one: a root complex's, and an SMMUv3's that its index does not name.
+    assert_eq!(refusal(&three(&[[0, 0xff, 0, SMMU_AT, 1]], &[])), Some(IortRefused::SingleMapping { at: 140 }));
+    assert_eq!(refusal(&three(&[], &[[0, 0, 0x30, ITS_AT, 1]])), Some(IortRefused::SingleMapping { at: 72 }));
+    let beside = smmu_with(5, INDEX_VALID, WIRED, 1, &[[0, 0, 0x30, ITS_AT, 1], [0, 0, 0x31, ITS_AT, 1]]);
+    assert_eq!(refusal(&behind(beside)), Some(IortRefused::SingleMapping { at: 72 }));
+    // The one it names carries the flag as Table 13 asks, and is no refusal.
+    let own = smmu_with(5, INDEX_VALID, WIRED, 0, &[[0, 0, 0x30, ITS_AT, 1]]);
+    assert_eq!(refusal(&behind(own.clone())), None);
+    assert_eq!(onward(&behind(own)), None);
+    // An index past the array names no entry: every mapping there is routes.
+    let past = behind(smmu_with(5, INDEX_VALID, WIRED, 1, &[[0, 0xff, 0x100, ITS_AT, 0]]));
+    assert_eq!(onward(&past), Some(ItsDevice { its: 7, device: 0x108 }));
+}
+
+/// `virt`'s four GSIVs: every control interrupt wired.
+const WIRED: [u32; 4] = [106, 107, 109, 108];
+/// Table 14, bit 4: `DeviceID mapping index valid`.
+const INDEX_VALID: u32 = 1 << 4;
+
+/// An ITS of id 7, `smmu`, and a root complex sending requesters
+/// `0x00..=0xff` to it as the same streams.
+fn behind(smmu: Vec<u8>) -> Vec<u8> {
+    table(5, &[its(7), smmu, root_complex(0, &[[0, 0xff, 0, SMMU_AT, 0]])])
+}
+
+/// Where the SMMUv3's own node sends stream 8.
+fn onward(table: &[u8]) -> Option<ItsDevice> {
+    match route(table, 0, 8) {
+        Ok(Route::Translated { stream: 8, its, .. }) => its,
+        other => panic!("requester 8 is stream 8 of the SMMUv3: {other:?}"),
+    }
+}
+
+#[test]
+fn the_mapping_a_revision_5_smmu_indexes_is_the_units_own_and_routes_no_stream() {
+    // An input base and length no range holds: they are not the table's to judge.
+    let wide = behind(smmu_with(5, INDEX_VALID, WIRED, 0, &[[0xffff_ffff, 0xffff_ffff, 0x30, ITS_AT, 0]]));
     assert_eq!(refusal(&wide), None);
-    // It still has to name an ITS.
-    assert_eq!(
-        refusal(&three(&[], &[[0, 0, 0x30, ROOT_AFTER_ONE, 1]])),
-        Some(IortRefused::Output { at: 72, reference: ROOT_AFTER_ONE })
-    );
+    assert_eq!(onward(&wide), None);
+    // And ones that would hold the stream: the entry is the unit's DeviceID and no stream's.
+    let plausible = behind(smmu_with(5, INDEX_VALID, WIRED, 0, &[[0, 0xffff, 0x30, ITS_AT, 0]]));
+    assert_eq!(onward(&plausible), None);
+    // The index picks the entry, and the other one still routes.
+    let second = smmu_with(5, INDEX_VALID, WIRED, 1, &[[0, 0xff, 0x100, ITS_AT, 0], [0, 0xffff, 0x30, ITS_AT, 0]]);
+    assert_eq!(onward(&behind(second)), Some(ItsDevice { its: 7, device: 0x108 }));
+    // Flag clear, the index is ignored whatever the GSIVs say.
+    let ignored = behind(smmu_with(5, 0, [0; 4], 0, &[[0, 0xff, 0x100, ITS_AT, 0]]));
+    assert_eq!(onward(&ignored), Some(ItsDevice { its: 7, device: 0x108 }));
+}
+
+#[test]
+fn a_revision_4_smmu_indexes_its_own_mapping_whenever_a_control_interrupt_is_not_wired() {
+    for unwired in 0..4 {
+        let mut gsivs = WIRED;
+        gsivs[unwired] = 0;
+        let own = behind(smmu_with(4, 0, gsivs, 0, &[[0xffff_ffff, 0xffff_ffff, 0x30, ITS_AT, 0]]));
+        assert_eq!(refusal(&own), None, "GSIV {unwired} zero");
+        assert_eq!(onward(&own), None, "GSIV {unwired} zero");
+        let plausible = behind(smmu_with(4, 0, gsivs, 0, &[[0, 0xffff, 0x30, ITS_AT, 0]]));
+        assert_eq!(onward(&plausible), None, "GSIV {unwired} zero");
+    }
+    // Every one wired, as on `virt`: the field is ignored, and bit 4 of the flags is reserved here.
+    for flags in [0, INDEX_VALID] {
+        let wired = behind(smmu_with(4, flags, WIRED, 0, &[[0, 0xff, 0x100, ITS_AT, 0]]));
+        assert_eq!(onward(&wired), Some(ItsDevice { its: 7, device: 0x108 }));
+    }
+}
+
+/// Only an SMMUv3 has a DeviceID mapping index. Read as one, this root
+/// complex would have no GSIV and, where the index is, its second mapping's
+/// output base: zero, naming the first.
+#[test]
+fn a_root_complex_has_no_mapping_of_its_own() {
+    let t = table(5, &[its(7), root_complex(0, &[[0, 0xff, 0, ITS_AT, 0], [0x100, 0xff, 0, ITS_AT, 0]])]);
+    assert_eq!(route(&t, 0, 8), Ok(Route::Untranslated(ItsDevice { its: 7, device: 8 })));
 }
 
 #[test]
@@ -513,84 +583,57 @@ fn no_corruption_of_a_published_iort_panics_or_hangs_the_decoder() {
     }
 }
 
-// --- the MADT's MSI controllers -------------------------------------------
+/// Memory that counts every byte the decoder reads of it.
+#[derive(Clone, Copy)]
+struct Counted<'a> {
+    machine: Machine<'a>,
+    reads: &'a Cell<usize>,
+}
 
-fn crafted_controllers(list: &[u8]) -> Vec<Result<MsiController, MadtHalt>> {
-    let t = madt(list);
+impl Phys for Counted<'_> {
+    fn readable(self, phys: u64, len: usize) -> bool {
+        self.machine.readable(phys, len)
+    }
+
+    fn byte(self, phys: u64) -> u8 {
+        self.reads.set(self.reads.get() + 1);
+        Phys::byte(self.machine, phys)
+    }
+}
+
+/// 499 root complexes of 40 mappings each, every one naming the table's last
+/// node: following each reference by a walk of the nodes when the table is
+/// opened would read ten million node headers. Opening reads the table for
+/// its checksum, each node and each mapping once; a route walks the nodes
+/// once to find its root complex and once for each of the two references it
+/// may follow.
+#[test]
+fn opening_a_table_and_routing_a_requester_each_read_it_a_bounded_number_of_times() {
+    const ROOTS: u32 = 499;
+    const ROOT_LEN: u32 = 36 + 40 * 20;
+    let its_at = 48 + ROOTS * ROOT_LEN;
+    let mut nodes: Vec<Vec<u8>> = (0..ROOTS)
+        .map(|segment| {
+            let mappings: Vec<[u32; 5]> = (0..40).map(|i| [i * 16, 15, 0x1000 + i * 16, its_at, 0]).collect();
+            root_complex(segment, &mappings)
+        })
+        .collect();
+    nodes.push(its(7));
+    let bytes = table(5, &nodes);
+    assert_eq!(bytes.len(), its_at as usize + 24);
+
     let head = rsdp(0x1000, 2, 36);
     let root = xsdt(&[TABLE_AT]);
-    let regions: &[(u64, &[u8])] = &[(0x800, &head), (0x1000, &root), (TABLE_AT, &t)];
-    let table = find_table(Machine { regions }, 0x800, b"APIC", MADT_ENTRIES).expect("MADT");
-    msi_controllers(&table).take(8).collect()
-}
+    let regions: &[(u64, &[u8])] = &[(0x800, &head), (0x1000, &root), (TABLE_AT, &bytes)];
+    let reads = Cell::new(0);
+    let opened = iort(Counted { machine: Machine { regions }, reads: &reads }, 0x800).expect("a table of 500 nodes");
+    let open = reads.replace(0);
+    assert!(open <= 3 * bytes.len(), "opening {} bytes read {open}", bytes.len());
 
-/// A GIC MSI Frame structure's 22 bytes after its type and length.
-fn frame(id: u32, base: u64, flags: u32, count: u16, spi_base: u16) -> Vec<u8> {
-    let mut body = vec![0u8; 2];
-    body.extend(id.to_le_bytes());
-    body.extend(base.to_le_bytes());
-    body.extend(flags.to_le_bytes());
-    body.extend(count.to_le_bytes());
-    body.extend(spi_base.to_le_bytes());
-    entry(0xD, 24, &body)
-}
-
-#[test]
-fn a_frame_names_its_spis_only_where_its_flag_says_the_structure_does() {
-    let mut list = frame(3, 0x0802_0000, 0, 64, 80);
-    list.extend(frame(4, 0x0803_0000, 1, 32, 144));
-    // Every flag but the select bit: reserved, and no word about the SPIs.
-    list.extend(frame(5, 0x0804_0000, !1, 8, 200));
-    assert_eq!(
-        crafted_controllers(&list),
-        [
-            Ok(MsiController::Frame(MsiFrame { id: 3, base: 0x0802_0000, spis: None })),
-            Ok(MsiController::Frame(MsiFrame {
-                id: 4,
-                base: 0x0803_0000,
-                spis: Some(SpiRange { base: 144, count: 32 })
-            })),
-            Ok(MsiController::Frame(MsiFrame { id: 5, base: 0x0804_0000, spis: None })),
-        ]
-    );
-}
-
-#[test]
-fn the_controllers_come_in_the_tables_order_past_every_other_structure() {
-    // A GICD, an ITS, a frame, a second ITS.
-    let mut list = entry(0xC, 24, &[0u8; 22]);
-    let its = |id: u32, base: u64| {
-        let mut body = vec![0u8; 2];
-        body.extend(id.to_le_bytes());
-        body.extend(base.to_le_bytes());
-        body.extend([0u8; 4]);
-        entry(0xF, 20, &body)
-    };
-    list.extend(its(1, 0x0808_0000));
-    list.extend(frame(2, 0x0802_0000, 0, 0, 0));
-    list.extend(its(9, 0x0809_0000));
-    assert_eq!(
-        crafted_controllers(&list),
-        [
-            Ok(MsiController::Its { id: 1, base: 0x0808_0000 }),
-            Ok(MsiController::Frame(MsiFrame { id: 2, base: 0x0802_0000, spis: None })),
-            Ok(MsiController::Its { id: 9, base: 0x0809_0000 }),
-        ]
-    );
-}
-
-#[test]
-fn a_frame_too_short_for_its_fields_is_no_controller_and_a_halt_ends_the_walk() {
-    // Twenty-two bytes: the SPI base would be read from the next structure.
-    let mut list = entry(0xD, 22, &[0xff; 20]);
-    list.extend(frame(1, 0x0802_0000, 0, 0, 0));
-    list.extend(entry(0xD, 0, &[]));
-    list.extend(frame(2, 0x0803_0000, 0, 0, 0));
-    assert_eq!(
-        crafted_controllers(&list),
-        [
-            Ok(MsiController::Frame(MsiFrame { id: 1, base: 0x0802_0000, spis: None })),
-            Err(MadtHalt { at: 46, declared: 0, list_len: 72 }),
-        ]
-    );
+    // The last mapping of the last root complex, so nothing is found early.
+    let device = 0x1000 + 39 * 16 + 15;
+    assert_eq!(opened.route(ROOTS - 1, 39 * 16 + 15), Ok(Route::Untranslated(ItsDevice { its: 7, device })));
+    let routed = reads.replace(0);
+    assert!(routed <= bytes.len() / 8, "routing through {} bytes read {routed}", bytes.len());
+    assert_eq!(opened.route(ROOTS, 0), Ok(Route::Unmapped));
 }

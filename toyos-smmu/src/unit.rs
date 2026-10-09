@@ -2,7 +2,10 @@
 //! and writes (§6.3), and [`probe`]: what a unit's identification registers
 //! let this crate's one configuration be built on.
 
-use crate::{Asid, Phys};
+use toyos_phys::Phys;
+
+use crate::queue::{Commands, Events, Indexes};
+use crate::Asid;
 
 /// Offsets in register page 0 (§6.2.1).
 pub const IDR0: usize = 0x000;
@@ -94,11 +97,6 @@ pub const fn command_error(cons: u32) -> CommandError {
     }
 }
 
-/// `SMMU_EVENTQ_PROD.OVFLG` and `SMMU_EVENTQ_CONS.OVACKFLG` [31] (§7.4):
-/// records were dropped on a full queue while the two differ, and the unit
-/// reports no further overflow until the consumer writes its flag equal.
-pub const EVENTQ_OVERFLOW: u32 = 1 << 31;
-
 /// What a unit lacks that this crate's one configuration needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lacks {
@@ -118,6 +116,11 @@ pub enum Lacks {
     FixedStructures,
     /// `IDR1.SIDSIZE`, `CMDQS` or `EVENTQS` holds a reserved value.
     Size(u8),
+    /// `IDR0.COHACC` clear with no override from the IORT: the unit does not
+    /// read its tables and queues coherently with the CPUs' caches, which
+    /// every cacheability written here ([`CR1_WRITE_BACK`], the stream table
+    /// entry's and the context descriptor's) takes it to.
+    CoherentAccess,
 }
 
 /// A unit the one configuration can be built on, and its sizes.
@@ -129,17 +132,21 @@ pub struct Unit {
     /// its entries.
     pub command_queue_log2: u8,
     pub event_queue_log2: u8,
-    /// `IDR5.OAS` in bits: no address the unit is given may reach past it.
-    pub output_bits: u8,
-    /// `IDR0.COHACC`, which the IORT's SMMUv3 node may override.
-    pub coherent: bool,
+    /// `IDR5.OAS` in bits: the bits of an address field above it are RES0
+    /// (§6.3.24), so nothing the unit is given may reach past it.
+    output_bits: u8,
     asid16: bool,
     /// `IDR0.STALL_MODEL` is `0b00`: stalling is there to be disabled.
     stall: bool,
 }
 
-/// §6.3.1, §6.3.2 and §6.3.6: the three identification registers, judged.
-pub const fn probe(idr0: u32, idr1: u32, idr5: u32) -> Result<Unit, Lacks> {
+/// §6.3.1, §6.3.2 and §6.3.6: the three identification registers, judged,
+/// with the IORT's `COHACC override` (DEN 0049 Table 14), which stands for
+/// `IDR0.COHACC` [4] where it is set.
+pub const fn probe(idr0: u32, idr1: u32, idr5: u32, coherent_override: bool) -> Result<Unit, Lacks> {
+    if idr0 & 1 << 4 == 0 && !coherent_override {
+        return Err(Lacks::CoherentAccess);
+    }
     if idr0 & 1 << 1 == 0 {
         return Err(Lacks::Stage1);
     }
@@ -179,7 +186,6 @@ pub const fn probe(idr0: u32, idr1: u32, idr5: u32) -> Result<Unit, Lacks> {
         command_queue_log2,
         event_queue_log2,
         output_bits: [32, 36, 40, 42, 44, 48, 52, 56][(idr5 & 0b111) as usize],
-        coherent: idr0 & 1 << 4 != 0,
         asid16: idr0 & 1 << 12 != 0,
         stall,
     })
@@ -215,35 +221,49 @@ impl Unit {
         }
     }
 
+    /// Whether the unit reads all of `bytes` at `address`: none of them at
+    /// or past `1 << IDR5.OAS`.
+    pub(crate) const fn reaches(&self, address: u64, bytes: u64) -> bool {
+        address + bytes <= 1 << self.output_bits
+    }
+
+    /// `bytes` at `address`, aligned to their own size, where the unit reads
+    /// them.
+    const fn holds(&self, address: u64, bytes: u64) -> bool {
+        address & (bytes - 1) == 0 && self.reaches(address, bytes)
+    }
+
     /// `SMMU_STRTAB_BASE` and `SMMU_STRTAB_BASE_CFG` (§6.3.24, §6.3.25) for
     /// a linear table of `1 << log2size` entries at `table`: `RA` [62] and
     /// the address, then `FMT` [17:16] zero and `LOG2SIZE` [5:0]. `None`
-    /// where the unit takes fewer StreamID bits, or the table is not aligned
-    /// to its own size as the unit reads its address.
+    /// where the unit takes fewer StreamID bits, the table is not aligned to
+    /// its own size as the unit reads its address, or it ends past the
+    /// unit's output size.
     pub const fn stream_table(&self, table: Phys<6>, log2size: u8) -> Option<(u64, u32)> {
-        if log2size > self.stream_bits || table.get() & ((64 << log2size) - 1) != 0 {
+        if log2size > self.stream_bits || !self.holds(table.get(), 64 << log2size) {
             return None;
         }
         Some((1 << 62 | table.get(), log2size as u32))
     }
 
     /// `SMMU_CMDQ_BASE` (§6.3.26) for a queue of `1 << log2size` 16-byte
-    /// commands at `queue`: `RA` [62], the address, `LOG2SIZE` [4:0]. `None`
-    /// past the unit's `CMDQS`, or where the queue is not aligned to the
-    /// larger of its size and 32 bytes.
-    pub const fn command_queue(&self, queue: Phys<5>, log2size: u8) -> Option<u64> {
-        if log2size > self.command_queue_log2 || queue.get() & ((16 << log2size) - 1) != 0 {
+    /// commands at `queue`, and its indexes: `RA` [62], the address,
+    /// `LOG2SIZE` [4:0]. `None` past the unit's `CMDQS` or its output size,
+    /// or where the queue is not aligned to the larger of its size and 32
+    /// bytes.
+    pub const fn command_queue(&self, queue: Phys<5>, log2size: u8) -> Option<(u64, Commands)> {
+        if log2size > self.command_queue_log2 || !self.holds(queue.get(), 16 << log2size) {
             return None;
         }
-        Some(1 << 62 | queue.get() | log2size as u64)
+        Some((1 << 62 | queue.get() | log2size as u64, Commands(Indexes { log2size })))
     }
 
     /// `SMMU_EVENTQ_BASE` (§6.3.29) for a queue of `1 << log2size` 32-byte
-    /// records: `WA` [62], the address, `LOG2SIZE` [4:0].
-    pub const fn event_queue(&self, queue: Phys<5>, log2size: u8) -> Option<u64> {
-        if log2size > self.event_queue_log2 || queue.get() & ((32 << log2size) - 1) != 0 {
+    /// records, and its indexes: `WA` [62], the address, `LOG2SIZE` [4:0].
+    pub const fn event_queue(&self, queue: Phys<5>, log2size: u8) -> Option<(u64, Events)> {
+        if log2size > self.event_queue_log2 || !self.holds(queue.get(), 32 << log2size) {
             return None;
         }
-        Some(1 << 62 | queue.get() | log2size as u64)
+        Some((1 << 62 | queue.get() | log2size as u64, Events(Indexes { log2size })))
     }
 }

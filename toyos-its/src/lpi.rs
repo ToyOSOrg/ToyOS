@@ -2,19 +2,17 @@
 //! reads and the pending table each one owns, and the redistributor registers
 //! that name them.
 
-use crate::Phys;
+use toyos_phys::Phys;
 
 /// The first LPI's INTID (§2.2): everything below is an SGI, a PPI, an SPI
 /// or special.
 pub const FIRST: u32 = 8192;
 
 /// Offsets in a redistributor's `RD_base` frame (§12.10, Table 12-27).
-pub const GICR_CTLR: usize = 0x0000;
-pub const GICR_TYPER: usize = 0x0008;
 pub const GICR_PROPBASER: usize = 0x0070;
 pub const GICR_PENDBASER: usize = 0x0078;
 
-/// `GICR_CTLR.EnableLPIs` [0] (§12.11): from here the redistributor reads
+/// `GICR_CTLR.EnableLPIs` [0] (§12.11.2): from here the redistributor reads
 /// both tables, and neither base register may be written.
 pub const CTLR_ENABLE_LPIS: u32 = 1 << 0;
 
@@ -27,7 +25,8 @@ pub const fn processor_number(typer: u64) -> u16 {
     (typer >> 8) as u16
 }
 
-/// An LPI's INTID, inside the space it was made in: [`Space::lpi`].
+/// An LPI's INTID, one the distributor and its redistributor both take:
+/// [`Space::lpi`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Lpi(u32);
 
@@ -41,12 +40,6 @@ impl Lpi {
     pub const fn configuration_index(self) -> usize {
         (self.0 - FIRST) as usize
     }
-
-    /// Where its bit is in a pending table, which is indexed by the INTID
-    /// itself: the byte, and the bit in it (§5.1.2).
-    pub const fn pending_bit(self) -> (usize, u8) {
-        ((self.0 / 8) as usize, (self.0 % 8) as u8)
-    }
 }
 
 /// One LPI's byte in the configuration table (Table 5-1): the priority's
@@ -55,10 +48,12 @@ pub const fn configuration(priority: u8, enabled: bool) -> u8 {
     priority & 0xFC | 0b10 | enabled as u8
 }
 
-/// The INTIDs of `id_bits` bits the tables are laid out for.
+/// The two tables laid out for INTIDs of `id_bits` bits, which the
+/// distributor has.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Space {
+pub struct Layout {
     id_bits: u8,
+    lpis: u32,
 }
 
 /// `InnerCache` [9:7] `0b111`, read-allocate write-allocate write-back, with
@@ -66,33 +61,31 @@ pub struct Space {
 /// inner shareable. Both base registers hold them at the same bits.
 const CACHED: u64 = 0b111 << 7 | 0b01 << 10;
 
-impl Space {
-    /// `None` below 14 bits, which reach no LPI, and above the 24 that keep
-    /// the configuration table within 16 MiB.
-    pub const fn new(id_bits: u8) -> Option<Self> {
-        if id_bits >= 14 && id_bits <= 24 {
-            Some(Self { id_bits })
-        } else {
-            None
+impl Layout {
+    /// `GICD_TYPER` (§12.9.38) judged: `None` where the distributor takes no
+    /// LPI (`LPIS` [17] clear), and for `id_bits` below 14, which reach no
+    /// LPI, or above its INTIDs' (`IDbits` [23:19] plus one). Its `num_LPIs`
+    /// [15:11], where not zero, counts the LPIs there are from 8192 on.
+    pub const fn new(gicd_typer: u32, id_bits: u8) -> Option<Self> {
+        let widest = (gicd_typer >> 19 & 0x1F) as u8 + 1;
+        if gicd_typer & 1 << 17 == 0 || id_bits < 14 || id_bits > widest {
+            return None;
         }
+        let numbered = (1u64 << id_bits) - FIRST as u64;
+        let counted = match gicd_typer >> 11 & 0x1F {
+            0 => numbered,
+            count => 2u64 << count,
+        };
+        Some(Self { id_bits, lpis: if counted < numbered { counted } else { numbered } as u32 })
     }
 
-    /// `intid` as an LPI of this space.
-    pub const fn lpi(self, intid: u32) -> Option<Lpi> {
-        if intid >= FIRST && intid >> self.id_bits == 0 {
-            Some(Lpi(intid))
-        } else {
-            None
-        }
-    }
-
-    /// One byte for every LPI.
-    pub const fn configuration_bytes(self) -> usize {
-        (1 << self.id_bits) - FIRST as usize
+    /// One byte for every INTID from 8192 that `id_bits` bits number.
+    pub const fn configuration_bytes(self) -> u64 {
+        (1 << self.id_bits) - FIRST as u64
     }
 
     /// One bit for every INTID, the first 8192 included.
-    pub const fn pending_bytes(self) -> usize {
+    pub const fn pending_bytes(self) -> u64 {
         (1 << self.id_bits) / 8
     }
 
@@ -100,6 +93,35 @@ impl Space {
     /// `Physical_Address` [51:12] and `IDbits` [4:0], the bits minus one.
     pub const fn propbaser(self, table: Phys<12>) -> u64 {
         CACHED | table.get() | (self.id_bits - 1) as u64
+    }
+
+    /// The LPIs of a redistributor that reads `propbaser` back: `None` where
+    /// its `IDbits` is not what [`Layout::propbaser`] wrote, which a
+    /// redistributor that holds the register as its own answers.
+    pub const fn space(self, propbaser: u64) -> Option<Space> {
+        if (propbaser & 0x1F) as u8 == self.id_bits - 1 {
+            Some(Space { lpis: self.lpis })
+        } else {
+            None
+        }
+    }
+}
+
+/// The LPIs there are: those a [`Layout`]'s tables hold, that the
+/// distributor counts, in a redistributor that took the layout.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Space {
+    lpis: u32,
+}
+
+impl Space {
+    /// `intid` as an LPI of this space.
+    pub const fn lpi(self, intid: u32) -> Option<Lpi> {
+        if intid >= FIRST && intid - FIRST < self.lpis {
+            Some(Lpi(intid))
+        } else {
+            None
+        }
     }
 }
 

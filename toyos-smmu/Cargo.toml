@@ -1,5 +1,5 @@
-# A member of the host workspace (root `Cargo.toml`), like toyos-acpi and
-# toyos-dma: it is pure, it has no dependencies, and its tests run on the host.
+# A member of the host workspace (root `Cargo.toml`), like toyos-acpi: it is
+# pure and its tests run on the host.
 #
 # What lives here is every word an SMMUv3 and its driver exchange. The unit
 # decides which memory a device reaches, so a field one bit off is an isolation
@@ -15,3 +15,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[dependencies]
+# The VMSAv8-64 stage 1 descriptors and the `MAIR` they index: the unit walks
+# the format the loader's tables are written in, read from its one declaration.
+toyos-bootmap = { path = "../toyos-bootmap" }
+toyos-phys = { path = "../toyos-phys" }

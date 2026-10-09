@@ -1,0 +1,12 @@
+# A member of the host workspace (root `Cargo.toml`): what toyos-smmu and
+# toyos-its both take an address as, declared once. An SMMUv3's and a GIC's
+# address fields are bits [47:n] of an address or bits [51:n] with the top
+# four zero, so one type bounds what either is given.
+
+[package]
+name = "toyos-phys"
+description = "A physical address below 2^48 by its alignment, the type an SMMUv3's and a GIC ITS's address fields are filled from, pure, forbid(unsafe_code)."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
