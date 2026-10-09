@@ -1009,12 +1009,13 @@ fn judge_trust_roots(package: &Value, text: &[u8], shipped: &[u8], report: &mut 
     }
 }
 
-/// [`judge_trust_roots`] on the build's own workspace.
-fn judge_trust_roots_of(root: &Path, report: &mut Report) -> Result<(), String> {
+/// [`judge_trust_roots`] on the build's own workspace, out of `metadata`, a
+/// document of it: the crate is a non-optional dependency of the root
+/// package, so every feature set resolves it.
+fn judge_trust_roots_of(metadata: &Value, report: &mut Report) -> Result<(), String> {
     let name = crate::build::TRUST_ROOTS_CRATE;
-    let metadata = metadata(root, &root.join("Cargo.toml"), &["--locked"], &[])?;
-    let graph = Graph::new(&metadata)?;
-    let found: Vec<&Value> = graph.packages.values().copied().filter(|p| str_of(p, "name") == Some(name)).collect();
+    let packages = metadata["packages"].as_array().ok_or("cargo metadata printed no packages")?;
+    let found: Vec<&Value> = packages.iter().filter(|p| str_of(p, "name") == Some(name)).collect();
     let [package] = found[..] else {
         return Err(format!("the build's workspace resolves {} packages named {name}, not one", found.len()));
     };
@@ -1363,7 +1364,12 @@ pub fn judge(root: &Path) -> Result<String, String> {
         roots: vec![library.join("std")],
     });
 
-    judge_trust_roots_of(root, &mut report)?;
+    let manifest = root.join("Cargo.toml");
+    let build = docs
+        .iter()
+        .find(|d| d.members.contains(&manifest))
+        .ok_or_else(|| format!("no shipped crate is in the workspace of {}", manifest.display()))?;
+    judge_trust_roots_of(&build.metadata, &mut report)?;
 
     let mut local = Local::default();
     for doc in &docs {
