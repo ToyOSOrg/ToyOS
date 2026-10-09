@@ -707,9 +707,10 @@ impl Sockets {
                 Event::Name(toyos_mdns::Event::Claimed) => {
                     say!("netstack: mDNS: no host answered for {HOSTNAME}.local; this machine answers as it")
                 }
-                Event::Name(toyos_mdns::Event::Lost) => {
-                    say!("netstack: mDNS: another host answered for {HOSTNAME}.local; this machine answers to no name")
-                }
+                Event::Name(toyos_mdns::Event::Lost) => say!(
+                    "netstack: mDNS: another host answered for {HOSTNAME}.local; this machine answers to no name and asks for {HOSTNAME}.local again every {} s",
+                    toyos_mdns::RETRY_MS / 1000
+                ),
             }
         }
 
