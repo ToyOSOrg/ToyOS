@@ -322,7 +322,8 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
         built_from.trim(),
         fork.display(),
     );
-    check_out_committed(&checkout, &commit, &crate::libcxx::SOURCES, &partial.join("src"));
+    let repository = git_out(&checkout, &["rev-parse", "--absolute-git-dir"]);
+    check_out_committed(Path::new(repository.trim()), &commit, &crate::libcxx::SOURCES, &partial.join("src"));
     fs::write(partial.join(SOURCE), format!("{key}\n"))
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
     read_only(&partial);
@@ -370,27 +371,27 @@ fn libraries(install: &Path) -> Vec<PathBuf> {
     named
 }
 
-/// Write `paths` as `commit` holds them, from the repository at `checkout`,
+/// Write `paths` as `commit` holds them, from the git directory `repository`,
 /// under `dest`: through an index of their own and with no sparse pattern, so
-/// nothing the checkout holds beside the commit, tracked, ignored or left out,
-/// reaches them.
-fn check_out_committed(checkout: &Path, commit: &str, paths: &[&str], dest: &Path) {
+/// nothing a checkout of it holds beside the commit, tracked, ignored or left
+/// out, reaches them.
+pub(crate) fn check_out_committed(repository: &Path, commit: &str, paths: &[&str], dest: &Path) {
     fs::create_dir_all(dest).unwrap_or_else(|e| panic!("create {}: {e}", dest.display()));
-    let index = toyos_tmpdir::TempDir::new("llvm-runtimes-index");
+    let index = toyos_tmpdir::TempDir::new("llvm-sources-index");
     let out = Command::new("git")
+        .env("GIT_DIR", repository)
         .env("GIT_INDEX_FILE", index.join("index"))
         .args(["-c", "core.sparseCheckout=false", "--work-tree"])
         .arg(dest)
         .args(["checkout", commit, "--"])
         .args(paths)
-        .current_dir(checkout)
         .output()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", checkout.display()));
+        .unwrap_or_else(|e| panic!("run git in {}: {e}", repository.display()));
     assert!(
         out.status.success(),
-        "git checkout {commit} -- {paths:?} into {} in {}: {}",
+        "git checkout {commit} -- {paths:?} into {} from {}: {}",
         dest.display(),
-        checkout.display(),
+        repository.display(),
         String::from_utf8_lossy(&out.stderr).trim(),
     );
 }

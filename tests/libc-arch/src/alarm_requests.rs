@@ -1,8 +1,8 @@
 //! What `alarm` answers and arms: the seconds an earlier alarm has left,
-//! rounded up and 0 once it is due or when there is none; and 0 seconds arm
-//! nothing.
+//! rounded up and 0 once it is due or when there is none; 0 seconds arm
+//! nothing; and a due alarm ends the process unless `SIGALRM` is ignored.
 
-use crate::alarmreq::{due, left};
+use crate::alarmreq::{due, ends, left, SIG_DFL, SIG_IGN};
 
 const SEC: u64 = 1_000_000_000;
 
@@ -24,4 +24,11 @@ fn the_seconds_left_round_up_and_end_at_zero() {
     assert_eq!(left(armed, 100 + 6 * SEC), 0, "an alarm past due answers 0");
     assert_eq!(left(None, 100), 0);
     assert_eq!(left(due(0, u32::MAX), 0), u32::MAX);
+}
+
+#[test]
+fn a_due_alarm_ends_the_process_unless_sigalrm_is_ignored() {
+    assert!(!ends(SIG_IGN), "an ignored SIGALRM ended the process");
+    assert!(ends(SIG_DFL));
+    assert!(ends(0x40_1000), "a handler, which never runs, kept the process");
 }

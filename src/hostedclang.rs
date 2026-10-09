@@ -1,6 +1,9 @@
-//! clang and `ld.lld` that run on ToyOS: built for `x86_64-unknown-toyos` from
+//! clang and `ld.lld` for a ToyOS host: built for `x86_64-unknown-toyos` from
 //! the LLVM commit the host's LLVM is (`src/llvm.rs`), by the toolchain's own
 //! clang against its C sysroot (`clang::CSysroot`), and linked statically.
+//! CMake builds them, beside bootstrap, until bootstrap's LLVM for a ToyOS
+//! host makes both
+//! (`issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`).
 //!
 //! **Made only when asked for** (`cargo run -- --hosted-clang`): its build is
 //! LLVM's, and its key moves with every sysroot's, so no other build makes it.
@@ -16,8 +19,7 @@
 //!
 //! `hosted-clang/<key>/` in the store holds `bin/clang`, `bin/ld.lld` and
 //! clang's resource headers in `lib/clang/<version>/include`, where clang looks
-//! beside itself; once its [`SOURCE`] file exists it is read-only. Each binary
-//! names no library it needs ([`static_elf`]).
+//! beside itself; once its [`SOURCE`] file exists it is read-only.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,7 +170,6 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
         // `fs::copy` follows the link the build installs clang as.
         let (from, to) = (built.join("bin").join(name), bin.join(kept));
         fs::copy(&from, &to).unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), to.display()));
-        static_elf(&to);
     }
     let resource = crate::clang::resource_version(&built);
     let version = resource.file_name().unwrap_or_else(|| panic!("{} names no version", resource.display()));
@@ -185,30 +186,12 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
 }
 
 /// Write [`SOURCES`] as the commit `fork`'s LLVM gitlink names holds them into
-/// `dest`, from the LLVM repository of `fork`'s git directory, through an index
-/// of their own: no checkout's files reach them.
+/// `dest`, from the LLVM repository of `fork`'s git directory: a linked
+/// worktree's `rust/src/llvm-project` is no checkout.
 fn export(fork: &Path, dest: &Path) {
-    let commit = gitlink(fork, LLVM);
     let common = git_out(fork, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     let repository = Path::new(common.trim()).join("modules").join(LLVM);
-    fs::create_dir_all(dest).unwrap_or_else(|e| panic!("create {}: {e}", dest.display()));
-    let index = toyos_tmpdir::TempDir::new("hosted-clang-index");
-    let out = Command::new("git")
-        .env("GIT_DIR", &repository)
-        .env("GIT_INDEX_FILE", index.join("index"))
-        .args(["-c", "core.sparseCheckout=false", "--work-tree"])
-        .arg(dest)
-        .args(["checkout", &commit, "--"])
-        .args(SOURCES)
-        .output()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", repository.display()));
-    assert!(
-        out.status.success(),
-        "git checkout {commit} from {} into {}: {}",
-        repository.display(),
-        dest.display(),
-        String::from_utf8_lossy(&out.stderr).trim(),
-    );
+    crate::llvm::check_out_committed(&repository, &gitlink(fork, LLVM), &SOURCES, dest);
 }
 
 /// Configure LLVM at `sources`, the commit `fork` names, for `c`'s target,
@@ -283,25 +266,6 @@ fn run(mut command: Command, what: &str, ninja: &Path) {
     command.env("PATH", path);
     let status = command.status().unwrap_or_else(|e| panic!("run {command:?}: {e}"));
     assert!(status.success(), "the ToyOS-hosted clang's {what} failed ({status}): its output above says why");
-}
-
-/// Refuse `elf` unless it is an executable for [`TARGET`] that names no
-/// library it needs.
-fn static_elf(elf: &Path) {
-    let bytes = fs::read(elf).unwrap_or_else(|e| panic!("read {}: {e}", elf.display()));
-    let machine = match TARGET {
-        Arch::X86_64 => toyos_elf::Machine::X86_64,
-        Arch::Aarch64 => toyos_elf::Machine::Aarch64,
-    };
-    let layout = toyos_elf::Layout::parse(&bytes, machine)
-        .unwrap_or_else(|e| panic!("{} is no {} executable: {e:?}", elf.display(), TARGET.userland()));
-    let needed = layout.dynamic().map_or(0, |dynamic| {
-        let start = dynamic.file_offset() as usize;
-        let table = bytes.get(start..start + dynamic.image().len() as usize);
-        let table = table.unwrap_or_else(|| panic!("{}'s PT_DYNAMIC is past its end", elf.display()));
-        toyos_elf::Dynamic::needed(table).count()
-    });
-    assert_eq!(needed, 0, "{} names {needed} libraries it needs, and it is linked statically", elf.display());
 }
 
 #[cfg(test)]

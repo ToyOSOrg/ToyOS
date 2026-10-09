@@ -1,11 +1,12 @@
 //! `alarm`: one per process, kept by a thread of this library's, started by
-//! the first alarm armed, that sleeps until it is due and then does what
-//! `SIGALRM`'s default action does, ending the process. A handler `sigaction`
-//! is given never runs: this library keeps none
+//! the first alarm armed, that sleeps until it is due. Then, with `SIGALRM`
+//! ignored, the alarm is gone; otherwise the keeper does what `SIGALRM`'s
+//! default action does and ends the process. A handler `signal` or `sigaction`
+//! is given never runs, and a mask that blocks `SIGALRM` holds nothing back
 //! (`issues/an-alarm-reaches-no-sigalrm-handler.md`).
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use toyos_abi::syscall;
 
@@ -27,6 +28,19 @@ static ALARM: Lock<Alarm> = Lock::new(Alarm { due: None, kept: false });
 
 /// Moved at every `alarm`, so a keeper asleep on an older one wakes.
 static TURN: AtomicU32 = AtomicU32::new(0);
+
+/// `SIGALRM`'s disposition: `SIG_DFL`, `SIG_IGN` or a handler's address.
+static DISPOSITION: AtomicUsize = AtomicUsize::new(alarmreq::SIG_DFL);
+
+/// Make `handler` `SIGALRM`'s disposition, and answer the one it replaces.
+pub(crate) fn dispose(handler: usize) -> usize {
+    DISPOSITION.swap(handler, Ordering::AcqRel)
+}
+
+/// `SIGALRM`'s disposition.
+pub(crate) fn disposition() -> usize {
+    DISPOSITION.load(Ordering::Acquire)
+}
 
 fn now() -> u64 {
     toyos_abi::clock::nanos_since_boot()
@@ -52,19 +66,26 @@ pub extern "C" fn alarm(seconds: u32) -> u32 {
     left
 }
 
-/// Sleep until the alarm is due or moved, and end the process once it is due.
+/// Sleep until the alarm is due or moved, and once it is due, drop it or end
+/// the process as [`alarmreq::ends`] says.
 unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
     loop {
         // Read before the alarm, so an `alarm` between the two moves it and
         // the wait below returns at once.
         let turn = TURN.load(Ordering::Acquire);
-        let wait = match ALARM.lock().due {
+        let mut alarm = ALARM.lock();
+        let wait = match alarm.due {
             None => None,
             Some(due) => match due.checked_sub(now()) {
                 Some(wait) if wait > 0 => Some(wait),
-                _ => syscall::exit(ALARM_END),
+                _ if alarmreq::ends(disposition()) => syscall::exit(ALARM_END),
+                _ => {
+                    alarm.due = None;
+                    None
+                }
             },
         };
+        drop(alarm);
         // SAFETY: `TURN` is a live, aligned u32.
         unsafe { syscall::futex_wait(TURN.as_ptr(), turn, wait) };
     }

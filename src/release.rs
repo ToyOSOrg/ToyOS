@@ -47,21 +47,39 @@ const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
 /// The products a toolchain is, in the order a build makes them, each under the
 /// name its cache entry and its job's outputs carry.
-const LAYERS: [(Keyed, &str); 4] = [
-    (Keyed::Llvm, "llvm"),
-    (Keyed::Compiler, "compiler"),
-    (Keyed::Freestanding, "freestanding"),
-    (Keyed::Sysroot, "sysroot"),
+const LAYERS: [(Part, &str); 4] = [
+    (Part::Llvm, "llvm"),
+    (Part::Compiler, "compiler"),
+    (Part::Freestanding, "freestanding"),
+    (Part::Sysroot, "sysroot"),
 ];
 
-/// Why no layer is the ToyOS-hosted clang: it is made only when asked for
-/// (`src/hostedclang.rs`), and a release carries what every build reads.
-const NOT_A_LAYER: &str = "a toolchain release carries no ToyOS-hosted clang: it is made only when asked for";
+/// What a toolchain is made of: the products every build reads, of the kinds
+/// the build system keys. The ToyOS-hosted clang is none, made only when asked
+/// for (`src/hostedclang.rs`).
+#[derive(Clone, Copy)]
+enum Part {
+    Llvm,
+    Compiler,
+    Freestanding,
+    Sysroot,
+}
+
+impl Part {
+    fn keyed(self) -> Keyed {
+        match self {
+            Part::Llvm => Keyed::Llvm,
+            Part::Compiler => Keyed::Compiler,
+            Part::Freestanding => Keyed::Freestanding,
+            Part::Sysroot => Keyed::Sysroot,
+        }
+    }
+}
 
 /// One of [`LAYERS`] of this tree's toolchain: the key the build system files
 /// it under, and where it is, relative to the checkout.
 struct Layer {
-    kind: Keyed,
+    kind: Part,
     name: &'static str,
     key: Key,
     path: PathBuf,
@@ -135,13 +153,12 @@ fn layers(root: &Path) -> Vec<Layer> {
         .iter()
         .map(|&(kind, name)| {
             let key = match kind {
-                Keyed::Llvm => &llvm,
-                Keyed::Compiler => &compiler,
-                Keyed::Freestanding => &freestanding,
-                Keyed::Sysroot => &sysroot,
-                Keyed::HostedClang => unreachable!("{NOT_A_LAYER}"),
+                Part::Llvm => &llvm,
+                Part::Compiler => &compiler,
+                Part::Freestanding => &freestanding,
+                Part::Sysroot => &sysroot,
             };
-            let dir = kind.store(&store(root)).join(key);
+            let dir = kind.keyed().store(&store(root)).join(key);
             let path = dir.strip_prefix(root).expect("a runner's store is in its checkout").to_path_buf();
             Layer { kind, name, key: key.clone(), path }
         })
@@ -153,13 +170,12 @@ fn layers(root: &Path) -> Vec<Layer> {
 fn defect(root: &Path, layer: &Layer) -> Option<String> {
     let dir = root.join(&layer.path);
     match layer.kind {
-        Keyed::Llvm => crate::llvm::defect(&dir),
-        Keyed::Compiler => {
+        Part::Llvm => crate::llvm::defect(&dir),
+        Part::Compiler => {
             crate::compiler::unplaced(&dir).or_else(|| crate::toolchain::toolchain_defect(&dir.join("stage2")))
         }
-        Keyed::Freestanding => crate::sysroot::unpublished(&dir),
-        Keyed::Sysroot => crate::sysroot::unfinished(&dir),
-        Keyed::HostedClang => unreachable!("{NOT_A_LAYER}"),
+        Part::Freestanding => crate::sysroot::unpublished(&dir),
+        Part::Sysroot => crate::sysroot::unfinished(&dir),
     }
 }
 

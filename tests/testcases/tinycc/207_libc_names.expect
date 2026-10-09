@@ -4,6 +4,14 @@ readlink into 4: 4, "/sys#"
 readlink into 0: -1, EINVAL
 readlink of a file: -1, EINVAL
 readlink of nothing: -1, ENOENT
+truncate to 2: 0; stat size: 2
+truncate of nothing: -1, ENOENT
+setbuf: file 0 bytes, the buffer holds them
+ftello: 10; fseeko 3: 0; ftello: 3; fgetc: 3
+setbuf NULL: file 3 bytes
+signal SIGALRM: was SIG_DFL, then SIG_IGN
+sigaction SIGALRM: 0 0, SIG_IGN
+alarm 5: 0; alarm 0: 1 to 5; again: 0
 entry: a DT_UNKNOWN
 entry: b DT_UNKNOWN
 entry: sub DT_DIR
@@ -16,4 +24,7 @@ strsignal: Segmentation fault; Unknown signal
 modf(-3.25): -3 and -0.25
 logb: -4 10
 logb(0): -inf, ERANGE
+lround: 3 -3 0
+lround(1e19): -9223372036854775808, EDOM
+pathconf _PC_PATH_MAX: 4096
 sysconf _SC_PAGE_SIZE: 4096

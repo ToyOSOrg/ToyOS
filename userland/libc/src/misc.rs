@@ -207,20 +207,42 @@ pub unsafe extern "C" fn abort() -> ! {
     syscall::exit(134) // SIGABRT
 }
 
-// Signal (stubs — ToyOS has no signals)
+// Signal (stubs — ToyOS has no signals, but `SIGALRM`'s disposition decides
+// what a due `alarm` does)
 
-type SigHandlerT = unsafe extern "C" fn(i32);
+const SIGALRM: i32 = 14;
 
+/// `signal.h`'s `struct sigaction`.
+#[repr(C)]
+pub struct SigAction {
+    handler: usize,
+    flags: u64,
+    restorer: usize,
+    mask: u64,
+}
+
+/// A handler by its address: `SIG_DFL` and `SIG_IGN` are no functions.
 #[no_mangle]
-pub unsafe extern "C" fn signal(_signum: i32, handler: SigHandlerT) -> SigHandlerT {
-    handler // return the handler as "previous", effectively a no-op
+pub unsafe extern "C" fn signal(signum: i32, handler: *const u8) -> *const u8 {
+    match signum {
+        SIGALRM => crate::alarm::dispose(handler as usize) as *const u8,
+        _ => handler, // return the handler as "previous", effectively a no-op
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn sigaction(
-    _signum: i32, _act: *const u8, _oldact: *mut u8,
-) -> i32 {
-    0 // success
+pub unsafe extern "C" fn sigaction(signum: i32, act: *const SigAction, oldact: *mut SigAction) -> i32 {
+    if signum != SIGALRM {
+        return 0; // success
+    }
+    let old = match unsafe { act.as_ref() } {
+        Some(act) => crate::alarm::dispose(act.handler),
+        None => crate::alarm::disposition(),
+    };
+    if let Some(oldact) = unsafe { oldact.as_mut() } {
+        *oldact = SigAction { handler: old, flags: 0, restorer: 0, mask: 0 };
+    }
+    0
 }
 
 /// The calling thread's mask, which is what POSIX's process mask is in a

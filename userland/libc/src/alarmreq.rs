@@ -1,8 +1,19 @@
-//! What `alarm` answers and arms, in nanoseconds of the monotonic clock. It
-//! reads nothing but what it is handed, so the host tests it
-//! (`toyos-libc-copies`).
+//! What `alarm` answers and arms, in nanoseconds of the monotonic clock, and
+//! what a due one does. It reads nothing but what it is handed, so the host
+//! tests it (`toyos-libc-copies`).
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// `signal.h`'s `SIG_DFL` and `SIG_IGN`, as addresses.
+pub(crate) const SIG_DFL: usize = 0;
+pub(crate) const SIG_IGN: usize = 1;
+
+/// Whether an alarm due under `SIGALRM`'s disposition `handler` ends the
+/// process: it does unless `SIGALRM` is ignored, since no handler runs
+/// (`issues/an-alarm-reaches-no-sigalrm-handler.md`).
+pub(crate) fn ends(handler: usize) -> bool {
+    handler != SIG_IGN
+}
 
 /// When an alarm of `seconds` armed at `now` is due; none for 0, which
 /// disarms.

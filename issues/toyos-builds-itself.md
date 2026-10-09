@@ -105,12 +105,12 @@ libc's state it is `userland/libc` at `15625e0cb`.
 
 **Blocked on other tracks.** M2 needs room for about a gigabyte of toolchain,
 and threads and `mmap` mature enough for LLVM
-(`issues/std-and-libc-drop-the-answer-thread-join-gives.md`); its package over
+(`issues/std-and-libc-drop-the-answer-thread-join-gives.md`). Packages over
 HTTPS
 (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`)
-waits on the network stack under it
+wait on the network stack under them
 (`issues/the-lan-is-not-yet-production-grade.md`,
-`issues/the-internet-clients-work-unchanged.md`).
+`issues/the-internet-clients-work-unchanged.md`), and M2 does not.
 M2 and M4 also need libc to start a child process
 (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`). M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
@@ -134,7 +134,9 @@ static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
   `issues/libc-stat-answers-one-serial-number-for-every-file.md`.
 
 **What M3 adds: a rustc that carries that LLVM**, after all of M2's.
-- Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`.
+- Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`, and
+  `issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`,
+  whose build of clang and lld replaces M2's.
 - Link: `issues/a-rust-std-binary-cannot-link-the-cxx-runtime.md`.
 - Test: `issues/nothing-builds-the-toyos-hosted-rustc.md`.
 
