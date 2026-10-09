@@ -1,0 +1,43 @@
+# One HTTPS download through netstack, timed: `https_download`'s boot on the
+# T14, where the `internet_download` metal row reads its rate off the stick.
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+
+# `log` is the port the job waits for netstack's lease on: on the T14 it is the
+# boot's first job.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+# The T14's onboard I219, by vendor and device.
+[programs.netstack]
+service = true
+serves = ["netstack"]
+devices = ["pci:8086:15fc"]
+
+# `netstack` for the job's lookup and connection, `log` for netstack's word on
+# its lease; `counters` and `trace` for every CPU's MPERF and stamp either
+# side of the transfer, MPERF being answered only beside `trace`; `dup`
+# because the runner hands the job a duplicate.
+[programs.test-runner]
+receives = ["netstack", "log"]
+syscap = ["counters", "trace", "dup"]
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
