@@ -3034,10 +3034,15 @@ fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
         peer.write_all(&[said]).map_err(|e| e.to_string())?;
         peer.set_read_timeout(Some(ANSWERED)).map_err(|e| e.to_string())?;
         let dialled = Instant::now();
+        // QEMU says nothing when it carries a connection, so its table is
+        // asked again after a wait that doubles to 64 ms.
+        let mut pause = Duration::from_millis(1);
         while carried() == before {
             if dialled.elapsed() > ANSWERED {
                 return Err(format!("QEMU's user network took no connection off its forward in {ANSWERED:?}"));
             }
+            thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(64));
         }
         Ok(peer)
     };
