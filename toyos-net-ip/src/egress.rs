@@ -7,6 +7,10 @@
 //! waits behind it and enters as room appears, ahead of any frame queued later (RFC 5227
 //! §2.1). A turn holds no datagram: it names the entry whose queue does, and goes with that entry.
 //!
+//! Only [ip]'s own ICMP messages wait here for a next hop. A transport's datagram is framed into
+//! the device's buffer or not taken: [`Ip::send_udp`] answers [`Sent::Pending`] for one whose
+//! next hop is being asked for, and its sender keeps it.
+//!
 //! Every datagram is atomic: DF set, identification 0 (`toyos-net-wire`'s one IPv4 form).
 
 use alloc::collections::VecDeque;
@@ -21,7 +25,7 @@ use toyos_net_wire::udp::UdpBuilder;
 use toyos_net_wire::Instant;
 
 use crate::counters::{Counter, Log};
-use crate::iface::Cx;
+use crate::iface::{Cx, Interface};
 use crate::limits::{nud::PENDING_TOTAL, CONTROL_QUEUE, ECHO_REPLIES};
 use crate::nud::{self, Held, Link, Nud};
 use crate::route::{NextHop, Route, Source};
@@ -34,7 +38,6 @@ pub const FRAME: usize = toyos_net_wire::ethernet::HEADER_LEN + MTU;
 pub(crate) enum FrameKind {
     Echo,
     Error,
-    Datagram,
 }
 
 #[derive(Debug)]
@@ -178,8 +181,16 @@ pub struct UdpOut<'a> {
 pub enum Sent {
     /// This many bytes of the caller's buffer are the frame: one credit spent.
     Frame(usize),
-    /// Held for its next hop; it leaves from [`Ip::transmit`] once resolved.
-    Held,
+    /// Not taken: this next hop's link address is being asked for. [`Event::Resolved`] or
+    /// [`Event::Failed`] names it when that ends, unless the routes change first.
+    Pending(Ipv4Addr),
+}
+
+/// Where a datagram goes on the link.
+enum Hop {
+    To(MacAddr),
+    /// The next hop whose link address is being asked for.
+    Asked(Ipv4Addr),
 }
 
 fn build<B: FrameBody>(source: IndividualMac, destination: MacAddr, body: &B, out: &mut [u8]) -> Option<usize> {
@@ -286,10 +297,10 @@ impl Ip {
         }
     }
 
-    /// A UDP datagram at a transmit opportunity: written into `frame` when its link
-    /// destination is known, or held here for its next hop, which spends no credit. The route is
-    /// the one of this moment, so a link broadcast is refused a datagram that does not carry the
-    /// permission. A refusal is counted and the datagram's flow is told it is unreachable.
+    /// A UDP datagram at a transmit opportunity: written into `frame` when its link destination
+    /// is known, and otherwise not taken, its next hop asked for. The route is the one of this
+    /// moment, so a link broadcast is refused a datagram that does not carry the permission. A
+    /// refusal is counted and the datagram's flow is told it is unreachable.
     pub fn send_udp(&mut self, now: Instant, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
         let now = self.clock(now);
         let flow = Flow {
@@ -308,7 +319,12 @@ impl Ip {
                 options: &[],
                 payload: out.datagram,
             };
-            self.datagram(now, &route, &builder, FrameKind::Datagram, out.broadcast, Some((flow, frame)))
+            self.fits(&builder)?;
+            let Some((i, mut cx)) = self.split(now, route.iface) else { return Err(Counter::UnknownInterface) };
+            match hop(i, &mut cx, &route, out.destination, out.broadcast)? {
+                Hop::To(mac) => build(i.mac, mac, &builder, frame).map(Sent::Frame).ok_or(Counter::IpExceedsMtu),
+                Hop::Asked(next_hop) => Ok(Sent::Pending(next_hop)),
+            }
         });
         if sent.is_err() {
             self.log.event(Event::Unreachable(flow));
@@ -317,65 +333,57 @@ impl Ip {
     }
 
     /// Sends one of [ip]'s own ICMP messages along `route`, into the control queue or held for
-    /// its next hop, and never in a link broadcast.
+    /// its next hop, and never in a link broadcast. One that cannot go is counted and dropped.
     pub(crate) fn own<P: Payload>(&mut self, now: Instant, route: &Route, builder: &Ipv4Builder<'_, P>, kind: FrameKind) {
-        let _ = self.datagram(now, route, builder, kind, false, None);
+        if self.fits(builder).is_err() {
+            return;
+        }
+        let Some((i, mut cx)) = self.split(now, route.iface) else { return };
+        if let NextHop::Neighbour(addr) = route.next_hop {
+            let holds = matches!(i.neighbours.get(&addr).map(|n| &n.state), None | Some(Nud::Incomplete(_)));
+            if holds && i.held >= PENDING_TOTAL {
+                return cx.log.count(Counter::NbPendingFull);
+            }
+        }
+        let Ok(hop) = hop(i, &mut cx, route, builder.destination, false) else { return };
+        let (to, held_for) = match hop {
+            Hop::To(mac) => (mac, None),
+            Hop::Asked(next_hop) => (MacAddr::ZERO, Some(next_hop)),
+        };
+        let Some(frame) = build_vec(i.mac, to, builder) else { return };
+        match held_for {
+            Some(next_hop) => nud::hold(i, &mut cx, next_hop, Held { frame, kind }),
+            None => {
+                cx.control.push(Item::Frame { iface: route.iface, frame, kind }, cx.log);
+            }
+        }
     }
 
-    /// The one place a datagram's link destination is chosen: the link's broadcast address only
-    /// with `broadcast`, and a transport's datagram comes with its flow and its frame.
-    fn datagram<P: Payload>(
-        &mut self,
-        now: Instant,
-        route: &Route,
-        builder: &Ipv4Builder<'_, P>,
-        kind: FrameKind,
-        broadcast: bool,
-        transport: Option<(Flow, &mut [u8; FRAME])>,
-    ) -> Result<Sent, Counter> {
+    fn fits<P: Payload>(&mut self, builder: &Ipv4Builder<'_, P>) -> Result<(), Counter> {
         if builder.length().map_or(true, |len| len > MTU) {
             self.log.count(Counter::IpExceedsMtu);
             return Err(Counter::IpExceedsMtu);
         }
-        let Some((i, mut cx)) = self.split(now, route.iface) else { return Err(Counter::UnknownInterface) };
-        let (destination, hold) = match route.next_hop {
-            NextHop::Broadcast if !broadcast => {
-                cx.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(builder.destination));
-                return Err(Counter::IpBroadcastNotPermitted);
-            }
-            NextHop::Broadcast => (MacAddr::BROADCAST, None),
-            NextHop::Multicast(group) => (MacAddr::multicast(group), None),
-            NextHop::Neighbour(addr) => {
-                let holds = matches!(i.neighbours.get(&addr).map(|n| &n.state), None | Some(Nud::Incomplete(_)));
-                if holds && i.held >= PENDING_TOTAL {
-                    cx.log.count(Counter::NbPendingFull);
-                    return Err(Counter::NbPendingFull);
-                }
-                match nud::send(i, &mut cx, addr, Some(route.source)) {
-                    Link::Resolved(mac) => (mac, None),
-                    Link::Pending => (MacAddr::ZERO, Some(addr)),
-                    Link::Failed(refusal) => return Err(refusal),
-                }
-            }
-        };
-        let mac = i.mac;
-        let (flow, out) = transport.unzip();
-        if let Some(addr) = hold {
-            let frame = build_vec(mac, destination, builder).ok_or(Counter::IpExceedsMtu)?;
-            nud::hold(i, &mut cx, addr, Held { frame, kind, flow });
-            return Ok(Sent::Held);
+        Ok(())
+    }
+}
+
+/// The one place a datagram's link destination is chosen: the link's broadcast address only
+/// with `broadcast`, and a neighbour's by its entry, which a datagram with nowhere to go yet
+/// creates and asks for.
+fn hop(i: &mut Interface, cx: &mut Cx<'_>, route: &Route, destination: Ipv4Addr, broadcast: bool) -> Result<Hop, Counter> {
+    match route.next_hop {
+        NextHop::Broadcast if !broadcast => {
+            cx.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(destination));
+            Err(Counter::IpBroadcastNotPermitted)
         }
-        match out {
-            Some(out) => build(mac, destination, builder, out).map(Sent::Frame).ok_or(Counter::IpExceedsMtu),
-            None => {
-                let frame = build_vec(mac, destination, builder).ok_or(Counter::IpExceedsMtu)?;
-                if cx.control.push(Item::Frame { iface: route.iface, frame, kind }, cx.log) {
-                    Ok(Sent::Held)
-                } else {
-                    Err(Counter::IpControlQueueFull)
-                }
-            }
-        }
+        NextHop::Broadcast => Ok(Hop::To(MacAddr::BROADCAST)),
+        NextHop::Multicast(group) => Ok(Hop::To(MacAddr::multicast(group))),
+        NextHop::Neighbour(addr) => match nud::send(i, cx, addr, Some(route.source)) {
+            Link::Resolved(mac) => Ok(Hop::To(mac)),
+            Link::Pending => Ok(Hop::Asked(addr)),
+            Link::Failed(refusal) => Err(refusal),
+        },
     }
 }
 
@@ -383,7 +391,6 @@ fn sent(cx: &mut Cx<'_>, kind: FrameKind) {
     match kind {
         FrameKind::Echo => cx.log.count(Counter::IcmpEchoRepliesSent),
         FrameKind::Error => cx.log.count(Counter::IcmpErrorsSent),
-        FrameKind::Datagram => {}
     }
 }
 

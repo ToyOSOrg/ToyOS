@@ -715,9 +715,23 @@ pub const V_FRAG_1: &str = "
 c0 00 02 01 13 88 13 89 00 20 7b b4 30 31 32 33
 34 35 36 37";
 
+/// An echo request carrying `data`: the reply it asks for is [ip]'s own message, which waits in
+/// [ip] while its next hop has no link address, and carries `data` where a UDP datagram carries
+/// its own.
+pub fn echo_request(source: Ipv4Addr, destination: Ipv4Addr, data: &[u8]) -> Vec<u8> {
+    let mut echo = vec![8, 0, 0, 0, 0, 1, 0, 1];
+    echo.extend_from_slice(data);
+    ipv4(source, destination, 1, &echo)
+}
+
 impl H {
+    /// `source` asks `ours` on if0 for an echo of `data`, in a frame from `m`.
+    pub fn echo(&mut self, source: Ipv4Addr, m: MacAddr, ours: Ipv4Addr, data: &[u8]) {
+        self.frame(&eth(MAC_A, m, 0x0800, &echo_request(source, ours, data)));
+    }
+
     /// A UDP datagram handed to [ip] now, from a socket that holds the broadcast permission: the
-    /// frame when it left at once, `None` when held.
+    /// frame when it left at once, `None` when [ip] did not take it, its next hop asked for.
     pub fn send(&mut self, source: Ipv4Addr, destination: Ipv4Addr, sport: u16, dport: u16, data: &[u8]) -> Result<Option<Vec<u8>>, Counter> {
         self.send_ttl(source, destination, sport, dport, data, Ttl::DEFAULT)
     }
@@ -736,7 +750,7 @@ impl H {
         self.collect();
         sent.map(|s| match s {
             Sent::Frame(n) => Some(frame[..n].to_vec()),
-            Sent::Held => None,
+            Sent::Pending(_) => None,
         })
     }
 

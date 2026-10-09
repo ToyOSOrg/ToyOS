@@ -336,9 +336,10 @@ fn s_udp_us_027_an_unconnected_socket_is_told_nothing_and_nothing_is_kept_for_an
 }
 
 // US-27, for a datagram accepted while [ip] holds its next hop failed (NUD-14): it never
-// waited, and is dropped at its turn, counted, and reported to its connected socket once.
+// waited, and is [ip]'s refusal at its turn, counted there and reported to its connected socket
+// once.
 #[test]
-fn s_udp_us_027_a_datagram_for_a_hop_ip_has_given_up_is_dropped_at_its_turn() {
+fn s_udp_us_027_a_datagram_for_a_hop_ip_has_given_up_is_ips_refusal_at_its_turn() {
     let mut u = U::uf();
     let id = u.bind(ANY, 50_001).unwrap();
     u.udp.connect(&mut u.ip, id, FAR, 53).unwrap();
@@ -346,10 +347,10 @@ fn s_udp_us_027_a_datagram_for_a_hop_ip_has_given_up_is_dropped_at_its_turn() {
     u.run(3_000);
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
     assert_eq!(u.udp.send(&mut u.ip, id, b"again"), Ok(()));
-    assert_eq!((u.out(), u.count(Counter::TxUnreachable)), (vec![], 2), "no request and no datagram");
+    assert_eq!(u.out(), Vec::<Vec<u8>>::new(), "no request and no datagram");
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Err(Error::Failed(SocketError::NextHopFailed)));
     assert_eq!(u.udp.recv(id, &mut [0; 64]), Ok(None));
-    assert_eq!((u.ip_count(toyos_net_ip::Counter::NbPendingDropped), u.ip_count(toyos_net_ip::Counter::NbFailedRefused)), (0, 0), "[ip] was handed neither");
+    assert_eq!((u.count(Counter::TxUnreachable), u.ip_count(toyos_net_ip::Counter::NbFailedRefused)), (1, 1), "the one that waited is [udp]'s drop, the one that did not [ip]'s refusal");
 }
 
 // US-26 as built: a datagram whose next hop is unresolved stays in its socket's queue, and
@@ -432,7 +433,7 @@ fn s_udp_us_053_a_closed_sockets_datagram_waits_for_its_next_hop_and_holds_back_
 }
 
 // A waiting datagram's next hop is the route's of the moment it leaves: when the routes change
-// it is asked again, and with no route left it is dropped and counted (US-24: the address
+// it is handed to [ip] again, which with no route left refuses and counts it (US-24: the address
 // it was accepted from is no longer assigned).
 #[test]
 fn s_udp_us_024_a_waiting_datagram_whose_route_goes_is_dropped() {
@@ -441,7 +442,7 @@ fn s_udp_us_024_a_waiting_datagram_whose_route_goes_is_dropped() {
     u.udp.send_to(&mut u.ip, id, FAR, 53, b"1").unwrap();
     u.out();
     u.ip.remove_address(u.clock(), u.if0, A).unwrap();
-    assert_eq!((datagrams(&u.out()), u.count(Counter::TxUnreachable)), (vec![], 1));
+    assert_eq!((datagrams(&u.out()), u.count(Counter::TxUnreachable), u.ip_count(toyos_net_ip::Counter::RouteNoSourceAddress)), (vec![], 0, 1));
     u.frame(&far_answers());
     assert_eq!(datagrams(&u.out()), vec![]);
 }

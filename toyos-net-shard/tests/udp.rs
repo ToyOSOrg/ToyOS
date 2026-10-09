@@ -181,9 +181,9 @@ fn s_udp_us_027_shard_a_failed_next_hop_drops_what_waited_for_it_and_tells_no_un
     assert!(net.wire()[start..].iter().all(|carried| !name(&carried.frame).starts_with("IPv4 Udp")), "{}", dump(&net, start));
 }
 
-// A datagram that waited is asked its route again when the routes change: with the link down it
-// has none and is dropped and counted, where it would otherwise wait for a next hop the link no
-// longer has.
+// A datagram that waited is handed to [ip] again when the routes change: with the link down it
+// has no route, and [ip] refuses and counts it, where it would otherwise wait for a next hop the
+// link no longer has.
 #[test]
 fn s_udp_us_024_shard_a_waiting_datagram_whose_route_goes_is_dropped() {
     let (mut net, a, socket) = b_resolved();
@@ -192,7 +192,7 @@ fn s_udp_us_024_shard_a_waiting_datagram_whose_route_goes_is_dropped() {
     shard.send_to(now, socket, C, 9, b"c1").unwrap();
     assert_eq!(left(shard, now), ["ARP request 192.0.2.3"]);
     shard.link_down(now).unwrap();
-    assert_eq!((left(shard, now), shard.udp_counters().get(Counter::TxUnreachable)), (vec![], 1));
+    assert_eq!((left(shard, now), shard.udp_counters().get(Counter::TxUnreachable), shard.ip().counters().get(toyos_net_ip::Counter::RouteNoSourceAddress)), (vec![], 0, 1));
     shard.link_up(now).unwrap();
     shard.receive(now, &c_answers());
     assert!(left(shard, now).iter().all(|frame| !frame.starts_with("UDP")));

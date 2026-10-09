@@ -16,8 +16,8 @@
 //! **A datagram waits for its next hop where it was accepted.** One the caller answers
 //! [`Offer::Waits`] stays in its sender's queue, under that queue's bound, and is passed over
 //! until [`Udp::wake`] names the hop: the sender's datagrams to other hops leave meanwhile, and
-//! those to one hop leave in the order they were accepted. One with no way out is dropped,
-//! counted, and reported to a connected socket; nothing is kept for another try.
+//! those to one hop leave in the order they were accepted. One whose hop [`Udp::fail`] names is
+//! dropped, counted, and reported to a connected socket; nothing is kept for another try.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call
 //! returns; one of legacy or insecure input is also a [`Refusal`] naming the socket and the peer.
@@ -94,7 +94,10 @@ pub mod limits {
     pub const RX_DATAGRAMS: usize = 16;
     pub const RX_BYTES: usize = 65_536;
     pub const TX_DATAGRAMS: usize = 16;
+    /// Bytes of a socket's accepted datagrams that have not left: no send counts them, since
+    /// TX_DATAGRAMS of MAX_PAYLOAD fit.
     pub const TX_BYTES: usize = 65_536;
+    const _: () = assert!(TX_DATAGRAMS.saturating_mul(MAX_PAYLOAD) <= TX_BYTES);
     /// Datagrams closed sockets had accepted and that have not left: one socket's queue, whose
     /// bytes MAX_PAYLOAD bounds.
     pub const CLOSED_DATAGRAMS: usize = TX_DATAGRAMS;
@@ -130,8 +133,8 @@ pub enum SocketError {
     Refused,
     /// An ICMP error said the way to the peer is administratively prohibited.
     Prohibited,
-    /// A datagram the socket had accepted found no way out, no route or no link address for its
-    /// next hop, or [ip] refused it as it left: it is gone.
+    /// A datagram the socket had accepted is gone: [ip] refused it as it left, or gave up the
+    /// next hop it waited for.
     NextHopFailed,
 }
 
@@ -261,10 +264,8 @@ pub enum Offer {
     /// It left [udp]: in a frame, or refused by [ip], which counted it and told its flow.
     Taken,
     /// The link address of this next hop is being asked for: the datagram stays with its sender
-    /// until [`Udp::wake`] names the hop.
+    /// until [`Udp::wake`] or [`Udp::fail`] names the hop.
     Waits(Ipv4Addr),
-    /// It has no way out: no route, or a next hop [ip] has given up on or has no room for.
-    Unreachable,
 }
 
 /// What [`Udp::serve`] handed the caller.
@@ -566,8 +567,7 @@ impl Udp {
             Err(refusal) => return self.refuse(route_refusal(refusal), me, peer),
         };
         let socket = self.socket(id)?;
-        let held: usize = socket.tx.iter().map(|queued| queued.payload.len()).sum();
-        if socket.tx.len() >= limits::TX_DATAGRAMS || held.saturating_add(payload.len()) > limits::TX_BYTES {
+        if socket.tx.len() >= limits::TX_DATAGRAMS {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
@@ -717,7 +717,7 @@ impl Udp {
     }
 
     /// A datagram of `flow` this crate had accepted will not leave: [ip] refused it as it left,
-    /// or it found no way out.
+    /// or gave up the next hop it waited for.
     pub fn unreachable(&mut self, flow: &Flow) {
         if let Some(socket) = self.connected(flow) {
             socket.pending = Some(SocketError::NextHopFailed);
@@ -743,8 +743,7 @@ impl Udp {
 
     /// Offers `sender`'s datagrams in the order it accepted them, those waiting for a next hop
     /// aside, until `offer` takes one: each is built as `offer` reads it. One `offer` answers
-    /// [`Offer::Waits`] for stays and waits; one it answers [`Offer::Unreachable`] for is dropped
-    /// and counted, and the connected socket it left from is told.
+    /// [`Offer::Waits`] for stays and waits.
     pub fn serve(&mut self, sender: Sender, mut offer: impl FnMut(&UdpOut<'_>) -> Offer) -> Served {
         let (queue, offered) = match sender {
             Sender::Closed => (&mut self.closed, &mut self.closed_offered),
@@ -753,35 +752,24 @@ impl Udp {
                 (&mut socket.tx, &mut socket.offered)
             }
         };
-        let mut taken = false;
-        let mut lost = Vec::new();
-        queue.retain_mut(|queued| {
-            if taken || queued.waits.is_some() {
-                return true;
-            }
+        let mut taken = None;
+        for (at, queued) in queue.iter_mut().enumerate().filter(|(_, queued)| queued.waits.is_none()) {
             match offer(&queued.out()) {
-                Offer::Taken => taken = true,
+                Offer::Taken => {
+                    taken = Some(at);
+                    break;
+                }
                 Offer::Waits(next_hop) => queued.waits = Some(next_hop),
-                Offer::Unreachable => lost.push(queued.flow()),
             }
-            queued.waits.is_some()
-        });
+        }
+        let taken = taken.and_then(|at| queue.remove(at)).is_some();
         let more = taken && queue.iter().any(|queued| queued.waits.is_none());
         *offered = more;
         self.counters.add(Counter::Tx, u64::from(taken));
-        self.lose(&lost);
         match (taken, more) {
             (true, true) => Served::More,
             (true, false) => Served::Last,
             (false, _) => Served::Nothing,
-        }
-    }
-
-    /// Datagrams this crate had accepted, each dropped for want of a way out.
-    fn lose(&mut self, lost: &[Flow]) {
-        self.counters.add(Counter::TxUnreachable, u64::try_from(lost.len()).unwrap_or(u64::MAX));
-        for flow in lost {
-            self.unreachable(flow);
         }
     }
 
@@ -799,7 +787,10 @@ impl Udp {
                 !waited
             });
         }
-        self.lose(&lost);
+        self.counters.add(Counter::TxUnreachable, u64::try_from(lost.len()).unwrap_or(u64::MAX));
+        for flow in &lost {
+            self.unreachable(flow);
+        }
     }
 
     /// `next_hop`'s link address is known: the datagrams that wait for it are offered again.

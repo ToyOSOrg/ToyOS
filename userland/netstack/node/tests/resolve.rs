@@ -956,20 +956,21 @@ fn a_query_the_network_reports_unreachable_is_counted_and_ends_a_lookup_with_no_
     assert_eq!(requests, [0, 1_000, 2_000], "the premise: [ip] asked for the resolver three times, a second apart");
 }
 
-// [ip] holds a next hop it gave up on as failed for a while. A query for it is accepted, and is
-// dropped at the transmit opportunity that would have carried it: the node reads that in the
-// same opportunity, and the lookup ends at the 4 s it started.
+// [ip] holds a next hop it gave up on as failed for a while. A query for it is accepted, and
+// [ip] refuses it at the transmit opportunity that would have carried it: the node reads that in
+// the same opportunity, and the lookup ends at the 4 s it started.
 #[test]
 fn a_query_for_a_resolver_ip_has_given_up_ends_its_lookup_in_the_opportunity_that_would_have_carried_it() {
     let mut net = Net::leased(&[SILENT], Some(R));
     let first = net.resolve("www.example").unwrap();
     assert_eq!(net.run(first, 10 * WAIT_MS), Some(Err(Ended::Failed(Failure::Unreachable))));
     net.until(4_000);
-    let dropped = net.lan.counted(Rule::TxUnreachable);
+    let refused = |net: &Net| net.lan.node.shard().ip().counters().get(toyos_net_ip::Counter::NbFailedRefused);
+    let (before, waited) = (refused(&net), net.lan.counted(Rule::TxUnreachable));
     let id = net.resolve("other.example").unwrap();
     assert_eq!(net.lan.node.take_resolved(), NONE, "the premise: the query was accepted");
     assert_eq!(net.lan.opportunity(), 0);
-    assert_eq!(net.lan.counted(Rule::TxUnreachable), dropped + 1, "the premise: the query was dropped at its turn, at 4 s");
+    assert_eq!((refused(&net), net.lan.counted(Rule::TxUnreachable)), (before + 1, waited), "the premise: [ip] refused the query at its turn, at 4 s, and it never waited");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::Failed(Failure::Unreachable)) }]);
     assert_eq!(net.ms(), 4_000);
     assert_eq!(net.lan.node.counters().get(Counter::QueryFailed), 3);

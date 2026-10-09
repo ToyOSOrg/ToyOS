@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
-use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, NextHop, Nud, Resolution, Sent, Source, UdpOut, FRAME};
+use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, Sent, FRAME};
 use toyos_net_udp::{Counter, Offer, Sender, Served, SocketId, Udp, Verdict};
 use toyos_net_wire::ethernet::{Frame, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Packet, MulticastAddr};
@@ -289,25 +289,6 @@ impl U {
         self.events.extend(events);
     }
 
-    /// The hop question the shard asks before [ip] is handed `out`: `None` is a datagram that
-    /// may leave now.
-    fn hop(ip: &mut Ip, now: Instant, out: &UdpOut<'_>) -> Option<Offer> {
-        let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
-        let Ok(route) = ip.route(out.destination, source, None) else { return Some(Offer::Unreachable) };
-        let NextHop::Neighbour(next_hop) = route.next_hop else { return None };
-        let answer = match ip.neighbour(route.iface, next_hop) {
-            Some(Nud::Failed) => Resolution::Failed,
-            Some(Nud::Incomplete(_)) => Resolution::Pending,
-            Some(entry) => Resolution::Resolved(entry.mac().expect("every other state holds a link address")),
-            None => ip.resolve(now, route.iface, next_hop, route.source),
-        };
-        match answer {
-            Resolution::Resolved(_) => None,
-            Resolution::Pending => Some(Offer::Waits(next_hop)),
-            Resolution::Failed => Some(Offer::Unreachable),
-        }
-    }
-
     /// A transmit opportunity with room for `credit` frames, composed as the shard composes it:
     /// [ip]'s frames first, then UDP's, a datagram per sender in turn, then what UDP's datagrams
     /// asked [ip] for. A datagram that waits for its next hop spends no frame and is never
@@ -326,19 +307,16 @@ impl U {
             let Some(sender) = round.pop_front() else { break };
             let mut framed = false;
             let served = udp.serve(sender, |out| {
-                if let Some(answer) = Self::hop(ip, now, out) {
-                    return answer;
-                }
                 let mut buf = [0u8; FRAME];
                 match ip.send_udp(now, out, &mut buf) {
                     Ok(Sent::Frame(n)) => {
                         frames.push(buf[..n].to_vec());
                         framed = true;
+                        Offer::Taken
                     }
-                    Ok(Sent::Held) => panic!("[ip] held a datagram of a sender's"),
-                    Err(_) => {}
+                    Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+                    Err(_) => Offer::Taken,
                 }
-                Offer::Taken
             });
             spent += usize::from(framed);
             if served == Served::More {

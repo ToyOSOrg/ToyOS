@@ -13,12 +13,11 @@
 //! next hop is unresolved or failed builds nothing, spends nothing, and is not asked again until
 //! [ip] reports a change for that next hop, for the routes, or, to a flow a full neighbour table
 //! refused, that the table has room: a waiting flow costs one question per such change. A UDP
-//! datagram is asked the same question before [ip] is handed it: one whose next hop is unresolved
-//! stays in its sender's queue in [udp], spending nothing and charged nothing, while the sender's
-//! datagrams to other next hops leave: it is asked again when [ip] reports that hop resolved or
-//! the routes changed, and dropped when [ip] reports the hop failed. One with no route, or whose
-//! next hop [ip] holds failed or has no room for, is dropped as its turn comes. [ip] holds no
-//! sender's datagram.
+//! datagram [ip] does not take, its next hop unresolved, stays in its sender's queue in [udp],
+//! spending nothing and charged nothing, while the sender's datagrams to other next hops leave:
+//! it is handed to [ip] again when [ip] reports that hop resolved or the routes changed, and
+//! dropped by [udp] when [ip] reports the hop failed. One [ip] refuses, for want of a route or
+//! for a next hop it holds failed or has no room for, is [ip]'s to count and report.
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
@@ -348,28 +347,17 @@ impl Shard {
     fn udp_frame(&mut self, now: Instant, sender: Sender, sink: &mut impl FnMut(&[u8])) -> Outcome {
         let Self { ip, udp, frame, .. } = self;
         let mut sent = None;
-        let served = udp.serve(sender, |out| {
-            let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
-            let Ok(route) = ip.route(out.destination, source, None) else { return Offer::Unreachable };
-            if let NextHop::Neighbour(next_hop) = route.next_hop {
-                match peek(ip, now, route.iface, next_hop, route.source) {
-                    (Resolution::Resolved(_), _) => {}
-                    (Resolution::Pending, _) => return Offer::Waits(next_hop),
-                    (Resolution::Failed, _) => return Offer::Unreachable,
-                }
+        let served = udp.serve(sender, |out| match ip.send_udp(now, out, frame) {
+            Ok(Sent::Frame(len)) => {
+                sent = frame.get(..len).map(|bytes| {
+                    sink(bytes);
+                    charge(bytes)
+                });
+                Offer::Taken
             }
-            match ip.send_udp(now, out, frame) {
-                Ok(Sent::Frame(len)) => {
-                    sent = frame.get(..len).map(|bytes| {
-                        sink(bytes);
-                        charge(bytes)
-                    });
-                }
-                Ok(Sent::Held) => unreachable!("[ip] is handed a datagram only once its next hop has a link address"),
-                // Counted by [ip], which tells the datagram's flow.
-                Err(_) => {}
-            }
-            Offer::Taken
+            Ok(Sent::Pending(next_hop)) => Offer::Waits(next_hop),
+            // Counted by [ip], which tells the datagram's flow.
+            Err(_) => Offer::Taken,
         });
         Outcome { frame: sent, leaves: served != UdpServed::More }
     }
@@ -672,33 +660,22 @@ fn hop(ip: &mut Ip, now: Instant, iface: IfIndex, tuple: &Tuple, waiting: &mut B
     let remote = tuple.remote.addr;
     let Ok(route) = ip.route(remote, Source::Bound(tuple.local.addr), Some(iface)) else { return Hop::Unreachable };
     let NextHop::Neighbour(next_hop) = route.next_hop else { return Hop::Unreachable };
-    let (answer, wait) = match peek(ip, now, iface, next_hop, route.source) {
-        (Resolution::Resolved(mac), _) => return Hop::Ready(Via { next_hop, mac }),
-        (Resolution::Pending, wait) => (Hop::Pending, wait),
-        (Resolution::Failed, wait) => (Hop::Unreachable, wait),
-    };
-    waiting.entry(wait).or_default().insert(remote);
-    answer
-}
-
-/// Whether a frame for `next_hop` can be built now, and what a flow that cannot build one waits
-/// on. The entry is peeked and does not move: only a next hop with no entry is resolved, which
-/// queues its request, preferring `source`.
-fn peek(ip: &mut Ip, now: Instant, iface: IfIndex, next_hop: Ipv4Addr, source: Ipv4Addr) -> (Resolution, Wait) {
-    match ip.neighbour(iface, next_hop) {
-        Some(entry) => {
-            let answer = match entry.mac() {
-                Some(mac) => Resolution::Resolved(mac),
-                None if matches!(entry, Nud::Failed) => Resolution::Failed,
-                None => Resolution::Pending,
-            };
-            (answer, Wait::Hop(next_hop))
-        }
-        None => match ip.resolve(now, iface, next_hop, source) {
-            Resolution::Failed => (Resolution::Failed, Wait::Room),
-            answer => (answer, Wait::Hop(next_hop)),
+    let (answer, wait) = match ip.neighbour(iface, next_hop) {
+        Some(entry) => match entry.mac() {
+            Some(mac) => (Hop::Ready(Via { next_hop, mac }), None),
+            None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(next_hop))),
+            None => (Hop::Pending, Some(Wait::Hop(next_hop))),
         },
+        None => match ip.resolve(now, iface, next_hop, route.source) {
+            Resolution::Resolved(mac) => (Hop::Ready(Via { next_hop, mac }), None),
+            Resolution::Pending => (Hop::Pending, Some(Wait::Hop(next_hop))),
+            Resolution::Failed => (Hop::Unreachable, Some(Wait::Room)),
+        },
+    };
+    if let Some(wait) = wait {
+        waiting.entry(wait).or_default().insert(remote);
     }
+    answer
 }
 
 /// What a frame costs its flow's deficit: its length, which `FRAME` bounds and `QUANTUM` fits.
