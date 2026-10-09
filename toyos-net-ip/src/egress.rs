@@ -300,10 +300,6 @@ impl Ip {
         };
         let source = if out.source.is_unspecified() { Source::Unspecified } else { Source::Bound(out.source) };
         let sent = self.route(out.destination, source, None).and_then(|route| {
-            if route.next_hop == NextHop::Broadcast && !out.broadcast {
-                self.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(out.destination));
-                return Err(Counter::IpBroadcastNotPermitted);
-            }
             let builder = Ipv4Builder {
                 source: Ipv4Source::new(route.source).map_err(|_| Counter::RouteNoSourceAddress)?,
                 destination: out.destination,
@@ -312,7 +308,7 @@ impl Ip {
                 options: &[],
                 payload: out.datagram,
             };
-            self.datagram(now, &route, &builder, FrameKind::Datagram, Some(flow), Some(frame))
+            self.datagram(now, &route, &builder, FrameKind::Datagram, out.broadcast, Some((flow, frame)))
         });
         if sent.is_err() {
             self.log.event(Event::Unreachable(flow));
@@ -321,19 +317,21 @@ impl Ip {
     }
 
     /// Sends one of [ip]'s own ICMP messages along `route`, into the control queue or held for
-    /// its next hop.
+    /// its next hop, and never in a link broadcast.
     pub(crate) fn own<P: Payload>(&mut self, now: Instant, route: &Route, builder: &Ipv4Builder<'_, P>, kind: FrameKind) {
-        let _ = self.datagram(now, route, builder, kind, None, None);
+        let _ = self.datagram(now, route, builder, kind, false, None);
     }
 
+    /// The one place a datagram's link destination is chosen: the link's broadcast address only
+    /// with `broadcast`, and a transport's datagram comes with its flow and its frame.
     fn datagram<P: Payload>(
         &mut self,
         now: Instant,
         route: &Route,
         builder: &Ipv4Builder<'_, P>,
         kind: FrameKind,
-        flow: Option<Flow>,
-        out: Option<&mut [u8; FRAME]>,
+        broadcast: bool,
+        transport: Option<(Flow, &mut [u8; FRAME])>,
     ) -> Result<Sent, Counter> {
         if builder.length().map_or(true, |len| len > MTU) {
             self.log.count(Counter::IpExceedsMtu);
@@ -341,6 +339,10 @@ impl Ip {
         }
         let Some((i, mut cx)) = self.split(now, route.iface) else { return Err(Counter::UnknownInterface) };
         let (destination, hold) = match route.next_hop {
+            NextHop::Broadcast if !broadcast => {
+                cx.log.refuse(Counter::IpBroadcastNotPermitted, route.iface, Peer::Ip(builder.destination));
+                return Err(Counter::IpBroadcastNotPermitted);
+            }
             NextHop::Broadcast => (MacAddr::BROADCAST, None),
             NextHop::Multicast(group) => (MacAddr::multicast(group), None),
             NextHop::Neighbour(addr) => {
@@ -357,6 +359,7 @@ impl Ip {
             }
         };
         let mac = i.mac;
+        let (flow, out) = transport.unzip();
         if let Some(addr) = hold {
             let frame = build_vec(mac, destination, builder).ok_or(Counter::IpExceedsMtu)?;
             nud::hold(i, &mut cx, addr, Held { frame, kind, flow });
