@@ -33,9 +33,9 @@ fixed here: two builds of one LLVM key differing is
   store's std and C library, not the one building: chiefly the panic
   locations of their path dependencies `toyos`, `toyos-abi` and
   `toyos-osrelease`. A worktree whose sysroot came from the store carries
-  another checkout's path. On `a944746d5`'s `testcases` ROOT
-  that is all 250 ELF files (24 in each C case, 6 in `fileserver`), and on
-  its `cargo run` ROOT all 27 programs (6 in `snake`).
+  another checkout's path. On the `testcases` ROOT that is all 250 ELF
+  files (23 in each C case, 6 in `fileserver`), and on the `cargo run` ROOT
+  all 27 programs (6 in `snake`).
 - Every guest binary, the kernel and the bootloader carry the cargo home's
   absolute path: the panic locations of registry and git dependencies (36 in
   `snake`, 7 in the kernel, 40 in the bootloader). Two checkouts on one host
