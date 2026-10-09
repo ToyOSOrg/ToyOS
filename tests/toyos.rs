@@ -3150,7 +3150,7 @@ fn job_said(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
 
 /// A machine with one NVMe disk and no USB controller boots the image off
 /// that disk, and what one boot wrote to `/home` and said into `/log` the next
-/// boot reads back: a file under a name of this run's, byte for byte, and a
+/// boot reads back: a file under a name of this run's, line for line, and a
 /// line of this run's in a log file the first boot listed.
 fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, qmp: true, ..Default::default() };
@@ -3190,10 +3190,17 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     // What the second boot said, and none of the first's servers' lines.
     console = console.split_once(bootlog::REBOOTING).expect("checked above").1.to_string();
     served_by_diskserver(&mut qemu, &mut console)?;
-    let shipped = job_said(&mut qemu, &format!("cat {source}"))?;
-    let read_back = job_said(&mut qemu, &format!("cat {kept}"))?;
-    if shipped.trim().is_empty() || read_back != shipped {
-        return Err(format!("{kept} reads back after the reboot as\n{read_back}\nand {source} is\n{shipped}"));
+    // A job's capture is every program's lines of its window, a server's
+    // late ones among them: the file's are the ones of its own form,
+    // `KEY=value`, which no program says.
+    let assignments = |said: &str| -> Vec<String> {
+        let key = |line: &str| line.split_once('=').is_some_and(|(key, _)| !key.is_empty() && key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'));
+        said.lines().filter(|line| key(line)).map(str::to_string).collect()
+    };
+    let shipped = assignments(&job_said(&mut qemu, &format!("cat {source}"))?);
+    let read_back = assignments(&job_said(&mut qemu, &format!("cat {kept}"))?);
+    if shipped.is_empty() || read_back != shipped {
+        return Err(format!("{kept} reads back after the reboot as\n{read_back:#?}\nand {source} is\n{shipped:#?}"));
     }
     // The line as the first boot's `logkeeper` filed it: `echo`'s own, whose
     // whole text is the nonce, which nothing the second boot says is.
@@ -3207,7 +3214,7 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     let Some(found) = found else {
         return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
     };
-    eprintln!("  [disk] after the reboot {kept} is {} bytes of {source}, and /log/{found} said {nonce}", read_back.len());
+    eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
     Ok(())
 }
 
