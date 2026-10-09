@@ -371,7 +371,7 @@ impl Udp {
         self.socket(id).map(|s| s.rx_full)
     }
 
-    /// Only netstack's own sockets: POSIX's `SO_BROADCAST`.
+    /// POSIX's `SO_BROADCAST`: without it a send to a broadcast address is refused.
     pub fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), Error> {
         self.socket(id).map(|s| s.broadcast = permitted)
     }

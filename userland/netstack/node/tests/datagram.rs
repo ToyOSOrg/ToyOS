@@ -1,8 +1,9 @@
-//! A client's datagram sockets on the node. No scenario ids: [udp]'s rules are its own crate's
-//! scenarios; these are the node's calls over them, and the word each of [udp]'s refusals is
-//! answered in, which the readers' specifications owe a scenario for and do not have. What is
-//! not ours: `etherparse` reads every frame the node emits (`lan::outside`), and each test names
-//! the RFC its expectation is read from.
+//! A client's datagram sockets on the node. [udp]'s rules are its own crate's scenarios; these
+//! are the node's calls over them, and the word each of [udp]'s refusals is answered in, which
+//! the readers' specifications owe a scenario for and do not have. The one id here is US-21's,
+//! the broadcast permission, which the node hands a client. What is not ours: `etherparse` reads
+//! every frame the node emits (`lan::outside`), and each test names the RFC its expectation is
+//! read from.
 
 mod common;
 mod lan;
@@ -10,7 +11,7 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{terms, A, MAC, MAC_B, MAC_R};
+use common::{terms, A, BROADCAST, MAC, MAC_B, MAC_R};
 use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
 use toyos_net_node::{Datagram, Event, Refused};
 use toyos_net_shard::Refusal;
@@ -18,6 +19,8 @@ use toyos_net_udp::Counter;
 use toyos_net_wire::Port;
 
 const ANY: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+/// The directed broadcast address of the leased 192.0.2.0/24 (RFC 922 §7).
+const SUBNET_BROADCAST: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 255);
 
 fn port(port: u16) -> Option<Port> {
     Some(Port::new(port).expect("not port 0"))
@@ -102,7 +105,7 @@ fn refused_send(lan: &mut Lan, id: toyos_net_node::DatagramId, to: Ipv4Addr, por
 }
 
 // The pipe ABI's words, `toyos::net`'s `ERR_*`: an address in use, not connected, invalid input,
-// resource exhausted. Each refusal is reached here by the call a client makes.
+// resource exhausted, permission denied. Each refusal is reached here by the call a client makes.
 #[test]
 fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     let mut lan = Lan::new();
@@ -117,18 +120,19 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     assert_eq!(lan.counted(Counter::PortInUse), 2);
     let (held, _) = lan.node.udp_bind(A, port(4_001), undrawn).unwrap();
 
-    let invalid: [(Ipv4Addr, u16, &[u8], Counter); 8] = [
+    let invalid: [(Ipv4Addr, u16, &[u8], Counter); 6] = [
         (B, 0, b"x", Counter::SendPortZero),
         (Ipv4Addr::UNSPECIFIED, 7, b"x", Counter::SendUnspecifiedDestination),
         (Ipv4Addr::LOCALHOST, 7, b"x", Counter::SendLoopback),
         (A, 7, b"x", Counter::SendToSelf),
         (Ipv4Addr::new(240, 0, 0, 1), 7, b"x", Counter::SendInvalidDestination),
-        (Ipv4Addr::BROADCAST, 7, b"x", Counter::BroadcastNotPermitted),
-        (Ipv4Addr::new(192, 0, 2, 255), 7, b"x", Counter::BroadcastNotPermitted),
         (B, 7, &[0; 1_473], Counter::ExceedsMtu),
     ];
     for (to, port, payload, rule) in invalid {
         refused_send(&mut lan, any, to, port, payload, Refused::InvalidInput, rule);
+    }
+    for to in [Ipv4Addr::BROADCAST, SUBNET_BROADCAST] {
+        refused_send(&mut lan, any, to, 7, b"x", Refused::PermissionDenied, Counter::BroadcastNotPermitted);
     }
     lan.node.udp_send_to(lan.now, any, B, 7, &[0; 1_472]).expect("1,472 octets fill one frame");
     lan.pump();
@@ -140,11 +144,6 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     lan.pump();
     lan.node.udp_send_to(lan.now, any, B, 7, b"later").expect("the same call, once the queue has left");
 
-    // What [udp] logs waits for the node's next pass over the stack's reports.
-    lan.fire(lan.now);
-    let logged = lan.node.drain_events().any(|event| matches!(event, Event::Stack { refusal: Refusal::Udp(refusal), .. } if refusal.rule == Counter::BroadcastNotPermitted));
-    assert!(logged, "a refused broadcast is a line for the log");
-
     assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
     refused_send(&mut lan, any, B, 7, b"late", Refused::NotConnected, Counter::NoSourceAddress);
     refused_send(&mut lan, held, B, 7, b"late", Refused::NotConnected, Counter::SourceAddressNotAssigned);
@@ -153,6 +152,82 @@ fn each_refusal_is_answered_in_the_pipes_word_for_it() {
     routerless.lease_on(&terms(3_600, None));
     let (id, _) = routerless.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
     refused_send(&mut routerless, id, OFF_LINK, 7, b"x", Refused::NotConnected, Counter::NoRoute);
+}
+
+// US-21 (decision U-4), POSIX's `SO_BROADCAST`: a send to the limited broadcast address or to the
+// held prefix's directed one is refused without the socket's permission, in the word that says
+// permission, and with it leaves in a frame to the link's broadcast address with the socket's
+// TTL, no link address asked for (RFC 919 §7, RFC 922 §7: an IP broadcast is a link broadcast;
+// RFC 1122 §3.3.6). The permission is the one socket's, and is taken back as it was given.
+#[test]
+fn a_broadcast_needs_its_permission() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(5_000), undrawn).unwrap();
+    let (other, _) = lan.node.udp_bind(ANY, port(5_002), undrawn).unwrap();
+    let frames = lan.sent.len();
+    for to in [Ipv4Addr::BROADCAST, SUBNET_BROADCAST] {
+        refused_send(&mut lan, id, to, 5_001, b"hi", Refused::PermissionDenied, Counter::BroadcastNotPermitted);
+    }
+    lan.pump();
+    assert_eq!(lan.sent.len(), frames, "nothing left for either");
+
+    assert_eq!(lan.node.udp_set_broadcast(id, true), Ok(()));
+    for to in [Ipv4Addr::BROADCAST, SUBNET_BROADCAST] {
+        assert_eq!(lan.node.udp_send_to(lan.now, id, to, 5_001, b"hi"), Ok(()));
+    }
+    lan.pump();
+    let left: Vec<Seen> = lan.sent[frames..].iter().map(|(_, seen)| seen.clone()).collect();
+    let broadcast = |destination| Seen::Udp(Udp { to: BROADCAST, source: A, source_port: 5_000, destination, port: 5_001, ttl: 64, payload: b"hi".to_vec() });
+    assert_eq!(left, [broadcast(Ipv4Addr::BROADCAST), broadcast(SUBNET_BROADCAST)], "each in a link broadcast, and no ARP request before it");
+
+    refused_send(&mut lan, other, Ipv4Addr::BROADCAST, 5_001, b"hi", Refused::PermissionDenied, Counter::BroadcastNotPermitted);
+    assert_eq!(lan.node.udp_set_broadcast(id, false), Ok(()));
+    for to in [Ipv4Addr::BROADCAST, SUBNET_BROADCAST] {
+        refused_send(&mut lan, id, to, 5_001, b"hi", Refused::PermissionDenied, Counter::BroadcastNotPermitted);
+    }
+    lan.node.udp_send_to(lan.now, id, B, 5_001, b"hi").expect("one host needs no permission");
+    lan.pump();
+    let destinations: Vec<Ipv4Addr> = lan.datagrams().iter().map(|(_, udp)| udp.destination).collect();
+    assert_eq!(destinations, [Ipv4Addr::BROADCAST, SUBNET_BROADCAST, B], "and no broadcast since the permission went");
+
+    lan.node.udp_close(lan.now, id).unwrap();
+    assert_eq!(lan.node.udp_set_broadcast(id, true), Err(Refused::NotConnected), "a closed socket is given nothing");
+}
+
+/// The line the log gets for a send [udp] refused under `rule`, from port 4000 bound to any.
+fn line(rule: Counter, peer: (Ipv4Addr, u16), suppressed: u64) -> Event {
+    let local = (ANY, port(4_000).unwrap());
+    Event::Stack { refusal: Refusal::Udp(toyos_net_udp::Refusal { rule, local, peer }), suppressed }
+}
+
+// A refusal [udp] logs (US-20's 0.0.0.0, US-21's broadcast) is the node's line for the log when
+// the send that met it returns: no frame, deadline or link change comes between. The shard lets
+// one line a rule through in 10 s, and the next after them says how many it stood for.
+#[test]
+fn a_refusal_is_logged_by_the_call_that_met_it() {
+    let mut lan = Lan::new();
+    lan.lease(3_600);
+    let (id, _) = lan.node.udp_bind(ANY, port(4_000), undrawn).unwrap();
+    assert_eq!(lan.node.drain_events().count(), 0, "nothing is owed the log before the send");
+
+    assert_eq!(lan.node.udp_send_to(lan.now, id, Ipv4Addr::BROADCAST, 7, b"x"), Err(Refused::PermissionDenied));
+    let logged: Vec<Event> = lan.node.drain_events().collect();
+    assert_eq!(logged, [line(Counter::BroadcastNotPermitted, (Ipv4Addr::BROADCAST, 7), 0)]);
+
+    assert_eq!(lan.node.udp_send_to(lan.now, id, ANY, 7, b"x"), Err(Refused::InvalidInput));
+    let logged: Vec<Event> = lan.node.drain_events().collect();
+    assert_eq!(logged, [line(Counter::SendUnspecifiedDestination, (ANY, 7), 0)]);
+
+    assert_eq!(lan.node.udp_send_to(lan.now, id, SUBNET_BROADCAST, 7, b"x"), Err(Refused::PermissionDenied));
+    assert_eq!(lan.node.udp_send_to(lan.now, id, B, 0, b"x"), Err(Refused::InvalidInput));
+    lan.node.udp_send_to(lan.now, id, B, 7, b"x").unwrap();
+    assert_eq!(lan.node.drain_events().count(), 0, "a second inside 10 s, a refusal that is no line, and a datagram accepted");
+
+    let later = lan.now.after(Duration::from_secs(10));
+    assert_eq!(lan.node.udp_send_to(later, id, Ipv4Addr::BROADCAST, 9, b"x"), Err(Refused::PermissionDenied));
+    let logged: Vec<Event> = lan.node.drain_events().collect();
+    assert_eq!(logged, [line(Counter::BroadcastNotPermitted, (Ipv4Addr::BROADCAST, 9), 1)]);
 }
 
 // A closed socket's port is free at once, and what it had accepted still leaves: in the first

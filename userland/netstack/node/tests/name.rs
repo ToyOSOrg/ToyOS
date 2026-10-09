@@ -174,6 +174,49 @@ fn a_held_lease_is_announced_at_once_and_a_second_later() {
     assert_eq!(lan.datagrams().len(), 2, "owed twice, sent twice");
 }
 
+// RFC 6762 §8: "Whenever a Multicast DNS responder starts up, wakes up from sleep, receives an
+// indication of a network interface "Link Change" event, or has any other reason to believe that
+// its network connectivity may have changed in some relevant way, it MUST perform the two startup
+// steps below: Probing (Section 8.1) and Announcing (Section 8.3)." §8.3: "at least two
+// unsolicited responses, one second apart." The node keeps its lease across the link, so the
+// address is not new and only the link's return says the name is owed again. §6: a return inside
+// the second of the record's last multicast is announced when that second ends.
+#[test]
+fn a_held_name_is_announced_again_when_the_link_returns() {
+    let mut lan = settled();
+    let from = lan.datagrams().len();
+    lan.link(false);
+    let down = lan.now.after(Duration::from_secs(30));
+    lan.fire(down);
+    assert!(since(&lan, from).is_empty(), "a link that went owes the name nothing");
+
+    lan.link(true);
+    let back = lan.now;
+    assert!(lan.node.lease().is_some(), "the lease outlived the link");
+    assert_eq!(lan.datagrams()[from..], [(back, &multicast(response()))], "announced as the link returns");
+    let owed = lan.node.next_deadline().expect("the second announcement is owed");
+    assert!(owed <= back.after(Duration::from_secs(1)), "and is a deadline of the node's");
+    assert!(lan.run_until(Duration::from_secs(2), |lan| lan.datagrams().len() == from + 2), "the second announcement");
+    let (second, again) = lan.datagrams()[from + 1];
+    assert_eq!(again, &multicast(response()));
+    // The responder's clock is whole milliseconds.
+    let apart = second.since(back);
+    assert!(apart <= Duration::from_secs(1) && apart > Duration::from_millis(999), "{apart:?} apart");
+    let quiet = lan.now.after(Duration::from_secs(10));
+    lan.fire(quiet);
+    assert_eq!(lan.datagrams().len(), from + 2, "owed twice, sent twice");
+
+    let asked = lan.now;
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &ours(0, CLASS_IN)));
+    lan.link(false);
+    lan.link(true);
+    assert_eq!(lan.datagrams()[from + 2..], [(asked, &multicast(response()))], "the answer, and no announcement in its second");
+    assert!(lan.run_until(Duration::from_secs(3), |lan| lan.datagrams().len() == from + 5), "both announcements");
+    let after: Vec<Duration> = lan.datagrams()[from + 3..].iter().map(|(at, _)| at.since(asked)).collect();
+    assert!(after[0] <= Duration::from_secs(1) && after[0] > Duration::from_millis(999), "{after:?}");
+    assert!(after[1] <= Duration::from_secs(2) && after[1] > Duration::from_millis(1_999), "{after:?}");
+}
+
 // RFC 6762 §6.7: a query from a port other than 5353 is a legacy resolver's, and its answer goes
 // to its own address and port. §5.4: one from port 5353 with the unicast-response bit is
 // answered at its own address, with the response a multicast would carry.

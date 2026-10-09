@@ -605,6 +605,11 @@ impl Shard {
         self.udp.set_ttl(id, unicast, multicast)
     }
 
+    /// Whether a socket's datagrams may go to a broadcast address.
+    pub fn udp_set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), toyos_net_udp::Error> {
+        self.udp.set_broadcast(id, permitted)
+    }
+
     /// Closes a socket: its port is free at once, and what it had accepted leaves as [udp]'s
     /// closed sender, in the round from this call.
     pub fn udp_close(&mut self, now: Instant, id: SocketId) -> Result<(), toyos_net_udp::Error> {

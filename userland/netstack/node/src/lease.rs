@@ -161,6 +161,10 @@ impl Stack {
         self.shard.udp_close(now, id)
     }
 
+    pub(crate) fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), toyos_net_udp::Error> {
+        self.shard.udp_set_broadcast(id, permitted)
+    }
+
     pub(crate) fn set_ttl(&mut self, id: SocketId, unicast: Ttl, multicast: Ttl) -> Result<(), toyos_net_udp::Error> {
         self.shard.udp_set_ttl(id, unicast, multicast)
     }
@@ -170,6 +174,19 @@ impl Stack {
     }
 
     // ---- the lease ----
+
+    /// The log lines among what the shard has reported, taken ahead of the reports before them:
+    /// none is read against the state.
+    pub(crate) fn refusals(&mut self, mut line: impl FnMut(Refusal, u64)) {
+        self.inbox.extend(self.shard.drain_events());
+        self.inbox.retain(|event| match *event {
+            Event::Refused { refusal, suppressed } => {
+                line(refusal, suppressed);
+                false
+            }
+            Event::Verified(_) | Event::Conflict { .. } | Event::Lost { .. } | Event::NotVerified(_) => true,
+        });
+    }
 
     /// The shard's next event, read against the state.
     pub(crate) fn report(&mut self) -> Option<Report> {
@@ -253,5 +270,50 @@ impl Stack {
             lease.router = None;
         }
         refused
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use toyos_net_shard::Secrets;
+    use toyos_net_udp::Counter;
+    use toyos_net_wire::ethernet::IndividualMac;
+
+    use super::*;
+
+    const A: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+    // No id, and no call of the node's reaches it: [ip] reports an address only at a frame, a
+    // deadline or a link change, each of which ends in the node's pass. The order is `Stack`'s to
+    // keep all the same: a log line taken while the verification of the address under probe
+    // waits takes nothing else, and the verification is still the next report.
+    #[test]
+    fn the_log_lines_are_taken_and_the_report_before_them_keeps_its_turn() {
+        let secrets = Secrets {
+            ip: [1; 16],
+            resets: [2; 16],
+            tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
+        };
+        let Some(mac) = IndividualMac::new(MacAddr([2, 0, 0, 0, 0, 0x0a])) else { unreachable!("an individual address") };
+        let mut now = Instant::from_millis(3_600_000);
+        let Ok(mut stack) = Stack::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }) else { unreachable!("a configuration [tcp] takes") };
+        stack.link(now, true);
+        assert_eq!(stack.probe(now, A, 24), Ok(()));
+        while stack.shard.ip().address(stack.shard.iface(), A) == Some(toyos_net_ip::AddrState::Tentative) {
+            stack.transmit(now, usize::MAX, |_| {});
+            let Some(next) = stack.next_deadline() else { unreachable!("conflict detection is still running") };
+            now = next;
+            stack.fire(now);
+        }
+        let Ok((socket, _)) = stack.bind(Ipv4Addr::UNSPECIFIED, Port::new(4_000), || 0) else { unreachable!("a free port") };
+        assert_eq!(stack.send_to(now, socket, Ipv4Addr::UNSPECIFIED, 7, b"x"), Err(toyos_net_udp::Error::Refused(Counter::SendUnspecifiedDestination)));
+
+        let mut lines = Vec::new();
+        stack.refusals(|refusal, _| lines.push(refusal));
+        assert!(matches!(lines.as_slice(), [Refusal::Udp(refusal)] if refusal.rule == Counter::SendUnspecifiedDestination), "{lines:?}");
+        assert!(matches!(stack.report(), Some(Report::Verified(Verified(A)))), "the verification is still to be read");
+        assert!(stack.report().is_none());
     }
 }

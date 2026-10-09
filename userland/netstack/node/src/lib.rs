@@ -158,10 +158,14 @@ impl Node {
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
-    /// lease stays; up, the client verifies a lease it holds and otherwise starts over.
+    /// lease stays; up, the client verifies a lease it holds and otherwise starts over, and the
+    /// machine's name is announced again for a lease that stayed.
     pub fn link(&mut self, now: Instant, up: bool, mut draw: impl FnMut() -> u32) {
         self.stack.link(now, up);
         if up {
+            if let Some(name) = &mut self.name {
+                name.link_returned(now);
+            }
             let out = self.client.link_up(now, &mut draw);
             self.carry_out(now, out, None, &mut draw);
         }
