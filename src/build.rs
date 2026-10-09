@@ -127,12 +127,31 @@ struct BootConfig {
     start: Vec<String>,
 }
 
+/// **Unknown fields refused**: a misspelled `folder` would be an image that
+/// silently grants no package a folder.
 #[derive(Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 struct AppsConfig {
     /// Connectors, and no `devices` or `syscap` beside it: an installed package
     /// reaches servers and claims no hardware.
     receives: Vec<String>,
+    /// The most of a folder of the session's home a package may be granted,
+    /// `read-only` or `read-write` (`toyos_manifest::grants`). It names a
+    /// right and never an app.
+    folder: Option<String>,
+}
+
+/// `[apps] folder`, spelled as `toyos_manifest::grants::Access` spells it.
+fn apps_folder(config: &SystemConfig) -> Result<Option<toyos_manifest::grants::Access>, String> {
+    config
+        .apps
+        .folder
+        .as_deref()
+        .map(|word| {
+            toyos_manifest::grants::Access::parse(word)
+                .ok_or_else(|| format!("`[apps] folder` is {word:?}, and is `read-only` or `read-write`"))
+        })
+        .transpose()
 }
 
 /// **Unknown fields refused**: a misspelled `starts` would be a row that
@@ -565,33 +584,40 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 ///
 /// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
 /// row receives it.
-const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power"];
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
 
-/// Who may hold the two authorities that change what the machine runs:
-/// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
-/// `[programs]` row and never `[apps]` — and the idle slot,
+/// The supervisor's ports that one row alone may receive, each with that row:
+/// the swap port, whose holder replaces any service's binary, and the grants
+/// port, whose holder writes which folder of the home a package sees.
+const HELD_ALONE: &[(&str, &str)] =
+    &[(toyos_swap::PORT, toyos_swap::HOLDER), (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER)];
+
+/// Who may hold the authorities that change what the machine runs or what a
+/// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
+/// — no other `[programs]` row and never `[apps]` — and the idle slot,
 /// [`toyos_update::slots::HOLDER`] alone.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
-/// because the holder of the one can replace any service's binary and the
-/// holder of the other writes the image the machine boots next.
+/// because the swap port's holder can replace any service's binary, the
+/// grants port's hands a package part of the home, and the idle slot's
+/// holder writes the image the machine boots next.
 fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     for (name, program) in &config.programs {
-        if name != toyos_swap::HOLDER && program.receives.iter().any(|r| r == toyos_swap::PORT) {
-            return Err(format!(
-                "`{name}` receives `{}`, which only `{}` may hold",
-                toyos_swap::PORT,
-                toyos_swap::HOLDER
-            ));
+        for (port, holder) in HELD_ALONE {
+            if name != holder && program.receives.iter().any(|r| r == port) {
+                return Err(format!("`{name}` receives `{port}`, which only `{holder}` may hold"));
+            }
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
         }
     }
-    if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
-        return Err(format!("`[apps] receives` names `{}`, which only `{}` may hold", toyos_swap::PORT, toyos_swap::HOLDER));
+    for (port, holder) in HELD_ALONE {
+        if config.apps.receives.iter().any(|r| r == port) {
+            return Err(format!("`[apps] receives` names `{port}`, which only `{holder}` may hold"));
+        }
     }
-    Ok(())
+    apps_folder(config).map(drop)
 }
 
 /// What a row may start through the launcher, and which rows open a login
@@ -651,11 +677,13 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     restart: cfg.restart,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
+                    folder: None,
                 }
             })
             .collect(),
         supervisor_serves: SUPERVISOR_SERVED.iter().map(|s| (*s).to_string()).collect(),
         apps: config.apps.receives.clone(),
+        folder: apps_folder(config).expect("the gate above read it"),
         start: config.boot.start.clone(),
     };
     toyos_manifest::render(&manifest)
@@ -2952,6 +2980,26 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+        let grants: SystemConfig = toml::from_str("[programs.grants]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&grants).is_ok());
+        let shell: SystemConfig = toml::from_str("[programs.shell]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&shell).is_err());
+        let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&apps).is_err());
+    }
+
+    /// `[apps] folder` is one of the two accesses, spelled as the manifest
+    /// spells it, and nothing else reaches a manifest.
+    #[test]
+    fn the_apps_folder_ceiling_is_one_of_two_spellings() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert!(gate("[apps]\nfolder = \"read-write\"\n").is_ok());
+        assert!(gate("[apps]\nfolder = \"read-only\"\n").is_ok());
+        assert!(gate("[apps]\n").is_ok());
+        for bad in ["rw", "read_write", "write", "Read-Write", ""] {
+            assert!(gate(&format!("[apps]\nfolder = {bad:?}\n")).is_err(), "{bad}");
+        }
+        assert!(toml::from_str::<SystemConfig>("[apps]\nfolders = \"read-write\"\n").is_err());
     }
 
     /// Every committed config passes, and each refusal has a config that

@@ -54,6 +54,11 @@
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
+//! **An installed package's launch also holds the folder of the home it was
+//! granted** ([`toyos_manifest::grants`]): the grant stored for that exact
+//! binary, which the supervisor alone writes, at the request of the one row
+//! holding the `grants` port from a login session, and starts in it.
+//!
 //! **A launch starts only what its caller's row lists** ([`toyos_manifest::launch`]).
 //! Every row whose `starts` lists anything is endowed a `launcher` the supervisor
 //! minted with its row and session as the badge, under a label of its own so
@@ -75,6 +80,7 @@ use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
+use toyos_manifest::grants::{self, Store};
 use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program, View};
@@ -152,11 +158,21 @@ struct Caller {
 enum Port {
     /// Who asks, off the connection's badge.
     Launcher(Caller),
+    /// Who asks to read or change the grants, off the connection's badge.
+    Grants(Caller),
     Swap,
     Power,
 }
 
-/// The poll tokens for the `launcher`, `swap` and `power` acceptors, and for the
+/// The ports the supervisor mints a row's badge on, its row and session: the
+/// launcher every row whose `starts` lists anything holds, and
+/// [`grants::PORT`], which its one holder asks on.
+struct Minted {
+    launcher: Acceptor,
+    grants: Acceptor,
+}
+
+/// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, and for the
 /// one connection whose swap has been answered and whose hang-up is awaited. A
 /// pending connection's token is [`TOKEN_PENDING_BASE`] plus its handle, which
 /// is unique among the connections the supervisor holds at once.
@@ -165,7 +181,8 @@ const TOKEN_SWAP_ACCEPTOR: u64 = 1;
 const TOKEN_HANGUP: u64 = 2;
 const TOKEN_POWER_ACCEPTOR: u64 = 3;
 const TOKEN_WAKE: u64 = 4;
-const TOKEN_PENDING_BASE: u64 = 5;
+const TOKEN_GRANTS_ACCEPTOR: u64 = 5;
+const TOKEN_PENDING_BASE: u64 = 6;
 
 /// How long a stop waits for `logkeeper` to say the log is whole.
 ///
@@ -413,10 +430,14 @@ fn main() {
     // Its connector goes at once: every launcher a program holds is one minted
     // with that program's row.
     let (launcher, _) = port::create().expect("supervisor: no port for `launcher`");
+    let grants_port = acceptors
+        .remove(grants::PORT)
+        .expect("supervisor: the manifest declares the supervisor serves `grants`");
     let (wake_read, wake_write) = toyos::pipe_pair().expect("supervisor: no pipe to hear a service end");
     let mut supervisor = Supervisor {
         system,
-        launcher,
+        minted: Minted { launcher, grants: grants_port },
+        store: Store::default(),
         syscap: &syscap,
         acceptors,
         connectors,
@@ -517,8 +538,11 @@ fn is_storage(program: &Program) -> bool {
 /// Everything the supervisor's loop acts on, for the machine's life.
 struct Supervisor<'a> {
     system: &'static Manifest,
-    /// What every launcher is minted on and every launch accepted from.
-    launcher: Acceptor,
+    /// What every launcher and every grants connector is minted on, and every
+    /// launch and grants request accepted from.
+    minted: Minted,
+    /// Every grant of a folder of the home, as [`grants::STORE`] holds them.
+    store: Store,
     syscap: &'a SysCap,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
@@ -623,7 +647,7 @@ impl<'a> Service<'a> {
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
         grants: &Grants<'_>,
-        launcher: &Acceptor,
+        minted: &Minted,
         log: &mut Log,
     ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
@@ -655,7 +679,7 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            (launcher, self.session),
+            (minted, self.session),
             Output::Boot(log),
         )?;
         kept.generation += 1;
@@ -811,7 +835,7 @@ impl<'a> Supervisor<'a> {
                     self.grants.roles.push((role, Arc::clone(&service.kept)));
                 }
                 let started =
-                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
+                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
                 match started {
                     Ok(_) => {}
                     Err(StartError::Partition(why)) => {
@@ -826,6 +850,83 @@ impl<'a> Supervisor<'a> {
         if !homes_made {
             self.make_session_home();
         }
+        self.load_grants();
+    }
+
+    /// [`grants::STORE`], read on the worker once DATA's server runs. A store
+    /// refused, which any declared row can write, is said and the boot starts
+    /// with no grant; the next grant written replaces it.
+    fn load_grants(&mut self) {
+        let read = self.files("the grants", || -> Result<Option<String>, String> {
+            match std::fs::metadata(grants::STORE) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.to_string()),
+                Ok(meta) if meta.len() > grants::MAX_STORE_BYTES as u64 => {
+                    return Err(format!("it is {} bytes, past the {} its grants fill", meta.len(), grants::MAX_STORE_BYTES));
+                }
+                Ok(_) => {}
+            }
+            std::fs::read_to_string(grants::STORE).map(Some).map_err(|e| e.to_string())
+        });
+        let store = read.and_then(|read| read).and_then(|text| text.map_or(Ok(Store::default()), |t| Store::parse(&t)));
+        match store {
+            Ok(store) => self.store = store,
+            Err(why) => say!("supervisor: grants: {} is refused ({why}); this boot starts with no grant", grants::STORE),
+        }
+    }
+
+    /// One request on [`grants::PORT`], answered with its text: the grants
+    /// listed, one written or one taken away.
+    fn serve_grants(&mut self, conn: &Connection, caller: &Caller, msg_type: u32, payload: &[u8]) {
+        let (msg, text) = match self.grant(caller, msg_type, payload) {
+            Ok(text) => (grants::MSG_DONE, text),
+            Err(why) => {
+                say!("supervisor: grants: refused {} in {}: {why}", caller.row.name, caller.session);
+                (grants::MSG_REFUSED, why)
+            }
+        };
+        let _ = conn.try_send_bytes(msg, text.as_bytes());
+    }
+
+    /// **Only a login session reads or changes the grants**: one is a user's,
+    /// and the machine's session is every service's.
+    fn grant(&mut self, caller: &Caller, msg_type: u32, payload: &[u8]) -> Result<String, String> {
+        let request = grants::Request::decode(msg_type, payload).ok_or("the request is not one this port reads")?;
+        if !matches!(caller.session, Session::Login(_)) {
+            return Err("only a login session may ask for grants".to_string());
+        }
+        let user = toyos_manifest::USER;
+        let mut store = self.store.clone();
+        let done = match request {
+            grants::Request::List => return Ok(store.entries().iter().map(grants::listed).collect()),
+            grants::Request::Revoke { package } => {
+                if !store.revoke(user, &package) {
+                    return Err(format!("{package} holds no grant"));
+                }
+                format!("{package}'s grant is revoked; its next launch holds no folder")
+            }
+            grants::Request::Add { package, folder } => {
+                grants::folder(&folder.path)?;
+                let ceiling = self.system.folder.ok_or("this image grants no package a folder")?;
+                if folder.access > ceiling {
+                    return Err(format!("{} is past this image's {ceiling}", folder.access));
+                }
+                let (system, name, path) = (self.system, package.clone(), folder.path.clone());
+                let binary = self.files("a grant's files", move || -> Result<String, String> {
+                    let program = installed(system, &name)?;
+                    is_folder(&path)?;
+                    binary_digest(&program)
+                })??;
+                let said = format!("{package} is granted {} {}", folder.path, folder.access);
+                store.put(grants::Entry { user: user.to_string(), package, binary, folder })?;
+                said
+            }
+        };
+        let text = store.render();
+        self.files("the grants", move || write_store(&text))??;
+        say!("supervisor: grants: {done}");
+        self.store = store;
+        Ok(done)
     }
 
     fn make_session_home(&mut self) {
@@ -931,12 +1032,13 @@ impl<'a> Supervisor<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
-        let poller = Poller::new(5 + MAX_PENDING_LAUNCHES as u32);
+        let poller = Poller::new(6 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
         let mut ready: Vec<u64> = Vec::new();
         loop {
-            poller.watch(&self.launcher, READABLE, TOKEN_ACCEPTOR);
+            poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
+            poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             poller.watch(&self.wake, READABLE, TOKEN_WAKE);
@@ -970,7 +1072,12 @@ impl<'a> Supervisor<'a> {
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
-                (TOKEN_ACCEPTOR, &self.launcher, (|s, c| s.caller(c).map(Port::Launcher)) as fn(&Self, &Connection) -> _),
+                (
+                    TOKEN_ACCEPTOR,
+                    &self.minted.launcher,
+                    (|s, c| s.caller(&s.minted.launcher, c).map(Port::Launcher)) as fn(&Self, &Connection) -> _,
+                ),
+                (TOKEN_GRANTS_ACCEPTOR, &self.minted.grants, |s, c| s.caller(&s.minted.grants, c).map(Port::Grants)),
                 (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
                 (TOKEN_POWER_ACCEPTOR, power, |_, _| Ok(Port::Power)),
             ] {
@@ -1034,6 +1141,7 @@ impl<'a> Supervisor<'a> {
                             Port::Launcher(caller) => {
                                 self.serve_launch(&p.conn, &caller, msg_type, p.rx.payload(payload_len))
                             }
+                            Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
                             Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
@@ -1070,12 +1178,12 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// The row and session a launcher connection's badge names. Only this
-    /// supervisor mints on its launcher, so a refusal here is its own bug, said
-    /// and the connection dropped.
-    fn caller(&self, conn: &Connection) -> Result<Caller, String> {
+    /// The row and session the badge of a connection on `acceptor`, one of
+    /// [`Minted`]'s, names. Only this supervisor mints on them, so a refusal
+    /// here is its own bug, said and the connection dropped.
+    fn caller(&self, acceptor: &Acceptor, conn: &Connection) -> Result<Caller, String> {
         let mut badge = [0u8; MAX_BADGE];
-        let badge = self.launcher.badge(conn, &mut badge).map_err(|e| format!("its connection has no badge ({e:?})"))?;
+        let badge = acceptor.badge(conn, &mut badge).map_err(|e| format!("its connection has no badge ({e:?})"))?;
         let Some(Authority { row, session }) = Authority::decode(badge) else {
             return Err(format!("its badge is not one this supervisor writes: {badge:?}"));
         };
@@ -1212,7 +1320,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -1383,7 +1491,7 @@ impl<'a> Supervisor<'a> {
             let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
             self.make_home(program);
             let service = &mut self.services[index];
-            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
                 Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                 Err(e) => {
                     let mut kept = service.kept.lock().expect("supervisor: a service's state is poisoned");
@@ -1403,7 +1511,7 @@ impl<'a> Supervisor<'a> {
         self.make_home(program);
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("supervisor: a service's state is poisoned").swapping = false;
                 swapped(&name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -1420,6 +1528,44 @@ impl<'a> Supervisor<'a> {
             }
         }
     }
+}
+
+/// The program installed package `name` launches, as its manifest names it
+/// and the image would start it: a package named after a declared row is none.
+fn installed(system: &Manifest, name: &str) -> Result<String, String> {
+    let file = Package::path(name);
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{file} cannot be read: {e}"))?;
+    let package = Package::parse(&text)?;
+    if package.name != name {
+        return Err(format!("{file} calls itself {:?}", package.name));
+    }
+    system.app_row(name, &package.program)?;
+    Ok(package.program)
+}
+
+/// `Ok` where `path` is a directory, and not a link to one.
+fn is_folder(path: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!("{path} is no directory")),
+        Err(e) => Err(format!("{path} is no directory: {e}")),
+    }
+}
+
+/// The SHA-256 of the binary at `path`, which a grant is keyed on.
+fn binary_digest(path: &str) -> Result<String, String> {
+    let bytes = read_binary(path).map_err(|why| why.to_string())?;
+    Ok(toyos_swap::hex(&toyos_swap::digest(&bytes)))
+}
+
+/// [`grants::STORE`] replaced whole: a name beside it, then one rename, so the
+/// store is never a partial one.
+fn write_store(text: &str) -> Result<(), String> {
+    let partial = format!("{}.partial", grants::STORE);
+    make_dir(grants::STORE_DIR)
+        .and_then(|()| std::fs::write(&partial, text))
+        .and_then(|()| std::fs::rename(&partial, grants::STORE))
+        .map_err(|e| format!("{} could not be written: {e}", grants::STORE))
 }
 
 /// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
@@ -1565,20 +1711,21 @@ impl Supervisor<'_> {
             }
         }
 
-        let installed;
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
         // be a file server's, which the supervisor supervises. Whether the
         // caller may start it is asked between the two, so a refused launch
-        // reads no image and judges no directory.
+        // reads no image and judges no directory. A package's binary is
+        // hashed there too: its grant is keyed on it.
         let (system, path) = (self.system, request.program.to_string());
         let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
                 let starts = authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
+                let binary = matches!(target, Target::Package(_)).then(|| binary_digest(&program.path));
                 let prepared = command.image_from(Path::new(&program.path)).prepare().map(drop);
-                Ok((starts, prepared.map(|()| command)))
+                Ok((starts, binary, prepared.map(|()| command)))
             })
         });
         let resolved = match found {
@@ -1589,12 +1736,9 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let (program, verdict) = match resolved {
-            Resolved::Row(row, verdict) => (row, verdict),
-            Resolved::Package(row, verdict) => {
-                installed = row;
-                (&installed, verdict)
-            }
+        let (mut program, verdict) = match resolved {
+            Resolved::Row(row, verdict) => (row.clone(), verdict),
+            Resolved::Package(row, verdict) => (row, verdict),
             Resolved::NotDeclared => {
                 // **`try_send_bytes` and not `send`.** A blocking write is the
                 // other half of the rule that made the read side an event loop: a
@@ -1612,7 +1756,7 @@ impl Supervisor<'_> {
         };
         // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
         // spawn the program itself.
-        let (starts, prepared) = match verdict {
+        let (starts, binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
                 say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
@@ -1620,7 +1764,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let command = match prepared {
+        let mut command = match prepared {
             Ok(command) => command,
             Err(e) => {
                 say!("supervisor: launcher: cannot start {}: {e}", program.name);
@@ -1628,6 +1772,20 @@ impl Supervisor<'_> {
                 return;
             }
         };
+        if let Some(binary) = binary {
+            match self.granted(&program.name, binary, command, request.cwd) {
+                Ok((granted, prepared)) => {
+                    program.folder = granted;
+                    command = prepared;
+                }
+                Err(why) => {
+                    say!("supervisor: launcher: {} was not started: {why}", program.name);
+                    let _ = conn.try_signal(launch::MSG_REFUSED);
+                    return;
+                }
+            }
+        }
+        let program = &program;
         let session = starts.session(&mut self.sessions);
         let caller_slots: Vec<(u32, toyos::RawHandle)> =
             request.slot_numbers().zip(slots.0.iter().copied()).collect();
@@ -1652,7 +1810,7 @@ impl Supervisor<'_> {
             &self.grants,
             &extras,
             Storage::default(),
-            (&self.launcher, session),
+            (&self.minted, session),
             Output::Launch { log: &mut self.log, slots: &caller_slots },
         );
         match started {
@@ -1680,6 +1838,35 @@ impl Supervisor<'_> {
                 let _ = conn.try_signal(launch::MSG_REFUSED);
             }
         }
+    }
+}
+
+impl Supervisor<'_> {
+    /// The folder package `name`'s launch of `binary` is granted
+    /// ([`grants::decide`]), and `command` prepared again to start in it
+    /// ([`grants::cwd`]) once it is still a directory. `Err` refuses the
+    /// launch: a grant whose folder is gone names nothing.
+    fn granted(
+        &mut self,
+        name: &str,
+        binary: Result<String, String>,
+        mut command: Command,
+        cwd: &str,
+    ) -> Result<(Option<grants::Folder>, Command), String> {
+        let binary = binary?;
+        let Some(folder) = grants::decide(self.store.find(toyos_manifest::USER, name), &binary, self.system.folder) else {
+            if self.system.folder.is_some() {
+                say!("supervisor: launcher: {name} holds no folder; `grants add {name} <folder>` grants it one");
+            }
+            return Ok((None, command));
+        };
+        let (path, cwd) = (folder.path.clone(), grants::cwd(&folder.path, cwd));
+        let prepared = self.files("a granted folder", move || -> Result<Command, String> {
+            is_folder(&path)?;
+            command.current_dir(&cwd).prepare().map_err(|e| format!("{cwd} is no working directory: {e}"))?;
+            Ok(command)
+        })??;
+        Ok((Some(folder), prepared))
     }
 }
 
@@ -1921,7 +2108,7 @@ fn start<'a>(
     grants: &Grants<'_>,
     extras: &[(&str, Connector)],
     storage: Storage,
-    launcher: (&Acceptor, Session),
+    launcher: (&Minted, Session),
     output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
     // A storage row's own arguments first: a file server's role leads its argv.
@@ -1963,6 +2150,11 @@ fn start<'a>(
     if let Some(ns) = launcher_namespace(program, launcher) {
         let raw = ns.into_raw();
         command.endow(LAUNCHER, raw.0);
+        held.0.push(raw);
+    }
+    if let Some(ns) = grants_namespace(program, launcher) {
+        let raw = ns.into_raw();
+        command.endow(grants::PORT, raw.0);
         held.0.push(raw);
     }
 
@@ -2246,9 +2438,10 @@ fn build_namespace(
     view: Vec<(String, Connector)>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
-    // Never the swap port: [`swap_namespace`] says why.
+    // Never the swap port nor the grants port: [`swap_namespace`] and
+    // [`grants_namespace`] say why.
     let receives: Vec<&String> =
-        program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
+        program.receives.iter().filter(|name| *name != toyos_swap::PORT && *name != grants::PORT).collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
     }
@@ -2362,18 +2555,39 @@ fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> 
 /// A `launcher` minted with `program`'s row and the session it runs in, in a
 /// namespace of its own, for a row whose `starts` lists anything; endowed under
 /// [`LAUNCHER`] and never an entry of `svc`, for [`swap_namespace`]'s reason.
-fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Session)) -> Option<Namespace> {
+fn launcher_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
     if program.starts.is_empty() {
         return None;
     }
     let badge = Authority { row: program.name.clone(), session }.encode();
-    let connector = launcher
+    let connector = minted
+        .launcher
         .mint(&badge)
         .unwrap_or_else(|e| panic!("supervisor: no launcher for {}: {e:?}", program.name));
     let ns = namespace::build()
         .add(LAUNCHER, &connector)
         .finish()
         .unwrap_or_else(|e| panic!("supervisor: no launcher namespace for {}: {e:?}", program.name));
+    Some(ns)
+}
+
+/// [`grants::PORT`] minted with `program`'s row and the session it runs in, in
+/// a namespace of its own, for the row whose `receives` names it; endowed under
+/// that name and never an entry of `svc`, for [`swap_namespace`]'s reason.
+/// The badge is who asks: the supervisor honours a login session's alone.
+fn grants_namespace(program: &Program, (minted, session): (&Minted, Session)) -> Option<Namespace> {
+    if !program.receives.iter().any(|name| name == grants::PORT) {
+        return None;
+    }
+    let badge = Authority { row: program.name.clone(), session }.encode();
+    let connector = minted
+        .grants
+        .mint(&badge)
+        .unwrap_or_else(|e| panic!("supervisor: no grants connector for {}: {e:?}", program.name));
+    let ns = namespace::build()
+        .add(grants::PORT, &connector)
+        .finish()
+        .unwrap_or_else(|e| panic!("supervisor: no grants namespace for {}: {e:?}", program.name));
     Some(ns)
 }
 

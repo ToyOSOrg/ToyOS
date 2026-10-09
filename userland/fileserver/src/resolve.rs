@@ -160,6 +160,28 @@ mod tests {
         assert_eq!(run(&vol(&[("x", "..")]), "", "x", true), Err(Refusal::Escape));
     }
 
+    /// The same suite under a folder of the home a package is granted: no
+    /// link inside it reaches the home around it, another app's folder or
+    /// the volume's other directories, and one to an absolute path is the
+    /// package's own table's to resolve, where none of those is.
+    #[test]
+    fn no_link_climbs_out_of_a_granted_folder() {
+        let root = "home/toy/Games";
+        let v = vol(&[
+            ("home/toy/Games/up", ".."),
+            ("home/toy/Games/home", "../.."),
+            ("home/toy/Games/other", "../Apps/other/Data"),
+            ("home/toy/Games/GBA/state", "../../../../state/supervisor"),
+            ("home/toy/Games/GBA/self", "../../Games/GBA"),
+        ]);
+        for rel in ["up", "up/Documents", "home", "other", "other/kept", "GBA/state/grants", "GBA/self"] {
+            assert_eq!(run(&v, root, rel, true), Err(Refusal::Escape), "{rel}");
+        }
+        let abs = vol(&[("home/toy/Games/abs", "/home/toy/Apps/other")]);
+        assert_eq!(run(&abs, root, "abs/kept", true), Ok(Resolved::Absolute("/home/toy/Apps/other/kept".to_string())));
+        assert_eq!(run(&vol(&[("home/toy/Games/GBA/back", "../ROMs")]), root, "GBA/back/a.gba", true), path("home/toy/Games/ROMs/a.gba"));
+    }
+
     #[test]
     fn a_link_that_stays_inside_by_going_up_and_back_resolves() {
         let v = vol(&[("home/toy/a/back", "../b")]);

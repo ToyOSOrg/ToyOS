@@ -3571,7 +3571,8 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
 /// `app_view` passed, every arm its package asks held, and the supervisor
 /// refused each of the two launches for its own reason: a package named after
 /// the shell's row, and one whose folder is a file. The guest sees only that
-/// each was refused.
+/// each was refused. And the supervisor wrote and took away the package's
+/// grant, and refused the machine's session one.
 fn app_view(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_app_view")?;
     let log = back.log();
@@ -3582,6 +3583,10 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         &named,
         "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
          /home/toy/Apps/appview is no directory",
+        "supervisor: grants: refused grants in the machine's session: only a login session may ask for grants",
+        "supervisor: grants: appview is granted /home/toy/Games read-write",
+        "  granted: cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok",
+        "supervisor: grants: appview's grant is revoked; its next launch holds no folder",
     ] {
         if !log.text().lines().any(|l| l.contains(said)) {
             return Err(format!("the log never said `{said}`\n{}", log.text()));

@@ -87,6 +87,7 @@ members = [
     "userland/editor",
     "userland/filepicker",
     "userland/filepicker-api",
+    "userland/grants",
     "userland/files",
     "userland/fileserver",
     "userland/host",

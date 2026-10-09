@@ -802,6 +802,29 @@ mod tests {
         }
     }
 
+    /// **A symlink where a grant's root is, is no directory**, so a connection
+    /// granted that root reaches nothing through it: the folder it named is
+    /// listed by nobody and nothing is made under it, and the directory the
+    /// link names is untouched. The supervisor checks a folder before it
+    /// grants it; this is what holds once a declared row replaces it after.
+    #[test]
+    fn a_symlink_at_a_grant_s_root_is_followed_by_nothing() {
+        let mut v = vol();
+        v.mkdir("home/toy/Apps/other").unwrap();
+        let kept = v.open("home/toy/Apps/other/kept", CREATE).unwrap();
+        v.close(kept).unwrap();
+        v.symlink("home/toy/Games", "Apps/other").unwrap();
+        let root = "home/toy/Games";
+        assert_eq!(v.lstat(root).unwrap().kind, Kind::Symlink);
+        assert_eq!(v.list(root).map(drop), Err(SyscallError::InvalidArgument));
+        assert_eq!(v.lstat("home/toy/Games/kept"), Err(SyscallError::NotFound));
+        assert_eq!(v.open("home/toy/Games/kept", PLAIN).map(drop), Err(SyscallError::NotFound));
+        assert_eq!(v.open("home/toy/Games/made", CREATE).map(drop), Err(SyscallError::NotFound));
+        assert_eq!(v.mkdir("home/toy/Games/sub"), Err(SyscallError::NotFound));
+        let listed: Vec<String> = v.list("home/toy/Apps/other").unwrap().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(listed, ["kept"]);
+    }
+
     #[test]
     fn a_file_reads_back_what_was_written_across_pages_and_holes() {
         let mut v = vol();
