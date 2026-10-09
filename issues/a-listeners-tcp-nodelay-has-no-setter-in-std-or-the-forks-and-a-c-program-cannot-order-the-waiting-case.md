@@ -17,11 +17,18 @@ connection waits to be accepted: a connect returns before the listener's end
 is established, so the answer rests on that event and not on the order
 loopback delivers in. A red there prints the host's name and both answers.
 
-The pipe ABI carries both halves (`toyos/src/net.rs`):
-`MsgType::TcpListenerSetOption` sets a listener's option, and an accept's
-answer says what its connection holds (`TcpOptions`). netstack answers the
-rule for both (`userland/netstack/src/listen.rs`), and the `libc_sockets`
-guest test reads it: `nodelay_accepted` by `toyos::net`, for a connection that
+`tests/host.rs` is green on Linux too: the `host` check runs it on
+`ubuntu-24.04`, whose log names
+`a_host_gives_a_connection_the_nodelay_its_listener_had_when_it_began ... ok`.
+
+The pipe ABI carries both halves (`toyos/src/net.rs`): a bind's request
+carries its listener's options and `MsgType::TcpListenerSetOption` sets one
+afterwards, and an accept's answer says what its connection holds
+(`TcpOptions`). netstack answers the rule for both
+(`userland/netstack/src/listen.rs`), but for the connection after a reset
+handshake
+(`issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`),
+and the `libc_sockets` guest test reads it: `nodelay_accepted` by `toyos::net`, for a connection that
 waited when the option was set, its wake read first, and for the next one
 dialled; `tests/netcase/nodelay_kept.c` by libc's `setsockopt` and
 `getsockopt`, for a listener's set before `bind`, its set and its clear after,
@@ -39,31 +46,28 @@ and the connections dialled after each. What no program reads yet:
   table of its own sockets, so a std listener's descriptor names none of
   them; on a listener of its own its `setsockopt` of `TCP_NODELAY` answers
   `Ok` and hands the option to nobody, and its `accept` records the accepted
-  socket's as off whatever the answer says. mio (`d1edcaa`,
+  socket's as off whatever the answer says; its bind names no option
+  (`toyos::net::tcp_bind`, which `tcp_bind_with` stands beside only until
+  the fork's bind passes its own). mio (`d1edcaa`,
   `src/net/tcp/toyos_stream.rs`) answers `nodelay()` true for every stream
   and its `set_nodelay` sends nothing. std's `TcpListener::accept`
   (`sdk/std/sys/net/connection.rs`) takes the accepted stream's option from
   the answer, which no test can turn red while no std listener can hold one.
 
-The node (`userland/netstack/node/src/listeners.rs`) has the listener's call,
-`Node::set_listener_nodelay`, and gives an accepted stream what its connection
-took from its listener; nothing ships it until the move.
+The node (`userland/netstack/node/src/listeners.rs`) takes a listener's
+option in its `listen` and in `Node::set_listener_nodelay`, and answers an
+accept with what its stream's connection took from its listener; nothing ships
+it until the move.
 
-Not read: Linux. No Linux host was at hand when this was filed. The `host`
-check runs `tests/host.rs` on Linux, and its first run on a pull request that
-carries the file is that reading.
-
-**Exit condition**: `tests/host.rs` is green in a `host` check's log, which
-is the Linux reading; and on ToyOS a program that sets `TCP_NODELAY` on a
+**Exit condition**: on ToyOS a program that sets `TCP_NODELAY` on a
 listening socket and accepts one connection begun before and one begun after
 reads the option on each as that test has a host answer, by libc's
 `getsockopt`, which needs libc's `poll` to answer for a listening socket, and
 by std's `nodelay()`, which needs a listener a Rust program can set the option
 on: the socket2 fork's, with the lock naming the commit that hands its
-listener's option to netstack and reads its accepted socket's from the answer,
-and mio's that reads a stream's.
+listener's option to netstack in its bind and reads its accepted socket's from
+the answer, and mio's that reads a stream's; and `toyos::net` has one bind
+call, which takes its options.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`; the
-Linux reading is the orchestrator's, at the first `host` run of the pull
-request that adds `tests/host.rs`; the fork commits are on socket2's and mio's
-`toyos` branches.
+fork commits are on socket2's and mio's `toyos` branches.

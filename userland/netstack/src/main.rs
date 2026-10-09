@@ -1008,20 +1008,17 @@ impl Netstack {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; TCP_SOCKET_BUFFER]);
         let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-        if socket.listen(port).is_err() {
-            msg.client.error(ERR_ADDR_IN_USE);
-            return;
-        }
+        let listening = listen::Listening::new(port, req.options.nodelay());
+        // Before the socket is in the set, so before a SYN can reach it. A
+        // fresh socket and a port that is not zero: neither refusal `listen`
+        // has can be this one.
+        listening.open(&mut socket);
 
         let handle = socket_set.add(socket);
         let socket_id = self.alloc_id();
         self.sockets.insert(socket_id, SocketKind::TcpListener(handle));
 
-        self.piped_listeners.insert(socket_id, PipedListener {
-            handle,
-            notify_write,
-            listening: listen::Listening::new(port),
-        });
+        self.piped_listeners.insert(socket_id, PipedListener { handle, notify_write, listening });
 
         msg.client.result(&TcpBindResponse {
             socket_id,

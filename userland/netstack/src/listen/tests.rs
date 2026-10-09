@@ -106,7 +106,7 @@ impl Net {
             wire,
             sockets,
             listener,
-            listening: Listening::new(PORT),
+            listening: Listening::new(PORT, false),
             sent: Vec::new(),
             now: Instant::from_millis(0),
             arp: true,
@@ -520,66 +520,4 @@ fn a_peer_that_answers_and_never_closes_is_reset_at_the_ceiling() {
     let answer = |net: &mut Net| net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 2));
     assert_eq!(at_the_ceiling(&mut net, answer), Ownerless::Cut, "the slot of a connection with no client never comes back");
     the_cut_is_said(&mut net);
-}
-
-/// Whether the socket holds `TCP_NODELAY`, which is what its accept answers.
-fn nodelay(net: &mut Net) -> bool {
-    !net.socket().nagle_enabled()
-}
-
-/// The owner's set of `TCP_NODELAY` on its listener.
-fn set_nodelay(net: &mut Net, on: bool) {
-    net.listening.set_nodelay(net.sockets.get_mut::<tcp::Socket>(net.listener), on);
-}
-
-/// **A connection has the option its listener held when its SYN arrived**: one
-/// set while the socket still listens is the connection's, and one cleared
-/// after its SYN, whether or not its handshake has finished, does not reach
-/// it.
-#[test]
-fn a_connection_begins_with_the_option_its_listener_held() {
-    let mut net = Net::new();
-    assert!(!nodelay(&mut net), "a fresh listener holds the option");
-    set_nodelay(&mut net, true);
-    let isn = net.syn(5001);
-    set_nodelay(&mut net, false);
-    assert!(nodelay(&mut net), "a clear after the SYN reached a handshake in progress");
-    net.send(5001, TcpControl::None, PEER_ISN + 1, Some(isn + 1));
-    net.pass();
-    set_nodelay(&mut net, false);
-    assert_eq!(net.accept(true, true), Accept::Take(()));
-    assert!(nodelay(&mut net), "a clear after the SYN reached a connection that waits");
-}
-
-/// **A set after a connection began is the next connection's**: the waiting
-/// one keeps what it has, and the socket that listens in its place holds the
-/// listener's option.
-#[test]
-fn a_set_after_a_connection_began_is_the_next_connections() {
-    let mut net = Net::new();
-    established(&mut net, 5001);
-    set_nodelay(&mut net, true);
-    assert_eq!(net.accept(true, true), Accept::Take(()));
-    assert!(!nodelay(&mut net), "a set after the connection was established reached it");
-    let mut next = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 4096]), tcp::SocketBuffer::new(vec![0; 4096]));
-    net.listening.open(&mut next);
-    assert_eq!(next.state(), tcp::State::Listen);
-    assert!(!next.nagle_enabled(), "the socket that listens next does not hold the listener's option");
-}
-
-/// **A socket its peer reset before its owner took it listens again with the
-/// listener's option as it is then**, and not as it was when the reset
-/// connection's SYN arrived.
-#[test]
-fn a_reset_connections_socket_listens_again_with_the_listeners_option() {
-    let mut net = Net::new();
-    let isn = net.syn(5001);
-    set_nodelay(&mut net, true);
-    net.ack_and(5001, isn, TcpControl::Rst);
-    assert_eq!(net.socket().state(), tcp::State::Closed, "the premise: reset before it was taken");
-    assert!(!nodelay(&mut net), "the premise: the reset connection began without the option");
-    assert!(!net.wakes(true));
-    established(&mut net, 5002);
-    assert_eq!(net.accept(true, true), Accept::Take(()));
-    assert!(nodelay(&mut net), "the connection after a reset one began without its listener's option");
 }

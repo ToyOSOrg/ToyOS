@@ -83,10 +83,10 @@ pub const ERR_PERMISSION_DENIED: u32 = 8;
 pub const ERR_OTHER: u32 = 255;
 
 /// Nagle's algorithm off. On a stream, [`tcp_set_option`]. On a listener,
-/// [`tcp_listener_set_option`]: for every connection whose SYN arrives from
-/// then on, and one that began before keeps what it has. A connection says
-/// what it began with in its accept's answer ([`TcpOptions`]); one a connect
-/// made begins with the algorithm on.
+/// its bind's [`TcpOptions`] and then [`tcp_listener_set_option`]: for every
+/// connection whose SYN arrives from then on, and one that began before keeps
+/// what it has. A connection says what it began with in its accept's answer
+/// ([`TcpOptions`]); one a connect made begins with the algorithm on.
 pub const OPT_NODELAY: u32 = 1;
 /// A datagram socket may send to a broadcast address: [`udp_set_option`].
 pub const OPT_BROADCAST: u32 = 2;
@@ -174,6 +174,8 @@ ipc_payload! {
         pub addr: [u8; 4],
         pub port: u16,
         pub _pad: u16,
+        /// What the listener holds from the moment its port listens.
+        pub options: TcpOptions,
     }
 
     pub struct TcpBindResponse {
@@ -191,8 +193,8 @@ ipc_payload! {
         pub socket_id: u32,
     }
 
-    /// The options a stream holds, a word each: zero is off and anything else
-    /// on.
+    /// The options a listener or a stream holds, a word each: zero is off and
+    /// anything else on.
     #[derive(Debug, PartialEq, Eq)]
     pub struct TcpOptions {
         nodelay: u32,
@@ -471,7 +473,13 @@ pub fn tcp_connect(
     Ok(TcpConnection { rx, tx, socket_id: TcpSocketId(resp.socket_id), local_port: resp.local_port })
 }
 
+/// A listener that holds no option.
 pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
+    tcp_bind_with(addr, port, TcpOptions::new(false))
+}
+
+/// A listener that holds `options` before any SYN can reach its port.
+pub fn tcp_bind_with(addr: [u8; 4], port: u16, options: TcpOptions) -> Result<TcpBound, NetError> {
     let netstack = NetstackConn::connect()?;
     let (notify, netstack_notify) = crate::pipe_pair().map_err(|_| NetError::Io)?;
 
@@ -479,7 +487,7 @@ pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
         .request_with_handles(
             [netstack_notify.into()],
             MsgType::TcpBindPiped,
-            &TcpBindPipedRequest { addr, port, _pad: 0 },
+            &TcpBindPipedRequest { addr, port, _pad: 0, options },
         )?
         .response()?;
 
@@ -687,6 +695,26 @@ mod tests {
         assert_eq!(request.value, 1);
         assert!(matches!(
             crate::ipc::decode_payload::<SocketOptionRequest>(&wire[..11]),
+            Err(IpcError::Malformed)
+        ));
+    }
+
+    /// The bind's request as netstack decodes it: the options last, after
+    /// the address and the port, any non-zero word an option that is on, and
+    /// a request without them refused.
+    #[test]
+    fn a_binds_request_ends_in_its_listeners_options() {
+        let mut wire = [192, 0, 2, 7, 0x16, 0, 0, 0, 0, 0, 0, 0];
+        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        assert_eq!((request.addr, request.port, request.options), ([192, 0, 2, 7], 22, TcpOptions::new(false)));
+        wire[8] = 1;
+        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        assert_eq!(request.options, TcpOptions::new(true));
+        wire[8..].copy_from_slice(&[0, 0, 0, 0x80]);
+        let request: TcpBindPipedRequest = crate::ipc::decode_payload(&wire).unwrap();
+        assert!(request.options.nodelay());
+        assert!(matches!(
+            crate::ipc::decode_payload::<TcpBindPipedRequest>(&wire[..8]),
             Err(IpcError::Malformed)
         ));
     }

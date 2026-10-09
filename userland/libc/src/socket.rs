@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall;
-use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
+use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
 use crate::errno::{
     EACCES, EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT, ENOSPC,
@@ -63,9 +63,10 @@ struct SocketEntry {
     notify_fd: i32,     // read end of listener notify pipe
     // What netstack holds for the socket, which `getsockopt` answers from: set
     // by a request it answered, or read from the accept's answer. A socket
-    // netstack does not hold yet keeps each for the call that makes it there
-    // to hand over: `broadcast` and a listener's `nodelay` for `bind`, a
-    // stream's `nodelay` for `connect`.
+    // netstack does not hold yet keeps each for the call that makes it there:
+    // a listener's `nodelay` goes in its `bind`'s request, `broadcast` is
+    // handed over after a datagram socket's bind, and a stream's `nodelay`
+    // after its `connect`.
     nodelay: bool,
     broadcast: bool,
 }
@@ -249,18 +250,10 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 
     match entry.kind {
         SocketKind::Tcp => {
-            let bound = match toyos::net::tcp_bind(ip, port) {
+            let bound = match toyos::net::tcp_bind_with(ip, port, TcpOptions::new(entry.nodelay)) {
                 Ok(b) => b,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            if entry.nodelay {
-                if let Err(e) = toyos::net::tcp_listener_set_option(bound.socket_id, OPT_NODELAY, 1) {
-                    // `bound`'s pipe end closes where it drops.
-                    let _ = toyos::net::tcp_close(bound.socket_id);
-                    set_errno(net_err_to_errno(e));
-                    return -1;
-                }
-            }
             entry.netstack_id = bound.socket_id.0;
             entry.local_port = bound.bound_port;
             entry.bound = true;

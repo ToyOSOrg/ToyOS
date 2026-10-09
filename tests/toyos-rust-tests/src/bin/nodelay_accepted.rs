@@ -1,9 +1,9 @@
 //! `TCP_NODELAY` as std answers it and as netstack's pipe ABI carries a
 //! listener's.
 //!
-//! The first half is std's alone and prints what any host prints: a stream
-//! and its duplicate are one socket, so a set on either is read on both, and
-//! a stream accepted from a listener that holds no option has none.
+//! The first half is std's alone: a stream and its duplicate are one socket,
+//! so a set on either is read on both, and a stream accepted from a listener
+//! that holds no option has none.
 //!
 //! The second is ToyOS's: a listener made by `toyos::net`, whose option std
 //! has no call for. A connection that waited when the option was set has not
@@ -18,7 +18,6 @@
 use std::net::{TcpListener, TcpStream};
 
 const WAITING: &str = "nodelay_accepted: both listeners wait for a peer";
-#[cfg(target_os = "toyos")]
 const AGAIN: &str = "nodelay_accepted: the listener waits for a second peer";
 
 struct Said(u32);
@@ -33,7 +32,6 @@ impl Said {
 
 /// The listener `toyos::net` binds on `port`: one connection that waits before
 /// the option is set, and one dialled after.
-#[cfg(target_os = "toyos")]
 fn the_pipe_abis_listener(port: u16, said: &mut Said) {
     use toyos::net::{self, NetError, OPT_NODELAY};
 
@@ -85,13 +83,7 @@ fn main() {
     said.said("read from the stream", stream.nodelay().ok(), Some(false));
 
     let listener = TcpListener::bind(("0.0.0.0", port(std_port))).expect("std's listener");
-    #[cfg(target_os = "toyos")]
     the_pipe_abis_listener(port(pipe_port), &mut said);
-    #[cfg(not(target_os = "toyos"))]
-    {
-        let _ = pipe_port;
-        println!("{WAITING}");
-    }
     let (accepted, _) = listener.accept().expect("std's accept");
     said.said("a stream accepted from a listener that holds none", accepted.nodelay().ok(), Some(false));
 

@@ -19,8 +19,9 @@ only effect of the option is when a small write leaves the machine, which a
 QEMU test may not time.
 
 A listener's is read: what an accepted socket answers is what netstack said of
-its connection, so libc's `bind` or its `setsockopt` on a listener storing the
-value and sending nothing turns that case red.
+its connection, so libc's `bind` naming no option in its request, or its
+`setsockopt` on a listener storing the value and sending nothing, turns that
+case red.
 
 **Exit**: a test reads what the stack holds for a stream's Nagle switch, on
 the node under a host test of its option call or through a guest's wire, and

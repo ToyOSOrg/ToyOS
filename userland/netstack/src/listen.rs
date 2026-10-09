@@ -13,9 +13,14 @@
 //! returns.
 //!
 //! **A connection begins with the option its listener held when its SYN
-//! arrived**, which is what a host gives it: the socket holds the listener's
-//! option from the moment it listens, a set reaches it only while it still
-//! does, and what it holds once it is a connection is that connection's.
+//! arrived**, which is what a host gives it, except the connection after a
+//! handshake its peer reset: the socket holds the listener's option from the
+//! moment it listens, its bind's from the first, a set reaches it only while
+//! it still does, and what it holds once it is a connection is that
+//! connection's. smoltcp puts a socket reset in `SynReceived` straight back to
+//! `Listen` with what it held, which no pass here sees, so a set that arrived
+//! during that handshake reaches no socket until the next accept or the next
+//! set: `issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`.
 
 use smoltcp::socket::tcp;
 
@@ -42,8 +47,9 @@ pub enum Accept<P> {
 }
 
 impl Listening {
-    pub fn new(port: u16) -> Self {
-        Self { port, woken: false, nodelay: false }
+    /// A listener on `port` that holds `nodelay` from its first socket on.
+    pub fn new(port: u16, nodelay: bool) -> Self {
+        Self { port, woken: false, nodelay }
     }
 
     pub fn port(&self) -> u16 {
@@ -53,7 +59,7 @@ impl Listening {
     /// Has a closed `socket` listen on the port, with the listener's option.
     pub fn open(&self, socket: &mut tcp::Socket) {
         let port = self.port;
-        socket.listen(port).unwrap_or_else(|e| panic!("netstack: a closed socket refused to listen on {port}: {e:?}"));
+        socket.listen(port).unwrap_or_else(|e| panic!("netstack: a socket refused to listen on {port}: {e:?}"));
         socket.set_nagle_enabled(!self.nodelay);
     }
 
