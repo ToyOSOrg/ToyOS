@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use common::{arp, sum, terms, A, BROADCAST, MAC, MAC_B, MAC_R, R};
 use lan::{udp, Lan, Seen, Udp, B, OFF_LINK};
-use toyos_mdns::{Event, Host, Lost};
+use toyos_mdns::{Event, Host};
 use toyos_net_node::{Counter, Refused};
 use toyos_net_wire::{Instant, Port};
 
@@ -49,6 +49,15 @@ fn named() -> Lan {
     lan
 }
 
+/// What the node logged of its name since the last call, in order.
+fn said(lan: &mut Lan) -> Vec<Event> {
+    let name = |event| match event {
+        toyos_net_node::Event::Name(event) => Some(event),
+        _ => None,
+    };
+    lan.node.drain_events().filter_map(name).collect()
+}
+
 /// The node's datagrams until there are `count` of them, which is at most `limit` away.
 fn until(lan: &mut Lan, count: usize, limit: Duration) {
     assert!(lan.run_until(limit, |lan| lan.datagrams().len() >= count), "{count} datagrams: {:?}", lan.datagrams());
@@ -61,7 +70,7 @@ fn settled() -> Lan {
     let mut lan = named();
     lan.lease(3_600);
     until(&mut lan, 5, Duration::from_secs(3));
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed));
+    assert_eq!(said(&mut lan), [Event::Claimed]);
     let quiet = lan.now.after(Duration::from_secs(2));
     lan.fire(quiet);
     assert_eq!(lan.datagrams().len(), 5);
@@ -247,17 +256,17 @@ fn a_held_lease_is_probed_for_three_times_and_its_name_announced_only_then() {
     assert!(lan.datagrams().is_empty(), "an address under probe has no name yet");
     assert!(lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the lease is held");
     let held = lan.now;
-    assert_eq!(lan.node.name_event(), None, "the name is not this machine's yet");
+    assert_eq!(said(&mut lan), [], "the name is not this machine's yet");
     let asked = to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN));
 
     until(&mut lan, 3, SECOND);
-    assert_eq!(lan.node.name_event(), None);
+    assert_eq!(said(&mut lan), []);
     lan.deliver(&asked);
     assert_eq!(since(&lan, 0), [probe(), probe(), probe()].map(multicast), "three probes, and no answer under them");
 
     until(&mut lan, 5, Duration::from_secs(2));
     claimed(&lan, 0, held);
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed));
+    assert_eq!(said(&mut lan), [Event::Claimed]);
     let later = lan.now.after(Duration::from_secs(10));
     lan.fire(later);
     assert_eq!(lan.datagrams().len(), 5, "owed five, sent five");
@@ -318,40 +327,57 @@ fn a_held_name_is_probed_for_again_when_the_link_returns_and_announced_only_then
     until(&mut lan, from + 1, SECOND);
     lan.deliver(&to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN)));
     assert_eq!(since(&lan, from), [multicast(probe())], "probed for, and answered to nobody under the probe");
-    assert_eq!(lan.node.name_event(), None);
+    assert_eq!(said(&mut lan), []);
 
     until(&mut lan, from + 5, Duration::from_secs(3));
     claimed(&lan, from, back);
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed));
+    assert_eq!(said(&mut lan), [Event::Claimed]);
     let quiet = lan.now.after(Duration::from_secs(10));
     lan.fire(quiet);
     assert_eq!(lan.datagrams().len(), from + 5, "owed five, sent five");
 }
 
-// A probe or an announcement that falls due with the link down: [udp] has no route for it, so it
-// is counted and gone, and the responder holds it sent. The name it then claims was probed for
-// on no wire, and nobody can ask for it there; the link's return is told to the responder, which
-// probes for it again (RFC 6762 §8) before a host on the link hears it announced.
+// The responder is told it has no link while the link is down: nothing of the name falls due
+// there, nothing is counted unsent, and no name is said claimed on no wire. The link's return is
+// a link after none, probed on (RFC 6762 §8) before a host on it hears the name announced.
 #[test]
-fn what_the_name_is_owed_with_the_link_down_is_counted_and_the_links_return_probes_for_it() {
+fn a_name_has_no_link_while_the_link_is_down_and_the_links_return_is_probed_on() {
     let mut lan = named();
     lan.lease(3_600);
+    until(&mut lan, 1, SECOND);
     lan.link(false);
-    let left = lan.datagrams().len();
     assert!(!lan.run_until(Duration::from_secs(5), |_| false), "every deadline of five seconds");
-    assert_eq!(lan.datagrams().len(), left, "nothing leaves a link that is down");
-    let unsent = lan.node.counters().get(Counter::NameUnsent);
-    assert_eq!(u64::try_from(left).unwrap() + unsent, 5, "three probes and two announcements, each sent or counted");
-    assert!(unsent >= 4, "all but a probe that left before the link went");
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed), "held, on no wire");
+    assert_eq!(since(&lan, 0), [multicast(probe())], "the probe that left before the link went, and nothing after");
+    assert_eq!(lan.node.counters().get(Counter::NameUnsent), 0, "nothing of the name fell due on a link that is down");
+    assert_eq!(said(&mut lan), [], "and no name is claimed on no wire");
 
     lan.now = lan.now.after(Duration::from_secs(5));
     lan.link(true);
     let back = lan.now;
-    until(&mut lan, left + 5, Duration::from_secs(3));
-    claimed(&lan, left, back);
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed));
-    assert_eq!(lan.node.counters().get(Counter::NameUnsent), unsent);
+    until(&mut lan, 6, Duration::from_secs(3));
+    claimed(&lan, 1, back);
+    assert_eq!(said(&mut lan), [Event::Claimed]);
+    assert_eq!(lan.node.counters().get(Counter::NameUnsent), 0);
+}
+
+// RFC 6762 §8.1: "If, by 250 ms after the third probe, no conflicting Multicast DNS responses
+// have been received, the host may move to the next step, announcing." A response the node
+// receives at the instant those 250 ms end has been received by then: it is handed to the
+// responder before the responder is asked what it owes, and the name is lost and never announced.
+#[test]
+fn a_conflicting_response_received_as_the_probing_ends_takes_the_name() {
+    let mut lan = named();
+    lan.lease(3_600);
+    until(&mut lan, 3, SECOND);
+    let ends = times(&lan, 0)[2].after(QUARTER);
+    assert_eq!(lan.node.next_deadline(), Some(ends), "the name is held at the node's next deadline");
+    lan.now = ends;
+    lan.deliver(&to_group(MAC_B, (B, MDNS), &says(B)));
+    assert_eq!(said(&mut lan), [Event::Lost]);
+    let later = lan.now.after(Duration::from_secs(60));
+    lan.fire(later);
+    assert_eq!(since(&lan, 0), [probe(), probe(), probe()].map(multicast), "three probes, and no announcement");
+    assert_eq!(said(&mut lan), []);
 }
 
 // RFC 6762 §8.1: "During probing, from the time the first probe packet is sent until 250 ms after
@@ -369,20 +395,20 @@ fn another_hosts_answer_under_the_probe_takes_the_name_and_the_node_says_so() {
         lan.lease(3_600);
         until(&mut lan, 1, SECOND);
         lan.deliver(&defended);
-        assert_eq!(lan.node.name_event(), Some(Event::Lost(Lost::Answered)));
+        assert_eq!(said(&mut lan), [Event::Lost]);
         let later = lan.now.after(Duration::from_secs(60));
         lan.fire(later);
         lan.deliver(&to_group(MAC_B, (B, 53_000), &ours(7, CLASS_IN)));
         lan.deliver(&to_group(MAC_B, (B, MDNS), &ours(0, CLASS_IN)));
         assert_eq!(since(&lan, 0), [multicast(probe())], "one probe, and then no probe, no announcement and no answer");
-        assert_eq!(lan.node.name_event(), None, "said once");
+        assert_eq!(said(&mut lan), [], "said once");
 
         lan.link(false);
         lan.link(true);
         let back = lan.now;
         until(&mut lan, 6, Duration::from_secs(3));
         claimed(&lan, 1, back);
-        assert_eq!(lan.node.name_event(), Some(Event::Claimed), "the other host is gone, and the name is this machine's");
+        assert_eq!(said(&mut lan), [Event::Claimed], "the other host is gone, and the name is this machine's");
     }
 }
 
@@ -407,7 +433,7 @@ fn a_later_probe_of_another_hosts_makes_the_node_wait_a_second_and_probe_again()
     assert!(after(heard, times(&lan, 0)[2], SECOND), "a later one is deferred to for a second: {:?}", times(&lan, 0)[2].since(heard));
     until(&mut lan, 7, Duration::from_secs(3));
     claimed(&lan, 2, times(&lan, 0)[2]);
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed), "nobody answered the second probing");
+    assert_eq!(said(&mut lan), [Event::Claimed], "nobody answered the second probing");
 }
 
 // RFC 6762 §9: a response that conflicts with a held name means the responder "MUST immediately
@@ -427,7 +453,7 @@ fn a_held_name_is_defended_and_probed_for_again_when_another_host_answers_for_it
     assert_eq!(lan.datagrams().len(), from + 1, "the name is answered to nobody");
     until(&mut lan, from + 6, Duration::from_secs(3));
     claimed(&lan, from + 1, contested);
-    assert_eq!(lan.node.name_event(), Some(Event::Claimed), "B said no more: the name is held again");
+    assert_eq!(said(&mut lan), [Event::Claimed], "B said no more: the name is held again");
 }
 
 // RFC 6762 §6.7: a query from a port other than 5353 is a legacy resolver's, and its answer goes

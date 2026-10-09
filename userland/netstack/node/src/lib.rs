@@ -74,6 +74,8 @@ pub enum Event {
     /// A refusal of the stack's, and how many of its rule it stands for beyond itself.
     Stack { refusal: toyos_net_shard::Refusal, suppressed: u64 },
     Dhcp(toyos_dhcp::Refusal),
+    /// What became of the machine's name.
+    Name(toyos_mdns::Event),
 }
 
 pub struct Node {
@@ -81,6 +83,8 @@ pub struct Node {
     client: Client,
     /// The responder for the machine's name, once [`Self::answer_as`] started it.
     name: Option<name::Name>,
+    /// The link as [`Self::link`] last reported it.
+    up: bool,
     resolver: resolve::Resolver,
     counters: Counters,
     events: Vec<Event>,
@@ -107,6 +111,7 @@ impl Node {
             stack,
             client,
             name: None,
+            up: false,
             resolver: resolve::Resolver::new(),
             counters: Counters::default(),
             events: Vec::new(),
@@ -161,14 +166,12 @@ impl Node {
     }
 
     /// The link came up or went down; the caller reports a change, not a state. Down, a held
-    /// lease stays; up, the client verifies a lease it holds and otherwise starts over, and the
-    /// machine's name is announced again for a lease that stayed.
+    /// lease stays and the machine's name has no link; up, the client verifies a lease it holds
+    /// and otherwise starts over, and the name of a lease that stayed is probed for again.
     pub fn link(&mut self, now: Instant, up: bool, mut draw: impl FnMut() -> u32) {
         self.stack.link(now, up);
+        self.up = up;
         if up {
-            if let Some(name) = &mut self.name {
-                name.link_returned(now);
-            }
             let out = self.client.link_up(now, &mut draw);
             self.carry_out(now, out, None, &mut draw);
         }

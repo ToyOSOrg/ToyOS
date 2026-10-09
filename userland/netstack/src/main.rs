@@ -1435,7 +1435,7 @@ fn main() {
     if let Card::Intel(nic) = &device.nic {
         nic.accept_multicast(toyos_mdns::GROUP_MAC);
     }
-    let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut iface, &mut socket_set);
+    let mut mdns = mdns::Responder::new(dhcp::HOSTNAME, &mut iface, &mut socket_set, resolve::random_u16);
 
     let total_mem = total_memory();
     let max_piped = max_piped_connections(total_mem);
@@ -1497,7 +1497,7 @@ fn main() {
             );
         }
 
-        mdns.pass(&iface, &mut socket_set, Instant::now());
+        mdns.pass(&iface, &mut socket_set, link_up, Instant::now());
 
         daemon.bridge_piped(&mut socket_set);
 

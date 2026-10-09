@@ -24,6 +24,48 @@ fn undrawn() -> u32 {
     panic!("no probing starts here, so no delay is drawn")
 }
 
+/// A responder driven as a caller drives it, and every event its calls
+/// returned since [`Machine::said`] was last asked, in order.
+struct Machine {
+    r: Responder<'static>,
+    said: Vec<Event>,
+}
+
+impl Machine {
+    fn new() -> Self {
+        Self { r: Responder::new(host()), said: Vec::new() }
+    }
+
+    /// A pass with nothing to read: the link, then what is owed.
+    fn on(&mut self, link: Option<Link>, now: u64, delay: impl FnOnce() -> u32) -> Option<Vec<u8>> {
+        self.r.on(link, now);
+        let (owed, event) = self.r.owed(now, delay);
+        self.said.extend(event);
+        owed
+    }
+
+    fn heard(&mut self, message: &[u8], from: Source, now: u64) -> Option<Answer> {
+        let (answer, event) = self.r.heard(message, from, now);
+        self.said.extend(event);
+        answer
+    }
+
+    fn owed_at(&self) -> Option<u64> {
+        self.r.owed_at()
+    }
+
+    /// [`LINK`] went down and is back at `now`: the caller had no link, and
+    /// has one.
+    fn link_returned(&mut self, now: u64) {
+        self.r.on(None, now);
+        self.r.on(Some(LINK), now);
+    }
+
+    fn said(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.said)
+    }
+}
+
 /// The probe for `addr`. §18.1, §18.2: ID zero and QR clear. §8.1: one
 /// question, the name, type `ANY` (255), class 1 with the unicast-response
 /// bit. §8.2: the proposed record in the Authority Section, which is the
@@ -100,11 +142,11 @@ fn probe_of(class: u16, proposed: &[Rr]) -> Vec<u8> {
 /// Every multicast `r` sends at its own deadlines up to `until`, each with
 /// its time. Nothing is due a millisecond before a deadline, and `delay` is
 /// drawn by the call that starts probing and by no other.
-fn run(r: &mut Responder, link: Link, until: u64, delay: u32) -> Vec<(u64, Vec<u8>)> {
+fn run(r: &mut Machine, link: Link, until: u64, delay: u32) -> Vec<(u64, Vec<u8>)> {
     let mut sent = Vec::new();
     for _ in 0..10_000 {
         let Some(at) = r.owed_at().filter(|at| *at <= until) else { return sent };
-        let starts = matches!(r.claim, Claim::Owed { .. });
+        let starts = matches!(r.r.claim, Claim::Owed { .. });
         if !starts && at > 0 {
             assert_eq!(r.on(Some(link), at - 1, undrawn), None, "nothing is due before {at}");
         }
@@ -129,19 +171,19 @@ fn claim_of(addr: [u8; 4], first: u64) -> Vec<(u64, Vec<u8>)> {
 
 /// A responder one probe into claiming `link`'s address: the probe left at
 /// 1,000.
-fn probing(link: Link) -> Responder<'static> {
-    let mut r = Responder::new(host());
+fn probing(link: Link) -> Machine {
+    let mut r = Machine::new();
     assert_eq!(r.on(Some(link), 1_000, || 0), Some(probe_for(link.addr)));
     r
 }
 
 /// A responder that holds its name on [`LINK`], its second announcement out
 /// at `at`.
-fn held(at: u64) -> Responder<'static> {
-    let mut r = Responder::new(host());
+fn held(at: u64) -> Machine {
+    let mut r = Machine::new();
     assert_eq!(r.on(Some(LINK), at - 1_750, || 0), Some(probe_for(ADDR)));
     assert_eq!(run(&mut r, LINK, at, 0), claim_of(ADDR, at - 1_750)[1..]);
-    assert_eq!((r.take_event(), r.owed_at()), (Some(Event::Claimed), None));
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Claimed], None));
     r
 }
 
@@ -152,7 +194,7 @@ fn ask(query: &[u8], port: u16) -> Option<Answer> {
 
 /// Whether `r` answers for its name at `now`, to a legacy resolver, which §6
 /// never delays.
-fn answers(r: &mut Responder, now: u64) -> bool {
+fn answers(r: &mut Machine, now: u64) -> bool {
     r.heard(&query(1, NAME, 1, 1), Source { addr: NEIGHBOUR, port: 53_000 }, now).is_some()
 }
 
@@ -249,7 +291,7 @@ fn a_malformed_message_is_no_question() {
 #[test]
 fn the_record_is_multicast_at_most_once_a_second_and_a_query_inside_it_waits() {
     let q = query(0, NAME, 1, 1);
-    let mut r = Responder::new(host());
+    let mut r = Machine::new();
     assert_eq!(r.on(Some(LINK), 19_250, || 0), Some(probe_for(ADDR)));
     assert_eq!(run(&mut r, LINK, 20_000, 0), claim_of(ADDR, 19_250)[1..4], "claimed, and first announced at 20,000");
     assert_eq!(r.owed_at(), Some(21_000), "§8.3: the second announcement");
@@ -278,7 +320,7 @@ fn the_record_is_multicast_at_most_once_a_second_and_a_query_inside_it_waits() {
 /// be proposing to use, should its probing be successful."
 #[test]
 fn rfc6762_8_1_a_probe_asks_any_for_the_name_with_the_unicast_bit_and_proposes_its_record_in_the_authority_section() {
-    let mut r = Responder::new(host());
+    let mut r = Machine::new();
     let probe = r.on(Some(LINK), 0, || 0).expect("no delay, so the first probe");
     #[rustfmt::skip]
     let want = [
@@ -303,15 +345,15 @@ fn rfc6762_8_1_a_probe_asks_any_for_the_name_with_the_unicast_bit_and_proposes_i
 #[test]
 fn rfc6762_8_1_three_probes_250_ms_apart_follow_the_drawn_delay_and_the_name_is_announced_250_ms_after_the_third() {
     for (draw, delay) in [(0, 0), (1, 1), (137, 137), (250, 250), (251, 0), (1_000, 247), (u32::MAX, u64::from(u32::MAX % 251))] {
-        let mut r = Responder::new(host());
+        let mut r = Machine::new();
         let mut sent: Vec<_> = r.on(Some(LINK), 5_000, || draw).map(|probe| (5_000, probe)).into_iter().collect();
         assert_eq!(sent.is_empty(), delay != 0, "draw {draw}");
-        assert_eq!(r.take_event(), None);
+        assert_eq!(r.said(), []);
         sent.extend(run(&mut r, LINK, 5_000 + delay + 749, draw));
         assert_eq!(sent, claim_of(ADDR, 5_000 + delay)[..3], "draw {draw}: three probes, and nothing announced so far");
-        assert_eq!(r.take_event(), None, "the name is not held 249 ms after the third probe");
+        assert_eq!(r.said(), [], "the name is not held 249 ms after the third probe");
         assert_eq!(run(&mut r, LINK, 60_000, draw), claim_of(ADDR, 5_000 + delay)[3..], "draw {draw}: announced twice, and nothing after");
-        assert_eq!(r.take_event(), Some(Event::Claimed));
+        assert_eq!(r.said(), [Event::Claimed]);
     }
 }
 
@@ -320,7 +362,7 @@ fn rfc6762_8_1_three_probes_250_ms_apart_follow_the_drawn_delay_and_the_name_is_
 /// with it: under the probe nothing is answered, to anyone.
 #[test]
 fn a_name_under_probe_is_answered_to_nobody() {
-    let mut r = Responder::new(host());
+    let mut r = Machine::new();
     assert_eq!(r.on(Some(LINK), 1_000, || 100), None);
     for now in [1_000, 1_099, 1_100, 1_350, 1_600, 1_849] {
         run(&mut r, LINK, now, 0);
@@ -339,7 +381,7 @@ fn a_name_under_probe_is_answered_to_nobody() {
 fn deferred(link: Link, from: [u8; 4], heard: &[u8]) -> bool {
     let mut r = probing(link);
     assert_eq!(r.heard(heard, Source { addr: from, port: PORT }, 1_100), None);
-    assert_eq!(r.take_event(), None);
+    assert_eq!(r.said(), []);
     match r.owed_at() {
         Some(1_250) => false,
         Some(2_100) => true,
@@ -368,7 +410,7 @@ fn rfc6762_8_2_the_lexicographically_later_data_wins_a_simultaneous_probe_and_th
     let mut r = probing(on(early));
     assert_eq!(r.heard(&proposing(late), Source { addr: late, port: PORT }, 1_100), None);
     assert_eq!(run(&mut r, on(early), 60_000, 0), claim_of(early, 2_100), "a second's wait, then the probing whole");
-    assert_eq!(r.take_event(), Some(Event::Claimed), "nobody answered the second probing: a stale packet's name is claimed");
+    assert_eq!(r.said(), [Event::Claimed], "nobody answered the second probing: a stale packet's name is claimed");
 
     let mut r = probing(on(late));
     assert_eq!(r.heard(&proposing(early), Source { addr: early, port: PORT }, 1_100), None);
@@ -479,12 +521,12 @@ fn rfc6762_8_1_a_conflicting_response_under_the_probe_takes_the_name_and_nothing
             assert_eq!(run(&mut r, LINK, now, 0).len(), probes - 1);
             assert_eq!(r.heard(&heard, from, now), None, "{what}");
             if !conflicts {
-                assert_eq!(r.take_event(), None, "{what}, after {probes} probes");
+                assert_eq!(r.said(), [], "{what}, after {probes} probes");
                 assert_eq!(run(&mut r, LINK, 60_000, 0), claim_of(ADDR, 1_000)[probes..], "{what}: the probing goes on");
                 continue;
             }
-            assert_eq!(r.take_event(), Some(Event::Lost(Lost::Answered)), "{what}, after {probes} probes");
-            assert_eq!((r.take_event(), r.owed_at()), (None, None), "said once, and nothing is owed");
+            assert_eq!(r.said(), [Event::Lost], "{what}, after {probes} probes");
+            assert_eq!((r.said(), r.owed_at()), (vec![], None), "said once, and nothing is owed");
             assert_eq!(run(&mut r, LINK, 3_600_000, 0), [], "{what}: no probe and no announcement");
             assert_eq!(r.on(Some(LINK), 3_600_000, undrawn), None);
             assert!(!answers(&mut r, 3_600_000), "{what}: and no answer");
@@ -502,12 +544,12 @@ fn rfc6762_8_1_a_conflicting_response_under_the_probe_takes_the_name_and_nothing
 #[test]
 fn rfc6762_8_1_nothing_heard_before_the_first_probe_is_sent_is_a_conflict() {
     let later = probe_of(1, &[(NAME, 1, 1, &MOVED)]);
-    let mut r = Responder::new(host());
+    let mut r = Machine::new();
     assert_eq!(r.on(Some(LINK), 1_000, || 200), None, "the delay");
     for heard in [says(&MOVED), later.clone()] {
         assert_eq!(r.heard(&heard, PEER, 1_100), None);
     }
-    assert_eq!((r.take_event(), r.owed_at()), (None, Some(1_200)));
+    assert_eq!((r.said(), r.owed_at()), (vec![], Some(1_200)));
     assert_eq!(r.on(Some(LINK), 1_200, undrawn), Some(probe_for(ADDR)));
 
     assert_eq!(r.heard(&later, PEER, 1_300), None);
@@ -515,7 +557,7 @@ fn rfc6762_8_1_nothing_heard_before_the_first_probe_is_sent_is_a_conflict() {
     for heard in [says(&MOVED), later.clone()] {
         assert_eq!(r.heard(&heard, PEER, 2_000), None);
     }
-    assert_eq!((r.take_event(), r.owed_at()), (None, Some(2_300)), "and in the second's wait no probe of the new probing is out");
+    assert_eq!((r.said(), r.owed_at()), (vec![], Some(2_300)), "and in the second's wait no probe of the new probing is out");
     assert_eq!(run(&mut r, LINK, 60_000, 0), claim_of(ADDR, 2_300));
 }
 
@@ -529,7 +571,7 @@ fn rfc6762_9_a_conflicting_response_resets_a_held_name_to_probing_and_nothing_el
     for (what, heard, from, conflicts) in about_the_name() {
         let mut r = held(10_000);
         assert_eq!(r.heard(&heard, from, 50_000), None, "{what}");
-        assert_eq!(r.take_event(), None, "{what}: the name is neither lost nor claimed yet");
+        assert_eq!(r.said(), [], "{what}: the name is neither lost nor claimed yet");
         if !conflicts {
             assert_eq!(r.owed_at(), None, "{what}");
             assert!(answers(&mut r, 50_000), "{what}: still held");
@@ -541,7 +583,7 @@ fn rfc6762_9_a_conflicting_response_resets_a_held_name_to_probing_and_nothing_el
         assert_eq!(run(&mut r, LINK, 50_326, 77), claim_of(ADDR, 50_077)[..1], "{what}: probed after a drawn delay");
         assert!(!answers(&mut r, 50_326));
         assert_eq!(run(&mut r, LINK, 3_600_000, 77), claim_of(ADDR, 50_077)[1..], "{what}: unanswered, the name is announced again");
-        assert_eq!(r.take_event(), Some(Event::Claimed));
+        assert_eq!(r.said(), [Event::Claimed]);
         assert!(answers(&mut r, 60_000));
     }
 }
@@ -555,7 +597,7 @@ fn rfc6762_9_a_held_name_another_host_answers_for_under_the_new_probe_is_lost() 
     assert_eq!(r.heard(&says(&MOVED), PEER, 50_000), None);
     assert_eq!(run(&mut r, LINK, 50_100, 0), [(50_000, probe_for(ADDR))]);
     assert_eq!(r.heard(&says(&MOVED), PEER, 50_100), None, "the holder defends");
-    assert_eq!((r.take_event(), r.owed_at()), (Some(Event::Lost(Lost::Answered)), None));
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], None));
     assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
     assert!(!answers(&mut r, 3_600_000));
 }
@@ -602,64 +644,71 @@ fn rfc6762_6_a_probe_for_a_held_name_is_answered_at_once_by_unicast_or_250_ms_af
     assert_eq!(r.owed_at(), Some(11_000));
 }
 
-/// `count` returns of the link `every` ms apart from 10,000, each probed on
-/// at once and answered for by another host a millisecond later. Returns the
-/// responder and when the last conflict was.
-fn answered_on_every_return(count: u64, every: u64) -> (Responder<'static>, u64) {
-    let mut r = held(5_000);
-    let mut last = 0;
-    for i in 0..count {
-        let now = 10_000 + i * every;
-        r.link_returned(now);
-        assert_eq!(r.on(Some(LINK), now, || 0), Some(probe_for(ADDR)), "return {i}: not limited yet");
-        assert_eq!(r.heard(&says(&MOVED), PEER, now + 1), None);
-        assert_eq!(r.take_event(), Some(Event::Lost(Lost::Answered)));
-        last = now + 1;
-    }
-    (r, last)
-}
-
 /// RFC 6762 §8.1: "If fifteen conflicts occur within any ten-second period,
 /// then the host MUST wait at least five seconds before each successive
-/// additional probe attempt."
+/// additional probe attempt." "For very simple devices, a valid way to comply
+/// with this requirement is to always wait five seconds after any failed
+/// probe attempt before trying again." Every probe attempt that would begin
+/// within ten seconds of a conflict waits the five, whatever begins it; §9's
+/// "MUST immediately reset its conflicted unique record to probing state" is
+/// kept whole for a conflict that follows none.
 #[test]
-fn rfc6762_8_1_fifteen_conflicts_in_ten_seconds_put_five_seconds_before_each_further_probe_attempt() {
-    // 14 x 714 ms is 9,996 ms: the fifteen fall within ten seconds.
-    let (mut r, last) = answered_on_every_return(15, 714);
-    let now = last + 700;
-    r.link_returned(now);
-    assert_eq!(r.on(Some(LINK), now, || 30), None);
-    assert_eq!(r.owed_at(), Some(now + 5_030), "five seconds, and the drawn delay");
-    assert_eq!(run(&mut r, LINK, now + 5_100, 30), [(now + 5_030, probe_for(ADDR))]);
+fn rfc6762_8_1_a_probe_attempt_within_ten_seconds_of_a_conflict_waits_five_seconds_first() {
+    let mut r = held(10_000);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 50_000), None);
+    assert_eq!(r.owed_at(), Some(50_000), "§9: no conflict came before this one, and it is probed on at once");
+    assert_eq!(run(&mut r, LINK, 54_999, 0), claim_of(ADDR, 50_000));
 
-    assert_eq!(r.heard(&probe_of(1, &[(NAME, 1, 1, &MOVED)]), PEER, now + 5_100), None, "a later probe");
-    assert_eq!(r.owed_at(), Some(now + 5_100 + 6_000), "§8.2's second, and the five");
-    assert_eq!(run(&mut r, LINK, now + 11_200, 30), [(now + 11_100, probe_for(ADDR))]);
-    assert_eq!(r.heard(&says(&MOVED), PEER, now + 11_200), None);
-    assert_eq!(r.take_event(), Some(Event::Lost(Lost::Answered)));
+    assert_eq!(r.heard(&says(&MOVED), PEER, 55_000), None, "five seconds after the last");
+    assert_eq!(r.owed_at(), Some(60_000), "five seconds before the probing");
+    assert_eq!(r.on(Some(LINK), 55_001, || 30), None, "a pass inside the five seconds draws the delay and sends nothing");
+    assert_eq!(r.owed_at(), Some(60_030), "the five seconds, then the drawn delay");
+    assert!(!answers(&mut r, 59_999), "§9: in probing state meanwhile, and answered to nobody");
+    assert_eq!(run(&mut r, LINK, 64_999, 0), claim_of(ADDR, 60_030), "and then the probing whole");
 
-    // The newest fifteen now span more than ten seconds, and each still came
-    // within ten of the one before: "each successive additional probe attempt".
-    r.link_returned(now + 12_000);
-    assert_eq!(r.on(Some(LINK), now + 12_000, || 0), None);
-    assert_eq!(r.owed_at(), Some(now + 17_000));
+    assert_eq!(r.heard(&says(&MOVED), PEER, 65_000), None, "ten seconds after the last is within ten seconds");
+    assert_eq!(r.owed_at(), Some(70_000));
+    assert_eq!(run(&mut r, LINK, 75_000, 0), claim_of(ADDR, 70_000));
+    assert_eq!(r.heard(&says(&MOVED), PEER, 75_001), None, "and 10,001 ms after it is not");
+    assert_eq!(r.owed_at(), Some(75_001));
+    assert_eq!(run(&mut r, LINK, 80_000, 0), claim_of(ADDR, 75_001));
+    assert_eq!(r.said(), [Event::Claimed; 4]);
 
-    // Ten seconds with no conflict end it.
-    r.link_returned(now + 21_201);
-    assert_eq!(r.on(Some(LINK), now + 21_201, || 0), Some(probe_for(ADDR)));
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), claim_of(ADDR, now + 21_201)[1..]);
+    // §8.2's second is the wait of a lost tiebreak that follows no conflict.
+    let later = probe_of(1, &[(NAME, 1, 1, &MOVED)]);
+    let mut r = probing(LINK);
+    assert_eq!(r.heard(&later, PEER, 1_100), None);
+    assert_eq!(run(&mut r, LINK, 2_100, 0), [(2_100, probe_for(ADDR))]);
+    assert_eq!(r.heard(&later, PEER, 2_200), None);
+    assert_eq!(r.owed_at(), Some(7_200), "the five seconds, which hold §8.2's one");
+    assert_eq!(run(&mut r, LINK, 60_000, 0), claim_of(ADDR, 7_200));
+
+    // A link after none begins a probe attempt like any other.
+    let mut r = probing(LINK);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 1_100), None);
+    assert_eq!(r.said(), [Event::Lost]);
+    r.link_returned(4_000);
+    assert_eq!(r.owed_at(), Some(9_000));
+    r.link_returned(11_100);
+    assert_eq!(r.owed_at(), Some(16_100), "ten seconds after the conflict");
+    r.link_returned(11_101);
+    assert_eq!(r.owed_at(), Some(11_101));
+    assert_eq!(run(&mut r, LINK, 60_000, 0), claim_of(ADDR, 11_101));
 }
 
-/// RFC 6762 §8.1's limit is of "fifteen conflicts" "within any ten-second
-/// period": fourteen are not fifteen, and fifteen in 10.01 s are not within
-/// ten.
+/// RFC 6762 §8.1: "If, by 250 ms after the third probe, no conflicting
+/// Multicast DNS responses have been received, the host may move to the next
+/// step, announcing." A response that has arrived when the 250 ms end is
+/// heard before what is owed is asked, and takes the name.
 #[test]
-fn rfc6762_8_1_fourteen_conflicts_or_fifteen_in_more_than_ten_seconds_limit_nothing() {
-    for (count, every) in [(14, 100), (15, 715), (40, 750)] {
-        let (mut r, last) = answered_on_every_return(count, every);
-        r.link_returned(last + 700);
-        assert_eq!(r.on(Some(LINK), last + 700, || 0), Some(probe_for(ADDR)), "{count} conflicts {every} ms apart");
-    }
+fn rfc6762_8_1_a_conflicting_response_received_as_the_last_250_ms_end_takes_the_name() {
+    let mut r = probing(LINK);
+    assert_eq!(run(&mut r, LINK, 1_749, 0), claim_of(ADDR, 1_000)[1..3]);
+    r.r.on(Some(LINK), 1_750);
+    assert_eq!(r.heard(&says(&MOVED), PEER, 1_750), None);
+    assert_eq!(r.said(), [Event::Lost]);
+    assert_eq!(r.r.owed(1_750, undrawn), (None, None), "and nothing is announced");
+    assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
 }
 
 /// RFC 6762 §8: "Whenever a Multicast DNS responder starts up, wakes up from
@@ -678,7 +727,7 @@ fn rfc6762_8_a_link_that_returns_is_probed_on_before_the_name_is_announced_or_an
     assert_eq!(r.owed_at(), Some(60_000));
     assert!(!answers(&mut r, 60_000), "not this host's until probed for again");
     assert_eq!(run(&mut r, LINK, 3_600_000, 120), claim_of(ADDR, 60_120));
-    assert_eq!(r.take_event(), Some(Event::Claimed));
+    assert_eq!(r.said(), [Event::Claimed]);
 
     assert_eq!(r.heard(&query(0, NAME, 1, 1), PEER, 99_900).map(|a| a.to), Some(To::Group));
     r.link_returned(100_000);
@@ -688,16 +737,17 @@ fn rfc6762_8_a_link_that_returns_is_probed_on_before_the_name_is_announced_or_an
 
     let mut lost = probing(LINK);
     assert_eq!(lost.heard(&says(&MOVED), PEER, 1_100), None);
-    assert_eq!(lost.take_event(), Some(Event::Lost(Lost::Answered)));
-    lost.link_returned(9_000);
-    assert_eq!(run(&mut lost, LINK, 3_600_000, 5), claim_of(ADDR, 9_005), "a lost name is probed for on the link's return");
-    assert_eq!(lost.take_event(), Some(Event::Claimed));
+    assert_eq!(lost.said(), [Event::Lost]);
+    lost.link_returned(12_000);
+    assert_eq!(run(&mut lost, LINK, 3_600_000, 5), claim_of(ADDR, 12_005), "a lost name is probed for on the link's return");
+    assert_eq!(lost.said(), [Event::Claimed]);
 
-    let mut unaddressed = Responder::new(host());
-    unaddressed.link_returned(5_000);
-    assert_eq!(unaddressed.owed_at(), None, "no address, no record to probe for");
-    assert_eq!(unaddressed.on(Some(LINK), 9_000, || 0), Some(probe_for(ADDR)), "the address that comes is probed on once");
-    assert_eq!(run(&mut unaddressed, LINK, 3_600_000, 0), claim_of(ADDR, 9_000)[1..]);
+    let mut down = held(10_000);
+    down.r.on(None, 20_000);
+    assert_eq!(down.owed_at(), None, "a link that is down is owed nothing");
+    assert!(!answers(&mut down, 20_000), "and nothing is answered on it");
+    assert_eq!(down.on(None, 30_000, undrawn), None);
+    assert_eq!(down.on(Some(LINK), 40_000, || 0), Some(probe_for(ADDR)), "and its return is probed on");
 }
 
 /// A link that returns again under the probe starts it over: each return is
@@ -715,7 +765,7 @@ fn a_flapping_link_restarts_the_probe_and_nothing_is_announced_until_one_runs_wh
     }
     assert_eq!(sent, [], "a return inside the last one's delay sends nothing");
     assert_eq!(run(&mut r, LINK, 3_600_000, 150), claim_of(ADDR, 24_900 + 150));
-    assert_eq!(r.take_event(), Some(Event::Claimed));
+    assert_eq!(r.said(), [Event::Claimed]);
 
     let mut sent = Vec::new();
     for flap in 0..50 {
@@ -726,9 +776,9 @@ fn a_flapping_link_restarts_the_probe_and_nothing_is_announced_until_one_runs_wh
     }
     let probes: Vec<_> = (0..50).flat_map(|flap| claim_of(ADDR, 40_000 + flap * 600).into_iter().take(3)).collect();
     assert_eq!(sent, probes, "three probes a return, and no announcement between two returns 600 ms apart");
-    assert_eq!(r.take_event(), None);
+    assert_eq!(r.said(), []);
     assert_eq!(run(&mut r, LINK, 3_600_000, 0), claim_of(ADDR, 49 * 600 + 40_000)[3..]);
-    assert_eq!(r.take_event(), Some(Event::Claimed));
+    assert_eq!(r.said(), [Event::Claimed]);
 }
 
 /// A storm of forged answers, one a millisecond for ten seconds, at a held
@@ -744,69 +794,52 @@ fn a_storm_of_forged_answers_costs_one_probe_and_the_name() {
         assert_eq!(r.heard(&says(&MOVED), PEER, 50_000 + ms), None);
     }
     assert_eq!(sent, [(50_000, probe_for(ADDR))]);
-    assert_eq!((r.take_event(), r.owed_at()), (Some(Event::Lost(Lost::Answered)), None));
+    assert_eq!((r.said(), r.owed_at()), (vec![Event::Lost], None));
     assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
 }
 
-/// Forged answers timed to spare every probe, one before each second
-/// announcement of a name held again: each costs a probing (§9), and the
-/// fifteenth since the link last returned costs the name, so the forger's
-/// packets buy fourteen probings and no more, however long it goes on. A
-/// return of the link is no peer's packet, and the count starts over at it.
+/// Forged answers, one a millisecond for a minute, that spare every probe:
+/// each strikes a name that is not under one. The first is probed on at once
+/// (§9) and every later one waits §8.1's five seconds, so the forger buys one
+/// probing in 5,750 ms, three probes and the announcement the next forged
+/// answer follows, for as long as it sends; nothing it sent is kept, and when
+/// it stops the probing it last bought holds the name.
 #[test]
-fn forged_answers_that_spare_every_probe_cost_fourteen_probings_and_then_the_name() {
+fn forged_answers_that_spare_every_probe_cost_one_probing_in_five_seconds_and_the_name_is_held_when_they_stop() {
     let mut r = held(10_000);
-    let (mut now, mut sent, mut forged) = (50_000, Vec::new(), 0);
-    while !matches!(r.claim, Claim::Lost) {
-        assert_eq!(r.heard(&says(&MOVED), PEER, now), None);
-        forged += 1;
-        let Some(at) = r.owed_at() else { break };
-        // The name is held again and announced once; the forger strikes before the second.
-        let round = run(&mut r, LINK, at + 1_749, 0);
-        assert_eq!(round, claim_of(ADDR, at)[..4], "forged answer {forged}");
-        assert_eq!(r.take_event(), Some(Event::Claimed));
-        sent.extend(round);
-        now = at + 1_749;
+    let mut sent = Vec::new();
+    for now in 50_000..110_000 {
+        sent.extend(run(&mut r, LINK, now, 0));
+        if !matches!(r.r.claim, Claim::Probing { sent: 1.., .. }) {
+            assert_eq!(r.heard(&says(&MOVED), PEER, now), None);
+        }
     }
-    assert_eq!((forged, sent.len()), (CONFLICTS, 14 * 4), "fourteen probings: three probes and an announcement each");
-    assert_eq!((r.take_event(), r.owed_at()), (Some(Event::Lost(Lost::Contested)), None));
-    for later in 0..1_000 {
-        assert_eq!(r.heard(&says(&MOVED), PEER, now + later), None);
-    }
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), [], "and nothing more, whatever it sends");
-
-    r.link_returned(4_000_000);
-    assert_eq!(run(&mut r, LINK, 5_000_000, 0), claim_of(ADDR, 4_000_000));
-    for forged in 0..14 {
-        let now = 5_000_000 + forged * 20_000;
-        assert_eq!(r.heard(&says(&MOVED), PEER, now), None);
-        assert_eq!(run(&mut r, LINK, now + 19_999, 0), claim_of(ADDR, now), "fourteen more are fourteen since the link returned");
-    }
-    r.link_returned(6_000_000);
-    assert_eq!(run(&mut r, LINK, 6_100_000, 0), claim_of(ADDR, 6_000_000));
-    assert_eq!(r.heard(&says(&MOVED), PEER, 6_100_000), None);
-    assert_eq!(run(&mut r, LINK, 6_200_000, 0), claim_of(ADDR, 6_100_000), "and the fifteenth is the first since the next return");
+    let probings: Vec<_> = (0..11).flat_map(|nth| claim_of(ADDR, 50_000 + nth * 5_750).into_iter().take(4)).collect();
+    assert_eq!(sent, probings, "eleven probings in the minute, each 5,750 ms after the one before");
+    assert_eq!(r.said(), [Event::Claimed; 11], "and the name is lost to none of them");
+    assert_eq!(run(&mut r, LINK, 3_600_000, 0), claim_of(ADDR, 113_250), "the forger stops, and its last conflict is probed on");
+    assert_eq!(r.said(), [Event::Claimed]);
+    assert!(answers(&mut r, 3_600_000));
 }
 
-/// Forged probes that win every tiebreak, one behind each first probe: each
-/// costs a second's wait and one probe (§8.2), and the fifteenth costs the
-/// name. A probe a second never reaches §8.1's fifteen in ten seconds.
+/// Forged probes that win every tiebreak, one a millisecond for a minute:
+/// the first costs §8.2's second and every later one §8.1's five, so the
+/// forger buys one probe in five seconds, and when it stops the name is
+/// claimed.
 #[test]
-fn forged_probes_that_win_every_tiebreak_cost_fifteen_probes_and_then_the_name() {
+fn forged_probes_that_win_every_tiebreak_cost_one_probe_in_five_seconds_and_the_name_is_claimed_when_they_stop() {
     let later = probe_of(1, &[(NAME, 1, 1, &MOVED)]);
     let mut r = probing(LINK);
-    let mut sent = vec![1_000];
-    for forged in 1..CONFLICTS as u64 {
-        assert_eq!(r.heard(&later, PEER, 1_000 * forged + 1), None);
-        assert_eq!(r.take_event(), None);
-        let probe = run(&mut r, LINK, 1_000 * forged + 1_100, 0);
-        assert_eq!(probe, [(1_000 * forged + 1_001, probe_for(ADDR))], "a second after forged probe {forged}");
-        sent.push(probe[0].0);
+    let mut sent = Vec::new();
+    for now in 1_001..61_000 {
+        sent.extend(run(&mut r, LINK, now, 0));
+        assert_eq!(r.heard(&later, PEER, now), None);
     }
-    assert_eq!(r.heard(&later, PEER, 16_000), None);
-    assert_eq!((r.take_event(), r.owed_at()), (Some(Event::Lost(Lost::Contested)), None));
-    assert_eq!(sent.len(), CONFLICTS);
-    assert_eq!(run(&mut r, LINK, 3_600_000, 0), []);
+    let probes: Vec<_> = (0..12).map(|nth| (2_001 + nth * 5_000, probe_for(ADDR))).collect();
+    assert_eq!(sent, probes, "a second after the first forged probe, and then one probe in five seconds");
+    assert_eq!(r.said(), []);
+    assert_eq!(run(&mut r, LINK, 3_600_000, 0), claim_of(ADDR, 62_001), "the forger stops, and the probing runs whole");
+    assert_eq!(r.said(), [Event::Claimed]);
 }
 
 /// Nothing a peer sends is trusted to be a message: no cut of a conflicting
@@ -818,15 +851,15 @@ fn no_cut_of_a_conflicting_response_or_of_a_winning_probe_is_one() {
     for cut in 0..response.len() {
         let mut r = probing(LINK);
         assert_eq!(r.heard(&response[..cut], PEER, 1_100), None);
-        assert_eq!((r.take_event(), r.owed_at()), (None, Some(1_250)), "under the probe, cut at {cut}");
+        assert_eq!((r.said(), r.owed_at()), (vec![], Some(1_250)), "under the probe, cut at {cut}");
         let mut r = held(10_000);
         assert_eq!(r.heard(&response[..cut], PEER, 50_000), None);
-        assert_eq!((r.take_event(), r.owed_at()), (None, None), "held, cut at {cut}");
+        assert_eq!((r.said(), r.owed_at()), (vec![], None), "held, cut at {cut}");
     }
     for cut in 0..later.len() {
         let mut r = probing(LINK);
         assert_eq!(r.heard(&later[..cut], PEER, 1_100), None);
-        assert_eq!((r.take_event(), r.owed_at()), (None, Some(1_250)), "cut at {cut}");
+        assert_eq!((r.said(), r.owed_at()), (vec![], Some(1_250)), "cut at {cut}");
     }
     let mut r = probing(LINK);
     assert_eq!(r.heard(&later, PEER, 1_100), None);
@@ -834,7 +867,7 @@ fn no_cut_of_a_conflicting_response_or_of_a_winning_probe_is_one() {
     assert_eq!(r.heard(&response, PEER, 2_100), None, "in the wait");
     assert_eq!(run(&mut r, LINK, 2_100, 0), [(2_100, probe_for(ADDR))]);
     assert_eq!(r.heard(&response, PEER, 2_101), None);
-    assert_eq!(r.take_event(), Some(Event::Lost(Lost::Answered)));
+    assert_eq!(r.said(), [Event::Lost]);
 }
 
 /// RFC 6762 §8.4: "if any of a host's IP addresses change, it MUST
@@ -845,18 +878,18 @@ fn no_cut_of_a_conflicting_response_or_of_a_winning_probe_is_one() {
 /// none is probed on. Nothing is answered without an address.
 #[test]
 fn an_address_after_none_is_probed_for_and_a_new_one_under_a_held_name_is_announced() {
-    let mut r = Responder::new(host());
+    let mut r = Machine::new();
     assert!(!answers(&mut r, 0), "no address yet");
     assert_eq!(r.on(None, 0, undrawn), None);
     assert_eq!(r.owed_at(), None);
     assert_eq!(r.on(Some(LINK), 0, || 0), Some(probe_for(ADDR)));
     assert_eq!(run(&mut r, LINK, 5_000, 0), claim_of(ADDR, 0)[1..]);
-    assert_eq!(r.take_event(), Some(Event::Claimed));
+    assert_eq!(r.said(), [Event::Claimed]);
 
     let moved = Link { addr: MOVED, prefix: 24 };
     assert_eq!(r.on(Some(moved), 9_000, undrawn), Some(record_of(MOVED)), "announced at once, and not probed for");
     assert_eq!(run(&mut r, moved, 60_000, 0), [(10_000, record_of(MOVED))], "§8.3: and a second later");
-    assert_eq!(r.take_event(), None);
+    assert_eq!(r.said(), []);
 
     assert_eq!(r.on(Some(moved), 60_500, undrawn), None);
     assert_eq!(r.on(None, 60_600, undrawn), None);
@@ -868,10 +901,10 @@ fn an_address_after_none_is_probed_for_and_a_new_one_under_a_held_name_is_announ
     let mut r = probing(LINK);
     assert_eq!(r.on(Some(moved), 1_250, undrawn), Some(probe_for(MOVED)), "a probe proposes the address held as it leaves");
     assert_eq!(r.heard(&says(&ADDR), PEER, 1_300), None, "and the address given up is another's");
-    assert_eq!(r.take_event(), Some(Event::Lost(Lost::Answered)));
+    assert_eq!(r.said(), [Event::Lost]);
     assert_eq!((r.on(Some(LINK), 2_000, undrawn), r.owed_at()), (None, None), "a lost name is not claimed by a new address");
     assert_eq!(r.on(None, 3_000, undrawn), None);
-    assert_eq!(r.on(Some(LINK), 4_000, || 0), Some(probe_for(ADDR)), "but by one after none");
+    assert_eq!(r.on(Some(LINK), 12_000, || 0), Some(probe_for(ADDR)), "but by one after none");
 }
 
 /// RFC 6762 §11: a query whose source is not on this link is ignored; a
