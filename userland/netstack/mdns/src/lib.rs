@@ -45,19 +45,27 @@
 //! when the last 250 ms end is heard under the probe and takes the name,
 //! where the other order would claim and announce it first.
 //!
-//! **A lost name is not replaced.** §9 recommends a responder change its name
-//! and probe again; this one holds none, says so to its owner and waits for a
-//! link after none. The name was moved in by the owner, who also asks the
+//! **A lost name is not replaced, and is probed for again.** §9 recommends a
+//! responder change its name and probe again; this one holds none and says so
+//! to its owner once. The name was moved in by the owner, who also asks the
 //! network to record it with the lease: a responder that picked another would
 //! answer to a name nothing else on the machine knows, that no storage keeps
 //! for the next boot (§9's third step), and that any host on the link could
-//! move again by answering for it.
+//! move again by answering for it. It probes for the same name again
+//! [`RETRY_MS`] after each loss, and at once on a link after none: a probing
+//! no host answers claims and announces the name as at start-up, and one the
+//! holder answers waits the interval again and says nothing. §9's loser "MUST
+//! cease using the name", and a probe uses none: it is a question, and
+//! nothing is announced or answered between a loss and a claim. §8.1 lets a
+//! failed probe be tried again five seconds later and asks for no retry at
+//! all.
 //!
 //! **What a peer can make this responder do.** Every byte read is a peer's,
 //! from a source on this link (§11); none is trusted, and none is kept.
 //!
 //! - It keeps nothing a message brought: its state is its fixed fields, of
-//!   which a conflict writes the claim and one time.
+//!   which a conflict writes the claim, whether its loss was said and one
+//!   time.
 //! - One conflict costs at most one probing: three probes and two
 //!   announcements.
 //! - §8.1: "If fifteen conflicts occur within any ten-second period, then the
@@ -70,10 +78,25 @@
 //!   the ten seconds before it is probed on at once, as §9 asks. So a peer's
 //!   messages buy at most one probing in five seconds, for as long as it
 //!   sends them, and the name is held again when it stops.
-//! - A lost name sends nothing and reads nothing until a link after none: it
-//!   stays lost after the other host has left or a forger has stopped. Two
-//!   packets from any host on the link buy that, a response that takes a held
-//!   name back to probing and a response under the probe.
+//! - A lost name's probing begins at least [`RETRY_MS`] after the one
+//!   before, whatever arrives: between two nothing is read, since no probe is
+//!   out for a message to conflict with or tie; under a probe a conflicting
+//!   response and a probe that wins the tiebreak each put the next probing
+//!   the interval later, where §8.2's second would let forged probes buy one
+//!   in five seconds. So a peer's messages buy at most three probes in the
+//!   interval from a host that holds no name, no announcement and no word to
+//!   its owner.
+//! - A link after none is probed on at once, whoever holds the name, in place
+//!   of the retry that was owed and never beside it. Under a lost name it
+//!   costs what it costs under any, its three probes, and §8.1's five seconds
+//!   first within ten of a conflict: one probing in five seconds while a
+//!   holder answers each.
+//! - Two packets from any host on the link take a held name, a response that
+//!   takes it back to probing and a response under the probe, and one more in
+//!   each interval keeps it: a host that answers every probe is what a holder
+//!   of the name is. When it stops, the next probing claims the name. One
+//!   that lets each retry claim the name and then takes it buys the owner two
+//!   words in the interval, claimed and lost.
 //!
 //! Where an answer goes follows the question (§5.4, §6.7):
 //!
@@ -271,8 +294,9 @@ pub enum Event {
     /// announced and answered with from here on.
     Claimed,
     /// §8.1: another host answered for the name under the probe. It is not
-    /// this host's, and nothing is announced or answered until a link comes
-    /// after none.
+    /// this host's, and nothing is announced or answered until it is
+    /// [`Event::Claimed`]. Said once: a later probing that host answers too
+    /// says nothing.
     Lost,
 }
 
@@ -295,6 +319,13 @@ const DEFER_MS: u64 = 1_000;
 /// before each successive additional probe attempt."
 const CONFLICT_WINDOW_MS: u64 = 10_000;
 const LIMITED_WAIT_MS: u64 = 5_000;
+
+/// How long after losing the name it is probed for again: a minute. A host
+/// that holds the name answers one probe a minute for each host that wants
+/// it, twelve times fewer than §8.1's five seconds would ask of it, and a
+/// name whose holder has left is back within the minute and the second a
+/// probing takes. §8.1's five seconds after a failed attempt are inside it.
+const RETRY_MS: u64 = 60_000;
 
 /// §6: a record is multicast on an interface at most once a second.
 const GROUP_EVERY_MS: u64 = 1_000;
@@ -319,16 +350,16 @@ enum Claim {
     /// the name is held. A message conflicts only once `sent` is not zero.
     Probing { sent: u8, at_ms: u64 },
     Held,
-    Lost,
 }
 
 /// This host's one record on its link, on the caller's monotonic clock in
-/// milliseconds: probed for on every link after none, then announced twice a
-/// second apart (§8, §8.3), answered to whoever asks, and multicast at most
-/// once a second (§6), so no host can turn the queries it sends into a
-/// multicast to every host on the link at its own rate. A query §6 holds back
-/// is answered when the second ends, not dropped: the caller wakes at
-/// [`Responder::owed_at`], for that and for every probe.
+/// milliseconds: probed for on every link after none and [`RETRY_MS`] after
+/// each loss, then announced twice a second apart (§8, §8.3), answered to
+/// whoever asks, and multicast at most once a second (§6), so no host can
+/// turn the queries it sends into a multicast to every host on the link at
+/// its own rate. A query §6 holds back is answered when the second ends, not
+/// dropped: the caller wakes at [`Responder::owed_at`], for that and for
+/// every probe, a retry's included.
 ///
 /// A message counts as sent once [`Responder::owed`] has handed it over.
 #[derive(Debug)]
@@ -337,6 +368,8 @@ pub struct Responder<'a> {
     /// The link the address is held on.
     link: Option<Link>,
     claim: Claim,
+    /// [`Event::Lost`] was said, and [`Event::Claimed`] not since.
+    lost: bool,
     /// When the name last met a conflict.
     conflict_ms: Option<u64>,
     last_group_ms: Option<u64>,
@@ -351,7 +384,7 @@ pub struct Responder<'a> {
 
 impl<'a> Responder<'a> {
     pub const fn new(host: Host<'a>) -> Self {
-        Self { host, link: None, claim: Claim::Lost, conflict_ms: None, last_group_ms: None, owed_ms: None, again: false }
+        Self { host, link: None, claim: Claim::Owed { from_ms: 0 }, lost: false, conflict_ms: None, last_group_ms: None, owed_ms: None, again: false }
     }
 
     /// This host is on `link` at `now_ms`, or on none while it holds no
@@ -395,6 +428,7 @@ impl<'a> Responder<'a> {
                 return (Some(probe(self.host, link.addr)), None);
             }
             self.claim = Claim::Held;
+            self.lost = false;
             event = Some(Event::Claimed);
             self.owed_ms = Some(self.group_free_ms(now_ms, GROUP_EVERY_MS));
             self.again = true;
@@ -446,7 +480,6 @@ impl<'a> Responder<'a> {
             Claim::Owed { from_ms } => Some(from_ms),
             Claim::Probing { at_ms, .. } => Some(at_ms),
             Claim::Held => self.owed_ms,
-            Claim::Lost => None,
         }
     }
 
@@ -473,33 +506,35 @@ impl<'a> Responder<'a> {
                 self.rival(message, link, now_ms);
                 (None, None)
             }
-            Claim::Owed { .. } | Claim::Probing { .. } | Claim::Lost => (None, None),
+            Claim::Owed { .. } | Claim::Probing { .. } => (None, None),
         }
     }
 
     /// A response: §6 has one from a port other than 5353 silently ignored,
-    /// and one that conflicts takes a name under probe (§8.1) and sends a
-    /// held one back to probing (§9).
+    /// and one that conflicts takes a name under probe (§8.1), which is
+    /// probed for again [`RETRY_MS`] later, and sends a held one back to
+    /// probing (§9).
     fn response(&mut self, message: &[u8], from: Source, link: Link, now_ms: u64) -> Option<Event> {
         let probing = match self.claim {
             Claim::Probing { sent, .. } if sent > 0 => true,
             Claim::Held => false,
-            Claim::Owed { .. } | Claim::Probing { .. } | Claim::Lost => return None,
+            Claim::Owed { .. } | Claim::Probing { .. } => return None,
         };
         if from.port != PORT || !conflicts(message, self.host, link.addr).unwrap_or(false) {
             return None;
         }
         let wait = self.conflict(now_ms);
         if probing {
-            self.release(Claim::Lost);
-            return Some(Event::Lost);
+            self.release(Claim::Owed { from_ms: now_ms.saturating_add(RETRY_MS) });
+            return (!core::mem::replace(&mut self.lost, true)).then_some(Event::Lost);
         }
         self.release(Claim::Owed { from_ms: now_ms.saturating_add(wait) });
         None
     }
 
     /// A query heard under this host's probe: §8.2's comparison if it is
-    /// another host's probe for the name.
+    /// another host's probe for the name. A lost name defers for
+    /// [`RETRY_MS`], as it does to an answer.
     fn rival(&mut self, query: &[u8], link: Link, now_ms: u64) {
         let Some((kind, _)) = asked(query, self.host) else { return };
         let Some((theirs, more)) = proposed(query, self.host, kind) else { return };
@@ -512,7 +547,7 @@ impl<'a> Responder<'a> {
             Ordering::Less => false,
         };
         if later {
-            let wait = self.conflict(now_ms).max(DEFER_MS);
+            let wait = self.conflict(now_ms).max(if self.lost { RETRY_MS } else { DEFER_MS });
             self.release(Claim::Probing { sent: 0, at_ms: now_ms.saturating_add(wait) });
         }
     }
