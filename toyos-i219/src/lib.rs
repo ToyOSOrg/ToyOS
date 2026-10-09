@@ -31,6 +31,28 @@
 //! interrupt record. On the host they are `stub.rs`, which is the datasheet
 //! written down.
 //!
+//! # A frame is offered only to a ring with room for it
+//!
+//! [`I219::tx_room`] is asked before there is a frame, and a caller answered
+//! none sleeps on its claim once [`I219::wake_on_room`] has unmasked the one
+//! cause that says a descriptor came back. Nothing here drops a frame for want
+//! of a descriptor, and nothing waits on the part.
+//!
+//! **A link that is down has no room**, and no frame is published while it
+//! is. One the part already holds it keeps for the link that comes: §10.2.7's
+//! Defer Count has "A defer event occurs when the transmitter cannot
+//! immediately send a packet due to the medium being busy either because:
+//! [...] The link is not up" of the 82574, and the *Intel Ethernet Connection
+//! I219 Datasheet* (612523) §9.5.4.6 is the I219's own Defer Count, with the
+//! same "or the link is not up". So the descriptors a link change finds unsent
+//! stay the part's, on both: it is owed their write-back within
+//! `STRANDED_DEADLINE_NANOS` of the link being read up over them
+//! ([`I219::begin_pass`]), the ring goes on when they come, and a part that
+//! has not written them back by then is refused by name
+//! ([`PassRefused::Stranded`]) and driven no further. **Neither is reset to
+//! take the ring back**: no Intel document says a reset over published
+//! descriptors is safe on the PCH's MAC, and the 82574 has no need of one.
+//!
 //! # The device is not trusted
 //!
 //! Every number in a written-back descriptor is the device's, and this driver
@@ -166,8 +188,9 @@ pub trait Interrupts {
 /// multiple of 128", so the count is a multiple of eight.
 pub const RX_RING: usize = 256;
 /// How many transmit descriptors the ring holds. A frame is handed to the
-/// device the moment it is filled and reclaimed on the next send, so what this
-/// bounds is how many may be in flight at once.
+/// device the moment it is filled and reclaimed when room is next asked for,
+/// so what this bounds is how many may be in flight at once: one fewer than
+/// this, [`I219::tx_room`]'s most.
 pub const TX_RING: usize = 16;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
@@ -382,6 +405,31 @@ pub struct Pass {
     pub link_changed: bool,
 }
 
+/// Why [`I219::begin_pass`] did not begin a pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PassRefused<C> {
+    /// The claim refused its interrupt record, in its own word: the function
+    /// is no longer this driver's.
+    Claim(C),
+    /// The part still holds `left` of the descriptors a link change left
+    /// in its transmit ring, this long after the link was read up over them.
+    Stranded { left: usize, after_nanos: u64 },
+}
+
+impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Claim(why) => write!(f, "its claim refused an interrupt read: {why:?}"),
+            Self::Stranded { left, after_nanos } => write!(
+                f,
+                "a link change left its transmit ring holding frames, and {} ms after the link \
+                 returned it has not written {left} of their descriptor(s) back",
+                after_nanos / 1_000_000
+            ),
+        }
+    }
+}
+
 /// Everything this driver has refused, dropped or been told about, for the one
 /// diagnostic line its caller prints on a change.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -399,12 +447,18 @@ pub struct Counters {
     pub overruns: u32,
     /// `ICR.RXDMT0`: free descriptors fell to the threshold.
     pub starved: u32,
-    /// Frames the caller offered that no transmit buffer holds.
-    pub too_long: u32,
-    /// Frames dropped for want of a free transmit descriptor. A count and not
-    /// a wait: a server never blocks, and a dropped frame's recovery is the
-    /// peer's retransmit.
-    pub tx_dropped: u32,
+    /// Times a caller with a frame found the transmit ring with no room:
+    /// [`I219::wake_on_room`] answering 0 on a link that is up.
+    pub tx_full: u32,
+    /// Times the transmit cause was unmasked for such a caller.
+    pub tx_wake_armed: u32,
+    /// Passes a message began whose only unmasked cause was the transmit one,
+    /// while it was unmasked: the wake a full ring was waiting on, taken, and
+    /// nothing a pass begun by anything else reads.
+    pub tx_wake_taken: u32,
+    /// Descriptors a link change found unsent in the ring, and left there for
+    /// the part to write back ([`I219::begin_pass`]).
+    pub stranded: u32,
     /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
     /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
@@ -417,11 +471,11 @@ pub struct Counters {
 
 impl Counters {
     /// The counts that are worth a line: every one but [`Self::spurious`],
-    /// [`Self::sent`] and [`Self::received`], which move on their own on a
-    /// working card, so a diagnostic keyed on them would print on nothing
-    /// having gone wrong.
+    /// [`Self::sent`], [`Self::received`] and the three of a full transmit
+    /// ring, which move on their own on a working card, so a diagnostic keyed
+    /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, sent: 0, received: 0, ..*self }
+        Self { spurious: 0, sent: 0, received: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
     }
 }
 
@@ -474,6 +528,23 @@ const RESET_SETTLE_NANOS: u64 = 1_000;
 /// handshake and says only that "the software device driver might time out if
 /// the PCIe Master Enable Status bit is not cleared within a given time".
 const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
+
+/// How long a part has to write back the descriptors a link change left in its
+/// transmit ring, from the pass that read the link up over them.
+///
+/// **One bound for both parts**, because their documents give the same
+/// count: §10.2.6.1's `TCTL.CT` below, and on the I219 its Power Management
+/// Control register (612523 §9.5.3.3, PHY address 01, page 769, register 21,
+/// bits 8:1), "Number of retries for a collided packet", default 0x0F.
+///
+/// **A ceiling on an event, and the slowest §10.2.6.1 lets a full ring leave**:
+/// [`TX_RING`]` - 1` frames of a whole buffer each, on a half-duplex link at
+/// 10 Mb/s, where a byte is 800 ns; each sent the "total of 16 attempts" a
+/// `TCTL.CT` of 15 allows, and each attempt behind a back-off that "clamps to
+/// the maximum number of slot times after 10 retries" — ten doublings of a
+/// slot, which is the collision window of "64 bytes for 10/100 Mb/s".
+const STRANDED_DEADLINE_NANOS: u64 =
+    (TX_RING as u64 - 1) * 16 * (TX_BUF_BYTES as u64 + (1 << 10) * 64) * 800;
 
 /// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
 /// the transmitter enabled.
@@ -669,6 +740,29 @@ pub enum Part {
     I219,
 }
 
+impl Part {
+    /// The cause that says a transmit descriptor was written back, as this
+    /// part raises a message for it.
+    ///
+    /// §7.2.8: "Any write backs are performed; either with the RS bit set or
+    /// when accumulated descriptors are written back [...] Transmit Descriptor
+    /// Write Back (ICR.TXDW)", and §10.2.4.1 gives the 82574 the same event a
+    /// second time as `TxQ0`, "Indicates transmit queue 0 write back" — the
+    /// name §7.4.2 maps to a vector, where "the ICR[24:20] bits reflect
+    /// specific interrupt causes" in MSI-X mode. Both are unmasked on it.
+    ///
+    /// **The PCH's MAC is never in that mode, and gets `TXDW` alone**: its
+    /// function publishes a Message Signaled Interrupt capability and no MSI-X
+    /// one (631120 §8.1, §8.1.15), so §7.4.1's fixed mapping is the only one
+    /// it has, and what its bit 22 means no Intel document publishes.
+    fn tx_done(self) -> u32 {
+        match self {
+            Self::E82574 => cause::TXDW | cause::TXQ0,
+            Self::I219 => cause::TXDW,
+        }
+    }
+}
+
 /// What [`I219::open`] found on the way up, for the one line a caller prints
 /// about a function that raised no link.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -713,6 +807,12 @@ pub struct I219<R: Registers, C, D, I> {
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
+    /// Whether [`Part::tx_done`] is unmasked: a caller found the ring full
+    /// and no pass has begun since.
+    tx_wake: bool,
+    /// The descriptors a link change left in the transmit ring that the part
+    /// has not yet written back.
+    stranded: Option<Stranded>,
     counters: Counters,
     /// What [`Self::wire`] has read out of the statistics registers so far.
     wire: Wire,
@@ -724,6 +824,16 @@ impl<R: Registers, C, D, I> Drop for I219<R, C, D, I> {
             pch::release(&self.regs);
         }
     }
+}
+
+/// The oldest descriptors of the transmit ring, published before a link change
+/// and not written back since.
+#[derive(Clone, Copy)]
+struct Stranded {
+    left: usize,
+    /// When the link change was read, which the deadline runs from while the
+    /// link is up.
+    since: u64,
 }
 
 impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
@@ -844,6 +954,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             rx_budget: RX_BUDGET,
             tx_next: 0,
             tx_clean: 0,
+            tx_wake: false,
+            stranded: None,
             counters: Counters::default(),
             wire: Wire::default(),
         };
@@ -1018,13 +1130,30 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// refuses to answer at all is not a pass with no messages in it — the
     /// function is no longer this driver's, and the refusal is handed up rather
     /// than counted as quiet.
-    pub fn begin_pass(&mut self) -> Result<Pass, I::Refused> {
+    ///
+    /// **A pass that reads `LSC` with a transmit descriptor still unsent leaves
+    /// it the part's**, counted [`Counters::stranded`], and a pass that finds
+    /// one still not written back `STRANDED_DEADLINE_NANOS` after the link
+    /// was read up over them is refused. [`Self::pass_due_in`] is when that
+    /// pass has to begin. `LSC` says the link changed and not that it is
+    /// down, so a link that reads up on both sides of it starts the same
+    /// deadline.
+    pub fn begin_pass(&mut self) -> Result<Pass, PassRefused<I::Refused>> {
         self.rx_budget = RX_BUDGET;
         let messages = match self.irq.taken() {
             Ok(count) => count,
             Err(why) if why == I::IDLE => 0,
-            Err(why) => return Err(why),
+            Err(why) => return Err(PassRefused::Claim(why)),
         };
+
+        // §10.2.4.6: the transmit cause is masked again, because it was wanted
+        // for one wake and left unmasked it is a message for every frame sent.
+        // Before the room this pass's sends ask for: a ring still full arms it
+        // again in [`Self::wake_on_room`].
+        let waited = core::mem::take(&mut self.tx_wake);
+        if waited {
+            self.regs.write(regs::IMC, self.part.tx_done());
+        }
 
         // Once, and written back. §10.2.4.1's case 3 says a read with no
         // interrupt asserted has no side effect at all, so a driver that
@@ -1047,15 +1176,60 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if messages > 0 && acknowledged == 0 {
             self.counters.spurious = self.counters.spurious.saturating_add(messages);
         }
+        // §7.4.3: "The cause bit stores the interrupt event regardless of the
+        // state of the mask bit", so the transmit cause is in `ICR` on a pass
+        // anything began. It is the wake only where a message came and no
+        // other unmasked cause is there to have raised it.
+        if waited
+            && messages > 0
+            && causes & self.part.tx_done() != 0
+            && causes & (cause::ENABLED | cause::ENABLED_MSIX) == 0
+        {
+            self.counters.tx_wake_taken = self.counters.tx_wake_taken.saturating_add(1);
+        }
 
-        // On `LSC` and on every pass that found no cause at all: the link can
-        // also come up before the mask was written, and then no `LSC` is ever
-        // delivered for it.
+        // On `LSC` alone: §7.4.3 records it masked or not, so a link that came
+        // up before the mask was written is in this read all the same.
         let before = self.link;
-        if causes & cause::LSC != 0 || !self.link.is_up() {
+        if causes & cause::LSC != 0 {
             self.refresh_link();
+            let unsent = self.unsent();
+            if unsent > 0 {
+                // A second change over the same descriptors counts none of
+                // them twice, and the deadline runs from the newest.
+                let counted = self.stranded.map_or(0, |stranded| stranded.left);
+                self.counters.stranded =
+                    self.counters.stranded.saturating_add((unsent - counted) as u32);
+                self.stranded = Some(Stranded { left: unsent, since: self.clock.nanos() });
+            }
+        }
+        if self.stranded.is_some() && self.link.is_up() {
+            self.reclaim_tx();
+        }
+        if let (Some(Stranded { left, since }), true) = (self.stranded, self.link.is_up()) {
+            let waited = self.clock.nanos().saturating_sub(since);
+            if waited >= STRANDED_DEADLINE_NANOS {
+                return Err(PassRefused::Stranded { left, after_nanos: waited });
+            }
         }
         Ok(Pass { messages, causes, link_changed: self.link != before })
+    }
+
+    /// How long until a pass has to begin whether or not a message came: when
+    /// the descriptors a link change stranded are owed. `None` where nothing
+    /// is owed, which is every ring but one a link change found unsent frames
+    /// in, and that one too while its link is down.
+    pub fn pass_due_in(&self) -> Option<u64> {
+        let Stranded { since, .. } = self.stranded?;
+        let waited = self.clock.nanos().saturating_sub(since);
+        self.link.is_up().then(|| STRANDED_DEADLINE_NANOS.saturating_sub(waited))
+    }
+
+    /// Transmit descriptors published and not written back, the written-back
+    /// ones reclaimed first.
+    fn unsent(&mut self) -> usize {
+        self.reclaim_tx();
+        (self.tx_next + TX_RING - self.tx_clean) % TX_RING
     }
 
     /// Re-read `STATUS` and take what it says about the link.
@@ -1140,7 +1314,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// one, walk `RDT` backwards over the rest of the ring.
     ///
     /// **Ready is read out of the descriptor, so there is no second record of
-    /// it to disagree.** [`Self::publish_rx`] zeroes the status word, and a
+    /// it to disagree.** [`publish_rx`] zeroes the status word, and a
     /// descriptor still in a caller's hands holds the non-zero word the device
     /// wrote back — `DD` is what [`Self::poll_rx`] took it on. The device
     /// touches neither until the tail passes it.
@@ -1169,25 +1343,65 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.regs.write(regs::RDT, tail as u32);
     }
 
-    /// Take a transmit descriptor and its buffer, or `None` where every one is
-    /// in flight or the frame does not fit one.
+    /// How many frames the transmit ring takes now, every descriptor the part
+    /// has written back taken first — and none while the link is down, whose
+    /// return is `LSC`'s to say.
     ///
-    /// Non-blocking by construction. A caller with no slot drops the frame:
-    /// spinning on the ring here would park its whole event loop on a device.
+    /// §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
+    /// descriptor would wrap the tail onto the head and read as empty — one
+    /// descriptor is never handed out, and a full ring is [`TX_RING`]` - 1` in
+    /// flight.
+    pub fn tx_room(&mut self) -> usize {
+        if !self.link.is_up() {
+            return 0;
+        }
+        TX_RING - 1 - self.unsent()
+    }
+
+    /// Ask for a message when the part next writes a transmit descriptor
+    /// back, and answer the room there is now that it has been asked.
+    ///
+    /// §10.2.4.5: "A particular interrupt can be enabled by writing a 1b to
+    /// the corresponding mask bit", and [`Part::tx_done`] stays unmasked until
+    /// the next [`Self::begin_pass`]. Each frame sent is a write-back and each
+    /// write-back the cause: `TXDCTL`'s description has "all descriptors
+    /// written back" with `GRAN` set, §7.2.4.2 writes them back "only when
+    /// TXDCTL.WTHRESH number of descriptors are ready", which at one is each,
+    /// and §7.2.8 sets `TXDW` when "any write backs are performed".
+    ///
+    /// **Unmasked first and counted after**, so no write-back is lost between
+    /// the two: one that landed before the mask was written is in the count,
+    /// and one that lands after it is a message. §7.4.3 signals an interrupt
+    /// "when unmasked bits in this register are set", so the first may be a
+    /// message as well, which costs a pass. A caller answered 0 waits on its
+    /// claim.
+    ///
+    /// With the link down nothing is unmasked and the answer is 0: the wake
+    /// is the link's own cause, which is never masked.
+    pub fn wake_on_room(&mut self) -> usize {
+        let room = self.tx_room();
+        if room > 0 || !self.link.is_up() {
+            return room;
+        }
+        self.counters.tx_full = self.counters.tx_full.saturating_add(1);
+        if !self.tx_wake {
+            self.regs.write(regs::IMS, self.part.tx_done());
+            self.tx_wake = true;
+            self.counters.tx_wake_armed = self.counters.tx_wake_armed.saturating_add(1);
+        }
+        self.tx_room()
+    }
+
+    /// Take a transmit descriptor and its buffer, or `None` where the ring has
+    /// no room ([`Self::tx_room`]) or the frame does not fit a buffer.
+    ///
+    /// Non-blocking by construction: a caller asks for room before it has a
+    /// frame, and waits on [`Self::wake_on_room`] where there is none.
     pub fn tx_reserve(&mut self, len: usize) -> Option<TxSlot> {
         // §7.2.10.1: one legacy descriptor carries one buffer, and this
         // driver's is `TX_BUF_BYTES`. A longer frame is refused rather than
-        // truncated into one, and counted apart from a full ring because it is
-        // a caller that offered more than it was told it could.
-        if len > TX_BUF_BYTES {
-            self.counters.too_long = self.counters.too_long.saturating_add(1);
-            return None;
-        }
-        self.reclaim_tx();
-        // §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
-        // descriptor would wrap the tail onto the head and read as empty.
-        if (self.tx_next + 1) % TX_RING == self.tx_clean {
-            self.counters.tx_dropped = self.counters.tx_dropped.saturating_add(1);
+        // truncated into one.
+        if len > TX_BUF_BYTES || self.tx_room() == 0 {
             return None;
         }
         let index = self.tx_next;
@@ -1226,13 +1440,19 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.dma.observe();
             self.tx_clean = (self.tx_clean + 1) % TX_RING;
             self.counters.sent = self.counters.sent.saturating_add(1);
+            // Stranded descriptors are the ring's oldest, so each one taken
+            // back while any is owed is one of them.
+            self.stranded = match self.stranded {
+                Some(Stranded { left, since }) if left > 1 => Some(Stranded { left: left - 1, since }),
+                _ => None,
+            };
         }
     }
 
     /// Take back every transmit descriptor the part has finished with, so
     /// [`Counters::sent`] says what has left and not only what was handed
     /// over — for a caller about to report it, since the ring is otherwise
-    /// reclaimed only when the next frame needs a slot.
+    /// reclaimed only when room is asked for.
     pub fn reclaim(&mut self) {
         self.reclaim_tx();
     }

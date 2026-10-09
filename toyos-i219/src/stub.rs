@@ -95,6 +95,12 @@ pub struct Permits {
     /// §7.4.5: an interrupt whose cause was already cleared. "This results in
     /// a spurious interrupt."
     pub spurious_interrupts: bool,
+    /// What a part does with the transmit descriptors it holds when its link
+    /// goes away. Off: it sends them when the link returns, which is §10.2.7's
+    /// Defer Count — a transmit deferred because "The link is not up". On: it
+    /// never sends them, and takes no other, until it is reset: the part a
+    /// driver has to refuse.
+    pub link_loss_strands_the_ring: bool,
     /// §10.2.4.1 case 3: "Interrupt was not asserted (ICR.INT_ASSERT=0): Read
     /// has no side affect." The document's own §7.4.5 says instead that "all
     /// bits in the ICR register are cleared on a read to ICR"; both readings
@@ -204,6 +210,7 @@ impl Default for Permits {
             shadow_head: true,
             null_padding: true,
             spurious_interrupts: true,
+            link_loss_strands_the_ring: true,
             icr_read_has_no_side_effect: true,
             master_takes_time_to_quiesce: true,
             firmware_takes_the_mdio_interface: true,
@@ -298,6 +305,11 @@ const OEM_SPEED_BITS: u16 = oem_bits::LOW_POWER_LINK_UP | oem_bits::GIGABIT_DISA
 
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
+
+/// §10.2.4.1's causes below the five §7.4.2 keeps for MSI-X mode: `ICR[19:0]`,
+/// which §7.4.1's fixed mapping makes the whole of what a part outside that
+/// mode signals.
+const CLASSIC_CAUSES: u32 = (1 << 20) - 1;
 
 /// How many reads of `EXTCNF_CTRL` §4.5.2's manageability agent holds the
 /// interface across before the software request registered under it is granted.
@@ -591,6 +603,9 @@ struct Model {
     rx_holding: Vec<(usize, u64, Vec<u8>)>,
     tx_head: usize,
     tx_holding: Vec<usize>,
+    /// The link went away over published descriptors, and this part takes
+    /// nothing off its transmit ring again before a reset.
+    tx_stranded: bool,
     /// Messages the function has sent that the claim has not read.
     messages: u32,
     /// One offset in the window that nothing decodes, which answers ones.
@@ -697,6 +712,7 @@ impl Model {
             rx_holding: Vec::new(),
             tx_head: 0,
             tx_holding: Vec::new(),
+            tx_stranded: false,
             messages: 0,
             not_decoding: None,
             written: BTreeSet::new(),
@@ -756,6 +772,7 @@ impl Model {
         self.master_reads = 0;
         self.rx_holding.clear();
         self.tx_holding.clear();
+        self.tx_stranded = false;
         // §4.5.2: the software and hardware ownership bits "are cleared on
         // reset", and the part takes the interface again "while loading the
         // extended configuration area" — which is what a reset makes it do.
@@ -904,6 +921,7 @@ impl Model {
         }
         self.phy.up = up;
         self.refresh_status();
+        self.strand_if_the_link_is_gone();
         self.raise(cause::LSC);
     }
 
@@ -1150,10 +1168,18 @@ impl Model {
                 }
                 self.refresh_status();
             }
-            // §10.2.4.5: set, not assign.
+            // §10.2.4.5: set, not assign — and "a PCIe interrupt is generated
+            // whenever one of the bits in this register is set, and the
+            // corresponding interrupt condition occurs", which §7.4.3 reads as
+            // level: "an interrupt is signaled when unmasked bits in this
+            // register are set". A cause already recorded is a message the
+            // moment it is unmasked.
             regs::IMS => {
                 let held = self.get(regs::IMS);
                 self.set(regs::IMS, held | value);
+                if self.get(regs::ICR) & value & !held & !cause::INT_ASSERTED != 0 {
+                    self.raise(0);
+                }
             }
             // §10.2.4.6: clear.
             regs::IMC => {
@@ -1733,29 +1759,39 @@ impl Model {
         }
     }
 
-    /// Record a cause and, if it is unmasked *and* has a vector, send a
-    /// message.
+    /// Record a cause and, if it is unmasked and this part's interrupt mode
+    /// carries it, send a message.
     ///
-    /// §10.2.4.1 gives every event two names: the classic cause and the
-    /// queue-or-other cause §10.2.4.9 allocates a vector to. Both are set in
-    /// `ICR`; only the second can reach a vector, and only while `IVAR`'s
-    /// enable bit for it is set. **A driver that programmed no `IVAR` is
-    /// therefore told nothing at all**, which is the part behaving as specified
-    /// and not a model being unkind.
+    /// **The 82574 is in MSI-X mode.** §10.2.4.1 gives every event two names:
+    /// the classic cause and the queue-or-other cause §10.2.4.9 allocates a
+    /// vector to. Both are set in `ICR`; only the second can reach a vector,
+    /// and only while `IVAR`'s enable bit for it is set. A driver that
+    /// programmed no `IVAR` is therefore told nothing at all, which is the
+    /// part behaving as specified and not a model being unkind.
+    ///
+    /// **The PCH's MAC is in MSI mode**, the only one its function has
+    /// (631120 §8.1.15, and no MSI-X capability in §8.1's table): §7.4.1's
+    /// fixed mapping, where every unmasked classic cause is the message, and
+    /// no second name is set because no document gives its bits 24:20 one.
     fn raise(&mut self, causes: u32) {
         let held = self.get(regs::ICR);
         let mut now = held | causes;
-        if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
-            now |= cause::RXQ0;
-        }
-        if causes & cause::TXDW != 0 {
-            now |= cause::TXQ0;
-        }
-        if causes & (cause::LSC | cause::RXO) != 0 {
-            now |= cause::OTHER;
+        if self.part == Part::E82574 {
+            if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
+                now |= cause::RXQ0;
+            }
+            if causes & cause::TXDW != 0 {
+                now |= cause::TXQ0;
+            }
+            if causes & (cause::LSC | cause::RXO) != 0 {
+                now |= cause::OTHER;
+            }
         }
         let unmasked = now & self.get(regs::IMS) & !cause::INT_ASSERTED;
-        let delivered = unmasked & self.vectored();
+        let delivered = match self.part {
+            Part::E82574 => unmasked & self.vectored(),
+            Part::I219 => unmasked & CLASSIC_CAUSES,
+        };
         self.set(regs::ICR, if delivered != 0 { now | cause::INT_ASSERTED } else { now });
         if delivered != 0 {
             self.messages = self.messages.saturating_add(1);
@@ -1940,6 +1976,17 @@ impl Model {
         self.raise(cause::RXT0);
     }
 
+    /// [`Permits::link_loss_strands_the_ring`], at every moment the model
+    /// looks: a link that is down over a published descriptor.
+    fn strand_if_the_link_is_gone(&mut self) {
+        let count = self.get(regs::TDLEN) as usize / tx_desc::BYTES;
+        if count == 0 || self.get(regs::STATUS) & status::LU != 0 {
+            return;
+        }
+        let published = self.tx_head != self.get(regs::TDT) as usize % count;
+        self.tx_stranded |= self.permits.link_loss_strands_the_ring && published;
+    }
+
     /// Take every published transmit descriptor and put its frame on the wire.
     fn transmit(&mut self) {
         if self.get(regs::TCTL) & tctl::EN == 0 {
@@ -1951,6 +1998,11 @@ impl Model {
             return;
         }
         let tail = self.get(regs::TDT) as usize % count;
+        // A frame leaves on a link. With none the descriptors stay the part's.
+        self.strand_if_the_link_is_gone();
+        if self.tx_stranded || self.get(regs::STATUS) & status::LU == 0 {
+            return;
+        }
         // §7.2.4.1: "The 82574 NEVER fetches descriptors beyond the descriptor
         // tail pointer."
         while self.tx_head != tail {
@@ -2300,6 +2352,7 @@ impl Nic {
             Part::I219 => model.refresh_phy_link(),
             Part::E82574 => {
                 model.refresh_status();
+                model.strand_if_the_link_is_gone();
                 model.raise(cause::LSC);
             }
         }
@@ -2319,6 +2372,24 @@ impl Nic {
     /// Frames the device has put on the wire, taken.
     pub fn sent(&self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.0.borrow_mut().sent)
+    }
+
+    /// Messages the claim holds that no pass has taken: what a caller asleep
+    /// on its claim would be woken by.
+    pub fn pending(&self) -> u32 {
+        self.0.borrow().messages
+    }
+
+    /// The messages the function sent never reach the claim, and its causes
+    /// stay recorded: what a part that raises no message for an unmasked
+    /// cause looks like to a pass something else begins.
+    pub fn messages_are_lost(&self) {
+        self.0.borrow_mut().messages = 0;
+    }
+
+    /// The clock moves on by `nanos` with nothing reaching the part.
+    pub fn time_passes(&self, nanos: u64) {
+        self.0.borrow_mut().nanos += nanos;
     }
 
     /// Stop the device acting on a tail register write, so it acts only when
