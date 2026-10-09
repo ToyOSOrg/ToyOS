@@ -7,6 +7,10 @@
 //! nothing. A destination, a port or a length is the client's number and is refused, never
 //! trusted; a datagram off the wire reaches a socket only through [udp]'s demultiplexer.
 //!
+//! **A socket holds a place** (`places`) from its bind to its close: what it makes the node hold
+//! is its two queues, `limits::RX_DATAGRAMS` received and `limits::TX_DATAGRAMS` accepted. A bind
+//! with no place left is answered [`Refused::ResourceExhausted`] with nothing made.
+//!
 //! A refusal [udp] logs comes out of [`Node::drain_events`] after the node's next `receive`,
 //! `fire` or `link`.
 
@@ -32,7 +36,8 @@ pub enum Refused {
     /// The call names what no datagram of this socket may carry: an address that is not this
     /// machine's to bind, a destination nothing is sent to, port 0, more than one frame holds.
     InvalidInput,
-    /// The socket holds all it may until some of it has left: the same call succeeds later.
+    /// The socket holds all it may until some of it has left, or the node holds all it has
+    /// places for: the same call succeeds later.
     ResourceExhausted,
 }
 
@@ -98,7 +103,11 @@ impl Node {
     /// or, with none named, an ephemeral one, which spends the one draw. Returns the socket and
     /// the port it holds.
     pub fn udp_bind(&mut self, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<(DatagramId, Port), Refused> {
+        if self.room() == 0 {
+            return Err(Refused::ResourceExhausted);
+        }
         let (id, port) = self.stack.bind(addr, port, draw).map_err(refused)?;
+        self.sockets = self.sockets.saturating_add(1);
         Ok((DatagramId(id), port))
     }
 
@@ -115,8 +124,11 @@ impl Node {
     }
 
     /// Closes the socket: its port is free at once, what it received is gone, and what it had
-    /// accepted still leaves, to [udp]'s bound.
+    /// accepted still leaves, to [udp]'s bound. Its place is back.
     pub fn udp_close(&mut self, now: Instant, id: DatagramId) -> Result<(), Refused> {
-        self.stack.close(now, id.0).map_err(refused)
+        self.stack.close(now, id.0).map_err(refused)?;
+        self.sockets = self.sockets.saturating_sub(1);
+        self.wake_owners(now);
+        Ok(())
     }
 }

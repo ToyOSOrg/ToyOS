@@ -26,10 +26,10 @@
 //! address restarts that clock for at most [`OWNERLESS_PER_PEER`] streams at once; any other has
 //! [`OWNERLESS_LIFE`] from the pass that first found it so, whatever it gives up, until it
 //! becomes one of them: a pass over the streams that begins with fewer makes it one, the oldest
-//! stream first. The count is an address's and addresses are not counted, so how many such
-//! streams the node holds in all is not bounded here, nor is how slowly a peer may take. A
-//! client that still holds its reading end, or may still write, is never timed here: what it
-//! cannot send is [tcp]'s to give up on.
+//! stream first. The count is an address's and addresses are not counted: how many such streams
+//! the node holds in all is `places`' to bound, of which each holds one, and how slowly a peer
+//! may take is bounded nowhere. A client that still holds its reading end, or may still write,
+//! is never timed here: what it cannot send is [tcp]'s to give up on.
 //!
 //! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here. A
 //! transmit opportunity can only fail a connect, whose next hop it found to answer nobody, and
@@ -93,7 +93,15 @@ pub trait FromClient {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal>;
 }
 
-/// The two ends a client's connect hands over.
+/// Why a connect made no stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectRefused {
+    /// The node holds all it has places for (`places`).
+    Full,
+    Stack(ConnectError),
+}
+
+/// The two ends a client's connect or accept hands over.
 pub struct Pipes {
     pub to_client: Box<dyn ToClient>,
     pub from_client: Box<dyn FromClient>,
@@ -162,6 +170,24 @@ struct Stream {
 }
 
 impl Stream {
+    /// An established connection on its client's pipes. `options` are the ones [tcp] holds for
+    /// it.
+    fn established(conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> Self {
+        Self {
+            conn,
+            remote,
+            to_client: Some(pipes.to_client),
+            from_client: Some(pipes.from_client),
+            connecting: false,
+            deadline: None,
+            done_writing: false,
+            extended: false,
+            held: false,
+            room: false,
+            options,
+        }
+    }
+
     /// One pass. `false` lets the stream go: its pipe ends drop with it, and its connection is
     /// [tcp]'s alone or gone. `extended` is how many streams each peer address kept alive when
     /// the pass over the streams began, and those it has made so since.
@@ -284,6 +310,20 @@ pub(crate) struct Streams {
 }
 
 impl Streams {
+    /// Holds `stream` under an id of its own.
+    fn hold(&mut self, stream: Stream) -> StreamId {
+        let id = StreamId(self.next);
+        self.next = self.next.saturating_add(1);
+        self.live.insert(id, stream);
+        id
+    }
+
+    /// Holds a connection a listener's owner accepted, established, on the pipes its accept
+    /// handed over. `options` are the ones [tcp] says it has.
+    pub(crate) fn accepted(&mut self, conn: ConnId, remote: Ipv4Addr, options: Options, pipes: Pipes) -> StreamId {
+        self.hold(Stream::established(conn, remote, options, pipes))
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.live.values().filter_map(|stream| stream.deadline).min()
     }
@@ -292,25 +332,14 @@ impl Streams {
 impl Node {
     /// An active open to `remote`, answered by a [`StreamEvent`] once the handshake ends or
     /// `timeout` passes. Refused, nothing was sent and the pipe ends are dropped.
-    pub fn connect(&mut self, now: Instant, remote: Endpoint, timeout: Option<Duration>, pipes: Pipes) -> Result<StreamId, ConnectError> {
-        let conn = self.stack.tcp_connect(now, remote)?;
-        let id = StreamId(self.streams.next);
-        self.streams.next = self.streams.next.saturating_add(1);
-        let stream = Stream {
-            conn,
-            remote: remote.addr,
-            to_client: Some(pipes.to_client),
-            from_client: Some(pipes.from_client),
-            connecting: true,
-            deadline: timeout.map(|within| now.after(within)),
-            done_writing: false,
-            extended: false,
-            held: false,
-            room: false,
-            options: Options::default(),
-        };
-        self.streams.live.insert(id, stream);
-        Ok(id)
+    pub fn connect(&mut self, now: Instant, remote: Endpoint, timeout: Option<Duration>, pipes: Pipes) -> Result<StreamId, ConnectRefused> {
+        if self.room() == 0 {
+            return Err(ConnectRefused::Full);
+        }
+        let conn = self.stack.tcp_connect(now, remote).map_err(ConnectRefused::Stack)?;
+        let deadline = timeout.map(|within| now.after(within));
+        // An active open has [tcp]'s defaults until `set_nodelay`.
+        Ok(self.streams.hold(Stream { connecting: true, deadline, ..Stream::established(conn, remote.addr, Options::default(), pipes) }))
     }
 
     /// One pass over every stream: netstack calls it when a pipe it watches is ready.
@@ -328,6 +357,7 @@ impl Node {
             *peers = peers.saturating_add(1);
         }
         live.retain(|id, stream| (connects && !stream.connecting) || stream.pass(*id, now, stack, events, &mut extended));
+        self.wake_owners(now);
     }
 
     /// The client lets go of the stream: nobody reads it, and what its pipe still holds is sent
@@ -338,6 +368,7 @@ impl Node {
             self.stack.tcp_abort(now, stream.conn);
             self.streams.live.remove(&id);
             self.streams.events.push_back(StreamEvent::Closed { id });
+            self.wake_owners(now);
             return;
         }
         stream.to_client = None;
@@ -388,6 +419,7 @@ impl Node {
         if held {
             self.stack.tcp_abort(now, stream.conn);
             self.streams.live.remove(&id);
+            self.wake_owners(now);
         }
     }
 
