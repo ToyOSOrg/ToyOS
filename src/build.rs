@@ -754,30 +754,6 @@ fn build_and_assemble(
     image::create_root_image(&root_files, &symlinks, quiet)
 }
 
-/// The programs an architecture cannot build yet, each with why. Such a program
-/// is left off that architecture's ROOT, said by name at build time; its row
-/// goes when its reason does.
-const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
-    (Arch::Aarch64, "calc", TOOLKIT_FORKS),
-    (Arch::Aarch64, "snake", TOOLKIT_FORKS),
-    (
-        Arch::Aarch64,
-        "doom",
-        "softbuffer's toyos fork stops it \
-         (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
-         AArch64 with the toolchain's clang",
-    ),
-];
-
-const TOOLKIT_FORKS: &str = "softbuffer's and winit's toyos forks resolve the published \
-     toyos-window 0.2.0, whose framebuffer is x86-64 only \
-     (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
-
-/// Why `arch`'s userland leaves `program` out, if it does.
-fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
-    NOT_YET_BUILT.iter().find(|(a, name, _)| *a == arch && *name == program).map(|(_, _, why)| *why)
-}
-
 /// Build `config`'s programs and the supervisor for `arch`, and add each to `root_files`.
 fn build_programs(
     root: &Path,
@@ -792,13 +768,6 @@ fn build_programs(
     let programs: Vec<ConfigCrate> = config_crates(root, config)
         .into_iter()
         .filter(|c| c.built == Built::Member)
-        .filter(|c| match not_built_for(arch, &c.name) {
-            Some(why) => {
-                eprintln!("{}: not built for {}, and not on this ROOT: {why}", c.name, arch.name());
-                false
-            }
-            None => true,
-        })
         .collect();
     for c in &programs {
         assert!(
@@ -2686,22 +2655,6 @@ mod tests {
             implied.is_empty(),
             "`test-actuators` implies {implied:?}, so it is several kernel builds again"
         );
-    }
-
-    /// **An architecture leaves out only what the shipped config builds**, and
-    /// each reason names the issue file that owns it.
-    #[test]
-    fn every_program_an_architecture_leaves_out_is_one_the_shipped_config_builds() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let programs = parse_config(&Boot::shipped(root).config).programs;
-        for (arch, name, why) in NOT_YET_BUILT {
-            assert!(programs.contains_key(*name), "{name} is left out for {arch:?} and the shipped config builds no such program");
-            assert_eq!(not_built_for(*arch, name), Some(*why));
-            let issue = why.split("issues/").nth(1).map(|rest| rest.split(')').next().unwrap_or(rest));
-            let issue = issue.unwrap_or_else(|| panic!("{name}'s reason names no issue file: {why}"));
-            assert!(root.join("issues").join(issue).is_file(), "{name}'s reason cites issues/{issue}, which does not exist");
-        }
-        assert_eq!(not_built_for(Arch::X86_64, "calc"), None, "x86-64 builds every program");
     }
 
     /// No image this repository ships starts sshserver.
