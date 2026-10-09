@@ -5,12 +5,13 @@
 //! the fork checkout's gitlink names (`sysroot::gitlink`, which refuses a
 //! checkout holding what no commit does and a gitlink staged and not committed),
 //! the committed tree of its `src/bootstrap` (one holding what no commit does is
-//! refused), the bootstrap configuration below, [`RECIPE`], and the tools the
+//! refused), the bootstrap configuration below, [`recipe`], and the tools the
 //! host builds it with ([`host_tools`]). `llvm/<key>/` in the store
 //! (`src/keystore.rs`) is what builds read of bootstrap's install of that LLVM and its clang
 //! ([`keep`]), with its LLD in `bin/` beside `llvm-config` and in `src/` the
-//! runtimes' sources the C++ runtime is built from (`src/libcxx.rs`) as its
-//! commit holds them, made by whichever build first needs it ([`resolve`]), and
+//! sources the C++ runtime (`src/libcxx.rs`) and the ToyOS-hosted clang
+//! (`src/hostedclang.rs`) are built from as its commit holds them ([`sources`]),
+//! made by whichever build first needs it ([`resolve`]), and
 //! stored only when it was built from what the key names. Once its [`SOURCE`]
 //! file exists it is read-only, its directories as well as its files.
 //! Every compiler build names it as the host's `llvm-config` with
@@ -50,7 +51,7 @@ use crate::toolchain::{self, host_triple};
 const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-project/lld; of the install, \
                       llvm-config, clang and llvm-ar in bin, and llvm-objcopy on an Apple host, LLVM's headers, \
                       every library llvm-config names and clang's resource headers; lld in bin, and the \
-                      runtimes' sources in src, read-only; 4";
+                      sources the C++ runtime and the ToyOS-hosted clang are built from in src, read-only; 5";
 
 /// What of the caller's environment the LLVM build, and every tool its key
 /// asks, sees:
@@ -127,7 +128,7 @@ pub fn host_lines(dir: &Path) -> String {
 /// changes no commit does.
 pub fn key(fork: &Path) -> Key {
     let tools = host_tools();
-    key_of(fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools, &stamp(fork)), &tools.identity)
+    key_of(fork, &recipe(), &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools, &stamp(fork)), &tools.identity)
 }
 
 /// What an LLVM, its clang and its LLD say they were built from.
@@ -165,6 +166,17 @@ pub(crate) fn stamp_options(fork: &Path) -> Vec<(String, String)> {
 pub(crate) fn host_compilers() -> (PathBuf, PathBuf) {
     let tools = host_tools();
     (tools.cc.clone(), tools.cxx.clone())
+}
+
+/// [`RECIPE`], with the pathspecs of what it keeps of the commit.
+fn recipe() -> String {
+    format!("{RECIPE}\n{}", sources().join(" "))
+}
+
+/// What of the commit an LLVM keeps in `src/`, as git's pathspecs: what the C++
+/// runtime and the ToyOS-hosted clang are built from.
+fn sources() -> Vec<&'static str> {
+    crate::libcxx::SOURCES.into_iter().chain(crate::hostedclang::SOURCES).collect()
 }
 
 /// [`key`], with what it reads beside `fork`'s committed `src/bootstrap`:
@@ -269,7 +281,7 @@ pub(crate) fn defect(dir: &Path) -> Option<String> {
         .iter()
         .chain(&["lib/clang"])
         .map(|k| dir.join(k))
-        .chain(crate::libcxx::SOURCES.iter().map(|s| dir.join("src").join(s)));
+        .chain(sources().into_iter().filter(|s| !s.starts_with(':')).map(|s| dir.join("src").join(s)));
     let tools = tools().map(|t| dir.join("bin").join(t)).filter(|p| !p.is_file());
     let gone: Vec<String> = kept.filter(|p| !p.is_dir()).chain(tools).map(|p| p.display().to_string()).collect();
     (!gone.is_empty()).then(|| format!("{} carries no {}", dir.display(), gone.join(", ")))
@@ -322,8 +334,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
         built_from.trim(),
         fork.display(),
     );
-    let repository = git_out(&checkout, &["rev-parse", "--absolute-git-dir"]);
-    check_out_committed(Path::new(repository.trim()), &commit, &crate::libcxx::SOURCES, &partial.join("src"));
+    check_out_committed(&checkout, &commit, &sources(), &partial.join("src"));
     fs::write(partial.join(SOURCE), format!("{key}\n"))
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
     read_only(&partial);
@@ -371,27 +382,27 @@ fn libraries(install: &Path) -> Vec<PathBuf> {
     named
 }
 
-/// Write `paths` as `commit` holds them, from the git directory `repository`,
+/// Write `paths` as `commit` holds them, from the repository at `checkout`,
 /// under `dest`: through an index of their own and with no sparse pattern, so
-/// nothing a checkout of it holds beside the commit, tracked, ignored or left
-/// out, reaches them.
-pub(crate) fn check_out_committed(repository: &Path, commit: &str, paths: &[&str], dest: &Path) {
+/// nothing the checkout holds beside the commit, tracked, ignored or left out,
+/// reaches them.
+fn check_out_committed(checkout: &Path, commit: &str, paths: &[&str], dest: &Path) {
     fs::create_dir_all(dest).unwrap_or_else(|e| panic!("create {}: {e}", dest.display()));
     let index = toyos_tmpdir::TempDir::new("llvm-sources-index");
     let out = Command::new("git")
-        .env("GIT_DIR", repository)
         .env("GIT_INDEX_FILE", index.join("index"))
         .args(["-c", "core.sparseCheckout=false", "--work-tree"])
         .arg(dest)
         .args(["checkout", commit, "--"])
         .args(paths)
+        .current_dir(checkout)
         .output()
-        .unwrap_or_else(|e| panic!("run git in {}: {e}", repository.display()));
+        .unwrap_or_else(|e| panic!("run git in {}: {e}", checkout.display()));
     assert!(
         out.status.success(),
-        "git checkout {commit} -- {paths:?} into {} from {}: {}",
+        "git checkout {commit} -- {paths:?} into {} in {}: {}",
         dest.display(),
-        repository.display(),
+        checkout.display(),
         String::from_utf8_lossy(&out.stderr).trim(),
     );
 }
@@ -573,10 +584,10 @@ mod tests {
         if !checkout.join(".git").exists() {
             git(&checkout, &["init", "-q"]);
         }
-        write(&checkout.join("llvm/CMakeLists.txt"), content);
-        for source in crate::libcxx::SOURCES {
+        for source in sources().into_iter().filter(|s| !s.starts_with(':')) {
             write(&checkout.join(source).join("CMakeLists.txt"), &format!("the {source} of {content}"));
         }
+        write(&checkout.join("llvm/test/lit.cfg.py"), "what no build reads");
         git(&checkout, &["add", "-A"]);
         let tree = git(&checkout, &["write-tree"]);
         let out = Command::new("git")
@@ -749,7 +760,7 @@ mod tests {
         let tools = host_tools();
         let config = config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools, &stamp(&fork));
         let base = key(&fork);
-        assert_eq!(key_of(&fork, RECIPE, &config, &tools.identity), base);
+        assert_eq!(key_of(&fork, &recipe(), &config, &tools.identity), base);
         let elsewhere = if host_triple() == "x86_64-unknown-linux-gnu" {
             "aarch64-unknown-linux-gnu"
         } else {
@@ -758,9 +769,9 @@ mod tests {
         let elsewhere = config_text(Path::new(KEYED_BUILD_DIR), elsewhere, tools, &stamp(&fork));
         for (what, other) in [
             ("the recipe", key_of(&fork, "another recipe", &config, &tools.identity)),
-            ("the [llvm]", key_of(&fork, RECIPE, &config.replace("X86", "RISCV;X86"), &tools.identity)),
-            ("the host", key_of(&fork, RECIPE, &elsewhere, &tools.identity)),
-            ("the host's tools", key_of(&fork, RECIPE, &config, "/usr/bin/gcc\ngcc 14\n")),
+            ("the [llvm]", key_of(&fork, &recipe(), &config.replace("X86", "RISCV;X86"), &tools.identity)),
+            ("the host", key_of(&fork, &recipe(), &elsewhere, &tools.identity)),
+            ("the host's tools", key_of(&fork, &recipe(), &config, "/usr/bin/gcc\ngcc 14\n")),
         ] {
             assert_ne!(other, base, "{what} did not move the key");
         }
@@ -819,7 +830,7 @@ mod tests {
                 "--show-sdk-version" => format!("{version}\n"),
                 other => panic!("xcrun was asked {other}"),
             });
-            key_of(&fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools, &stamp(&fork)), &tools.identity)
+            key_of(&fork, &recipe(), &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), &tools, &stamp(&fork)), &tools.identity)
         });
         assert_ne!(older, newer, "two SDK versions at one SDK path named one LLVM");
     }
@@ -1013,11 +1024,13 @@ mod tests {
         assert!(stored.iter().all(|n| n.to_string_lossy().ends_with(".partial")), "stored: {stored:?}");
     }
 
-    /// **The runtimes' sources are the commit's**: made while the LLVM was
+    /// **The sources it keeps are the commit's**: made while the LLVM was
     /// built, an edit to a file the commit holds is refused and nothing is
-    /// stored, and a file the checkout ignores is not stored with it.
+    /// stored, a file the checkout ignores is not stored with it, and the
+    /// ToyOS-hosted clang's are kept beside the runtimes' without the tests
+    /// its pathspecs leave out.
     #[test]
-    fn the_runtimes_sources_are_the_commit_s() {
+    fn the_kept_sources_are_the_commit_s() {
         let scratch = Scratch::new("llvm-runtimes");
         let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
@@ -1042,6 +1055,9 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("src/libcxx/CMakeLists.txt")).unwrap(), "the libcxx of A");
         assert!(checkout.join("libcxx/utils/cache.pyc").is_file());
         assert!(!dir.join("src/libcxx/utils").exists(), "a file the checkout ignores was stored");
+        assert_eq!(fs::read_to_string(dir.join("src/clang/CMakeLists.txt")).unwrap(), "the clang of A");
+        assert!(checkout.join("llvm/test/lit.cfg.py").is_file());
+        assert!(!dir.join("src/llvm/test").exists(), "a test the pathspecs leave out was stored");
     }
 
     const WORKTREE: &str = "TOYOS_LLVM_TEST_WORKTREE";

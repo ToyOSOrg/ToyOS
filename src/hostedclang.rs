@@ -8,14 +8,15 @@
 //! **Made only when asked for** (`cargo run -- --hosted-clang`): its build is
 //! LLVM's, and its key moves with every sysroot's, so no other build makes it.
 //!
-//! **A function of its key** ([`key`]): the host LLVM's key, which names the
-//! commit, the revision and repository it says it was built from, and the
-//! host's tools, n2 and CMake among them; the sysroot's, which names the C
-//! library, the C++ runtime and the clang that builds against them; and
-//! [`RECIPE`] with [`OPTIONS`]. Its sources are the commit's, written from the
-//! fork's LLVM repository, never a checkout's files. CMake builds
-//! LLVM's tablegens for the build machine first, in a nested build of its own
-//! (`NATIVE`), with the C and C++ compilers the LLVM key names.
+//! **A function of its key** ([`key_of`]): the host LLVM's key, which names the
+//! commit, what of it the LLVM keeps, the revision and repository it says it
+//! was built from, and the host's tools, n2 and CMake among them; the
+//! sysroot's, which names the C library, the C++ runtime and the clang that
+//! builds against them; and [`RECIPE`] with [`OPTIONS`]. Its sources are
+//! [`SOURCES`] of the commit as that LLVM keeps them in the store
+//! (`src/llvm.rs`), never a checkout's files. CMake builds LLVM's tablegens for
+//! the build machine first, in a nested build of its own (`NATIVE`), with the C
+//! and C++ compilers the LLVM key names.
 //!
 //! `hosted-clang/<key>/` in the store holds `bin/clang`, `bin/ld.lld` and
 //! clang's resource headers in `lib/clang/<version>/include`, where clang looks
@@ -28,25 +29,24 @@ use std::process::Command;
 use crate::arch::Arch;
 use crate::buildlock::{Guard, Keyed};
 use crate::clang::CSysroot;
-use crate::compiler::LLVM;
 use crate::keystore::{self, Key};
-use crate::sysroot::{clone_tree, git_out, gitlink};
+use crate::sysroot::clone_tree;
 
 /// What changes how the key's sources become this product and is none of the
 /// other parts. Moving it moves every key.
-const RECIPE: &str = "CMake and n2 build of clang and lld from the LLVM commit's SOURCES, for the TARGET \
+const RECIPE: &str = "CMake and n2 build of clang and lld from the SOURCES the host's LLVM keeps, for the TARGET \
                       against its C sysroot, saying the version, revision and repository the host's clang \
                       says; of the build, clang as bin/clang, lld as bin/ld.lld and clang's resource \
-                      headers; 2";
+                      headers; 3";
 
 /// The ToyOS the binaries run on.
 const TARGET: Arch = Arch::X86_64;
 
-/// What of the commit the build reads, as git's pathspecs: LLVM, clang and
-/// LLD, the CMake modules they share, the third-party sources LLVM compiles in,
-/// and libunwind's headers, which LLD's Mach-O port reads. No test, which the
-/// configuration builds none of.
-const SOURCES: [&str; 12] = [
+/// What of the commit the build reads, as git's pathspecs the host's LLVM keeps:
+/// LLVM, clang and LLD, the CMake modules they share, the third-party sources
+/// LLVM compiles in, and libunwind's headers, which LLD's Mach-O port reads. No
+/// test, which the configuration builds none of.
+pub(crate) const SOURCES: [&str; 12] = [
     "llvm",
     "clang",
     "lld",
@@ -100,7 +100,11 @@ pub fn dispatch(root: &Path) {
     let mut lock = crate::buildlock::shared(root, "the ToyOS-hosted clang");
     let sysroot = crate::toolchain::ensure(root, &mut lock);
     let fork = crate::sysroot::fork_checkout(root, &mut lock);
-    let hosted = resolve(&keystore::host(), &fork, sysroot.dir(), &crate::n2::ninja(root));
+    let store = keystore::host();
+    // Inside the worktree lock, which keeps every build in `fork` but an
+    // LLVM's, whose key's lock serialises them, out.
+    let llvm = crate::llvm::resolve(root, &store, &fork);
+    let hosted = resolve(&store, &fork, &llvm.dir, sysroot.dir(), &crate::n2::ninja(root));
     for (_, kept) in BINARIES {
         let binary = hosted.dir.join("bin").join(kept);
         let size = fs::metadata(&binary).unwrap_or_else(|e| panic!("stat {}: {e}", binary.display())).len();
@@ -108,27 +112,26 @@ pub fn dispatch(root: &Path) {
     }
 }
 
-/// The product the LLVM fork `fork` names and the sysroot `sysroot` holds, in
-/// `store`: made if nobody on this host has made it, under `ninja`.
-pub fn resolve(store: &Path, fork: &Path, sysroot: &Path, ninja: &Path) -> HostedClang {
-    let key = key(fork, sysroot);
+/// The product of the LLVM at `llvm`, the one the fork `fork` names, and the
+/// sysroot at `sysroot`, both held in use in `store`: made if nobody on this
+/// host has made it, under `ninja`.
+pub fn resolve(store: &Path, fork: &Path, llvm: &Path, sysroot: &Path, ninja: &Path) -> HostedClang {
+    let key = key_of(&stored(llvm), &stored(sysroot), &options());
     let dir = Keyed::HostedClang.store(store).join(&key);
-    let make = || place(fork, sysroot, ninja, &key, &dir);
+    let make = || place(fork, llvm, sysroot, ninja, &key, &dir);
     let using = keystore::made(store, Keyed::HostedClang, &key, || defect(&dir), make);
     HostedClang { dir, _using: using }
 }
 
-/// The key of what `fork`'s LLVM and the sysroot at `sysroot` make.
-fn key(fork: &Path, sysroot: &Path) -> Key {
-    let named = sysroot.file_name().and_then(|n| n.to_str()).and_then(Key::parse);
-    let sysroot =
-        named.unwrap_or_else(|| panic!("{} is no sysroot of the store: its name is no key", sysroot.display()));
-    key_of(&crate::llvm::key(fork), &sysroot, &options())
+/// The key the store product at `dir` is filed under.
+fn stored(dir: &Path) -> Key {
+    let named = dir.file_name().and_then(|n| n.to_str()).and_then(Key::parse);
+    named.unwrap_or_else(|| panic!("{} is no product of the store: its name is no key", dir.display()))
 }
 
 fn key_of(llvm: &Key, sysroot: &Key, options: &[(String, String)]) -> Key {
     let options: Vec<String> = options.iter().map(|(name, value)| format!("{name}={value}")).collect();
-    let parts = [RECIPE, TARGET.userland(), &SOURCES.join(" "), &options.join("\n"), llvm.as_str(), sysroot.as_str()];
+    let parts = [RECIPE, TARGET.userland(), &options.join("\n"), llvm.as_str(), sysroot.as_str()];
     Key::of(parts.join("\n\0\n").as_bytes())
 }
 
@@ -153,18 +156,12 @@ fn defect(dir: &Path) -> Option<String> {
 }
 
 /// Build what `key` names and put it at `dir`. The caller holds the key's lock.
-fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
+fn place(fork: &Path, llvm: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
     eprintln!("Building the ToyOS-hosted clang and LLD {key}: nobody on this host has");
     let scratch = dir.with_extension("build");
     keystore::remove(&scratch);
-    // From the LLVM repository of `fork`'s git directory: a linked worktree's
-    // `rust/src/llvm-project` is no checkout.
-    let sources = scratch.join("src");
-    let common = git_out(fork, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    let repository = Path::new(common.trim()).join("modules").join(LLVM);
-    crate::llvm::check_out_committed(&repository, &gitlink(fork, LLVM), &SOURCES, &sources);
     let built = scratch.join("build");
-    build(fork, &sources, &built, &CSysroot::of(sysroot, TARGET), ninja, &scratch);
+    build(fork, &llvm.join("src"), &built, &CSysroot::of(sysroot, TARGET), ninja, &scratch);
 
     let partial = dir.with_extension("partial");
     keystore::remove(&partial);
@@ -178,9 +175,13 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
     let resource = crate::clang::resource_version(&built);
     let version = resource.file_name().unwrap_or_else(|| panic!("{} names no version", resource.display()));
     clone_tree(&resource.join("include"), &partial.join("lib/clang").join(version).join("include"));
-    // What was built is what the key names, or it is not that key's.
-    let again = self::key(fork, sysroot);
-    assert!(again == *key, "the sources moved while {key} was being built (they now name {again}); nothing was kept");
+    // The fork the version stamp was read from names the LLVM built, or this
+    // is not the key's.
+    let again = crate::llvm::key(fork);
+    assert!(
+        again == stored(llvm),
+        "the fork moved while {key} was being built (it now names LLVM {again}); nothing was kept"
+    );
     let source = partial.join(SOURCE);
     fs::write(&source, format!("{key}\n")).unwrap_or_else(|e| panic!("write {}: {e}", source.display()));
     crate::llvm::read_only(&partial);
@@ -189,7 +190,7 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
     keystore::remove(&scratch);
 }
 
-/// Configure LLVM at `sources`, the commit `fork` names, for `c`'s target,
+/// Configure LLVM at `sources`, of the commit `fork` names, for `c`'s target,
 /// in `built`, and build clang and LLD there under `ninja`; `scratch` holds
 /// the links CMake runs the compilers by.
 fn build(fork: &Path, sources: &Path, built: &Path, c: &CSysroot, ninja: &Path, scratch: &Path) {
