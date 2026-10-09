@@ -1,5 +1,4 @@
-use resvg::tiny_skia;
-use resvg::usvg;
+//! An icon the build drew (`src/icons.rs`), in one colour, and its blit.
 
 pub struct Sprite {
     width: usize,
@@ -8,34 +7,16 @@ pub struct Sprite {
 }
 
 impl Sprite {
-    /// Rasterize an SVG at the given pixel size. The SVG is scaled to fit a `size x size` square.
-    pub fn from_svg(svg_bytes: &[u8], size: u32) -> Self {
-        let tree = usvg::Tree::from_data(svg_bytes, &usvg::Options::default())
-            .expect("failed to parse SVG");
-        let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("failed to create pixmap");
-        let svg_size = tree.size();
-        let sx = size as f32 / svg_size.width();
-        let sy = size as f32 / svg_size.height();
-        resvg::render(&tree, tiny_skia::Transform::from_scale(sx, sy), &mut pixmap.as_mut());
-        // resvg outputs premultiplied RGBA; convert to straight alpha
-        let mut data = pixmap.take();
-        for chunk in data.chunks_exact_mut(4) {
-            let a = chunk[3] as u16;
-            if a > 0 && a < 255 {
-                chunk[0] = ((chunk[0] as u16 * 255) / a) as u8;
-                chunk[1] = ((chunk[1] as u16 * 255) / a) as u8;
-                chunk[2] = ((chunk[2] as u16 * 255) / a) as u8;
-            }
-        }
-        Self { width: size as usize, height: size as usize, data }
-    }
-
-    /// Rasterize an SVG, replacing `currentColor` with the given RGB color.
-    pub fn from_svg_colored(svg_bytes: &[u8], size: u32, color: [u8; 3]) -> Self {
-        let svg_str = String::from_utf8_lossy(svg_bytes);
-        let hex = format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
-        let replaced = svg_str.replace("currentColor", &hex);
-        Self::from_svg(replaced.as_bytes(), size)
+    /// The icon `/system/share/icons/<stem>.alpha`, in `color`.
+    pub fn icon(stem: &str, color: [u8; 3]) -> Self {
+        let path = format!("/system/share/icons/{stem}.alpha");
+        let file = std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let (size, mask) = file.split_at_checked(8).unwrap_or_else(|| panic!("{path} has no header"));
+        let width = u32::from_le_bytes(size[..4].try_into().unwrap()) as usize;
+        let height = u32::from_le_bytes(size[4..].try_into().unwrap()) as usize;
+        assert_eq!(mask.len(), width * height, "{path} is not {width}x{height}");
+        let data = mask.iter().flat_map(|&a| [color[0], color[1], color[2], a]).collect();
+        Self { width, height, data }
     }
 
     pub fn width(&self) -> usize {
