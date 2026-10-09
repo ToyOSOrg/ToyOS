@@ -409,8 +409,9 @@ mod tests {
         let other = "0".repeat(DIGEST_LEN);
         let games = |access| Some(Folder { path: "/home/toy/Games".into(), access });
         use Access::*;
+        type Row<'a> = (Option<&'a Entry>, &'a str, Option<Access>, Option<Folder>);
         #[rustfmt::skip]
-        let table: [(Option<&Entry>, &str, Option<Access>, Option<Folder>); 8] = [
+        let table: [Row; 8] = [
             (Some(&rw), BIN, Some(ReadWrite), games(ReadWrite)),
             (Some(&ro), BIN, Some(ReadWrite), games(ReadOnly)),
             (Some(&rw), BIN, Some(ReadOnly), games(ReadOnly)),
