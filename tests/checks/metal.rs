@@ -391,7 +391,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: const { std::num::NonZeroUsize::new(38).expect("a chunk holds a member") },
+        member_ms: toyos_tco::RUST_MEMBER_MS,
         jobs: Vec::from(jobs.map(String::from)),
         files: Vec::new(),
         links: Vec::new(),
@@ -436,26 +436,84 @@ pub fn a_boots_last_job_is_behind_every_other() {
     assert!(refused.contains("other ends the boot \"own\" on later and another row ends it on hold"), "{refused}");
 }
 
+/// **A boot's rows' jobs run before its members, its last job behind both,
+/// and its bounds follow from who rides it**: the runner's bound over the list
+/// is the rows' and what each member adds, the kernel's over the boot twice
+/// that, and a boot no member rides keeps the bounds a row's boot had. A
+/// shared boot that disagrees with a row about the image is refused, and so
+/// are two under one name.
+pub fn rows_run_before_members_under_a_bound_the_members_widen() {
+    static EARLY: Metal =
+        Metal { arms: &[metal::once("shared", "tests/testcases", &[], &["tone", "cost"])], judge: |_| Ok(()) };
+    static HELD: Metal = Metal {
+        arms: &[
+            metal::Arm { last: Some("hold"), ..metal::once("shared", "tests/testcases", &[], &["late"]) },
+            metal::once("own", "tests/testcases", &[], &["alone"]),
+        ],
+        judge: |_| Ok(()),
+    };
+    static WEDGES: Metal = Metal {
+        arms: &[metal::once("wedge", "tests/jobcase", &[toyos_build::metal::WEDGE_ARM], &[])],
+        judge: |_| Ok(()),
+    };
+    let members = |boot: &str, member_ms: u64, jobs: &[&str]| metal::SharedBoot {
+        boot: boot.to_string(),
+        config: "tests/testcases",
+        params: &[],
+        features: &[],
+        member_ms,
+        jobs: jobs.iter().map(ToString::to_string).collect(),
+        files: vec![(format!("expect/{}", jobs[0]), Vec::new())],
+        links: Vec::new(),
+    };
+    let rows = [("early", &EARLY), ("held", &HELD), ("wedges", &WEDGES)];
+    let shared = [members("shared", 860, &["m1", "m2", "m3"]), members("corpus", 260, &["c1", "c2"])];
+    let boots = metal::batches(&rows, &shared).expect("one image a boot");
+    let bounds = |boot: &str| (boots[boot].bound_ms(), boots[boot].deadline_ms());
+    assert_eq!(boots["shared"].jobs, ["tone", "cost", "late", "m1", "m2", "m3", "hold"]);
+    assert_eq!(bounds("shared"), (62_580, 125_160));
+    assert_eq!(boots["corpus"].jobs, ["c1", "c2"]);
+    assert_eq!(bounds("corpus"), (60_520, 121_040));
+    // No member: the bounds every row's boot had before a list could widen.
+    assert_eq!(bounds("own"), (60_000, 120_000));
+    // A staged wedge keeps its short deadline, whatever its list's bound.
+    assert_eq!(bounds("wedge"), (60_000, toyos_tco::STAGED_BOUND_MS));
+
+    let debug = metal::SharedBoot { features: toyos_build::build::TEST_KERNEL, ..shared[0].clone() };
+    let Err(refused) = metal::batches(&rows, &[debug]) else {
+        panic!("a shared boot rode a row's boot on another kernel");
+    };
+    assert!(refused.contains("the shared boot \"shared\" rides the boot \"shared\" as"), "{refused}");
+    let Err(refused) = metal::batches(&rows, &[shared[0].clone(), shared[0].clone()]) else {
+        panic!("two shared boots under one name were batched");
+    };
+    assert!(refused.contains("two shared boots are both named \"shared\""), "{refused}");
+}
+
 /// **What a run's words take**: no word the whole profile; a name word every
-/// row and member it is part of, chunked as they come; a boot word that boot
-/// as the whole profile chunks it, with every row that rides it; and a word
-/// that takes nothing is refused.
+/// row and member it is part of, and of a shared boot only the files its
+/// members name; a boot word that boot whole, with every row that rides it,
+/// whatever name words stand beside it; and a word that takes nothing is
+/// refused.
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
         ("alpha_row", Metal { arms: &[metal::once("own", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
-        ("beta_row", Metal { arms: &[metal::once("shared-2", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
+        ("beta_row", Metal { arms: &[metal::once("shared", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
     ];
     let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
         boot: boot.to_string(),
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: const { std::num::NonZeroUsize::new(2).expect("a chunk holds a member") },
+        member_ms: toyos_tco::RUST_MEMBER_MS,
         jobs: jobs.iter().map(ToString::to_string).collect(),
-        files: Vec::new(),
-        links: Vec::new(),
+        files: jobs
+            .iter()
+            .flat_map(|job| [(format!("expect/{job}"), Vec::new()), (format!("bin/test_c_{job}"), Vec::new())])
+            .collect(),
+        links: jobs.iter().map(|job| (format!("bin/{job}"), "/system/bin/test_rs_ccheck".to_string())).collect(),
     };
-    let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1"])];
+    let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1", "c2"])];
     let taken = |names: &[&str], boots: &[&str]| {
         metal::select(names, boots, &ROWS, &profile).map(|(rows, shared)| {
             let rows: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
@@ -467,18 +525,24 @@ pub fn words_take_rows_members_and_whole_boots() {
     let took = |rows: &str, shared: &str| Ok::<_, String>((rows.to_string(), shared.to_string()));
     assert_eq!(
         taken(&[], &[]),
-        took("alpha_row,beta_row", "shared=test_rs_a1+test_rs_a2,shared-2=test_rs_b1,ccorpus=c1")
+        took("alpha_row,beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1,ccorpus=c1+c2")
     );
     assert_eq!(taken(&["b1"], &[]), took("", "shared=test_rs_b1"));
     assert_eq!(taken(&["alpha", "c1"], &[]), took("alpha_row", "ccorpus=c1"));
-    assert_eq!(taken(&[], &["shared"]), took("", "shared=test_rs_a1+test_rs_a2"));
-    assert_eq!(taken(&[], &["shared-2"]), took("beta_row", "shared-2=test_rs_b1"));
-    assert_eq!(taken(&["alpha"], &["ccorpus", "shared-2"]), took("alpha_row,beta_row", "shared-2=test_rs_b1,ccorpus=c1"));
+    assert_eq!(taken(&[], &["shared"]), took("beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1"));
+    // One boot, once and whole, where a name word takes a member of it too.
+    assert_eq!(taken(&["a2"], &["shared"]), took("beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1"));
+    assert_eq!(taken(&["alpha"], &["ccorpus"]), took("alpha_row", "ccorpus=c1+c2"));
     assert_eq!(taken(&[], &["own"]), took("alpha_row", ""));
+    // A member taken by name brings its own files and links and no other's.
+    let (_, shared) = metal::select(&["c2"], &[], &ROWS, &profile).expect("a member's name");
+    let paths: Vec<&str> = shared[0].files.iter().map(|(path, _)| path.as_str()).collect();
+    assert_eq!(paths, ["expect/c2", "bin/test_c_c2"]);
+    assert_eq!(shared[0].links, [("bin/c2".to_string(), "/system/bin/test_rs_ccheck".to_string())]);
     let refused: [(&[&str], &[&str], &str); 3] = [
         (&["a1", "nope"], &[], "\"nope\" is part of no"),
         (&["rs_a1"], &[], "\"rs_a1\" is part of no"),
-        (&[], &["shared", "shared-3"], "boot:shared-3 names no boot"),
+        (&[], &["shared", "shared-2"], "boot:shared-2 names no boot"),
     ];
     for (names, boots, refusal) in refused {
         let said = taken(names, boots).expect_err("a word that takes nothing was accepted");

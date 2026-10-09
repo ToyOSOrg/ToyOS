@@ -77,8 +77,10 @@ and takes no VFS lock. So it is not this.
 `kernel/src/deadline.rs`: a bound armed off the parameter line and polled from
 the timer interrupt entry in both rings on every CPU, which on expiry seals a
 `WEDGED` record carrying **the tail of the log ring** into the black box and
-writes the reset register itself. Every metal image carries it
-(`toyos_tco::WEDGE_BOUND_MS`, 120 s). The next occurrence therefore ends itself
+writes the reset register itself. Every metal image carries one: twice its
+list's bound (`toyos_tco::wedge_bound_ms`), which is 120 s where no shared
+member rides the boot, or `toyos_tco::STAGED_BOUND_MS` where the boot stages
+its own wedge. The next occurrence therefore ends itself
 without a hand and leaves the records `logd` never wrote, which is the one
 channel that crosses a reset without `logd`.
 

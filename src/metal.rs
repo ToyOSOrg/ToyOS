@@ -37,29 +37,25 @@ const GOING_DOWN_SECS: u64 = 120;
 /// the firmware's pass and Ubuntu's own boot.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
-/// Every bound a metal boot runs under, by the constant that arms it: the
-/// firmware's over the span before the handoff, the TCO the loader arms there
-/// and the kernel keeps feeding, the runner's own over its job list — which no
-/// watchdog covers, because a kernel with an unfinished job is alive — the
-/// panicked kernel's own over its panel, and the kernel's own over the whole
-/// boot, which is the only one that reaches a machine still executing and
-/// making no progress.
-const WATCHDOG_BOUNDS_MS: &[u64] = &[
-    toyos_tco::FIRMWARE_BOUND_MS,
-    toyos_tco::BOUND_MS,
-    toyos_tco::JOB_BOUND_MS,
-    toyos_tco::PANIC_BOUND_MS,
-    toyos_tco::WEDGE_BOUND_MS,
-];
+/// Every bound a metal boot runs under that its image does not carry, by the
+/// constant that arms it: the firmware's over the span before the handoff, the
+/// TCO the loader arms there and the kernel keeps feeding, and the panicked
+/// kernel's own over its panel.
+const WATCHDOG_BOUNDS_MS: &[u64] =
+    &[toyos_tco::FIRMWARE_BOUND_MS, toyos_tco::BOUND_MS, toyos_tco::PANIC_BOUND_MS];
 
-/// How long the machine has to answer `ssh` again after `reboot`.
+/// How long a machine flashed with an image armed with `deadline_ms` has to
+/// answer `ssh` again after `reboot`.
 ///
 /// **Derived, because a literal is wrong the day any of it moves.** A boot is
-/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
-/// fired; [`RETURN_ALLOWANCE_SECS`] is what coming back costs after that.
-pub fn return_secs() -> u64 {
-    let longest =
-        WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
+/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] and the
+/// kernel's own bound over the whole boot could have fired: that one is the
+/// image's, the only one that reaches a machine still executing and making no
+/// progress, and it outlasts the runner's bound over its list, which
+/// `toyos_tco::wedge_bound_ms` derives it from. [`RETURN_ALLOWANCE_SECS`] is
+/// what coming back costs after that.
+pub fn return_secs(deadline_ms: u64) -> u64 {
+    let longest = WATCHDOG_BOUNDS_MS.iter().copied().fold(deadline_ms, u64::max);
     longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
 }
 
@@ -822,12 +818,13 @@ pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
 }
 
-/// The `boot-deadline=` bound an image armed with `armed` carries.
-pub fn bound_for(armed: &[impl AsRef<str>]) -> u64 {
+/// The `boot-deadline=` bound an image armed with `armed` carries, whose
+/// runner bounds its list at `list_ms`.
+pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
     if stages_a_wedge(armed) {
         toyos_tco::STAGED_BOUND_MS
     } else {
-        toyos_tco::WEDGE_BOUND_MS
+        toyos_tco::wedge_bound_ms(list_ms)
     }
 }
 
@@ -850,16 +847,18 @@ pub fn flashable(name: &str) -> bool {
 /// The pre-flash gate: what the image is armed with, judged before it is
 /// written. Read off the image's own ESP, so it answers about the artifact
 /// rather than about whoever built it.
-fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
+fn arms_are_admissible(path: &Path) -> Result<(Vec<String>, u64), Refusal> {
     let armed = crate::image::params_of(path)
         .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
-    judge_arms(&armed)?;
-    Ok(armed)
+    let deadline_ms = judge_arms(&armed)?;
+    Ok((armed, deadline_ms))
 }
 
 /// The gate's decision, over the list alone — so it can be staged without an
-/// image, which is the only way the refusals below get a test at all.
-pub fn judge_arms(armed: &[String]) -> Result<(), Refusal> {
+/// image, which is the only way the refusals below get a test at all. An
+/// admitted image answers with the bound on its own boot, in milliseconds,
+/// which is what the loop waits it out by.
+pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     // **Every flashed image carries a bound on its own boot, and this is the
     // gate.** The bound was first asked for only of the image that stages a
     // wedge, which is the sharpest case and not the only one: a kernel that
@@ -868,12 +867,13 @@ pub fn judge_arms(armed: &[String]) -> Result<(), Refusal> {
     // measured twice on the T14, once as a hang after the job list and once as
     // a `--install-sudoers` that fell through into flashing an ordinary
     // `target/bootable.img`, which has no job list and no deadline at all.
-    if !armed.iter().any(|name| name.starts_with(toyos_tco::DEADLINE_PARAM)) {
+    // A bound nothing can read is no bound: the kernel panics on it.
+    let Some(Ok(deadline_ms)) = toyos_tco::deadline_in(&armed.join(",")) else {
         return Err(Refusal::NoBound { staged_a_wedge: stages_a_wedge(armed) });
-    }
+    };
     match armed.iter().find(|name| !flashable(name)) {
         Some(name) => Err(Refusal::Armed { name: name.clone() }),
-        None => Ok(()),
+        None => Ok(deadline_ms),
     }
 }
 
@@ -1345,13 +1345,12 @@ declare_flags!(METAL = {
     INSTALL_SUDOERS = "--install-sudoers", Next;
     READBACK = "--readback", Next;
     FAT32_CHECK = "--fat32-check", None;
-    WAIT_SECS = "--wait-secs", Next;
     DRY_RUN = "--dry-run", None;
 });
 
 /// The flags that describe a boot, as against the ones that say which machine
 /// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
-const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK, &WAIT_SECS];
+const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK];
 
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1377,7 +1376,6 @@ pub struct Args {
     /// The boot-describing flags this command line named, in the order given —
     /// so a refusal can say which ones rather than that there were some.
     about_a_boot: Vec<&'static str>,
-    wait_secs: u64,
     /// Where the stick's two files and this boot's own facts are written, for a
     /// judge that is not this process. Absent leaves the run's only account its
     /// standard output, which no per-test predicate can be held to.
@@ -1412,7 +1410,6 @@ impl Args {
                 .map(|seen| seen.flag.name)
                 .filter(|name| ABOUT_A_BOOT.iter().any(|flag| flag.name == *name))
                 .collect(),
-            wait_secs: return_secs(),
             readback: value(&READBACK).map(PathBuf::from),
             fat32_check: METAL.present(args, &FAT32_CHECK),
         };
@@ -1429,10 +1426,6 @@ impl Args {
         }
         if let Some(node) = value(&DEVICE) {
             out.target.node = Node::parse(node)?;
-        }
-        if let Some(secs) = value(&WAIT_SECS) {
-            out.wait_secs =
-                secs.parse().map_err(|_| Refusal::Usage(format!("--wait-secs: {secs:?}")))?;
         }
         // **`--install-sudoers` is an action, not a mode.** It installs the
         // rule and exits; a command line that also describes a boot is asking
@@ -1559,8 +1552,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     );
     // The pre-flash gate, before the disk is even asked what it is: what this
     // image will arm, judged against the only table that has ruled on any of it.
-    let armed = arms_are_admissible(asked)?;
-    println!("image {}: armed with {armed:?}", image.path.display());
+    let (armed, deadline_ms) = arms_are_admissible(asked)?;
+    // Off the image and not off this build's constants: the bound is the
+    // artifact's, and the wait for it is as long as that boot can last.
+    let wait_secs = return_secs(deadline_ms);
+    println!(
+        "image {}: armed with {armed:?}, so it is waited {wait_secs} s to come back",
+        image.path.display()
+    );
 
     driver.require_sudo()?;
     let policy =
@@ -1591,7 +1590,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
 
-    let back = driver.ride_the_reboot(args.wait_secs)?;
+    let back = driver.ride_the_reboot(wait_secs)?;
     println!("the machine answered ssh again after {back} s");
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
@@ -2048,8 +2047,21 @@ mod tests {
         assert!(refusal.to_string().contains("stops every CPU on purpose"), "{refusal}");
 
         // And with the bound, both go through — the wedge because it is paired.
-        assert_eq!(judge_arms(&armed(&[&bound])), Ok(()));
-        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(()));
+        // The gate answers with the bound the image carries, which is what the
+        // loop waits it out by.
+        assert_eq!(judge_arms(&armed(&[&bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+        let longer = format!("{}271360", toyos_tco::DEADLINE_PARAM);
+        assert_eq!(judge_arms(&armed(&["watchdog", &longer])), Ok(271_360));
+        // A bound nothing can read is no bound.
+        for unread in ["soon", "", "0"] {
+            let unread = format!("{}{unread}", toyos_tco::DEADLINE_PARAM);
+            assert_eq!(
+                judge_arms(&armed(&[&unread])),
+                Err(Refusal::NoBound { staged_a_wedge: false }),
+                "{unread}"
+            );
+        }
         // The bound does not excuse an arm nobody ruled on.
         assert!(matches!(
             judge_arms(&armed(&["nvme-write-selftest", &bound])),
@@ -2071,12 +2083,12 @@ mod tests {
         // And it is exactly what `tests/common/metal.rs` arms every image with:
         // the same two constants, so a change to either moves both.
         assert!(bound.starts_with(toyos_tco::DEADLINE_PARAM));
-        assert_eq!(judge_arms(&[bound]), Ok(()));
+        assert_eq!(judge_arms(&[bound]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
     }
     /// What every metal image is armed with, spelled the way `tests/common/metal.rs`
     /// spells it.
     fn alloc_deadline() -> String {
-        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS)
+        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS))
     }
 
     /// **`--install-sudoers` is an action and not a mode.** It installed the
@@ -2096,7 +2108,6 @@ mod tests {
             vec!["--readback", "target/metal/x"],
             vec!["--fat32-check"],
             vec!["--dry-run"],
-            vec!["--wait-secs", "60"],
         ] {
             let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
@@ -2155,9 +2166,9 @@ mod tests {
         let bound = alloc_deadline();
         for arm in WEDGE_ARMS {
             assert!(flashable(arm), "{arm} reaches no stick");
-            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(()), "{arm}");
+            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
-            assert_eq!(bound_for(&[arm]), toyos_tco::STAGED_BOUND_MS, "{arm}");
+            assert_eq!(bound_for(&[arm], 135_680), toyos_tco::STAGED_BOUND_MS, "{arm}");
             // And with no bound behind it, the sharpest refusal names it as the
             // wedge it is rather than as a plain image.
             assert_eq!(
@@ -2167,9 +2178,11 @@ mod tests {
             );
         }
         // The negative half: an arm that stops nothing is not judged as one,
-        // and keeps the bound a wedge nobody staged is ended by.
+        // and keeps the bound a wedge nobody staged is ended by, which is
+        // twice its list's.
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
-        assert_eq!(bound_for(&["watchdog"]), toyos_tco::WEDGE_BOUND_MS);
+        assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
+        assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about
@@ -2555,20 +2568,24 @@ mod tests {
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
     }
 
-    /// The wait is the *longest* watchdog plus the allowance, computed here by
+    /// The wait is the *longest* bound plus the allowance, computed here by
     /// hand from the constants rather than from the expression under test — so
-    /// a `max` that became a `min` reds instead of agreeing with itself.
+    /// a `max` that became a `min` reds instead of agreeing with itself. The
+    /// image's own deadline is one of them: a boot armed past every constant
+    /// is waited for that long, and one armed under them for the longest
+    /// constant.
     #[test]
     fn the_wait_outlasts_every_watchdog_a_boot_runs_under() {
         assert_eq!(toyos_tco::FIRMWARE_BOUND_MS, 60_000);
         assert_eq!(toyos_tco::BOUND_MS, 9_600);
-        assert_eq!(toyos_tco::JOB_BOUND_MS, 60_000);
         assert_eq!(toyos_tco::PANIC_BOUND_MS, 60_000);
         assert_eq!(RETURN_ALLOWANCE_SECS, 300);
-        assert_eq!(return_secs(), 420);
+        assert_eq!(return_secs(120_000), 420);
+        assert_eq!(return_secs(271_360), 572);
+        assert_eq!(return_secs(271_001), 572);
+        assert_eq!(return_secs(toyos_tco::STAGED_BOUND_MS), 360);
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
-        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::JOB_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
     }
 
@@ -2596,7 +2613,7 @@ mod tests {
         assert!(Refusal::Wedge { why: "x" }.about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
-        assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1p1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
@@ -2642,7 +2659,6 @@ mod tests {
         let args = Args::parse(&[]).unwrap();
         assert_eq!(args.target.user, "t14");
         assert_eq!(args.target.node.whole(), "/dev/sda");
-        assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
         let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
@@ -2661,10 +2677,6 @@ mod tests {
         assert_eq!(Args::parse(&part), Err(Refusal::Node("/dev/nvme0n1p2".to_string())));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
-        assert!(matches!(
-            Args::parse(&["--wait-secs".to_string(), "soon".to_string()]),
-            Err(Refusal::Usage(_))
-        ));
     }
 
     /// A disk carrying `parts` in order, so `admit`'s refusals are exercised on
