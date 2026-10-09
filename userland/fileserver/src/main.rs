@@ -92,6 +92,10 @@ const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::M
 /// How long an accepted connection may take to lend its window.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Why a client asking for a request number the wire does not have is let go,
+/// whatever its grant.
+const NO_SUCH_OPERATION: &str = "it asked for an operation this protocol does not have";
+
 /// The volume memory stands in for when DATA has no partition: 1 GiB of
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
@@ -618,8 +622,10 @@ impl Server {
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
-        if rights::changes(op, r.flags) && !self.clients[&id].writes {
-            return Err(SyscallError::PermissionDenied);
+        match rights::changes(op, r.flags) {
+            None => return Ok(Answer::Drop(NO_SUCH_OPERATION)),
+            Some(true) if !self.clients[&id].writes => return Err(SyscallError::PermissionDenied),
+            Some(_) => {}
         }
         match op {
             OPEN => {
@@ -829,7 +835,7 @@ impl Server {
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
-            _ => Ok(Answer::Drop("it asked for an operation this protocol does not have")),
+            _ => Ok(Answer::Drop(NO_SUCH_OPERATION)),
         }
     }
 

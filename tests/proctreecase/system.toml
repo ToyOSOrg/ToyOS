@@ -18,9 +18,9 @@
 # login session its row opens, which has a share of its own, and so is every
 # shell launched down from it, whose `login` row opens none there.
 #
-# And `app_view`, under QEMU: test-runner's row lists `/apps`, so a job
-# launches the package it installed under the image's `[apps]` row and the
-# view an installed package is minted.
+# And `app_view`: test-runner's row lists `/apps`, so a job launches the
+# package it installed under the image's `[apps]` row and the view an
+# installed package is minted, and is refused one named after the `shell` row.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]

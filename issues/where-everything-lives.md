@@ -82,7 +82,7 @@ until that lands nothing verifies it.
    another app's folder, and the shell's history is still
    `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `userland/shell`).
    Built for a package launched from `/apps` (`toyos_manifest::Program::view`,
-   judged by the `app_view` guest test). Each desktop app in the image still
+   judged by the `app_view` metal row). Each desktop app in the image still
    runs with the session's `HOME` and the whole tree: its row declares no view
    until that isolation stage gives every row one.
 3. **Users.** The users track creates `/home/<user>` and its folders from a

@@ -127,7 +127,7 @@ const RUST_SKIP: &[&str] = &[
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
     // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
-    // not give: the `app_view` machine test runs it on tests/proctreecase.
+    // not give: the `app_view` metal row runs it on tests/proctreecase.
     "app_view",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
@@ -334,11 +334,6 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
-    // What an installed package's view holds, and that its own directory is
-    // read-only: the supervisor's grants and the file server's refusals,
-    // neither of which has a host build. Under QEMU and not as a metal row,
-    // so the merge queue's guest suite holds the boundary on every change.
-    "app_view",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -752,6 +747,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
+    (
+        // An installed package sees its own directory read-only and its own
+        // folder as `HOME`, and nothing else of `/apps` or `/home`.
+        "app_view",
+        metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
+    ),
     // ---- one image: tests/metalcase, which runs no job ----
     //
     // The rows after the first read what any boot that hands the machine back
@@ -1010,8 +1011,9 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, and the shells `fs_share`
-/// asks DATA's server through, under its share and in a login session.
+/// rows `launch_authority` is refused and started, the shells `fs_share`
+/// asks DATA's server through, under its share and in a login session, and
+/// the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
@@ -1022,6 +1024,7 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
         "test_rs_launch_authority",
         "test_rs_port_badge",
         "test_rs_fs_share",
+        "test_rs_app_view",
     ],
 )];
 
@@ -3197,7 +3200,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
-        "app_view" => app_view(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3234,20 +3236,6 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
             "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
         ));
     }
-    Ok(())
-}
-
-/// Boot `tests/proctreecase`, whose test-runner holds a launcher listing
-/// `/apps`, and run `app_view` there: it installs itself as a package,
-/// launches it, and the package judges its own view.
-fn app_view() -> Result<(), String> {
-    const JOB: &str = "test_rs_app_view";
-    let case = compile::repo_root().join("tests/proctreecase");
-    let (_, job) = suite_bin(qemu::SUITE_ARCH, "app_view");
-    let mut qemu =
-        QemuInstance::boot_with_options(&case, &[], &[("app_view".to_string(), job)], BootOptions::default());
-    let said = job_said(&mut qemu, JOB)?;
-    eprintln!("{said}");
     Ok(())
 }
 
@@ -3575,6 +3563,28 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
         let line = refused(caller, Sessions::default().machine(), target, why);
         if !log.text().lines().any(|l| l.contains(&line)) {
             return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
+    }
+    Ok(())
+}
+
+/// `app_view` passed, every arm its package asks held, and the supervisor
+/// refused each of the two launches for its own reason: a package named after
+/// the shell's row, and one whose folder is a file. The guest sees only that
+/// each was refused.
+fn app_view(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_app_view")?;
+    let log = back.log();
+    let named = format!("supervisor: launcher: {}", toyos_manifest::row_named("shell"));
+    for said in [
+        "  every arm held",
+        "app_view: the app saw its own package read-only and its own folder as HOME, and nothing else",
+        &named,
+        "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
+         /home/toy/Apps/appview is no directory",
+    ] {
+        if !log.text().lines().any(|l| l.contains(said)) {
+            return Err(format!("the log never said `{said}`\n{}", log.text()));
         }
     }
     Ok(())

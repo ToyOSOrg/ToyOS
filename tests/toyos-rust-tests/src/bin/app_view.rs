@@ -3,7 +3,10 @@
 //!
 //! The job installs this binary as the package `appview` beside another
 //! package and another app's folder, and launches it through test-runner's
-//! launcher, whose row lists `/apps`. Run as the app (`app`), it asks:
+//! launcher, whose row lists `/apps`. Two launches are refused first: the
+//! same binary installed as `shell`, a row the image declares, whose folder
+//! of the home is the shell's; and `appview` while a file stands where its
+//! folder goes. Run as the app (`app`), it asks:
 //!
 //! - its `HOME` is `/home/toy/Apps/appview`, holding `Config Data Cache State`,
 //!   and a file it writes there lands in that folder of `/home`;
@@ -34,6 +37,12 @@ const HOME: &str = "/home/toy/Apps/appview";
 const MANIFEST: &[u8] = b"name = \"appview\"\nversion = \"1\"\n\
     digest = \"0000000000000000000000000000000000000000000000000000000000000000\"\n\
     program = \"/apps/appview/appview\"\n";
+/// A package named after the shell's row, whose `Apps/shell` is the shell's.
+const ROW_PACKAGE: &str = "/apps/shell";
+const ROW_PROGRAM: &str = "/apps/shell/shell";
+const ROW_MANIFEST: &[u8] = b"name = \"shell\"\nversion = \"1\"\n\
+    digest = \"0000000000000000000000000000000000000000000000000000000000000000\"\n\
+    program = \"/apps/shell/shell\"\n";
 const OTHER_PACKAGE_FILE: &str = "/apps/other/kept";
 const OTHER_FOLDER_FILE: &str = "/home/toy/Apps/other/Data/kept";
 const KEPT: &[u8] = b"what the app wrote in its own folder";
@@ -47,20 +56,39 @@ fn main() {
 }
 
 fn job() {
-    let _ = fs::remove_dir_all(PACKAGE);
+    for dir in [PACKAGE, ROW_PACKAGE] {
+        let _ = fs::remove_dir_all(dir);
+    }
+    let _ = fs::remove_dir_all(HOME);
+    let _ = fs::remove_file(HOME);
     fs::create_dir_all(format!("{PACKAGE}/sub")).expect("make the package's directories");
     fs::copy(SELF, PROGRAM).expect("install this binary as the package's program");
     fs::write(format!("{PACKAGE}/manifest.toml"), MANIFEST).expect("write the package's manifest");
+    fs::create_dir_all(ROW_PACKAGE).expect("make the row-named package's directory");
+    fs::copy(SELF, ROW_PROGRAM).expect("install this binary as the row-named package's program");
+    fs::write(format!("{ROW_PACKAGE}/manifest.toml"), ROW_MANIFEST).expect("write the row-named package's manifest");
     for file in [OTHER_PACKAGE_FILE, OTHER_FOLDER_FILE] {
         let dir = file.rsplit_once('/').expect("a file in a directory").0;
         fs::create_dir_all(dir).unwrap_or_else(|e| panic!("make {dir}: {e}"));
         fs::write(file, b"not the app's").unwrap_or_else(|e| panic!("write {file}: {e}"));
     }
+    let mut red = Vec::new();
+
+    // Refused, and the supervisor says why (the metal row's judge reads it).
+    match Command::new(ROW_PROGRAM).arg(APP).output() {
+        Err(e) => println!("  a package named after the shell's row: refused ({e})"),
+        Ok(ran) => red.push(format!("a package named after the shell's row ran: {ran:?}")),
+    }
+    fs::write(HOME, b"no folder").expect("plant a file where the app's folder goes");
+    match Command::new(PROGRAM).arg(APP).output() {
+        Err(e) => println!("  a package whose folder is a file: refused ({e})"),
+        Ok(ran) => red.push(format!("a package whose folder is a file ran: {ran:?}")),
+    }
+    fs::remove_file(HOME).expect("take the planted file away");
 
     let ran = Command::new(PROGRAM).arg(APP).output().expect("launch the package through the launcher");
     print!("{}", String::from_utf8_lossy(&ran.stdout));
     print!("{}", String::from_utf8_lossy(&ran.stderr));
-    let mut red = Vec::new();
     if ran.status.code() != Some(0) {
         red.push(format!("the app ended {:?}", ran.status));
     }
@@ -80,7 +108,7 @@ fn job() {
         Ok(bytes) if bytes == KEPT => println!("  the app's write is in {HOME}/Data"),
         other => red.push(format!("what the app wrote is not in {HOME}/Data/kept: {other:?}")),
     }
-    for dir in [PACKAGE, "/apps/other", "/home/toy/Apps/other"] {
+    for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME] {
         let _ = fs::remove_dir_all(dir);
     }
     if !red.is_empty() {

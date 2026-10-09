@@ -70,6 +70,12 @@ pub fn app_home(name: &str) -> String {
     format!("{}/Apps/{name}", session_home())
 }
 
+/// Why a launch of the package `name` is refused when a row the image declares
+/// has that name: [`app_home`] is a folder that row keeps its own in.
+pub fn row_named(name: &str) -> String {
+    format!("the package {name} is named after a row the image declares, and {} is that row's folder", app_home(name))
+}
+
 /// What an app's own folder holds, made with it: where it keeps its config,
 /// data, cache and state. English on disk, as every home folder is.
 pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
@@ -322,14 +328,19 @@ impl Manifest {
     }
 
     /// The row a launch of an installed package is built from: synthesized,
-    /// because a package has no `[programs]` key to hold one.
-    pub fn app_row(&self, name: &str, program: &str) -> Program {
-        Program {
+    /// because a package has no `[programs]` key to hold one. **A package
+    /// named after a row the image declares is refused** ([`row_named`]): its
+    /// folder of the home would be that row's.
+    pub fn app_row(&self, name: &str, program: &str) -> Result<Program, String> {
+        if self.program(name).is_some() {
+            return Err(row_named(name));
+        }
+        Ok(Program {
             name: name.to_string(),
             path: program.to_string(),
             receives: self.apps.clone(),
             ..Program::default()
-        }
+        })
     }
 
     /// Every `serves` name in the whole manifest, not only the ones [`start`]
@@ -581,7 +592,7 @@ mod tests {
     /// row's construction rather than by a check.
     #[test]
     fn a_package_row_is_connectors_and_nothing_else() {
-        let row = sample().app_row("gbae", "/apps/gbae/gbae");
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
         assert_eq!(row.receives, ["compositor", "soundserver"]);
         assert!(row.devices.is_empty());
         assert!(row.syscap.is_empty());
@@ -629,11 +640,25 @@ mod tests {
     /// user's home, the layout's `/home/<user>/Apps/<name>`.
     #[test]
     fn a_package_s_home_is_its_own_folder() {
-        let row = sample().app_row("gbae", "/apps/gbae/gbae");
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
         assert_eq!(row.package(), Some("gbae"));
         assert_eq!(row.home(), "/home/toy/Apps/gbae");
-        assert_eq!(APP_FOLDERS, ["Config", "Data", "Cache", "State"]);
         assert_eq!(sample().program("compositor").unwrap().package(), None);
+    }
+
+    /// **A package named after a declared row is refused**, by name: the
+    /// shell keeps its history in `Apps/shell`, which would be the package's
+    /// folder.
+    #[test]
+    fn a_package_named_after_a_declared_row_is_refused() {
+        let m = parse("program shell /system/bin/shell\n");
+        assert_eq!(m.app_row("shell", "/apps/shell/shell"), Err(row_named("shell")));
+        assert!(row_named("shell").contains("/home/toy/Apps/shell"));
+        let s = sample();
+        for row in &s.programs {
+            assert_eq!(s.app_row(&row.name, &format!("/apps/{0}/{0}", row.name)), Err(row_named(&row.name)));
+        }
+        assert!(m.app_row("gbae", "/apps/gbae/gbae").is_ok());
     }
 
     fn views(row: &Program) -> Vec<(&'static str, String, String, bool)> {
@@ -645,7 +670,7 @@ mod tests {
     /// whole, so a third directory, a wider root or a writable package is red.
     #[test]
     fn a_package_s_view_is_its_own_directory_read_only_and_its_own_folder() {
-        let row = sample().app_row("gbae", "/apps/gbae/gbae");
+        let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
         assert_eq!(
             views(&row),
             [
@@ -655,7 +680,7 @@ mod tests {
         );
         // The longest name a package has is still beneath its own directories.
         let longest = "n".repeat(MAX_PROGRAM_NAME);
-        let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}"));
+        let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}")).unwrap();
         assert_eq!(
             views(&row).into_iter().map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
             [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
