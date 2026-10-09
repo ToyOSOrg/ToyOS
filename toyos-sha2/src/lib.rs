@@ -72,68 +72,95 @@ const H512: [u64; 8] = [
     0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
 ];
 
-/// One block into the hash value: SHA-256's computation, §6.2.2, with
-/// §4.1.2's functions.
-fn compress256(state: &mut [u32; 8], block: &[u8; 64]) {
-    let mut w = [0u32; 64];
-    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
-        *word = u32::from_be_bytes(*bytes);
-    }
-    for t in 16..64 {
-        let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
-        let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
-        w[t] = w[t - 16]
-            .wrapping_add(s0)
-            .wrapping_add(w[t - 7])
-            .wrapping_add(s1);
-    }
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for t in (0..64).step_by(8) {
-        let kw = |i: usize| K256[t + i].wrapping_add(w[t + i]);
-        round256([a, b, c, e, f, g], &mut d, &mut h, kw(0));
-        round256([h, a, b, d, e, f], &mut c, &mut g, kw(1));
-        round256([g, h, a, c, d, e], &mut b, &mut f, kw(2));
-        round256([f, g, h, b, c, d], &mut a, &mut e, kw(3));
-        round256([e, f, g, a, b, c], &mut h, &mut d, kw(4));
-        round256([d, e, f, h, a, b], &mut g, &mut c, kw(5));
-        round256([c, d, e, g, h, a], &mut f, &mut b, kw(6));
-        round256([b, c, d, f, g, h], &mut e, &mut a, kw(7));
-    }
-    for (word, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-        *word = word.wrapping_add(v);
-    }
+/// `$step::<I>$args` for each `I` of a pass's sixteen rounds, written out so
+/// that every index into the schedule and the working variables is a
+/// constant.
+macro_rules! sixteen {
+    ($step:ident $args:tt) => {
+        sixteen!(@ $step $args 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+    };
+    (@ $step:ident $args:tt $($i:literal)*) => {
+        $($step::<$i> $args;)*
+    };
 }
 
-/// One block into the hash value: SHA-512's computation, §6.4.2, with
-/// §4.1.3's functions.
-fn compress512(state: &mut [u64; 8], block: &[u8; 128]) {
-    let mut w = [0u64; 80];
-    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<8>().0) {
-        *word = u64::from_be_bytes(*bytes);
-    }
-    for t in 16..80 {
-        let s0 = w[t - 15].rotate_right(1) ^ w[t - 15].rotate_right(8) ^ (w[t - 15] >> 7);
-        let s1 = w[t - 2].rotate_right(19) ^ w[t - 2].rotate_right(61) ^ (w[t - 2] >> 6);
-        w[t] = w[t - 16]
-            .wrapping_add(s0)
-            .wrapping_add(w[t - 7])
-            .wrapping_add(s1);
-    }
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for t in (0..80).step_by(8) {
-        let kw = |i: usize| K512[t + i].wrapping_add(w[t + i]);
-        round512([a, b, c, e, f, g], &mut d, &mut h, kw(0));
-        round512([h, a, b, d, e, f], &mut c, &mut g, kw(1));
-        round512([g, h, a, c, d, e], &mut b, &mut f, kw(2));
-        round512([f, g, h, b, c, d], &mut a, &mut e, kw(3));
-        round512([e, f, g, a, b, c], &mut h, &mut d, kw(4));
-        round512([d, e, f, h, a, b], &mut g, &mut c, kw(5));
-        round512([c, d, e, g, h, a], &mut f, &mut b, kw(6));
-        round512([b, c, d, f, g, h], &mut e, &mut a, kw(7));
-    }
-    for (word, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-        *word = word.wrapping_add(v);
-    }
+/// The two compression functions differ in their word, block, constants and
+/// rotations, and in nothing about how a block is computed.
+macro_rules! compress {
+    ($(#[$doc:meta])* $name:ident: $word:ty, block $block:literal, $k:expr,
+     sigma0 $s0:expr, sigma1 $s1:expr, schedule0 $r0:expr, schedule1 $r1:expr) => {
+        $(#[$doc])*
+        fn $name(state: &mut [$word; 8], blocks: &[[u8; $block]]) {
+            /// Round `I` of a pass, the working variables standing where
+            /// they are rather than moved along: this round's `a` is
+            /// `v[(8 - I % 8) % 8]`, and it writes only its new `e` and `a`.
+            #[inline(always)]
+            fn round<const I: usize>(v: &mut [$word; 8], k: &[$word; 16], w: &[$word; 16]) {
+                let at = |n: usize| (n + 8 - I % 8) % 8;
+                let (a, b, c) = (v[at(0)], v[at(1)], v[at(2)]);
+                let (e, f, g) = (v[at(4)], v[at(5)], v[at(6)]);
+                let [x, y, z] = $s1;
+                let t1 = v[at(7)]
+                    .wrapping_add(k[I])
+                    .wrapping_add(w[I])
+                    .wrapping_add(g ^ (e & (f ^ g)))
+                    .wrapping_add(e.rotate_right(x) ^ e.rotate_right(y) ^ e.rotate_right(z));
+                let [x, y, z] = $s0;
+                let t2 = (a.rotate_right(x) ^ a.rotate_right(y) ^ a.rotate_right(z))
+                    .wrapping_add(b ^ ((a ^ b) & (b ^ c)));
+                v[at(3)] = v[at(3)].wrapping_add(t1);
+                v[at(7)] = t1.wrapping_add(t2);
+            }
+
+            /// The schedule's word `I` of the next pass in place of this
+            /// pass's: `w[I]` holds W(t-16) going in and W(t) coming out.
+            #[inline(always)]
+            fn schedule<const I: usize>(w: &mut [$word; 16]) {
+                let (w15, w2) = (w[(I + 1) % 16], w[(I + 14) % 16]);
+                let [x, y, z] = $r0;
+                let s0 = w15.rotate_right(x) ^ w15.rotate_right(y) ^ (w15 >> z);
+                let [x, y, z] = $r1;
+                let s1 = w2.rotate_right(x) ^ w2.rotate_right(y) ^ (w2 >> z);
+                w[I] = w[I]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[(I + 9) % 16])
+                    .wrapping_add(s1);
+            }
+
+            let mut hash = *state;
+            for block in blocks {
+                let mut w: [$word; 16] = [0; 16];
+                for (word, bytes) in w.iter_mut().zip(block.as_chunks().0) {
+                    *word = <$word>::from_be_bytes(*bytes);
+                }
+                let mut v = hash;
+                for (pass, k) in $k.as_chunks::<16>().0.iter().enumerate() {
+                    if pass > 0 {
+                        sixteen!(schedule(&mut w));
+                    }
+                    sixteen!(round(&mut v, k, &w));
+                }
+                for (word, v) in hash.iter_mut().zip(v) {
+                    *word = word.wrapping_add(v);
+                }
+            }
+            *state = hash;
+        }
+    };
+}
+
+compress! {
+    /// Blocks into the hash value: SHA-256's computation, §6.2.2, with
+    /// §4.1.2's functions.
+    compress256: u32, block 64, K256,
+    sigma0 [2, 13, 22], sigma1 [6, 11, 25], schedule0 [7, 18, 3], schedule1 [17, 19, 10]
+}
+
+compress! {
+    /// Blocks into the hash value: SHA-512's computation, §6.4.2, with
+    /// §4.1.3's functions.
+    compress512: u64, block 128, K512,
+    sigma0 [28, 34, 39], sigma1 [14, 18, 41], schedule0 [1, 8, 7], schedule1 [19, 61, 6]
 }
 
 /// The two hashes differ in their word, block, length field, constants and
@@ -178,13 +205,11 @@ macro_rules! hash {
                     if self.filled < $block {
                         return;
                     }
-                    $compress(&mut self.state, &self.block);
+                    $compress(&mut self.state, core::slice::from_ref(&self.block));
                     self.filled = 0;
                 }
                 let (blocks, rest) = bytes.as_chunks::<$block>();
-                for block in blocks {
-                    $compress(&mut self.state, block);
-                }
+                $compress(&mut self.state, blocks);
                 self.block[..rest.len()].copy_from_slice(rest);
                 self.filled = rest.len();
             }
@@ -227,32 +252,4 @@ hash! {
 hash! {
     /// SHA-512, §6.4: a 64-byte digest.
     Sha512: u64, block 128, length 16, digest 64, H512, compress512
-}
-
-/// One round of §6.2.2 step 3, the working variables named where they stand
-/// this round rather than moved along: `d` takes `e`'s new value and `h`
-/// takes `a`'s.
-#[inline(always)]
-fn round256([a, b, c, e, f, g]: [u32; 6], d: &mut u32, h: &mut u32, kw: u32) {
-    let t1 = h
-        .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
-        .wrapping_add(g ^ (e & (f ^ g)))
-        .wrapping_add(kw);
-    let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
-        .wrapping_add((a & b) ^ (c & (a ^ b)));
-    *d = d.wrapping_add(t1);
-    *h = t1.wrapping_add(t2);
-}
-
-/// One round of §6.4.2 step 3, named as [`round256`] names them.
-#[inline(always)]
-fn round512([a, b, c, e, f, g]: [u64; 6], d: &mut u64, h: &mut u64, kw: u64) {
-    let t1 = h
-        .wrapping_add(e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41))
-        .wrapping_add(g ^ (e & (f ^ g)))
-        .wrapping_add(kw);
-    let t2 = (a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39))
-        .wrapping_add((a & b) ^ (c & (a ^ b)));
-    *d = d.wrapping_add(t1);
-    *h = t1.wrapping_add(t2);
 }
