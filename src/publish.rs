@@ -407,6 +407,31 @@ mod tests {
         assert!(!out.path().join("archives/gbae-v0.tar.gz").exists(), "a refused publish wrote no archive");
     }
 
+    /// A timestamp on disk naming targets 2^64 − 1 leaves no next version:
+    /// the publish refuses it by name rather than counting past it.
+    #[test]
+    fn a_timestamp_naming_the_last_targets_version_is_refused() {
+        let src = TempDir::new("publish-src");
+        let out = TempDir::new("publish-repo");
+        let m = manifest(src.path(), &[("gbae", 3, "gbae-v1.tar.gz", b"gbae bytes")]);
+        publish(&m, out.path(), &key(), NOW).unwrap();
+        let mut held = Timestamp::parse(&read(out.path(), "timestamp.txt")).unwrap();
+        held.targets.version = u64::MAX;
+        let last = signed(render::timestamp(&held), Role::Timestamp, &key());
+        fs::write(out.path().join("timestamp.txt"), &last).unwrap();
+        fs::copy(out.path().join("targets.1.txt"), out.path().join(repo::targets_file(u64::MAX))).unwrap();
+
+        let why = repo::Refused::Malformed {
+            role: Role::Timestamp,
+            line: 3,
+            why: "`targets` is not `<version> <length> <sha256>` within the targets cap",
+        };
+        assert_eq!(Timestamp::parse(&last).err(), Some(why.clone()));
+        let refused = publish(&m, out.path(), &key(), NOW + DAY);
+        assert!(refused.as_ref().unwrap_err().ends_with(&format!("timestamp.txt: {why}")), "{refused:?}");
+        assert_eq!(read(out.path(), "timestamp.txt"), last, "a refused publish wrote nothing");
+    }
+
     /// Two rows whose archives share a file name share its url: one archive,
     /// or a refusal, never the second row's bytes under the first's SHA-256.
     #[test]

@@ -436,7 +436,7 @@ impl Timestamp {
 fn snapshot(words: &[&str]) -> Option<Snapshot> {
     let [version, length, digest] = words else { return None };
     Some(Snapshot {
-        version: number(version).filter(|&v| v >= 1)?,
+        version: number(version).filter(|v| (1..u64::MAX).contains(v))?,
         length: number(length).filter(|l| (1..=TARGETS_CAP as u64).contains(l))?,
         sha256: hex32(digest)?,
     })
