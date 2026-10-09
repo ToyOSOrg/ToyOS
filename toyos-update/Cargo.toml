@@ -29,3 +29,5 @@ ed25519-dalek = { version = "2.2", default-features = false }
 # SHA-256 over the sections and SHA-512 over the signed header, as SSHSIG
 # names it. Already resolved in every lockfile that builds this crate.
 sha2 = { version = "0.10", default-features = false }
+# The calendar a repository document's `expires` is written in, the tree's one.
+toyos-wallclock = { path = "../toyos-wallclock" }

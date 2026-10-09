@@ -35,6 +35,7 @@ pub mod metaldevices;
 pub mod metalimage;
 pub mod metaltimings;
 pub mod n2;
+pub mod publish;
 pub mod release;
 pub mod sdkversion;
 pub mod soundfont;
