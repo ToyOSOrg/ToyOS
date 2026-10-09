@@ -78,9 +78,14 @@ fn two_peers(port: u16) {
     let mut wakes = [0u8; 2];
     let mut woken = 0;
     while woken < wakes.len() {
-        let left = WOKEN
-            .checked_sub(asked.elapsed())
-            .unwrap_or_else(|| panic!("the listener was woken for {woken} of two peers in {WOKEN:?}"));
+        let Some(left) = WOKEN.checked_sub(asked.elapsed()) else {
+            // Which half is missing: a connection that never finished its
+            // handshake, or a wake for one that did.
+            let waiting: Vec<_> = (0..wakes.len())
+                .map(|_| toyos::net::tcp_accept(bound.socket_id).map(|accepted| accepted.remote_port))
+                .collect();
+            panic!("the listener was woken for {woken} of two peers in {WOKEN:?}, and two accepts then answered {waiting:?}");
+        };
         poller.watch(&bound.notify, READABLE, 0);
         poller.wait(1, left.as_nanos() as u64, |_| {});
         match bound.notify.read_nonblock(&mut wakes[woken..]) {
