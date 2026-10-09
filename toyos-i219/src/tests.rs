@@ -12,7 +12,7 @@ use std::{format, vec};
 use crate::phy as toyos_phy;
 use crate::phy::{Others, PhyRefusal};
 use crate::regs::{self, cause, ctrl, extcnf, ivar, rctl, rx_desc, tctl, tx_desc};
-use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
+use crate::stub::{Access, Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
 
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
@@ -1328,6 +1328,123 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
         assert_eq!(counters.over_length, 0, "{}", nic.because("a length was refused"));
         assert_eq!(counters.errored, 0, "{}", nic.because("a frame was reported bad"));
         assert_eq!(counters.split, 0, "{}", nic.because("a frame was split"));
+    }
+}
+
+// --- the order of the driver's accesses against the part's ---
+
+/// Frames both ways on `part` with every latitude on, and everything the
+/// driver did to the grant and the registers while they moved.
+fn a_worked_trace(seed: u64, part: Part) -> (Vec<Access>, usize, usize) {
+    let nic = Nic::with(seed, part, Permits::default());
+    let mut driver = open(&nic);
+    link_up(&nic, &mut driver);
+    let (mut sent, mut received) = (0, 0);
+    for round in 0..(TX_RING as u8 * 3) {
+        nic.deliver(&frame(round + 1, 64 + round as usize));
+        if let Some(slot) = driver.tx_reserve(64) {
+            nic.put_bytes(slot.at, &frame(0x80 | round, 64));
+            driver.tx_commit(slot);
+            sent += 1;
+        }
+        nic.run();
+        one_pass(&mut driver);
+        received += drain(&nic, &mut driver).len();
+    }
+    driver.reclaim();
+    (nic.trace(), sent, received)
+}
+
+/// Whether `word`, loaded from `at`, is a descriptor's status with `DD` set.
+fn found_done(at: usize, word: u64) -> bool {
+    let status_of = |ring: usize, count: usize, bytes: usize| {
+        (ring..ring + count * bytes).contains(&at) && (at - ring) % bytes == 8
+    };
+    if status_of(OFF_RX_RING, RX_RING, rx_desc::BYTES) {
+        (word >> rx_desc::STATUS_SHIFT) as u8 & rx_desc::status::DD != 0
+    } else if status_of(OFF_TX_RING, TX_RING, tx_desc::BYTES) {
+        (word >> tx_desc::STATUS_SHIFT) as u8 & tx_desc::STATUS_DD != 0
+    } else {
+        false
+    }
+}
+
+/// `toyos_device_memory::DmaBuffers::publish`'s order, at both tails: §7.2.4.1
+/// and §7.1.8 have the part fetch on the tail write, so no store into the
+/// grant stands between the last `publish` and a write of `TDT` or `RDT`.
+/// The model reads one memory whole and cannot fail on it; the trace can.
+#[test]
+fn a_tail_register_is_written_only_after_a_publish_that_follows_the_last_descriptor_store() {
+    for (part, _) in PARTS {
+        for seed in 1..=8u64 {
+            let (trace, sent, received) = a_worked_trace(seed, part);
+            let mut unpublished = None;
+            let (mut stored, mut moved) = ([false; 2], [0usize; 2]);
+            for access in trace {
+                match access {
+                    Access::Store { at } => {
+                        unpublished = Some(at);
+                        stored[(at >= OFF_TX_RING) as usize] = true;
+                    }
+                    Access::Publish => unpublished = None,
+                    Access::Write { reg } if reg == regs::RDT || reg == regs::TDT => {
+                        assert_eq!(
+                            unpublished, None,
+                            "seed {seed}, {part:?}: tail register {reg:#x} was written over a \
+                             store into the grant that no publish followed"
+                        );
+                        let ring = (reg == regs::TDT) as usize;
+                        moved[ring] += core::mem::take(&mut stored[ring]) as usize;
+                    }
+                    Access::Load { .. } | Access::Observe | Access::Write { .. } => {}
+                }
+            }
+            // The arming of each ring is one more than the frames.
+            assert!(received > 0 && sent > 0, "seed {seed}, {part:?}: no frame moved");
+            assert!(moved[0] > 1, "seed {seed}, {part:?}: RDT never moved over a stored descriptor");
+            assert_eq!(moved[1], sent + 1, "seed {seed}, {part:?}: TDT did not move once a frame");
+        }
+    }
+}
+
+/// `toyos_device_memory::DmaBuffers::observe`'s order, on both rings: §7.1.7.1
+/// and §7.2.4.2 write descriptors back in batches, so after the load that
+/// first finds `DD` in a descriptor the driver loads nothing from the grant
+/// before an `observe` — the descriptor's own length and errors least of all.
+#[test]
+fn a_descriptors_fields_are_read_only_after_an_observe_that_follows_the_load_that_found_dd() {
+    for (part, _) in PARTS {
+        for seed in 1..=8u64 {
+            let (trace, sent, received) = a_worked_trace(seed, part);
+            // Status words whose `DD` the driver has found since it last
+            // stored them, and the one no `observe` has followed yet.
+            let mut taken = std::collections::BTreeSet::new();
+            let mut unobserved = None;
+            let mut found = [0usize; 2];
+            for access in trace {
+                match access {
+                    Access::Store { at } => {
+                        taken.remove(&at);
+                    }
+                    Access::Load { at, word } => {
+                        assert_eq!(
+                            unobserved, None,
+                            "seed {seed}, {part:?}: {at:#x} was loaded after the load that found \
+                             DD, with no observe between them"
+                        );
+                        if found_done(at, word) && taken.insert(at) {
+                            unobserved = Some(at);
+                            found[(at >= OFF_TX_RING) as usize] += 1;
+                        }
+                    }
+                    Access::Observe => unobserved = None,
+                    Access::Publish | Access::Write { .. } => {}
+                }
+            }
+            assert_eq!(unobserved, None, "seed {seed}, {part:?}: a DD was found and never observed");
+            assert_eq!(found[0], received, "seed {seed}, {part:?}: not every frame was found by its DD");
+            assert_eq!(found[1], sent, "seed {seed}, {part:?}: not every sent descriptor was found by its DD");
+        }
     }
 }
 // --- the PHY behind MDIC ---

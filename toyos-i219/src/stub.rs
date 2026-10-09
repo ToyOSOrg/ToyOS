@@ -12,6 +12,12 @@
 //! Every run takes a seed; every assertion this file makes prints it; and the
 //! seed reproduces the run exactly.
 //!
+//! **The order of the driver's accesses is recorded, and judged by a test.**
+//! This model has one memory and reads it whole, so a barrier left out changes
+//! nothing it does; [`Access`] is every store, load and barrier the driver
+//! made on the grant and every register it wrote, in one trace. A frame's
+//! bytes are its caller's accesses and are not in it.
+//!
 //! **Two parts, one model.** [`Nic::new`] is the 82574 the QEMU arm runs
 //! against; §10.2.2.7 addresses its PHY as "1 = Gigabit PHY. 2 = PCIe PHY" and
 //! none of that register set is modelled here, so an `MDIC` access to it is an
@@ -56,6 +62,21 @@ use crate::{phy, wake, Clock, DmaBuffers, Interrupts, Part, Registers};
 /// address would still be inside a zero-based region, and this makes that
 /// mistake a refusal instead of a pass.
 pub const DEVICE_BASE: u64 = 0x0000_0001_0000_0000;
+
+/// What the driver did to the part, in the order it did it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    /// A store into the grant.
+    Store { at: usize },
+    /// A load from the grant, and the word it found.
+    Load { at: usize, word: u64 },
+    /// [`DmaBuffers::publish`].
+    Publish,
+    /// [`DmaBuffers::observe`].
+    Observe,
+    /// A write of a register.
+    Write { reg: usize },
+}
 
 /// The station address the modelled NVM holds (§10.2.5.23: entry 0 is loaded
 /// from the `IA` field after a reset).
@@ -613,6 +634,7 @@ struct Model {
     /// Every register offset the driver has written, so a test about what a
     /// path does *not* write can say so.
     written: BTreeSet<usize>,
+    trace: Vec<Access>,
     /// Every restart of auto-negotiation the driver wrote, by the register it
     /// wrote it to, in order.
     restarts: Vec<Restart>,
@@ -716,6 +738,7 @@ impl Model {
             messages: 0,
             not_decoding: None,
             written: BTreeSet::new(),
+            trace: Vec::new(),
             restarts: Vec::new(),
             held: false,
             arbitration_at: Vec::new(),
@@ -2232,6 +2255,11 @@ impl Nic {
         self.0.borrow().written.clone()
     }
 
+    /// Everything the driver did to the grant and every register it wrote.
+    pub fn trace(&self) -> Vec<Access> {
+        self.0.borrow().trace.clone()
+    }
+
     /// Nothing in the window decodes `reg`, so reads of it answer ones.
     pub fn window_does_not_decode(&self, reg: usize) {
         self.0.borrow_mut().not_decoding = Some(reg);
@@ -2456,7 +2484,9 @@ impl Registers for Bar {
     }
 
     fn write32(&self, reg: usize, value: u32) {
-        self.0.borrow_mut().write(reg, value);
+        let mut model = self.0.borrow_mut();
+        model.trace.push(Access::Write { reg });
+        model.write(reg, value);
     }
 
     // Every register of this part is thirty-two bits, and is reached as one.
@@ -2509,11 +2539,16 @@ impl DmaBuffers for Grant {
     }
 
     fn read64(&self, at: usize) -> u64 {
-        self.0.borrow().desc_read(at)
+        let mut model = self.0.borrow_mut();
+        let word = model.desc_read(at);
+        model.trace.push(Access::Load { at, word });
+        word
     }
 
     fn write64(&self, at: usize, word: u64) {
-        self.0.borrow_mut().desc_write(at, word);
+        let mut model = self.0.borrow_mut();
+        model.trace.push(Access::Store { at });
+        model.desc_write(at, word);
     }
 
     // A legacy descriptor is two sixty-four-bit halves, and is reached as them.
@@ -2530,10 +2565,13 @@ impl DmaBuffers for Grant {
         panic!("a descriptor was written at {at:#x} as 32 bits")
     }
 
-    // The host has one memory and one observer of it, so the two barriers are
-    // where they are on a machine — at the boundary — and cost nothing here.
-    fn publish(&self) {}
-    fn observe(&self) {}
+    fn publish(&self) {
+        self.0.borrow_mut().trace.push(Access::Publish);
+    }
+
+    fn observe(&self) {
+        self.0.borrow_mut().trace.push(Access::Observe);
+    }
 }
 
 pub struct Line(Rc<RefCell<Model>>);
