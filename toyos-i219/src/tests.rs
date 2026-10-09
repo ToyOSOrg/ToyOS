@@ -154,10 +154,22 @@ fn a_window_or_grant_too_small_is_refused() {
         fn bytes(&self) -> usize {
             self.0
         }
-        fn read(&self, _: usize) -> u32 {
+        fn read8(&self, _: usize) -> u8 {
             panic!("a refused window was read")
         }
-        fn write(&self, _: usize, _: u32) {
+        fn read16(&self, _: usize) -> u16 {
+            panic!("a refused window was read")
+        }
+        fn read32(&self, _: usize) -> u32 {
+            panic!("a refused window was read")
+        }
+        fn write8(&self, _: usize, _: u8) {
+            panic!("a refused window was written")
+        }
+        fn write16(&self, _: usize, _: u16) {
+            panic!("a refused window was written")
+        }
+        fn write32(&self, _: usize, _: u32) {
             panic!("a refused window was written")
         }
     }
@@ -178,10 +190,22 @@ fn a_window_or_grant_too_small_is_refused() {
         fn device_addr(&self, _: usize) -> u64 {
             panic!("a refused grant was addressed")
         }
-        fn read(&self, _: usize) -> u64 {
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a refused grant was read at {at:#x} as 16 bits")
+        }
+        fn read32(&self, at: usize) -> u32 {
+            panic!("a refused grant was read at {at:#x} as 32 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a refused grant was written at {at:#x} as 16 bits")
+        }
+        fn write32(&self, at: usize, _: u32) {
+            panic!("a refused grant was written at {at:#x} as 32 bits")
+        }
+        fn read64(&self, _: usize) -> u64 {
             panic!("a refused grant was read")
         }
-        fn write(&self, _: usize, _: u64) {
+        fn write64(&self, _: usize, _: u64) {
             panic!("a refused grant was written")
         }
         fn publish(&self) {}
@@ -232,10 +256,22 @@ fn a_window_that_reads_ones_is_refused() {
         fn bytes(&self) -> usize {
             regs::REGISTER_BYTES
         }
-        fn read(&self, _: usize) -> u32 {
+        fn read8(&self, at: usize) -> u8 {
+            panic!("a 32-bit register was read at {at:#x} as 8 bits")
+        }
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a 32-bit register was read at {at:#x} as 16 bits")
+        }
+        fn write8(&self, at: usize, _: u8) {
+            panic!("a 32-bit register was written at {at:#x} as 8 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a 32-bit register was written at {at:#x} as 16 bits")
+        }
+        fn read32(&self, _: usize) -> u32 {
             u32::MAX
         }
-        fn write(&self, _: usize, _: u32) {}
+        fn write32(&self, _: usize, _: u32) {}
     }
     struct NoClock;
     impl Clock for NoClock {
@@ -2933,20 +2969,32 @@ fn quiesce_stops_what_a_previous_holder_left_running() {
         fn bytes(&self) -> usize {
             crate::regs::REGISTER_BYTES
         }
-        fn read(&self, reg: usize) -> u32 {
+        fn read8(&self, at: usize) -> u8 {
+            panic!("a 32-bit register was read at {at:#x} as 8 bits")
+        }
+        fn read16(&self, at: usize) -> u16 {
+            panic!("a 32-bit register was read at {at:#x} as 16 bits")
+        }
+        fn write8(&self, at: usize, _: u8) {
+            panic!("a 32-bit register was written at {at:#x} as 8 bits")
+        }
+        fn write16(&self, at: usize, _: u16) {
+            panic!("a 32-bit register was written at {at:#x} as 16 bits")
+        }
+        fn read32(&self, reg: usize) -> u32 {
             *self.0.borrow().get(&reg).unwrap_or(&0)
         }
-        fn write(&self, reg: usize, value: u32) {
+        fn write32(&self, reg: usize, value: u32) {
             self.0.borrow_mut().insert(reg, value);
         }
     }
     let regs = Regs(core::cell::RefCell::default());
     let rctl = crate::regs::rctl::EN | crate::regs::rctl::BAM;
     let tctl = crate::regs::tctl::EN | crate::regs::tctl::PSP;
-    crate::Registers::write(&regs, crate::regs::RCTL, rctl);
-    crate::Registers::write(&regs, crate::regs::TCTL, tctl);
+    crate::Registers::write32(&regs, crate::regs::RCTL, rctl);
+    crate::Registers::write32(&regs, crate::regs::TCTL, tctl);
     crate::quiesce(&regs);
-    let read = |reg| crate::Registers::read(&regs, reg);
+    let read = |reg| crate::Registers::read32(&regs, reg);
     assert_eq!(read(crate::regs::RCTL), crate::regs::rctl::BAM);
     assert_eq!(read(crate::regs::TCTL), crate::regs::tctl::PSP);
     assert_eq!(read(crate::regs::IMC), u32::MAX);

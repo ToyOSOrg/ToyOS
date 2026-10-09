@@ -23,3 +23,6 @@ publish = false
 # The type a used-ring element's two fields stay in until each has met its
 # bound.
 toyos-untrusted = { path = "../toyos-untrusted" }
+# `Registers` and `DmaBuffers`: the boundary every userland driver is written
+# against, and the order of its two barriers.
+toyos-device-memory = { path = "../toyos-device-memory" }

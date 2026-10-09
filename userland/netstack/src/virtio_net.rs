@@ -8,35 +8,30 @@
 //! instead is refused at the unit and recorded against this process.
 //!
 //! **The transport and the rings are `toyos-virtio`'s**, where every word the
-//! device writes is bounded and every refusal is host-tested; [`Bar`] and
-//! [`Grant`] are the two implementations it is written against, one
-//! instruction deep. What is this file's is the network device (§5.1): which
-//! buffer goes with which head, the header in front of every frame, and what
-//! becomes of a refusal.
+//! device writes is bounded and every refusal is host-tested, over
+//! `device.rs`'s register window and grant. What is this file's is the
+//! network device (§5.1): which buffer goes with which head, the header in
+//! front of every frame, and what becomes of a refusal.
 //!
-//! **A used-ring element the device is not believed on is counted and
-//! dropped**, because losing a token costs throughput and believing a bad one
-//! costs memory; **a used ring that can no longer be read ends this
-//! program**, by name, because every frame after it is one that silently
-//! never arrives ([`finished`]).
+//! **A used ring the device is not believed on ends this program**, by the
+//! refusal's own name ([`finished`]): no conforming device writes one, the
+//! refused element spent one a chain in flight was owed, and every frame
+//! after it is one that silently never arrives.
 //!
 //! Virtio 1.2 throughout: §4.1.4 for the PCI capability layout, §5.1 for the
 //! network device.
 
-use std::cell::{Cell, RefCell};
-use std::sync::atomic::{fence, Ordering};
+use std::cell::RefCell;
 
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos_device_memory::DmaBuffers;
 use toyos_virtio::pci::{Layout, Live, Offer, VendorCap};
-use toyos_virtio::queue::{
-    avail_bytes, desc_bytes, Buffer, Parts, Published, Used, UsedRefusal, Virtqueue,
-};
-use toyos_virtio::{DmaBuffers, Registers};
+use toyos_virtio::queue::{avail_bytes, desc_bytes, Buffer, Parts, Published, Used, Virtqueue};
 
-use crate::device::{KernelRefused, Latch};
+use crate::device::{Bar, Grant, KernelRefused};
 
 /// PCI's own vendor-specific capability id; virtio's config structures are all
 /// published under it (§4.1.4).
@@ -96,87 +91,6 @@ const _: () = {
     assert!(NET_HDR_SIZE < RX_BUF_SIZE && NET_HDR_SIZE < TX_BUF_SIZE);
 };
 
-/// The register window: one volatile access of the width `toyos-virtio` asks
-/// for, at an offset it has bounded.
-struct Bar(Window);
-
-impl Registers for Bar {
-    fn bytes(&self) -> usize {
-        self.0.bytes()
-    }
-
-    fn read8(&self, at: usize) -> u8 {
-        self.0.read(at)
-    }
-
-    fn read16(&self, at: usize) -> u16 {
-        self.0.read(at)
-    }
-
-    fn read32(&self, at: usize) -> u32 {
-        self.0.read(at)
-    }
-
-    fn write8(&self, at: usize, value: u8) {
-        self.0.write(at, value);
-    }
-
-    fn write16(&self, at: usize, value: u16) {
-        self.0.write(at, value);
-    }
-
-    fn write32(&self, at: usize, value: u32) {
-        self.0.write(at, value);
-    }
-}
-
-/// The DMA grant, as both queues reach their rings and this file its frames.
-#[derive(Clone, Copy)]
-struct Grant {
-    window: Window,
-    /// Where the device reaches the grant's first byte. Not a physical address:
-    /// what the unit translates for this function and for nothing else.
-    device_base: u64,
-}
-
-impl DmaBuffers for Grant {
-    fn bytes(&self) -> usize {
-        self.window.bytes()
-    }
-
-    fn device_addr(&self, at: usize) -> u64 {
-        self.device_base + at as u64
-    }
-
-    fn read16(&self, at: usize) -> u16 {
-        self.window.read(at)
-    }
-
-    fn read32(&self, at: usize) -> u32 {
-        self.window.read(at)
-    }
-
-    fn write16(&self, at: usize, value: u16) {
-        self.window.write(at, value);
-    }
-
-    fn write32(&self, at: usize, value: u32) {
-        self.window.write(at, value);
-    }
-
-    fn write64(&self, at: usize, value: u64) {
-        self.window.write(at, value);
-    }
-
-    fn publish(&self) {
-        fence(Ordering::Release);
-    }
-
-    fn observe(&self) {
-        fence(Ordering::Acquire);
-    }
-}
-
 /// Why the device was not brought up. Each keeps its own word: a machine with
 /// no such device and one that refused a feature set ask different things of a
 /// caller.
@@ -211,24 +125,14 @@ impl std::fmt::Display for Refusal {
 
 /// The next chain the device has finished with on `rings`, or `None`.
 ///
-/// An element the device is not believed on is counted into `refused` and
-/// skipped, never returned, so one bad element cannot hide the ones behind it.
-///
-/// A used index past what this driver made available is not an element: from
-/// there on nothing in the ring can be told from a stale entry, so nothing
-/// drives this NIC from there and this dies where it can be read.
-fn finished(rings: &mut Virtqueue<Grant>, refused: &mut u32) -> Option<Used> {
-    loop {
-        match rings.poll_used() {
-            Ok(done) => return done,
-            Err(
-                UsedRefusal::Head(_) | UsedRefusal::NoChain { .. } | UsedRefusal::Written { .. },
-            ) => *refused = refused.saturating_add(1),
-            Err(why @ UsedRefusal::Jumped { .. }) => {
-                panic!("netstack: this NIC cannot be driven on — {why}")
-            }
-        }
-    }
+/// **Every way the used ring is not believed ends the device's use**: a head
+/// past the table, a head with no chain in flight, more bytes than a chain's
+/// writable ones, and an index past what was made available. Nothing drives
+/// this NIC from there, and this dies where it can be read.
+fn finished(rings: &mut Virtqueue<Grant>) -> Option<Used> {
+    rings
+        .poll_used()
+        .unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
 }
 
 /// The bound the capability walk rests on, asked once before the walk.
@@ -272,9 +176,6 @@ pub struct VirtioNet {
     grant: Grant,
     rx: RefCell<Virtqueue<Grant>>,
     tx: RefCell<TxQueue>,
-    /// Used-ring elements the receive queue's device was not believed on.
-    rx_refused: Cell<u32>,
-    reported: Latch<u32>,
     mac: [u8; 6],
 }
 
@@ -303,9 +204,9 @@ impl VirtioNet {
         // `mapped`, which this struct holds for its own life.
         let window = unsafe { Window::new(mapped.as_ptr(), bar_bytes as usize) };
 
-        let offer = Offer::acknowledge(Bar(window), &layout)?;
+        let offer = Offer::acknowledge(Bar::over(window), &layout)?;
         let offered = offer.features();
-        let mut setup = offer.accept(VIRTIO_NET_F_MAC)?;
+        let setup = offer.accept(VIRTIO_NET_F_MAC)?;
         let features = setup.features();
         // The line the kernel's virtio drivers print, in the same shape:
         // `iommu_virtio_platform` reads it back for every virtio function the
@@ -328,19 +229,20 @@ impl VirtioNet {
         // `region`, which this struct holds.
         let window = unsafe { Window::new(region.memory.as_ptr(), GRANT_BYTES as usize) };
         window.zero();
-        let grant = Grant { window, device_base: region.device_addr };
+        let grant = Grant::over(window, region.device_addr);
 
         let rx = Virtqueue::new(grant, RX_QUEUE, RX_QUEUE_SIZE, RX_PARTS);
         let tx = TxQueue::new(grant);
         // The vector the kernel already put in the table, named to the device
         // for each of its sources.
-        setup.config_vector(MSIX_ENTRY)?;
-        setup.enable(&rx, MSIX_ENTRY)?;
-        setup.enable(&tx.rings, MSIX_ENTRY)?;
+        let mut setup = setup
+            .config_vector(MSIX_ENTRY)?
+            .enable(&rx, MSIX_ENTRY)?
+            .enable(&tx.rings, MSIX_ENTRY)?;
 
         let mut mac = [0u8; 6];
         for (at, byte) in mac.iter_mut().enumerate() {
-            *byte = setup.device_read8(at)?;
+            (setup, *byte) = setup.device_read8(at)?;
         }
 
         let nic = Self {
@@ -351,8 +253,6 @@ impl VirtioNet {
             grant,
             rx: RefCell::new(rx),
             tx: RefCell::new(tx),
-            rx_refused: Cell::new(0),
-            reported: Latch::default(),
             mac,
         };
 
@@ -365,19 +265,6 @@ impl VirtioNet {
 
     pub fn mac(&self) -> [u8; 6] {
         self.mac
-    }
-
-    /// Say what this driver has refused, when the count has moved. Once a
-    /// pass, never per element: a burst of refusals is one line.
-    pub fn report(&self) {
-        let refused = self.rx_refused.get() + self.tx.borrow().refused;
-        if self.reported.moved(refused).is_none() {
-            return;
-        }
-        crate::say!(
-            "netstack: this NIC has refused {refused} used-ring element(s) — the device named a \
-             descriptor this driver never published or claimed more bytes than it was given"
-        );
     }
 
     /// Drain the interrupt record, so the claim stops reading ready.
@@ -400,7 +287,7 @@ impl VirtioNet {
         let at = OFF_RX_BUFS + index * RX_BUF_SIZE;
         // The header is zeroed before the buffer is published: what the device
         // writes there is its own, and what it leaves behind is this driver's.
-        self.grant.window.sub(at, NET_HDR_SIZE).zero();
+        self.grant.window().sub(at, NET_HDR_SIZE).zero();
         let buffer = Buffer::writable(self.grant.device_addr(at), RX_BUF_SIZE as u32);
         let published = self.rx.borrow_mut().publish(index as u16, &[buffer]);
         self.device.notify(published);
@@ -410,12 +297,9 @@ impl VirtioNet {
     /// header excluded, or `None`.
     pub fn poll_rx(&self) -> Option<(usize, usize)> {
         loop {
-            let mut refused = self.rx_refused.get();
-            let done = finished(&mut self.rx.borrow_mut(), &mut refused);
-            self.rx_refused.set(refused);
             // The head is below this queue's size, which is the buffer count,
             // and `written` no more than the one buffer its chain is.
-            let Used { head, written } = done?;
+            let Used { head, written } = finished(&mut self.rx.borrow_mut())?;
             let (index, total) = (head as usize, written as usize);
             if total <= NET_HDR_SIZE {
                 // Shorter than its own header is nothing to hand up, and the
@@ -438,7 +322,7 @@ impl VirtioNet {
 
     /// Where a received frame's bytes are, past the virtio header.
     pub fn rx_frame(&self, index: usize, len: usize) -> &[u8] {
-        let window = self.grant.window.sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
+        let window = self.grant.window().sub(OFF_RX_BUFS + index * RX_BUF_SIZE + NET_HDR_SIZE, len);
         // SAFETY: the window is inside the grant, which lives as long as
         // `self`; the device has finished with this buffer — its used-ring
         // element is what said so — and it is not posted again until
@@ -474,8 +358,6 @@ struct TxQueue {
     /// Transmit heads nothing is in flight on.
     free: Vec<u16>,
     grant: Grant,
-    /// Used-ring elements the device was not believed on.
-    refused: u32,
 }
 
 impl TxQueue {
@@ -484,7 +366,6 @@ impl TxQueue {
             rings: Virtqueue::new(grant, TX_QUEUE, TX_QUEUE_SIZE, TX_PARTS),
             free: (0..TX_QUEUE_SIZE).rev().collect(),
             grant,
-            refused: 0,
         }
     }
 
@@ -496,7 +377,7 @@ impl TxQueue {
     /// and §2.7.7 has the device notify for every buffer it uses on such a
     /// queue.
     fn room(&mut self) -> usize {
-        while let Some(done) = finished(&mut self.rings, &mut self.refused) {
+        while let Some(done) = finished(&mut self.rings) {
             self.free.push(done.head);
         }
         self.free.len()
@@ -524,8 +405,8 @@ impl TxQueue {
             .expect("netstack: a frame was offered to a transmit queue that had said it has no room");
         let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
         // The header is this driver's and zeroed before the frame goes in.
-        self.grant.window.sub(at, NET_HDR_SIZE).zero();
-        let window = self.grant.window.sub(at + NET_HDR_SIZE, len);
+        self.grant.window().sub(at, NET_HDR_SIZE).zero();
+        let window = self.grant.window().sub(at + NET_HDR_SIZE, len);
         // SAFETY: the window is inside the grant, which lives as long as the
         // driver that holds this queue; the device is not reading it, because
         // this head is out of `free` and its descriptor is published only
@@ -583,19 +464,19 @@ mod tests {
         // SAFETY: `leak` gives the allocation the `'static` lifetime the
         // window needs, and nothing but this queue and the test reaches it.
         let window = unsafe { Window::new(backing.as_mut_ptr().cast(), GRANT_BYTES as usize) };
-        TxQueue::new(Grant { window, device_base: DEVICE_BASE })
+        TxQueue::new(Grant::over(window, DEVICE_BASE))
     }
 
     /// The head in available-ring entry `nth` (§2.7.6).
     fn made_available(queue: &TxQueue, nth: u16) -> u16 {
         let entry = (nth % TX_QUEUE_SIZE) as usize;
-        queue.grant.window.read(TX_PARTS.avail + RING_ENTRIES + entry * AVAIL_ENTRY_BYTES)
+        queue.grant.window().read(TX_PARTS.avail + RING_ENTRIES + entry * AVAIL_ENTRY_BYTES)
     }
 
     /// The device, finishing with the `count` oldest chains it was given and
     /// answering their heads (§2.7.8).
     fn device_uses(queue: &TxQueue, count: u16) -> Vec<u16> {
-        let ring = queue.grant.window;
+        let ring = queue.grant.window();
         let used_idx: u16 = ring.read(TX_PARTS.used + 2);
         (0..count)
             .map(|nth| {
@@ -626,7 +507,7 @@ mod tests {
             published += 1;
         }
         assert_eq!(published as u16, TX_QUEUE_SIZE);
-        let ring = queue.grant.window;
+        let ring = queue.grant.window();
         assert_eq!(ring.read::<u16>(TX_PARTS.avail + 2), TX_QUEUE_SIZE);
         for nth in 0..TX_QUEUE_SIZE {
             let chain = TX_PARTS.desc + made_available(&queue, nth) as usize * DESC_BYTES;
@@ -645,7 +526,6 @@ mod tests {
         let _ = queue.send(60, |frame| frame.fill(0xEE));
         assert!(back.contains(&made_available(&queue, TX_QUEUE_SIZE)));
         assert_eq!(queue.room(), 2);
-        assert_eq!(queue.refused, 0);
     }
 
     /// A frame offered to a queue that said it had no room is netstack's own
@@ -660,22 +540,50 @@ mod tests {
         let _ = queue.send(60, |frame| frame.fill(2));
     }
 
-    /// An element the device is not believed on is counted and gives no head
-    /// back; a used index past every frame offered ends the program by name.
-    #[test]
-    #[should_panic(expected = "this NIC cannot be driven on — the used index reads 3")]
-    fn a_used_ring_that_cannot_be_read_ends_the_driver() {
+    /// A queue with two frames in flight, on heads 0 and 1, whose device then
+    /// writes one used element, `id` and `len`, and counts `used_idx` of them.
+    fn after_the_device_wrote(id: u32, len: u32, used_idx: u16) -> TxQueue {
         let mut queue = queue();
         let _ = queue.send(60, |frame| frame.fill(1));
         let _ = queue.send(60, |frame| frame.fill(2));
-        let ring = queue.grant.window;
-        // One element for a head past the table: counted, and no room for it.
-        ring.write(TX_PARTS.used + RING_ENTRIES, 0xFFFFu32);
-        ring.write(TX_PARTS.used + 2, 1u16);
-        assert_eq!(queue.room(), TX_BUF_COUNT - 2);
-        assert_eq!(queue.refused, 1);
-        // And then more elements than frames.
-        ring.write(TX_PARTS.used + 2, 3u16);
-        queue.room();
+        assert_eq!([made_available(&queue, 0), made_available(&queue, 1)], [0, 1]);
+        let ring = queue.grant.window();
+        ring.write(TX_PARTS.used + RING_ENTRIES, id);
+        ring.write(TX_PARTS.used + RING_ENTRIES + 4, len);
+        ring.write(TX_PARTS.used + 2, used_idx);
+        queue
+    }
+
+    /// Each way the used ring is not believed ends the program by that
+    /// refusal's own name, where it is read: none is counted and passed over.
+    #[test]
+    #[should_panic(expected = "this NIC cannot be driven on — a used element's head")]
+    fn a_used_head_past_the_table_ends_the_driver() {
+        after_the_device_wrote(0xFFFF, 0, 1).room();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "this NIC cannot be driven on — a used element names head 5, where no chain \
+                    is in flight"
+    )]
+    fn a_used_head_with_no_chain_in_flight_ends_the_driver() {
+        after_the_device_wrote(5, 0, 1).room();
+    }
+
+    /// A transmit chain is the device's to read and has no byte it may write.
+    #[test]
+    #[should_panic(
+        expected = "this NIC cannot be driven on — the used element for head 0 claims more bytes \
+                    than its chain may be written"
+    )]
+    fn a_used_length_past_the_chains_writable_bytes_ends_the_driver() {
+        after_the_device_wrote(0, 1, 1).room();
+    }
+
+    #[test]
+    #[should_panic(expected = "this NIC cannot be driven on — the used index reads 3")]
+    fn a_used_index_past_every_frame_offered_ends_the_driver() {
+        after_the_device_wrote(0, 0, 3).room();
     }
 }

@@ -34,6 +34,7 @@ members = [
     "toyos-blockring/transport",
     "toyos-bootmap",
     "toyos-cpuvuln",
+    "toyos-device-memory",
     "toyos-dhcp",
     "toyos-dns",
     "toyos-elf",

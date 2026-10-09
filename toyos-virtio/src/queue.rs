@@ -12,16 +12,18 @@
 //! kept here, in memory the device does not reach. A descriptor table the
 //! device has rewritten into a loop is therefore a loop nothing follows.
 //!
-//! **The order of a publication is §2.7.13's**: the descriptors and the ring
-//! entry, a barrier, the index, a barrier, and only then the notification —
-//! which [`Published`] is owed for and only a live transport sends.
+//! **The order of a publication is §2.7.13's** (steps 4 and 6): the
+//! descriptors and the ring entry, `publish`, the index, `publish`, and only
+//! then the notification — which [`Published`] is owed for and only a live
+//! transport sends. **An element is read after the index that counts it**
+//! (§2.7.8.2): the used index, `observe`, the element.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use toyos_untrusted::{Refused, Untrusted};
 
-use crate::DmaBuffers;
+use toyos_device_memory::DmaBuffers;
 
 /// §2.7: "The maximum Queue Size value is 32768."
 pub const MAX_QUEUE_SIZE: u16 = 32768;
@@ -109,7 +111,9 @@ pub struct Used {
     pub written: u32,
 }
 
-/// Why the used ring was not believed. The device wrote every word of it.
+/// Why the used ring was not believed. The device wrote every word of it, and
+/// none of these is one a conforming device writes: the queue is not one to
+/// go on reading after any of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsedRefusal {
     /// An element's `id` is past the descriptor table. The element is taken

@@ -18,11 +18,12 @@ use std::rc::Rc;
 use std::vec;
 use std::vec::Vec;
 
-use crate::pci::{status, Source, VendorCap, NO_VECTOR, VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1};
+use toyos_device_memory::{DmaBuffers, Registers};
+
+use crate::pci::{status, Source, VendorCap, VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1};
 use crate::queue::{
     Buffer, Parts, AVAIL_ENTRY_BYTES, DESC_BYTES, RING_ENTRIES, USED_ELEM_BYTES,
 };
-use crate::{DmaBuffers, Registers};
 
 /// Where the device reaches the grant. Not zero: a driver that told the
 /// device a grant offset instead of a device address is then not inside it.
@@ -40,6 +41,9 @@ pub const NOTIFY_BYTES: u32 = 0x1000;
 pub const NOTIFY_OFF_MULTIPLIER: u32 = 4;
 pub const QUEUES: usize = 3;
 pub const QUEUE_MAX: u16 = 256;
+
+/// §4.1.5.1.2: what a vector field reads when the device mapped none.
+const NO_VECTOR: u16 = 0xFFFF;
 
 /// A device-type feature bit, and one the device does not offer.
 pub const FEATURE_OFFERED: u64 = 1 << 5;
@@ -440,6 +444,10 @@ impl DmaBuffers for Machine {
 
     fn read32(&self, at: usize) -> u32 {
         self.state(|s| s.load(at, 4)) as u32
+    }
+
+    fn read64(&self, at: usize) -> u64 {
+        self.state(|s| s.load(at, 8))
     }
 
     fn write16(&self, at: usize, value: u16) {

@@ -31,8 +31,8 @@ use crate::Registers;
 /// One read-modify-write: `set` raised and `clear` lowered, every other bit as
 /// the part holds it.
 fn modify<R: Registers>(regs: &R, reg: usize, set: u32, clear: u32) {
-    let held = regs.read(reg);
-    regs.write(reg, (held | set) & !clear);
+    let held = regs.read32(reg);
+    regs.write32(reg, (held | set) & !clear);
 }
 
 /// Everything this module owes the part, after its reset and before its rings.
@@ -54,8 +54,8 @@ pub(crate) fn prepare<R: Registers>(regs: &R) {
 /// the read, and the word composed from it would set every field of the
 /// register.
 pub(crate) fn release<R: Registers>(regs: &R) {
-    let held = regs.read(regs::CTRL_EXT);
+    let held = regs.read32(regs::CTRL_EXT);
     if held != u32::MAX {
-        regs.write(regs::CTRL_EXT, held & !ctrl_ext::DRIVER_HOLDS_THE_FUNCTION);
+        regs.write32(regs::CTRL_EXT, held & !ctrl_ext::DRIVER_HOLDS_THE_FUNCTION);
     }
 }

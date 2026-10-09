@@ -6,7 +6,9 @@
 //! on which queues are configured; [`Setup::driver_ok`] answers a [`Live`],
 //! and only a `Live` sends a notification — §3.1.1 has none sent before
 //! `DRIVER_OK`. A queue is enabled by the one call that gave it its addresses
-//! and its vector (§4.1.4.3.2), so none is enabled without them.
+//! and its vector (§4.1.4.3.2), so none is enabled without them. **Every step
+//! takes the device by value and a refusal does not give it back**, so
+//! nothing is written to a device after `FAILED` was.
 //!
 //! **Access widths are §4.1.3.1's**: a byte for `device_status`, sixteen bits
 //! for a sixteen-bit field, and a sixty-four-bit field as its two halves.
@@ -16,8 +18,9 @@
 
 use alloc::vec::Vec;
 
+use toyos_device_memory::{DmaBuffers, Registers};
+
 use crate::queue::{Published, Virtqueue};
-use crate::{DmaBuffers, Registers};
 
 /// §4.1.4: `cfg_type`.
 const CFG_COMMON: u8 = 1;
@@ -63,9 +66,6 @@ pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 /// §6: the device reaches memory through addresses the platform translates,
 /// which is what [`DmaBuffers::device_addr`] answers.
 pub const VIRTIO_F_ACCESS_PLATFORM: u64 = 1 << 33;
-
-/// §4.1.5.1.2: what a vector field reads when the device mapped none.
-pub const NO_VECTOR: u16 = 0xFFFF;
 
 /// One vendor-specific capability (§4.1.4's `virtio_pci_cap`), as a driver
 /// read it out of configuration space. Every field is the device's.
@@ -341,6 +341,9 @@ impl<R: Registers> Offer<R> {
 
 /// A device whose features are settled and which is not yet live: §3.1.1
 /// step 7.
+///
+/// Each step answers the `Setup` it was made on, or the refusal that ended
+/// it: §3.1.1 has a driver that set `FAILED` go no further.
 pub struct Setup<R: Registers> {
     wires: Wires<R>,
     features: u64,
@@ -355,28 +358,28 @@ impl<R: Registers> Setup<R> {
     }
 
     /// Map configuration changes to MSI-X table entry `entry` (§4.1.5.1.2).
-    pub fn config_vector(&mut self, entry: u16) -> Result<(), Refusal> {
+    pub fn config_vector(self, entry: u16) -> Result<Self, Refusal> {
         self.bind(common::CONFIG_MSIX_VECTOR, entry, Source::Config)
     }
 
-    fn bind(&mut self, field: usize, entry: u16, source: Source) -> Result<(), Refusal> {
+    fn bind(mut self, field: usize, entry: u16, source: Source) -> Result<Self, Refusal> {
         let at = self.wires.common + field;
         self.wires.regs.write16(at, entry);
         // §4.1.5.1.2.2: "on success, the previously written value is returned".
         if self.wires.regs.read16(at) != entry {
             return Err(self.wires.refuse(Refusal::NoVector(source)));
         }
-        Ok(())
+        Ok(self)
     }
 
     /// Give the device `queue`: its size, its three addresses and MSI-X table
     /// entry `entry` for its used-buffer notifications, and then — and only
     /// then (§4.1.4.3.2) — its enable.
     pub fn enable<M: DmaBuffers>(
-        &mut self,
+        mut self,
         queue: &Virtqueue<M>,
         entry: u16,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Self, Refusal> {
         let (index, wanted) = (queue.index(), queue.size());
         let at = self.wires.common;
         self.wires.regs.write16(at + common::QUEUE_SELECT, index);
@@ -406,19 +409,20 @@ impl<R: Registers> Setup<R> {
         }
         let doorbell = self.wires.notify.at + into as usize;
 
-        self.bind(common::QUEUE_MSIX_VECTOR, entry, Source::Queue(index))?;
-        self.wires.regs.write16(at + common::QUEUE_ENABLE, 1);
-        self.doorbells.push((index, doorbell));
-        Ok(())
+        let mut bound = self.bind(common::QUEUE_MSIX_VECTOR, entry, Source::Queue(index))?;
+        bound.wires.regs.write16(at + common::QUEUE_ENABLE, 1);
+        bound.doorbells.push((index, doorbell));
+        Ok(bound)
     }
 
     /// One byte of the device-specific structure, `at` bytes into it.
-    pub fn device_read8(&mut self, at: usize) -> Result<u8, Refusal> {
+    pub fn device_read8(mut self, at: usize) -> Result<(Self, u8), Refusal> {
         let Region { at: base, bytes } = self.wires.device;
         if at >= bytes {
             return Err(self.wires.refuse(Refusal::PastDeviceConfig { at, bytes }));
         }
-        Ok(self.wires.regs.read8(base + at))
+        let byte = self.wires.regs.read8(base + at);
+        Ok((self, byte))
     }
 
     /// §3.1.1 step 8: the device is live.

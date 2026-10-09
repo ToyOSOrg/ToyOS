@@ -2451,12 +2451,26 @@ impl Registers for Bar {
         regs::REGISTER_BYTES
     }
 
-    fn read(&self, reg: usize) -> u32 {
+    fn read32(&self, reg: usize) -> u32 {
         self.0.borrow_mut().read(reg)
     }
 
-    fn write(&self, reg: usize, value: u32) {
+    fn write32(&self, reg: usize, value: u32) {
         self.0.borrow_mut().write(reg, value);
+    }
+
+    // Every register of this part is thirty-two bits, and is reached as one.
+    fn read8(&self, at: usize) -> u8 {
+        panic!("a 32-bit register was read at {at:#x} as 8 bits")
+    }
+    fn read16(&self, at: usize) -> u16 {
+        panic!("a 32-bit register was read at {at:#x} as 16 bits")
+    }
+    fn write8(&self, at: usize, _: u8) {
+        panic!("a 32-bit register was written at {at:#x} as 8 bits")
+    }
+    fn write16(&self, at: usize, _: u16) {
+        panic!("a 32-bit register was written at {at:#x} as 16 bits")
     }
 }
 
@@ -2494,12 +2508,26 @@ impl DmaBuffers for Grant {
         DEVICE_BASE + at as u64
     }
 
-    fn read(&self, at: usize) -> u64 {
+    fn read64(&self, at: usize) -> u64 {
         self.0.borrow().desc_read(at)
     }
 
-    fn write(&self, at: usize, word: u64) {
+    fn write64(&self, at: usize, word: u64) {
         self.0.borrow_mut().desc_write(at, word);
+    }
+
+    // A legacy descriptor is two sixty-four-bit halves, and is reached as them.
+    fn read16(&self, at: usize) -> u16 {
+        panic!("a descriptor was read at {at:#x} as 16 bits")
+    }
+    fn read32(&self, at: usize) -> u32 {
+        panic!("a descriptor was read at {at:#x} as 32 bits")
+    }
+    fn write16(&self, at: usize, _: u16) {
+        panic!("a descriptor was written at {at:#x} as 16 bits")
+    }
+    fn write32(&self, at: usize, _: u32) {
+        panic!("a descriptor was written at {at:#x} as 32 bits")
     }
 
     // The host has one memory and one observer of it, so the two barriers are

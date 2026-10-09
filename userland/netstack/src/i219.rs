@@ -1,5 +1,6 @@
-//! The I219, as netstack drives it: the four implementations the driver's logic is
-//! written against, and nothing else.
+//! The I219, as netstack drives it: the clock and the claim the driver's logic
+//! is written against beside `device.rs`'s register window and grant, and
+//! nothing else.
 //!
 //! What the kernel keeps is the *claim*: config space, the interrupt vector it
 //! programmed into this function, and the address space the function
@@ -7,7 +8,7 @@
 //! [`PciDev::dma_alloc`] answered; one this driver invented instead is refused
 //! at the unit and recorded against this process.
 //!
-//! **Two views of one grant, and the split is the boundary itself.** [`Grant`]
+//! **Two views of one grant, and the split is the boundary itself.** `Grant`
 //! is the driver's, and it reaches descriptors — sixteen bytes each, read and
 //! written a word at a time. [`Nic::frames`] is netstack's, and it reaches
 //! payloads. The driver never touches a payload and netstack never touches a
@@ -21,32 +22,10 @@ use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
-use toyos_i219::{Clock, DmaBuffers, Interrupts, Registers};
+use toyos_device_memory::Registers;
+use toyos_i219::{Clock, Interrupts};
 
-use crate::device::{KernelRefused, Latch};
-
-/// The register window. The offsets are `toyos-i219`'s own constants, all under
-/// `toyos_i219::regs::REGISTER_BYTES`, which its `open` refuses a shorter window
-/// than.
-pub struct Bar {
-    window: Window,
-    /// The mapping the window points into, kept for as long as the window is.
-    _mapped: SharedMemory,
-}
-
-impl Registers for Bar {
-    fn bytes(&self) -> usize {
-        self.window.bytes()
-    }
-
-    fn read(&self, reg: usize) -> u32 {
-        self.window.read::<u32>(reg)
-    }
-
-    fn write(&self, reg: usize, value: u32) {
-        self.window.write::<u32>(reg, value);
-    }
-}
+use crate::device::{Bar, Grant, KernelRefused, Latch};
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
 /// anchor plus the timestamp counter — and the thread's own sleep, which is how
@@ -61,40 +40,6 @@ impl Clock for Monotonic {
 
     fn pause(&self, nanos: u64) {
         std::thread::sleep(std::time::Duration::from_nanos(nanos));
-    }
-}
-
-/// The DMA grant, as the driver reaches its descriptors.
-pub struct Grant {
-    window: Window,
-    device_base: u64,
-    /// The region the window points into, kept for as long as the window is.
-    _region: DmaRegion,
-}
-
-impl DmaBuffers for Grant {
-    fn bytes(&self) -> usize {
-        self.window.bytes()
-    }
-
-    fn device_addr(&self, at: usize) -> u64 {
-        self.device_base + at as u64
-    }
-
-    fn read(&self, at: usize) -> u64 {
-        self.window.read::<u64>(at)
-    }
-
-    fn write(&self, at: usize, word: u64) {
-        self.window.write::<u64>(at, word);
-    }
-
-    fn publish(&self) {
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-    }
-
-    fn observe(&self) {
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
     }
 }
 
@@ -137,7 +82,13 @@ impl std::fmt::Display for Opening {
 
 /// The card, brought up and driving.
 pub struct Nic {
+    /// Above the mappings it reaches: dropping the driver writes the part's
+    /// registers, and fields drop in the order they are declared.
     driver: RefCell<Driver>,
+    /// Held for their mappings' lives: the register window points into the
+    /// first and the grant's into the second.
+    _mapped: SharedMemory,
+    _region: DmaRegion,
     claim: Rc<PciDev>,
     /// netstack's view of the same grant: the frame payloads, and nothing else.
     frames: Window,
@@ -146,8 +97,8 @@ pub struct Nic {
     reported: Latch<(toyos_i219::Counters, toyos_i219::Link)>,
 }
 
-/// The claim's register window, mapped.
-fn registers(dev: &PciDev) -> Result<Bar, Opening> {
+/// The claim's register window, and the mapping it points into.
+fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
     let info = dev
         .describe()
         .map_err(KernelRefused::on("the claim's description"))
@@ -172,25 +123,26 @@ fn registers(dev: &PciDev) -> Result<Bar, Opening> {
         info.dev,
         info.func,
     );
-    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and
-    // `mapped` is moved into the `Bar` that carries the window.
+    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and `mapped`
+    // goes to the caller with the window, which keeps both for as long as it
+    // keeps either.
     let window = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
-    Ok(Bar { window, _mapped: mapped })
+    Ok((Bar::over(window), mapped))
 }
 
 /// Everything the claim is asked for before the part is reached, in the order
 /// it is asked: the register window, the part stopped, then one grant — as the
-/// driver reaches its descriptors, and as netstack reaches its frames.
-fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
-    let bar = registers(dev)?;
+/// driver reaches its descriptors — with the two mappings they point into.
+fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Opening> {
+    let (bar, mapped) = registers(dev)?;
     // Before the grant: the grant is what starts the function mastering, and a
     // part a previous holder left receiving would write into its descriptors.
     // Said first: whether the kernel's release reset the part is read here, in
     // the receive and transmit enables it handed over.
     crate::say!(
         "netstack: I219: inherited RCTL {:#010x} TCTL {:#010x}",
-        toyos_i219::Registers::read(&bar, toyos_i219::regs::RCTL),
-        toyos_i219::Registers::read(&bar, toyos_i219::regs::TCTL)
+        bar.read32(toyos_i219::regs::RCTL),
+        bar.read32(toyos_i219::regs::TCTL)
     );
     toyos_i219::quiesce(&bar);
     let region = dev
@@ -199,11 +151,11 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, Window), Opening> {
         .map_err(Opening::Kernel)?;
     let device_base = region.device_addr;
     // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
-    // `region` is moved into the `Grant`, which its caller keeps for as long
-    // as it keeps either window.
-    let frames =
+    // `region` goes to the caller with the grant, which keeps both for as
+    // long as it keeps either.
+    let window =
         unsafe { Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize) };
-    Ok((bar, Grant { window: frames, device_base, _region: region }, frames))
+    Ok((bar, Grant::over(window, device_base), mapped, region))
 }
 
 /// What a bring-up says about itself: a sentence each for what it asked the
@@ -243,7 +195,10 @@ impl Nic {
     /// Take the claim's register window and one grant, and bring the part up.
     pub fn open(dev: PciDev, part: toyos_i219::Part) -> Result<Self, Opening> {
         let dev = Rc::new(dev);
-        let (bar, grant, frames) = granted(&dev)?;
+        // Bound before the driver, so one that is refused lets its part go
+        // while both are still mapped.
+        let (bar, grant, mapped, region) = granted(&dev)?;
+        let frames = grant.window();
         let driver =
             toyos_i219::I219::open(part, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
                 .map_err(Opening::Driver)?;
@@ -251,6 +206,8 @@ impl Nic {
         say_brought_up(driver.brought_up());
         Ok(Self {
             driver: RefCell::new(driver),
+            _mapped: mapped,
+            _region: region,
             claim: dev,
             frames,
             mac,

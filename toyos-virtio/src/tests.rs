@@ -46,10 +46,11 @@ fn setup(machine: &Machine) -> Setup<Machine> {
 
 /// A live device with queue 0 enabled.
 fn live(machine: &Machine) -> (Live<Machine>, Virtqueue<Machine>) {
-    let mut setup = setup(machine);
     let queue = queue(machine, 0);
-    setup.config_vector(ENTRY).expect("a vector for configuration changes");
-    setup.enable(&queue, ENTRY).expect("queue 0");
+    let setup = setup(machine)
+        .config_vector(ENTRY)
+        .and_then(|setup| setup.enable(&queue, ENTRY))
+        .unwrap_or_else(|why| panic!("the stub takes a vector and queue 0: {why}"));
     (setup.driver_ok(), queue)
 }
 
@@ -289,12 +290,12 @@ fn a_device_that_does_not_keep_features_ok_is_refused_and_told_so() {
 #[test]
 fn a_queue_shallower_than_the_drivers_rings_is_refused() {
     let machine = Machine::new();
-    let mut shallow = setup(&machine);
+    let shallow = setup(&machine);
     // After the reset, which is what gives a queue its maximum back.
     machine.state(|s| s.queues[0].size = SIZE / 2);
     assert_eq!(
-        shallow.enable(&queue(&machine, 0), ENTRY),
-        Err(Refusal::QueueTooShallow { queue: 0, offered: SIZE / 2, wanted: SIZE })
+        shallow.enable(&queue(&machine, 0), ENTRY).err(),
+        Some(Refusal::QueueTooShallow { queue: 0, offered: SIZE / 2, wanted: SIZE })
     );
     assert!(!machine.state(|s| s.queues[0].enabled));
     assert_eq!(machine.statuses().last(), Some(&(11 | status::FAILED)));
@@ -303,8 +304,8 @@ fn a_queue_shallower_than_the_drivers_rings_is_refused() {
     let absent = QUEUES as u16;
     let rings = Virtqueue::new(machine.clone(), absent, SIZE, parts(0));
     assert_eq!(
-        setup(&machine).enable(&rings, ENTRY),
-        Err(Refusal::QueueTooShallow { queue: absent, offered: 0, wanted: SIZE })
+        setup(&machine).enable(&rings, ENTRY).err(),
+        Some(Refusal::QueueTooShallow { queue: absent, offered: 0, wanted: SIZE })
     );
 }
 
@@ -314,19 +315,24 @@ fn a_queue_shallower_than_the_drivers_rings_is_refused() {
 fn a_vector_the_device_does_not_map_is_refused_and_its_queue_stays_disabled() {
     let machine = Machine::new();
     machine.state(|s| s.permits.no_vector_for = Some(Source::Config));
-    assert_eq!(setup(&machine).config_vector(ENTRY), Err(Refusal::NoVector(Source::Config)));
+    assert_eq!(
+        setup(&machine).config_vector(ENTRY).err(),
+        Some(Refusal::NoVector(Source::Config))
+    );
     assert_eq!(machine.statuses().last(), Some(&(11 | status::FAILED)));
 
     let machine = Machine::new();
     machine.state(|s| s.permits.no_vector_for = Some(Source::Queue(1)));
-    let mut setup = setup(&machine);
-    setup.config_vector(ENTRY).expect("the configuration vector maps");
-    setup.enable(&queue(&machine, 0), ENTRY).expect("queue 0's vector maps");
+    let setup = setup(&machine)
+        .config_vector(ENTRY)
+        .and_then(|setup| setup.enable(&queue(&machine, 0), ENTRY))
+        .unwrap_or_else(|why| panic!("the configuration vector and queue 0's map: {why}"));
     assert_eq!(
-        setup.enable(&queue(&machine, 1), ENTRY),
-        Err(Refusal::NoVector(Source::Queue(1)))
+        setup.enable(&queue(&machine, 1), ENTRY).err(),
+        Some(Refusal::NoVector(Source::Queue(1)))
     );
     machine.state(|s| assert!(s.queues[0].enabled && !s.queues[1].enabled));
+    assert_eq!(machine.statuses().last(), Some(&(11 | status::FAILED)));
 }
 
 /// §4.1.4.4: the notify address is `cap.offset + queue_notify_off *
@@ -338,10 +344,10 @@ fn a_notify_offset_outside_the_notification_structure_is_refused() {
     let enable = |notify_off: u16, multiplier: u32| {
         let machine = Machine::new();
         machine.state(|s| s.notify_off_multiplier = multiplier);
-        let mut setup = setup(&machine);
+        let setup = setup(&machine);
         // After the reset, which is what gives a queue its offset back.
         machine.state(|s| s.queues[0].notify_off = notify_off);
-        let enabled = setup.enable(&queue(&machine, 0), ENTRY);
+        let enabled = setup.enable(&queue(&machine, 0), ENTRY).map(|_| ());
         (machine, enabled)
     };
     let refused = |notify_off| Err(Refusal::Doorbell { queue: 0, notify_off });
@@ -370,12 +376,12 @@ fn a_notification_is_the_queues_index_at_the_queues_address() {
     for multiplier in [NOTIFY_OFF_MULTIPLIER, 0] {
         let machine = Machine::new();
         machine.state(|s| s.notify_off_multiplier = multiplier);
-        let mut setup = setup(&machine);
         let mut queues = [queue(&machine, 0), queue(&machine, 1), queue(&machine, 2)];
-        for queue in &queues {
-            setup.enable(queue, ENTRY).expect("the queue");
-        }
-        let live = setup.driver_ok();
+        let live = queues
+            .iter()
+            .try_fold(setup(&machine), |setup, queue| setup.enable(queue, ENTRY))
+            .unwrap_or_else(|why| panic!("the stub takes three queues: {why}"))
+            .driver_ok();
         machine.forget_trace();
         for index in [2usize, 0, 1] {
             live.notify(queues[index].publish(0, &one(64, true)));
@@ -407,14 +413,23 @@ fn a_chain_on_a_queue_the_device_was_never_given_is_the_drivers_mistake() {
 #[test]
 fn a_field_past_the_device_structure_is_refused_and_not_read() {
     let machine = Machine::new();
-    let mut setup = setup(&machine);
+    let mut device = setup(&machine);
     machine.forget_trace();
-    let mac: Vec<u8> = (0..6).map(|at| setup.device_read8(at).expect("inside")).collect();
+    let mut mac = [0u8; 6];
+    for (at, byte) in mac.iter_mut().enumerate() {
+        (device, *byte) =
+            device.device_read8(at).unwrap_or_else(|why| panic!("byte {at} is inside: {why}"));
+    }
     assert_eq!(mac, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
     assert_eq!(machine.trace().len(), 6);
     for at in [6, 7, usize::MAX] {
+        let machine = Machine::new();
+        let device = setup(&machine);
         machine.forget_trace();
-        assert_eq!(setup.device_read8(at), Err(Refusal::PastDeviceConfig { at, bytes: 6 }));
+        assert_eq!(
+            device.device_read8(at).err(),
+            Some(Refusal::PastDeviceConfig { at, bytes: 6 })
+        );
         assert_eq!(machine.trace(), [Event::Status(11 | status::FAILED)]);
     }
 }
