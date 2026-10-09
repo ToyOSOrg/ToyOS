@@ -136,6 +136,17 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
+The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
+`src/miscompile.rs` now refuses a sysroot for) is not their cause.
+`tests/virtsmpcase`'s image was built and `virt_el1_smp` run by the compiler
+before the fix and by the fixed one, each with the sysroot it built, and every
+function of the image's 124 crates compared in object code as the image build
+makes it. The two differ in six functions of `rustc_demangle`'s `v0` printer,
+a loop peeled or not, and in the sysroot's std in `fs::DirBuilder::_create`,
+which tests a count where the other tests sixteen times it; a counters read
+calls neither, and no function of `counters_read`, `test-runner`,
+`supervisor`, `logkeeper`, `toybox`, `kernelprobe` or the loader differs.
+
 The fifth and sixth silent ones, two guests of one run: `virt_smp` and
 `virt_mask_windows`, in the whole suite on `wt/toyos-lastword` at
 `aa7448db0`, whose diff changes the stop's hold of the console wire and
@@ -153,15 +164,13 @@ nothing these guests run before the stop begins.
   test_rs_counters_read===` at 11.731 and the kernel's `spawn:
   /system/bin/test_rs_counters_read pid=13` at 11.739 on cpu4.
   `virt_mask_windows` said nothing while its second wait ran, as the two
-  stalls below did; the run kept no PL011 log of it.
+  stalls without a console above did; the run kept no PL011 log of it.
 - **What is known.** The next whole suite at that commit, at load 79.44
   rising to 78.28, passed 46 of 46.
-
-Not known of any of them: whether the fork compiler's fault reaches
-`test_rs_counters_read` or the kernel under it.
-`issues/the-forks-llvm-deletes-a-loops-exit-on-a-no-wrap-flag-scalar-evolution-gives-the-wrong-value.md`
-has LLVM's ScalarEvolution deleting a loop's exit on both architectures, and
-records every function but the ones it names as not measured.
+- **Not compared.** These two ran the kernel of `wt/toyos-lastword` at
+  `aa7448db0`, built by the compiler before the ScalarEvolution fix. The
+  comparison across the fix above was of `main`'s `tests/virtsmpcase` image;
+  theirs was not compared, so whether the fault reaches them is not known.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
