@@ -235,7 +235,8 @@ pub struct Readback {
     pub stick_secs: u64,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
-    /// What this boot's judges measured, for the machine's record to judge.
+    /// What was measured on this boot and no owner has taken yet
+    /// ([`Self::taken`]).
     numbers: RefCell<BTreeMap<String, u64>>,
 }
 
@@ -462,9 +463,11 @@ impl Readback {
             })
     }
 
-    /// One number this boot measured, judged by [`run`] against this machine's
-    /// record once every judge has spoken. A second value under one name is
-    /// refused: which of the two a record kept would be nobody's reading.
+    /// One number measured on this boot. It is its measurer's, the row whose
+    /// judge called this or the boot itself for what [`judge_readbacks`] reads
+    /// off every boot, and is judged against this machine's record once every
+    /// judge has spoken. A second value under one name is refused: which of
+    /// the two a record kept would be nobody's reading.
     pub fn measured(&self, name: &str, value: u64) -> Result<(), String> {
         match self.numbers.borrow_mut().entry(name.to_string()) {
             Entry::Vacant(slot) => {
@@ -477,6 +480,11 @@ impl Readback {
                 was.get()
             )),
         }
+    }
+
+    /// What was measured on this boot since this was last asked.
+    fn taken(&self) -> BTreeMap<String, u64> {
+        std::mem::take(&mut self.numbers.borrow_mut())
     }
 
     /// The job ran and the kernel recorded it exiting cleanly.
@@ -1005,10 +1013,41 @@ pub fn run(
     }
 }
 
+/// What `backs` measured since they were last asked becomes one owner's: judged
+/// against the record whatever the owner's verdict, and a new row of it only
+/// where the owner `passed`. A name a second owner measures is judged on the
+/// first reading and recorded off neither; answers whether one was.
+fn own(
+    measured: &mut BTreeMap<String, Reading>,
+    owner: &str,
+    passed: bool,
+    backs: &[&Readback],
+) -> bool {
+    let mut twice = false;
+    for (name, value) in backs.iter().flat_map(|back| back.taken()) {
+        match measured.entry(name) {
+            Entry::Vacant(slot) => {
+                slot.insert(Reading { value, passed });
+            }
+            Entry::Occupied(mut first) => {
+                eprintln!("  FAIL {} is measured twice, and {owner} is the second", first.key());
+                first.get_mut().passed = false;
+                twice = true;
+            }
+        }
+    }
+    twice
+}
+
 /// Every verdict a run's readbacks carry, and this machine's record judged by
-/// them and added to off the boots that passed: one function of the readbacks,
-/// whether the loop wrote them a moment ago or a run long past did. Answers
-/// whether anything was red.
+/// them: one function of the readbacks, whether the loop wrote them a moment
+/// ago or a run long past did. Answers whether anything was red.
+///
+/// **A number is its owner's, and fails with its owner alone.** What a boot
+/// reads off itself is the boot's, and stands or falls with the boot's own
+/// checks; what a row's judge measured is the row's, and stands or falls with
+/// that judge. Neither is moved by another row or a shared member riding the
+/// same boot.
 pub fn judge_readbacks(
     root: &Path,
     readbacks: &BTreeMap<String, Result<Readback, String>>,
@@ -1016,15 +1055,13 @@ pub fn judge_readbacks(
     shared: &[SharedBoot],
 ) -> bool {
     let mut red = false;
-    // **A boot with any failure of its own adds no row**, whether the loop,
-    // the boot's own checks, or a test or member riding it failed.
-    let mut failed: BTreeSet<&str> = BTreeSet::new();
+    let mut measured: BTreeMap<String, Reading> = BTreeMap::new();
     eprintln!("\n[metal] the boots");
     for (label, back) in readbacks {
         let back = match back {
             Err(why) => {
                 eprintln!("  FAIL {label}: {why}");
-                failed.insert(label);
+                red = true;
                 continue;
             }
             Ok(back) => back,
@@ -1072,9 +1109,9 @@ pub fn judge_readbacks(
         for why in &findings {
             eprintln!("    FAIL {why}");
         }
-        if !findings.is_empty() {
-            failed.insert(label);
-        }
+        let whole = findings.is_empty();
+        let twice = own(&mut measured, &format!("the boot {label}"), whole, &[back]);
+        red |= twice || !whole;
     }
 
     eprintln!("\n[metal] the tests");
@@ -1093,16 +1130,15 @@ pub fn judge_readbacks(
             Some(why) => Err(why),
             None => judge(&owed),
         };
-        match verdict {
+        match &verdict {
             Ok(()) => {
                 eprintln!("  PASS {name}");
                 passed += 1;
             }
-            Err(why) => {
-                eprintln!("  FAIL {name}: {why}");
-                failed.extend(arms.iter().map(|arm| arm.boot));
-            }
+            Err(why) => eprintln!("  FAIL {name}: {why}"),
         }
+        let twice = own(&mut measured, name, verdict.is_ok(), &owed);
+        red |= twice || verdict.is_err();
     }
     let mut members = 0usize;
     for boot in shared {
@@ -1124,7 +1160,7 @@ pub fn judge_readbacks(
                 // bury the four that matter.
                 Err(why) => {
                     eprintln!("  FAIL {job}: {}", why.lines().next().unwrap_or(&why));
-                    failed.insert(&boot.boot);
+                    red = true;
                 }
             }
         }
@@ -1135,27 +1171,8 @@ pub fn judge_readbacks(
             }
         }
     }
-    red |= !failed.is_empty();
 
     eprintln!("\n[metal] the timings");
-    let mut measured: BTreeMap<String, Reading> = BTreeMap::new();
-    for (label, back) in readbacks {
-        let Ok(back) = back else { continue };
-        let passed = !failed.contains(label.as_str());
-        for (name, &value) in back.numbers.borrow().iter() {
-            match measured.entry(name.clone()) {
-                Entry::Vacant(slot) => {
-                    slot.insert(Reading { value, passed });
-                }
-                // Judged on the first, and recorded off neither.
-                Entry::Occupied(mut first) => {
-                    eprintln!("  FAIL {name} is measured by two boots, and {label} is the second");
-                    first.get_mut().passed = false;
-                    red = true;
-                }
-            }
-        }
-    }
     let machine = one_machine(readbacks);
     let record =
         machine.as_ref().map_err(Clone::clone).and_then(|machine| Record::load(root, machine));
@@ -1178,7 +1195,7 @@ pub fn judge_readbacks(
                 );
             }
             eprintln!(
-                "  {} number(s) on {} {}, BIOS {}; {} past its record, {} off a boot that failed",
+                "  {} number(s) on {} {}, BIOS {}; {} past its record, {} whose owner failed",
                 measured.len(),
                 machine.vendor,
                 machine.product,

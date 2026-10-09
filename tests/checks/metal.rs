@@ -173,6 +173,10 @@ static FAILING: Metal = Metal {
     arms: &[metal::once("failing", "tests/jobcase", &[], &[])],
     judge: span_and_fail,
 };
+static BESIDE: Metal = Metal {
+    arms: &[metal::once("failing", "tests/jobcase", &[], &[])],
+    judge: |b| b[0].measured("beside.failing.us", 9),
+};
 static REFUSED: Metal =
     Metal { arms: &[metal::once("refused", "tests/jobcase", &[], &[])], judge: span };
 static LATE: Metal =
@@ -182,11 +186,12 @@ static ONE: Metal =
 static TWO: Metal =
     Metal { arms: &[metal::once("two", "tests/jobcase", &[], &[])], judge: unqualified };
 
-/// **The record is one function of the readbacks.** A boot the loop refused, a
-/// boot a riding test failed and a boot whose own check failed are each
-/// judged, and none adds a row; the one boot with no failure of its own is
-/// recorded whole.
-pub fn a_boot_with_a_failure_of_its_own_adds_no_row() {
+/// **A number is recorded off its owner's verdict and nobody else's.** A row
+/// that fails keeps its own number out of the record, and neither its boot's
+/// numbers nor those of the row beside it on that boot; a boot whose own check
+/// fails keeps its own out, and not those of the row that passed on it; a boot
+/// the loop refused measured nothing.
+pub fn a_number_fails_with_its_owner_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
     plant(&dir, "passing", PANEL, BOOTED, None);
@@ -197,19 +202,38 @@ pub fn a_boot_with_a_failure_of_its_own_adds_no_row() {
     let why = readbacks["refused"].as_ref().err().expect("the loop's refusal, read back");
     assert!(why.contains("never reported: no panic"), "{why}");
 
-    let tests = [("passes", &PASSING), ("fails", &FAILING), ("refused", &REFUSED), ("late", &LATE)];
+    let tests = [
+        ("passes", &PASSING),
+        ("fails", &FAILING),
+        ("beside", &BESIDE),
+        ("refused", &REFUSED),
+        ("late", &LATE),
+    ];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
-    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "three failed boots judged green");
+    assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "three failures judged green");
     let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
         names,
         [
+            "beside.failing.us",
+            "boot.failing.complete_ms",
+            "boot.failing.panel_max_us",
+            "boot.failing.panel_us",
             "boot.passing.complete_ms",
             "boot.passing.panel_max_us",
             "boot.passing.panel_us",
+            "span.late.us",
             "span.passing.us"
         ]
+    );
+    // The row's own failure is red with nothing else beside it.
+    let alone = [("fails", &FAILING)];
+    let runs: Vec<&(&str, &'static Metal)> = alone.iter().collect();
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    assert!(
+        metal::judge_readbacks(&root, &read(&dir, &["failing"]), &runs, &[]),
+        "a failing row judged green"
     );
 }
 
@@ -250,9 +274,9 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
     assert!(!record.measured.keys().any(|name| name.contains("holed")), "{:?}", record.measured);
 }
 
-/// Two boots under one name are judged on the first reading and recorded off
+/// Two rows under one name are judged on the first reading and recorded off
 /// neither.
-pub fn a_name_two_boots_measured_is_refused() {
+pub fn a_name_two_owners_measured_is_refused() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
     plant(&dir, "one", PANEL, BOOTED, None);
@@ -325,10 +349,10 @@ pub fn a_run_under_another_bios_fails_and_records_nothing() {
     assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
 }
 
-/// **A failing shared member fails its boot**: the run is red, and that boot
-/// adds no row while the shared boot whose members all passed is recorded
-/// whole.
-pub fn a_failing_shared_member_fails_its_boot() {
+/// **A failing shared member fails itself alone**: the run is red, and the
+/// boot it rode records its own numbers as the boot whose members all passed
+/// does.
+pub fn a_failing_shared_member_fails_itself_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
     let jobs = ["test_rs_std_tls", "test_rs_fs_large_file"];
@@ -360,7 +384,14 @@ pub fn a_failing_shared_member_fails_its_boot() {
     let names: Vec<&str> = record.measured.keys().map(String::as_str).collect();
     assert_eq!(
         names,
-        ["boot.passing.complete_ms", "boot.passing.panel_max_us", "boot.passing.panel_us"]
+        [
+            "boot.failing.complete_ms",
+            "boot.failing.panel_max_us",
+            "boot.failing.panel_us",
+            "boot.passing.complete_ms",
+            "boot.passing.panel_max_us",
+            "boot.passing.panel_us"
+        ]
     );
 }
 
