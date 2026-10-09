@@ -1272,7 +1272,7 @@ mod tests {
         );
 
         // Both keys: met.
-        let both = signed(body.clone(), Role::Targets, &[1, 2]);
+        let both = signed(body, Role::Targets, &[1, 2]);
         let ts = signed(render::timestamp(&timestamp_of(2, &both)), Role::Timestamp, &[1]);
         world.repo.put("targets.2.txt", both);
         world.repo.put(TIMESTAMP_FILE, ts);
