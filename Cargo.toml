@@ -214,9 +214,6 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # takes (`issues/the-internet-clients-work-unchanged.md`), whose C
 # and assembly the host's `cc` compiles.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-# The commit an image is built from, its time and whether the tree is that
-# commit's, where `git` is a host's C tool (`src/build.rs`'s `release`).
-gix = { version = "0.88", default-features = false, features = ["status", "sha1"] }
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel

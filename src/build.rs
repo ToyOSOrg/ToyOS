@@ -664,43 +664,27 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
 
 /// Which build `root`'s tree makes for `arch` against the sysroot whose key
 /// for it is `toolchain`, as `/system/etc/os-release` records it, read with
-/// gitoxide (`issues/the-build-runs-host-tools-outside-rust-and-qemu.md`,
-/// row 21). Untracked files are dirty whatever `status.showUntrackedFiles`
+/// `git`. Untracked files are dirty whatever `status.showUntrackedFiles`
 /// says; submodules are not read, because the fork's state is the toolchain
 /// key's.
 fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_osrelease::Release {
-    let repo = gix::open(root).unwrap_or_else(|e| panic!("{} is no git checkout: {e}", root.display()));
-    let head = repo.head_commit().unwrap_or_else(|e| panic!("{}'s HEAD names no commit: {e}", root.display()));
-    let commit = toyos_osrelease::Hex::parse(&head.id.to_string()).expect("a SHA-1 commit is forty hex digits");
-    let time = head.time().unwrap_or_else(|e| panic!("commit {} names no committer time: {e}", head.id));
-    let committed = u64::try_from(time.seconds)
-        .unwrap_or_else(|_| panic!("commit {} was committed before 1970: {}", head.id, time.seconds));
-    // Set whole: the platform `status` makes has no walk at all for a
-    // checkout configured to show no untracked files.
-    let walk = repo
-        .dirwalk_options()
-        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))
-        .emit_untracked(gix::dir::walk::EmissionMode::CollapseDirectory);
-    let changes = repo
-        .status(gix::progress::Discard)
-        .and_then(|status| {
-            status
-                .index_worktree_options_mut(|options| options.dirwalk_options = Some(walk))
-                .index_worktree_submodules(None)
-                .into_iter(None)
-        })
-        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()));
-    // An index entry whose stat alone moved, and an ignored file the walk
-    // passed, summarise to nothing.
-    let dirty = changes.map(|item| item.unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))).any(
-        |item| match item {
-            gix::status::Item::IndexWorktree(change) => change.summary().is_some(),
-            gix::status::Item::TreeIndex(_) => true,
-        },
+    let head = crate::sysroot::git_out(root, &["log", "-1", "--no-show-signature", "--format=%H %ct", "HEAD"]);
+    let (id, time) = head
+        .trim()
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("{}'s HEAD names no commit and time: {head:?}", root.display()));
+    let commit = toyos_osrelease::Hex::parse(id).expect("a SHA-1 commit is forty hex digits");
+    let committed: u64 =
+        time.parse().unwrap_or_else(|_| panic!("commit {id} was not committed after 1970: {time}"));
+    // `--no-optional-locks`, because a status otherwise rewrites the index it
+    // refreshes, under the lock a concurrent `git` in this checkout takes.
+    let status = crate::sysroot::git_bytes(
+        root,
+        &["--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=all"],
     );
     toyos_osrelease::Release {
         commit,
-        tree: if dirty { toyos_osrelease::Tree::Dirty } else { toyos_osrelease::Tree::Clean },
+        tree: if status.is_empty() { toyos_osrelease::Tree::Clean } else { toyos_osrelease::Tree::Dirty },
         toolchain: toyos_osrelease::Hex::parse(toolchain.as_str()).expect("a key is sixteen hex digits"),
         arch: match arch {
             Arch::X86_64 => toyos_osrelease::Arch::X86_64,
@@ -2108,7 +2092,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(committed.success());
-        // The ref as `git` wrote it, for an oracle that is not gitoxide.
+        // The ref as `git` wrote it, read off the file rather than asked of `git`.
         let head = fs::read_to_string(work.join(".git/refs/heads/wt")).unwrap();
         let key = crate::keystore::Key::parse("0123456789abcdef").unwrap();
 
