@@ -221,7 +221,7 @@ gix = { version = "0.88", default-features = false, features = ["status", "sha1"
 # The authorities `build::trust_roots` writes to ROOT, as the rustls project
 # publishes the Mozilla root program, and the PEM it writes them in.
 webpki-root-certs = "1"
-base64 = "0.22"
+pem = "4"
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel

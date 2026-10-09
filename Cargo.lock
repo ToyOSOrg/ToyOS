@@ -5664,7 +5664,6 @@ name = "toyos-build"
 version = "0.1.0"
 dependencies = [
  "acpiserver-api",
- "base64 0.22.1",
  "bcachefs",
  "fatfs",
  "flate2",
@@ -5675,6 +5674,7 @@ dependencies = [
  "image",
  "kernel",
  "libc",
+ "pem",
  "rcgen",
  "rustls",
  "serde",

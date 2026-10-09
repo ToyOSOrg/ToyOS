@@ -40,9 +40,11 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    off, leaving nothing to call `__assert_fail`), and `toyos` in `LINUX_ABI`
    and in `src/rand.rs`'s `getrandom` list. The build writes the Mozilla
    roots of `webpki-root-certs` to ROOT as `/system/etc/ssl/cert.pem`
-   (`build::TRUST_ROOTS`), and a test image stages that file with its
-   harness's authority after them. In an x86-64 QEMU guest `ring_kat`
-   passes known answers, and `https_fetch` has an unchanged `ureq` 3 on
+   (`build::TRUST_ROOTS`), with the text of their licence,
+   CDLA-Permissive-2.0, beside them, which the owner allowed for these roots
+   and the licence gate holds them to; `https_fetch` stages a file of its own
+   holding them and its harness's authority. In an x86-64 QEMU guest
+   `ring_kat` passes known answers, RSA and P-384 among them, and `https_fetch` has an unchanged `ureq` 3 on
    `rustls` 0.23 fetch a body over TLS 1.3 byte-exact, send the project's
    `User-Agent`, and refuse a wrong name and an untrusted root. Not run:
    AArch64, the T14.

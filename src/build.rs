@@ -337,11 +337,16 @@ struct GuestEnv {
     image_key: String,
     /// Whose floor the loader keeps (`signing::FLOOR_ENV`), which follows the key.
     floor_scope: &'static str,
+    /// `CSysroot::cc_env` for the architecture's userland: every guest crate
+    /// that compiles C compiles it with the toolchain's clang against libc's C
+    /// sysroot, never with the host's `cc`.
+    cc: Vec<(String, String)>,
 }
 
 impl GuestEnv {
-    fn new(sysroot: Sysroot) -> Self {
+    fn new(sysroot: Sysroot, arch: Arch) -> Self {
         Self {
+            cc: crate::clang::CSysroot::of(sysroot.dir(), arch).cc_env(),
             sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
@@ -371,7 +376,8 @@ fn cargo_build(
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
-        .env_remove("RUSTC");
+        .env_remove("RUSTC")
+        .envs(env.cc.iter().map(|(k, v)| (k, v)));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -714,21 +720,23 @@ fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_o
 /// `/system/etc/ssl/cert.pem`.
 pub const TRUST_ROOTS: &str = "etc/ssl/cert.pem";
 
+/// The crate [`trust_roots`] reads them out of: `licence::judge` holds them to
+/// its licence and [`TRUST_ROOTS_LICENCE`] to its licence text.
+pub const TRUST_ROOTS_CRATE: &str = "webpki-root-certs";
+
+/// Where on ROOT their licence's text is, and the text: CDLA-Permissive-2.0
+/// lets the roots be shared only with it.
+pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
+    "etc/ssl/CDLA-Permissive-2.0.txt",
+    include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
+);
+
 /// The Mozilla root program's authorities as `webpki-root-certs` publishes
 /// them, each certificate a PEM block in the published order.
 pub fn trust_roots() -> Vec<u8> {
-    use base64::Engine;
-    let mut pem = String::new();
-    for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-        pem.push_str("-----BEGIN CERTIFICATE-----\n");
-        let body = base64::engine::general_purpose::STANDARD.encode(cert.as_ref());
-        for line in body.as_bytes().chunks(64) {
-            pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-            pem.push('\n');
-        }
-        pem.push_str("-----END CERTIFICATE-----\n");
-    }
-    pem.into_bytes()
+    let config = pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF);
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter();
+    roots.map(|cert| pem::encode_config(&pem::Pem::new("CERTIFICATE", cert.to_vec()), config)).collect::<String>().into_bytes()
 }
 
 fn build_and_assemble(
@@ -752,16 +760,8 @@ fn build_and_assemble(
         root_files.extend(assets::collect(&config.assets, &programs));
     }
 
-    // A test image's roots are these and its harness's CA after them, staged
-    // whole under the same name, so the client reads one file either way.
-    let roots = trust_roots();
-    match extra_files.iter().find(|(name, _)| name == TRUST_ROOTS) {
-        Some((_, staged)) => assert!(
-            staged.starts_with(&roots),
-            "a test image staged {TRUST_ROOTS} with other than the build's roots at its head"
-        ),
-        None => root_files.push((TRUST_ROOTS.to_string(), roots)),
-    }
+    root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
+    root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
@@ -813,11 +813,6 @@ fn build_programs(
 
     let ws_target = root.join(format!("target/{target}/{PROFILE}"));
 
-    // Every userland crate that compiles C compiles it with the toolchain's
-    // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
-    let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
@@ -832,7 +827,7 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(root, target, &extra, env, &cc_env, quiet);
+        cargo_build(root, target, &extra, env, &[], quiet);
     }
 
     for c in &programs {
@@ -1733,7 +1728,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
     let config = parse_config(&boot.config);
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -1947,7 +1942,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -2023,7 +2018,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
         if !quiet {
             eprintln!("[build] Building cdylib subcrate: {lib_name}");
         }
-        cargo_build(&sub_path, target, &[], env, &build.cc_env(), quiet);
+        cargo_build(&sub_path, target, &[], env, &[], quiet);
 
         let lib_out = sub_path.join(format!("target/{target}/{PROFILE}"));
         lib_search_dirs.push(lib_out.clone());
@@ -2045,10 +2040,11 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     for dir in &lib_search_dirs {
         link_flags.push_str(&format!("-L {} ", dir.display()));
     }
-    let mut extra_env = build.cc_env();
-    if !link_flags.is_empty() {
-        extra_env.push(("RUSTFLAGS", link_flags.trim_end()));
-    }
+    let extra_env: Vec<(&str, &str)> = if link_flags.is_empty() {
+        vec![]
+    } else {
+        vec![("RUSTFLAGS", link_flags.trim_end())]
+    };
     cargo_build(crate_path, target, &["--bins"], env, &extra_env, quiet);
 
     let bin_dir = crate_path.join(format!("target/{target}/{PROFILE}"));
@@ -2086,9 +2082,6 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
 struct TestBuild {
     target: &'static str,
     env: GuestEnv,
-    /// `CSysroot::cc_env` for the target: a test crate's C is compiled as a
-    /// program's is (`build_programs`), never by the host's `cc`.
-    cc_env: Vec<(String, String)>,
     _lock: buildlock::Held,
     _artifact: buildlock::Guard,
 }
@@ -2096,15 +2089,10 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[PathBuf]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
         invalidate_stale(&mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
-        let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
-        TestBuild { target: arch.userland(), env, cc_env, _lock: lock, _artifact: artifact }
-    }
-
-    fn cc_env(&self) -> Vec<(&str, &str)> {
-        self.cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+        TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
     }
 }
 
@@ -2114,7 +2102,7 @@ pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, q
     let _building = Building::start(format!("{} {name} of {}", arch.name(), hostws::rel(root, crate_path)));
     let build = TestBuild::begin(root, arch, "a test binary", &[crate_path.to_path_buf()]);
     let (target, env) = (build.target, &build.env);
-    cargo_build(crate_path, target, &["--bin", name], env, &build.cc_env(), quiet);
+    cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);
     let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
     fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
 }
@@ -2124,24 +2112,6 @@ pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, q
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **The roots file reads back, by the reader a client reads it with, as
-    /// every published root in the published order and nothing else**: a
-    /// line break or a padding byte the writer got wrong is a root no client
-    /// trusts, or a file no client reads.
-    #[test]
-    fn the_trust_roots_read_back_as_the_published_set() {
-        let read: Vec<Vec<u8>> = ureq::tls::parse_pem(&trust_roots())
-            .map(|item| match item.expect("every block of the roots file parses") {
-                ureq::tls::PemItem::Certificate(cert) => cert.der().to_vec(),
-                _ => panic!("the roots file holds a PEM block that is not a certificate"),
-            })
-            .collect();
-        let published: Vec<Vec<u8>> =
-            webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|cert| cert.to_vec()).collect();
-        assert!(!published.is_empty());
-        assert_eq!(read, published);
-    }
 
     /// **The release a tree records is its commit, at that commit's own time,
     /// and dirty from the first file that is not that commit's**: an

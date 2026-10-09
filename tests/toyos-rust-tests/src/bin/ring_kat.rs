@@ -18,9 +18,12 @@ fn check(what: &str, got: &[u8], want: &str) {
 }
 
 fn digests() {
-    // FIPS 180-2, appendix B.1 and C.1, and B.3.
+    // FIPS 180-2, appendix B.1, D.1 and C.1, and B.3.
     check("sha256(abc)", digest::digest(&digest::SHA256, b"abc").as_ref(),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    check("sha384(abc)", digest::digest(&digest::SHA384, b"abc").as_ref(),
+        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed\
+         8086072ba1e7cc2358baeca134c825a7");
     check("sha512(abc)", digest::digest(&digest::SHA512, b"abc").as_ref(),
         "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
          2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
@@ -143,6 +146,88 @@ fn signatures() {
     public.verify(b"sample", &sig).expect("ecdsa p-256 rfc6979 a.2.5 verifies");
     assert!(public.verify(b"samplf", &sig).is_err(), "ecdsa p-256 verifies another message");
     println!("ring_kat: ecdsa p-256 rfc6979 a.2.5 verified, and refused for another message");
+
+    // RFC 6979, appendix A.2.6: P-384, SHA-384, the message "sample".
+    let public = signature::UnparsedPublicKey::new(
+        &signature::ECDSA_P384_SHA384_FIXED,
+        hex("04ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64\
+             def8f0ea9055866064a254515480bc13\
+             8015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1\
+             288b231c3ae0d4fe7344fd2533264720"),
+    );
+    verifies("ecdsa p-384 rfc6979 a.2.6", b"sample", hex(
+        "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c\
+         81a648152e44acf96e36dd1e80fabe46\
+         99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94f\
+         a329c145786e679e7b82c71a38628ac8",
+    ), |m, s| public.verify(m, s));
+
+    // NIST CAVP's FIPS 186-3 RSA SigVer files, `[mod = 2048]`, SHA256: the
+    // first vector of each whose result is P.
+    let pkcs1 = signature::RsaPublicKeyComponents {
+        n: hex("c47abacc2a84d56f3614d92fd62ed36ddde459664b9301dcd1d61781cfcc026b\
+                cb2399bee7e75681a80b7bf500e2d08ceae1c42ec0b707927f2b2fe92ae85208\
+                7d25f1d260cc74905ee5f9b254ed05494a9fe06732c3680992dd6f0dc634568d\
+                11542a705f83ae96d2a49763d5fbb24398edf3702bc94bc168190166492b8671\
+                de874bb9cecb058c6c8344aa8c93754d6effcd44a41ed7de0a9dcd9144437f21\
+                2b18881d042d331a4618a9e630ef9bb66305e4fdf8f0391b3b2313fe549f0189\
+                ff968b92f33c266a4bc2cffc897d1937eeb9e406f5d0eaa7a14782e76af3fce9\
+                8f54ed237b4a04a4159a5f6250a296a902880204e61d891c4da29f2d65f34cbb"),
+        e: hex("49d2a1"),
+    };
+    verifies("rsa pkcs#1 v1.5 sha-256 2048 cavp SigVer15", &hex(
+        "95123c8d1b236540b86976a11cea31f8bd4e6c54c235147d20ce722b03a6ad75\
+         6fbd918c27df8ea9ce3104444c0bbe877305bc02e35535a02a58dcda306e632a\
+         d30b3dc3ce0ba97fdf46ec192965dd9cd7f4a71b02b8cba3d442646eeec4af59\
+         0824ca98d74fbca934d0b6867aa1991f3040b707e806de6e66b5934f05509bea",
+    ), hex(
+        "51265d96f11ab338762891cb29bf3f1d2b3305107063f5f3245af376dfcc7027\
+         d39365de70a31db05e9e10eb6148cb7f6425f0c93c4fb0e2291adbd22c77656a\
+         fc196858a11e1c670d9eeb592613e69eb4f3aa501730743ac4464486c7ae68fd\
+         509e896f63884e9424f69c1c5397959f1e52a368667a598a1fc90125273d9341\
+         295d2f8e1cc4969bf228c860e07a3546be2eeda1cde48ee94d062801fe666e4a\
+         7ae8cb9cd79262c017b081af874ff00453ca43e34efdb43fffb0bb42a4e2d32a\
+         5e5cc9e8546a221fe930250e5f5333e0efe58ffebf19369a3b8ae5a67f6a048b\
+         c9ef915bda25160729b508667ada84a0c27e7e26cf2abca413e5e4693f4a9405",
+    ), |m, s| pkcs1.verify(&signature::RSA_PKCS1_2048_8192_SHA256, m, s));
+
+    // Its salt is 32 bytes, the one length `ring` verifies with SHA-256.
+    let pss = signature::RsaPublicKeyComponents {
+        n: hex("a47d04e7cacdba4ea26eca8a4c6e14563c2ce03b623b768c0d49868a57121301\
+                dbf783d82f4c055e73960e70550187d0af62ac3496f0a3d9103c2eb7919a7275\
+                2fa7ce8c688d81e3aee99468887a15288afbb7acb845b7c522b5c64e678fcd3d\
+                22feb84b44272700be527d2b2025a3f83c2383bf6a39cf5b4e48b3cf2f56eef0\
+                dfff18555e31037b915248694876f3047814415164f2c660881e694b58c28038\
+                a032ad25634aad7b39171dee368e3d59bfb7299e4601d4587e68caaf8db457b7\
+                5af42fc0cf1ae7caced286d77fac6cedb03ad94f1433d2c94d08e60bc1fdef05\
+                43cd2951e765b38230fdd18de5d2ca627ddc032fe05bbd2ff21e2db1c2f94d8b"),
+        e: hex("10e43f"),
+    };
+    verifies("rsa-pss sha-256 2048 cavp SigVerPSS", &hex(
+        "e002377affb04f0fe4598de9d92d31d6c786040d5776976556a2cfc55e54a1dc\
+         b3cb1b126bd6a4bed2a184990ccea773fcc79d246553e6c64f686d21ad415267\
+         3cafec22aeb40f6a084e8a5b4991f4c64cf8a927effd0fd775e71e8329e41fdd\
+         4457b3911173187b4f09a817d79ea2397fc12dfe3d9c9a0290c8ead31b6690a6",
+    ), hex(
+        "4f9b425c2058460e4ab2f5c96384da2327fd29150f01955a76b4efe956af06dc\
+         08779a374ee4607eab61a93adc5608f4ec36e47f2a0f754e8ff839a8a19b1db1\
+         e884ea4cf348cd455069eb87afd53645b44e28a0a56808f5031da5ba9112768d\
+         fbfca44ebe63a0c0572b731d66122fb71609be1480faa4e4f75e43955159d70f\
+         081e2a32fbb19a48b9f162cf6b2fb445d2d6994bc58910a26b5943477803cdaa\
+         a1bd74b0da0a5d053d8b1dc593091db5388383c26079f344e2aea600d0e32416\
+         4b450f7b9b465111b7265f3b1b063089ae7e2623fc0fda8052cf4bf3379102fb\
+         f71d7c98e8258664ceed637d20f95ff0111881e650ce61f251d9c3a629ef222d",
+    ), |m, s| pss.verify(&signature::RSA_PSS_2048_8192_SHA256, m, s));
+}
+
+/// Verify `sig` over `message`, then refuse it with one bit of the signature
+/// flipped.
+fn verifies(what: &str, message: &[u8], sig: Vec<u8>, verify: impl Fn(&[u8], &[u8]) -> Result<(), ring::error::Unspecified>) {
+    verify(message, &sig).unwrap_or_else(|_| panic!("{what} does not verify"));
+    let mut forged = sig;
+    forged[0] ^= 1;
+    assert!(verify(message, &forged).is_err(), "{what} verifies with a flipped signature bit");
+    println!("ring_kat: {what} verified, and refused with a flipped signature bit");
 }
 
 fn system_random() {

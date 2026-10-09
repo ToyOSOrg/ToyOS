@@ -140,6 +140,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a NIC in front of netstack and HTTPS servers behind it:
     // `https_fetch` runs it on `tests/netcase`.
     "https_get",
+    // `https_fetch` runs it on the boot its fetches run on, so that test
+    // carries its own oracle; a shared run would be the same QEMU CPU twice.
+    "ring_kat",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -3181,9 +3184,9 @@ fn libc_sockets() -> Result<(), String> {
 }
 
 /// An unchanged HTTPS client — `ureq` on `rustls` on `ring`, as published but
-/// for `ring`'s ToyOS arms — trusting `build::TRUST_ROOTS` and sending the
-/// project's `User-Agent`, on one boot of `tests/netcase` against servers this
-/// run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
+/// for `ring`'s ToyOS arms — trusting `build::trust_roots` and this run's
+/// authority, and sending the project's `User-Agent`, on one boot of
+/// `tests/netcase` against servers this run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
 /// every byte the host computes with another SHA-256 than the guest's; and it
 /// refuses a certificate for another address and one from an authority the
 /// roots file does not hold, each by its own name, at the handshake. First,
@@ -3208,20 +3211,20 @@ fn https_fetch() -> Result<(), String> {
     let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
     let untrusted = Server::start(stranger.leaf(host), body)?;
 
+    // The shipped roots and the harness's authority, under a name of the
+    // test's own: the client reads the file its argument names.
+    const ROOTS: &str = "etc/ssl/harness-cert.pem";
     let mut roots = toyos_build::build::trust_roots();
     roots.extend_from_slice(trusted.pem().as_bytes());
     let crate_path = compile::repo_root().join("tests/toyos-rust-tests");
     let bins = [JOB, KAT].map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, name)));
-    let options = BootOptions {
-        extra_root_files: vec![(toyos_build::build::TRUST_ROOTS.to_string(), roots)],
-        ..Default::default()
-    };
+    let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
     let mut qemu = boot_netcase(&[], &bins, options)?;
     let kat = qemu.run_test("test_rs_ring_kat", Duration::from_secs(120));
     if kat.error.is_some() || kat.exit_code != Some(0) || !kat.stdout.lines().any(|l| l.trim_end() == "ring_kat: ok") {
         return Err(format!("{KAT} ended {:?} ({:?}):\n{}", kat.exit_code, kat.error, kat.stdout));
     }
-    let roots = format!("/system/{}", toyos_build::build::TRUST_ROOTS);
+    let roots = format!("/system/{ROOTS}");
     let fetches: [(&str, &Server, String, i32); 3] = [
         ("the trusted server", &fetched, want, 0),
         ("the server named for another address", &wrong_name, format!("{JOB}: refused not-valid-for-name"), 2),
