@@ -13,10 +13,13 @@
 //! [`RENEW`] of its expiry, and then root `N+1` carries the same keys; the
 //! targets and the timestamp each take their next version; an item's sequence
 //! never falls, and an equal one names the same archive; an archive under
-//! `archives/` is never rewritten. Every file lands by rename, the timestamp
-//! last, so a copy of the directory taken mid-publish names only what it
-//! holds. **What is written has first been read back through the client**,
-//! from root 1, so a repository this writes is one a machine accepts.
+//! `archives/` is never rewritten. Every file lands by rename, synced with its
+//! directory, the timestamp last, so a copy of the directory taken mid-publish
+//! or after a power loss names only what it holds. **What is written has first
+//! been read back through the client** ([`repo::refresh`]), by a machine
+//! pinning root 1 and holding the directory as it was, every archive streamed
+//! through [`repo::Archive`]: the client's floors are the publisher's, and a
+//! repository this writes is one such a machine accepts.
 //!
 //! ```toml
 //! [[package]]
@@ -97,8 +100,8 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
     let beside = manifest.parent().unwrap_or(Path::new("."));
 
     let mut new: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut root = current_root(dir)?;
-    match &root {
+    let current = current_root(dir)?;
+    let root = match &current {
         Some((r, _)) if !one_key(r, key) => {
             return Err(format!(
                 "{}'s root {} is not {}'s alone, and a publish rotates no key",
@@ -107,34 +110,28 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
                 key.fingerprint()
             ));
         }
-        Some((r, _)) if r.expires >= now + RENEW => {}
+        Some((r, _)) if r.expires >= now + RENEW => r.version,
         _ => {
-            let version = root.as_ref().map_or(1, |(r, _)| r.version + 1);
-            let next = minted(version, now + ROOT_LIFE, key);
-            let bytes = signed(render::root(&next), Role::Root, key);
-            new.insert(repo::root_file(version), bytes.clone());
-            root = Some((next, bytes));
+            let version = current.as_ref().map_or(1, |(r, _)| r.version + 1);
+            let bytes = signed(render::root(&minted(version, now + ROOT_LIFE, key)), Role::Root, key);
+            new.insert(repo::root_file(version), bytes);
+            version
         }
-    }
+    };
 
-    let held = previous(dir)?;
     let mut items = Vec::new();
     for row in &rows.package {
         let path = beside.join(&row.archive);
         let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let file = row.archive.file_name().and_then(|f| f.to_str()).ok_or_else(|| format!("{} names no file", path.display()))?;
         let url = format!("{ARCHIVES}/{file}");
-        match fs::read(dir.join(&url)) {
-            Ok(there) if there != bytes => {
-                return Err(format!("{url} is already published with other bytes, and an archive is never rewritten"));
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                new.insert(url.clone(), bytes.clone());
-            }
-            Err(e) => return Err(format!("{}: {e}", dir.join(&url).display())),
+        // An archive already published, or listed by an earlier row, is never
+        // rewritten: the read-back's stream refuses one with other bytes.
+        let there = dir.join(&url).try_exists().map_err(|e| format!("{}: {e}", dir.join(&url).display()))?;
+        if !there && !new.contains_key(&url) {
+            new.insert(url.clone(), bytes.clone());
         }
-        let item = Item {
+        items.push(Item {
             name: row.name.clone(),
             target: row.target.clone(),
             sequence: row.sequence,
@@ -142,23 +139,13 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
             url,
             length: bytes.len() as u64,
             sha256: toyos_update::sha256(&bytes),
-        };
-        if let Some(was) = held.as_ref().and_then(|(_, t)| t.items.iter().find(|i| (&i.name, &i.target) == (&item.name, &item.target))) {
-            if item.sequence < was.sequence {
-                return Err(format!("{} for {} is sequence {}, below the {} published", item.name, item.target, item.sequence, was.sequence));
-            }
-            if item.sequence == was.sequence && item.sha256 != was.sha256 {
-                return Err(format!(
-                    "{} for {} is sequence {} with another archive than the one published: a new archive is a new sequence",
-                    item.name, item.target, item.sequence
-                ));
-            }
-        }
-        items.push(item);
+        });
     }
     items.sort_by(|a, b| (&a.name, &a.target).cmp(&(&b.name, &b.target)));
 
-    let (timestamp_version, targets_version) = held.as_ref().map_or((1, 1), |(ts, t)| (ts.version + 1, t.version + 1));
+    let held = previous(dir)?;
+    let (timestamp_version, targets_version) =
+        held.as_ref().map_or((1, 1), |p| (p.timestamp_version + 1, p.targets_version + 1));
     let targets = Targets { version: targets_version, expires: now + TARGETS_LIFE, items };
     let targets_bytes = signed(render::targets(&targets), Role::Targets, key);
     let timestamp = Timestamp {
@@ -173,14 +160,25 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
     new.insert(repo::targets_file(targets.version), targets_bytes);
     new.insert(repo::TIMESTAMP_FILE.into(), signed(render::timestamp(&timestamp), Role::Timestamp, key));
 
-    // Read back, as a machine pinning root 1 would, before anything is written.
+    // Read back before anything is written, as a machine pinning root 1 and
+    // holding what the directory holds now would read it, every archive
+    // streamed through the client's check.
     let first = match new.get(&repo::root_file(1)) {
         Some(bytes) => bytes.clone(),
         None => fs::read(dir.join(repo::root_file(1))).map_err(|e| format!("{}: {e}", dir.display()))?,
     };
+    let machine = current.as_ref().map(|(_, root)| Held {
+        root,
+        timestamp: held.as_ref().map(|p| p.timestamp.as_slice()),
+        targets: held.as_ref().map(|p| p.targets.as_slice()),
+    });
     let mut overlay = Overlay { dir, new: &new };
-    let fresh = repo::refresh(&mut overlay, Held { root: &first, timestamp: None, targets: None }, None, now)
-        .map_err(|why| format!("the repository this publish would leave is refused by the client: {why}"))?;
+    let refused = |what: &str, why: repo::Refused| format!("a machine holding what {} holds now refuses {what}: {why}", dir.display());
+    let fresh = repo::refresh(&mut overlay, Held { root: &first, timestamp: None, targets: None }, machine, now)
+        .map_err(|why| refused("what this publish would leave", why))?;
+    for item in &fresh.targets.items {
+        overlay.stream(item)?.map_err(|why| refused(&item.url, why))?;
+    }
     assert_eq!(fresh.targets, targets, "the client reads back the targets this rendered");
 
     fs::create_dir_all(dir.join(ARCHIVES)).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -189,8 +187,7 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
     for (name, bytes) in rest {
         land(&dir.join(name), bytes)?;
     }
-    let root = root.expect("a root, minted where there was none").0;
-    Ok(Published { root: root.version, targets: targets.version, timestamp: timestamp.version })
+    Ok(Published { root, targets: targets.version, timestamp: timestamp.version })
 }
 
 /// Whether `root` gives every role to `key` alone, at threshold one.
@@ -225,27 +222,36 @@ fn current_root(dir: &Path) -> Result<Option<(Root, Vec<u8>)>, String> {
     Ok(found)
 }
 
-/// The timestamp `dir` holds and the targets it names, where it holds one.
-fn previous(dir: &Path) -> Result<Option<(Timestamp, Targets)>, String> {
+/// What `dir` holds past its roots, where it holds a timestamp.
+struct Previous {
+    timestamp: Vec<u8>,
+    timestamp_version: u64,
+    /// The targets the timestamp names.
+    targets: Vec<u8>,
+    targets_version: u64,
+}
+
+fn previous(dir: &Path) -> Result<Option<Previous>, String> {
     let path = dir.join(repo::TIMESTAMP_FILE);
-    let bytes = match fs::read(&path) {
+    let timestamp = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let timestamp = Timestamp::parse(&bytes).map_err(|why| format!("{}: {why}", path.display()))?;
-    let path = dir.join(repo::targets_file(timestamp.targets.version));
-    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let targets = Targets::parse(&bytes).map_err(|why| format!("{}: {why}", path.display()))?;
-    Ok(Some((timestamp, targets)))
+    let parsed = Timestamp::parse(&timestamp).map_err(|why| format!("{}: {why}", path.display()))?;
+    let path = dir.join(repo::targets_file(parsed.targets.version));
+    let targets = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(Previous { timestamp, timestamp_version: parsed.version, targets, targets_version: parsed.targets.version }))
 }
 
-/// Write `bytes` to `path` whole or not at all.
+/// Write `bytes` to `path` whole or not at all, and durably before the next.
 fn land(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let staged = path.with_extension(format!("staged.{}", std::process::id()));
+    let parent = path.parent().expect("a file under the repository");
     fs::write(&staged, bytes)
         .and_then(|()| fs::File::open(&staged)?.sync_all())
         .and_then(|()| fs::rename(&staged, path))
+        .and_then(|()| fs::File::open(parent)?.sync_all())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -253,6 +259,29 @@ fn land(path: &Path, bytes: &[u8]) -> Result<(), String> {
 struct Overlay<'a> {
     dir: &'a Path,
     new: &'a BTreeMap<String, Vec<u8>>,
+}
+
+impl Overlay<'_> {
+    /// `item`'s archive, streamed through the client's check.
+    fn stream(&self, item: &Item) -> Result<Result<(), repo::Refused>, String> {
+        let mut archive = repo::Archive::of(item);
+        if let Some(bytes) = self.new.get(&item.url) {
+            return Ok(archive.take(bytes).and_then(|()| archive.finish()));
+        }
+        let path = self.dir.join(&item.url);
+        let mut file = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut chunk = vec![0; 1 << 16];
+        loop {
+            match file.read(&mut chunk).map_err(|e| format!("{}: {e}", path.display()))? {
+                0 => return Ok(archive.finish()),
+                n => {
+                    if let Err(why) = archive.take(&chunk[..n]) {
+                        return Ok(Err(why));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Mirror for Overlay<'_> {
@@ -286,6 +315,7 @@ mod tests {
     fn manifest(dir: &Path, rows: &[(&str, u64, &str, &[u8])]) -> PathBuf {
         let mut text = String::new();
         for (name, sequence, file, bytes) in rows {
+            fs::create_dir_all(dir.join(file).parent().unwrap()).unwrap();
             fs::write(dir.join(file), bytes).unwrap();
             text += &format!(
                 "[[package]]\nname = {name:?}\ntarget = \"x86_64-unknown-toyos\"\nsequence = {sequence}\nversion = \"1.0\"\narchive = {file:?}\n"
@@ -298,6 +328,10 @@ mod tests {
 
     fn read(dir: &Path, name: &str) -> Vec<u8> {
         fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    fn gbae(targets: &Targets) -> &Item {
+        targets.items.iter().find(|i| i.name == "gbae").expect("gbae")
     }
 
     /// What a machine holding `dir`'s files accepts next.
@@ -316,8 +350,7 @@ mod tests {
         let fresh = client(out.path(), NOW, None).expect("what was published");
         let names: Vec<&str> = fresh.targets.items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, ["gbae", "snake"]);
-        let gbae = fresh.targets.item("gbae", "x86_64-unknown-toyos").unwrap();
-        assert_eq!(read(out.path(), &gbae.url), b"gbae bytes");
+        assert_eq!(read(out.path(), &gbae(&fresh.targets).url), b"gbae bytes");
         let root = Root::parse(&fresh.root).unwrap();
         assert_eq!((root.keys.as_slice(), root.expires), ([key().public()].as_slice(), NOW + ROOT_LIFE));
         assert!(!out.path().read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("staged")));
@@ -337,7 +370,7 @@ mod tests {
         assert_eq!(publish(&m, out.path(), &key(), NOW + DAY), Ok(Published { root: 1, targets: 2, timestamp: 2 }));
         let held = Held { root: &first.root, timestamp: Some(&first.timestamp), targets: Some(&first.targets_bytes) };
         let second = client(out.path(), NOW + DAY, Some(held)).expect("the next publish, past the first's floors");
-        assert_eq!(second.targets.item("gbae", "x86_64-unknown-toyos").unwrap().sequence, 4);
+        assert_eq!(gbae(&second.targets).sequence, 4);
 
         let late = NOW + ROOT_LIFE - RENEW + 1;
         assert_eq!(publish(&m, out.path(), &key(), late), Ok(Published { root: 2, targets: 3, timestamp: 3 }));
@@ -352,20 +385,42 @@ mod tests {
         publish(&manifest(src.path(), &[("gbae", 3, "gbae-v1.tar.gz", b"gbae bytes")]), out.path(), &key(), NOW).unwrap();
         let before = read(out.path(), "timestamp.txt");
 
+        // The client's floors, held as the directory holds them.
+        let (name, target, holder) = (String::from("gbae"), String::from("x86_64-unknown-toyos"), repo::Holder::Machine);
         let lower = publish(&manifest(src.path(), &[("gbae", 2, "gbae-v0.tar.gz", b"old")]), out.path(), &key(), NOW);
-        assert!(lower.as_ref().unwrap_err().contains("is sequence 2, below the 3 published"), "{lower:?}");
+        let why = repo::Refused::Sequence { name: name.clone(), target: target.clone(), sequence: 2, floor: 3, holder };
+        assert!(lower.as_ref().unwrap_err().ends_with(&why.to_string()), "{lower:?}");
         let same = publish(&manifest(src.path(), &[("gbae", 3, "gbae-v1b.tar.gz", b"other")]), out.path(), &key(), NOW);
-        assert!(same.as_ref().unwrap_err().contains("a new archive is a new sequence"), "{same:?}");
+        let why = repo::Refused::Reissued { name, target, sequence: 3, holder };
+        assert!(same.as_ref().unwrap_err().ends_with(&why.to_string()), "{same:?}");
         let rewritten = publish(&manifest(src.path(), &[("gbae", 4, "gbae-v1.tar.gz", b"rewritten")]), out.path(), &key(), NOW);
-        assert!(rewritten.as_ref().unwrap_err().contains("is never rewritten"), "{rewritten:?}");
+        assert!(rewritten.as_ref().unwrap_err().contains("refuses archives/gbae-v1.tar.gz: "), "{rewritten:?}");
         let other = publish(&manifest(src.path(), &[("gbae", 4, "gbae-v4.tar.gz", b"new")]), out.path(), &Key::throwaway_from([4; 32]), NOW);
         assert!(other.as_ref().unwrap_err().contains("a publish rotates no key"), "{other:?}");
         let unknown = src.path().join("unknown.toml");
         fs::write(&unknown, "[[package]]\nname = \"gbae\"\nowner = \"me\"\n").unwrap();
         assert!(publish(&unknown, out.path(), &key(), NOW).unwrap_err().contains("owner"));
         let bad_name = publish(&manifest(src.path(), &[("Gbae", 1, "g.tar.gz", b"g")]), out.path(), &key(), NOW);
-        assert!(bad_name.as_ref().unwrap_err().contains("refused by the client"), "{bad_name:?}");
+        assert!(bad_name.as_ref().unwrap_err().contains("refuses what this publish would leave"), "{bad_name:?}");
 
         assert_eq!(read(out.path(), "timestamp.txt"), before, "a refused publish wrote nothing");
+        assert!(!out.path().join("archives/gbae-v0.tar.gz").exists(), "a refused publish wrote no archive");
+    }
+
+    /// Two rows whose archives share a file name share its url: one archive,
+    /// or a refusal, never the second row's bytes under the first's SHA-256.
+    #[test]
+    fn two_rows_naming_one_archive_with_other_bytes_are_refused() {
+        let src = TempDir::new("publish-src");
+        let out = TempDir::new("publish-repo");
+        let rows = [("gbae", 1, "a/x.tar.gz", &b"gbae bytes"[..]), ("snake", 1, "b/x.tar.gz", b"snake bytes")];
+        let clash = publish(&manifest(src.path(), &rows), out.path(), &key(), NOW);
+        let why = repo::Refused::ArchiveShort { length: 11, got: 10 };
+        assert!(clash.as_ref().unwrap_err().ends_with(&format!("refuses archives/x.tar.gz: {why}")), "{clash:?}");
+        assert!(!out.path().join("timestamp.txt").exists(), "a refused publish wrote nothing");
+
+        let rows = [("gbae", 1, "a/x.tar.gz", &b"one archive"[..]), ("snake", 1, "b/x.tar.gz", b"one archive")];
+        publish(&manifest(src.path(), &rows), out.path(), &key(), NOW).expect("one archive, named twice");
+        assert_eq!(read(out.path(), "archives/x.tar.gz"), b"one archive");
     }
 }

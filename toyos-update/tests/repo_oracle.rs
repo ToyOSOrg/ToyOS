@@ -51,7 +51,7 @@ fn refused(result: Result<repo::Fresh, Refused>) -> Refused {
 #[test]
 fn a_repository_ssh_keygen_signed_is_accepted_and_a_bent_one_is_not() {
     let fresh = refresh(ROOT, TIMESTAMP, TARGETS).expect("the repository OpenSSH signed");
-    let hello = fresh.targets.item("hello", "x86_64-unknown-toyos").expect("the item");
+    let hello = fresh.targets.items.iter().find(|i| (i.name.as_str(), i.target.as_str()) == ("hello", "x86_64-unknown-toyos")).expect("the item");
     let mut archive = Archive::of(hello);
     archive.take(ARCHIVE).expect("within its length");
     archive.finish().expect("its SHA-256");

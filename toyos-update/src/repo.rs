@@ -193,8 +193,6 @@ pub enum Refused {
     Sequence { name: String, target: String, sequence: u64, floor: u64, holder: Holder },
     /// An item's sequence equal to a holder's, naming another archive.
     Reissued { name: String, target: String, sequence: u64, holder: Holder },
-    /// No item of that name for that target.
-    NoItem { name: String, target: String },
     /// An archive longer than its item says.
     ArchivePast { length: u64 },
     /// An archive that ended before its item's length.
@@ -259,7 +257,6 @@ impl fmt::Display for Refused {
                 f,
                 "{name} for {target} is sequence {sequence} with another archive than {holder}'s sequence {sequence}"
             ),
-            Self::NoItem { name, target } => write!(f, "the repository has no {name} for {target}"),
             Self::ArchivePast { length } => write!(f, "the archive runs past its signed {length} bytes"),
             Self::ArchiveShort { length, got } => {
                 write!(f, "the archive ended at {got} bytes, short of its signed {length}")
@@ -448,12 +445,6 @@ fn snapshot(words: &[&str]) -> Option<Snapshot> {
 impl Targets {
     pub fn parse(bytes: &[u8]) -> Result<Self, Refused> {
         Self::of(&document(bytes, Role::Targets)?)
-    }
-
-    /// The item `name` for `target`, or the refusal naming it.
-    pub fn item(&self, name: &str, target: &str) -> Result<&Item, Refused> {
-        self.find(name, target)
-            .ok_or_else(|| Refused::NoItem { name: name.into(), target: target.into() })
     }
 
     fn find(&self, name: &str, target: &str) -> Option<&Item> {
@@ -823,10 +814,11 @@ fn document(bytes: &[u8], role: Role) -> Result<Doc<'_>, Refused> {
     let first_sig = lines.iter().position(|l| l.starts_with("sig ")).unwrap_or(lines.len());
     let signed = &bytes[..lines[..first_sig].iter().map(|l| l.len() + 1).sum::<usize>()];
     let version = match lines[0].split(' ').collect::<Vec<_>>()[..] {
-        [MAGIC, name, version] if name == role.name() => number(version).filter(|&v| v >= 1),
+        // Below the largest, so a version always has a next one.
+        [MAGIC, name, version] if name == role.name() => number(version).filter(|v| (1..u64::MAX).contains(v)),
         _ => None,
     }
-    .ok_or_else(|| bad(1, "the header is not `toyos-repo <role> <version>` for this role"))?;
+    .ok_or_else(|| bad(1, "the header is not `toyos-repo <role> <version>` for this role, 1 to 2^64 - 2"))?;
     let mut sigs = Vec::new();
     for (at, line) in lines.iter().enumerate().skip(first_sig) {
         let sig = match line.split(' ').collect::<Vec<_>>()[..] {
@@ -1232,7 +1224,7 @@ mod tests {
     fn a_repository_the_renderer_writes_is_one_the_client_accepts() {
         let mut world = World::new();
         let fresh = world.refresh().expect("the repository");
-        let gbae = fresh.targets.item("gbae", TRIPLE).expect("gbae");
+        let gbae = fresh.targets.find("gbae", TRIPLE).expect("gbae");
         assert_eq!((gbae.sequence, gbae.length), (3, ARCHIVE.len() as u64));
         assert_eq!(fresh.root, world.image_root, "no root past the image's");
         assert_eq!(fresh.targets_bytes, world.repo.0["targets.2.txt"]);
@@ -1240,10 +1232,6 @@ mod tests {
         archive.take(&ARCHIVE[..5]).unwrap();
         archive.take(&ARCHIVE[5..]).unwrap();
         assert_eq!(archive.finish(), Ok(()));
-        assert_eq!(
-            fresh.targets.item("gbae", "aarch64-unknown-toyos").unwrap_err(),
-            Refused::NoItem { name: "gbae".into(), target: "aarch64-unknown-toyos".into() }
-        );
 
         // What the machine then holds is a floor and not a refusal: the same
         // repository fetched again is accepted.
@@ -1474,6 +1462,59 @@ mod tests {
         world.repo.publish(1, &targets(1, vec![item(1, ARCHIVE)]), 2);
         let fresh = world.refresh().expect("the rotated repository from version 1");
         assert_eq!(Root::parse(&fresh.root).unwrap(), two);
+    }
+
+    /// The machine holds root 2, which took every role from key 1 for key 2;
+    /// a mirror that withholds `root.2.txt` and serves key 1's timestamp is
+    /// still judged by root 2, never by the image's older root 1.
+    #[test]
+    fn a_machines_newer_root_holds_though_the_mirror_withholds_it() {
+        let mut world = World::new();
+        let two = signed(render::root(&one_key(2, 2)), Role::Root, &[1, 2]);
+        let machine = Held { root: &two, timestamp: None, targets: None };
+        let (repo, image) = world.parts();
+        assert!(matches!(
+            refused(refresh(repo, image, Some(machine), NOW)),
+            Refused::Threshold { role: Role::Timestamp, root: 2, first: Some(SigRefused::NotTheRolesKey), .. }
+        ));
+    }
+
+    #[test]
+    fn a_machines_root_at_the_images_version_with_other_bytes_is_refused() {
+        let mut world = World::new();
+        let other = signed(render::root(&Root { expires: NOW + DAY, ..one_key(1, 1) }), Role::Root, &[1]);
+        assert_ne!(other, world.image_root);
+        let machine = Held { root: &other, timestamp: None, targets: None };
+        let (repo, image) = world.parts();
+        assert_eq!(
+            refused(refresh(repo, image, Some(machine), NOW)),
+            Refused::Changed { role: Role::Root, version: 1, holder: Holder::Image }
+        );
+    }
+
+    /// No document is at the last version, so a walk always has a next one to
+    /// ask for: a held root there is not a root, and a mirror's is refused by
+    /// its header.
+    #[test]
+    fn a_root_at_the_last_version_is_refused() {
+        let mut world = World::new();
+        let last = signed(render::root(&one_key(u64::MAX, 1)), Role::Root, &[1]);
+        let machine = Held { root: &last, timestamp: None, targets: None };
+        let (repo, image) = world.parts();
+        assert_eq!(
+            refused(refresh(repo, image, Some(machine), NOW)),
+            Refused::Held { role: Role::Root, holder: Holder::Machine }
+        );
+
+        let mut world = World::new();
+        let before = signed(render::root(&one_key(u64::MAX - 1, 1)), Role::Root, &[1]);
+        world.repo.put(&root_file(u64::MAX), last.clone());
+        let machine = Held { root: &before, timestamp: None, targets: None };
+        let (repo, image) = world.parts();
+        assert!(matches!(
+            refused(refresh(repo, image, Some(machine), NOW)),
+            Refused::Malformed { role: Role::Root, line: 1, .. }
+        ));
     }
 
     #[test]
