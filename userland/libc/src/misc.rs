@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
+use crate::alarmreq::SIGALRM;
 use crate::errno::{ECHILD, ENOSYS};
 use crate::strtonum;
 
@@ -210,22 +211,28 @@ pub unsafe extern "C" fn abort() -> ! {
 // Signal (stubs — ToyOS has no signals, but `SIGALRM`'s disposition decides
 // what a due `alarm` does)
 
-const SIGALRM: i32 = 14;
-
 /// `signal.h`'s `struct sigaction`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct SigAction {
-    handler: usize,
+    pub(crate) handler: usize,
     flags: u64,
     restorer: usize,
     mask: u64,
+}
+
+impl SigAction {
+    /// The action of `handler` alone, as `signal` makes one.
+    pub(crate) const fn of(handler: usize) -> Self {
+        Self { handler, flags: 0, restorer: 0, mask: 0 }
+    }
 }
 
 /// A handler by its address: `SIG_DFL` and `SIG_IGN` are no functions.
 #[no_mangle]
 pub unsafe extern "C" fn signal(signum: i32, handler: *const u8) -> *const u8 {
     match signum {
-        SIGALRM => crate::alarm::dispose(handler as usize) as *const u8,
+        SIGALRM => crate::alarm::act(Some(SigAction::of(handler as usize))).handler as *const u8,
         _ => handler, // return the handler as "previous", effectively a no-op
     }
 }
@@ -235,12 +242,9 @@ pub unsafe extern "C" fn sigaction(signum: i32, act: *const SigAction, oldact: *
     if signum != SIGALRM {
         return 0; // success
     }
-    let old = match unsafe { act.as_ref() } {
-        Some(act) => crate::alarm::dispose(act.handler),
-        None => crate::alarm::disposition(),
-    };
+    let old = crate::alarm::act(unsafe { act.as_ref() }.copied());
     if let Some(oldact) = unsafe { oldact.as_mut() } {
-        *oldact = SigAction { handler: old, flags: 0, restorer: 0, mask: 0 };
+        *oldact = old;
     }
     0
 }

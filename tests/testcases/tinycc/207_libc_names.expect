@@ -10,7 +10,7 @@ setbuf: file 0 bytes, the buffer holds them
 ftello: 10; fseeko 3: 0; ftello: 3; fgetc: 3
 setbuf NULL: file 3 bytes
 signal SIGALRM: was SIG_DFL, then SIG_IGN
-sigaction SIGALRM: 0 0, SIG_IGN
+sigaction SIGALRM: 0 0, SIG_IGN, flags 0x10000000, mask 0x200
 alarm 5: 0; alarm 0: 1 to 5; again: 0
 entry: a DT_UNKNOWN
 entry: b DT_UNKNOWN

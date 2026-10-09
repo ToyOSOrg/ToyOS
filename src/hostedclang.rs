@@ -13,7 +13,7 @@
 //! host's tools, n2 and CMake among them; the sysroot's, which names the C
 //! library, the C++ runtime and the clang that builds against them; and
 //! [`RECIPE`] with [`OPTIONS`]. Its sources are the commit's, written from the
-//! fork's LLVM repository ([`export`]), never a checkout's files. CMake builds
+//! fork's LLVM repository, never a checkout's files. CMake builds
 //! LLVM's tablegens for the build machine first, in a nested build of its own
 //! (`NATIVE`), with the C and C++ compilers the LLVM key names.
 //!
@@ -157,8 +157,12 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
     eprintln!("Building the ToyOS-hosted clang and LLD {key}: nobody on this host has");
     let scratch = dir.with_extension("build");
     keystore::remove(&scratch);
+    // From the LLVM repository of `fork`'s git directory: a linked worktree's
+    // `rust/src/llvm-project` is no checkout.
     let sources = scratch.join("src");
-    export(fork, &sources);
+    let common = git_out(fork, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let repository = Path::new(common.trim()).join("modules").join(LLVM);
+    crate::llvm::check_out_committed(&repository, &gitlink(fork, LLVM), &SOURCES, &sources);
     let built = scratch.join("build");
     build(fork, &sources, &built, &CSysroot::of(sysroot, TARGET), ninja, &scratch);
 
@@ -183,15 +187,6 @@ fn place(fork: &Path, sysroot: &Path, ninja: &Path, key: &Key, dir: &Path) {
     keystore::retire(dir);
     fs::rename(&partial, dir).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
     keystore::remove(&scratch);
-}
-
-/// Write [`SOURCES`] as the commit `fork`'s LLVM gitlink names holds them into
-/// `dest`, from the LLVM repository of `fork`'s git directory: a linked
-/// worktree's `rust/src/llvm-project` is no checkout.
-fn export(fork: &Path, dest: &Path) {
-    let common = git_out(fork, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    let repository = Path::new(common.trim()).join("modules").join(LLVM);
-    crate::llvm::check_out_committed(&repository, &gitlink(fork, LLVM), &SOURCES, dest);
 }
 
 /// Configure LLVM at `sources`, the commit `fork` names, for `c`'s target,

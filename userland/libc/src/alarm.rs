@@ -6,16 +6,17 @@
 //! (`issues/an-alarm-reaches-no-sigalrm-handler.md`).
 
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
 use crate::alarmreq;
+use crate::misc::SigAction;
 use crate::pthread::Lock;
 
 /// What the process ends with when its alarm is due: the code of an end by
-/// `SIGALRM` (14), as `abort`'s is `SIGABRT`'s.
-const ALARM_END: i32 = 128 + 14;
+/// `SIGALRM`, as `abort`'s is `SIGABRT`'s.
+const ALARM_END: i32 = 128 + alarmreq::SIGALRM;
 
 struct Alarm {
     /// When the alarm is due, in the monotonic clock's nanoseconds.
@@ -29,17 +30,18 @@ static ALARM: Lock<Alarm> = Lock::new(Alarm { due: None, kept: false });
 /// Moved at every `alarm`, so a keeper asleep on an older one wakes.
 static TURN: AtomicU32 = AtomicU32::new(0);
 
-/// `SIGALRM`'s disposition: `SIG_DFL`, `SIG_IGN` or a handler's address.
-static DISPOSITION: AtomicUsize = AtomicUsize::new(alarmreq::SIG_DFL);
+/// `SIGALRM`'s action, whose handler is its disposition: `SIG_DFL`, `SIG_IGN`
+/// or a handler's address.
+static ACTION: Lock<SigAction> = Lock::new(SigAction::of(alarmreq::SIG_DFL));
 
-/// Make `handler` `SIGALRM`'s disposition, and answer the one it replaces.
-pub(crate) fn dispose(handler: usize) -> usize {
-    DISPOSITION.swap(handler, Ordering::AcqRel)
-}
-
-/// `SIGALRM`'s disposition.
-pub(crate) fn disposition() -> usize {
-    DISPOSITION.load(Ordering::Acquire)
+/// Make `new`, if any, `SIGALRM`'s action, and answer the one it replaces whole.
+pub(crate) fn act(new: Option<SigAction>) -> SigAction {
+    let mut action = ACTION.lock();
+    let old = *action;
+    if let Some(new) = new {
+        *action = new;
+    }
+    old
 }
 
 fn now() -> u64 {
@@ -78,7 +80,7 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
             None => None,
             Some(due) => match due.checked_sub(now()) {
                 Some(wait) if wait > 0 => Some(wait),
-                _ if alarmreq::ends(disposition()) => syscall::exit(ALARM_END),
+                _ if alarmreq::ends(act(None).handler) => syscall::exit(ALARM_END),
                 _ => {
                     alarm.due = None;
                     None

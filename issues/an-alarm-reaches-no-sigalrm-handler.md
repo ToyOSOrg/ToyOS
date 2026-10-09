@@ -29,7 +29,7 @@ both wait on that stage, its owner.
 
 What a due alarm does under each disposition is held on the host
 (`tests/libc-arch/src/alarm_requests.rs`); `207_libc_names.c` reads the
-disposition back and arms and disarms an alarm. No guest case lets one come
+action back whole and arms and disarms an alarm. No guest case lets one come
 due.
 
 **Exit**: a guest C case shows `SIGALRM` delivered as POSIX says: a handler

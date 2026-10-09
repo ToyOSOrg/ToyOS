@@ -4,7 +4,8 @@
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-/// `signal.h`'s `SIG_DFL` and `SIG_IGN`, as addresses.
+/// `signal.h`'s `SIGALRM`, and its `SIG_DFL` and `SIG_IGN` as addresses.
+pub(crate) const SIGALRM: i32 = 14;
 pub(crate) const SIG_DFL: usize = 0;
 pub(crate) const SIG_IGN: usize = 1;
 

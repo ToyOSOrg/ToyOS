@@ -2,7 +2,7 @@
    the name and kind of each entry; dladdr naming the image and the exported
    symbol an address lies in; a file truncated by its path; a stream on a
    buffer of its caller's, or none, sought and told by off_t; SIGALRM's
-   disposition, and an alarm armed and disarmed; and strnlen, strsignal, modf,
+   action, read back whole, and an alarm armed and disarmed; and strnlen, strsignal, modf,
    lround, logb, pathconf and the <endian.h> conversions. */
 #include <dirent.h>
 #include <dlfcn.h>
@@ -132,10 +132,13 @@ static void alarms(void) {
     void (*then)(int) = signal(SIGALRM, SIG_DFL);
     printf("signal SIGALRM: was %s, then %s\n", was == SIG_DFL ? "SIG_DFL" : "another",
            then == SIG_IGN ? "SIG_IGN" : "another");
-    struct sigaction ignore = { .sa_handler = SIG_IGN }, old = { .sa_handler = SIG_DFL };
+    struct sigaction ignore = { .sa_handler = SIG_IGN, .sa_flags = SA_RESTART }, old = { .sa_handler = SIG_DFL };
+    sigemptyset(&ignore.sa_mask);
+    sigaddset(&ignore.sa_mask, SIGUSR1);
     int set = sigaction(SIGALRM, &ignore, NULL);
     int got = sigaction(SIGALRM, NULL, &old);
-    printf("sigaction SIGALRM: %d %d, %s\n", set, got, old.sa_handler == SIG_IGN ? "SIG_IGN" : "another");
+    printf("sigaction SIGALRM: %d %d, %s, flags 0x%lx, mask 0x%lx\n", set, got,
+           old.sa_handler == SIG_IGN ? "SIG_IGN" : "another", old.sa_flags, (unsigned long)old.sa_mask);
     signal(SIGALRM, SIG_DFL);
     unsigned first = alarm(5);
     unsigned left = alarm(0);
