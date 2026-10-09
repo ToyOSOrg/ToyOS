@@ -21,7 +21,6 @@ macro_rules! device_info {
 device_info!(
     toyos_abi::FramebufferInfo,
     toyos_abi::pci::PciFunctionInfo,
-    toyos_abi::virtio_sound::VirtioSoundInfo,
     toyos_abi::hda::HdaInfo,
     toyos_abi::part::PartitionInfo,
     toyos_abi::acpi::AcpiInfo,
@@ -274,51 +273,6 @@ impl PartitionDev {
 }
 
 impl AsHandle for PartitionDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-/// A virtio-sound device the kernel brought up and drives no policy on.
-///
-/// What the claimant gets is the region the descriptors point into, mapped
-/// writable, an interrupt it may wait on, and one register call per queue
-/// doorbell. It gets no descriptor table and no physical address, so there is
-/// nothing here that can point the device at memory.
-pub struct VirtioSoundDev(pub(crate) Device);
-
-impl VirtioSoundDev {
-    pub fn info(&self) -> Result<toyos_abi::virtio_sound::VirtioSoundInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// Drain all pending completion records in one nonblocking read.
-    ///
-    /// Returns the number of records written to `records`. The kernel ring
-    /// holds at most 16 records, so a 16-entry buffer always drains fully.
-    /// Empty ring surfaces as `Err(WouldBlock)`.
-    pub fn read_completions(
-        &self,
-        records: &mut [toyos_abi::audio::AudioCompletionRecord],
-    ) -> Result<usize, SyscallError> {
-        const REC_SIZE: usize = toyos_abi::audio::AudioCompletionRecord::SIZE;
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                records.as_mut_ptr() as *mut u8,
-                records.len() * REC_SIZE,
-            )
-        };
-        let n = syscall::read_nonblock(self.0.0.0, buf)?;
-        assert_eq!(n % REC_SIZE, 0, "partial audio completion record ({n} bytes)");
-        Ok(n / REC_SIZE)
-    }
-
-    /// Ring one queue's doorbell. `offset` is one of the three the info struct
-    /// reports and nothing else is on the kernel's allow-list.
-    pub fn notify(&self, offset: u32, queue: u16) -> Result<(), SyscallError> {
-        syscall::device_reg_write(self.0.as_handle(), offset, syscall::RegWidth::U16, queue as u32)
-    }
-}
-
-impl AsHandle for VirtioSoundDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 

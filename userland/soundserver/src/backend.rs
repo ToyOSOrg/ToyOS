@@ -96,10 +96,6 @@ impl Backend for VirtioBackend {
     }
 
     fn completions(&mut self, out: &mut [AudioCompletionRecord]) -> usize {
-        // Where the kernel used to service the event queue inside the same
-        // syscall: the device's own view of an underrun, which this process's
-        // counters cannot see.
-        self.virtio.poll_events();
         self.virtio.completions(out)
     }
 

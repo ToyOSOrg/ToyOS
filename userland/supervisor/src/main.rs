@@ -2032,9 +2032,7 @@ fn start<'a>(
         let request = DeviceRequest::parse(name)
             .unwrap_or_else(|| panic!("supervisor: `{name}` is not a device this ABI has"));
         // A device this machine does not have is not endowed, and the supervisor says
-        // which: "did I get an HDA or a virtio-sound?" becomes "which claims
-        // are in my endowment table?", which is the same question with the
-        // answer already in hand.
+        // which.
         //
         // The label is the manifest's own spelling, which is exactly what the
         // claimant looks the claim up by: one string, written once.

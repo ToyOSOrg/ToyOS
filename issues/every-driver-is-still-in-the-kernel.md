@@ -29,20 +29,16 @@ is not built.
 
 What is left of the staged work:
 
-1. **Audio and virtio-gpu, re-scoped.** `drivers/hda.rs` and
-   `drivers/virtio_sound.rs` bring their device up and gate soundd's register
-   access; `drivers/virtio_gpu.rs` is the only `Gpu` whose `SYS_GPU_*` calls do
-   anything, since GOP's are all no-ops. Each leaves when its userland holder
-   claims the function as `pci`, as netd does, retiring the `hda-audio` and
-   `virtio-sound` classes, their arms of `SYS_DEVICE_REG_READ`/`WRITE`, and
-   `SYS_GPU_*`, which is an ABI change. GOP stays: it is memory the loader
-   hands over, and the panic console paints it.
-   A virtio holder stands on `toyos-virtio`, whose first client is netstack's
-   NIC, and the second one owes that crate two things. The walk of the
-   capability list moves into it from `userland/netstack/src/virtio_net.rs`,
-   over a configuration read the caller passes in, which closes
-   `issues/the-virtio-capability-walk-reads-a-refused-configuration-read-as-zeros.md`.
-   And before a client ends its device on `UsedRefusal::Written` for a chain
+1. **HDA and virtio-gpu, re-scoped.** `drivers/hda.rs` brings its device up
+   and gates soundserver's register access; `drivers/virtio_gpu.rs` is the only
+   `Gpu` whose `SYS_GPU_*` calls do anything, since GOP's are all no-ops. Each
+   leaves when its userland holder claims the function as `pci`, as netstack
+   and soundserver's virtio-sound driver do, retiring the `hda-audio` class,
+   its arms of `SYS_DEVICE_REG_READ`/`WRITE`, and `SYS_GPU_*`, which is an ABI
+   change. GOP stays: it is memory the loader hands over, and the panic console
+   paints it.
+   A virtio holder stands on `toyos-virtio`, which walks the capability list
+   too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as
    `len` on such a queue is measured: the NIC's transmit queue is the only
    one read so far.

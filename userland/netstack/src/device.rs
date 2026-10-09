@@ -1,5 +1,6 @@
 //! What both NIC drivers need from the substrate: `toyos-device-memory`'s
-//! boundary over the SDK's `toyos::volatile::Window`, the kernel's word for a
+//! boundary over the SDK's `toyos::volatile::Window`, the claim's
+//! configuration space as `toyos-virtio` walks it, the kernel's word for a
 //! call a bring-up cannot go on without, and the latch a diagnostic is printed
 //! on.
 //!
@@ -14,8 +15,10 @@ use std::cell::Cell;
 use std::sync::atomic::{fence, Ordering};
 
 use toyos::volatile::Window;
-use toyos_abi::syscall::SyscallError;
+use toyos::PciDev;
+use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_device_memory::{DmaBuffers, Registers};
+use toyos_virtio::pci::ConfigSpace;
 
 /// A mapped BAR, as a driver reaches its device's registers.
 #[derive(Clone, Copy)]
@@ -117,6 +120,23 @@ impl DmaBuffers for Grant {
 
     fn observe(&self) {
         fence(Ordering::Acquire);
+    }
+}
+
+/// A claim's configuration space, as `toyos-virtio`'s capability walk reads
+/// it: each read one `config_read` of its width, and its refusal the kernel's
+/// word.
+pub struct ClaimConfig<'a>(pub &'a PciDev);
+
+impl ConfigSpace for ClaimConfig<'_> {
+    type Refused = SyscallError;
+
+    fn read8(&self, at: u16) -> Result<u8, SyscallError> {
+        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8)
+    }
+
+    fn read32(&self, at: u16) -> Result<u32, SyscallError> {
+        self.0.config_read(at as u32, RegWidth::U32)
     }
 }
 

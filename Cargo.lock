@@ -5272,9 +5272,12 @@ dependencies = [
  "rubato",
  "toyos",
  "toyos-abi",
+ "toyos-device-memory",
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-virtio",
+ "toyos-virtio-sound",
 ]
 
 [[package]]
@@ -6091,6 +6094,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-virtio-sound"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]

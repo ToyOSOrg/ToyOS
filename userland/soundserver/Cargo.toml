@@ -9,6 +9,9 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-hda = { path = "../../toyos-hda" }
 toyos-mixer = { path = "mixer" }
+toyos-virtio-sound = { path = "virtio-sound" }
+toyos-virtio = { path = "../../toyos-virtio" }
+toyos-device-memory = { path = "../../toyos-device-memory" }
 toyos-inspect = { path = "../../toyos-inspect" }
 rubato = "0.16"
 

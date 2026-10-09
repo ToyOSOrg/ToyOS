@@ -28,20 +28,10 @@ use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_device_memory::DmaBuffers;
-use toyos_virtio::pci::{Layout, Live, Offer, VendorCap};
+use toyos_virtio::pci::{vendor_caps, Layout, Live, Offer, WalkRefusal};
 use toyos_virtio::queue::{avail_bytes, desc_bytes, Buffer, Parts, Published, Used, Virtqueue};
 
-use crate::device::{Bar, Grant, KernelRefused};
-
-/// PCI's own vendor-specific capability id; virtio's config structures are all
-/// published under it (§4.1.4).
-const CAP_ID_VENDOR: u8 = 0x09;
-
-/// Where the capability list starts, and how far a walk may follow it. The
-/// pointer is the *device's*, so a malformed or cyclic chain ends the walk
-/// rather than running for ever.
-const CAPABILITIES_PTR: u32 = 0x34;
-const MAX_CAPABILITIES: usize = 48;
+use crate::device::{Bar, ClaimConfig, Grant, KernelRefused};
 
 /// §5.1.3: the device has a MAC address of its own to read.
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
@@ -99,6 +89,8 @@ pub enum Refusal {
     /// What the device published or answered, as the transport refused it.
     Device(toyos_virtio::pci::Refusal),
     Kernel(KernelRefused),
+    /// The capability list, as the walk refused it.
+    Walk(WalkRefusal<SyscallError>),
     /// The claim answered a configuration read it had to refuse.
     Unbounded(&'static str, u32),
 }
@@ -114,6 +106,7 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::Device(why) => write!(f, "{why}"),
             Self::Kernel(why) => write!(f, "{why}"),
+            Self::Walk(why) => write!(f, "{why}"),
             Self::Unbounded(what, at) => write!(
                 f,
                 "the claim answered a {what} at {at:#x}, so it is not a claim on one \
@@ -137,7 +130,8 @@ fn finished(rings: &mut Virtqueue<Grant>) -> Option<Used> {
 
 /// The bound the capability walk rests on, asked once before the walk.
 ///
-/// **The walk below indexes configuration space by numbers the *device* wrote**
+/// **`toyos_virtio::pci::vendor_caps` indexes configuration space by numbers
+/// the *device* wrote**
 /// — the capability pointer and every `next` link in the chain — and it is safe
 /// only because a claim answers its own function's 4 KiB and nothing else. That
 /// is the kernel's contract, so this is where the driver that depends on it
@@ -187,7 +181,7 @@ impl VirtioNet {
         let info = dev.describe().map_err(KernelRefused::on("the claim's description")).map_err(Refusal::Kernel)?;
 
         config_space_is_bounded(&dev)?;
-        let layout = Layout::of(&vendor_caps(&dev))?;
+        let layout = Layout::of(&vendor_caps(&ClaimConfig(&dev)).map_err(Refusal::Walk)?)?;
         // The kernel hands out a BAR at a time, and reports 0 bytes for one it
         // keeps back.
         let bar = layout.bar();
@@ -415,37 +409,6 @@ impl TxQueue {
         let frame = Buffer::readable(self.grant.device_addr(at), (NET_HDR_SIZE + len) as u32);
         (result, self.rings.publish(head, &[frame]))
     }
-}
-
-/// The vendor capabilities a function published, in its list's order, walked
-/// once.
-fn vendor_caps(dev: &PciDev) -> Vec<VendorCap> {
-    let mut found = Vec::new();
-    let mut seen = 0usize;
-    let Ok(first) = dev.config_read(CAPABILITIES_PTR, RegWidth::U8) else {
-        return found;
-    };
-    let mut next = first;
-    // The pointer is the device's: a chain that does not terminate, or one
-    // pointing outside the header, ends the walk rather than running off
-    // the window or for ever.
-    while next >= 0x40 && next < 0x100 && seen < MAX_CAPABILITIES {
-        seen += 1;
-        let Ok(id) = dev.config_read(next, RegWidth::U8) else { break };
-        if id as u8 == CAP_ID_VENDOR {
-            let read = |at: u32, width| dev.config_read(next + at, width).unwrap_or(0);
-            found.push(VendorCap {
-                cfg_type: read(3, RegWidth::U8) as u8,
-                bar: read(4, RegWidth::U8) as u8,
-                offset: read(8, RegWidth::U32),
-                length: read(12, RegWidth::U32),
-                notify_off_multiplier: read(16, RegWidth::U32),
-            });
-        }
-        let Ok(link) = dev.config_read(next + 1, RegWidth::U8) else { break };
-        next = link;
-    }
-    found
 }
 
 /// The transmit queue's room, over a plain allocation for the grant. What a
