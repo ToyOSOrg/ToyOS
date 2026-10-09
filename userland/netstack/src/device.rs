@@ -1,10 +1,124 @@
-//! What both NIC drivers need from the substrate beside the SDK's
-//! `toyos::volatile::Window`: the kernel's word for a call a bring-up cannot go
-//! on without, and the latch a diagnostic is printed on.
+//! What both NIC drivers need from the substrate: `toyos-device-memory`'s
+//! boundary over the SDK's `toyos::volatile::Window`, the kernel's word for a
+//! call a bring-up cannot go on without, and the latch a diagnostic is printed
+//! on.
+//!
+//! **[`Bar`] and [`Grant`] are the one implementation of the boundary both
+//! driver crates are written against**, an instruction deep: every offset
+//! that reaches them a driver crate has bounded, and the two barriers are here
+//! and nowhere else in this program. Neither owns its mapping: a driver's
+//! holder keeps the `SharedMemory` and the `DmaRegion` for as long as it keeps
+//! the driver.
 
 use std::cell::Cell;
+use std::sync::atomic::{fence, Ordering};
 
+use toyos::volatile::Window;
 use toyos_abi::syscall::SyscallError;
+use toyos_device_memory::{DmaBuffers, Registers};
+
+/// A mapped BAR, as a driver reaches its device's registers.
+#[derive(Clone, Copy)]
+pub struct Bar(Window);
+
+impl Bar {
+    pub fn over(window: Window) -> Self {
+        Self(window)
+    }
+}
+
+impl Registers for Bar {
+    fn bytes(&self) -> usize {
+        self.0.bytes()
+    }
+
+    fn read8(&self, at: usize) -> u8 {
+        self.0.read(at)
+    }
+
+    fn read16(&self, at: usize) -> u16 {
+        self.0.read(at)
+    }
+
+    fn read32(&self, at: usize) -> u32 {
+        self.0.read(at)
+    }
+
+    fn write8(&self, at: usize, value: u8) {
+        self.0.write(at, value);
+    }
+
+    fn write16(&self, at: usize, value: u16) {
+        self.0.write(at, value);
+    }
+
+    fn write32(&self, at: usize, value: u32) {
+        self.0.write(at, value);
+    }
+}
+
+/// A DMA grant, as a driver reaches its rings and descriptors.
+#[derive(Clone, Copy)]
+pub struct Grant {
+    window: Window,
+    /// Where the device reaches the grant's first byte. Not a physical address:
+    /// what the unit translates for this function and for nothing else.
+    device_base: u64,
+}
+
+impl Grant {
+    pub fn over(window: Window, device_base: u64) -> Self {
+        Self { window, device_base }
+    }
+
+    /// The same bytes, for the holder's own view of them: the frames, which no
+    /// driver crate reaches.
+    pub fn window(&self) -> Window {
+        self.window
+    }
+}
+
+impl DmaBuffers for Grant {
+    fn bytes(&self) -> usize {
+        self.window.bytes()
+    }
+
+    fn device_addr(&self, at: usize) -> u64 {
+        self.device_base + at as u64
+    }
+
+    fn read16(&self, at: usize) -> u16 {
+        self.window.read(at)
+    }
+
+    fn read32(&self, at: usize) -> u32 {
+        self.window.read(at)
+    }
+
+    fn read64(&self, at: usize) -> u64 {
+        self.window.read(at)
+    }
+
+    fn write16(&self, at: usize, value: u16) {
+        self.window.write(at, value);
+    }
+
+    fn write32(&self, at: usize, value: u32) {
+        self.window.write(at, value);
+    }
+
+    fn write64(&self, at: usize, value: u64) {
+        self.window.write(at, value);
+    }
+
+    fn publish(&self) {
+        fence(Ordering::Release);
+    }
+
+    fn observe(&self) {
+        fence(Ordering::Acquire);
+    }
+}
 
 /// The kernel refused a call a bring-up cannot go on without, and the word is
 /// the kernel's own.

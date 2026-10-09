@@ -482,14 +482,14 @@ impl<'a, R: Registers, C: Clock> Arbitration<'a, R, C> {
     /// poll is the one exception (it is the transaction, not the arbitration).
     fn read_at(&self, reg: usize) -> u32 {
         self.pace();
-        let reading = self.regs.read(reg);
+        let reading = self.regs.read32(reg);
         self.last.set(Some(self.clock.nanos()));
         reading
     }
 
     fn write_at(&self, reg: usize, value: u32) {
         self.pace();
-        self.regs.write(reg, value);
+        self.regs.write32(reg, value);
         self.last.set(Some(self.clock.nanos()));
     }
 
@@ -659,7 +659,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
         // and a part that never clears it is refused with nothing written.
         let waiting_since = self.mdio.clock.nanos();
         loop {
-            if self.mdio.regs.read(regs::MDIC) & mdic::WAIT == 0 {
+            if self.mdio.regs.read32(regs::MDIC) & mdic::WAIT == 0 {
                 break;
             }
             let waited = self.mdio.clock.nanos().saturating_sub(waiting_since);
@@ -668,10 +668,10 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
             }
         }
         let command = command(phy, reg, op, data);
-        self.mdio.regs.write(regs::MDIC, command);
+        self.mdio.regs.write32(regs::MDIC, command);
         let started = self.mdio.clock.nanos();
         loop {
-            let answer = self.mdio.regs.read(regs::MDIC);
+            let answer = self.mdio.regs.read32(regs::MDIC);
             if answer & mdic::ERROR != 0 {
                 return Err(PhyRefusal::MdiError { phy, reg });
             }
@@ -776,7 +776,7 @@ impl<'a, R: Registers, C: Clock> Owned<'a, R, C> {
     /// cycle that never ends stops the ask**, because the interconnect that did
     /// not carry one transaction carries none, whatever address it names.
     pub(crate) fn ask(&self) -> Answer {
-        let mdic = || self.mdio.regs.read(regs::MDIC);
+        let mdic = || self.mdio.regs.read32(regs::MDIC);
         let mut last = 0;
         for addr in [SPECIFIC, GENERAL] {
             let high = self.read(addr, reg::IDENTIFIER_HIGH);
