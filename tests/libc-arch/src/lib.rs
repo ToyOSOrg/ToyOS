@@ -7,8 +7,9 @@
 //! `core::str::from_utf8`, the number reader against the host C library's and
 //! IEEE 754's rounding of hexadecimal input computed exactly, AArch64's
 //! `long double` widening against compiler-builtins', the errno codes against
-//! `include/errno.h`, and IPv4 addresses and their texts against the host C
-//! library's.
+//! `include/errno.h`, IPv4 addresses and their texts against the host C
+//! library's, and the socket option rule against the host's `setsockopt` and
+//! `getsockopt`.
 
 #[cfg(test)]
 extern crate alloc;
@@ -43,6 +44,9 @@ mod pollreq;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/sigmask.rs"]
 mod sigmask;
+#[cfg(test)]
+#[path = "../../../userland/libc/src/sockopt.rs"]
+mod sockopt;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/strtonum.rs"]
 mod strtonum;
@@ -81,6 +85,8 @@ mod poll_requests;
 mod prototypes;
 #[cfg(test)]
 mod signal_masks;
+#[cfg(test)]
+mod socket_options;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]

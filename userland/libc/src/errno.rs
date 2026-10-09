@@ -26,6 +26,7 @@ pub(crate) const ECHILD: i32 = 10;
 pub(crate) const EAGAIN: i32 = 11;
 pub(crate) const ENOMEM: i32 = 12;
 pub(crate) const EACCES: i32 = 13;
+pub(crate) const EFAULT: i32 = 14;
 pub(crate) const EBUSY: i32 = 16;
 pub(crate) const EEXIST: i32 = 17;
 pub(crate) const ENODEV: i32 = 19;
