@@ -87,6 +87,11 @@ actuators! {
     /// `LET_GO`. Judged by `machine_shutdown_wire_kept`.
     wire_kept_through_the_stop = "wire-kept-through-the-stop";
 
+    /// Have `klogd` hold the console's wire from the boot's last word until the
+    /// stop has taken the seal, where the stop does not hold it itself. Judged
+    /// by `machine_shutdown_wire_at_the_seal`.
+    wire_held_at_the_last_word = "wire-held-at-the-last-word";
+
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 

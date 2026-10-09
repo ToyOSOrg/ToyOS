@@ -74,13 +74,23 @@ pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the stop alerts where `klogd` kept the console's wire through the
-/// stop's whole budget, in `kernel/src/log/console.rs`.
+/// What the stop alerts where the console's wire was kept through the stop's
+/// whole budget, in `kernel/src/log/console.rs`.
 const WIRE_KEPT: &str = "kept the wire through the stop's";
 
-/// What both of the stop's alerts say where `klogd` let the wire go only past
-/// the stop's budget or not at all, in `kernel/src/log/console.rs`.
+/// What both of the stop's alerts say where the wire's holder let it go only
+/// past the stop's budget or not at all, in `kernel/src/log/console.rs`.
 pub const WIRE_LATE: &str = "the wire through the stop's";
+
+/// What a staging says where the `klogd` it woke had not taken the wire
+/// `DEAF_CPU` into the stop's wait, with `klogd`'s state and the run queue, in
+/// `kernel/src/log/console.rs`. Every staged test reds on it.
+const STAGED_KLOGD_UNRUN: &str = "console: the staged klogd has not taken the wire";
+
+/// What a stop staged by `wire-held-at-the-last-word` logs where it holds the
+/// console's wire itself, in `kernel/src/log/console.rs`; where it does not,
+/// `klogd` holds it inside its hold from here to the seal.
+const STOP_HOLDS_AT_THE_LAST_WORD: &str = "console: the stop holds the wire at the boot's last word, staged";
 
 /// What a stop staged by `wire-held-across-the-stop` logs once `klogd` holds
 /// the console's wire, in `kernel/src/log/console.rs`.
@@ -103,6 +113,7 @@ pub fn wire_staged(kept: bool) -> &'static [&'static str] {
 /// where it did not `klogd` said it let the wire go there and the console is
 /// otherwise clean.
 pub fn judge_the_held_wire(console: &str, last: &str, kept: bool) -> Result<(), String> {
+    serial::Serial::named("staged stop", console.to_string()).must_not_say(STAGED_KLOGD_UNRUN)?;
     let lines: Vec<&str> = console.lines().collect();
     let at = |what: &str| lines.iter().position(|l| l.contains(what));
     let held = at(WIRE_HELD).ok_or_else(|| format!("the staged klogd never said it held the wire\n{console}"))?;
@@ -117,7 +128,7 @@ pub fn judge_the_held_wire(console: &str, last: &str, kept: bool) -> Result<(), 
     match (kept, at(WIRE_KEPT), at(WIRE_LET_GO)) {
         (true, Some(alert), None) if held < alert && alert < record => Ok(()),
         (false, None, Some(let_go)) if held < let_go && let_go < record => {
-            serial::Serial::named("the stop", console.to_string()).must_be_clean()
+            serial::Serial::named("staged stop", console.to_string()).must_be_clean()
         }
         (_, alert, let_go) => Err(format!(
             "klogd {} the wire, and the stop's alert is on line {alert:?} and klogd's let-go on line {let_go:?}\n{console}",
@@ -144,6 +155,39 @@ pub fn machine_shutdown_wire_held(test_config: &Path, kept: bool) -> Result<(), 
     ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
     judge_the_held_wire(&console, SHUTTING_DOWN, kept)?;
     eprintln!("  [power] klogd held the wire across the stop{}; the record and the last word reached it", if kept { " and kept it" } else { "" });
+    Ok(())
+}
+
+/// `klogd` is staged to hold the console's wire from the boot's last word to
+/// past the stop's seal, on one CPU, which from the seal on runs nothing but
+/// the stop: a stop that left the wire to `klogd` there powers off with the
+/// last word on no console. This one holds the wire itself, says so above the
+/// last word, and puts the last word on the console.
+pub fn machine_shutdown_wire_at_the_seal(test_config: &Path) -> Result<(), String> {
+    let options =
+        BootOptions { qmp: true, smp: 1, kernel_params: &["wire-held-at-the-last-word"], ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let mut console = boot.text().to_string();
+    qemu::await_marker(&mut qemu, &mut console, Q35_S5_SUPPLIED, "the ACPI server to hand the kernel \\_S5")?;
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    let lines: Vec<&str> = console.lines().collect();
+    let at = |what: &str| lines.iter().position(|l| l.contains(what));
+    match (at(STOP_HOLDS_AT_THE_LAST_WORD), at(SHUTTING_DOWN)) {
+        (Some(holds), Some(said)) if holds < said => {}
+        (holds, said) => {
+            return Err(format!(
+                "the stop's hold of the wire at the last word is on line {holds:?} and {SHUTTING_DOWN:?} on \
+                 {said:?}\n{console}"
+            ))
+        }
+    }
+    serial::Serial::named("staged stop", console.clone()).must_be_clean()?;
+    eprintln!("  [power] the stop held the wire at the last word and across the seal; the last word reached it");
     Ok(())
 }
 

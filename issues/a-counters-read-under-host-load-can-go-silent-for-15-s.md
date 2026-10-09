@@ -136,25 +136,26 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
-**What a last-word stall of `virt_mask_windows` can be, measured.** Under
-HVF, on the entropy stage's branch at `863d73ed3` with a probe on the stop's
-two drains, `virt_mask_windows` stalled with the same line, `STALLED: waiting
-for the boot's last word — it went quiet`, and the guest had not gone quiet
-but off: the last word's drain found the console wire free with one ticket
-outstanding (`ticket=197 now=196`), its turn posted to `klogd` and never
-taken, and `serial::flush_final` spun 2.95 s on it, gave up and the machine
-powered off with its last records on no console. A red `virt_el1_smp`, probed
-before the ticket was, found the holder word free and spun 4.16 s; 2 reds in
-21 runs of the five SMP tests side by side, load 23
-to 52. That is fixed by the change that deleted `flush_final`: the stop takes
-the wire from `klogd` for good and parks while it waits, bounded by
-`log::console::LET_GO`, past which it says so and writes over the holder.
-What links the two stalls without a console above to it: the same test, the
-same wait, ended by the same bound, on a boot whose last word went through
-that drain. What does not: they ran under TCG, where the entropy stage saw 0
-of 50 emulated runs stall, and nothing of theirs names the wire, so neither
-is shown to be it. The occurrences that stall at a job's end are not this:
-they stop before the stop begins.
+The fifth and sixth silent ones, two guests of one run: `virt_smp` and
+`virt_mask_windows`, in the whole suite on `wt/toyos-lastword` at
+`aa7448db0`, whose diff changes the stop's hold of the console wire and
+nothing these guests run before the stop begins.
+
+- **The lines.** `FAIL virt_smp: STALLED: waiting for the job
+  test_rs_counters_read to end — it went quiet` and `FAIL virt_mask_windows:
+  STALLED: waiting for the boot's last word — it went quiet`, three seconds
+  apart on the host's clock; 44 of 46 passed.
+- **The load.** 12 wide on the 14-core host, 1-minute load 35.09 when the
+  run began and 79.44 when it ended; liveness ceilings paid at 1.00x;
+  workers 346 s building against 752 s testing.
+- **The same profile as the second.** `virt_smp`'s last three lines are
+  `===TEST_END unmap_touch exit=0===` at 11.730, `===TEST_START
+  test_rs_counters_read===` at 11.731 and the kernel's `spawn:
+  /system/bin/test_rs_counters_read pid=13` at 11.739 on cpu4.
+  `virt_mask_windows` said nothing while its second wait ran, as the two
+  stalls below did; the run kept no PL011 log of it.
+- **What is known.** The next whole suite at that commit, at load 79.44
+  rising to 78.28, passed 46 of 46.
 
 Not known of any of them: whether the fork compiler's fault reaches
 `test_rs_counters_read` or the kernel under it.

@@ -1,10 +1,10 @@
-//! The stop's claim on the console wire, and `klogd`'s answer to it.
+//! The stop's claim on the console wire, and its holder's answer to it.
 //!
-//! The stop [`Handoff::ask`]s and then tries the wire; `klogd` lets the wire go
-//! and then reads [`Handoff::asked`], and posts that it let go when it was.
-//! Each side's write and its later read are split by a `SeqCst` fence, so at
-//! least one of them sees the other's: the stop's try finds the wire free, or
-//! `klogd` sees the ask and posts. Without them both can read stale, and the
+//! The stop [`Handoff::ask`]s and then tries the wire; every holder lets the
+//! wire go and then reads [`Handoff::asked`], and posts that it let go when it
+//! was. Each side's write and its later read are split by a `SeqCst` fence, so
+//! at least one of them sees the other's: the stop's try finds the wire free,
+//! or the holder sees the ask and posts. Without them both can read stale, and the
 //! stop waits out its whole budget on a wire nobody holds.
 //! Compiled a second time by `kernel-loom`, whose `console_handoff` drives
 //! both sides over the real `SleepLock`.

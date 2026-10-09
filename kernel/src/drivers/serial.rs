@@ -14,7 +14,7 @@ use crate::arch::IrqGuard;
 use crate::log;
 use super::serial_lock::{BackendLock, Held, Seized};
 use crate::scheduler::Parkable;
-use crate::sleeplock::{SleepGuard, SleepLock};
+use crate::sleeplock::{Holder, SleepGuard, SleepLock};
 
 use crate::arch::console_uart as uart;
 
@@ -253,17 +253,16 @@ pub unsafe fn panic_flush() {
     unsafe { crate::log::console::drain_bypassed(&mut uart) };
 }
 
-/// Every committed record through the registers, for a stop whose wire
-/// `klogd` kept: a line of the holder's still in flight may interleave with
-/// these. Never bypasses: every CPU is still live here, and reading the ring
-/// unsynchronised is only safe once nothing else runs.
-pub fn drain_over_the_wire() {
+/// The registers for a stop whose wire `klogd` kept, to write its records
+/// over the holder through: a line of the holder's still in flight may
+/// interleave with them. Never bypasses: every CPU is still live here.
+pub fn over_the_wire(write: impl FnOnce(&mut BackendGuard)) {
     if !has_console() {
         return;
     }
     let mut uart = panic_registers();
     match &mut uart.0 {
-        Hold::Held(guard) => crate::log::console::drain_locked(guard),
+        Hold::Held(guard) => write(guard),
         Hold::Reentered(_) | Hold::Expired(_) => uart.write(NOT_DRAINED),
     }
 }
@@ -284,28 +283,23 @@ pub fn wire(parkable: &Parkable) -> SleepGuard<'_, ()> {
     WIRE.lock(parkable)
 }
 
-/// Who holds the wire, for the stop that waited it out.
-pub fn wire_holder() -> impl core::fmt::Display {
-    struct Holder(Option<crate::scheduler::TaskId>);
-    impl core::fmt::Display for Holder {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            match self.0 {
-                Some(task) => write!(f, "task {task}"),
-                None => write!(f, "a context with no task"),
-            }
-        }
-    }
-    Holder(WIRE.holder())
-}
-
 /// The wire, if it is free, from any context — the boot before per-CPU state
-/// exists included, which has no task to hold it as.
-pub fn try_wire() -> Option<SleepGuard<'static, ()>> {
-    if crate::log::PERCPU_READY.load(Ordering::Acquire) {
+/// exists included, which has no task to hold it as; and who holds it where
+/// it is not.
+pub fn try_wire() -> Result<SleepGuard<'static, ()>, Holder> {
+    let taken = if crate::log::PERCPU_READY.load(Ordering::Acquire) {
         WIRE.try_lock()
     } else {
         WIRE.try_lock_untasked()
-    }
+    };
+    taken.ok_or_else(|| WIRE.holder_name())
+}
+
+/// Whether the running task holds the wire, for a staging that asks who holds
+/// it at the boot's last word.
+#[cfg(feature = "boot-actuators")]
+pub fn wire_is_mine() -> bool {
+    WIRE.holder().is_some_and(|holder| Some(holder) == crate::scheduler::current_task())
 }
 
 /// Whether the UART has refused a write, which is said once.

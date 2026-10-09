@@ -250,10 +250,10 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
-    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
-    // under HVF the power-off can come before `klogd` has put it on the wire
-    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
+    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
+    // stop's whole wait for the console's wire
+    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -325,6 +325,10 @@ const MACHINE_TESTS: &[&str] = &[
     "machine_shutdown_wire_held",
     // The same with `klogd` keeping the wire through the stop's budget.
     "machine_shutdown_wire_kept",
+    // The same with `klogd` staged inside its hold of the wire from the boot's
+    // last word past the seal, where the stop does not hold it: the one CPU
+    // runs nothing but the stop from the seal on.
+    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -3206,6 +3210,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
+        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),

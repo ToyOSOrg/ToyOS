@@ -92,7 +92,7 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // shipping `klogd` does at any moment.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::wire_held_across_the_stop() {
-        crate::log::console::stage_a_held_wire(&parkable);
+        crate::log::console::hold_across_the_stop(&parkable);
     }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
@@ -104,7 +104,7 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     let stop_began = crate::log::read::newest_committed();
     // Held to the machine's end: every record below reaches the wire before a
     // CPU is taken down, whoever was writing it when the stop began.
-    let wire = crate::log::console::take_for_the_stop(&parkable);
+    let mut wire = crate::log::console::take_for_the_stop(&parkable);
     // The machine's census, which no process's start or end takes.
     crate::census::log();
     #[cfg(feature = "mask-windows")]
@@ -120,6 +120,12 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.
     crate::drivers::xhci::flush_disks();
+    // `klogd` inside its hold of the wire as the last word is logged, which a
+    // stop that did not hold the wire would leave it in at the seal below.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_at_the_last_word() {
+        crate::log::console::hold_at_the_last_word(&parkable);
+    }
     log!("{last}");
     // Order is load-bearing: the console drain, the seal, then the caller's
     // non-returning call.
@@ -144,6 +150,10 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // `power::reboot`/`power::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.
     crate::drivers::xhci::seal_shut();
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_at_the_last_word() {
+        crate::log::console::sealed();
+    }
     Ok((stopping, wire))
 }
 

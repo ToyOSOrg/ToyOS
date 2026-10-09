@@ -10,9 +10,9 @@
 //! watchdog, a triple fault, power loss — are outside it and always will be.
 //!
 //! **Nothing an end says is logged after the console's last drain.** The
-//! stop holds the console's wire (`log::console::StopWire`), which `klogd`
-//! let go of for good, and its drain here is the log ring's last reader for
-//! the console: a record committed past it reaches no wire. What an end says
+//! stop holds the console's wire (`log::console::StopWire`), or writes over
+//! the holder that kept it, and its drain here is the log ring's last reader
+//! for the console: a record committed past it reaches no wire. What an end says
 //! through the ring it says above the drain (`arch::power::settle`);
 //! `arch::power::off` and `arch::power::reset` log nothing, and a panic in
 //! either drains for itself. The black box's page is another reader and an
@@ -33,7 +33,7 @@ pub fn shutdown_refused() -> Option<&'static str> {
 }
 
 /// Return the machine to firmware.
-pub fn reboot(wire: StopWire) -> ! {
+pub fn reboot(mut wire: StopWire) -> ! {
     wire.drain();
     // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
     assert!(can_reboot(), "reboot: no reset, and the caller did not ask can_reboot() first");
@@ -64,7 +64,7 @@ pub fn reset_now() -> ! {
 }
 
 /// Power the machine off. The caller asked [`shutdown_refused`] first.
-pub fn shutdown(stopping: crate::quiesce::Stopping, wire: StopWire) -> ! {
+pub fn shutdown(stopping: crate::quiesce::Stopping, mut wire: StopWire) -> ! {
     // Above the drain, because it logs.
     let settled = crate::arch::power::settle(stopping);
     // Nothing drains the log ring after this point, and nothing below logs.

@@ -1,10 +1,10 @@
-//! Loom: the stop's claim on the console wire against `klogd`'s letting go
+//! Loom: the stop's claim on the console wire against a holder's letting go
 //! (`kernel/src/log/handoff.rs`), over the real `SleepLock`.
 //!
-//! `klogd` holds the wire, lets it go, and reads whether the stop asked; the
-//! stop asks, and tries the wire. One of them must see the other: the stop's
-//! try finds the wire free, or `klogd` sees the ask, and so posts the let-go
-//! the stop parks on. Where neither does, the stop waits out its whole budget
+//! The holder, `klogd` here, lets the wire go and reads whether the stop
+//! asked; the stop asks, and tries the wire. One of them must see the other:
+//! the stop's try finds the wire free, or the holder sees the ask, and so
+//! posts the release the stop parks on. Where neither does, the stop waits out its whole budget
 //! on a wire nobody holds and writes over it. Removing either `SeqCst` fence
 //! from `handoff.rs` reds this model with exactly that outcome.
 
