@@ -25,7 +25,7 @@ pub(crate) struct Interface {
     pub neighbours: BTreeMap<Ipv4Addr, nud::Neighbour>,
     /// A send found the table full of entries in use, and none has become evictable since.
     pub full: bool,
-    /// Datagrams its entries queue, held for resolution or released and not yet left:
+    /// [ip]'s own messages its entries queue, held for resolution or released and not yet left:
     /// PENDING_TOTAL bounds them.
     pub held: usize,
     pub reachable: Duration,
