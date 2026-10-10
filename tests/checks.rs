@@ -897,6 +897,16 @@ mod checks {
     }
 
     #[test]
+    fn metal_readbacks_of_a_machine_with_no_record_are_red() {
+        metal_checks::readbacks_of_a_machine_with_no_record_are_red_and_record_nothing();
+    }
+
+    #[test]
+    fn metal_bench_reaches_the_loop_as_its_host() {
+        metal_checks::the_bench_reaches_the_loop_as_its_host();
+    }
+
+    #[test]
     fn metal_failing_shared_member_fails_itself_alone() {
         metal_checks::a_failing_shared_member_fails_itself_alone();
     }
@@ -940,7 +950,7 @@ mod checks {
             .find(|(name, _)| *name == "blackbox_unclaimed_page")
             .map(|(name, decl)| vec![(*name, decl)])
             .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
-        let verdict = metal::run(mode, &selected, &[], &[], true);
+        let verdict = metal::run(mode, None, &selected, &[], &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
         }
