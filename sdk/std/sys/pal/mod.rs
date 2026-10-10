@@ -42,15 +42,19 @@ pub(crate) static ARGV: AtomicUsize = AtomicUsize::new(0); // *const *const u8 a
 // Stack layout at entry (set up by kernel), with the stack pointer 16-byte aligned:
 //   [sp]   = argc
 //   [sp+8] = argv[0], argv[1], ..., NULL
+// The image relocates itself first, from its own header's address.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "lea rdi, [rip + __ehdr_start]",
+        "call {relocate}",
         "mov rdi, [rsp]",
         "lea rsi, [rsp + 8]",
         "call {start_rust}",
         "ud2",
+        relocate = sym toyos::relocate::relocate_self,
         start_rust = sym start_rust,
     );
 }
@@ -60,6 +64,9 @@ unsafe extern "C" fn _start() -> ! {
 #[unsafe(naked)]
 unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "adrp x0, __ehdr_start",
+        "add x0, x0, :lo12:__ehdr_start",
+        "bl {relocate}",
         "ldr x0, [sp]",
         "add x1, sp, #8",
         // The outermost frame record: a backtrace ends here.
@@ -67,6 +74,7 @@ unsafe extern "C" fn _start() -> ! {
         "mov x30, xzr",
         "bl {start_rust}",
         "brk #0x1",
+        relocate = sym toyos::relocate::relocate_self,
         start_rust = sym start_rust,
     );
 }

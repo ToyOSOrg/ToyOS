@@ -15,24 +15,22 @@ mod common;
 use common::*;
 use toyos_elf::dynamic::{self, Dynamic};
 use toyos_elf::gnu_hash::{self, GnuHash};
-use toyos_elf::rela::{self, FillLattice, Op, Rela, RelaCounts, RelaTable, RelocError, RelocKind, Rules};
+use toyos_elf::rela::{self, Op, Rela, RelaCounts, RelaTable, RelocError, RelocKind, Rules};
 use toyos_elf::section::{SectionTable, Unapplied, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
 use toyos_elf::Machine;
 
 /// Every entry through [`rela::parse`], in an image spanning all of memory with
-/// a TLS segment no offset leaves: the window, fill page and symbol count are
-/// the only bounds left to decide.
+/// a TLS segment no offset leaves: the window and the symbol count are the
+/// only bounds left to decide.
 fn validate(
     mut entries: impl Iterator<Item = Rela>,
     window: (u64, u64),
     sym_count: usize,
-    fill: Option<FillLattice>,
 ) -> Result<(), RelocError> {
     let rules = Rules {
         extent: extent(0, u64::MAX),
         window,
-        fill,
         tls: Some(tls_segment(u64::MAX)),
     };
     let syms = vec![0; sym_count * toyos_elf::sym::ENTRY_SIZE];
@@ -120,25 +118,25 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
 
     let overflowing = [rela(u64::MAX - 3, 0, 8, 0)].concat();
     assert_eq!(
-        validate(RelaTable::new(&overflowing, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&overflowing, Machine::X86_64).iter(), window, 4),
         Err(RelocError::OffsetOverflows),
     );
 
     let below = [rela(0xFF8, 0, 8, 0)].concat();
     assert_eq!(
-        validate(RelaTable::new(&below, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&below, Machine::X86_64).iter(), window, 4),
         Err(RelocError::OutsideWindow),
     );
 
     // One byte of an eight-byte write past the end.
     let straddling = [rela(0x1FF9, 0, 8, 0)].concat();
     assert_eq!(
-        validate(RelaTable::new(&straddling, Machine::X86_64).iter(), window, 4, None),
+        validate(RelaTable::new(&straddling, Machine::X86_64).iter(), window, 4),
         Err(RelocError::OutsideWindow),
     );
 
     let fits = [rela(0x1FF8, 0, 8, 0)].concat();
-    assert_eq!(validate(RelaTable::new(&fits, Machine::X86_64).iter(), window, 4, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&fits, Machine::X86_64).iter(), window, 4), Ok(()));
 }
 
 /// A table the loader reads while it writes must not lie inside the range it
@@ -207,44 +205,6 @@ fn a_read_table_on_a_page_of_the_write_window_is_refused() {
     );
 }
 
-/// psABI oracle: every entry is applied or the object rejected. An 8-byte write
-/// in a page's last 7 bytes is refused for a chunked writer, accepted for `None`.
-#[test]
-fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
-    let window = (0u64, 0x1_0000u64);
-    let lattice = FillLattice { base: 0, granule: 4096 };
-
-    for off in 0xFF9u64..=0xFFF {
-        let straddles = [rela(off, 0, 8, 0)].concat();
-        assert_eq!(
-            validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, Some(lattice)),
-            Err(RelocError::StraddlesFillPage),
-            "offset {off:#x} straddles the page but was accepted",
-        );
-        assert_eq!(
-            validate(RelaTable::new(&straddles, Machine::X86_64).iter(), window, 4, None),
-            Ok(()),
-            "offset {off:#x} refused for a contiguous writer",
-        );
-    }
-
-    // A write ending at the boundary fits; a 4-byte TPOFF32 fits in the last 4.
-    assert_eq!(
-        validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
-        Ok(()),
-    );
-    assert_eq!(
-        validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(lattice)),
-        Ok(()),
-    );
-
-    let shifted = FillLattice { base: 3, granule: 4096 };
-    assert_eq!(
-        validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat(), Machine::X86_64).iter(), window, 4, Some(shifted)),
-        Err(RelocError::StraddlesFillPage),
-    );
-}
-
 /// A `DTPOFF64` with `r_sym == 0` writes its addend verbatim, so validation has
 /// to cover every type the loader writes and not just the ones it applies at
 /// load time.
@@ -254,14 +214,14 @@ fn every_written_type_is_validated_and_no_other_is() {
     for raw in [6u32, 7, 8, 16, 17, 18, 23] {
         let bytes = [rela(0x1000, 0, raw, 0)].concat();
         assert_eq!(
-            validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4, None),
+            validate(RelaTable::new(&bytes, Machine::X86_64).iter(), window, 4),
             Err(RelocError::OutsideWindow),
             "type {raw} was not validated",
         );
     }
     // A type nobody patches may name any offset at all.
     let ignored = [rela(u64::MAX, 0, 42, 0)].concat();
-    assert_eq!(validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&ignored, Machine::X86_64).iter(), window, 0), Ok(()));
 }
 
 /// A TLS descriptor is filled by a resolver this loader does not have, so an
@@ -273,35 +233,13 @@ fn an_aarch64_tls_descriptor_is_refused_by_name() {
     let desc = [rela(0x10, 1, 1031, 0)].concat();
     assert_eq!(RelocKind::from_raw(Machine::Aarch64, 1031), RelocKind::TlsDesc);
     assert_eq!(
-        validate(RelaTable::new(&desc, Machine::Aarch64).iter(), window, 4, None),
+        validate(RelaTable::new(&desc, Machine::Aarch64).iter(), window, 4),
         Err(RelocError::TlsDescriptor),
     );
     assert!(RelocError::TlsDescriptor.as_str().contains("R_AARCH64_TLSDESC"));
-    assert_eq!(validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&desc, Machine::X86_64).iter(), window, 4), Ok(()));
     let counts = RelaCounts::of(RelaTable::new(&desc, Machine::Aarch64).iter());
     assert_eq!(counts.count_of(RelocKind::TlsDesc), 1);
-}
-
-/// An executable's loader keeps no group until the counts allow it: one TLS
-/// descriptor refuses the image outright, before anything is reserved, and a
-/// group too large for one allocation refuses it too.
-#[test]
-fn an_executable_s_reservation_is_had_only_through_its_refusals() {
-    let mixed = [rela(0, 0, 8, 0), rela(8, 1, 6, 0), rela(16, 2, 18, 0), rela(24, 3, 7, 0)].concat();
-    let desc = [rela(0, 0, 1027, 0), rela(0x10, 1, 1031, 0)].concat();
-
-    let aarch64 = RelaCounts::of(RelaTable::new(&desc, Machine::Aarch64).iter());
-    assert_eq!(aarch64.for_executable(24, usize::MAX), Err(rela::ExeRefusal::TlsDescriptor));
-    assert!(rela::ExeRefusal::TlsDescriptor.as_str().contains("R_AARCH64_TLSDESC"));
-
-    let kept = RelaCounts::of(RelaTable::new(&mixed, Machine::X86_64).iter())
-        .for_executable(24, 48)
-        .expect("two entries of 24 bytes fit 48");
-    assert_eq!((kept.relative, kept.bind, kept.tpoff64, kept.tpoff32), (1, 2, 1, 0));
-
-    let x86 = RelaCounts::of(RelaTable::new(&mixed, Machine::X86_64).iter());
-    assert_eq!(x86.for_executable(24, 47), Err(rela::ExeRefusal::TooLarge));
-    assert_eq!(x86.for_executable(usize::MAX, usize::MAX), Err(rela::ExeRefusal::TooLarge));
 }
 
 #[test]
@@ -313,22 +251,22 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
     for raw in [6u32, 7, 16, 17, 18, 23] {
         let bind = [rela(0x10, 4, raw, 0)].concat();
         assert_eq!(
-            validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4, None),
+            validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 4),
             Err(RelocError::SymbolPastTable),
             "type {raw}",
         );
-        assert_eq!(validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 5, None), Ok(()));
+        assert_eq!(validate(RelaTable::new(&bind, Machine::X86_64).iter(), window, 5), Ok(()));
     }
 
     let relative = [rela(0x10, u32::MAX, 8, 0)].concat();
-    assert_eq!(validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0, None), Ok(()));
+    assert_eq!(validate(RelaTable::new(&relative, Machine::X86_64).iter(), window, 0), Ok(()));
 }
 
 /// Four whole entries and eight bytes of a fifth: the partial entry is no
 /// symbol a relocation may name.
 #[test]
 fn a_symbol_index_is_bounded_by_the_whole_entries_of_its_table() {
-    let rules = Rules { extent: extent(0, 0x100), window: (0, 0x100), fill: None, tls: None };
+    let rules = Rules { extent: extent(0, 0x100), window: (0, 0x100), tls: None };
     let syms = [0u8; 4 * 24 + 8];
     for raw in [6u32, 7, 16, 17, 18, 23] {
         let parse = |r_sym| {
@@ -746,7 +684,6 @@ fn each_machine_reads_its_own_relocation_numbers() {
     let rules = Rules {
         extent: extent(0, 0x100),
         window: (0, 0x100),
-        fill: None,
         tls: None,
     };
     let parsed = rela::parse(entry, &rules, SymTab::empty()).unwrap().unwrap();

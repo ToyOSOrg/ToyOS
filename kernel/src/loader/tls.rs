@@ -159,52 +159,28 @@ unsafe fn rebase(frames: &Unpublished, tp_offset: usize, at: UserAddr) {
     }
 }
 
-/// One combined block for every startup module; `None` when they do not fit, since a missing module would mean relocations resolving against a block that is not there.
-/// The executable's module goes where its linker resolved its own accesses: next to the thread
-/// pointer, last in variant II and first in variant I.
+/// The id the first `dlopen`ed module with TLS takes: the executable's is 1.
+pub const FIRST_DLOPEN_MODULE: u64 = 2;
+
+/// The static block's one module, the executable's, and its layout; no module for an executable
+/// without TLS, and `None` when it does not fit. The module goes where its linker resolved its own
+/// accesses: ending at the thread pointer in variant II, starting at it in variant I.
 pub fn build_tls_layout(
-    loaded_libs: &[crate::elf::LoadedLib],
     layout: &Layout,
     exe_tls_template: Option<&OwnedAlloc>,
-) -> Option<(alloc::vec::Vec<TlsModule>, Static, u64)> {
-    // (template, memsz, placed bytes, align, module id). Module id 1 is the executable's;
-    // libraries start at 2.
-    let exe = match layout.tls().and_then(TlsSegment::occupied) {
-        None => None,
-        Some(tls) => {
-            let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
-            // Variant II's executable ends at the thread pointer at its extent, not its `memsz`:
-            // its linker fixed every local-exec offset against the rounded size.
-            let placed = match VARIANT {
-                Variant::II => toyos_elf::tls::exe_extent(memsz, align)?,
-                Variant::I => memsz,
-            };
-            Some((exe_tls_template.map(|buf| buf.slice(tls.template().len() as usize)), memsz, placed, align, 1))
-        }
+) -> Option<(alloc::vec::Vec<TlsModule>, Static)> {
+    let Some(tls) = layout.tls().and_then(TlsSegment::occupied) else {
+        return Some((alloc::vec::Vec::new(), Static::new(VARIANT, 0, 1, 1)?));
     };
-    let with_tls = || {
-        loaded_libs.iter().filter_map(|lib| Some((lib.tls_template, lib.tls()?.occupied()?)))
+    let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
+    // Variant II's executable ends at the thread pointer at its extent, not its `memsz`:
+    // its linker fixed every local-exec offset against the rounded size.
+    let placed = match VARIANT {
+        Variant::II => toyos_elf::tls::exe_extent(memsz, align)?,
+        Variant::I => memsz,
     };
-    let libs = with_tls().zip(2u64..).map(|((template, tls), id)| {
-        let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
-        (template, memsz, memsz, align, id)
-    });
-    let next_module_id = 2 + with_tls().count() as u64;
-    let order: alloc::vec::Vec<_> = match VARIANT {
-        Variant::II => libs.chain(exe).collect(),
-        Variant::I => exe.into_iter().chain(libs).collect(),
-    };
-
-    let mut modules = alloc::vec::Vec::with_capacity(order.len());
-    let mut cursor = 0usize;
-    let mut max_align = 1usize;
-    for (template, memsz, placed, align, module_id) in order.iter().copied() {
-        let (base_offset, next) = toyos_elf::tls::place_module(cursor, placed, align)?;
-        cursor = next;
-        max_align = max_align.max(align);
-        modules.push(TlsModule { template, memsz, base_offset, module_id, is_static: true });
-    }
-    let first_align = order.first().map_or(1, |&(_, _, _, align, _)| align);
-    let tls = Static::new(VARIANT, cursor, max_align, first_align)?;
-    Some((modules, tls, next_module_id))
+    let (base_offset, end) = toyos_elf::tls::place_module(0, placed, align)?;
+    let template = exe_tls_template.map(|buf| buf.slice(tls.template().len() as usize));
+    let module = TlsModule { template, memsz, base_offset, module_id: 1, is_static: true };
+    Some((alloc::vec![module], Static::new(VARIANT, end, align.max(1), align)?))
 }

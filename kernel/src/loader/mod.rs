@@ -1,22 +1,22 @@
 //! Building a process out of an ELF file.
 //!
-//! Segment contents are demand-paged through a relocation index the fault
-//! handler applies per page; shared libraries are the exception and are
-//! mapped eagerly since they are shared between processes.
+//! The kernel reads an executable's program headers and its `PT_TLS`
+//! template, demand-pages its `PT_LOAD`s and jumps to its entry; it reads no
+//! dynamic section, applies no relocation and loads no library at spawn. The
+//! program relocates itself (`toyos::relocate`).
 //!
 //! Every number the file names is untrusted: a refusal is
 //! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.
 //!
-//! A spawn that lands writes one record, `spawn: <path> pid=N unresolved=N
-//! (…ms)`, once the process is in the table and placed; a spawn that is
-//! refused writes one, naming why. Nothing is said on the way, by this file or
-//! by `crate::elf` under it (`crate::process`'s header).
+//! A spawn that lands writes one record, `spawn: <path> pid=N (…ms)`, once
+//! the process is in the table and placed; a spawn that is refused writes
+//! one, naming why. Nothing is said on the way, by this file or by
+//! `crate::elf` under it (`crate::process`'s header).
 
 // `warn`, not `deny`: the rest of the kernel is not yet swept for undocumented unsafe blocks.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod start;
-mod symbols;
 mod tls;
 
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
@@ -40,23 +40,13 @@ use crate::sync::Lock;
 use crate::{scheduler, vfs, UserAddr};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::SyscallError;
-use toyos_elf::section::SectionTable;
-use toyos_elf::sym::{self, SymTab};
-use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{Layout, RelocError, TlsSegment};
+use toyos_elf::{Layout, TlsSegment};
 use toyos_symbols::frame::BuildId;
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
 /// User virtual address space starts at 1 TB, above any direct-mapped physical RAM.
 const USER_VM_BASE: u64 = 0x100_0000_0000;
-
-/// The most of a `.gnu.hash` table the loader will read off an executable.
-///
-/// A table exceeding this yields no symbol count at all — the loader falls
-/// back to the `DT_SYMTAB`/`DT_STRTAB` gap rather than a short count nothing
-/// downstream could tell from a real one.
-const MAX_GNU_HASH_BYTES: u64 = 64 * 1024;
 
 /// Read a byte range from a file through the page cache.
 ///
@@ -93,21 +83,6 @@ pub(crate) fn read_file_range(
     result
 }
 
-/// [`read_file_range`] for a length the ELF declared.
-///
-/// `None` above [`crate::mm::MAX_HEAP_ALLOC`]: past that the allocation would
-/// assert in the heap's page source rather than fail, so this refuses instead
-/// of clamping to a table nothing downstream could tell was short.
-fn read_elf_table(
-    backing: &dyn crate::file_backing::FileBacking,
-    offset: u64,
-    len: usize,
-) -> Option<Vec<u8>> {
-    if len > crate::mm::MAX_HEAP_ALLOC {
-        return None;
-    }
-    Some(read_file_range(backing, offset, len))
-}
 
 /// Insert one demand-paged region per `PT_LOAD` segment.
 ///
@@ -184,161 +159,6 @@ fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
     }
 }
 
-/// Everything the executable's `PT_DYNAMIC` names, resolved to file offsets
-/// and read.
-struct ExeTables {
-    /// `DT_NEEDED` values, as offsets into `dynstr`.
-    needed: Vec<u64>,
-    dynstr: Vec<u8>,
-    dynsym: Vec<u8>,
-    relas: elf::ParsedRelaEntries,
-}
-
-impl ExeTables {
-    fn symbols(&self) -> SymTab<'_> {
-        SymTab::new(&self.dynsym, &self.dynstr)
-    }
-}
-
-/// Turn a `DT_*` vaddr into a file offset, or refuse the binary.
-///
-/// `Err` when the vaddr lies below every `PT_LOAD`: there is no file offset for it.
-fn file_off(layout: &Layout, path: &str, what: &str, vaddr: u64) -> Result<u64, SyscallError> {
-    match layout.vaddr_to_file_offset(vaddr) {
-        Some(off) => Ok(off),
-        None => {
-            log!("spawn: {}: {} vaddr {:#x} is in or near no PT_LOAD segment", path, what, vaddr);
-            Err(SyscallError::InvalidArgument)
-        }
-    }
-}
-
-/// Read a table whose length the file declared, or refuse the binary.
-///
-/// `Err` above one kernel allocation, where the `Vec` would instead panic in
-/// the heap's page source.
-fn table(
-    backing: &dyn crate::file_backing::FileBacking,
-    path: &str,
-    what: &str,
-    off: u64,
-    len: usize,
-) -> Result<Vec<u8>, SyscallError> {
-    match read_elf_table(backing, off, len) {
-        Some(v) => Ok(v),
-        None => {
-            log!("spawn: {}: {} declares {} bytes, past one kernel allocation", path, what, len);
-            Err(SyscallError::ResourceExhausted)
-        }
-    }
-}
-
-fn read_exe_tables(
-    backing: &dyn crate::file_backing::FileBacking,
-    layout: &Layout,
-    path: &str,
-) -> Result<ExeTables, SyscallError> {
-    let (dyn_info, needed) = match layout.dynamic() {
-        Some(dynamic) => {
-            let data = table(backing, path, "PT_DYNAMIC", dynamic.file_offset(), dynamic.image().len() as usize)?;
-            let mut needed = Vec::new();
-            needed.reserve_exact(data.len() / toyos_elf::dynamic::ENTRY_SIZE);
-            needed.extend(toyos_elf::Dynamic::needed(&data));
-            (toyos_elf::Dynamic::parse(&data), needed)
-        }
-        None => (toyos_elf::Dynamic::default(), Vec::new()),
-    };
-
-    let rela_data = match dyn_info.rela {
-        Some(t) => {
-            let off = file_off(layout, path, "DT_RELA", t.vaddr)?;
-            table(backing, path, "DT_RELASZ", off, t.size as usize)?
-        }
-        // No PT_DYNAMIC: `.rela.dyn` is found through section headers by shape, not name.
-        None if layout.dynamic().is_none() => rela_dyn_from_sections(backing, layout, path)?,
-        None => Vec::new(),
-    };
-    let jmprel_data = match dyn_info.jmprel {
-        Some(t) => {
-            let off = file_off(layout, path, "DT_JMPREL", t.vaddr)?;
-            table(backing, path, "DT_PLTRELSZ", off, t.size as usize)?
-        }
-        None => Vec::new(),
-    };
-    let symtab_file_off = match dyn_info.symtab {
-        Some(vaddr) => Some(file_off(layout, path, "DT_SYMTAB", vaddr)?),
-        None => None,
-    };
-    let dynstr = match dyn_info.strtab_table() {
-        Some(t) => {
-            let off = file_off(layout, path, "DT_STRTAB", t.vaddr)?;
-            table(backing, path, "DT_STRSZ", off, t.size as usize)?
-        }
-        None => Vec::new(),
-    };
-    let dynsym = match (symtab_file_off, exe_sym_count(backing, layout, &dyn_info, path)?) {
-        (Some(off), n) if n > 0 => table(backing, path, "symbol count", off, n * sym::ENTRY_SIZE)?,
-        _ => Vec::new(),
-    };
-
-    // Parsed like a library's but for the window and the fill page: the
-    // executable's writes land anywhere in its own image, one demand-fault page
-    // at a time, so a crossing write is refused, not silently dropped.
-    let extent = layout.extent();
-    let rules = Rules {
-        extent,
-        window: (extent.min(), extent.max()),
-        fill: Some(FillLattice { base: extent.min(), granule: FILL_GRANULE }),
-        tls: layout.tls(),
-    };
-    let relas = elf::parse_rela_entries(&rela_data, &jmprel_data, &rules, SymTab::new(&dynsym, &dynstr)).map_err(|refused| {
-        log!("spawn: {}: {}", path, refused.as_str());
-        refused.error()
-    })?;
-
-    Ok(ExeTables { needed, dynstr, dynsym, relas })
-}
-
-/// `.dynsym`'s entry count, by the rule `Dynamic::sym_count` states.
-fn exe_sym_count(
-    backing: &dyn crate::file_backing::FileBacking,
-    layout: &Layout,
-    dyn_info: &toyos_elf::Dynamic,
-    path: &str,
-) -> Result<usize, SyscallError> {
-    let gnu_hash = match dyn_info.gnu_hash {
-        Some(vaddr) => {
-            let off = file_off(layout, path, "DT_GNU_HASH", vaddr)?;
-            let len = layout.file_bytes_from(vaddr).unwrap_or(0).min(MAX_GNU_HASH_BYTES) as usize;
-            Some(read_file_range(backing, off, len))
-        }
-        None => None,
-    };
-    Ok(dyn_info.sym_count(gnu_hash.as_deref()).unwrap_or_else(|gap| {
-        log!("spawn: {}: .gnu.hash does not describe a symbol count in its {} bytes", path, gnu_hash.as_ref().map_or(0, |t| t.len()));
-        gap
-    }))
-}
-
-/// `.rela.dyn` located through section headers, for a file with no `PT_DYNAMIC`.
-fn rela_dyn_from_sections(
-    backing: &dyn crate::file_backing::FileBacking,
-    layout: &Layout,
-    path: &str,
-) -> Result<Vec<u8>, SyscallError> {
-    let Some(sections) = layout.section_headers() else {
-        return Ok(Vec::new());
-    };
-    let shdrs = table(backing, path, "e_shnum", sections.file_offset, sections.byte_len())?;
-    let mut first = |off: u64| {
-        let head = read_file_range(backing, off, toyos_elf::rela::ENTRY_SIZE);
-        toyos_elf::RelaTable::new(&head, crate::arch::ELF_MACHINE).get(0)
-    };
-    match SectionTable::new(&shdrs).rela_dyn(&mut first) {
-        Some((off, size)) => table(backing, path, "SHT_RELA sh_size", off, size as usize),
-        None => Ok(Vec::new()),
-    }
-}
 
 /// Load a program and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. `commit` builds the
@@ -346,9 +166,7 @@ fn rela_dyn_from_sections(
 /// left to refuse.
 ///
 /// `path` is the program, opened here — or, with `image`, the bytes the caller
-/// read from it itself, and then nothing opens it and its libraries come from
-/// `/system/lib` alone, since the directory it names is no volume of this
-/// kernel's. `argv[0]` is only the name the child goes by.
+/// read from it itself, and then nothing opens it. `argv[0]` is only the name the child goes by.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
@@ -370,7 +188,6 @@ pub fn spawn<H>(
     let admission = Admission::ask(parent)?;
     let t0 = crate::clock::nanos_since_boot();
 
-    let from_image = image.is_some();
     let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
         Some(image) => image,
         None => {
@@ -408,32 +225,14 @@ pub fn spawn<H>(
     // Where the image's first byte lands: every `ImageOffset` the file's
     // numbers were parsed into is added to it, and its span fits above it.
     let image_start = UserAddr::new(USER_VM_BASE);
-    // `SYS_QUERY_MODULES` answers with the mapped table, so an image without
-    // one has no true answer to give.
+    // The program reads the mapped table to relocate itself, and
+    // `SYS_QUERY_MODULES` answers with it: an image without one has neither.
     let Some(phdrs) = layout.program_headers() else {
         log!("spawn: {}: no PT_LOAD maps the program header table", path);
         return Err(SyscallError::InvalidArgument.into());
     };
 
-    let exe = read_exe_tables(backing.as_ref(), &layout, path)?;
     let t1 = crate::clock::nanos_since_boot();
-
-    // Reserved from the counts, not grown: these are exact upper bounds on `add_u64` calls.
-    let u64_writes =
-        exe.relas.relative.len() + exe.relas.glob_dat.len() + exe.relas.tpoff64.len();
-    let Some(mut reloc_index) =
-        elf::RelocationIndex::with_capacity(u64_writes, exe.relas.tpoff32.len())
-    else {
-        log!("spawn: {}: {} relocations do not fit one index", path, u64_writes);
-        return Err(SyscallError::ResourceExhausted.into());
-    };
-    for &(r_offset, target) in &exe.relas.relative {
-        reloc_index.add_u64(r_offset, (image_start + target.get()).raw());
-    }
-
-    let t2 = crate::clock::nanos_since_boot();
-    let mut loaded_libs = load_needed_libs(&exe, path, from_image)?;
-    let t_deps = crate::clock::nanos_since_boot();
 
     // ELF segments are demand-faulted; the address space starts with the clock page alone.
     let Some(mut space) = crate::mm::paging::AddressSpace::new_user() else {
@@ -443,53 +242,6 @@ pub fn spawn<H>(
     crate::clock::map_page(&mut space);
     let child_pt: PageTables = Arc::new(Lock::new(space));
     insert_elf_regions(&mut child_pt.lock(), &layout, image_start, &backing)?;
-
-    // Libraries get user addresses before any relocation is written: RELATIVE
-    // and GLOB_DAT compute a GOT value as `user_base + addend`/`st_value`.
-    map_libs(&child_pt, &mut loaded_libs, path)?;
-    for lib in &loaded_libs.libs {
-        if lib.user_base.raw() != lib.phys_base {
-            elf::rebase_relative_relocs(lib);
-        }
-    }
-
-    // References no module defines. The file chooses how many, so they are a count in the spawn's record and never a record each.
-    let mut unresolved = 0u64;
-    if !loaded_libs.libs.is_empty() {
-        // A PIE without `--export-dynamic` exports nothing through `.dynsym`;
-        // read `.symtab` only when that lookup came back empty.
-        let fallback = exe
-            .symbols()
-            .defined()
-            .next()
-            .is_none()
-            .then(|| symbols::read_symtab(backing.as_ref(), &layout))
-            .flatten();
-        let exe_sym_map = match &fallback {
-            Some((syms, strs)) => {
-                symbols::static_map(&SymTab::new(syms, strs), image_start, extent)
-            }
-            None => symbols::dynamic_map(&exe.symbols(), image_start, extent),
-        };
-        let exe_sym_map = exe_sym_map.map_err(|refused| {
-            log!("spawn: {}: {}", path, refused.as_str());
-            SyscallError::InvalidArgument
-        })?;
-        for lib in &loaded_libs.libs {
-            unresolved += elf::resolve_lib_bind_relocs(lib, &exe_sym_map, &loaded_libs.libs);
-        }
-
-        for &(r_offset, r_sym) in &exe.relas.glob_dat {
-            if r_sym.get() == 0 {
-                continue;
-            }
-            let name = elf::relocated_symbol(exe.symbols(), r_sym).name_in(&exe.dynstr);
-            match loaded_libs.libs.iter().find_map(|lib| lib.resolve(name)) {
-                Some(addr) => reloc_index.add_u64(r_offset, addr.raw()),
-                None => unresolved += 1,
-            }
-        }
-    }
 
     // Mapped eagerly, not demand-paged: every process touches the stack immediately.
     let stack_pages = match PageAlloc::new(USER_STACK_SIZE) {
@@ -543,23 +295,10 @@ pub fn spawn<H>(
         None => None,
     };
 
-    let Some((tls_modules, tls, next_tls_module_id)) =
-        tls::build_tls_layout(&loaded_libs.libs, &layout, exe_tls_template.as_ref())
-    else {
-        log!("spawn: {}: the TLS modules do not fit one block", path);
+    let Some((tls_modules, tls)) = tls::build_tls_layout(&layout, exe_tls_template.as_ref()) else {
+        log!("spawn: {}: the TLS module does not fit one block", path);
         return Err(SyscallError::ResourceExhausted.into());
     };
-
-    match apply_tls_relocs(&exe, &layout, &loaded_libs.libs, &tls_modules, tls, &mut reloc_index) {
-        Ok(more) => unresolved += more,
-        Err(refused) => {
-            log!("spawn: {}: {}", path, refused.as_str());
-            return Err(SyscallError::InvalidArgument.into());
-        }
-    }
-
-    reloc_index.finalize();
-    let reloc_index = if reloc_index.len() > 0 { Some(Arc::new(reloc_index)) } else { None };
 
     let Some((tls_pages, thread_pointer, _)) =
         tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
@@ -598,8 +337,6 @@ pub fn spawn<H>(
         }
     };
 
-
-    let NeededLibs { libs: loaded_libs, paths: lib_paths } = loaded_libs;
     let pid = admission.pid();
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
@@ -613,17 +350,16 @@ pub fn spawn<H>(
             elf_alloc: exe_tls_template,
             tls_modules,
             tls,
-            next_tls_module_id,
+            next_tls_module_id: tls::FIRST_DLOPEN_MODULE,
             dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
-            loaded_libs,
-            reloc_index,
+            loaded_libs: Vec::new(),
             elf_base: UserAddr::new(base),
             exe_eh_frame_hdr: layout
                 .eh_frame_hdr()
                 .map_or((0, 0), |r| ((image_start + r.start().get()).raw(), r.len())),
             exe_vaddr_max: image_end,
             exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
-            lib_paths,
+            lib_paths: Vec::new(),
         },
         mmap_regions: Vec::new(),
         pipe_maps: Vec::new(),
@@ -686,178 +422,10 @@ pub fn spawn<H>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} unresolved={} (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
-        path, pid, unresolved,
-        (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
-        (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
+    log!("spawn: {} pid={} (layout={}ms tls={}ms total={}ms)",
+        path, pid, (t1 - t0) / 1_000_000, (t_tls - t1) / 1_000_000, (t3 - t0) / 1_000_000);
 
     Ok((pid, held))
-}
-
-/// The libraries an executable's `DT_NEEDED` entries name, and the paths they were found at.
-struct NeededLibs {
-    libs: Vec<elf::LoadedLib>,
-    paths: Vec<String>,
-}
-
-/// The most distinct libraries one executable may pull in; each is a private
-/// 2 MiB window, so a `DT_NEEDED` list naming more is refused rather than loaded.
-const MAX_NEEDED_LIBS: usize = 64;
-
-/// Load each distinct `DT_NEEDED` library, from the executable's own directory
-/// first and `/system/lib` second; an image's from `/system/lib` alone.
-fn load_needed_libs(exe: &ExeTables, path: &str, from_image: bool) -> Result<NeededLibs, SyscallError> {
-    let mut out = NeededLibs { libs: Vec::new(), paths: Vec::new() };
-    if exe.needed.is_empty() {
-        return Ok(out);
-    }
-    let exe_dir = match from_image {
-        true => "/system/lib",
-        false => path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""),
-    };
-
-    // Collapse duplicates to the distinct set and bound it: a repeat resolves to
-    // one library `elf/cache.rs` holds one window for, so it buys no second one.
-    let mut distinct: Vec<&str> = Vec::new();
-    for &name_offset in &exe.needed {
-        // An offset outside the string table yields an empty name, not a bounds failure.
-        let lib_name = toyos_elf::cstr(&exe.dynstr, name_offset);
-        if lib_name.is_empty() || distinct.contains(&lib_name) {
-            continue;
-        }
-        if distinct.len() == MAX_NEEDED_LIBS {
-            log!("spawn: {}: more than {} distinct DT_NEEDED libraries", path, MAX_NEEDED_LIBS);
-            return Err(SyscallError::ResourceExhausted);
-        }
-        distinct.push(lib_name);
-    }
-    out.libs.reserve_exact(distinct.len());
-    out.paths.reserve_exact(distinct.len());
-
-    for lib_name in distinct {
-        // Which spelling opens is decided before the cache is consulted, and is
-        // the key from here on: keyed by the exe-dir string it never found, a
-        // library loaded through the fallback was mapped a second time by any
-        // later `dlopen("/system/lib/…")`. Fallback only for NotFound — any other error
-        // would repeat on `/system/lib` too and produce a misleading second log line.
-        let (so_backing, id, lib_path) = {
-            let in_exe_dir = alloc::format!("{}/{}", exe_dir, lib_name);
-            let opened = vfs::lock().open_backing_identified(&in_exe_dir);
-            match opened {
-                Ok((b, id)) => (b, id, in_exe_dir),
-                Err(SyscallError::NotFound) => {
-                    let fallback = alloc::format!("/system/lib/{}", lib_name);
-                    match vfs::lock().open_backing_identified(&fallback) {
-                        Ok((b, id)) => (b, id, fallback),
-                        Err(e) => {
-                            log!("spawn: {}: failed to load {}: {e}", path, lib_name);
-                            return Err(e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log!("spawn: {}: failed to load {}: {e}", path, lib_name);
-                    return Err(e);
-                }
-            }
-        };
-
-        match elf::try_clone_cached(&lib_path, id) {
-            Ok(Some(lib)) => {
-                out.paths.push(lib_path);
-                out.libs.push(lib);
-                continue;
-            }
-            Err(e) => {
-                log!(
-                    "spawn: {}: {}: the cached image is stale — the file behind this path changed \
-                     since it was loaded, and the image cannot be replaced while a process has it \
-                     mapped",
-                    path, lib_path
-                );
-                return Err(e);
-            }
-            Ok(None) => {}
-        }
-
-        match elf::load_shared_lib(so_backing.as_ref()) {
-            Ok((lib, rw_offset, rw_size)) => {
-                out.libs.push(elf::cache_loaded_lib(&lib_path, id, lib, rw_offset, rw_size)?);
-                out.paths.push(lib_path);
-            }
-            Err(e) => {
-                log!("spawn: {}: failed to load {}: {}", path, lib_name, e);
-                return Err(SyscallError::NotFound);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Give every library a virtual address in the child and map its pages there.
-///
-/// A cached library's read-only pages are the cache's own; only its writable
-/// window is private to this process.
-fn map_libs(
-    child_pt: &PageTables,
-    loaded: &mut NeededLibs,
-    path: &str,
-) -> Result<(), SyscallError> {
-    for lib in &mut loaded.libs {
-        let Some(vaddr) = lib.map_into(child_pt) else {
-            log!("spawn: {}: out of virtual address space for a library", path);
-            return Err(SyscallError::ResourceExhausted);
-        };
-        lib.user_base = vaddr;
-    }
-    Ok(())
-}
-
-/// Apply the TLS relocations of every startup library, and index the executable's.
-///
-/// Libraries' land directly; the executable's go into the relocation index
-/// because its pages do not exist yet. Answers how many references name a
-/// symbol no module defines.
-fn apply_tls_relocs(
-    exe: &ExeTables,
-    layout: &Layout,
-    loaded_libs: &[elf::LoadedLib],
-    tls_modules: &[elf::TlsModule],
-    tls: toyos_elf::tls::Static,
-    reloc_index: &mut elf::RelocationIndex,
-) -> Result<u64, RelocError> {
-    let tls_info = elf::TlsModuleInfo { libs: loaded_libs, modules: tls_modules };
-    let mut unresolved = 0;
-    for lib in loaded_libs {
-        // Matched by template pointer, unique per lib; a lib without TLS matches nothing.
-        let module = tls_modules.iter().find(|m| m.template == lib.tls_template);
-        let base_offset = module.map_or(0, |m| m.base_offset);
-        // Initial-exec: references to TLS in the static block.
-        unresolved += elf::apply_tpoff_relocs(lib, base_offset, tls, &tls_info)?;
-        // General-dynamic: this lib's own TLS, reached through the DTV.
-        if let Some(m) = module {
-            unresolved += elf::apply_dtpoff_relocs(lib, &tls_info)?;
-            unresolved += elf::apply_dtpmod_relocs(lib, m.module_id, &tls_info);
-        }
-    }
-
-    let exe_base_offset = tls_modules
-        .iter()
-        .find(|m| m.module_id == 1)
-        .map_or(0, |m| m.base_offset);
-    let exe_tpoff =
-        |r| elf::compute_tpoff(r, exe_base_offset, layout.tls(), exe.symbols(), tls, &tls_info);
-    for &(r_offset, r) in &exe.relas.tpoff64 {
-        let value = exe_tpoff(r)?;
-        unresolved += u64::from(value.is_none());
-        reloc_index.add_u64(r_offset, value.unwrap_or(0) as u64);
-    }
-    for &(r_offset, r) in &exe.relas.tpoff32 {
-        let value = exe_tpoff(r)?;
-        unresolved += u64::from(value.is_none());
-        reloc_index.add_i32(r_offset, elf::tpoff32_value(value.unwrap_or(0))?);
-    }
-    Ok(unresolved)
 }
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every

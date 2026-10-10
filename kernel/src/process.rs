@@ -461,8 +461,7 @@ pub struct PageFaultRecord {
     pub fault_addr: u64,
     pub page_elf_offset: u64,
     pub block_idx: u32,
-    pub reloc_count: u16,
-    // bit 0 writable, 1 has_relocs, 2 anonymous, 3 beyond_extent, 4 executable; 0 and 4 come from one `Prot` and are never both set (W^X).
+    // bit 0 writable, 2 anonymous, 3 beyond_extent, 4 executable; 0 and 4 come from one `Prot` and are never both set (W^X).
     pub flags: u16,
     pub duration_us: u16, // microseconds spent handling this fault
 }
@@ -478,8 +477,7 @@ impl PageFaultTrace {
     pub fn new() -> Self {
         Self {
             entries: [PageFaultRecord {
-                fault_addr: 0, page_elf_offset: 0, block_idx: 0,
-                reloc_count: 0, flags: 0, duration_us: 0,
+                fault_addr: 0, page_elf_offset: 0, block_idx: 0, flags: 0, duration_us: 0,
             }; 32],
             write_pos: 0,
             total: 0,
@@ -514,8 +512,6 @@ pub struct ElfInfo {
     pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), MappedPages>,
     /// Dynamically loaded shared libraries (indexed by dlopen handle).
     pub loaded_libs: Vec<elf::LoadedLib>,
-    /// RELATIVE relocation index for demand-paged ELF (applied per-page on fault).
-    pub reloc_index: Option<Arc<elf::RelocationIndex>>,
     pub elf_base: UserAddr,
     /// The executable's `.eh_frame_hdr` as (address, size), `(0, 0)` without one.
     pub exe_eh_frame_hdr: (u64, u64),
@@ -540,7 +536,6 @@ impl ElfInfo {
             next_tls_module_id: 1,
             dynamic_tls_blocks: alloc::collections::BTreeMap::new(),
             loaded_libs: Vec::new(),
-            reloc_index: None,
             elf_base: UserAddr::new(0),
             exe_eh_frame_hdr: (0, 0),
             exe_vaddr_max: 0,
@@ -1107,7 +1102,6 @@ fn teardown_resources(
     data.mmap_regions.clear();
     data.pipe_maps.clear();
     data.demand_pages.clear();
-    data.elf.reloc_index = None;
 
     Consumed {
         peak_memory: data.peak_memory,
@@ -1472,14 +1466,13 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
 
     let mut data = data_arc.lock();
 
-    let reloc_index = data.elf.reloc_index.clone();
     let elf_base = data.elf.elf_base.raw();
 
     let page_alloc = match PageAlloc::new(page_2m as usize) {
         Some(a) => a,
         None => return false,
     };
-    // A bounds-checked window, not a bare `*mut u8`: both fills below are the kernel's own arithmetic, unchecked until something bounds it.
+    // A bounds-checked window, not a bare `*mut u8`: the fill below is the kernel's own arithmetic, unchecked until something bounds it.
     let page = page_alloc.window();
 
     // Multiple segments (e.g. .text/.rodata) can share a 2MB range.
@@ -1518,23 +1511,6 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
             }
         }
     }
-
-
-    let mut total_relocs = 0u16;
-    if let Some(ref ri) = reloc_index {
-        let mut offset = 0u64;
-        while offset < page_2m {
-            let page_elf_offset = (region_start + offset).wrapping_sub(elf_base);
-            if ri.has_relocs_in_page(page_elf_offset) {
-                // `subslice` bounds `offset + 4096` against the frame's own size; `apply_to_page` bounds every write against the window it's handed.
-                total_relocs = total_relocs.saturating_add(
-                    ri.apply_to_page(page_elf_offset, page.subslice(offset as usize, 4096)) as u16,
-                );
-            }
-            offset += 4096;
-        }
-    }
-
 
     // No invalidation: the fault means the PDE was absent, so nothing is cached from it (`map_window` derives that from the entry it replaces).
     // Claimed under the install lock, not the decide-to-fill one: a racing sibling can reach here too and lose the install race; the loser's fill is thrown away rather than both being installed, since no shootdown is issued from a fault.
@@ -1578,7 +1554,6 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
         fault_addr,
         page_elf_offset: region_start.wrapping_sub(elf_base),
         block_idx: (region_start / PAGE_2M) as u32,
-        reloc_count: total_relocs,
         flags: match fault_prot {
             Prot::Read => 0,
             Prot::ReadWrite => 1,
@@ -1618,15 +1593,13 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
             if rec.fault_addr == 0 { continue; }
             let mut flag_str = [b' '; 5];
             if rec.flags & 1 != 0 { flag_str[0] = b'W'; } // writable
-            if rec.flags & 2 != 0 { flag_str[1] = b'R'; } // has_relocs
             if rec.flags & 4 != 0 { flag_str[2] = b'A'; } // anonymous
             if rec.flags & 8 != 0 { flag_str[3] = b'Z'; } // beyond extent (zero)
             // Never beside `W` (one `Prot`'s variants); both set means lost W^X.
             if rec.flags & 16 != 0 { flag_str[4] = b'X'; } // executable
             let flags = core::str::from_utf8(&flag_str).unwrap_or("????");
-            log!("    fault={:#x} elf_off={:#x} blk={} relocs={} {}us [{}]",
-                rec.fault_addr, rec.page_elf_offset, rec.block_idx,
-                rec.reloc_count, rec.duration_us, flags);
+            log!("    fault={:#x} elf_off={:#x} blk={} {}us [{}]",
+                rec.fault_addr, rec.page_elf_offset, rec.block_idx, rec.duration_us, flags);
         }
     }
 

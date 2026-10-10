@@ -23,7 +23,7 @@ mod common;
 
 use common::*;
 use toyos_elf::dynamic::{Dynamic, InitArray};
-use toyos_elf::rela::{self, FillLattice, Op, ReadTables, RelaTable, Rules, TlsRef};
+use toyos_elf::rela::{self, Op, ReadTables, RelaTable, Rules, TlsRef};
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::tls::{self, Static, TlsOffset, Variant};
 use toyos_elf::{ImageRange, Layout, Machine, TlsSegment};
@@ -117,21 +117,10 @@ impl Rng {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
-    /// Demand-filled at `USER_VM_BASE`, written a page at a time: the window
-    /// is the whole image and a write may not cross a fill page.
-    Exe,
-    /// Loaded whole at vaddr 0: the window is the writable segments, and no
-    /// table the loader reads may sit on a page of it.
-    Lib,
-}
-
 /// One module, with the numbers it was built from.
 struct Case {
     bytes: Vec<u8>,
     machine: Machine,
-    mode: Mode,
 }
 
 fn reloc_number(machine: Machine, which: usize) -> u32 {
@@ -149,11 +138,8 @@ fn generate(rng: &mut Rng) -> Case {
     // rate per number would refuse nearly every image over its first one.
     rng.hostile = rng.pick(&[0, 1, 2, 5, 15]);
     let machine = if rng.chance(50) { Machine::X86_64 } else { Machine::Aarch64 };
-    let mode = if rng.chance(50) { Mode::Exe } else { Mode::Lib };
-    let vmin = match mode {
-        Mode::Exe => rng.pick(&[0u64, 0x1000, 0x40_0000]),
-        Mode::Lib => 0,
-    };
+    // Where the kernel loads a library: at vaddr 0.
+    let vmin = 0u64;
     let bss = rng.pick(&[0u64, 0x800, 0x3000]);
     let span = SIZE as u64 + bss;
 
@@ -240,7 +226,7 @@ fn generate(rng: &mut Rng) -> Case {
         }
     }
 
-    Case { bytes, machine, mode }
+    Case { bytes, machine }
 }
 
 fn put(bytes: &mut [u8], at: u64, data: &[u8]) {
@@ -347,27 +333,16 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
         None => return Err(()),
     };
     let rela_bytes = at(&case.bytes, rela_range);
-    let window = match case.mode {
-        Mode::Exe => (extent.min(), extent.max()),
-        Mode::Lib => {
-            let window = layout.writable_window().ok_or(())?;
-            let span_of = |r: ImageRange| (r.start().get(), r.end().get());
-            let tables = ReadTables {
-                dynsym: span_of(sym_range),
-                dynstr: span_of(str_range),
-                rela: span_of(rela_range),
-                jmprel: (0, 0),
-            };
-            rela::tables_outside_window(&tables, window, 4096).map_err(|_| ())?;
-            window
-        }
+    let window = layout.writable_window().ok_or(())?;
+    let span_of = |r: ImageRange| (r.start().get(), r.end().get());
+    let tables = ReadTables {
+        dynsym: span_of(sym_range),
+        dynstr: span_of(str_range),
+        rela: span_of(rela_range),
+        jmprel: (0, 0),
     };
-    let rules = Rules {
-        extent,
-        window,
-        fill: (case.mode == Mode::Exe).then_some(FillLattice { base: extent.min(), granule: 4096 }),
-        tls,
-    };
+    rela::tables_outside_window(&tables, window, 4096).map_err(|_| ())?;
+    let rules = Rules { extent, window, tls };
     let mut relocs = Vec::new();
     for raw in RelaTable::new(rela_bytes, case.machine).iter() {
         if let Some(r) = rela::parse(raw, &rules, symbols).map_err(|_| ())? {
@@ -474,10 +449,9 @@ fn every_derived_address_lies_inside_the_image_or_the_image_is_refused() {
                     Ok(Ok(())) => reached.add(&this),
                     Ok(Err(())) => {}
                     Err(_) => panic!(
-                        "seed {seed:#x} iteration {i} ({:?}, {:?}, placed {placement:?}) \
+                        "seed {seed:#x} iteration {i} ({:?}, placed {placement:?}) \
                          panicked; its image is {} bytes",
                         case.machine,
-                        case.mode,
                         case.bytes.len(),
                     ),
                 }

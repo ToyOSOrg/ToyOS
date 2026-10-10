@@ -117,7 +117,6 @@ impl Snapshot {
         LoadedLib {
             memory,
             user_base,
-            phys_base: self.image.phys(),
             image: self.image,
             dynsym: self.dynsym,
             dynstr: self.dynstr,
