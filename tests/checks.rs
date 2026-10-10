@@ -488,7 +488,7 @@ mod checks {
             let xhci = if cpu == 0 { 40 } else { 0 };
             format!(
                 "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} xhci={xhci} userdev=0 \
-                 sound=0 i8042=0 dmafault=0 hda=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
+                 i8042=0 dmafault=0 hda=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
             )
         };
         let issued = |at: &str, on: u32, total: u64| {
@@ -991,7 +991,7 @@ mod checks {
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
         // What the seal itself writes of the machine, above the ring's tail.
-        let census = "| irq: cpu0 timer=9 kick=2 xhci=1729 userdev=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 \
+        let census = "| irq: cpu0 timer=9 kick=2 xhci=1729 userdev=0 i8042=0 dmafault=0 hda=0 tlb=0 \
                       nmi=0 spurious=0 unclaimed=0\n\
                       | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
                       bench=0\n\

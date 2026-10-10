@@ -1739,7 +1739,7 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
     if taken.is_some() && IRQ[slot].take_unannounced() {
         log!("pcidev: slot {slot} took its first message on vector {:#x}", VECTORS[slot]);
     }
-    Ok(taken.map(|count| DeviceIrqRecord { count }))
+    Ok(taken)
 }
 
 /// Whether a read of the claim answers at once: a message is waiting, or the
@@ -1752,7 +1752,7 @@ pub fn has_irq(binding: &Binding) -> bool {
 /// handler, so it allocates nothing; `record.rs` owns the counting, and
 /// `kernel-loom` models it against a concurrent reader.
 pub fn isr(slot: usize) {
-    IRQ[slot].took();
+    IRQ[slot].took(crate::clock::nanos_since_boot());
     WATCHES[slot].post_in_place();
 }
 

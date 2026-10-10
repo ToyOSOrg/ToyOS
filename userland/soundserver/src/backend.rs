@@ -7,7 +7,6 @@
 //! refilled* and nothing else in the loop can be written without knowing which.
 
 use toyos::AsHandle;
-use toyos_abi::audio::AudioCompletionRecord;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
@@ -37,6 +36,17 @@ pub(crate) enum Pipeline {
     Ring,
 }
 
+/// Periods the device has given back, and when it said so.
+#[derive(Clone, Copy)]
+pub(crate) struct Completion {
+    pub(crate) mask: u32,
+    /// When the device's first word about these periods landed: where a
+    /// wake's lateness is split between the device and soundserver.
+    pub(crate) first_nanos: u64,
+    /// When its newest landed, which the DLL takes as the last period's.
+    pub(crate) last_nanos: u64,
+}
+
 /// The device half of the mix loop.
 ///
 /// Two implementations and no more: a framework before there are three is an
@@ -55,8 +65,8 @@ pub(crate) trait Backend {
     /// mapped once at claim.
     fn buffer(&self, idx: usize) -> *mut u8;
 
-    /// Completion records, oldest first, into `out`. `0` is nothing pending.
-    fn completions(&mut self, out: &mut [AudioCompletionRecord]) -> usize;
+    /// The periods given back since the last call, or `None` for none.
+    fn completion(&mut self) -> Option<Completion>;
 
     /// Period `idx` has played and is soundserver's again.
     ///
@@ -95,12 +105,8 @@ impl Backend for VirtioBackend {
         self.virtio.buffer(idx)
     }
 
-    fn completions(&mut self, out: &mut [AudioCompletionRecord]) -> usize {
-        // Where the kernel used to service the event queue inside the same
-        // syscall: the device's own view of an underrun, which this process's
-        // counters cannot see.
-        self.virtio.poll_events();
-        self.virtio.completions(out)
+    fn completion(&mut self) -> Option<Completion> {
+        self.virtio.completion()
     }
 
     fn released(&mut self, _idx: usize) {}
@@ -133,13 +139,16 @@ impl Backend for HdaBackend {
         self.buffers[idx]
     }
 
-    fn completions(&mut self, out: &mut [AudioCompletionRecord]) -> usize {
+    /// The kernel's record has one time, the newest interrupt's, and it is
+    /// both of the completion's.
+    fn completion(&mut self) -> Option<Completion> {
         match self.hda.dev().completions() {
-            Ok(record) => {
-                out[0] = record;
-                1
-            }
-            Err(syscall::SyscallError::WouldBlock) => 0,
+            Ok(record) => Some(Completion {
+                mask: record.mask,
+                first_nanos: record.timestamp_nanos,
+                last_nanos: record.timestamp_nanos,
+            }),
+            Err(syscall::SyscallError::WouldBlock) => None,
             Err(e) => panic!("soundserver: hda completions failed: {e:?}"),
         }
     }

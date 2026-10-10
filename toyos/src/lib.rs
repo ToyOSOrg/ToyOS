@@ -36,7 +36,7 @@ pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{
-    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev, VirtioSoundDev,
+    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev,
 };
 
 pub use toyos_abi::RawHandle;
