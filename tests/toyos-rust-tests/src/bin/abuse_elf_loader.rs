@@ -10,9 +10,12 @@
 //!
 //! An executable's dynamic section is the program's own
 //! (`toyos::relocate`): the spawn cases crafted in one are answered either way,
-//! the kernel lives, and a child the kernel starts dies ([`dies`]).
+//! the kernel lives, and a child the kernel starts dies ([`dies`]). A real std
+//! image whose dynamic section names a form its own `_start` refuses exits
+//! [`REFUSED_STATUS`] with [`REFUSED_LINE`] ([`refuses_itself`]).
 
 use std::fs;
+use std::process::Command;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
@@ -231,7 +234,11 @@ fn write_file_in(dir: &str, name: &str, bytes: &[u8]) -> String {
 }
 
 fn spawn_path(path: &str) -> Result<RawHandle, SyscallError> {
-    let argv = format!("{path}\0");
+    spawn_argv(path, &format!("{path}\0"))
+}
+
+/// `path` spawned with `argv`, NUL-separated, and no slot of this process's.
+fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
@@ -369,6 +376,10 @@ fn base_exe(size: usize) -> Elf {
 }
 
 fn main() {
+    // A copy [`refuses_itself`] spawns that reached this far was not refused.
+    if std::env::args().nth(1).as_deref() == Some(REFUSED_COPY) {
+        panic!("a copy of this program whose relocations its _start must refuse reached main");
+    }
     fs::create_dir_all(DIR).expect("create /tmp/abuse_loader_exe");
     fs::create_dir_all(BIG_DIR).expect("create /tmp/abuse_loader");
 
@@ -613,6 +624,11 @@ fn main() {
     let unmapped = Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).entry(0).build();
     spawn_refused("phdrs_unmapped", &unmapped);
     dlopen_refused("phdrs_unmapped.so", &unmapped);
+
+    // 22. This program's own image, a library to load in one copy and a `RELR`
+    //     table in another: its `_start` refuses both before it writes a word.
+    refuses_itself("needs_a_library", DT_NEEDED as u64);
+    refuses_itself("carries_relr", DT_RELR);
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
@@ -1024,4 +1040,56 @@ fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
         .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)
         .build()
+}
+
+/// What `toyos::relocate` writes to slot 2 when it refuses its own program.
+const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
+/// The status it exits with then.
+const REFUSED_STATUS: i32 = 127;
+/// `process::HANDLE_FAULT_EXIT_CODE`.
+const HANDLE_FAULT: i32 = 139;
+/// The argument a refused copy is handed, which its `main` panics on.
+const REFUSED_COPY: &str = "--refused-copy";
+
+const DT_DEBUG: u64 = 21;
+const DT_RELR: u64 = 36;
+
+/// This program's own file with its `DT_DEBUG` entry's tag made `tag`: a std
+/// image as lld linked it, whose dynamic section now names `tag` ahead of its
+/// `DT_RELA`.
+fn own_image_tagged(tag: u64) -> Vec<u8> {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut bytes = fs::read(&exe).unwrap_or_else(|e| panic!("read {exe:?}: {e}"));
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let phoff = word(&bytes, 32) as usize;
+    let phnum = usize::from(u16::from_le_bytes([bytes[56], bytes[57]]));
+    let dynamic = (0..phnum)
+        .map(|i| phoff + i * PH_SIZE)
+        .find(|&at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) == PT_DYNAMIC)
+        .expect("lld's PT_DYNAMIC");
+    let (offset, size) = (word(&bytes, dynamic + 8) as usize, word(&bytes, dynamic + 32) as usize);
+    let entry = (offset..offset + size).step_by(16).find(|&at| word(&bytes, at) == DT_DEBUG).expect("lld's DT_DEBUG");
+    bytes[entry..entry + 8].copy_from_slice(&tag.to_le_bytes());
+    bytes
+}
+
+/// A copy of this program tagged `tag` exits [`REFUSED_STATUS`] and says
+/// [`REFUSED_LINE`] on the slot 2 it is handed. Handed no slot 2, it names a
+/// handle it does not hold, and the kernel ends it.
+fn refuses_itself(name: &str, tag: u64) {
+    let path = write_file(name, &own_image_tagged(tag));
+    let out = Command::new(&path)
+        .arg(REFUSED_COPY)
+        .output()
+        .unwrap_or_else(|e| panic!("{name}: spawn: {e}"));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(REFUSED_STATUS), "{name}: exited {:?}, said {said:?}", out.status);
+    assert_eq!(said, REFUSED_LINE, "{name}");
+
+    let child = spawn_argv(&path, &format!("{path}\0{REFUSED_COPY}\0"))
+        .unwrap_or_else(|e| panic!("{name} without slot 2: spawn gave {e:?}"));
+    // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
+    let child = unsafe { toyos::process::Process::from_raw(child) };
+    let code = child.wait().unwrap_or_else(|e| panic!("{name} without slot 2: wait: {e:?}"));
+    assert_eq!(code, HANDLE_FAULT, "{name} without slot 2");
 }
