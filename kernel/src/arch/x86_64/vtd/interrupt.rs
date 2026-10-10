@@ -35,6 +35,7 @@
 use crate::log;
 use alloc::vec::Vec;
 
+use crate::arch::apic::narrow_destination;
 use crate::drivers::pci::MSG_DEST;
 use crate::iommu::{Refused, StreamId};
 use crate::sync::Lock;
@@ -60,9 +61,8 @@ const VECTOR_SHIFT: u64 = 16;
 const DESTINATION_SHIFT: u64 = 32;
 /// `SVT=01b` over `SQ=00b`: a message reaching this entry carries `SID` in all sixteen bits or is refused.
 const VERIFY_SOURCE_ID: u64 = 1 << 18;
-/// Without `EIME`, `DST` 47:40 holds eight bits and `0xFF` there is broadcast, not a CPU.
+/// Without `EIME`, `DST` 47:40 holds what [`narrow_destination`] makes of an id.
 const NARROW_DESTINATION_SHIFT: u64 = 8;
-const NARROW_DESTINATIONS: u32 = 0xFF;
 
 const MESSAGE_REMAPPABLE: u32 = 1 << 4;
 const MESSAGE_SUBHANDLE_VALID: u32 = 1 << 3;
@@ -98,7 +98,7 @@ const _: () = assert!(crate::pcidev::MAX_FUNCTIONS < ENTRIES as usize);
 
 /// A claimed function's message reaches [`MSG_DEST`], which an entry holds with
 /// or without `EIME`, so writing a claim slot's entry is never refused.
-const _: () = assert!(MSG_DEST < NARROW_DESTINATIONS);
+const _: () = assert!(narrow_destination(MSG_DEST).is_ok());
 
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
@@ -169,7 +169,7 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
         let Some(table) = remap.table else {
             return Err(Refused::TableFull);
         };
-        if !remap.extended && dest >= NARROW_DESTINATIONS {
+        if !remap.extended && narrow_destination(dest).is_err() {
             Err(Refused::DestinationTooWide(dest))
         } else if remap.used == ENTRIES {
             Err(Refused::TableFull)

@@ -88,8 +88,10 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // reportable: a panic that can be reported but not ended leaves the machine
     // holding its panel for a hand that may not be in the room.
     super::power::init_reset(rsdp_addr);
+    percpu::init_bsp(super::cpu::hardware_id());
+    // After the IDT: an xAPIC's register page is mapped here, and a fault
+    // there must diagnose rather than triple-fault.
     apic::init();
-    percpu::init_bsp(apic::id());
     super::power::init_control(rsdp_addr);
     ioapic::init(&madt);
     idt::enable_interrupts();

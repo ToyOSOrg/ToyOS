@@ -88,11 +88,13 @@ pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
 /// `apic_id` as the eight bits an xAPIC ICR, a compatibility-format MSI and
 /// an I/O APIC entry carry it in (SDM §13.6.1, §13.11.1), or the refusal:
 /// `0xFF` there is the broadcast, not a CPU.
-pub fn narrow_destination(apic_id: u32) -> Result<u8, &'static str> {
-    u8::try_from(apic_id)
-        .ok()
-        .filter(|id| *id != 0xFF)
-        .ok_or("the APIC id does not fit an 8-bit destination, where 0xFF is broadcast")
+/// VT-d's remapping entry without `EIME` holds the same eight bits.
+pub const fn narrow_destination(apic_id: u32) -> Result<u8, &'static str> {
+    if apic_id < 0xFF {
+        Ok(apic_id as u8)
+    } else {
+        Err("the APIC id does not fit an 8-bit destination, where 0xFF is broadcast")
+    }
 }
 
 /// The compatibility-format message that raises `vector` on the CPU whose APIC
