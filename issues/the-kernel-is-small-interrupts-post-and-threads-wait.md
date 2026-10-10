@@ -138,6 +138,26 @@ times:
        MSI-X tables is not measured: one in the BAR that holds the registers
        refuses usbd's claim as it refuses blockd's
        (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`).
+
+       **Stage 1, usbd beside the kernel's driver**: the test-only
+       `xhci-leave=<vendor>:<device>` leaves one controller to a claim, and
+       `/system/bin/usbd` drives it — the handoff, a reset, its rings in one
+       grant, MSI through the claim, and every device enumerated and named
+       over `inspect`; no class is bound. QEMU's spare is
+       `qemu-xhci,msix=off,msi=on`: with MSI-X off and MSI left `auto` it
+       offers no MSI either, and the claim is refused for it. Read on the T14
+       (stage 0, `boot:testcases` readbacks): firmware owns neither
+       controller. 00:0d.0, 8086:9a13, the Type-C one (port 1 USB 2.0, ports
+       2..=5 USB 3.1) and 00:14.0, 8086:a0ed (ports 1..=12 USB 2.0, 13..=16
+       USB 3.1) each read `USBLEGSUP 0x01002201` and `USBLEGCTLSTS
+       0xe0000000` — firmware's semaphore clear, every SMI enable clear, the
+       three status bits latched — and each is armed on MSI. Which reset
+       either advertises no boot has printed: a claim's release says it, and
+       `usbd_drives_the_type_c_controller` releases 00:0d.0's twice. QEMU's
+       `qemu-xhci` advertises none, so its next claim inherits the last
+       holder's ranges as residue. The orchestrator's stage-0 rulings for the
+       stages after: pcidev arms MSI and keeps MSI-X Enable clear where the
+       table shares the register BAR, and one usbd runs per controller.
 5. **USB by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
