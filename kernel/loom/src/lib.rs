@@ -378,6 +378,11 @@ pub mod scheduler {
 #[path = "../../src/sleeplock.rs"]
 pub mod sleeplock;
 
+/// The stop's claim on the console wire and `klogd`'s answer, driven over the
+/// sleep lock above by `tests/console_handoff.rs`. Atomics and nothing else.
+#[path = "../../src/log/handoff.rs"]
+pub mod log_handoff;
+
 /// The i8042's interrupt tally. `tests/i8042_tally.rs` is the only model whose
 /// subject is a *driver*, and it is here for the reason the others are: the
 /// property is "no reader ever sees this pair disagree", which is a claim about
