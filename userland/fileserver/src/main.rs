@@ -192,11 +192,8 @@ fn main() {
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
-    let mut number = [0u8; 8];
-    toyos_abi::syscall::random(&mut number).expect("fileserver: the kernel would not draw the volume's number");
     Server {
         volume,
-        number: u64::from_le_bytes(number),
         acceptor,
         clients: BTreeMap::new(),
         next_client: 0,
@@ -330,9 +327,6 @@ fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>,
 
 struct Server {
     volume: Box<dyn Volume>,
-    /// The volume's number on the wire ([`HELLO`]), drawn at this start: a
-    /// restart numbers its files afresh, so it is another volume.
-    number: u64,
     /// The role's port, which every grant is minted on.
     acceptor: Acceptor,
     clients: BTreeMap<u64, Client>,
@@ -603,7 +597,10 @@ impl Server {
                 Err(_) => return Answer::Drop("its window would not map"),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
-            return Answer::Reply(Reply { value: granted, value2: self.number, ..Reply::ok() });
+            // The volume is this start's pid, which the kernel never issues
+            // again: a restart numbers its files afresh, so it is another volume.
+            let volume = u64::from(toyos_abi::syscall::getpid().0);
+            return Answer::Reply(Reply { value: granted, value2: volume, ..Reply::ok() });
         }
         if self.clients[&id].window.is_none() {
             return Answer::Drop("it asked before it lent a window");

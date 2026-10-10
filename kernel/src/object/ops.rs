@@ -112,10 +112,6 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
         }
-        let volume = match vfs.volume(&target) {
-            Ok(volume) => volume,
-            Err(e) => return e.to_u64(),
-        };
 
         let built = if truncate && create {
             let mtime = crate::clock::mtime_now();
@@ -125,24 +121,24 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Ok(()) | Err(SyscallError::NotFound) => {}
                 Err(e) => return e.to_u64(),
             }
-            vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
+            vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
         } else {
             // `mtime_target` takes no reference, so it runs first and the reference-taking
             // `open_target` runs last — a refusal cannot strand a reference. `CREATE` acts on `NotFound` only.
             match vfs.mtime_target(&target) {
-                Ok(mtime) => vfs.open_target(&target).map(|file_id| {
+                Ok(mtime) => vfs.open_target(&target).map(|(file_id, volume)| {
                     let position =
                         if append { file_cache::size(file_id) as usize } else { 0 };
-                    (file_id, mtime, position)
+                    (file_id, volume, mtime, position)
                 }),
                 Err(SyscallError::NotFound) if create => {
                     let mtime = crate::clock::mtime_now();
-                    vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
+                    vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
                 }
                 Err(e) => Err(e),
             }
         };
-        built.map(|(file_id, mtime, position)| (file_id, volume, mtime, position))
+        built
     };
 
     let (file_id, volume, mtime, position) = match opened {

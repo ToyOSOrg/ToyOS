@@ -97,7 +97,7 @@ pub const KIND_DIR: u64 = 2;
 pub const KIND_SYMLINK: u64 = 3;
 
 /// [`HELLO`]'s answer: the capability's rights in `value`, and in `value2` the
-/// volume the server's files are on, drawn at its start.
+/// volume the server's files are on: its pid, which no other process ever holds.
 pub const RIGHT_WRITE: u64 = 1;
 
 /// Set by the client on every volume a server answers ([`Stat::volume`]): a
