@@ -55,9 +55,12 @@
 //! the caller's direct spawn carries in place of its own.
 //!
 //! **An installed package's launch also holds the folder of the home it was
-//! granted** ([`toyos_manifest::grants`]): the grant stored for that exact
-//! binary, which the supervisor alone writes, at the request of the one row
-//! holding the `grants` port from a login session, and starts in it.
+//! granted** ([`toyos_manifest::grants`]): the answer stored for the exact
+//! bytes it starts, which the supervisor alone writes, at the request of the
+//! one row holding the `grants` port from a login session or as the person at
+//! the screen's answer, and starts in it. A launch with no stored answer in a
+//! session that holds the screen waits for that answer ([`Parked`]), asked on
+//! [`toyos_manifest::consent::PORT`], which only the supervisor connects to.
 //!
 //! **A launch starts only what its caller's row lists** ([`toyos_manifest::launch`]).
 //! Every row whose `starts` lists anything is endowed a `launcher` the supervisor
