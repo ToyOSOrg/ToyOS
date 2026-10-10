@@ -519,7 +519,7 @@ fn pinned_fork(root: &Path) -> String {
 /// fork, and is never moved: one strictly ahead of the pin is used as it
 /// stands, and any other whose `HEAD`, or a nested submodule checked out in it,
 /// is not at the commit the pin records is refused by name with the command
-/// that moves it.
+/// that moves it and the commits that move would leave.
 ///
 /// Every build in a worktree asks this at once, so the making and the move are
 /// each decided and done under the worktree's lock held exclusively
@@ -589,14 +589,14 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
             if holds(&fork, &pinned) {
                 git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
             } else {
-                submodule_update(root, "rust");
+                submodule_update(root, "rust", declared_shallow(root, "rust"));
             }
             for (path, _, commit) in misplaced(&fork, "HEAD") {
                 let at = fork.join(&path);
                 if holds(&at, &commit) {
                     git_run(&at, &["checkout", "--detach", "-q", &commit]);
                 } else {
-                    submodule_update(&fork, &path);
+                    submodule_update(&fork, &path, declared_shallow(&fork, &path));
                 }
             }
             eprintln!("{} was at {head}, and this tree pins {pinned}: checked it out", fork.display());
@@ -608,7 +608,9 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
 /// A linked worktree's fork checkout `fork` used as it stands where it is
 /// strictly ahead of `pinned`; otherwise refused by name, with the command that
 /// moves it, wherever it or a nested submodule checked out in it is not at the
-/// commit `pinned` records.
+/// commit `pinned` records. Where that move would leave commits the refusal
+/// names them, or, where it cannot know them before a fetch, the command stops
+/// after the fetch.
 fn refuse_off_pin(root: &Path, fork: &Path, pinned: &str) {
     let head = git_out(fork, &["rev-parse", "HEAD"]).trim().to_string();
     if head != pinned && git_try(fork, &["merge-base", "--is-ancestor", pinned, &head]).is_ok() {
@@ -617,11 +619,19 @@ fn refuse_off_pin(root: &Path, fork: &Path, pinned: &str) {
     // Each mismatch's own fix, in the order it must run: a nested one is known once the checkout holds its pin.
     let mut fixes = Vec::new();
     let mut fix = |at: &Path, url: &str, commit: &str, from: &str| {
+        let mut line = format!("{} is at {from}, not at {commit}, what this tree's pin records there", at.display());
         if !holds(at, commit) {
             fixes.push(format!("git -C {} fetch --no-recurse-submodules {url} {commit}", at.display()));
+            // Which commits the checkout would leave is known only once the commit is here.
+            fixes.push(format!("git -C {} merge-base --is-ancestor {from} {commit}", at.display()));
+            line += "; where checking it out would leave commits of its own the command stops before it, and the next \
+                     build names them";
+        } else if git_try(at, &["merge-base", "--is-ancestor", from, commit]).is_err() {
+            let left = git_out(at, &["log", "--oneline", &format!("{commit}..{from}")]);
+            line += &format!("; checking it out leaves these, which {commit} does not hold:\n{}", left.trim_end());
         }
         fixes.push(format!("git -C {} checkout --detach -q {commit}", at.display()));
-        format!("{} is at {from}, not at {commit}, what this tree's pin records there", at.display())
+        line
     };
     let mut wrong = Vec::new();
     if head != pinned {
@@ -646,8 +656,15 @@ fn refuse_off_pin(root: &Path, fork: &Path, pinned: &str) {
 /// Each nested submodule checked out in `fork` whose `HEAD` is not the commit
 /// `tree` records there: its path, its `HEAD` and that commit.
 fn misplaced(fork: &Path, tree: &str) -> Vec<(String, String, String)> {
-    gitlinks(fork, tree)
-        .into_iter()
+    git_out(fork, &["ls-tree", "-r", tree])
+        .lines()
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
+                _ => None,
+            }
+        })
         .filter(|(path, _)| fork.join(path).join(".git").exists())
         .map(|(path, commit)| {
             let at = git_out(&fork.join(&path), &["rev-parse", "HEAD"]).trim().to_string();
@@ -657,37 +674,38 @@ fn misplaced(fork: &Path, tree: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// The submodules `tree` in `repo` records, by path, each with its commit.
-fn gitlinks(repo: &Path, tree: &str) -> Vec<(String, String)> {
-    git_out(repo, &["ls-tree", "-r", tree])
-        .lines()
-        .filter_map(|entry| {
-            let (meta, path) = entry.split_once('\t')?;
-            match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
-                ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
-                _ => None,
-            }
-        })
-        .collect()
+/// Whether `repo`'s `.gitmodules` declares the submodule at `path` `shallow`,
+/// which git keys by the submodule's name: one named otherwise than by its
+/// path is refused, where a lookup by path would miss it and fetch the whole
+/// history.
+fn declared_shallow(repo: &Path, path: &str) -> bool {
+    let named = git_try(repo, &["config", "--file", ".gitmodules", "--get", &format!("submodule.{path}.path")]);
+    assert!(
+        named.as_deref().is_ok_and(|named| named.trim_ascii() == path.as_bytes()),
+        "{}'s .gitmodules names the submodule at {path} otherwise than by its path, and its depth is read by \
+         that name: `git config --file .gitmodules --get-regexp '\\.path$'` shows its name",
+        repo.display(),
+    );
+    let shallow = format!("submodule.{path}.shallow");
+    let shallow = git_out(repo, &["config", "--file", ".gitmodules", "--type", "bool", "--default", "false", "--get", &shallow]);
+    shallow.trim() == "true"
 }
 
 /// The submodule at `path` in `repo` checked out at the commit `repo`'s index
 /// records there, fetched as rustc's bootstrap fetches its LLVM: `git submodule
 /// sync`, so its `origin` is the URL `repo`'s `.gitmodules` records, then `git
-/// submodule update --init`, one commit deep where `.gitmodules` declares it
-/// `shallow`. Its own fetch recurses into no submodule of its own, whose
-/// `origin` is synced only once it has moved.
+/// submodule update --init`, one commit deep where `shallow`. Its own fetch
+/// recurses into no submodule of its own, whose `origin` is synced only once
+/// it has moved.
 ///
-/// `repo` must be the primary's superproject or its own fork checkout, whose
+/// `repo` must be a superproject or the primary's own fork checkout, whose
 /// submodules' git directories are their own: run in a linked worktree's fork
 /// checkout, whose nested one is a git worktree of the primary's, `update`
 /// writes that checkout's path as `core.worktree` into the config the
 /// primary's shares, and git in the primary's fails.
-fn submodule_update(repo: &Path, path: &str) {
-    let shallow = format!("submodule.{path}.shallow");
-    let shallow = git_out(repo, &["config", "--file", ".gitmodules", "--type", "bool", "--default", "false", "--get", &shallow]);
+pub(crate) fn submodule_update(repo: &Path, path: &str, shallow: bool) {
     git_run(repo, &["submodule", "sync", "--", path]);
-    let depth: &[&str] = if shallow.trim() == "true" { &["--depth", "1"] } else { &[] };
+    let depth: &[&str] = if shallow { &["--depth", "1"] } else { &[] };
     let update = ["-c", "fetch.recurseSubmodules=false", "submodule", "update", "--init", "--checkout"];
     git_run(repo, &[&update[..], depth, &["--", path]].concat());
 }
@@ -1164,6 +1182,10 @@ mod tests {
     use toyos_tmpdir::TempDir;
 
     fn git(dir: &Path, args: &[&str]) -> String {
+        git_result(dir, args).unwrap_or_else(|why| panic!("{why}"))
+    }
+
+    fn git_result(dir: &Path, args: &[&str]) -> Result<String, String> {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
             .args(["-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main"])
@@ -1172,8 +1194,10 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("run git");
-        assert!(out.status.success(), "git {args:?} in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
+        if !out.status.success() {
+            return Err(format!("git {args:?} in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(String::from_utf8(out.stdout).unwrap().trim().to_string())
     }
 
     fn write(path: &Path, text: &str) {
@@ -1583,10 +1607,22 @@ mod tests {
         git(&fork, &["checkout", "-q", &c1]);
         let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(said.contains(&format!("is at {c1}, not at {c2}")), "{said}");
+        assert!(!said.contains("leaves these"), "a checkout behind its pin was said to leave commits: {said}");
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a linked checkout behind its pin was moved");
         run_fix(&said);
         assert_eq!(fork_checkout(&linked, &mut lock), fork);
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "the refusal's command did not move the checkout to its pin");
+
+        // One with commits of the agent's on an older pin is refused naming the commits the command leaves.
+        git(&fork, &["checkout", "-q", &c1]);
+        write(&fork.join("library/std/src/lib.rs"), "pub fn d() {}\n");
+        git(&fork, &["commit", "-qam", "D, the agent's on its old pin"]);
+        let d = git(&fork, &["rev-parse", "--short", "HEAD"]);
+        let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(said.contains(&format!("leaves these, which {c2} does not hold:\n{d} D, the agent's on its old pin")), "{said}");
+        run_fix(&said);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
 
         // One at its pin with a nested checkout off what the pin records there is refused, not built.
         let nested = fork.join("library/backtrace");
@@ -1606,6 +1642,7 @@ mod tests {
         let mine = git(&nested, &["rev-parse", "HEAD"]);
         let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(said.contains(&format!("is at {mine}, not at {recorded}")), "{said}");
+        assert!(said.contains("leaves these") && said.contains("the agent's own, not yet recorded"), "{said}");
         assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit nothing records was moved off");
         assert_eq!(git(&primary.join("rust"), &["status", "--porcelain"]), before, "the primary's fork was touched");
     }
@@ -1613,13 +1650,19 @@ mod tests {
     /// Runs the command a linked worktree's refusal names, each git command of
     /// it in turn.
     fn run_fix(said: &str) {
+        try_fix(said).unwrap_or_else(|why| panic!("{why}"));
+    }
+
+    /// [`run_fix`], stopping at the first step that fails, as `&&` does.
+    fn try_fix(said: &str) -> Result<(), String> {
         let command = said.rsplit_once("`").and_then(|(head, _)| head.rsplit_once("`")).map(|(_, c)| c);
         let command = command.unwrap_or_else(|| panic!("the refusal names no command: {said}"));
         for step in command.split(" && ") {
             let args: Vec<&str> = step.split(' ').collect();
             assert_eq!(args[0], "git", "{step}");
-            git(Path::new("/"), &args[1..]);
+            git_result(Path::new("/"), &args[1..])?;
         }
+        Ok(())
     }
 
     /// **Twelve builds starting at once in a worktree make its fork checkout
@@ -1666,21 +1709,7 @@ mod tests {
         // What git asks of a submodule's local path, and of no `https` URL.
         git(&theirs.join("library/backtrace"), &["config", "protocol.file.allow", "always"]);
         let before = configs();
-
-        let bt = base.join("backtrace-moved");
-        git(&base, &["clone", "-q", path_str(&base.join("backtrace-src")), path_str(&bt)]);
-        write(&bt.join("lib.rs"), "pub fn trace_most() {}\n");
-        git(&bt, &["commit", "-qam", "backtrace, moved"]);
-        let b3 = git(&bt, &["rev-parse", "HEAD"]);
-        let upstream = base.join("fork-src");
-        git(&upstream, &["config", "--file", ".gitmodules", "submodule.library/backtrace.url", path_str(&bt)]);
-        git(&upstream, &["update-index", "--cacheinfo", &format!("160000,{b3},library/backtrace")]);
-        git(&upstream, &["add", ".gitmodules"]);
-        git(&upstream, &["commit", "-qm", "C5"]);
-        let c5 = git(&upstream, &["rev-parse", "HEAD"]);
-        git(&theirs, &["-c", "fetch.recurseSubmodules=false", "fetch", "-q", path_str(&upstream), &c5]);
-        git(&linked, &["update-index", "--cacheinfo", &format!("160000,{c5},rust")]);
-        git(&linked, &["commit", "-qm", "pins C5"]);
+        let b3 = pin_a_nested_commit_only_its_url_holds(&base, &primary, &linked);
 
         let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
 
@@ -1694,6 +1723,74 @@ mod tests {
         assert_eq!(git(&fork.join("library/backtrace"), &["rev-parse", "HEAD"]), b3);
         assert_eq!(configs(), before, "the refusal's command wrote the primary's fork configuration");
         git(&theirs, &["status", "--porcelain", "--ignore-submodules=none"]);
+    }
+
+    /// `linked` pinned at C5, whose `library/backtrace` is a commit B3 that
+    /// only the URL C5's `.gitmodules` records holds; B3.
+    fn pin_a_nested_commit_only_its_url_holds(base: &Path, primary: &Path, linked: &Path) -> String {
+        let bt = base.join("backtrace-moved");
+        git(base, &["clone", "-q", path_str(&base.join("backtrace-src")), path_str(&bt)]);
+        write(&bt.join("lib.rs"), "pub fn trace_most() {}\n");
+        git(&bt, &["commit", "-qam", "backtrace, moved"]);
+        let b3 = git(&bt, &["rev-parse", "HEAD"]);
+        let upstream = base.join("fork-src");
+        git(&upstream, &["config", "--file", ".gitmodules", "submodule.library/backtrace.url", path_str(&bt)]);
+        git(&upstream, &["update-index", "--cacheinfo", &format!("160000,{b3},library/backtrace")]);
+        git(&upstream, &["add", ".gitmodules"]);
+        git(&upstream, &["commit", "-qm", "C5"]);
+        let c5 = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&primary.join("rust"), &["-c", "fetch.recurseSubmodules=false", "fetch", "-q", path_str(&upstream), &c5]);
+        git(linked, &["update-index", "--cacheinfo", &format!("160000,{c5},rust")]);
+        git(linked, &["commit", "-qm", "pins C5"]);
+        b3
+    }
+
+    /// **A linked worktree's command never leaves a nested commit of the
+    /// agent's**: where the commit its pin records is not fetched yet, the
+    /// refusal's command stops after fetching it rather than check out over
+    /// commits it does not hold, and the next refusal names them.
+    #[test]
+    fn a_linked_refusal_s_command_leaves_no_commit_of_the_agent_s() {
+        let base = TempDir::new("fork-linked-diverged");
+        let (primary, linked, _c1, _c2) = two_pins(&base);
+        let mut lock = buildlock::shared(&linked, "a build");
+        let fork = fork_checkout(&linked, &mut lock);
+        let nested = fork.join("library/backtrace");
+        git(&primary.join("rust/library/backtrace"), &["config", "protocol.file.allow", "always"]);
+        write(&nested.join("lib.rs"), "pub fn trace_mine() {}\n");
+        git(&nested, &["commit", "-qam", "the agent's own, on the old pin"]);
+        let mine = git(&nested, &["rev-parse", "HEAD"]);
+        let b3 = pin_a_nested_commit_only_its_url_holds(&base, &primary, &linked);
+
+        let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(said.contains(&format!("is at {mine}, not at {b3}")), "{said}");
+        let stopped = try_fix(&said);
+
+        assert!(stopped.as_ref().is_err_and(|why| why.contains("merge-base")), "{stopped:?}");
+        assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "the refusal's command left a commit of the agent's");
+        let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(said.contains("leaves these") && said.contains("the agent's own, on the old pin"), "{said}");
+    }
+
+    /// **A submodule's depth is read by its path or refused**: `shallow` is
+    /// read where `.gitmodules` names the submodule by its path, and one named
+    /// otherwise is refused by name rather than fetched whole.
+    #[test]
+    fn a_submodule_named_otherwise_than_by_its_path_is_refused() {
+        let base = TempDir::new("fork-named");
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "--file", ".gitmodules", "submodule.sub.path", "sub"]);
+        assert!(!declared_shallow(&repo, "sub"));
+        git(&repo, &["config", "--file", ".gitmodules", "submodule.sub.shallow", "true"]);
+        assert!(declared_shallow(&repo, "sub"));
+
+        git(&repo, &["config", "--file", ".gitmodules", "--rename-section", "submodule.sub", "submodule.other"]);
+        let said = refusal(|| {
+            declared_shallow(&repo, "sub");
+        });
+        assert!(said.contains("names the submodule at sub otherwise than by its path"), "{said}");
     }
 
     /// Where a linked worktree's `rust/` is a fork checkout that is not whole,
