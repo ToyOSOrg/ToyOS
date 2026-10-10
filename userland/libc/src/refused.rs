@@ -71,6 +71,12 @@ pub extern "C" fn fchmod(_fd: i32, _mode: u32) -> i32 {
     refuse()
 }
 
+/// No call sets a file's times.
+#[no_mangle]
+pub unsafe extern "C" fn utimes(_path: *const u8, _times: *const u8) -> i32 {
+    refuse()
+}
+
 /// No call answers a filesystem's size or free space.
 #[no_mangle]
 pub unsafe extern "C" fn statvfs(_path: *const u8, _buf: *mut u8) -> i32 {

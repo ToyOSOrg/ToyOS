@@ -49,11 +49,6 @@ impl Guid {
         [0x95, 0x89, 0xA5, 0xC3, 0xCF, 0xD5, 0x55, 0xFD],
     );
 
-    /// [`Guid::TOYOS_ROOT`]'s canonical text, for a host partition-table writer
-    /// that names a type by string. `toyos_root_text_is_the_type_guid` is what
-    /// holds the two spellings together.
-    pub const TOYOS_ROOT_TEXT: &'static str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
-
     /// `064E3777-5076-4C71-8E07-90AD24CFE8D6` — the TOYOS-DATA partition type,
     /// the writable volume `/apps` and `/home` are two paths into.
     pub const TOYOS_DATA: Self = Self::from_fields(
@@ -62,8 +57,6 @@ impl Guid {
         0x4C71,
         [0x8E, 0x07, 0x90, 0xAD, 0x24, 0xCF, 0xE8, 0xD6],
     );
-
-    pub const TOYOS_DATA_TEXT: &'static str = "064E3777-5076-4C71-8E07-90AD24CFE8D6";
 
     /// `94464329-E06E-4288-A9DA-7FC7154F5E92` — the slot table's partition
     /// type: which partitions make each slot, and which slot is marked
@@ -75,8 +68,6 @@ impl Guid {
         [0xA9, 0xDA, 0x7F, 0xC7, 0x15, 0x4F, 0x5E, 0x92],
     );
 
-    pub const TOYOS_SLOTS_TEXT: &'static str = "94464329-E06E-4288-A9DA-7FC7154F5E92";
-
     /// `037719D7-DEA5-481A-AA07-6AF8BE6D51E2` — a slot's FAT partition: its
     /// kernel, its boot parameter and its signed header. A *type*, so it
     /// selects nothing; the slot table names each one by its unique GUID.
@@ -86,8 +77,6 @@ impl Guid {
         0x481A,
         [0xAA, 0x07, 0x6A, 0xF8, 0xBE, 0x6D, 0x51, 0xE2],
     );
-
-    pub const TOYOS_BOOT_TEXT: &'static str = "037719D7-DEA5-481A-AA07-6AF8BE6D51E2";
 
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
@@ -140,21 +129,6 @@ mod tests {
 
         let text = heapless_format(Guid(ON_DISK));
         assert_eq!(&text[..], b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
-    }
-
-    /// The host writes the partition table by naming the type in text and the
-    /// kernel matches it as bytes; nothing else compares the two spellings.
-    #[test]
-    fn toyos_root_text_is_the_type_guid() {
-        let text = heapless_format(Guid::TOYOS_ROOT);
-        assert_eq!(&text[..], Guid::TOYOS_ROOT_TEXT.as_bytes());
-        let text = heapless_format(Guid::TOYOS_DATA);
-        assert_eq!(&text[..], Guid::TOYOS_DATA_TEXT.as_bytes());
-        let text = heapless_format(Guid::TOYOS_SLOTS);
-        assert_eq!(&text[..], Guid::TOYOS_SLOTS_TEXT.as_bytes());
-        let text = heapless_format(Guid::TOYOS_BOOT);
-        assert_eq!(&text[..], Guid::TOYOS_BOOT_TEXT.as_bytes());
-        assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
     }
 
     #[test]

@@ -6,8 +6,8 @@ opened: 2026-09-29
 
 # A child's end is an event, and a parent takes its children down
 
-libc cannot start a child: `fork` and `execvp` answer `ENOSYS`, `waitpid`
-`ECHILD` and `system` `-1` (`userland/libc/src/misc.rs`,
+libc cannot start a child: `fork` and `execvp` answer `ENOSYS`, `waitpid`,
+`wait` and `wait4` `ECHILD`, and `system` `-1` (`userland/libc/src/misc.rs`,
 `userland/libc/src/stdio.rs`), and there is no `posix_spawn`. M2 and M4 of
 `issues/toyos-builds-itself.md` and the exit of
 `issues/toyos-runs-on-arm64.md` need it.

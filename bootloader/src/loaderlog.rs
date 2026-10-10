@@ -14,11 +14,7 @@
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
-use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::proto::media::partition::PartitionInfo;
-use uefi::table::boot::{BootServices, SearchType};
-use uefi::{prelude::*, CStr16, Handle};
+use crate::efi::{cstr16, BootServices, CStr16, File, Handle, Mode, PartitionInfo, SimpleFileSystem, Status, SystemTable};
 
 /// The loader's first line, which is also the file's: [`open`] runs before it.
 pub const BEGINS_AT: &str = "ToyOS Bootloader 1.0";
@@ -51,7 +47,7 @@ const NAME: &CStr16 = cstr16!("loader.log");
 /// A UEFI application owns the machine: one processor, no preemption, and
 /// nothing here runs from a firmware callback, so the cell has one caller at a
 /// time and no borrow of its contents outlives the call that took it.
-struct Sink(UnsafeCell<Option<RegularFile>>);
+struct Sink(UnsafeCell<Option<File>>);
 
 // SAFETY: [`Sink`]'s own contract; nothing else in this crate names the type.
 unsafe impl Sync for Sink {}
@@ -61,7 +57,7 @@ static SINK: Sink = Sink(UnsafeCell::new(None));
 /// The log partition's root, kept open beside [`SINK`] for the same span and
 /// under the same contract: the one way to write another file on the volume
 /// once [`open`] holds it exclusively ([`with_open_volume`]).
-struct Volume(UnsafeCell<Option<Directory>>);
+struct Volume(UnsafeCell<Option<File>>);
 
 // SAFETY: [`Sink`]'s contract, which this shares.
 unsafe impl Sync for Volume {}
@@ -81,7 +77,7 @@ pub fn volume_handle(
     bs: &BootServices,
     guid: &[u8; 16],
 ) -> Result<Handle, alloc::string::String> {
-    let Ok(handles) = bs.locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()) else {
+    let Ok(handles) = bs.handles::<SimpleFileSystem>() else {
         return Err("this machine publishes no filesystem at all".into());
     };
     let mut on_gpt = 0usize;
@@ -105,13 +101,14 @@ pub fn volume_handle(
 /// protocol when it returns** — which is what makes this usable before [`open`]
 /// takes the same handle exclusively and keeps it for the rest of the pass.
 pub fn with_volume<T>(
-    system_table: &SystemTable<Boot>,
+    system_table: &SystemTable,
     guid: &[u8; 16],
-    visit: impl FnOnce(&mut uefi::proto::media::file::Directory) -> T,
+    visit: impl FnOnce(&mut File) -> T,
 ) -> Result<T, alloc::string::String> {
     let bs = system_table.boot_services();
     let handle = volume_handle(bs, guid)?;
-    let mut fs = crate::protocol::exclusive::<SimpleFileSystem>(bs, handle)
+    let mut fs = bs
+        .exclusive::<SimpleFileSystem>(handle)
         .map_err(|e| alloc::format!("the log partition would not open ({e})"))?;
     let mut root = fs
         .open_volume()
@@ -121,7 +118,7 @@ pub fn with_volume<T>(
 
 /// Hand the log partition's root to `visit`, once [`open`] holds the volume;
 /// `Err` where it does not, which is a pass whose log never opened.
-pub fn with_open_volume<T>(visit: impl FnOnce(&mut Directory) -> T) -> Result<T, alloc::string::String> {
+pub fn with_open_volume<T>(visit: impl FnOnce(&mut File) -> T) -> Result<T, alloc::string::String> {
     // SAFETY: [`Volume`]'s contract: one caller at a time, and no borrow
     // outlives this call.
     let volume = unsafe { &mut *VOLUME.0.get() };
@@ -131,13 +128,13 @@ pub fn with_open_volume<T>(visit: impl FnOnce(&mut Directory) -> T) -> Result<T,
     }
 }
 
-pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
+pub fn open(system_table: &SystemTable, guid: &[u8; 16], truncate: bool) {
     let bs = system_table.boot_services();
     let handle = match volume_handle(bs, guid) {
         Ok(handle) => handle,
         Err(why) => return refused(format_args!("{why}")),
     };
-    let mut fs = match crate::protocol::exclusive::<SimpleFileSystem>(bs, handle) {
+    let mut fs = match bs.exclusive::<SimpleFileSystem>(handle) {
         Ok(fs) => fs,
         Err(e) => return refused(format_args!("the log partition would not open ({e})")),
     };
@@ -149,17 +146,17 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     // offset zero without truncating it, so a shorter boot than the last would
     // end in the last one's tail.
     if truncate {
-        match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
+        match root.open(NAME, Mode::ReadWrite) {
             Ok(stale) => {
                 if let Err(e) = stale.delete() {
                     return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
                 }
             }
-            Err(e) if e.status() == Status::NOT_FOUND => {}
+            Err(Status::NOT_FOUND) => {}
             Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
         }
     }
-    let file = match root.open(NAME, FileMode::CreateReadWrite, FileAttribute::empty()) {
+    let file = match root.open(NAME, Mode::CreateReadWrite) {
         Ok(file) => file,
         Err(e) => return refused(format_args!("{NAME} would not open ({e})")),
     };
@@ -192,10 +189,7 @@ pub fn line(args: fmt::Arguments) {
     let text = alloc::format!("{args}\n");
     // A short write is a truncated line, and the count firmware did write is
     // the error's payload rather than its status.
-    let written = match file.write(text.as_bytes()) {
-        Ok(()) => file.flush().map_err(|e| (e.status(), text.len())),
-        Err(e) => Err((e.status(), *e.data())),
-    };
+    let written = file.write(text.as_bytes()).and_then(|()| file.flush().map_err(|status| (status, text.len())));
     if let Err((status, wrote)) = written {
         // Taken out of the sink before `refused` runs: nothing may re-enter
         // `line` while this `&mut` is live.
@@ -215,14 +209,11 @@ pub fn close() {
 /// The unique GUID of the GPT partition `handle` sits on. `None` is a handle
 /// that publishes no partition record, or one on a table that is not GPT.
 fn unique_guid(bs: &BootServices, handle: Handle) -> Option<[u8; 16]> {
-    let info = crate::protocol::get::<PartitionInfo>(bs, handle).ok()?;
-    let entry = info.gpt_partition_entry()?;
-    // A `repr(packed)` entry, where a reference into it would be unaligned.
-    Some({ entry.unique_partition_guid }.to_bytes())
+    bs.get::<PartitionInfo>(handle).ok()?.gpt_unique_guid()
 }
 
 /// Why there is no log, and that the boot goes on without one.
 fn refused(why: fmt::Arguments) {
     // The console directly: there is no file, and this says why.
-    uefi_services::println!("{} Loader log: {why}. This boot's loader lines are on the screen only", crate::stamp::now());
+    crate::efi::print(format_args!("{} Loader log: {why}. This boot's loader lines are on the screen only\n", crate::stamp::now()));
 }

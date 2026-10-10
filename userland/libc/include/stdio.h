@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
 #include <bits/types/FILE.h>
 
 #ifdef __cplusplus
@@ -40,6 +41,9 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fseek(FILE *stream, long offset, int whence);
 long ftell(FILE *stream);
+int fseeko(FILE *stream, off_t offset, int whence);
+off_t ftello(FILE *stream);
+void setbuf(FILE *stream, char *buf);
 void rewind(FILE *stream);
 int fflush(FILE *stream);
 int feof(FILE *stream);

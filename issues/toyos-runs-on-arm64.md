@@ -182,8 +182,8 @@ refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 `irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as
 the one x86 implementation and a simulator as the other. PCI is
 ECAM/MMIO-only (`drivers/pci.rs:134-154`), no `0xCF8`. NVMe, xHCI and virtio
-have no ISA dependence beyond TSC-based waits. The bootloader is the `uefi`
-crate (0.26, aarch64-capable already); only 12 of its 2,881 lines are x86.
+have no ISA dependence beyond TSC-based waits. The bootloader calls UEFI
+through its own bindings, which boot both targets.
 The pure decision crates carry no arch at all: `toyos-acpi`, `-gpt`,
 `-fat32`, `-dma`, `-userbound`, `-proclife`, `-blackbox`, `-elide` and
 others.

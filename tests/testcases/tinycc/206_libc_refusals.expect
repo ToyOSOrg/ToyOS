@@ -15,6 +15,10 @@ setrlimit: -1, ENOSYS
 msync: -1, ENOSYS
 mprotect: -1, ENOSYS
 realpath: -1, ENOSYS
+utimes: -1, ENOSYS
+wait: -1, ECHILD
+wait4: -1, ECHILD
+pathconf 12345: -1, EINVAL
 fcntl F_SETLK: -1, EINVAL
 fcntl F_SETLKW: -1, EINVAL
 fcntl F_GETLK: -1, EINVAL

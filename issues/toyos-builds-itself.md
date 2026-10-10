@@ -38,6 +38,10 @@ AArch64 one step behind, on `issues/toyos-runs-on-arm64.md`'s track.
 - Make it work, then optimise, then compare: no performance study now, and no
   comparison before a compilation inside ToyOS succeeds.
 
+**Decided** (owner, 2026-10-09). M2 installs clang and lld from a local file
+first, without waiting for packages over HTTPS, and links them statically:
+"Yes, decoupled and static (Recommended)".
+
 **To build** (2026-10-01), in an order that is open. Where a stage names
 libc's state it is `userland/libc` at `15625e0cb`.
 - **The `libc` crate gains a ToyOS module**, checked by `ctest` against
@@ -99,12 +103,14 @@ libc's state it is `userland/libc` at `15625e0cb`.
   how it is split into packages, and how a self-host test's guest reaches
   them.
 
-**Blocked on other tracks.** M2 needs packages over HTTPS
+**Blocked on other tracks.** M2 needs room for about a gigabyte of toolchain,
+and threads and `mmap` mature enough for LLVM
+(`issues/std-and-libc-drop-the-answer-thread-join-gives.md`). Packages over
+HTTPS
 (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`)
-and the network stack under it (`issues/the-lan-is-not-yet-production-grade.md`,
-`issues/the-internet-clients-work-unchanged.md`), room for about a
-gigabyte of toolchain, and threads and `mmap` mature enough for LLVM
-(`issues/std-and-libc-drop-the-answer-thread-join-gives.md`).
+wait on the network stack under them
+(`issues/the-lan-is-not-yet-production-grade.md`,
+`issues/the-internet-clients-work-unchanged.md`), and M2 does not.
 M2 and M4 also need libc to start a child process
 (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`). M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
@@ -119,16 +125,18 @@ the ToyOS-hosted rustc names no linker the guest has
 (`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). *Exit*: the
 commit that lands M2's compile-and-run test, which links inside the guest.
 
-**What stops M2: LLVM, clang and lld built for a ToyOS host**, in the order
-each blocks the next, as
-`issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`
-measures it.
+**What stops M2: clang and lld running inside ToyOS.** `cargo run --
+--hosted-clang` makes a clang and an `ld.lld` for `x86_64-unknown-toyos`,
+static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
+85.6 MB, 121.9 MB and 70.9 MB stripped. No guest has run either.
 - Run: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md` lists,
   `issues/libc-has-no-pread-or-pwrite.md`, and
   `issues/libc-stat-answers-one-serial-number-for-every-file.md`.
 
 **What M3 adds: a rustc that carries that LLVM**, after all of M2's.
-- Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`.
+- Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`, and
+  `issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`,
+  whose build of clang and lld replaces M2's.
 - Link: `issues/a-rust-std-binary-cannot-link-the-cxx-runtime.md`.
 - Test: `issues/nothing-builds-the-toyos-hosted-rustc.md`.
 
@@ -136,7 +144,7 @@ M3's exit then waits on a linker in the guest
 (`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`).
 
 **Also owed, by milestone.**
-- M2: the host triple a ToyOS-hosted LLVM records
+- M3: the host triple the ToyOS-hosted LLVM bootstrap builds records
   (`issues/a-toyos-hosted-llvm-is-configured-as-running-on-the-build-machine.md`,
   whose other half, the configure inside ToyOS, is M5's).
 - M3: `issues/the-hosted-rustcs-stage2-carries-seventeen-proc-macro-libraries-no-image-needs.md`.

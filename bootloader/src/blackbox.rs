@@ -16,8 +16,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use uefi::prelude::*;
-use uefi::table::boot::{AllocateType, MemoryType};
+use crate::efi::{AllocateType, SystemTable};
 
 use toyos_blackbox::{BYTES, PHYS, State};
 use toyos_wallclock::Civil;
@@ -53,12 +52,8 @@ pub struct Page(u64);
 /// last one's file or replaces it is what the page decides — so a refusal is
 /// returned as a line for the caller to write rather than printed here, where a
 /// machine with no console would lose it.
-pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>) {
-    match system_table.boot_services().allocate_pages(
-        AllocateType::Address(PHYS),
-        MemoryType::LOADER_DATA,
-        toyos_blackbox::PAGES,
-    ) {
+pub fn claim(system_table: &SystemTable) -> (Option<Page>, Option<String>) {
+    match system_table.boot_services().allocate_pages(AllocateType::Address(PHYS), toyos_blackbox::PAGES) {
         Ok(at) => {
             // `AllocateType::Address` allocates that address or fails; firmware
             // answering with another one has not done what was asked of it.
