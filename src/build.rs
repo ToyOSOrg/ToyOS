@@ -2907,6 +2907,7 @@ mod tests {
         "diag/system.toml",
         "console/system.toml",
         "tests/acpicase/system.toml",
+        "tests/downloadcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",

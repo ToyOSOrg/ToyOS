@@ -206,8 +206,8 @@ impl Leases {
                 // read off a stick or a stream has this line and nothing else
                 // to say what this machine's network was.
                 Some(lease) => say!(
-                    "netstack: DHCP: lease {}/{} from {}, gateway {}, dns [{}], {} ms after \
-                     netstack came up",
+                    "{}{}/{} from {}, gateway {}, dns [{}], {} ms after netstack came up",
+                    toyos_tco::LEASE_SAID,
                     lease.address,
                     lease.prefix_len,
                     lease.server,
@@ -230,8 +230,8 @@ impl Leases {
                 return false;
             }
             say!(
-                "netstack: DHCP: no lease as {} in {} s; this machine has no address and every \
-                 connect through it is refused",
+                "{}{} in {} s; this machine has no address and every connect through it is refused",
+                toyos_tco::NO_LEASE_SAID,
                 HOSTNAME,
                 self.began.elapsed().as_secs(),
             );

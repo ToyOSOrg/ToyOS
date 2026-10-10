@@ -154,6 +154,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host peer that ends each stream as the stream asks:
     // `libc_sockets` runs it on `tests/netcase`.
     "stream_ends_std",
+    // It downloads from the internet, inside a job list's bound alone: the
+    // `internet_download` metal row runs it.
+    "https_download",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -957,7 +960,52 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/downloadcase, the internet download ----
+    (
+        // A public file over HTTPS through netstack on the I219, for as long as
+        // the list's bound leaves it: its rate is reported, never judged. A boot
+        // of its own, so the transfer has the machine alone.
+        "internet_download",
+        metal::Metal {
+            arms: &[metal::once("download", "tests/downloadcase", &[], &["test_rs_https_download"])],
+            judge: |b| https_download_on_metal(b[0]),
+        },
+    ),
 ];
+
+/// What `https_download` said of its transfer, printed as it said it: green
+/// for a job that ended 0 having read some of the body, and, where it read
+/// all of it, a body of the file's length and hash. Its busy fraction is
+/// read: the T14 counts MPERF on every CPU (`counters_on_metal`), so one it
+/// could not read is the job's defect.
+fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
+    /// The job's file's length, and the SHA-256 its publisher states beside it
+    /// (`<url>.sha256`).
+    const DOWNLOAD_BYTES: &str = "170439044";
+    const DOWNLOAD_SHA256: &str = "1a9ee8caaa18a3e433fef93cea8a55dc1ebd478ed761b2fef69d4565f9d00e7f";
+    const SAID: &str = "https_download: ";
+    let log = back.log();
+    let said = log.text().lines().find_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim()));
+    if let Some(said) = said {
+        eprintln!("  [download] {said}");
+    }
+    back.job_passed("test_rs_https_download")?;
+    let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
+    let field = |name: &str| said.split_whitespace().find_map(|word| word.strip_prefix(name)?.strip_prefix('='));
+    match said.split_whitespace().next() {
+        Some("whole") if field("bytes") == Some(DOWNLOAD_BYTES) && field("sha256") == Some(DOWNLOAD_SHA256) => {}
+        Some("whole") => {
+            return Err(format!("https_download's body is not {DOWNLOAD_BYTES} bytes hashing {DOWNLOAD_SHA256}: {said}"))
+        }
+        // A cut says its bytes only where the body's first read came.
+        Some("cut") if field("bytes").is_some() => {}
+        _ => return Err(format!("https_download read none of the body: {said}")),
+    }
+    if field("busy") == Some("unread") {
+        return Err(format!("https_download read no MPERF on the T14: {said}"));
+    }
+    Ok(())
+}
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.
@@ -3284,13 +3332,12 @@ fn boot_netcase(
     rust_bins: &[(String, Vec<u8>)],
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
-    const LEASED: &str = "netstack: DHCP: lease ";
     /// `userland/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    await_marker(&mut qemu, &mut console, toyos_tco::LEASE_SAID, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
     await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
     Ok(qemu)
 }

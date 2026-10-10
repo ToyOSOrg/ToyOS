@@ -126,10 +126,21 @@ pub const fn list_bound_ms(members_ms: u64) -> u64 {
     JOB_BOUND_MS + members_ms
 }
 
+/// The environment variable the test runner sets on each job of a list to the
+/// bound it gave that list, in milliseconds from boot: what a job that must
+/// end its own work inside the list reads.
+pub const LIST_BOUND_ENV: &str = "TOYOS_LIST_BOUND_MS";
+
 /// The bound netstack gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
 /// with no server, so the two read one declaration.
 pub const LEASE_BOUND_MS: u64 = 20_000;
+
+/// What netstack's line on a lease it took opens with, and its line on
+/// [`LEASE_BOUND_MS`] passing with none: netstack says them, and the harness
+/// and the jobs that wait on its lease read them.
+pub const LEASE_SAID: &str = "netstack: DHCP: lease ";
+pub const NO_LEASE_SAID: &str = "netstack: DHCP: no lease as ";
 
 /// The bound a panicked kernel holds its panel for before it returns the
 /// machine to firmware itself, in milliseconds. A minute is this project's
