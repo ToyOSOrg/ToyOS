@@ -128,6 +128,9 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
+    // not give: the `app_view` metal row runs it on tests/proctreecase.
+    "app_view",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
@@ -142,15 +145,15 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host that dials its listeners when it says they wait:
     // `libc_sockets` runs it on `tests/netcase`.
     "nodelay_accepted",
-    // It needs a host peer that ends each stream as the stream asks:
-    // `libc_sockets` runs it on `tests/netcase`.
-    "stream_ends_std",
     // It needs a NIC in front of netstack and HTTPS servers behind it:
     // `https_fetch` runs it on `tests/netcase`.
     "https_get",
     // `https_fetch` runs it on the boot its fetches run on, so that test
     // carries its own oracle; a shared run would be the same QEMU CPU twice.
     "ring_kat",
+    // It needs a host peer that ends each stream as the stream asks:
+    // `libc_sockets` runs it on `tests/netcase`.
+    "stream_ends_std",
     // It downloads from the internet, inside a job list's bound alone: the
     // `internet_download` metal row runs it.
     "https_download",
@@ -775,6 +778,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
+    (
+        // An installed package sees its own directory read-only and its own
+        // folder as `HOME`, and nothing else of `/apps` or `/home`.
+        "app_view",
+        metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
+    ),
     // ---- one image: tests/metalcase, which runs no job ----
     //
     // The rows after the first read what any boot that hands the machine back
@@ -1078,8 +1087,9 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, and the shells `fs_share`
-/// asks DATA's server through, under its share and in a login session.
+/// rows `launch_authority` is refused and started, the shells `fs_share`
+/// asks DATA's server through, under its share and in a login session, and
+/// the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
@@ -1090,6 +1100,7 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
         "test_rs_launch_authority",
         "test_rs_port_badge",
         "test_rs_fs_share",
+        "test_rs_app_view",
     ],
 )];
 
@@ -3906,6 +3917,28 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
         let line = refused(caller, Sessions::default().machine(), target, why);
         if !log.text().lines().any(|l| l.contains(&line)) {
             return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
+    }
+    Ok(())
+}
+
+/// `app_view` passed, every arm its package asks held, and the supervisor
+/// refused each of the two launches for its own reason: a package named after
+/// the shell's row, and one whose folder is a file. The guest sees only that
+/// each was refused.
+fn app_view(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_app_view")?;
+    let log = back.log();
+    let named = format!("supervisor: launcher: {}", toyos_manifest::row_named("shell"));
+    for said in [
+        "  every arm held",
+        "app_view: the app saw its own package read-only and its own folder as HOME, and nothing else",
+        &named,
+        "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
+         /home/toy/Apps/appview is no directory",
+    ] {
+        if !log.text().lines().any(|l| l.contains(said)) {
+            return Err(format!("the log never said `{said}`\n{}", log.text()));
         }
     }
     Ok(())

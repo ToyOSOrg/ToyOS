@@ -2,7 +2,8 @@
 //! cache every byte of its volume passes through ([`cache`]), the volumes it
 //! can serve ([`data`] for the bcachefs DATA role, [`fat`] for FAT32's LOG and
 //! BOOT, [`absent`] for a role with no volume this boot), and the resolver that
-//! keeps every path inside the directory a connection was given ([`resolve`]).
+//! keeps every path inside the directory a connection was given ([`resolve`]),
+//! and which requests a read-only one is refused ([`rights`]).
 //!
 //! **This is the page cache.** A block of the volume — a btree node, a FAT
 //! sector, a file's data — is read into [`cache::Cache`] once and served from
@@ -18,5 +19,6 @@ pub mod data;
 pub mod disk;
 pub mod fat;
 pub mod resolve;
+pub mod rights;
 pub mod volume;
 pub mod writeback;
