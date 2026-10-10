@@ -130,6 +130,31 @@ fn main() {
             }
         }
     }
+    // Writes the key's package repository and builds nothing.
+    if let Some(manifest) = CARGO_RUN.value(&args, &flags::PUBLISH) {
+        let key = toyos_build::signing::key();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_secs();
+        let published = toyos_build::publish::repository(&root, key)
+            .and_then(|dir| toyos_build::publish::publish(Path::new(manifest), &dir, key, now).map(|p| (dir, p)));
+        match published {
+            Ok((dir, p)) => println!(
+                "Published into {}: root {}, targets {}, timestamp {}, signed by {}.",
+                dir.display(),
+                p.root,
+                p.targets,
+                p.timestamp,
+                key.fingerprint()
+            ),
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let arch = toyos_build::build::arch_for(&args);
     check_prerequisites(&root, arch);
