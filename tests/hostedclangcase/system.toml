@@ -1,0 +1,11 @@
+# The boot `hosted_clang_hello` stages ToyOS's own clang and LLD on, with the C
+# sysroot they read: a ROOT of its own, since they are a quarter of a gigabyte
+# and no other test reads them.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]

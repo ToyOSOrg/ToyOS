@@ -175,6 +175,9 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
+    // `hosted_clang_hello` runs it on tests/hostedclangcase.
+    "hosted_clang_hello",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -334,6 +337,10 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // clang and LLD built for ToyOS, compiling and linking inside it: the
+    // claim is that they run on ToyOS, which no host test can make, and the
+    // T14 would read nothing a guest does not.
+    "hosted_clang_hello",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3200,6 +3207,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
