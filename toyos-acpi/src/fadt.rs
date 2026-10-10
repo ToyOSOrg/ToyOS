@@ -23,10 +23,6 @@ const FADT_X_DSDT: usize = 140;
 const PSCI_COMPLIANT: u16 = 1 << 0;
 const PSCI_USE_HVC: u16 = 1 << 1;
 
-/// The bytes [`reset_register`] reads to the end of, so a caller opening the
-/// table for that decode alone asks for what it needs and nothing after it.
-pub const FADT_FOR_RESET: usize = FADT_RESET_VALUE + size_of::<u8>();
-
 /// Fixed feature flags bit 10, `RESET_REG_SUP` (Table 5.10); then the address space IDs of Table 5.1.
 const RESET_REG_SUP: u32 = 1 << 10;
 const SPACE_SYSTEM_MEMORY: u8 = 0;
@@ -263,8 +259,11 @@ impl SmiCmd {
 
     /// The five values, each `None` where the tables name none: `S4BIOS_REQ`
     /// where `s4bios`, the FACS's `S4BIOS_F`, is clear, whatever the field
-    /// holds, and each other where its field is zero.
-    pub fn named(&self, s4bios: bool) -> [Option<u8>; 5] {
+    /// holds, and each other where its field is zero; then `RESET_VALUE`
+    /// where `reset`, the FADT's reset register, is this very port, a write
+    /// of which resets the machine (Table 5.9, `RESET_REG`) and is a sixth
+    /// meaning.
+    pub fn named(&self, s4bios: bool, reset: Reset) -> [Option<u8>; 6] {
         let nonzero = |value: u8| (value != 0).then_some(value);
         [
             nonzero(self.acpi_enable),
@@ -272,6 +271,10 @@ impl SmiCmd {
             s4bios.then_some(self.s4bios_req),
             nonzero(self.pstate_cnt),
             nonzero(self.cst_cnt),
+            match reset {
+                Reset::Port { port, value } if port == self.port => Some(value),
+                _ => None,
+            },
         ]
     }
 }

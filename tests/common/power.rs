@@ -676,8 +676,8 @@ pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String
 }
 
 /// What `/system/bin/acpiserver` says once it serves q35's power button,
-/// whole: q35 has no embedded controller.
-const ACPI_ARMED: &str = "acpiserver: armed: power button served, embedded controller none";
+/// whole, before it loads the tables.
+const ACPI_ARMED: &str = "acpiserver: armed: power button served";
 
 /// The server's line for the press, naming the SCI it came on.
 const ACPI_PRESSED: &str =

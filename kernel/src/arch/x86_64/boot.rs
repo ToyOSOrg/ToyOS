@@ -76,6 +76,8 @@ pub fn reserved() -> Region {
 /// What the boot learns bringing interrupts up and hands later steps.
 pub struct Platform {
     madt: MadtInfo,
+    /// The FACS as `power::init_reset` read it, for `acpi_mode::init`.
+    facs: Option<Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>>,
 }
 
 /// Interrupt delivery, this CPU's per-CPU block and the syscall gate.
@@ -87,7 +89,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // Off the same tables as the MADT, and before the IDT below makes a panic
     // reportable: a panic that can be reported but not ended leaves the machine
     // holding its panel for a hand that may not be in the room.
-    super::power::init_reset(rsdp_addr);
+    let facs = super::power::init_reset(rsdp_addr);
     percpu::init_bsp(super::cpu::hardware_id());
     // After the IDT: an xAPIC's register page is mapped here, and a fault
     // there must diagnose rather than triple-fault.
@@ -96,7 +98,7 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     ioapic::init(&madt);
     idt::enable_interrupts();
     super::syscall::init();
-    Platform { madt }
+    Platform { madt, facs }
 }
 
 /// The clock: the TSC, calibrated against the HPET, and the CMOS wall clock.
@@ -134,10 +136,10 @@ pub fn timer() {
 }
 
 /// The platform's own devices that are not PCI functions.
-pub fn platform_devices(rsdp_addr: u64) {
+pub fn platform_devices(platform: &Platform, rsdp_addr: u64) {
     super::i8042::init(rsdp_addr);
     super::pio::fill_i8042_row();
-    super::acpi_mode::init(rsdp_addr);
+    super::acpi_mode::init(rsdp_addr, platform.facs);
 }
 
 /// Every other CPU, running.
