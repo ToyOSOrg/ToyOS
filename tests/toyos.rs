@@ -148,9 +148,6 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host peer that ends each stream as the stream asks:
     // `libc_sockets` runs it on `tests/netcase`.
     "stream_ends_std",
-    // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
-    // twenty seconds. On a shared boot it would be twenty seconds of nothing.
-    "lan_hold",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -237,7 +234,7 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 // the only one that architecture has.
 const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_panic_muted", qemu::Profile::Metal),
-    // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
+    // The same fatal path from inside a boot checkpoint's painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound. The profile
     // whose 16550 is the console, where the fatal path writes its last line raw.
@@ -578,22 +575,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 eprintln!("  [trace] {}", log.must_say("trace_flood: ")?);
                 Ok(())
             },
-        },
-    ),
-    (
-        // One CPU deafened by the actuator, named by the blocked-task dump and
-        // found by its NMI where it spins.
-        "dump_nmi_probe",
-        metal::Metal {
-            // Held open by a job, because an empty list ends the boot before the
-            // actuator arms.
-            arms: &[metal::once(
-                "testcases-deaf",
-                "tests/testcases",
-                &["dump-deaf-cpu"],
-                &["test_rs_lan_hold"],
-            )],
-            judge: |b| faults::dump_nmi_probe_on_metal(&b[0].kernel()),
         },
     ),
     (
@@ -2754,8 +2735,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "screen_fatal_behind_a_painter" => {
             // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
-            // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
-            // go fatal once it holds the latch, so the fatal path meets a
+            // IPI lands mid-paint. The actuator has the last boot checkpoint's
+            // painter go fatal once it holds the latch, so the fatal path meets a
             // holder beneath itself; the report must take the screen
             // regardless, and its CPU must go on to watch the reset bound,
             // which is what the reset proves.
@@ -2774,17 +2755,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.keys(&[
-                    ("ctrl", true),
-                    ("alt", true),
-                    ("d", true),
-                    ("d", false),
-                    ("alt", false),
-                    ("ctrl", false),
-                ]);
-            }
             let dump = qemu.screendump_until(HELD, Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -2904,7 +2874,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             // The death's own census, which the seal writes as lines of its
             // own. Anchored at the line's start: the ring's tail under it can
-            // carry a blocked-task dump's `irq: cpu0`, behind a record's stamp.
+            // carry an `irq: cpu0` record, behind its stamp.
             for owed in ["irq: cpu0 ", "tlb: shootdowns="] {
                 if !sealed.lines().any(|line| line.starts_with(owed)) {
                     return Err(format!(

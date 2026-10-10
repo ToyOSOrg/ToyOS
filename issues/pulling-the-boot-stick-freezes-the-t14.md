@@ -7,11 +7,11 @@ opened: 2026-08-06
 # Pulling the boot stick freezes the T14, and the diagnosis that was wrong
 
 **The report.** Pulling the USB stick while the desktop is up freezes the whole
-machine unrecoverably, from a USB-A or a USB-C port alike, and **Ctrl+Alt+D does
-not answer afterwards**. That last clause is the strongest signal available: the
-blocked-task dump is dispatched from `drain_irqs` at the top of a scheduler
-pass, so no CPU is reaching a pass — not three of eight as in the wedge, all of
-them.
+machine unrecoverably, from a USB-A or a USB-C port alike, and **Ctrl+Alt+D did
+not answer afterwards**. That last clause was the strongest signal available: the
+blocked-task dump, since removed with its hotkey, was dispatched from
+`drain_irqs` at the top of a scheduler pass, so no CPU was reaching a pass — not
+three of eight as in the wedge, all of them.
 
 **A diagnosis to withdraw, recorded because it read well.** The mechanism first
 proposed was: every CPU entering a pass takes `XHCI`, one holds it across a full
@@ -60,7 +60,7 @@ aims all of them at a dead device on one event.
   further scheduler pass.
 - **The metal claim is still the owner's to make.** Everything above is the
   guest-side proxy — no pass blocks — and the acceptance test is a stick pulled
-  out of a running T14 with Ctrl+Alt+D still answering.
+  out of a running T14 with the desktop still answering typing.
 - `log_file`'s flush still holds `SINK` and the VFS across device I/O. The doc's
   "unbounded and uninterruptible" is half right, and the precise reading is
   **bounded in acquisition, unbounded in work**: `poll` is `try_lock` on both and

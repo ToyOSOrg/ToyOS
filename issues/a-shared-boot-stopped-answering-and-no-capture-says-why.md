@@ -50,8 +50,8 @@ would leave a whole boot idle straight after a sibling thread's clean exit.
 path's two posts.
 
 **Exit condition.** A capture taken from a boot that has actually stopped, which
-names the first waiter and the subject it waits on — the blocked-task dump, or
-that boot's trace diary and panic records.
+names the first waiter and the subject it waits on — that boot's trace diary
+and panic records.
 
 **The periodic reporter is gone.** The owner ruled on 2026-10-04, choosing
 "Remove it entirely": "Delete the periodic report and its counters; hang

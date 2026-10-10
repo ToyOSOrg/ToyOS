@@ -136,7 +136,6 @@ fn discard_pending() {
     let mut sink = Discard;
     drain_ordered(&super::shards(), &mut cursor, &mut sink);
     DRAINED.put(&cursor);
-    LOST.store(DRAINED.lost(), Ordering::Relaxed);
 }
 
 /// At most `budget` records onto the wire the caller holds. Returns how many went.
@@ -146,8 +145,6 @@ fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
     drain_ordered(&super::shards(), &mut cursor, &mut sink);
     let records = sink.records;
     DRAINED.put(&cursor);
-    RECORDS.fetch_add(records, Ordering::Relaxed);
-    LOST.store(DRAINED.lost(), Ordering::Relaxed);
     records
 }
 
@@ -450,22 +447,7 @@ extern "C" fn body(_arg: u64) -> ! {
             continue;
         }
         // No deadline: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.
-        PARKS.fetch_add(1, Ordering::Relaxed);
         // `klogd` is never killed, so this cancel arm is unreachable.
         let _ = watch::wait(&parkable, &armed, crate::time::Deadline::never());
     }
-}
-
-/// Three counters read by `sched::dump`: records drained, records lost, and parks.
-static RECORDS: AtomicU64 = AtomicU64::new(0);
-static LOST: AtomicU64 = AtomicU64::new(0);
-static PARKS: AtomicU64 = AtomicU64::new(0);
-
-/// `(records drained, records lost, parks)`, via three relaxed loads.
-pub fn stats() -> (u64, u64, u64) {
-    (
-        RECORDS.load(Ordering::Relaxed),
-        LOST.load(Ordering::Relaxed),
-        PARKS.load(Ordering::Relaxed),
-    )
 }

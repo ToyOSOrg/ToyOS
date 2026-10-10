@@ -1962,44 +1962,6 @@ impl QmpMonitor {
     }
 }
 
-/// An open QMP connection for injecting input.
-///
-/// One connection rather than one per event, because QEMU delivers each
-/// `input-send-event` as its own input sync — so a thousand pointer packets
-/// is a thousand commands, and a thousand reconnects on top of that is the
-/// difference between a second and a minute.
-pub struct QmpInput(Qmp);
-
-impl QmpInput {
-    pub fn open(socket: &Path) -> Self {
-        Self(Qmp::connect(socket))
-    }
-
-    fn send(&mut self, body: &[String]) {
-        if body.is_empty() {
-            return;
-        }
-        self.0.execute(&format!(
-            "{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":[{}]}}}}",
-            body.join(",")
-        ));
-    }
-
-    /// Every key transition in `events` as one batch, so a chord like Shift+B
-    /// arrives as a chord rather than as a race.
-    pub fn keys(&mut self, events: &[(&str, bool)]) {
-        let body: Vec<String> = events
-            .iter()
-            .map(|(qcode, down)| {
-                format!(
-                    "{{\"type\":\"key\",\"data\":{{\"down\":{down},\"key\":{{\"type\":\"qcode\",\"data\":\"{qcode}\"}}}}}}"
-                )
-            })
-            .collect();
-        self.send(&body);
-    }
-}
-
 /// The argv `options` would launch QEMU with, built against placeholder
 /// paths. A profile's claim about which devices exist is a claim about this
 /// list and nothing else — no screendump can see a device that is present but

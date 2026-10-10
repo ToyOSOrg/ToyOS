@@ -86,9 +86,9 @@ instrument that would settle the split the `ps` column was going to.
 The assignment was reclaimed 2026-08-23: #142's investigation left no artifact.
 
 Investigation is the scheduler agent's (#142); the shapes are consistent with
-one defect. Ctrl+Alt+D is now machine-wide and process-named, and on the
-owner's laptop one press named three CPUs not reaching a scheduler pass and
-three threads ready-and-never-run.
+one defect. On the owner's laptop one press of the blocked-task dump's hotkey,
+since removed, named three CPUs not reaching a scheduler pass and three threads
+ready-and-never-run.
 
 ## The amplifier is closed, and it was most of the arithmetic
 
@@ -98,8 +98,8 @@ advertises for ever the number it wrote on its way into idle, which is zero.
 That did not merely leave a shed core unused: it left it in the rotation as a
 CPU every spawn would rather have than a busy one, and an `Adopt` posted into a
 CPU that never drains is a task no balance path can reach. `InTransit` is one of
-the words the dump renders as `ready`, which is why the census says `ready and
-has never run` and `cpu_ns` says zero.
+the words `task_sched_state` reports as `ready`, which is why the dump's census
+said `ready and has never run` and `cpu_ns` says zero.
 
 It also fits the shape of this file's own numbers rather than contradicting it.
 Twelve `/system/bin/ls`, two of them hung, is a *fraction* lost and not everything —
@@ -121,12 +121,13 @@ reverted (`kernel/sim/tests/policy.rs`,
 ## What is still open here, stated as the two things it is
 
 **Why a CPU stops reaching a pass at all.** Nothing in this work touched it and
-nothing in it explains it. The instrument that can name it exists —
-`sched::dump`'s NMI probe separates a CPU spinning with `IF` clear from one
-halted with its kick undelivered from one wedged below the interrupt layer —
-and it has never been fired at a machine in this state. Capture
-`info registers -a` over QMP before pressing Ctrl+Alt+D, which destroys what it
-reports on.
+nothing in it explains it. In a guest, `info registers -a` over QMP
+(`src/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
+injecting anything, since a keystroke revives a halted CPU. On metal, a CPU
+that has stopped taking interrupts is ended by `crate::hardlockup` on a boot
+armed with a deadline and a CPU that states a PMU, and its record in the black
+box (`kernel/src/blackbox.rs`) names where it stood. Neither has been fired at
+a machine in this state.
 
 **The one task per silent CPU.** The rule cannot do better without a liveness
 beat the idle path does not have, and adding one is an audio change
