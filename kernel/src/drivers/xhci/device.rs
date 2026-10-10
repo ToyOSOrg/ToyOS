@@ -784,6 +784,7 @@ fn bind_hid(
         report_size,
         role,
         refused: 0,
+        rolled_over: 0,
         broke_with: None,
         failures: 0,
     };

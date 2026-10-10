@@ -42,8 +42,10 @@ pub struct HidDevice {
     pub report: crate::mm::Dma<'static>,
     pub report_size: u32,
     pub role: HidRole,
-    /// Reports refused since bind; only the first and each power of two after it is logged, so a device cannot flood the log.
+    /// Reports refused since bind, none of them believed; logged as [`tally`] says.
     pub refused: u32,
+    /// Keyboard reports in rollover since bind, each believed for its modifiers alone; logged as [`tally`] says.
+    pub rolled_over: u32,
     /// The completion code this endpoint broke with; read and cleared by [`super::XhciController::recover_endpoints`], never by the code that sets it.
     pub broke_with: Option<u32>,
     /// Consecutive failures; a delivered report clears it — see [`super::MAX_HID_FAILURES`].
@@ -71,7 +73,7 @@ impl HidDevice {
                 Ok(Read::Keys(transitions)) => keyboard::apply(transitions) != 0,
                 Ok(Read::RollOver(transitions)) => {
                     let queued = keyboard::apply(transitions) != 0;
-                    self.refuse(format_args!("RollOver, its modifiers believed"));
+                    self.roll_over();
                     queued
                 }
                 Err(why) => return self.refuse(format_args!("{why:?}")),
@@ -88,10 +90,17 @@ impl HidDevice {
 
     #[cold]
     fn refuse(&mut self, why: core::fmt::Arguments<'_>) {
-        self.refused = self.refused.saturating_add(1);
-        if self.refused.is_power_of_two() {
+        if tally(&mut self.refused) {
             log!("xHCI: slot {} {} report refused, {} since it bound: {why}",
                 self.slot_id, self.kind(), self.refused);
+        }
+    }
+
+    #[cold]
+    fn roll_over(&mut self) {
+        if tally(&mut self.rolled_over) {
+            log!("xHCI: slot {} keyboard report in rollover, its modifiers believed and its other keys held, \
+                {} since it bound", self.slot_id, self.rolled_over);
         }
     }
 
@@ -125,6 +134,12 @@ impl HidDevice {
         // An `Mmio` write: ordered after the TRB it announces.
         db_base.write_u32(self.slot_id as u64 * 4, self.int_ep_dci as u32);
     }
+}
+
+/// Counts one more; true for the first and each power of two after it, so a device cannot flood the log.
+fn tally(count: &mut u32) -> bool {
+    *count = count.saturating_add(1);
+    count.is_power_of_two()
 }
 
 fn motion(motion: Motion) -> mouse::Motion {

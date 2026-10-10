@@ -351,6 +351,10 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // A boot keyboard reporting more keys than its six slots name: the
+    // kernel's driver reading a report a device delivered over xHCI has no host
+    // build, and the T14 binds no USB keyboard.
+    "usb_keyboard_rollover",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3409,6 +3413,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3528,6 +3533,34 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     };
     eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
     Ok(())
+}
+
+/// Seven keys held on QEMU's `usb-kbd`, whose seventh report is ErrorRollOver
+/// in every slot: the driver counts it as a rollover, and as no refusal.
+fn usb_keyboard_rollover(test_config: &Path) -> Result<(), String> {
+    const BOUND: &str = "xHCI: USB keyboard ready on slot ";
+    const ROLLED_OVER: &str = " keyboard report in rollover, its modifiers believed and its other keys held, 1 since it bound";
+    const REFUSED: &str = " report refused, ";
+    let options = BootOptions { qmp: true, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|arg| arg.starts_with("usb-kbd,")) {
+        return Err("this machine was to have a usb-kbd".to_string());
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the keyboard to bind", |c| c.contains(BOUND))?;
+    const KEYS: [&str; 7] = ["q", "w", "e", "r", "t", "y", "u"];
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        input.keys(&KEYS.map(|key| (key, true)));
+        input.keys(&KEYS.map(|key| (key, false)));
+    }
+    await_guest(&mut qemu, &mut console, "the driver to read the rollover", |c| {
+        c.contains(ROLLED_OVER) || c.contains(REFUSED)
+    })?;
+    let said = serial::Serial::named("the typed-on boot", console);
+    said.must_not_say(REFUSED)?;
+    eprintln!("  [usbhid] {}", said.must_say(ROLLED_OVER)?.trim());
+    said.must_be_clean()
 }
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and
