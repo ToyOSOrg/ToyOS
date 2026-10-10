@@ -178,10 +178,13 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
             ));
         }
         eprintln!(
-            "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, the audio \
-             function {sound} among them{}",
+            "  [iommu] {name}: {} virtio function(s) negotiated, behind a unit = {behind_unit}; {}",
             negotiated.len(),
-            if behind_unit { "" } else { "; the NIC's and the audio function's claims refused for want of a unit" }
+            if behind_unit {
+                format!("the audio function {sound} among them")
+            } else {
+                format!("the NIC's and the audio function {sound}'s claims refused for want of a unit")
+            }
         );
     }
     declining_is_not_free(test_config)
@@ -204,7 +207,7 @@ const NVME_AT: &str = "00:02.0";
 
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
 /// `tests/netcase`'s soundserver row claims.
-const SOUND_AT: &str = "00:05.0";
+const SOUND_AT: &str = "00:04.0";
 
 /// Why a machine with no unit hands no function over, in the kernel's words.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
@@ -251,14 +254,16 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
 /// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
 /// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
 /// at v11.1.1), so `FEATURES_OK` never sticks. The actuator withholds the bit
-/// from every virtio device but the console, and each of them is refused for it.
+/// from every virtio device the kernel drives but the console — on this
+/// machine the virtio-gpu it adds for that, since every other function is a
+/// process's claim — and each of them is refused for it.
 fn declining_is_not_free(test_config: &Path) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
         BootOptions {
-            profile: Profile::Headless,
+            profile: Profile::HeadlessVirtioGpu,
             kernel_params: &["virtio-no-access-platform"],
             ..Default::default()
         },

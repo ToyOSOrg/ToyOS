@@ -694,6 +694,10 @@ pub enum Profile {
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
     HeadlessNoUsb,
+    /// [`Profile::Headless`] with a virtio-gpu behind the unit: a virtio
+    /// function the kernel still drives itself beside the console, which is
+    /// what `virtio-no-access-platform` withholds the bit from.
+    HeadlessVirtioGpu,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -738,6 +742,7 @@ impl Profile {
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
+            | Self::HeadlessVirtioGpu
             | Self::Metal => Arch::X86_64,
         }
     }
@@ -861,6 +866,8 @@ struct Shape {
     /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
     /// the protocol from RDRAND without one.
     rng: bool,
+    /// A virtio-gpu, which the kernel drives.
+    virtio_gpu: bool,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -917,6 +924,7 @@ impl Profile {
                 storage: Storage::Stick { nvme_bytes: 0 },
                 iommu: None,
                 rng: true,
+                virtio_gpu: false,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -928,6 +936,7 @@ impl Profile {
                 storage: Storage::Disk { data_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
                 rng: false,
+                virtio_gpu: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -943,10 +952,12 @@ impl Profile {
                 storage: Storage::Stick { nvme_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
                 rng: false,
+                virtio_gpu: false,
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
+            Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
         }
     }
 
@@ -2183,6 +2194,9 @@ fn qemu_command(
     }
     if shape.rng {
         qemu.arg("-device").arg("virtio-rng-pci");
+    }
+    if shape.virtio_gpu {
+        qemu.arg("-device").arg(format!("virtio-gpu-pci{platform}"));
     }
 
     // The NIC before the virtio block, so a profile that has one and not the
