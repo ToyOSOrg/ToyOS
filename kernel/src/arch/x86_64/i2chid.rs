@@ -13,7 +13,8 @@
 //! No interrupt is taken: the touchpad's line is GPIO 9 on the FCH's GPIO
 //! bank (`AMDI0030`), whose level this reads every [`TICK`] and reads the
 //! input register only while the line is away from the level it held idle.
-//! Nothing here writes a chipset power, reset or pin-mux register: a
+//! Nothing here writes a chipset power, reset or pin-mux register, nor the
+//! GPIO page, which the acpi claim's AML may write: a
 //! controller that does not read as a DesignWare core is logged and left.
 
 use toyos_i2chid::report::{self, Mouse};
@@ -278,7 +279,12 @@ fn hex(bytes: &[u8]) -> impl core::fmt::Display + '_ {
 }
 
 fn bring_up(sleep: &Sleeper) -> Result<Pad, &'static str> {
-    let fch = crate::mm::paging::map_mmio(FCH_81, 0x1000, MmioPolicy::Uncacheable);
+    let mmio = crate::mm::paging::map_mmio(I2CA, 0x1000, MmioPolicy::Uncacheable);
+    // Only read, so reached through I2CA's 2 MiB mapping rather than mapped
+    // as a window this kernel drives, which would refuse the acpi claim's
+    // AML every GPIO and AOAC field on the page.
+    const { assert!(FCH_81 >> 21 == I2CA >> 21) };
+    let fch = Mmio::new(crate::mm::DirectMap::from_phys(FCH_81), 0x1000);
     log!(
         "i2c-hid: AOAC I2C0 control={:#04x} state={:#04x}; GPIO{} {:#010x}",
         fch.read_u8(AOAC_I2C0),
@@ -286,7 +292,6 @@ fn bring_up(sleep: &Sleeper) -> Result<Pad, &'static str> {
         TOUCHPAD_PIN,
         pin(fch)
     );
-    let mmio = crate::mm::paging::map_mmio(I2CA, 0x1000, MmioPolicy::Uncacheable);
     let comp_type = mmio.read_u32(reg::COMP_TYPE);
     let version = mmio.read_u32(reg::COMP_VERSION);
     let param = mmio.read_u32(reg::COMP_PARAM_1);
