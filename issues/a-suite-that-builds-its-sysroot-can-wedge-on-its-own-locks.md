@@ -28,6 +28,13 @@ process, and stopped:
 `cargo run -- --ci host` ran beside it in the same worktree; whether it took
 part is not established.
 
+It recurred on #836's round 4, the same shape on the host the other agents'
+suites loaded: the harness built `fa7a35ac0091a05b`'s std by 14:35:56, ran its
+other tests, and from 14:43:03 one worker alone waited on `using sysroot
+fa7a35ac0091a05b — the holder left no readable note`, 930 s by 14:48:17, with
+`lsof` showing the key's lock file open twice in the harness and nowhere else.
+`--ci host` again ran beside it and had finished at 14:45:47.
+
 **Exit condition**: no path holds the worktree build lock while it waits on a
 key's lock, and a suite started on a head whose sysroot is not yet made
 finishes.
