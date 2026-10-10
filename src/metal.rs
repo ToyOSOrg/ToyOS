@@ -783,6 +783,12 @@ pub const FLASHABLE: &[&str] = &[
     // own driver sends the controller on every boot. It reaches no firmware
     // state, and firmware programs the controller again at the next power-on.
     "i8042-withheld",
+    // The kernel leaves one xHCI controller to a claim, and `usbd` drives it
+    // through the unit: the handoff, a reset and its own rings, as this
+    // kernel's driver does every boot. Firmware owns neither of the T14's two
+    // (each reads `USBLEGSUP 0x01002201`, every SMI enable clear), and
+    // firmware takes the controller back at the next power-on.
+    "xhci-leave=",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
@@ -841,7 +847,7 @@ pub fn flashable(name: &str) -> bool {
     // address, which every image the harness builds has, and the boot
     // deadline's bound. Neither arms an instrument, and the second is what ends
     // a boot this loop would otherwise wait 360 s for and then need a hand on.
-    crate::build::is_valued_param(name) || FLASHABLE.contains(&name)
+    crate::build::is_valued_param(name) || FLASHABLE.iter().any(|ruled| crate::build::arms(ruled, name))
 }
 
 /// The pre-flash gate: what the image is armed with, judged before it is

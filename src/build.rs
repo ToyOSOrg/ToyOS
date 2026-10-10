@@ -1159,7 +1159,7 @@ fn check_params(root: &Path, params: &[String]) {
     let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name) || own.contains(name) || is_valued_param(name),
+            declared.iter().any(|a| arms(a, name)) || own.contains(name) || is_valued_param(name),
             "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
              Actuators it declares: {}.\n\
              Boot parameters it declares: {}.\n\
@@ -1332,6 +1332,12 @@ pub fn manifest_and_symlinks(config: &Path) -> (Vec<u8>, Vec<(String, String)>) 
     let config = parse_config(config);
     let symlinks = config.symlinks.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     (render_manifest(&config), symlinks)
+}
+
+/// Whether the boot parameter `param` arms `actuator`: by its whole name, or,
+/// for a name that ends in `=`, with the value it carries after it.
+pub fn arms(actuator: &str, param: &str) -> bool {
+    param == actuator || (actuator.ends_with('=') && param.starts_with(actuator))
 }
 
 /// Every actuator `kernel/src/actuator.rs` declares, read out of the file that
@@ -2420,8 +2426,11 @@ mod tests {
         let both: Vec<&String> = actuators.iter().filter(|a| features.contains(a)).collect();
         assert!(both.is_empty(), "declared as both an actuator and a kernel feature: {both:?}");
         assert!(
-            actuators.iter().all(|a| a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')),
-            "an actuator name is ASCII `[a-z0-9-]`, and these are not: {actuators:?}"
+            actuators.iter().all(|a| {
+                a.strip_suffix('=').unwrap_or(a).bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
+            "an actuator name is ASCII `[a-z0-9-]`, `=` after it where it carries a value, and \
+             these are not: {actuators:?}"
         );
     }
 

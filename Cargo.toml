@@ -117,6 +117,7 @@ members = [
     "userland/toyos-window",
     "userland/trace",
     "userland/update",
+    "userland/usbd",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and

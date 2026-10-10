@@ -429,6 +429,25 @@ impl PortState {
         }
     }
 
+    /// A port found connected when its controller was brought up: given the
+    /// reset [`inherited_reset`] answers and awaited like any other, so the
+    /// device whatever ran before left there is asked nothing until it has
+    /// been reset. Answers which reset, and the write that performs it.
+    ///
+    /// **The write acknowledges the connect it was found by**: that edge is
+    /// this device's arrival, and left set it reads after the enumeration as
+    /// a replug of the device just enumerated. One that lands after the
+    /// write is a real replug and is seen.
+    ///
+    /// For a driver that steps every port with [`Self::step`] from bring-up
+    /// on: a boot scan that waits in place answers the same question through
+    /// [`inherited_reset`] and keeps no machine while it does.
+    pub fn adopt(&mut self, portsc: Portsc, now: Nanos) -> (Reset, portsc::Write) {
+        let kind = inherited_reset(reset_needed(self.protocol, portsc));
+        self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind };
+        (kind, reset_write(kind, portsc).acknowledging_connect(portsc))
+    }
+
     fn give_up(&mut self, why: GaveUp) -> Step<'static> {
         self.gave_up(why);
         Step::GaveUp(why)
@@ -619,6 +638,38 @@ mod tests {
         assert_eq!(inherited(Some(Protocol::Usb3), connected(false, 6)), Reset::Warm);
         assert_eq!(inherited(Some(Protocol::Usb2), connected(true, 0)), Reset::Hot);
         assert_eq!(inherited(None, trained), Reset::Hot);
+    }
+
+    /// A port adopted at bring-up is reset whatever its link says, and the
+    /// completion of that reset is what enumerates it — never the link that
+    /// was already trained.
+    #[test]
+    fn an_adopted_port_is_enumerated_by_its_reset_and_not_by_its_link() {
+        const PRC: u32 = 1 << 21;
+        const WRC: u32 = 1 << 19;
+        let mut port = PortState::EMPTY;
+        port.speaks(Some(Protocol::Usb3));
+        let trained = connected(true, 0);
+        let (kind, write) = port.adopt(trained, 0);
+        assert_eq!(kind, Reset::Warm);
+        assert_eq!(write.raw() & (1 << 31), 1 << 31, "{:#010x} is no warm reset", write.raw());
+        assert!(port.outstanding());
+        // Still trained and no completion: the reset is awaited, not skipped.
+        assert!(matches!(port.step(trained, 1), Step::Wait(at) if at == RESET_DEADLINE_NS));
+        let done = Portsc::from_raw(trained.raw() | PRC | WRC);
+        assert!(matches!(port.step(done, 2), Step::Enumerate { after: Some(Reset::Warm), .. }));
+
+        // A USB2 port has only the one reset, and its deadline still gives up.
+        // The connect it was found by is acknowledged with the reset, or the
+        // device it enumerates reads as replugged the moment it is enumerated.
+        const CSC: u32 = 1 << 17;
+        let mut port = PortState::EMPTY;
+        port.speaks(Some(Protocol::Usb2));
+        let arrived = Portsc::from_raw(connected(false, 7).raw() | CSC);
+        let (kind, write) = port.adopt(arrived, 0);
+        assert_eq!(kind, Reset::Hot);
+        assert_eq!(write.raw() & CSC, CSC, "{:#010x} leaves the arrival's edge set", write.raw());
+        assert!(matches!(port.step(connected(false, 7), RESET_DEADLINE_NS), Step::GaveUp(GaveUp::ResetNeverFinished)));
     }
 
     /// Every report that moves the belief leaves the port to be read: a device
