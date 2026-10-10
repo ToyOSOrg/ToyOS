@@ -740,13 +740,17 @@ pub enum Profile {
     /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
     /// function that writes where it is told to through the unit.
     VirtSmmu,
+    /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
+    /// QEMU's `edu`, a function that sends an MSI when told to, and an
+    /// `e1000e` the IORT routes past the SMMUv3.
+    VirtIts,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu => {
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu | Self::VirtIts => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -902,6 +906,12 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
+    /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
+    /// With it comes one `edu`, whose message is the only one a guest of
+    /// this suite can raise on demand, and an `e1000e` behind a root port of
+    /// a `pxb-pcie` with `bypass_iommu=on`, which QEMU's IORT routes straight
+    /// to the ITS: a plain root port's buses it routes through the unit.
+    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -949,6 +959,7 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
+            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -1060,6 +1071,9 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
+    /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
+    /// it, and the host's own UTC with `None`.
+    pub rtc_base: Option<&'static str>,
 }
 
 impl BootOptions {
@@ -1098,6 +1112,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
+            rtc_base: None,
         }
     }
 }
@@ -2154,6 +2169,7 @@ fn qemu_command(
             match shape.smmu {
                 Smmu::Absent => machine,
                 Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
+                Smmu::WithIts => format!("{machine},iommu=smmuv3,its=on,kernel-irqchip=off"),
             }
         }
     };
@@ -2227,6 +2243,9 @@ fn qemu_command(
         (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
     }
     qemu.arg("-display").arg("none").arg("-no-reboot");
+    if let Some(base) = options.rtc_base {
+        qemu.arg("-rtc").arg(format!("base={base}"));
+    }
     if let Some((w, h)) = shape.panel {
         assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
@@ -2289,6 +2308,13 @@ fn qemu_command(
         // routes nothing for the first, whose entry the table holds.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
+    }
+    if shape.smmu == Smmu::WithIts {
+        qemu.arg("-device").arg("edu");
+        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
+        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
+        // No option ROM: firmware has no use for the NIC.
+        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the

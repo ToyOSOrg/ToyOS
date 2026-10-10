@@ -2,16 +2,23 @@
 //! kernel's own address-space rules forbid.
 //!
 //! `abuse_elf_segments` covers the sizes a program header declares.  This one
-//! covers what the loader *derives* from them: the file offset a `DT_*` vaddr
-//! maps to, the address a segment lands at once the image is rebased to
-//! `USER_VM_BASE`, the TLS block's layout, and every table whose length the
-//! file gets to name.  Each case is a kernel panic or a forbidden mapping
-//! before the fix; each must be an error return after it, with the kernel
-//! intact.
+//! covers what the loader *derives* from them: the address a segment lands at
+//! once the image is rebased to `USER_VM_BASE`, the TLS block's layout, and
+//! what `dlopen` reads of a library's tables.  Each case is a kernel panic or
+//! a forbidden mapping before the fix; each must be an error return after it,
+//! with the kernel intact.
+//!
+//! An executable's dynamic section is the program's own
+//! (`toyos::relocate`): the spawn cases crafted in one are answered either way,
+//! the kernel lives, and a child the kernel starts dies ([`dies`]). A real std
+//! image whose dynamic section names a form its own `_start` refuses exits
+//! [`REFUSED_STATUS`] with [`REFUSED_LINE`] ([`refuses_itself`]).
 
 use std::fs;
+use std::process::Command;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
+use toyos_abi::RawHandle;
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
@@ -226,8 +233,12 @@ fn write_file_in(dir: &str, name: &str, bytes: &[u8]) -> String {
     path
 }
 
-fn spawn_path(path: &str) -> Result<u64, SyscallError> {
-    let argv = format!("{path}\0");
+fn spawn_path(path: &str) -> Result<RawHandle, SyscallError> {
+    spawn_argv(path, &format!("{path}\0"))
+}
+
+/// `path` spawned with `argv`, NUL-separated, and no slot of this process's.
+fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
     unsafe {
         syscall::spawn(&SpawnArgs {
             path_ptr: path.as_ptr() as u64,
@@ -249,18 +260,17 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
-    .map(|pid| pid.0 as u64)
 }
 
-fn spawn_result(name: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
+fn spawn_result(name: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
     spawn_path(&write_file(name, bytes))
 }
 
 /// Spawn must refuse this file. A success is as much a failure as a panic:
 /// every case here describes a process the kernel cannot safely build.
-fn refused(name: &str, outcome: Result<u64, SyscallError>) {
+fn refused(name: &str, outcome: Result<RawHandle, SyscallError>) {
     match outcome {
-        Ok(pid) => panic!("{name}: spawn returned pid {pid} for an ELF that must be refused"),
+        Ok(child) => panic!("{name}: spawn started {child:?} for an ELF that must be refused"),
         Err(e) => assert!(
             matches!(e, SyscallError::InvalidArgument | SyscallError::ResourceExhausted),
             "{name}: spawn gave {e:?}",
@@ -280,7 +290,7 @@ fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
 
 /// The same bytes handed to the kernel by handle, as a spawn from a file
 /// server's volume hands them: the image route to the same loader.
-fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
+fn spawn_image(path: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{path}\0");
     let object = image_object(bytes);
     unsafe {
@@ -304,7 +314,6 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
-    .map(|pid| pid.0 as u64)
 }
 
 /// Refused whether the kernel opens the file or is handed its bytes.
@@ -313,16 +322,29 @@ fn spawn_refused(name: &str, bytes: &[u8]) {
     refused(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
 }
 
-/// Refused where the kernel opens the file, whose `DT_NEEDED` library is
-/// written beside it. The image route's answer is the kernel's *first*
-/// refusal on that route: `image_expected` is `NotFound` when nothing rejects
-/// the file before `DT_NEEDED` is walked from `/system/lib` alone and finds
-/// nothing there, `InvalidArgument` when a table check upstream of that walk
-/// refuses first.
-fn spawn_refused_beside_its_library(name: &str, bytes: &[u8], image_expected: SyscallError) {
-    refused(name, spawn_result(name, bytes));
-    let image = spawn_image(&format!("{DIR}/{name}"), bytes);
-    assert_eq!(image, Err(image_expected), "{name} as an image");
+/// The kernel answers this spawn and lives, and a child it started dies. These
+/// files are crafted in a dynamic section the kernel no longer reads: a
+/// program relocates itself (`toyos::relocate`), and each of these enters at
+/// bytes that are no program, so the child dies before it reads one.
+fn dies(name: &str, outcome: Result<RawHandle, SyscallError>) {
+    match outcome {
+        Ok(child) => {
+            // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
+            let child = unsafe { toyos::process::Process::from_raw(child) };
+            let code = child.wait().unwrap_or_else(|e| panic!("{name}: wait for the child: {e:?}"));
+            assert_ne!(code, 0, "{name}: a child entering at bytes that are no program exited 0");
+        }
+        Err(e) => assert!(
+            matches!(e, SyscallError::InvalidArgument | SyscallError::ResourceExhausted),
+            "{name}: spawn gave {e:?}",
+        ),
+    }
+}
+
+/// [`dies`], whether the kernel opens the file or is handed its bytes.
+fn spawn_dies(name: &str, bytes: &[u8]) {
+    dies(name, spawn_result(name, bytes));
+    dies(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
 }
 
 /// Load it and throw it away. These cases are about a *walk* the loader does,
@@ -354,13 +376,15 @@ fn base_exe(size: usize) -> Elf {
 }
 
 fn main() {
+    // A copy [`refuses_itself`] spawns that reached this far was not refused.
+    if std::env::args().nth(1).as_deref() == Some(REFUSED_COPY) {
+        panic!("a copy of this program whose relocations its _start must refuse reached main");
+    }
     fs::create_dir_all(DIR).expect("create /tmp/abuse_loader_exe");
     fs::create_dir_all(BIG_DIR).expect("create /tmp/abuse_loader");
 
-    // 1. A DT_* vaddr below every PT_LOAD. `vaddr_to_file_offset` searched for
-    //    the nearest segment at or below it and panicked outright when there
-    //    was none — the one entry in this class with no failure path at all.
-    spawn_refused(
+    // 1. A DT_* vaddr below every PT_LOAD.
+    spawn_dies(
         "rela_below_image",
         &Elf::new(0x4000)
             .ph(Phdr::load(0, 0x1000, 0x3000, 0x3000, PF_R | PF_W))
@@ -449,15 +473,10 @@ fn main() {
             .build(),
     );
 
-    // 8. A section header table of 2.4 MiB, in a file big enough to hold it.
-    //    The loader reads a declared table into one `Vec`, and dlmalloc serves
-    //    an allocation that size by asking its page source for a 4 MiB
-    //    granule — `mm/alloc.rs`'s assert, in syscall context.
-    //
-    //    The file has to be real: `read_file_range` clamps the declared length
-    //    to what the file holds, so a 16 KiB file with a 2.4 MiB `e_shnum`
-    //    reaches a 16 KiB allocation and proves nothing.
-    refused(
+    // 8. A section header table of 2.4 MiB, in a file big enough to hold it,
+    //    which the kernel read into one `Vec` past `mm/alloc.rs`'s assert when
+    //    it looked for an executable's `.rela.dyn` and `.symtab` there.
+    dies(
         "shnum_past_heap",
         spawn_path(&write_file_in(
             BIG_DIR,
@@ -468,7 +487,7 @@ fn main() {
 
     // 9. Same ceiling, reached through DT_STRSZ instead — a size no section
     //    header has to agree with, in a file that can back it.
-    refused(
+    dies(
         "strsz_past_heap",
         spawn_path(&write_file_in(
             BIG_DIR,
@@ -499,23 +518,9 @@ fn main() {
             .build(),
     );
 
-    // 12. Two relocation tables the ceiling *accepts*, whose derived index
-    //     does not fit. This is the gap in cases 8 and 9: they prove an input
-    //     over the ceiling is refused, and say nothing about an input under it
-    //     from which the kernel derives something over.
-    //
-    //     `DT_RELASZ` and `DT_PLTRELSZ` are bounded separately at
-    //     MAX_HEAP_ALLOC and both feed one `RelocationIndex`, so two tables of
-    //     87,210 entries each are 174,420 entries of 16 bytes = 2.7 MiB in a
-    //     single Vec. Under the old growth-by-doubling that overshot to 4 MiB
-    //     on the push.
-    //
-    //     This case is also the actuator for the allocator-lock defect:
-    //     the >2 MiB assert fires inside
-    //     `KernelAllocator::alloc` *while it holds the dlmalloc lock*, so the
-    //     recovered CPU's next allocation spins on a lock the dead thread
-    //     still owns. Nothing else in the suite stages that, which is part of
-    //     why it has stayed open -- do not build a second one.
+    // 12. Two relocation tables the ceiling accepted, whose derived index did
+    //     not fit: `DT_RELASZ` and `DT_PLTRELSZ` were bounded apart and both
+    //     fed one index the kernel built at spawn, 2.7 MiB in a single `Vec`.
     {
         const N: usize = 87_210; // MAX_HEAP_ALLOC / 24, the most either table can declare
         const SZ: usize = N * 24;
@@ -536,17 +541,16 @@ fn main() {
             bytes[at..at + 8].copy_from_slice(&((i as u64) * 8).to_le_bytes());
             bytes[at + 8..at + 16].copy_from_slice(&R_X86_64_RELATIVE.to_le_bytes());
         }
-        refused(
+        dies(
             "rela_index_past_heap",
             spawn_path(&write_file_in(BIG_DIR, "rela_index_past_heap", &bytes)),
         );
     }
 
-    // 12b. More distinct DT_NEEDED names than the loader will load: each is one
-    //      private window, so above the cap it is refused before any open — where
-    //      the unbounded loader reached an open of a missing name and got NotFound.
+    // 12b. More distinct DT_NEEDED names than the kernel loaded at spawn, each
+    //      one private window.
     {
-        const N: usize = 65; // MAX_NEEDED_LIBS (64) + 1, all distinct
+        const N: usize = 65; // one past the kernel's 64, all distinct
         const STRTAB: usize = 0x2000;
         let mut tags: Vec<(i64, u64)> =
             vec![(DT_STRTAB, STRTAB as u64), (DT_STRSZ, (N * 4) as u64)];
@@ -559,7 +563,7 @@ fn main() {
             elf = elf.poke(STRTAB + off, &[b'a' + (i % 26) as u8, b'A' + (i / 26) as u8]);
             tags.push((DT_NEEDED, off as u64));
         }
-        spawn_refused("too_many_needed_libs", &elf.dynamic(0x1000, &tags).build());
+        spawn_dies("too_many_needed_libs", &elf.dynamic(0x1000, &tags).build());
     }
 
     // 11. A DTPMOD64 relocation naming a TLS symbol no loaded module defines.
@@ -568,8 +572,8 @@ fn main() {
     dlopen_survives("dtpmod_unresolved.so", &so_with_dtpmod());
 
     // 13. A RELATIVE write beginning in a page's last seven bytes: r_offset
-    //     0x1FFE + 8 crosses 0x2000. Dropped by the per-page applier; refused now.
-    spawn_refused(
+    //     0x1FFE + 8 crosses 0x2000, which the kernel's per-page applier dropped.
+    spawn_dies(
         "reloc_straddles_fill_page",
         &Elf::new(0x4000)
             .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
@@ -606,7 +610,7 @@ fn main() {
     f13_cross_module_addend_is_kept();
 
     // 19. A relocation naming a symbol the executable's short-read `.dynsym` does
-    //     not hold is refused by name.
+    //     not hold, which the kernel refused by name while it read one.
     globdat_past_short_dynsym();
 
     // 20. The apply-time TLS refusals, each named by its reason in the log.
@@ -619,6 +623,11 @@ fn main() {
     let unmapped = Elf::new(0x2000).ph(Phdr::load(0x1000, 0, 0x1000, 0x1000, PF_R | PF_X)).entry(0).build();
     spawn_refused("phdrs_unmapped", &unmapped);
     dlopen_refused("phdrs_unmapped.so", &unmapped);
+
+    // 22. This program's own image, a library to load in one copy and a `RELR`
+    //     table in another: its `_start` refuses both before it writes a word.
+    refuses_itself("needs_a_library", DT_NEEDED as u64);
+    refuses_itself("carries_relr", DT_RELR);
 
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
@@ -748,36 +757,33 @@ fn so_with_non_zero_vaddr_min() -> Vec<u8> {
 
 /// Every file-chosen value the loader turns into an address or a thread-pointer
 /// offset, set to one no image holds: a `RELATIVE` addend, a TPOFF addend, a
-/// symbol's `st_value`, `DT_INIT_ARRAY`. Each is refused; the kernel living
-/// through them is what the checks at the end of `main` assert.
+/// symbol's `st_value`, `DT_INIT_ARRAY`. Each is refused where the kernel reads
+/// it, a library's, and dies where it no longer does, an executable's; the
+/// kernel living through them is what the checks at the end of `main` assert.
 fn values_are_bounded_by_the_image() {
     // RELATIVE `B + A` with `A = i64::MAX`: `USER_VM_BASE + A` overflowed.
-    spawn_refused(
+    spawn_dies(
         "relative_addend_past_image",
         &exe_with(&[], &[(0x2000, R_X86_64_RELATIVE, i64::MAX)], None).build(),
     );
     // TPOFF64 against the executable's own 16-byte PT_TLS, `A = i64::MIN`:
     // `tls::Static::tpoff` subtracted with overflow.
-    spawn_refused(
+    spawn_dies(
         "tpoff_addend_past_tls",
         &exe_with(&[], &[(0x2000, R_X86_64_TPOFF64, i64::MIN)], Some(16)).build(),
     );
     // An export at `0xFFFF_FFFF_FFFF_F000` in an executable that needs a
-    // library: the loader builds a map of the exe's exports for the library's
-    // slots to bind against, and that map added the value to the load base. The
-    // dependency is written beside the exe, where `DT_NEEDED` resolves first.
+    // library: the kernel built a map of the exe's exports for the library's
+    // slots to bind against, and that map added the value to the load base.
     {
         let dep = "export_dep.so";
-        write_file(dep, &so_with(&[], &[], None));
         // `.dynstr` at 0x1800 holds "far\0<dep>\0"; the export names the first.
         let name_at = 1 + FAR.len() as u64 + 1;
         let exe = exe_with(&[(DT_NEEDED, name_at)], &[], None)
             .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE)
             .poke(0x1801, FAR.as_bytes())
             .poke(0x1800 + name_at as usize, dep.as_bytes());
-        // The export map is built after `load_needed_libs` (`kernel/src/loader/mod.rs`), so the
-        // image route never reaches it: the dependency missing from `/system/lib` answers first.
-        spawn_refused_beside_its_library("export_past_image", &exe.build(), SyscallError::NotFound);
+        spawn_dies("export_past_image", &exe.build());
     }
 
     dlopen_refused("so_relative_addend_past_image.so", &so_with(&[], &[(0x1400, 0, R_X86_64_RELATIVE, i64::MAX)], None));
@@ -915,14 +921,15 @@ fn tls_defs_so(name: &[u8; 4], memsz: u64) -> Vec<u8> {
 /// The apply-time TLS refusals, which no `r_sym == 0` case reaches because
 /// `rela::parse` refuses those before either apply pass runs. Each refuses a
 /// *resolved* `S + A` outside the defining module's `PT_TLS`, named
-/// `TLS_OUTSIDE_SEGMENT` beside the file in the kernel log the harness checks.
+/// `TLS_OUTSIDE_SEGMENT` beside the file in the kernel log; the executable's
+/// spawn dies instead, its tables its own.
 fn tls_apply_time_refusals_are_reached() {
     // dlopen, the module's own symbol: `apply_tpoff_relocs` refuses, and the
     // mapping guard takes the library back down.
     dlopen_refused("tls_apply_refs.so", &so_tls_ref_past_segment());
 
-    // spawn, the executable's own symbol: `apply_tls_relocs` refuses.
-    spawn_refused("tls_apply_spawn", &exe_tls_ref_past_segment());
+    // spawn, the executable's own symbol, which `apply_tls_relocs` refused.
+    spawn_dies("tls_apply_spawn", &exe_tls_ref_past_segment());
 
     // dlopen, another module's symbol: `S + A` (8 + 0x140) leaves the defining
     // module's 0x20-byte `PT_TLS`. Named apart from f13's `xtls`, which stays
@@ -936,15 +943,12 @@ fn tls_apply_time_refusals_are_reached() {
     // `S + A - tp` leaves an `i64`.
     const PAST_I64: u64 = 0x8000_0000_0000_0010;
     let dep = "tpoff_overflow_dep.so";
-    write_file(dep, &tls_defs_so(b"wtls", PAST_I64));
     // `.dynstr` at 0x1800 holds "wtls\0<dep>\0".
     let exe = exe_with(&[(DT_NEEDED, 6)], &[(0x2000, (1u64 << 32) | R_X86_64_TPOFF64, i64::MAX)], None)
         .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
         .poke(0x1801, b"wtls\0")
         .poke(0x1806, dep.as_bytes());
-    // `apply_tls_relocs` (`kernel/src/loader/mod.rs`) runs after `load_needed_libs`, so the image
-    // route never reaches it: the dependency missing from `/system/lib` answers first.
-    spawn_refused_beside_its_library("tpoff_overflow_spawn", &exe.build(), SyscallError::NotFound);
+    spawn_dies("tpoff_overflow_spawn", &exe.build());
 
     let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
@@ -957,7 +961,6 @@ fn tls_apply_time_refusals_are_reached() {
 /// `GLOB_DAT` naming symbol 469, the first index past the whole entries.
 fn globdat_past_short_dynsym() {
     let dep = "globdat_dep.so";
-    write_file(dep, &so_with(&[], &[], None));
     // nbuckets 1, symoffset 1000, bloom_size 1, bloom_shift 0, the bloom word
     // and bucket 0: a bucket below `symoffset` makes `symoffset` the count.
     let mut gnu_hash = Vec::new();
@@ -971,9 +974,7 @@ fn globdat_past_short_dynsym() {
     )
     .poke(0x1801, dep.as_bytes())
     .poke(0x3000, &gnu_hash);
-    // `rela::parse` (`toyos-elf/src/rela.rs`) bounds `r_sym` against the exe's own `.dynsym`
-    // before `load_needed_libs` ever runs.
-    spawn_refused_beside_its_library("globdat_past_dynsym", &exe.build(), SyscallError::InvalidArgument);
+    spawn_dies("globdat_past_dynsym", &exe.build());
 }
 
 /// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
@@ -1038,4 +1039,56 @@ fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
         .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
         .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)
         .build()
+}
+
+/// What `toyos::relocate` writes to slot 2 when it refuses its own program.
+const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
+/// The status it exits with then.
+const REFUSED_STATUS: i32 = 127;
+/// `process::HANDLE_FAULT_EXIT_CODE`.
+const HANDLE_FAULT: i32 = 139;
+/// The argument a refused copy is handed, which its `main` panics on.
+const REFUSED_COPY: &str = "--refused-copy";
+
+const DT_DEBUG: u64 = 21;
+const DT_RELR: u64 = 36;
+
+/// This program's own file with its `DT_DEBUG` entry's tag made `tag`: a std
+/// image as lld linked it, whose dynamic section now names `tag` ahead of its
+/// `DT_RELA`.
+fn own_image_tagged(tag: u64) -> Vec<u8> {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut bytes = fs::read(&exe).unwrap_or_else(|e| panic!("read {exe:?}: {e}"));
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let phoff = word(&bytes, 32) as usize;
+    let phnum = usize::from(u16::from_le_bytes([bytes[56], bytes[57]]));
+    let dynamic = (0..phnum)
+        .map(|i| phoff + i * PH_SIZE)
+        .find(|&at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) == PT_DYNAMIC)
+        .expect("lld's PT_DYNAMIC");
+    let (offset, size) = (word(&bytes, dynamic + 8) as usize, word(&bytes, dynamic + 32) as usize);
+    let entry = (offset..offset + size).step_by(16).find(|&at| word(&bytes, at) == DT_DEBUG).expect("lld's DT_DEBUG");
+    bytes[entry..entry + 8].copy_from_slice(&tag.to_le_bytes());
+    bytes
+}
+
+/// A copy of this program tagged `tag` exits [`REFUSED_STATUS`] and says
+/// [`REFUSED_LINE`] on the slot 2 it is handed. Handed no slot 2, it names a
+/// handle it does not hold, and the kernel ends it.
+fn refuses_itself(name: &str, tag: u64) {
+    let path = write_file(name, &own_image_tagged(tag));
+    let out = Command::new(&path)
+        .arg(REFUSED_COPY)
+        .output()
+        .unwrap_or_else(|e| panic!("{name}: spawn: {e}"));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(REFUSED_STATUS), "{name}: exited {:?}, said {said:?}", out.status);
+    assert_eq!(said, REFUSED_LINE, "{name}");
+
+    let child = spawn_argv(&path, &format!("{path}\0{REFUSED_COPY}\0"))
+        .unwrap_or_else(|e| panic!("{name} without slot 2: spawn gave {e:?}"));
+    // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
+    let child = unsafe { toyos::process::Process::from_raw(child) };
+    let code = child.wait().unwrap_or_else(|e| panic!("{name} without slot 2: wait: {e:?}"));
+    assert_eq!(code, HANDLE_FAULT, "{name} without slot 2");
 }

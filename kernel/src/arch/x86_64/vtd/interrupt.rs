@@ -35,8 +35,9 @@
 use crate::log;
 use alloc::vec::Vec;
 
-use crate::drivers::pci::MSG_DEST;
-use crate::iommu::{Refused, StreamId};
+use super::super::apic::MSG_DEST;
+use super::super::idt::DriverIrq;
+use crate::iommu::StreamId;
 use crate::sync::Lock;
 
 use super::table::Table;
@@ -71,6 +72,32 @@ const PIN_REMAPPABLE: u32 = 1 << 16;
 pub struct Msi {
     pub address: u32,
     pub data: u32,
+}
+
+/// Why a source could not be given an entry. Carried rather than collapsed:
+/// one message for all three sends whoever reads it looking in the wrong place.
+#[derive(Clone, Copy)]
+pub enum Refused {
+    /// Wider than the destination an entry holds without extended interrupt mode.
+    DestinationTooWide(u32),
+    /// Every entry in the table is already spoken for.
+    TableFull,
+    /// Firmware's device scopes named no requester id for this interrupt controller.
+    ControllerUnnamed(u8),
+}
+
+impl core::fmt::Display for Refused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DestinationTooWide(id) => {
+                write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
+            }
+            Self::TableFull => write!(f, "the interrupt remapping table is full"),
+            Self::ControllerUnnamed(id) => {
+                write!(f, "firmware named no requester id for interrupt controller {id}")
+            }
+        }
+    }
 }
 
 pub struct Pin {
@@ -211,13 +238,22 @@ fn message(index: u16) -> Msi {
     }
 }
 
-pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
-    Ok(message(allocate(source, vector, dest, false)?))
+/// The message a kernel driver's `source` raises `irq` with: an entry of its
+/// own where the table is armed, and the compatibility format where no unit
+/// remaps, which is what that message has always said.
+pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
+    if !is_armed() {
+        let (address, data) = super::super::apic::msi_message(irq.vector());
+        return Ok(Msi { address, data });
+    }
+    Ok(message(allocate(source, irq.vector(), MSG_DEST, false)?))
 }
 
-/// Claim slot `slot`'s entry, written for `source` at `vector` and published
-/// to every unit before this returns, and the message that reaches it.
-pub fn claim(slot: usize, source: StreamId, vector: u8) -> Msi {
+/// Claim slot `slot`'s entry, written for `source` at the slot's vector and
+/// published to every unit before this returns, and the message that reaches
+/// it.
+pub fn claim(slot: usize, source: StreamId) -> Result<Msi, Refused> {
+    let vector = super::super::idt::claim_vector(slot);
     let (index, read) = {
         let remap = REMAP.lock();
         let Some(table) = remap.table else {
@@ -239,7 +275,7 @@ pub fn claim(slot: usize, source: StreamId, vector: u8) -> Msi {
         (index, table.read_pair(slot))
     };
     report(index, source, MSG_DEST, read);
-    message(index)
+    Ok(message(index))
 }
 
 /// Claim slot `slot`'s entry not present again, and gone from every unit's

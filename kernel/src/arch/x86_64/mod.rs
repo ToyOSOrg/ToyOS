@@ -46,8 +46,11 @@ pub use apic as irqchip;
 pub use i8042 as keyboard_controller;
 pub use idt as trap;
 pub use vtd as iommu_unit;
+pub use vtd::interrupt as message_unit;
 
-pub use apic::{msi_message, MSI_DOORBELL};
+pub use apic::MSI_DOORBELL;
+pub use idt::DriverIrq;
+pub(crate) use idt::slot_interrupt;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;

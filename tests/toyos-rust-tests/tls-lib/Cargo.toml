@@ -1,6 +1,6 @@
 [package]
 name = "tls-lib"
-description = "A guest test fixture: a cdylib of thread-locals that std_tls links through DT_NEEDED."
+description = "A guest test fixture: a cdylib of thread-locals that std_tls_multi_crate and the C corpus load with dlopen."
 version = "0.1.0"
 edition = "2021"
 
