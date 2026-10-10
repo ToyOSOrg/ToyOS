@@ -113,7 +113,7 @@ mod tests {
 
     /// A sixteen-dword window; a read at or past byte 64 is outside it.
     fn window(cells: &[u32; 16]) -> impl Fn(u64) -> Option<u32> + '_ {
-        move |at: u64| (at % 4 == 0 && at + 4 <= 64).then(|| cells[(at / 4) as usize])
+        move |at: u64| (at.is_multiple_of(4) && at + 4 <= 64).then(|| cells[(at / 4) as usize])
     }
 
     fn header(id: u8, next: u8) -> u32 {
