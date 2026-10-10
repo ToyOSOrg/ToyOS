@@ -20,7 +20,7 @@
 //! receive <name>            a connector in this program's namespace
 //! device <class>            a claim the supervisor mints and endows
 //! syscap <right>            a right on the SysCap dup the supervisor endows
-//! slots                     the idle slot's partitions and the slot table, claimed by the supervisor
+//! slots                     the idle slot's partitions and the slot table
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
@@ -239,9 +239,8 @@ pub struct Program {
     /// the system may enter the RT band, mint a device claim, read the machine
     /// log, list every process in the machine, or power the machine off.
     pub syscap: Vec<String>,
-    /// The machine's idle slot, granted as claims: the slot table's partition
-    /// and the idle slot's FAT volume and ROOT, which the supervisor resolves against
-    /// the ROOT the kernel holds and mints (`toyos_update::slots`). The
+    /// The machine's idle slot: the slot table's partition and the idle
+    /// slot's FAT volume and ROOT (`toyos_update::slots`). The
     /// authority to write the next image and nothing else: the slot a boot
     /// runs is never among them. One program holds it — `src/build.rs` gates
     /// which.

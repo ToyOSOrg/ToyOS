@@ -186,6 +186,14 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It claims the NVMe controller a boot off that disk starts no server
+    // for, and reads the inventory: `block_grants_reach_their_partitions`
+    // runs it on tests/blockgrantcase.
+    "partition_grant",
+    // It installs the image its machine test staged into a second slot on
+    // the disk diskserver drives: `update_writes_the_idle_slot_through_the_block_service`
+    // runs it on tests/slotscase.
+    "update_idle_slot",
     // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
@@ -376,6 +384,21 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // A badge the kernel stamps on a connection to diskserver, judged by
+    // diskserver on the disk it drives: the grant's decisions are host-tested
+    // in diskserver and toyos-blockring, but whether the badge diskserver
+    // reads is the one a connector was minted with, and whether a refused
+    // open stays refused against a partition nothing else holds, is the
+    // kernel's port and a claimed controller, which have no host build; and
+    // the T14 boots from a stick, so no disk diskserver drives holds a
+    // partition the loader named.
+    "block_grants_reach_their_partitions",
+    // The supervisor reading the slot table through a block session and
+    // minting `update` the idle slot's partitions, which `update` writes and
+    // marks through diskserver: the supervisor, the launcher and diskserver
+    // have no host build, and the T14's slots are on its stick, which only
+    // the kernel drives until usbd.
+    "update_writes_the_idle_slot_through_the_block_service",
     // usbd on a controller the kernel leaves alone, with two devices on it,
     // and a transfer aimed past its claim's grants: usbd is one binary that
     // owns its controller, with no host build; `toyos-xhci`'s host tests and
@@ -3686,6 +3709,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
+        "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         other => Err(format!("unknown machine test {other}")),
@@ -3723,6 +3748,11 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
         return Err(format!(
             "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
         ));
+    }
+    // The boot volume's grant does not write, and only that one.
+    let read_only = said.text().lines().filter(|line| line.contains("diskserver: session ") && line.contains(", read-only)")).count();
+    if read_only != 1 {
+        return Err(format!("diskserver opened {read_only} read-only sessions, and only the slot's volume is granted one\n{console}"));
     }
     Ok(())
 }
@@ -3806,6 +3836,148 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
         return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
     };
     eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
+    Ok(())
+}
+
+/// What `partition_grant` says, a line per grant it was refused through.
+const GRANTS_SAID: [&str; 5] = [
+    "partition_grant: the log's grant opened the log and was refused the boot volume NotGranted",
+    "partition_grant: DATA's grant opened DATA and was refused the log NotGranted",
+    "partition_grant: the boot volume's read-only grant read it and was refused a write ReadOnly",
+    "partition_grant: the port's own connector was refused a listing and an open NotGranted",
+    "partition_grant: the running ROOT was refused Held to the grant naming it",
+];
+
+/// A connection to diskserver opens only what the badge on its connector
+/// grants, on the NVMe disk the machine booted from: `partition_grant` starts
+/// diskserver itself and mints each grant, and diskserver names each refusal.
+fn block_grants_reach_their_partitions() -> Result<(), String> {
+    const JOB: &str = "partition_grant";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/blockgrantcase");
+    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
+    let result = qemu.run_test("test_rs_partition_grant", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let said = serial::Serial::named("the job", result.stdout);
+    for line in GRANTS_SAID {
+        eprintln!("  [grant] {}", said.must_say(line)?.trim());
+    }
+    // diskserver's own word for each refusal, beside the job's.
+    for refused in ["refused: NotGranted", "refused: Held"] {
+        if !said.text().lines().any(|l| l.contains("diskserver: an open of ") && l.trim_end().ends_with(refused)) {
+            return Err(format!("diskserver never said an open was {refused}:\n{}", said.text()));
+        }
+    }
+    Ok(())
+}
+
+/// The update image `update_writes_the_idle_slot_through_the_block_service`
+/// stages: a ROOT of one file, signed with this run's key at a version past
+/// any a build signs; the ROOT's length, which the second slot is made to
+/// hold exactly, so the host mounts the partition whole; its file; and the
+/// three files the slot's FAT volume is to carry, each with its bytes.
+struct StagedUpdate {
+    image: Vec<u8>,
+    version: u64,
+    root_bytes: u64,
+    marker: Vec<u8>,
+    volume: [(&'static str, Vec<u8>); 3],
+}
+
+/// Where the staged ROOT's one file is, and the path the guest reads the
+/// update image at.
+const UPDATE_MARKER: &str = "etc/update-test";
+const UPDATE_IMAGE: &str = "share/update-test.img";
+
+fn staged_update() -> StagedUpdate {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("this host's clock is past 1970");
+    let marker = format!("update {} {}\n", std::process::id(), since.as_nanos()).into_bytes();
+    let root = toyos_build::image::create_root_image(&[(UPDATE_MARKER.to_string(), marker.clone())], &[], true);
+    // Past every version a build signs, which is its Unix time.
+    let version = u64::from(u32::MAX) << 8;
+    let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version };
+    let kernel = b"update test kernel";
+    let image = toyos_build::image::update_image(kernel, &root, "", signing);
+    // The image is the signed header, the kernel, the boot parameter and
+    // ROOT, end to end (`toyos_update::image`).
+    let signed = toyos_update::image::SIGNED_BYTES;
+    let volume = [
+        (toyos_update::slots::SIGNED_FILE, image[..signed].to_vec()),
+        (toyos_update::slots::KERNEL_FILE, kernel.to_vec()),
+        (toyos_update::slots::CMDLINE_FILE, image[signed + kernel.len()..image.len() - root.len()].to_vec()),
+    ];
+    StagedUpdate { image, version, root_bytes: root.len() as u64, marker, volume }
+}
+
+/// `update` on a machine booted off its NVMe disk: the supervisor reads the
+/// slot table through a session on diskserver and grants `update` the idle
+/// slot's partitions as connectors minted for each, and `update` writes the
+/// signed image there and marks it — read back off the disk by the host, and
+/// its FAT volume judged by toyos-fat32-check, which shares no code with it.
+fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String> {
+    const JOB: &str = "update_idle_slot";
+    let staged = staged_update();
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/slotscase");
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessNoUsb,
+        extra_root_files: vec![(UPDATE_IMAGE.to_string(), staged.image.clone())],
+        second_slot: Some(staged.root_bytes),
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
+    let result = qemu.run_test("test_rs_update_idle_slot", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let said = serial::Serial::named("the job", result.stdout);
+    eprintln!(
+        "  [update] {}",
+        said.must_say("supervisor: the idle slot is B, granted with the slot table read through the block service")?.trim()
+    );
+    eprintln!("  [update] {}", said.must_say(&format!("update: installed version {} in slot B", staged.version))?.trim());
+
+    let mut disk = fs::File::open(qemu.boot_image()).map_err(|e| format!("{}: {e}", qemu.boot_image().display()))?;
+    let table = toyos_build::image::slot_table_of(&mut disk)?;
+    let marked = table.slot(table.marked).ok_or("the slot table marks a slot it does not carry")?;
+    if table.marked.letter() != 'B' || marked.version != staged.version {
+        return Err(format!("after the update the slot table marks {} at version {}, not B at {}", table.marked.letter(), marked.version, staged.version));
+    }
+    let (_, read_back) = toyos_build::image::root_file_on(qemu.boot_image(), UPDATE_MARKER)?;
+    if read_back != staged.marker {
+        return Err(format!("slot B's ROOT carries {:?} at {UPDATE_MARKER}, and the update carried {:?}", String::from_utf8_lossy(&read_back), String::from_utf8_lossy(&staged.marker)));
+    }
+    eprintln!("  [update] the disk's slot table marks B at version {}, and B's ROOT mounts carrying the update's {UPDATE_MARKER}", staged.version);
+
+    use std::io::{Read as _, Seek as _};
+    // B's FAT volume: judged whole by the checker that is no part of the
+    // driver `update` wrote it with, then each file read back byte for byte.
+    let (at, len) = toyos_build::image::partition_extent(&mut disk, marked.boot)?;
+    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
+    disk.seek(std::io::SeekFrom::Start(at))
+        .and_then(|_| disk.read_exact(&mut volume))
+        .map_err(|e| format!("slot B's volume at byte {at}: {e}"))?;
+    let complaints = toyos_fat32_check::check(&volume);
+    if !complaints.is_empty() {
+        return Err(format!("toyos-fat32-check refuses slot B's volume:\n{}", toyos_fat32_check::describe(&complaints)));
+    }
+    for (name, staged) in &staged.volume {
+        let read = toyos_build::image::read_file_on(&mut disk, marked.boot, name)
+            .map_err(|why| format!("slot B's volume: {why}"))?;
+        if read != *staged {
+            return Err(format!("slot B's {name} is {} bytes that are not the {} the update carried", read.len(), staged.len()));
+        }
+    }
+    eprintln!("  [update] slot B's volume checks out, carrying the update's {} byte for byte", staged.volume.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
     Ok(())
 }
 

@@ -1,4 +1,5 @@
-//! A file server's decisions: where its blocks come from ([`disk`]), the one
+//! A file server's decisions: the blocks memory stands in for a partition
+//! with ([`ram`]) — a partition's own are `diskserver::disk`'s — the one
 //! cache every byte of its volume passes through ([`cache`]), the volumes it
 //! can serve ([`data`] for the bcachefs DATA role, [`fat`] for FAT32's LOG and
 //! BOOT, [`absent`] for a role with no volume this boot), and the resolver that
@@ -16,8 +17,8 @@
 pub mod absent;
 pub mod cache;
 pub mod data;
-pub mod disk;
 pub mod fat;
+pub mod ram;
 pub mod resolve;
 pub mod rights;
 pub mod volume;
