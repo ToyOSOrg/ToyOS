@@ -277,7 +277,7 @@ fn host_files() -> Vec<PathBuf> {
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
 #[cfg(test)]
 fn digest(bytes: &[u8]) -> String {
-    toyos_sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The shapes of a value that identifies a machine or the network it is on,

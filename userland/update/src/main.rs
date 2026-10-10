@@ -156,7 +156,7 @@ fn take(input: &mut impl Read, len: u64, sha256: toyos_update::Digest, section: 
 /// ROOT onto the idle ROOT partition as it arrives, a call's worth of blocks
 /// at a time, and held to `sha256` once whole.
 fn stream_root(input: &mut impl Read, root: &PartitionDev, len: u64, sha256: toyos_update::Digest) -> Result<(), String> {
-    let mut hasher = toyos_sha2::Sha256::new();
+    let mut hasher = toyos_sha2_hw::sha256();
     let mut run: Vec<Block> = vec![[0; BLOCK_BYTES]; MAX_BLOCKS_PER_CALL];
     let blocks = len / BLOCK_BYTES as u64;
     let mut at = 0u64;

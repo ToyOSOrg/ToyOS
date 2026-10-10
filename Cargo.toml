@@ -62,6 +62,7 @@ members = [
     "toyos-random",
     "toyos-rootimage",
     "toyos-sha2",
+    "toyos-sha2-hw",
     "toyos-smmu",
     "toyos-ssh",
     "toyos-swap",
@@ -212,7 +213,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
 # store key, a ROOT's name, a release asset's digest, and the harness's of a
 # body a guest fetches over TLS.
-toyos-sha2 = { path = "toyos-sha2" }
+toyos-sha2-hw = { path = "toyos-sha2-hw" }
 # The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }

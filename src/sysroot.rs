@@ -46,8 +46,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use toyos_sha2::Sha256;
-
 use crate::arch::Arch;
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::compiler::{self, Compiler};
@@ -246,7 +244,7 @@ fn hex(digest: &[u8]) -> String {
 
 /// The first 16 hex digits of the SHA-256 of `data`.
 pub(crate) fn short(data: &[u8]) -> String {
-    hex(&Sha256::digest(data))[..16].to_string()
+    hex(&toyos_sha2_hw::sha256_digest(data))[..16].to_string()
 }
 
 /// Every file under `dir` a build reads, sorted: no `target/` and no dotted
@@ -310,7 +308,7 @@ pub(crate) fn tree_identity(base: &Path, paths: &[&str], links: Links) -> String
     let mut sources = Vec::new();
     source_files(base, paths, links, &mut sources);
     sources.sort();
-    let mut hasher = Sha256::new();
+    let mut hasher = toyos_sha2_hw::sha256();
     for (path, commit) in sources {
         hasher.update(path.strip_prefix(base).unwrap_or(&path).to_string_lossy().as_bytes());
         hasher.update([0]);
