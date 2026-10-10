@@ -26,7 +26,8 @@ start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "
 # a row read out of one would be a directory deciding what the machine hands
 # out; this is the image's answer, one for all of them. Connectors only —
 # `devices` and `syscap` have no spelling here, so nothing installed claims
-# hardware or enters the RT band.
+# hardware or enters the RT band — and no directory: a package sees its own
+# `/apps/<name>` read-only and its own `/home/toy/Apps/<name>`, its `HOME`.
 [apps]
 receives = ["compositor", "soundserver", "filepicker"]
 
