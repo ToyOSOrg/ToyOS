@@ -34,7 +34,7 @@ leaves a line in the queue at the stop goes red without that and green with it.
 
 The stop drains the queue on the wire right after
 `quiesce::stop()`, before `Syncing filesystems...`
-(`log::console::drain_for_the_stop`).
+(`log::console::take_for_the_stop`).
 - The drain disabled as a checked patch: `cargo test --test toyos-build --
   --nightly quiesce_stops_the_machine` EXIT=1, `1 line(s) reached the
   console after the boot's last word: console: a holder's line, queued once

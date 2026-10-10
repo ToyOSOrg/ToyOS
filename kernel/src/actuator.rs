@@ -79,6 +79,19 @@ actuators! {
     /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
     stop_budget_spent = "stop-budget-spent";
 
+    /// Have `klogd` take the console's wire as the stop begins and keep it
+    /// until the stop asks for it. Judged by `machine_shutdown_wire_held`.
+    wire_held_across_the_stop = "wire-held-across-the-stop";
+
+    /// The same, with `klogd` keeping the wire through the stop's whole
+    /// `LET_GO`. Judged by `machine_shutdown_wire_kept`.
+    wire_kept_through_the_stop = "wire-kept-through-the-stop";
+
+    /// Have `klogd` hold the console's wire from the boot's last word until the
+    /// stop has taken the seal, where the stop does not hold it itself. Judged
+    /// by `machine_shutdown_wire_at_the_seal`.
+    wire_held_at_the_last_word = "wire-held-at-the-last-word";
+
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
@@ -197,6 +210,7 @@ const IMPLIES: &[(&str, &[&str])] = &[
     // so the control that ends a machine no other bound ends is staged over the
     // one that stops this machine ending itself.
     ("hard-lockup-probe", &["wedge-before-reset"]),
+    ("wire-kept-through-the-stop", &["wire-held-across-the-stop"]),
 ];
 
 #[cfg(feature = "boot-actuators")]
