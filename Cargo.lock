@@ -5362,7 +5362,7 @@ dependencies = [
 [[package]]
 name = "sysinfo"
 version = "0.39.6"
-source = "git+https://github.com/ToyOSOrg/sysinfo?branch=toyos-0.39.6#52adf173726ed6f0b9b7d6bbf38ccee476368dd5"
+source = "git+https://github.com/ToyOSOrg/sysinfo?branch=toyos-0.39.6#bcb2381592d4e8a9a40f11f41ccc3c915ca6a876"
 dependencies = [
  "libc",
  "memchr",
@@ -5371,6 +5371,7 @@ dependencies = [
  "objc2-io-kit",
  "toyos",
  "toyos-abi",
+ "toyos-osrelease",
  "windows",
 ]
 

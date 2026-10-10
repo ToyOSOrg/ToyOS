@@ -27,11 +27,9 @@ pub struct Memory {
     pub total: u64,
 }
 
-/// A logo: its lines, each with the SGR foreground colour it is drawn in, and
-/// the colour its labels take.
+/// A logo: its lines, each with the SGR foreground colour it is drawn in.
 pub struct Logo {
     pub lines: &'static [(u8, &'static str)],
-    pub accent: u8,
 }
 
 /// A spinning top.
@@ -46,7 +44,6 @@ const TOYOS: Logo = Logo {
         (35, "      '. .'"),
         (37, "        V"),
     ],
-    accent: 36,
 };
 
 /// The logo of the system `os-release(5)`'s `ID` names, if toyfetch has one.
@@ -57,16 +54,17 @@ pub fn logo_for(distribution_id: &str) -> Option<&'static Logo> {
     }
 }
 
+/// The SGR foreground colour every label takes.
+const ACCENT: u8 = 36;
 const RESET: &str = "\x1b[0m";
 /// Columns between the logo and the facts.
 const GAP: usize = 3;
 const MIB: u64 = 1024 * 1024;
 
 pub fn render(facts: &Facts, logo: Option<&Logo>) -> String {
-    let accent = logo.map_or(36, |logo| logo.accent);
     let mut info: Vec<String> = fields(facts)
         .into_iter()
-        .filter_map(|(label, value)| Some(format!("\x1b[1;{accent}m{label}{RESET}: {}", value?)))
+        .filter_map(|(label, value)| Some(format!("\x1b[1;{ACCENT}m{label}{RESET}: {}", value?)))
         .collect();
     info.push(String::new());
     info.push(
@@ -155,7 +153,7 @@ mod tests {
     fn full() -> Facts {
         Facts {
             os: Some("ToyOS 1a2b3c4d5e6f (dirty)".into()),
-            kernel: Some("ToyOS 1a2b3c4d5e6f".into()),
+            kernel: Some("ToyOS 1a2b3c4d5e6f-dirty".into()),
             arch: "x86_64".into(),
             cpu: Some(Cpu {
                 brand: Some("AMD Ryzen 7 PRO 4750U".into()),
@@ -201,7 +199,7 @@ mod tests {
         assert_eq!(
             render(&full(), Some(&TOYOS)),
             "\x1b[1;37m       _|_\x1b[0m         \x1b[1;36mOS\x1b[0m: ToyOS 1a2b3c4d5e6f (dirty)\n\
-             \x1b[1;36m    .-'   '-.\x1b[0m      \x1b[1;36mKernel\x1b[0m: ToyOS 1a2b3c4d5e6f\n\
+             \x1b[1;36m    .-'   '-.\x1b[0m      \x1b[1;36mKernel\x1b[0m: ToyOS 1a2b3c4d5e6f-dirty\n\
              \x1b[1;36m  .'         '.\x1b[0m    \x1b[1;36mArch\x1b[0m: x86_64\n\
              \x1b[1;33m (====ToyOS====)\x1b[0m   \x1b[1;36mCPU\x1b[0m: AMD Ryzen 7 PRO 4750U (16)\n\
              \x1b[1;35m  '.         .'\x1b[0m    \x1b[1;36mMemory\x1b[0m: 300 MiB / 2048 MiB\n\
@@ -249,16 +247,14 @@ mod tests {
     fn the_facts_taller_than_the_logo_keep_their_column() {
         const SHORT: Logo = Logo {
             lines: &[(31, "/\\"), (31, "\\/")],
-            accent: 32,
         };
         let said = shown(&render(&full(), Some(&SHORT)));
         let lines: Vec<&str> = said.lines().collect();
         assert_eq!(lines[0], "/\\   OS: ToyOS 1a2b3c4d5e6f (dirty)");
-        assert_eq!(lines[1], "\\/   Kernel: ToyOS 1a2b3c4d5e6f");
+        assert_eq!(lines[1], "\\/   Kernel: ToyOS 1a2b3c4d5e6f-dirty");
         assert_eq!(lines[2], "     Arch: x86_64");
         assert_eq!(lines[7], "     Terminal: Apple_Terminal");
         assert_eq!(lines[8], "");
-        assert!(render(&full(), Some(&SHORT)).contains("\x1b[1;32mOS\x1b[0m"));
     }
 
     #[test]

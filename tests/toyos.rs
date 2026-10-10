@@ -3807,13 +3807,9 @@ fn toyfetch_reports(test_config: &Path) -> Result<(), String> {
         }
     };
 
-    let dirty = match release.tree {
-        toyos_osrelease::Tree::Clean => "",
-        toyos_osrelease::Tree::Dirty => " (dirty)",
-    };
     let wanted = [
-        ("OS", format!("{} {}{dirty}", toyos_osrelease::NAME, release.short())),
-        ("Kernel", format!("{} {}", toyos_osrelease::NAME, release.short())),
+        ("OS", release.pretty_name().to_string()),
+        ("Kernel", format!("{} {}", toyos_osrelease::NAME, release.uname_release())),
         ("Arch", release.arch.machine().to_string()),
     ];
     for (label, value) in wanted {

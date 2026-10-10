@@ -1,5 +1,6 @@
 //! `/system/etc/os-release`: which build an image is, written by the build
-//! system into ROOT and read by `/system/bin/supervisor` and libc's `uname`.
+//! system into ROOT and read by `/system/bin/supervisor`, libc's `uname` and
+//! the sysinfo fork.
 //!
 //! The freedesktop os-release format (`os-release(5)`), ToyOS's own fields
 //! prefixed `TOYOS_` as it asks. The build is the file's one writer, so
@@ -45,6 +46,9 @@ pub const GUEST_PATH: &str = concat!("/system/", path!());
 
 /// The operating system's name, `NAME` and `uname`'s `sysname`.
 pub const NAME: &str = "ToyOS";
+
+/// `ID`, the operating system's identifier.
+pub const ID: &str = "toyos";
 
 /// What `/system/bin/supervisor` says a release under, followed by its commit.
 pub const SAID: &str = "supervisor: build ";
@@ -130,6 +134,25 @@ impl Release {
     pub fn uname_release(&self) -> UnameRelease<'_> {
         UnameRelease(self)
     }
+
+    /// `PRETTY_NAME`: [`NAME`], [`Release::short`], and ` (dirty)` after it
+    /// for a tree that was not that commit's.
+    pub fn pretty_name(&self) -> PrettyName<'_> {
+        PrettyName(self)
+    }
+}
+
+/// [`Release::pretty_name`].
+pub struct PrettyName<'a>(&'a Release);
+
+impl fmt::Display for PrettyName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{NAME} {}", self.0.short())?;
+        match self.0.tree {
+            Tree::Clean => Ok(()),
+            Tree::Dirty => f.write_str(" (dirty)"),
+        }
+    }
 }
 
 /// [`Release::uname_release`].
@@ -148,15 +171,10 @@ impl fmt::Display for UnameRelease<'_> {
 /// The file's bytes.
 impl fmt::Display for Release {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let short = self.short();
-        let dirty = match self.tree {
-            Tree::Clean => "",
-            Tree::Dirty => " (dirty)",
-        };
         writeln!(f, "NAME=\"{NAME}\"")?;
-        writeln!(f, "ID=\"toyos\"")?;
-        writeln!(f, "VERSION_ID=\"{short}\"")?;
-        writeln!(f, "PRETTY_NAME=\"{NAME} {short}{dirty}\"")?;
+        writeln!(f, "ID=\"{ID}\"")?;
+        writeln!(f, "VERSION_ID=\"{}\"", self.short())?;
+        writeln!(f, "PRETTY_NAME=\"{}\"", self.pretty_name())?;
         writeln!(f, "{BUILD_ID}=\"{}\"", self.commit.as_str())?;
         writeln!(f, "{ARCHITECTURE}=\"{}\"", self.arch.os_release())?;
         writeln!(f, "HOME_URL=\"https://github.com/ToyOSOrg/ToyOS\"")?;
