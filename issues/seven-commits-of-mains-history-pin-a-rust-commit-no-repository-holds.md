@@ -36,7 +36,7 @@ At `42e5fca73`:
 ## Read, not measured
 
 No check sees whether a commit a branch carries pins a `rust` commit the fork
-holds. A worktree's build fetches its pin from the primary checkout's `rust/`
+holds. A worktree's build takes its pin from the primary checkout's `rust/`
 (`sysroot::fork_checkout`), never from the fork, so a commit made there and
 never pushed builds green.
 
