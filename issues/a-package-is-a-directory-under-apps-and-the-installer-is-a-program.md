@@ -52,12 +52,14 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   under `/apps` because `/apps` is writable to it, and it asks the user
   before it installs — at install, the moment the user typed the command,
   never at first run, so a refusal leaves nothing on disk and no answer has
-  to be stored. `pkg install <url>`, `pkg install <file>`, `pkg remove
+  to be stored. `pkg install <name>`, `pkg install <file>`, `pkg remove
   <name>`, `pkg list`.
-- **Verification is by the release's own `SHA256SUMS` first**:
-  the installer fetches the sums file from the same release, checks the
-  archive against it, and refuses on mismatch or absence. Signatures are a
-  later stage of the same file, not a different mechanism.
+- **Verification is by a signed repository** (owner ruling: `pkg install
+  <url>` and the release's `SHA256SUMS` behind it are retired): a root pinned
+  in the image, then a timestamp and a targets naming each archive by length
+  and SHA-256 (`toyos-update/src/repo.rs`, written by `src/publish.rs`).
+  `pkg install <file>` stays for local and offline installs, checked against
+  the `SHA256SUMS` beside it.
 - **Fetching is HTTPS.** GitHub serves releases only over TLS, so `pkg`
   carries a TLS client; the network stack under it is netd's. A crate that
   does TLS is not our job to write and is widely used; it takes the fork
@@ -66,7 +68,9 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **Running is the desktop's.** gbae opens a window through winit and
   softbuffer and plays through cpal, all three on the forks the SDK release
   branches carry. It lists a directory itself and reads the ROM the user picks
-  out of it. The first run is the milestone's end.
+  out of it. The first run is the milestone's end. Under stage 5's view that
+  listing reaches no ROM outside its own folder
+  (`issues/an-installed-gbae-browses-to-no-rom.md`).
 
 ## Stages, in order
 
@@ -81,21 +85,25 @@ The storage track's users and mount-protocol stages do not block this one.
    a device or a right. The stage-then-commit above amends it: `pkg` writes
    `/apps/<name>/` in place today, its `manifest.toml` last
    (`userland/pkg/src/main.rs`).
-2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the sums
-   file from the same release. This is the internet-client track's last
+2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the signed
+   repository's files and the archives its targets names. This is the
+   internet-client track's last
    stage (`issues/the-internet-clients-work-unchanged.md`). Judged in QEMU against a server the harness
    runs on the host in Rust; then once against GitHub itself, by hand, with the owner
    watching. No registered test fetches anything.
 3. Updates: `pkg install` of a newer version replaces the directory whole
    after the new archive verified; the old one is gone only after the new
    one is in place.
-4. Signatures over the sums file, from a key the owner publishes with the
-   project.
+4. The signed repository. Landed: the verifier and the publisher, on the
+   host. Owed: `pkg install <name>` from a mirror list whose one kind is a
+   local directory, the pinned root and its floors under `/system/etc/pkg/`,
+   the machine's under `/state/pkg`, and the commit by rename.
 5. The users track's per-user `/home`
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`) decides
-   where a package's own data goes. Until then nothing says where: a
-   committed `/apps/<name>` is written by nothing, and that directory is where
-   a package wrote before the stage-then-commit ruling.
+   where a package's own data goes. Until then it goes in its own folder of
+   the session user's home, `/home/toy/Apps/<name>`, which is its `HOME` and
+   the one part of the home it sees; its own `/apps/<name>` is read-only to
+   it (`toyos_manifest::Program::view`).
 6. **An app's rights are its request ∩ the user's grant ∩ the image's
    ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
    package's manifest *requests* rights; the user *grants* them per user
@@ -112,10 +120,9 @@ The storage track's users and mount-protocol stages do not block this one.
 7. **The apps leave this repository.** Each app (snake first, as the pilot:
    it builds unchanged for every OS) moves to its own repository, built with
    only the published SDK crates and the released toolchain, and published as
-   a release archive with its `SHA256SUMS`, the shape gbae already has. The
-   image then carries none of them; `pkg install <url>` brings them. Blocked
-   by stage 6.
-   Installing by name (`pkg install snake`) needs an index and is undesigned.
+   a release archive, the shape gbae already has, which the signed
+   repository's targets names. The image then carries none of them; `pkg
+   install <name>` brings them. Blocked by stage 6.
    **Doom goes at this stage too** (owner ruling, 2026-09-26): the `doom`
    crate with the doomgeneric C it compiles, `assets/DOOM1.WAD`, and
    `assets/soundfont.sf2`, which doom alone opens, leave the image as one

@@ -32,5 +32,22 @@ metal harness's swapping boots, which that row was the one user of, and
 `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the commit
 that restores those.
 
+netstack's listener is the node's now, whose queue is [tcp]'s: a connect
+that arrives while another waits to be accepted is queued
+(`a_connect_between_two_accepts_is_queued_not_reset`,
+`userland/netstack/node/tests/listeners.rs`), and in a guest two host peers
+that dial before any accept are both accepted (`netstack_streams`, which on
+smoltcp ended `the listener was woken for 1 of two peers`). What is left of the
+exit is `lan_swap`.
+
+QEMU's own forward is a third place such a reset can come from, and it was
+not ruled out of the reading above: its listener queues one connection, and a
+host dial that arrives while one is queued is reset by QEMU with no SYN sent to
+the guest. Measured while `netstack_streams` was written, with the host at a
+load of 30 and twelve guests beside it: 3 of 8 runs red, the host's second
+dial ending `Connection reset by peer (os error 54)` and the frames recorded
+on the guest's card holding one SYN; none of 5 once the harness dialled its
+second peer only after QEMU's table showed the first carried.
+
 **Exit**: a listener that queues a connect arriving between two accepts, and
 `lan_swap` restored and green.

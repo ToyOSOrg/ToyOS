@@ -24,7 +24,7 @@ syscap = ["logread"]
 [programs.netstack]
 service = true
 serves = ["netstack"]
-devices = ["pci:1af4:1041"]
+devices = ["pci:1af4:1041", "pci:8086:10d3"]
 
 # `netstack` because `netstack_socket_churn` connects through it and reads its
 # counts.
