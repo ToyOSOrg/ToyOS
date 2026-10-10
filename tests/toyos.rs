@@ -2752,6 +2752,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     profile,
                     qmp: true,
                     kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
+                    // The fatal path is the boot's own end: it never reaches userland.
+                    ready_marker: HELD,
                     ..Default::default()
                 },
             );
