@@ -6,6 +6,11 @@
 //! `fixed_hardware`, `pm1a_control` and `reset_register` read, at their
 //! offsets and with the machine's own bytes, and zeros everywhere else, then
 //! sealed. The whole table was checked against these fields outside the tree.
+//!
+//! **No field here is an OEM string or identifier**, the condition the
+//! orchestrator ruled an extract of this laptop's FACP is committed under:
+//! the header's OEM ID, OEM table ID, OEM revision and creator fields are
+//! zeros (`common::sdt`), and nothing names the machine but "an AMD laptop".
 
 mod common;
 

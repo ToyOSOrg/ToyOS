@@ -365,7 +365,7 @@ pub fn timer() {
 
 /// The platform's own devices that are not PCI functions: none this kernel
 /// drives on an ACPI Arm machine.
-pub fn platform_devices(_rsdp_addr: u64) {}
+pub fn platform_devices(_platform: &Platform, _rsdp_addr: u64) {}
 
 /// Every other CPU, running.
 pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
