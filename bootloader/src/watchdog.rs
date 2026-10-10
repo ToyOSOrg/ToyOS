@@ -152,7 +152,7 @@ fn chipset(ecam: u64) -> Option<(&'static Chipset, u32, u32)> {
 }
 
 /// Whether firmware's own map describes `[at, at + len)` inside one region.
-fn described(system_table: &SystemTable<Boot>, at: u64, len: u64) -> bool {
+pub(crate) fn described(system_table: &SystemTable<Boot>, at: u64, len: u64) -> bool {
     let bs = system_table.boot_services();
     let size = bs.memory_map_size();
     // Eight descriptors of slack: the map can grow between the two calls, and

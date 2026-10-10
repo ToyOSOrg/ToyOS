@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use toyos_update::image::{Header, SIGNATURE_BYTES, SIGNED_BYTES};
 use toyos_update::policy::{self, Refusal};
-use toyos_update::record::{self, Booted, Record};
+use toyos_update::record::{self, Record};
 use toyos_update::slots::{self, Slot, Which};
 use toyos_update::{sig, Digest};
 use uefi::prelude::*;
@@ -44,9 +44,6 @@ const HEAD: &str = "Slot";
 /// A slot every byte of which its signature vouches for.
 pub struct Chosen {
     pub which: Which,
-    pub version: u64,
-    /// The SHA-256 of its signed header, which names the image exactly.
-    pub digest: Digest,
     pub kernel: Vec<u8>,
     pub cmdline: Vec<u8>,
     pub root: RootImage,
@@ -153,7 +150,7 @@ fn verify(
         return Err(Refusal::Hash("root"));
     }
     println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
-    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None })
+    Ok(Chosen { which, kernel, cmdline, root, refused: None })
 }
 
 /// `slot`'s signed header, held to [`KEY`], and its SHA-256.
@@ -187,27 +184,6 @@ fn signed_header(bs: &BootServices, which: Which, slot: &Slot) -> Result<(Header
         header.version
     );
     Ok((header, digest))
-}
-
-/// The version the image the record says the last boot proved carries, read
-/// out of its slot's signed header, verified in this pass; or why no version
-/// is.
-pub fn proven(handle: Handle, system_table: &SystemTable<Boot>, booted: &Booted) -> Result<u64, String> {
-    let bs = system_table.boot_services();
-    let letter = booted.slot.letter();
-    let mut disk = Disk::open(bs, crate::rootimage::boot_disk(handle, bs)?)?;
-    let table = disk.slot_table()?;
-    let slot = table.slot(booted.slot).ok_or_else(|| alloc::format!("the slot table carries no slot {letter}"))?;
-    let (header, digest) = signed_header(bs, booted.slot, &slot).map_err(|why| alloc::format!("slot {letter}: {why}"))?;
-    if digest != booted.digest {
-        let (mut have, mut want) = ([0u8; 64], [0u8; 64]);
-        return Err(alloc::format!(
-            "slot {letter}'s signed header is {}, and the record names {}",
-            toyos_update::hex(&digest, &mut have),
-            toyos_update::hex(&booted.digest, &mut want)
-        ));
-    }
-    Ok(header.version)
 }
 
 /// `bytes` is the section whose header entry names `want`.

@@ -2920,6 +2920,7 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
+        "survey/system.toml",
         "tests/acpicase/system.toml",
         "tests/blockgrantcase/system.toml",
         "tests/jobcase/system.toml",
