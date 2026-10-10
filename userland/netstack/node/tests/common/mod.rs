@@ -291,8 +291,11 @@ pub fn echo_request(destination: Ipv4Addr, id: u16, seq: u16, data: &[u8]) -> Ve
     ipv4(MAC, MAC_R, R, destination, 1, &icmp)
 }
 
+/// What [`Node::receive`] hands each frame to.
+type Sink<'s> = dyn FnMut(&[u8]) + 's;
+
 /// `frames`, in order, as the batch [`Node::receive`] takes.
-pub fn batch<'a>(frames: &'a [&'a [u8]]) -> impl FnMut(&mut dyn FnMut(&[u8])) -> bool + 'a {
+pub fn batch<'a>(frames: &'a [&'a [u8]]) -> impl FnMut(&mut Sink<'_>) -> bool + 'a {
     let mut left = frames.iter();
     move |sink| left.next().map(|frame| sink(frame)).is_some()
 }
