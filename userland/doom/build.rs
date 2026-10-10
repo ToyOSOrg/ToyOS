@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::{fs, path::Path};
 
 /// The upstream doomgeneric commit `/system/bin/doom` is built from.
@@ -158,21 +157,12 @@ fn main() {
     println!("cargo:rerun-if-changed=doomgeneric");
 }
 
-fn http_agent() -> ureq::Agent {
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::Rustls)
-        .root_certs(ureq::tls::RootCerts::WebPki)
-        .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .build()
-        .new_agent()
-}
+/// Root `CLAUDE.md`'s: the only `User-Agent` ToyOS sends.
+const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
 fn download_doomgeneric(root: &Path) {
     println!("Downloading doomgeneric {DOOMGENERIC_COMMIT}...");
-    let agent = http_agent();
+    let agent = ureq::Agent::config_builder().user_agent(USER_AGENT).build().new_agent();
     // The commit is the checksum: GitHub's archive of a sha is that sha's tree
     // and can be nothing else, so pinning the URL needs no second hash of ours.
     let resp = agent
