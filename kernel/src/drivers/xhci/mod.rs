@@ -1188,9 +1188,8 @@ impl XhciController {
     fn teardown_port(&mut self, port_idx: u8) -> bool {
         while let Some(at) = self.devices.iter().position(|d| d.port_idx == port_idx) {
             let mut dev = self.devices.remove(at);
-            let role = dev.role;
             dev.unbind();
-            match role {
+            match &dev.role {
                 hid::HidRole::Keyboard(_) => log!(
                     "xHCI: USB keyboard on slot {} unplugged from port {}",
                     dev.slot_id, port_idx + 1

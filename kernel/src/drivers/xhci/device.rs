@@ -4,7 +4,7 @@ use crate::log;
 use toyos_xhci::enumerate::{
     self, ep0_packet_from_descriptor, initial_ep0_packet, Act, Enumeration, Learnt, Next, Request,
 };
-use toyos_xhci::job::{Await, Outcome, Stages, CC_SUCCESS};
+use toyos_xhci::job::{self, Await, Outcome, Stages, CC_SUCCESS};
 use toyos_xhci::port::{self, Reset};
 use toyos_xhci::identity::UsbId;
 use toyos_xhci::recovery;
@@ -588,8 +588,8 @@ fn read_back(
 /// Bytes a control request actually moved, or `None` if it did not complete; Success alone doesn't say.
 fn delivered(outcome: Outcome, want: u16) -> Option<u16> {
     let Outcome::Transfer { code: CC_SUCCESS, residue } = outcome else { return None };
-    // A residue past `want` is the controller contradicting itself; `min` refuses to believe it.
-    Some(want.saturating_sub(residue.min(u16::MAX as u32) as u16))
+    // No more than `want`, so it is a `u16`.
+    Some(job::moved(want.into(), residue) as u16)
 }
 
 fn command_name(cmd: enumerate::Command) -> &'static str {
@@ -759,7 +759,7 @@ fn bind_hid(
     };
     let report_size = pointer.map_or(keyboard::REPORT, Pointer::request) as u32;
     let role = match pointer {
-        None => HidRole::Keyboard(keyboard::Keyboard::new()),
+        None => HidRole::Keyboard(keyboard::Keyboard::default()),
         // A pointer with no free button-table entry can't be bound; sharing one would publish another's releases.
         Some(pointer) => match crate::mouse::PointerSource::claim() {
             Some(source) => HidRole::Pointer(source, pointer),

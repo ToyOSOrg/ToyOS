@@ -4,13 +4,18 @@
 //! ```text
 //! mouse   byte 0 buttons (bit 0 left, 1 right, 2 middle, the rest the maker's)
 //!         byte 1 X, byte 2 Y: signed displacements, Y positive towards the user
-//!         byte 3 the wheel, where the mouse sends one
+//!         byte 3 the wheel, where the mouse sends one (not B.2's; see below)
 //! tablet  byte 0 buttons, bytes 1-2 X and 3-4 Y little endian, 0 to 0x7FFF,
 //!         byte 5 the wheel
 //! ```
 //!
 //! Buttons are carried whole: the bits past the boot three are further
 //! buttons on every pointer this decoder reads, QEMU's included.
+//!
+//! Appendix B.2 lays out bytes 0 to 2 and leaves the rest to the device.
+//! Byte 3 is read as the wheel because QEMU's `usb-mouse` report descriptor
+//! puts it there and Linux's boot mouse driver `usbmouse` reads it so; a
+//! mouse that puts something else there scrolls.
 
 /// The largest absolute coordinate, which is the tablet's logical maximum and
 /// the edge of the space every pointer's motion is merged into.

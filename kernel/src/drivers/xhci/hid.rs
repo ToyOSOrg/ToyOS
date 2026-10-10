@@ -1,5 +1,7 @@
 
-use toyos_usbhid::{keyboard::Keyboard, pointer::{Motion, Pointer}};
+use toyos_usbhid::keyboard::{Keyboard, Read};
+use toyos_usbhid::pointer::{Motion, Pointer};
+use toyos_xhci::job;
 
 use crate::{keyboard, log, mouse};
 use super::{Mmio, Trb, TrbRing, TRB_NORMAL};
@@ -13,7 +15,6 @@ pub enum HidType {
 }
 
 /// What a *bound* device is, with what its reports are read against: a keyboard's own last report, since diffing against another device's would synthesize releases for keys still down; and a pointer's source, carried rather than derived from the (per-controller) slot id.
-#[derive(Clone, Copy)]
 pub enum HidRole {
     Keyboard(Keyboard),
     Pointer(mouse::PointerSource, Pointer),
@@ -58,16 +59,21 @@ impl HidDevice {
         }
     }
 
-    /// Reads the report a transfer delivered; `unmoved` is what of `report_size` the device did not send, which still holds the last report's bytes.
-    pub fn dispatch_report(&mut self, unmoved: u32) {
+    /// Reads the report a transfer delivered; `residue` is what of `report_size` the device did not send, whose bytes are still the last report's.
+    pub fn dispatch_report(&mut self, residue: u32) {
         let mut buf = [0u8; 8];
         // `report_size` is 4, 6 or 8, so `copy_to` never sees more than 8; not yet requeued, so this copy has the buffer to itself.
-        let delivered = &mut buf[..self.report_size.saturating_sub(unmoved) as usize];
+        let delivered = &mut buf[..job::moved(self.report_size, residue) as usize];
         self.report.copy_to(0, delivered);
         // Waking on an unchanged report would make readiness disagree with `has_data()`.
         let queued = match &mut self.role {
             HidRole::Keyboard(keys) => match keys.report(delivered) {
-                Ok(transitions) => keyboard::apply(transitions) != 0,
+                Ok(Read::Keys(transitions)) => keyboard::apply(transitions) != 0,
+                Ok(Read::RollOver(transitions)) => {
+                    let queued = keyboard::apply(transitions) != 0;
+                    self.refuse(format_args!("RollOver, its modifiers believed"));
+                    queued
+                }
                 Err(why) => return self.refuse(format_args!("{why:?}")),
             },
             HidRole::Pointer(source, pointer) => match pointer.decode(delivered) {
