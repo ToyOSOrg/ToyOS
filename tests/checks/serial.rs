@@ -72,6 +72,15 @@ pub fn self_check() -> Result<(), String> {
             )
             .must_be_clean()
         }),
+        ("must_be_clean on a DMA fault naming no enumerated function", false, &|| {
+            Serial::named(
+                "test capture",
+                "[ 0.001 cpu0 kernel] NVMe: found\n[ 4.100 cpu0 kernel] iommu: DMA FAULT \
+                 owner=none unit0 stream=0x18 addr=0x0000000000000000 access=none reason=0x04 \
+                 domain=unknown bme=unknown-function unitfaults=1 streamfaults=1 first=y C_BAD_STE\n",
+            )
+            .must_be_clean()
+        }),
         ("must_be_clean on an empty capture", false, &|| dead.must_be_clean()),
     ];
 
@@ -166,6 +175,14 @@ pub fn self_check() -> Result<(), String> {
         (
             "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=slot0 unit0 stream=00:03.0 \
              addr=0x1000 access=read reason=0x06 read-permission",
+            None,
+        ),
+        // And on a requester no enumerated function is: the unit refused it,
+        // and the machine goes on.
+        (
+            "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=none unit0 stream=00:1f.7 \
+             addr=0x1000 access=write reason=0x02 domain=unknown bme=unknown-function \
+             context-entry-not-present",
             None,
         ),
         ("[ 0.001 cpu0 kernel] EARLY PANIC: nothing is up yet", Some(Died::Kernel)),
