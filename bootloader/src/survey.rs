@@ -639,7 +639,7 @@ impl Ecam {
     /// MCFG decodes is ever addressed: past `last` lies whatever else the
     /// platform maps there, which is not configuration space.
     fn read(&self, bus: u8, dev: u8, f: u8, offset: usize) -> u32 {
-        assert!((self.first..=self.last).contains(&bus) && dev < 32 && f < 8 && offset < 0x1000 && offset % 4 == 0);
+        assert!((self.first..=self.last).contains(&bus) && dev < 32 && f < 8 && offset < 0x1000 && offset.is_multiple_of(4));
         let at = self.base + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(f) << 12) + offset as u64;
         // SAFETY: boot services identity-map the address space, and the
         // assert holds the address inside the window the MCFG declares.
