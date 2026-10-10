@@ -15,6 +15,17 @@ pub fn typing(write_back: &[(u64, u64)]) -> Typing<'_> {
     Typing::ByMap(write_back)
 }
 
+/// The CPU's physical address width, from `ID_AA64MMFR0_EL1.PARange`, or why
+/// it cannot be read.
+pub fn physical_bits() -> Result<u32, alloc::string::String> {
+    let mmfr0: u64;
+    // SAFETY: reads an ID register EL1 and above may always read.
+    unsafe { core::arch::asm!("mrs {}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack, preserves_flags)) };
+    let parange = mmfr0 & 0xF;
+    toyos_bootmap::aarch64::physical_bits(parange)
+        .ok_or_else(|| alloc::format!("ID_AA64MMFR0_EL1.PARange reads {parange:#x}, an encoding the Arm ARM reserves"))
+}
+
 /// The exception level the loader runs at, from `CurrentEL`.
 fn current_el() -> u64 {
     let current: u64;
