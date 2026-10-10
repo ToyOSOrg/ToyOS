@@ -40,7 +40,7 @@
 //! nothing ToyOS put there. The read may have an effect in the device that
 //! nothing here knows of. Inside that, every page a device the kernel knows
 //! of decodes in is refused, whatever firmware types it and whoever drives
-//! the device, and an address in the ECAM window is a configuration access
+//! the device, and an address in an ECAM window is a configuration access
 //! and is decided as one.
 //!
 //! **What the allocator hands out is refused wherever the map lists it.** A
@@ -71,6 +71,7 @@
 
 use toyos_abi::acpi::{Refused, Width, UNLISTED};
 use toyos_abi::boot::MemoryMapEntry;
+use toyos_acpi::{ConfigRegister, EcamWindow, SEGMENT_GROUP};
 
 use crate::port::{KeptCommands, Mediated, IO_PORTS};
 use crate::span::PAGE_4K;
@@ -96,26 +97,6 @@ pub const FIXED_RANGE_END: u64 = 0x10_0000;
 /// Bytes of configuration space a function has.
 const CONFIG_BYTES: u16 = 0x1000;
 
-/// The window configuration space is reached through, as the MCFG names it
-/// (PCI Firmware Specification 3.3, Table 4-3): `base` is bus 0's, whatever
-/// the first bus the window decodes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Ecam {
-    pub base: u64,
-    pub segment: u16,
-    pub first_bus: u8,
-    pub last_bus: u8,
-}
-
-impl Ecam {
-    fn holds(&self, at: u64) -> bool {
-        // Saturating: the base is firmware's word.
-        let start = self.base.saturating_add(u64::from(self.first_bus) << 20);
-        let end = self.base.saturating_add((u64::from(self.last_bus) + 1) << 20);
-        (start..end).contains(&at)
-    }
-}
-
 /// One PCI function on the segment group the kernel enumerated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Function {
@@ -133,7 +114,9 @@ pub struct Memory<'a, D> {
     pub map: &'a [MemoryMapEntry],
     /// One past the last byte the kernel maps.
     pub mapped_end: u64,
-    pub ecam: Option<Ecam>,
+    /// The windows configuration space is reached through, as the MCFG
+    /// bounds them.
+    pub ecam: &'a [EcamWindow],
     pub devices: D,
     /// The FACS, as `(start, end)`.
     pub facs: Option<(u64, u64)>,
@@ -212,15 +195,13 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
     pub fn decide(self, at: u64, width: Width, write: bool) -> MemoryVerdict {
         use MemoryVerdict::Refused as No;
         let Some(last) = at.checked_add(width.bytes() - 1) else { return No(Refused::Unmapped) };
-        if let Some(ecam) = self.ecam {
-            match (ecam.holds(at), ecam.holds(last)) {
-                (true, true) => {
-                    let offset = at - ecam.base;
-                    let function =
-                        Function { bus: (offset >> 20) as u8, device: (offset >> 15 & 0x1F) as u8, function: (offset >> 12 & 7) as u8 };
-                    return MemoryVerdict::AsConfig(function, (offset & 0xFFF) as u16);
+        for window in self.ecam {
+            match (window.locate(at), window.locate(last)) {
+                (Some(register), Some(_)) => {
+                    let ConfigRegister { bus, device, function, offset } = register;
+                    return MemoryVerdict::AsConfig(Function { bus, device, function }, offset);
                 }
-                (false, false) => {}
+                (None, None) => {}
                 _ => return No(Refused::Straddles),
             }
         }
@@ -475,14 +456,13 @@ impl ConfigAt {
 /// configuration from and what moves the ports it declared. A read is held to
 /// its shape: a function the window reaches, and at most a dword that crosses
 /// no dword boundary, the unit a configuration register is defined in.
-pub fn config(ecam: Option<Ecam>, segment: u16, function: Function, offset: u16, width: Width, write: bool) -> Result<ConfigAt, Refused> {
+pub fn config(ecam: &[EcamWindow], segment: u16, function: Function, offset: u16, width: Width, write: bool) -> Result<ConfigAt, Refused> {
     if write {
         return Err(Refused::ConfigWrite);
     }
-    let reached = ecam.is_some_and(|ecam| {
-        ecam.segment == segment && (ecam.first_bus..=ecam.last_bus).contains(&function.bus)
-    });
-    if !reached || function.device > 31 || function.function > 7 {
+    let Function { bus, device, function: number } = function;
+    let reached = segment == SEGMENT_GROUP && ecam.iter().any(|window| window.offset(bus, device, number).is_some());
+    if !reached {
         return Err(Refused::ConfigUnreachable);
     }
     let bytes = width.bytes() as u16;
