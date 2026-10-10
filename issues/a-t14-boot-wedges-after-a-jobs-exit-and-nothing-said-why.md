@@ -67,7 +67,8 @@ ran.
 
 **The VFS lock is not in the window.** Run 20 also shows `vfs::lock()` held
 across a 32 s stick write with other CPUs at 200M spins, and a spawn does take
-that lock. But it takes it at `loader/mod.rs:370` and in `load_needed_libs`, both
+that lock. But it took it at `loader/mod.rs:370` and in `load_needed_libs` (deleted
+since: an executable relocates itself, and nothing loads a `DT_NEEDED`), both
 *before* the `ELF: … relocations indexed` and `spawn: TLS … modules` records
 that every hung boot wrote; everything after them reads the already-open backing
 and takes no VFS lock. So it is not this.
