@@ -191,6 +191,10 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It plays through soundserver's virtio-sound driver, which the T14 has no
+    // device for, and its counts are judged beside soundserver's lines:
+    // `virtio_sound_counts` runs it.
+    "virtio_sound_counts",
     // It claims the NVMe controller a boot off that disk starts no server
     // for, and reads the inventory: `block_grants_reach_their_partitions`
     // runs it on tests/blockgrantcase.
@@ -381,6 +385,10 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
+    // A stream through soundserver's own virtio-sound driver, counted and
+    // ordered: the device exists only on a QEMU machine — the T14's sound is
+    // HDA — and its audio goes nowhere, since no guest test plays any.
+    "virtio_sound_counts",
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
@@ -3836,6 +3844,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
+        "virtio_sound_counts" => virtio_sound_counts(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
@@ -4310,6 +4319,69 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         };
         eprintln!("  [claims] {}", line.trim());
     }
+    Ok(())
+}
+
+/// soundserver brings the virtio-sound function up itself, behind the unit, and
+/// plays one stream through it to the end: the job's counts (`inspect`'s), and
+/// soundserver's lines in their order — the stream started once after the
+/// client connected, and stopped once, before soundserver suspended, with no
+/// refusal on the way.
+fn virtio_sound_counts(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "virtio_sound_counts";
+    /// soundserver's bring-up, which it says before any client is accepted.
+    const BROUGHT_UP: [&str; 3] = [
+        "virtio-sound: configured stream 0: 44100Hz 2ch s16le",
+        "soundserver: ready, 8 buffers, 44100Hz 2ch, 512 bytes/period, 128 frames/period",
+        "soundserver: suspended",
+    ];
+    /// The stream's lines, in the order they are owed, each once.
+    const IN_ORDER: [&str; 6] = [
+        " connected (id=",
+        "soundserver: resumed",
+        "virtio-sound: stream 0 started",
+        " removed (",
+        "virtio-sound: stream 0 stopped",
+        "soundserver: suspended",
+    ];
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let mut console = qemu.boot_log().to_string();
+    await_guest(&mut qemu, &mut console, "soundserver's bring-up", |c| BROUGHT_UP.iter().all(|l| c.contains(l)))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let boot = serial::Serial::named("the boot", console);
+    boot.must_be_clean()?;
+    boot.must_say("soundserver: VirtIO: PCI ")?;
+    boot.must_say("access_platform=y")?;
+    boot.must_not_say(audio::NULL_SINK)?;
+
+    let result = qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let said = &result.stdout;
+    let Some(counted) = said.lines().find(|l| l.contains("virtio_sound_counts: ")) else {
+        return Err(format!("the job never said what it counted:\n{said}"));
+    };
+    if said.contains("cannot be driven on") {
+        return Err(format!("soundserver refused its device mid-stream:\n{said}"));
+    }
+    let mut from = 0;
+    for line in IN_ORDER {
+        let times = said.matches(line).count();
+        let Some(at) = said[from..].find(line) else {
+            return Err(format!("`{line}` is not after the line before it in the window:\n{said}"));
+        };
+        if times != 1 {
+            return Err(format!("`{line}` said {times} times in one stream's window:\n{said}"));
+        }
+        from += at + line.len();
+    }
+    eprintln!("  [sound] {}", counted.trim());
     Ok(())
 }
 

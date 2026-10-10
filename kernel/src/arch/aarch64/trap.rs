@@ -518,7 +518,6 @@ pub fn install() {
 pub enum DriverIrq {
     Xhci,
     Hda,
-    VirtioSound,
 }
 
 impl core::fmt::Display for DriverIrq {
@@ -529,7 +528,6 @@ impl core::fmt::Display for DriverIrq {
 
 pub const XHCI_VECTOR: DriverIrq = DriverIrq::Xhci;
 pub const HDA_VECTOR: DriverIrq = DriverIrq::Hda;
-pub const VIRTIO_SOUND_VECTOR: DriverIrq = DriverIrq::VirtioSound;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

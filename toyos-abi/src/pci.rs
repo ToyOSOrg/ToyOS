@@ -86,18 +86,28 @@ const _: () = assert!(core::mem::size_of::<DmaMapping>() == 8 + 8);
 /// One record and not a queue: the kernel accumulates, so a driver that slept
 /// through several is told about all of them at once and there is no ring for a
 /// slow reader to overflow. The count says how many messages arrived, never
-/// what any of them meant — and it is the whole record, because what a message
-/// meant is in the device's own rings and a driver that wanted a time has
-/// its clock page (`crate::clock`).
+/// what any of them meant: that is in the device's own rings.
+///
+/// **The two times are when messages landed, which a driver reading its rings
+/// later cannot recover**: a driver clocked by its device — soundserver's DLL —
+/// is clocked by these and not by when it woke. Both are nanoseconds since
+/// boot on the clock page's clock (`crate::clock`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceIrqRecord {
     /// Never 0 in a record that was answered; an empty count is `WouldBlock`.
     pub count: u32,
+    pub _pad: u32,
+    /// When the first message `count` holds landed.
+    pub first_nanos: u64,
+    /// When the newest landed: never older than the newest message `count`
+    /// holds, and newer only by one that lands as the read is made, which the
+    /// next read counts.
+    pub last_nanos: u64,
 }
 
 impl DeviceIrqRecord {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
-const _: () = assert!(DeviceIrqRecord::SIZE == 4);
+const _: () = assert!(DeviceIrqRecord::SIZE == 4 + 4 + 8 + 8);

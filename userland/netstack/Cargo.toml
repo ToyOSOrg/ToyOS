@@ -10,6 +10,7 @@ toyos = { path = "../../toyos" }
 toyos-device-memory = { path = "../../toyos-device-memory" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-virtio = { path = "../../toyos-virtio" }
+toyos-pci-claim = { path = "../toyos-pci-claim" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }
@@ -21,6 +22,9 @@ toyos-net-shard = { path = "../../toyos-net-shard" }
 toyos-net-tcp = { path = "../../toyos-net-shard/tcp" }
 toyos-net-udp = { path = "../../toyos-net-udp" }
 toyos-net-wire = { path = "../../toyos-net-wire" }
+
+[dev-dependencies]
+toyos-pci-claim = { path = "../toyos-pci-claim", features = ["host-grant"] }
 
 [package.metadata.toyos.host]
 exempt.owns = "the NIC ToyOS claims for it"

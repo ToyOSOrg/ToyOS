@@ -11,7 +11,6 @@ mod timer;
 mod tlb;
 pub(crate) mod unclaimed;
 mod user_dev;
-mod virtio_sound;
 mod xhci;
 
 pub(crate) use user_dev::{claim_vector, slot_interrupt};
@@ -46,7 +45,7 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
 
 /// The vector a driver in this kernel arms its function's message with: one
-/// of the three below, each its own gate.
+/// of the two below, each its own gate.
 #[derive(Clone, Copy)]
 pub struct DriverIrq(Vector);
 
@@ -67,9 +66,6 @@ pub const XHCI_VECTOR: DriverIrq = DriverIrq(Vector::Xhci);
 
 /// The vector the HDA controller's message-signalled interrupt carries.
 pub const HDA_VECTOR: DriverIrq = DriverIrq(Vector::Hda);
-
-/// The vector the virtio-sound device's MSI-X entry carries.
-pub const VIRTIO_SOUND_VECTOR: DriverIrq = DriverIrq(Vector::VirtioSound);
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -282,7 +278,6 @@ idt_vectors! {
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
-        ring3 VirtioSound  = 0x23, virtio_sound::virtio_sound_entry;
         ring3 I8042        = 0x24, i8042::i8042_entry;
         ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;
         ring3 Hda          = 0x26, hda::hda_entry;
