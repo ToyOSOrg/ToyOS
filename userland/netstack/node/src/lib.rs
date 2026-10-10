@@ -72,7 +72,7 @@ toyos_net_wire::counters! {
 /// The most frames one [`Node::receive`] takes. A device may refill its ring as fast as it is
 /// read, and a batch that waited for it to empty would keep the deadlines, the transmit
 /// opportunity and every stream's pass waiting with it.
-pub const RECEIVE_BUDGET: usize = 64;
+const RECEIVE_BUDGET: usize = 64;
 
 /// A line for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,7 +156,7 @@ impl Node {
     // ---- the device ----
 
     /// The frames the device received since the last call, one by one and at most
-    /// [`RECEIVE_BUDGET`]: `next` hands its next frame to the sink it is given and answers
+    /// `RECEIVE_BUDGET`: `next` hands its next frame to the sink it is given and answers
     /// `false` once it had none. One pass over the streams follows the last frame, so what the
     /// batch brought reaches each client in one write and not one a frame. `true` is a batch
     /// that stopped at the bound, and another is owed without waiting for the device to say so.

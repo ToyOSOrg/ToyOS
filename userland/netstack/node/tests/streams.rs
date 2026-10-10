@@ -668,7 +668,7 @@ fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_
 
 // A device that refills its ring as fast as it is read never says it has no frame: a batch
 // stops at the bound and answers that another pass is owed, and one that found the ring empty
-// owes none.
+// owes none, a ring one short of the bound included.
 #[test]
 fn a_batch_stops_at_its_bound_and_says_a_pass_is_owed() {
     let (mut net, _, client) = established();
@@ -676,15 +676,18 @@ fn a_batch_stops_at_its_bound_and_says_a_pass_is_owed() {
     let mut handed = 0usize;
     let endless = |sink: &mut dyn FnMut(&[u8])| {
         handed += 1;
+        assert!(handed <= 1 << 16, "a batch with no bound");
         sink(&frame);
         true
     };
     assert!(net.node.receive(net.now, endless, draw(&mut net.draws)), "a pass is owed");
-    assert_eq!(handed, toyos_net_node::RECEIVE_BUDGET);
+    assert!(handed > 1, "a bound of one frame is a pass a frame");
     assert_eq!(client.borrow().inbox, b"again", "the rest of the batch was the same segment again");
 
     let next = net.far.text(b"once");
-    assert!(!net.node.receive(net.now, batch(&[&next]), draw(&mut net.draws)), "the ring was emptied");
+    let short: Vec<&[u8]> = vec![&next; handed - 1];
+    assert!(!net.node.receive(net.now, batch(&short), draw(&mut net.draws)), "the ring was emptied");
+    assert_eq!(client.borrow().inbox, b"againonce");
 }
 
 // A send pipe found empty is asked again only once the kernel says it holds bytes: a batch of
