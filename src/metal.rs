@@ -438,29 +438,20 @@ impl Identity {
         if self.model != want.model {
             return Err(no("model", want.model.clone(), self.model.clone()));
         }
-        self.removable()
-    }
-
-    fn removable(&self) -> Result<(), Refusal> {
-        match self.removable {
-            true => Ok(()),
-            false => Err(Refusal::Identity {
-                field: "removable",
-                want: "1".to_string(),
-                got: "0".to_string(),
-            }),
+        if !self.removable {
+            return Err(no("removable", "1".to_string(), "0".to_string()));
         }
+        Ok(())
     }
 }
 
-/// `machine`'s record under `root`, once the disk answered as the stick it
-/// names: the one disk this loop writes on that machine.
-fn recorded_stick(root: &Path, machine: &Machine, disk: &Identity) -> Result<Record, Refusal> {
+/// Whether `disk` is the stick `machine`'s record under `root` names: the one
+/// disk this loop writes on that machine.
+fn recorded_stick(root: &Path, machine: &Machine, disk: &Identity) -> Result<(), Refusal> {
     let record = Record::load(root, machine)
         .map_err(Refusal::Record)?
         .ok_or_else(|| Refusal::Unrecorded { path: root.join(machine.path()).display().to_string() })?;
-    disk.check(&record.stick)?;
-    Ok(record)
+    disk.check(&record.stick)
 }
 
 /// Record `machine` with `disk` as its stick where it has no record, and check
@@ -471,9 +462,10 @@ fn record_machine(root: &Path, machine: &Machine, disk: &Identity) -> Result<Opt
     let wrote = match Record::load(root, machine).map_err(Refusal::Record)? {
         Some(_) => None,
         None => {
-            disk.removable()?;
             let stick =
                 Stick { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
+            // Before the write, so a fixed disk is never recorded as a stick.
+            disk.check(&stick)?;
             Some(Record::new(machine, stick).save(root).map_err(Refusal::Record)?)
         }
     };
@@ -2617,7 +2609,7 @@ mod tests {
 
         let bigger = Identity::parse("500118192\nSanDisk \nUltra           \n1\n").unwrap();
         assert_eq!(
-            recorded_stick(root, &t14, &bigger).map(|_| ()),
+            recorded_stick(root, &t14, &bigger),
             Err(Refusal::Identity {
                 field: "size",
                 want: "60062500".to_string(),
@@ -2630,7 +2622,7 @@ mod tests {
             ("60062500\nSanDisk \nUltra           \n0\n", "removable"),
         ] {
             let disk = Identity::parse(answer).unwrap();
-            let refused = recorded_stick(root, &t14, &disk).map(|_| ());
+            let refused = recorded_stick(root, &t14, &disk);
             assert!(matches!(refused, Err(Refusal::Identity { field: f, .. }) if f == field), "{field}");
         }
         assert!(Identity::parse("60062500\nSanDisk \n").is_err());
@@ -2647,7 +2639,7 @@ mod tests {
         let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
         let stick = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
 
-        let refused = recorded_stick(&root, &bench, &stick).map(|_| ());
+        let refused = recorded_stick(&root, &bench, &stick);
         let path = root.join("tests/metal/acme-bench-2.toml").display().to_string();
         assert_eq!(refused, Err(Refusal::Unrecorded { path: path.clone() }));
         let said = refused.unwrap_err().to_string();
@@ -2662,7 +2654,8 @@ mod tests {
 
         let wrote = record_machine(&root, &bench, &stick).expect("recorded");
         assert_eq!(wrote, Some(root.join("tests/metal/acme-bench-2.toml")));
-        let record = recorded_stick(&root, &bench, &stick).expect("the stick it was recorded with");
+        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(()));
+        let record = Record::load(&root, &bench).expect("a readable record").expect("a record");
         assert_eq!(
             record.stick,
             Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() }
@@ -2680,7 +2673,7 @@ mod tests {
             record_machine(&root, &bench, &t14_stick),
             Err(Refusal::Identity { field: "size", .. })
         ));
-        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(record));
+        assert_eq!(Record::load(&root, &bench), Ok(Some(record)), "a refused capture moved the record");
         // Neither refusal is about a boot: the loop exits 2.
         assert!(!Refusal::Unrecorded { path }.about_the_boot());
     }
