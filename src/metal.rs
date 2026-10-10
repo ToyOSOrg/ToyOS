@@ -934,10 +934,20 @@ fn one_partition(
     })
 }
 
-/// How many bytes `dd` says it copied, out of its own last line.
-fn dd_copied(stderr: &str) -> Option<u64> {
+/// What `dd` said of a copy on its own last line,
+/// `<bytes> bytes (…) copied, <secs> s, <rate>`.
+#[derive(Debug, Clone, PartialEq)]
+struct DdSaid {
+    bytes: u64,
+    secs: f64,
+}
+
+fn dd_said(stderr: &str) -> Option<DdSaid> {
     let line = stderr.lines().find(|l| l.contains(" bytes ") && l.contains("copied"))?;
-    line.split_whitespace().next()?.parse().ok()
+    let bytes = line.split_whitespace().next()?.parse().ok()?;
+    let (_, after) = line.split_once("copied, ")?;
+    let (secs, _) = after.split_once(" s, ")?;
+    Some(DdSaid { bytes, secs: secs.parse().ok()? })
 }
 
 /// The id and the partition GUID of every entry `efibootmgr` lists under
@@ -1080,19 +1090,24 @@ impl Driver {
     /// count and then the table the kernel re-read are both compared. `wipefs`
     /// first, because the stick outlives the image and its old backup GPT would
     /// otherwise leave the firmware two tables.
-    fn flash(&self, image: &Flashable) -> Result<(), Refusal> {
+    ///
+    /// `None` is a dry run, which wrote nothing to time.
+    fn flash(&self, image: &Flashable) -> Result<Option<Flashed>, Refusal> {
+        let began = std::time::Instant::now();
         self.as_root("wiping the old signatures", Job::Wipe, None, None)?;
+        let wipe = began.elapsed().as_secs_f64();
+        let began = std::time::Instant::now();
         let out = self.as_root("flashing the stick", Job::Flash, None, Some(&image.path))?;
-        let Some(out) = out else { return Ok(()) };
+        let Some(out) = out else { return Ok(None) };
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        let copied = dd_copied(&stderr).ok_or_else(|| Refusal::Remote {
+        let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
             what: "flashing the stick".to_string(),
-            status: "printed no byte count".to_string(),
+            status: "printed no byte count and seconds".to_string(),
             stderr,
         })?;
-        if copied != image.bytes {
+        if dd.bytes != image.bytes {
             let what = "the byte count dd reported".to_string();
-            return Err(Refusal::Landed { what, want: image.bytes, got: copied });
+            return Err(Refusal::Landed { what, want: image.bytes, got: dd.bytes });
         }
         self.ssh("settling the new table", "udevadm settle")?;
         for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
@@ -1109,7 +1124,7 @@ impl Driver {
                 }
             }
         }
-        Ok(())
+        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
     }
 
     /// The boot entry for *this* image's ESP. An entry carrying the label but
@@ -1165,10 +1180,13 @@ impl Driver {
 
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
     /// the machine is watched down before it is watched back up: a probe that
-    /// caught dying Ubuntu would read a stick ToyOS had never booted.
-    fn ride_the_reboot(&self, secs: u64) -> Result<u64, Refusal> {
+    /// caught dying Ubuntu would read a stick ToyOS had never booted. Answers
+    /// the wall seconds going down took, and the whole seconds coming back did.
+    fn ride_the_reboot(&self, secs: u64) -> Result<(f64, u64), Refusal> {
+        let began = std::time::Instant::now();
         self.wait(GOING_DOWN_SECS, "go down", false)?;
-        self.wait(secs, "come back", true)
+        let down = began.elapsed().as_secs_f64();
+        Ok((down, self.wait(secs, "come back", true)?))
     }
 
     /// Wait for the log partition's device node, and say how long it took.
@@ -1523,6 +1541,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         return Ok(None);
     }
     let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
+    let began = std::time::Instant::now();
 
     let Some(asked) = &args.image else {
         return Err(Refusal::Usage(String::from(
@@ -1577,31 +1596,38 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
+    let preamble = began.elapsed().as_secs_f64();
 
-    driver.flash(&image)?;
+    let flashed = driver.flash(&image)?;
+    let began = std::time::Instant::now();
     let entry = driver.boot_entry(&image.esp)?;
 
     driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
     driver.as_root("rebooting", Job::Reboot, None, None)?;
+    let entry = began.elapsed().as_secs_f64();
     if driver.dry_run {
         driver.as_root("mounting the log partition", Job::Mount, None, None)?;
         driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
         println!("dry run: nothing was written and the machine was not rebooted");
         return Ok(None);
     }
+    let flashed = flashed.expect("only a dry run flashes nothing, and it has returned");
 
-    let back = driver.ride_the_reboot(wait_secs)?;
+    let (down, back) = driver.ride_the_reboot(wait_secs)?;
     println!("the machine answered ssh again after {back} s");
     // Before the mount, so the stick's own answer is a number rather than
     // the reason a mount failed.
     let stick = driver.wait_for_the_stick()?;
     println!("the boot stick enumerated {stick} s after the machine answered");
+    let began = std::time::Instant::now();
     let (loader, log) = driver.read_log()?;
+    let read_log = began.elapsed().as_secs_f64();
     print!("{loader}{log}");
     // The outside judge, and it runs before the verdict: a volume this
     // cannot read is a finding about what the boot wrote, and the reason to
     // read the sectors rather than the mount is that a mount has already
     // had a FAT driver's opinion about them.
+    let began = std::time::Instant::now();
     if args.fat32_check {
         let bytes = driver.raw_log(image.log.sectors)?;
         if let Some(dir) = &args.readback {
@@ -1617,8 +1643,29 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         }
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
-    let boot = boot_file(back, stick, &machine);
+    let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
+    let phases = Phases {
+        preamble,
+        wipe: flashed.wipe,
+        flash: flashed.flash,
+        dd_secs: flashed.dd,
+        entry,
+        down,
+        read_log,
+        raw_log,
+    };
+    println!("phases: {phases}");
+    let boot = BootFile { back, stick, machine, phases }.text();
     judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
+}
+
+/// What [`Driver::flash`] took, on a run that was no rehearsal.
+struct Flashed {
+    wipe: f64,
+    /// The write and the table read back after it.
+    flash: f64,
+    /// `dd`'s own seconds for the write.
+    dd: f64,
 }
 
 /// This boot's verdict, **judged before the readback is written, and written
@@ -1830,6 +1877,117 @@ pub const VENDOR_KEY: &str = "machine_vendor";
 pub const PRODUCT_KEY: &str = "machine_product";
 pub const BIOS_KEY: &str = "machine_bios";
 
+/// [`Phases`]' keys, each in wall seconds; [`RAW_LOG_KEY`] reads [`NOT_READ`]
+/// on a run that read no volume.
+const PREAMBLE_KEY: &str = "preamble_secs";
+const WIPE_KEY: &str = "wipe_secs";
+const FLASH_KEY: &str = "flash_secs";
+const DD_SECS_KEY: &str = "dd_secs";
+const ENTRY_KEY: &str = "entry_secs";
+const DOWN_KEY: &str = "down_secs";
+const READ_LOG_KEY: &str = "read_log_secs";
+const RAW_LOG_KEY: &str = "raw_log_secs";
+const NOT_READ: &str = "-";
+
+/// Where one run of the loop spent its wall time, by the host's clock, phase
+/// by phase; coming back and the stick are [`BACK_SECS`] and
+/// [`STICK_SECS_KEY`]. Any save of the log partition before the flash is no
+/// phase of this loop's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phases {
+    /// Admitting the image, then the rule, the lid policy, the disk and the
+    /// machine read off the machine.
+    pub preamble: f64,
+    pub wipe: f64,
+    /// `dd` over `ssh`, and the table read back.
+    pub flash: f64,
+    /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
+    /// whichever of the wire and the stick is slower, and splits neither out.
+    pub dd_secs: f64,
+    /// The boot entry, `--bootnext` and `reboot`.
+    pub entry: f64,
+    pub down: f64,
+    pub read_log: f64,
+    /// The volume read whole and the outside judge's check of it; `None` on a
+    /// run without `--fat32-check`.
+    pub raw_log: Option<f64>,
+}
+
+impl fmt::Display for Phases {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "preamble {:.1} s, wipe {:.1} s, flash {:.1} s (dd {:.1} s), entry {:.1} s, down {:.1} \
+             s, read_log {:.1} s, raw_log ",
+            self.preamble,
+            self.wipe,
+            self.flash,
+            self.dd_secs,
+            self.entry,
+            self.down,
+            self.read_log
+        )?;
+        match self.raw_log {
+            Some(secs) => write!(f, "{secs:.1} s"),
+            None => f.write_str(NOT_READ),
+        }
+    }
+}
+
+/// [`READBACK_BOOT`]'s content: what the host measured about the boot, and the
+/// machine it ran on.
+pub struct BootFile {
+    pub back: u64,
+    pub stick: u64,
+    pub machine: Machine,
+    pub phases: Phases,
+}
+
+impl BootFile {
+    pub fn text(&self) -> String {
+        let Self { back, stick, machine, phases } = self;
+        let secs = |s: f64| format!("{s:.3}");
+        let rows = [
+            (BACK_SECS, back.to_string()),
+            (STICK_SECS_KEY, stick.to_string()),
+            (VENDOR_KEY, machine.vendor.clone()),
+            (PRODUCT_KEY, machine.product.clone()),
+            (BIOS_KEY, machine.bios.clone()),
+            (PREAMBLE_KEY, secs(phases.preamble)),
+            (WIPE_KEY, secs(phases.wipe)),
+            (FLASH_KEY, secs(phases.flash)),
+            (DD_SECS_KEY, secs(phases.dd_secs)),
+            (ENTRY_KEY, secs(phases.entry)),
+            (DOWN_KEY, secs(phases.down)),
+            (READ_LOG_KEY, secs(phases.read_log)),
+            (RAW_LOG_KEY, phases.raw_log.map_or_else(|| NOT_READ.to_string(), secs)),
+        ];
+        rows.iter().map(|(name, value)| format!("{name} {value}\n")).collect()
+    }
+}
+
+/// The phases a readback names, or why it names none.
+pub fn phases(text: &str) -> Result<Phases, String> {
+    let named = |name: &str| word(text, name).ok_or_else(|| format!("names no `{name}`"));
+    let secs = |name: &str| -> Result<f64, String> {
+        let got = named(name)?;
+        got.parse().map_err(|_| format!("reads `{name} {got}`, which is no count of seconds"))
+    };
+    Ok(Phases {
+        preamble: secs(PREAMBLE_KEY)?,
+        wipe: secs(WIPE_KEY)?,
+        flash: secs(FLASH_KEY)?,
+        dd_secs: secs(DD_SECS_KEY)?,
+        entry: secs(ENTRY_KEY)?,
+        down: secs(DOWN_KEY)?,
+        read_log: secs(READ_LOG_KEY)?,
+        raw_log: match named(RAW_LOG_KEY)?.as_str() {
+            NOT_READ => None,
+            _ => Some(secs(RAW_LOG_KEY)?),
+        },
+    })
+}
+
 /// Every file a readback directory carries, so a run that writes none of them
 /// leaves none of the last run's behind.
 pub const READBACK_FILES: &[&str] = &[
@@ -1882,16 +2040,6 @@ fn write_readback(
     wrote(&dir.join(READBACK_KERNEL), log)?;
     wrote(&dir.join(READBACK_BOOT), boot)?;
     wrote(&dir.join(READBACK_VERDICT), verdict)
-}
-
-/// [`READBACK_BOOT`]'s text: what the host measured about the boot, and the
-/// machine it ran on.
-fn boot_file(back: u64, stick: u64, machine: &Machine) -> String {
-    format!(
-        "{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n{VENDOR_KEY} {}\n{PRODUCT_KEY} {}\n\
-         {BIOS_KEY} {}\n",
-        machine.vendor, machine.product, machine.bios
-    )
 }
 
 /// Whether this boot was a loader pass that reported a record and booted no
@@ -2245,13 +2393,53 @@ mod tests {
         assert_eq!(back_secs("back_secs later\n"), None);
     }
 
+    fn t14() -> Machine {
+        Machine::parse("LENOVO\n20W0003AMZ\nN34ET71W (1.71 )\n").expect("three lines")
+    }
+
+    fn phased(raw_log: Option<f64>) -> Phases {
+        Phases {
+            preamble: 3.104,
+            wipe: 0.412,
+            flash: 121.5,
+            dd_secs: 117.234,
+            entry: 2.25,
+            down: 8.0,
+            read_log: 1.375,
+            raw_log,
+        }
+    }
+
     #[test]
     fn the_machine_crosses_in_the_boot_file() {
-        let t14 = Machine::parse("LENOVO\n20W0003AMZ\nN34ET71W (1.71 )\n").expect("three lines");
-        let boot = boot_file(47, 0, &t14);
-        assert_eq!(machine(&boot), Ok(t14));
+        let boot = BootFile { back: 47, stick: 0, machine: t14(), phases: phased(None) }.text();
+        assert_eq!(machine(&boot), Ok(t14()));
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
+    }
+
+    /// Every phase the loop timed is the one a judge reads back, the volume
+    /// read's absence included, and a file missing any phase names none.
+    #[test]
+    fn the_phases_cross_in_the_boot_file() {
+        for raw_log in [Some(9.875), None] {
+            let boot =
+                BootFile { back: 141, stick: 2, machine: t14(), phases: phased(raw_log) }.text();
+            assert_eq!(phases(&boot), Ok(phased(raw_log)), "{boot}");
+            assert_eq!((back_secs(&boot), stick_secs(&boot)), (Some(141), Some(2)));
+            for line in boot.lines().filter(|line| line.contains("_secs ")) {
+                if line.starts_with(BACK_SECS) || line.starts_with(STICK_SECS_KEY) {
+                    continue;
+                }
+                let short = boot.replace(&format!("{line}\n"), "");
+                assert!(phases(&short).is_err(), "{line:?} gone still names phases");
+            }
+        }
+        assert!(phases("back_secs 47\nstick_secs 0\n").is_err());
+        let garbled = BootFile { back: 1, stick: 0, machine: t14(), phases: phased(None) }
+            .text()
+            .replace("flash_secs 121.500", "flash_secs later");
+        assert!(phases(&garbled).is_err());
     }
 
     /// A judge reading the readback later rules on the boot as the loop did.
@@ -2624,12 +2812,13 @@ mod tests {
     fn dd_is_believed_only_where_it_states_a_count() {
         let real = "44+0 records in\n44+0 records out\n\
                     184549376 bytes (185 MB, 176 MiB) copied, 12.3169 s, 15.0 MB/s\n";
-        assert_eq!(dd_copied(real), Some(184_549_376));
+        assert_eq!(dd_said(real), Some(DdSaid { bytes: 184_549_376, secs: 12.3169 }));
         let short = "10+0 records in\n10+0 records out\n\
                      41943040 bytes (42 MB, 40 MiB) copied, 3.1 s, 13.5 MB/s\n";
-        assert_eq!(dd_copied(short), Some(41_943_040));
-        assert_eq!(dd_copied("44+0 records in\n44+0 records out\n"), None);
-        assert_eq!(dd_copied(""), None);
+        assert_eq!(dd_said(short), Some(DdSaid { bytes: 41_943_040, secs: 3.1 }));
+        assert_eq!(dd_said("44+0 records in\n44+0 records out\n"), None);
+        assert_eq!(dd_said(""), None);
+        assert_eq!(dd_said("41943040 bytes (42 MB, 40 MiB) copied\n"), None);
     }
 
     #[test]

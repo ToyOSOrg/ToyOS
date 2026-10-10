@@ -6,12 +6,12 @@ opened: 2026-10-08
 
 # A stream its peer reset refuses the option requests a host answers
 
-netstack lets a piped connection's socket and id go once the wire is finished
-and it has closed both of its pipe ends (`bridge_piped`,
-`userland/netstack/src/main.rs`). A peer's reset does both at once, so a
-client that still holds the stream names an id netstack no longer has, and
-`handle_tcp_set_option` answers it `ERR_NOT_CONNECTED`. Before the socket left
-with its bridge it answered from the kept socket.
+The node lets a stream go once it holds neither of its pipe ends
+(`userland/netstack/node/src/streams.rs`), and netstack's id for it goes with
+it (`userland/netstack/src/serve.rs`, `Sockets::settle`). A peer's reset ends
+both pipes at once, so a client that still holds the stream names an id
+netstack no longer has, and `Sockets::set_option` answers it
+`ERR_NOT_CONNECTED`.
 
 What a host answers `std::net::TcpStream` on a stream whose peer reset it,
 after the read that reported the reset:

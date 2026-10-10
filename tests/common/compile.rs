@@ -110,11 +110,17 @@ const LINK_FLAGS: &[(&str, &[&str])] = &[
 /// Link `objects` into a ToyOS executable through the clang driver — which
 /// names `ld.lld` and the sysroot's `libtoyos_c.a`, and makes a PIE — and
 /// return its bytes.
+///
+/// **Without DWARF, and with `.symtab`**, as `[profile.toyos]` links every Rust
+/// guest binary: the archive brings its Rust libraries' DWARF into every case
+/// and nothing reads it, while `symbolize` and the loader's dlopen binding read
+/// `.symtab`.
 pub fn link_toyos(objects: &[PathBuf], name: &str) -> Vec<u8> {
     let c = c_sysroot();
     let out = scratch(name, ".elf");
     let output = Command::new(&c.clang)
         .args(c.args())
+        .arg("-Wl,--strip-debug")
         .args(objects)
         .args(LINK_FLAGS.iter().filter(|(case, _)| *case == name).flat_map(|(_, flags)| flags.iter()))
         .arg("-o")

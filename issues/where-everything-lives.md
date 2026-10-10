@@ -81,6 +81,10 @@ until that lands nothing verifies it.
    **Exit**: a launched app's `home_dir()` is its folder, it cannot name
    another app's folder, and the shell's history is still
    `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `userland/shell`).
+   Built for a package launched from `/apps` (`toyos_manifest::Program::view`,
+   judged by the `app_view` metal row). Each desktop app in the image still
+   runs with the session's `HOME` and the whole tree: its row declares no view
+   until that isolation stage gives every row one.
 3. **Users.** The users track creates `/home/<user>` and its folders from a
    login row, and `toy` stops being a constant in `toyos-manifest`.
    **Exit**: init names no user.

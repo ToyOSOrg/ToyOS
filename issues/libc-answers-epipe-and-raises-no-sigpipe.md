@@ -16,10 +16,8 @@ and none of those
 `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
 has it imitate is `SIGPIPE`. So every write behaves as if `MSG_NOSIGNAL` were
 given, and a C program that relies on the default action to stop writing into a
-closed pipe runs on, and stops only if it reads the error. `send` on a stream answers `EIO` for every refusal today; the libc
-change the move carries for
-`issues/a-netstack-client-cannot-tell-a-reset-from-the-peers-fin.md` answers
-`EPIPE` after `shutdown(SHUT_WR)`, and raises nothing either.
+closed pipe runs on, and stops only if it reads the error. `send` on a stream answers `EPIPE` after
+`shutdown(SHUT_WR)` (`userland/libc/src/socket.rs`), and raises nothing either.
 
 Whether libc raises `SIGPIPE` on these, or states the departure as it states
 others, is a decision of libc's design that nobody has made.

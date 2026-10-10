@@ -1,4 +1,5 @@
-//! The key an image is signed with, and the one place a private key is held.
+//! The key an image and the package repository are signed with
+//! (`src/publish.rs`), and the one place a private key is held.
 //!
 //! **Two keys, chosen by what the image is for.** An image for a QEMU guest
 //! of `cargo run` or `cargo test`, a CI run or a metal-loop stick is signed
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use toyos_update::image::{Header, HEADER_BYTES, SIGNATURE_BYTES, SIGNED_BYTES};
+use toyos_update::repo::Role;
 
 /// The variable the loader and `/system/bin/update` take the public key from
 /// at compile time: 64 lowercase hex digits.
@@ -101,6 +103,12 @@ impl Key {
         out[..HEADER_BYTES].copy_from_slice(&bytes);
         out[HEADER_BYTES..].copy_from_slice(&signature);
         out
+    }
+
+    /// The `sig` line this key vouches for a package repository document's
+    /// `body` with, as `role` (`src/publish.rs`).
+    pub fn sign_document(&self, role: Role, body: &[u8]) -> String {
+        toyos_update::repo::render::signature(&self.seed, role, body)
     }
 
     /// A key from a seed the caller chose, for a test that needs a second,

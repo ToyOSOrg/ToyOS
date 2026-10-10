@@ -138,7 +138,7 @@ impl Node {
     /// Queues `payload` for `destination:port`; it leaves in a later [`Node::transmit`].
     pub fn udp_send_to(&mut self, now: Instant, id: DatagramId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Refused> {
         let sent = self.stack.send_to(now, id.0, destination, port, payload).map_err(refused);
-        self.log();
+        self.log(now);
         sent
     }
 

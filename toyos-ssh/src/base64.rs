@@ -18,20 +18,27 @@ pub(crate) fn encode(bytes: &[u8]) -> String {
     out
 }
 
-/// The bytes `text` spells, whitespace and `=` skipped.
+/// The bytes `text` spells, its whitespace dropped: padded and canonical,
+/// what [`encode`] writes and nothing else, so one blob has one spelling.
 pub(crate) fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
-    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
-    let mut out = Vec::new();
-    for chunk in digits.chunks(4) {
-        if chunk.len() == 1 {
-            return Err("base64 that ends one digit into a group");
+    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    let pad = digits.iter().rev().take_while(|&&c| c == b'=').count();
+    if !digits.len().is_multiple_of(4) || pad > 2 {
+        return Err("base64 that is not whole padded groups of four");
+    }
+    let mut out = Vec::with_capacity(digits.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in &digits[..digits.len() - pad] {
+        acc = acc << 6 | ALPHABET.iter().position(|a| a == c).ok_or("a character that is not base64")? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
         }
-        let mut n = 0u32;
-        for (i, c) in chunk.iter().enumerate() {
-            let v = ALPHABET.iter().position(|a| a == c).ok_or("a character that is not base64")?;
-            n |= (v as u32) << (18 - 6 * i);
-        }
-        out.extend_from_slice(&n.to_be_bytes()[1..chunk.len()]);
+    }
+    if acc != 0 {
+        return Err("base64 with bits set past its last byte");
     }
     Ok(out)
 }
@@ -40,7 +47,7 @@ pub(crate) fn decode(text: &str) -> Result<Vec<u8>, &'static str> {
 mod tests {
     use super::*;
 
-    /// RFC 4648 §10's vectors, both ways.
+    /// RFC 4648 §10's vectors, both ways, and every other spelling refused.
     #[test]
     fn rfc_4648_vectors() {
         for (plain, armour) in
@@ -49,7 +56,15 @@ mod tests {
             assert_eq!(encode(plain.as_bytes()), armour);
             assert_eq!(decode(armour).as_deref(), Ok(plain.as_bytes()));
         }
-        assert_eq!(decode("Zm9vY"), Err("base64 that ends one digit into a group"));
-        assert_eq!(decode("Zm9!"), Err("a character that is not base64"));
+        assert_eq!(decode("Zm9v\nYmFy\n").as_deref(), Ok(&b"foobar"[..]));
+        for bent in ["Zm9vY", "Zg=", "Zm9vYg", "Z==="] {
+            assert_eq!(decode(bent), Err("base64 that is not whole padded groups of four"), "{bent:?}");
+        }
+        for bent in ["Zm9!", "Zg=a", "Z=g=", "Zg==Zg=="] {
+            assert_eq!(decode(bent), Err("a character that is not base64"), "{bent:?}");
+        }
+        for bent in ["Zh==", "Zm9="] {
+            assert_eq!(decode(bent), Err("base64 with bits set past its last byte"), "{bent:?}");
+        }
     }
 }
