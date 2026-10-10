@@ -268,17 +268,6 @@ mediated access, leaves open:
   controller not at all; Linux runs it after. Owner: this stage. **Exit**:
   the slice that runs the `_STA` and `_INI` walk runs it before `_REG`.
 
-- **The server waits for no release of the Global Lock** (the orchestrator's
-  ruling, not the owner's). A take that finds the firmware holding the lock
-  leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
-  name and counted in the server's ledger; the access under it is not made,
-  and the table or method that asked is refused. The wait that section
-  describes, for the SCI the firmware raises with `GBL_STS`, is not in the
-  tree: no tier reached it, and the T14's load took the lock 241 times and
-  found the firmware holding it in none. Owner: this stage. **Exit**: a
-  machine's log carries the denial, `the Global Lock: the firmware holds it`,
-  which the `acpi_tables_loaded` row reds on as on every refusal; the wait
-  comes back with the test that reaches its port sequence.
 - **A press during the load waits for it, and a power-off asked during it is
   refused.** The server arms the power button
   and then loads the tables before it serves an SCI, so a press in that time

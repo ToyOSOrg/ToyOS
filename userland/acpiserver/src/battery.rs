@@ -324,7 +324,7 @@ impl Power {
     /// information; `None` where there is nothing to read.
     pub fn find<K: Kernel, C: Controller>(aml: &mut Aml<'_, K, C>, controller: bool) -> Option<Power> {
         let mut power = Power { batteries: Vec::new(), adapters: Vec::new(), ac_said: None, refused: Ledger::default(), stopping: false };
-        let takes = aml.host.takes;
+        let (takes, contended, given_back) = (aml.host.takes, aml.host.contended, aml.host.given_back);
         let hids: Vec<String> = match aml.interpreter.walk() {
             Ok(mut walk) => {
                 let mut found = Vec::new();
@@ -430,10 +430,12 @@ impl Power {
             }
         }
         let found = format!(
-            "{present} of {count} control-method batteries present, {} AC adapter(s), {} embedded controller device(s) told their space is there; the Global Lock taken {} times on the way",
+            "{present} of {count} control-method batteries present, {} AC adapter(s), {} embedded controller device(s) told their space is there; the Global Lock taken {} times on the way and given back {} times, the firmware found holding it by {} of the takes",
             power.adapters.len(),
             if controller { controllers.len() } else { 0 },
             aml.host.takes - takes,
+            aml.host.given_back - given_back,
+            aml.host.contended - contended,
         );
         if present == 0 {
             println!("acpiserver: {}{found}", acpiserver_api::NO_BATTERY);

@@ -251,7 +251,7 @@ pub mod tests {
     use super::*;
     use crate::ec::tests::Emulated;
     use crate::host::tests::Scripted;
-    use crate::host::{Take, HELD};
+    use crate::host::Take;
 
     fn load_only<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
         load(kernel, None::<Emulated>, rsdp).0
@@ -488,10 +488,10 @@ pub mod tests {
     }
 
     /// A Lock field's access takes the Global Lock through the kernel and
-    /// gives it back; one the firmware holds is the load's refusal, by name,
-    /// and the field is not read without it.
+    /// gives it back; one the firmware holds is waited for, and the load goes
+    /// on once the take after its release has it.
     #[test]
-    fn a_lock_field_read_at_load_takes_the_lock_and_a_held_lock_refuses_the_table() {
+    fn a_lock_field_read_at_load_takes_the_lock_and_waits_out_the_firmwares_hold() {
         const NVS: u64 = 0x7700_0000;
         // OperationRegion (REGN, SystemMemory, 0x77000000, 4); Field (REGN,
         // ByteAcc, Lock, Preserve) { FLDA, 8 }; Name (COPY, 0); Store (FLDA, COPY).
@@ -527,8 +527,10 @@ pub mod tests {
 
         let kernel = with_nvs();
         kernel.takes.borrow_mut().push_back(Take::Pending);
-        let loaded = load_only(&kernel, CRAFTED_RSDP);
-        assert_eq!(loaded, Loaded { blocks: vec![Err(format!("denied by this server: {HELD}"))], s5: None, handed: false });
-        assert_ne!(kernel.asked.borrow().last(), Some(&field), "the field was read without the lock");
+        kernel.releases.borrow_mut().push_back(true);
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((5, 0)), handed: true });
+        assert!(!kernel.held.get(), "the load ended holding the Global Lock");
+        assert_eq!(kernel.waited.borrow().len(), 1, "the firmware's hold was not waited out");
+        assert_eq!(kernel.asked.borrow().last(), Some(&field));
     }
 }

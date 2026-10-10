@@ -13,9 +13,12 @@
 //! is the kernel's to make or refuse, and a refusal it names is denied under
 //! that name.
 //!
-//! **The Global Lock is the kernel's to exchange** (ACPI 6.5 §5.2.10.1). A
-//! take that finds the firmware holding it is denied by name ([`HELD`]) and
-//! counted: this server waits for no release of the firmware's yet.
+//! **The Global Lock's word is the kernel's to exchange** (ACPI 6.5
+//! §5.2.10.1). A take that finds the firmware holding it leaves the firmware
+//! the pending bit, waits for the release that bit asks for
+//! ([`Kernel::released`]) and takes again, and is counted; one the firmware
+//! holds past [`RELEASE`] ends this server loudly, and one an Acquire bounds
+//! below that comes back untaken at its bound.
 //!
 //! **The power-off's sleep type is the one thing handed to the kernel**
 //! ([`Kernel::s5`]): the kernel writes the register, and reads no AML.
@@ -40,8 +43,10 @@ use crate::ledger::Ledger;
 /// firmware chose: this machine's own, and quoted in no record.
 pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
 
-/// The denial of a take that found the firmware holding the Global Lock.
-pub const HELD: &str = "the Global Lock: the firmware holds it, and this server waits for no release yet";
+/// The most the firmware may hold the Global Lock after a take left it the
+/// pending bit: this server's bound, and no measurement, over a lock SMM
+/// holds for one handler's run.
+pub const RELEASE: Duration = Duration::from_secs(1);
 
 /// The kernel does nothing more for this claim: the machine is stopping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,6 +75,10 @@ pub trait Kernel {
     fn access(&self, access: Access) -> Result<Answer, Stopping>;
     fn lock_take(&self) -> Result<Take, Stopping>;
     fn lock_release(&self) -> Result<(), Stopping>;
+    /// Waits until `until` for the firmware to give back a Global Lock a
+    /// take left it the pending bit in ([`crate::sci::await_release`]):
+    /// `false` is the deadline.
+    fn released(&self, until: Instant) -> bool;
     /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
     /// once under a claim: `false` where it is wider than the register's
     /// field, and the kernel kept nothing.
@@ -161,9 +170,11 @@ pub struct Firmware<'k, K, C> {
     /// Reads made, by [`Space`].
     pub reads: [u64; 3],
     pub pages: Pages,
-    /// Takes of the Global Lock, and how many found the firmware holding it.
+    /// Takes of the Global Lock, how many found the firmware holding it,
+    /// and gives back.
     pub takes: u64,
     pub contended: u64,
+    pub given_back: u64,
     pub notifies: u64,
     /// Bytes of the controller's space read and written.
     pub ec_reads: u64,
@@ -184,6 +195,7 @@ impl<'k, K: Kernel, C: Controller> Firmware<'k, K, C> {
             pages: Pages::default(),
             takes: 0,
             contended: 0,
+            given_back: 0,
             notifies: 0,
             ec_reads: 0,
             ec_writes: 0,
@@ -300,22 +312,40 @@ impl<K: Kernel, C: Controller> Host for Firmware<'_, K, C> {
         }
     }
 
-    fn global_lock(&mut self, take: bool) -> Result<(), Denied> {
-        if !take {
-            return self.kernel.lock_release().map_err(|Stopping| self.stopped());
-        }
+    fn global_take(&mut self, within: Option<u16>) -> Result<bool, Denied> {
         self.takes += 1;
-        match self.kernel.lock_take() {
-            Err(Stopping) => Err(self.stopped()),
-            Ok(Take::Taken) => Ok(()),
-            Ok(Take::Unusable) => {
-                Err(self.deny("the Global Lock: the kernel exchanges no lock word in this machine's FACS".into(), format_args!("a take")))
+        let asked = Instant::now();
+        let bound = asked + RELEASE;
+        let until = within.map_or(bound, |ms| bound.min(asked + Duration::from_millis(ms.into())));
+        let mut contended = false;
+        loop {
+            match self.kernel.lock_take() {
+                Err(Stopping) => return Err(self.stopped()),
+                Ok(Take::Taken) => return Ok(true),
+                Ok(Take::Unusable) => {
+                    let what = "the Global Lock: the kernel exchanges no lock word in this machine's FACS";
+                    return Err(self.deny(what.into(), format_args!("a take")));
+                }
+                Ok(Take::Pending) => {}
             }
-            Ok(Take::Pending) => {
+            if !contended {
+                contended = true;
                 self.contended += 1;
-                Err(self.deny(HELD.into(), format_args!("a take the firmware was left the request for")))
+            }
+            if !self.kernel.released(until) {
+                assert!(
+                    until < bound,
+                    "acpiserver: the firmware held the Global Lock {RELEASE:?} after a take left it the pending bit, and raised no GBL_STS"
+                );
+                return Ok(false);
             }
         }
+    }
+
+    fn global_release(&mut self) -> Result<(), Denied> {
+        self.kernel.lock_release().map_err(|Stopping| self.stopped())?;
+        self.given_back += 1;
+        Ok(())
     }
 }
 
@@ -342,6 +372,11 @@ pub mod tests {
         /// What each take answers, in turn; `Taken` once it runs out.
         pub takes: RefCell<VecDeque<Take>>,
         pub held: Cell<bool>,
+        /// What each wait for the firmware's release answers, in turn; the
+        /// deadline once it runs out. Each deadline asked, after the moment
+        /// the scripted kernel was made.
+        pub releases: RefCell<VecDeque<bool>>,
+        pub waited: RefCell<Vec<Instant>>,
         /// Accesses and lock exchanges answered before the machine stops.
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
@@ -403,6 +438,12 @@ pub mod tests {
             self.stopping()?;
             assert!(self.held.replace(false), "a lock nobody held was given back");
             Ok(())
+        }
+
+        fn released(&self, until: Instant) -> bool {
+            assert!(!self.held.get(), "a release waited for under a lock already held");
+            self.waited.borrow_mut().push(until);
+            self.releases.borrow_mut().pop_front().unwrap_or(false)
         }
 
         fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
@@ -532,29 +573,59 @@ pub mod tests {
     fn the_lock_is_taken_and_given_back_through_the_kernel() {
         let kernel = machine();
         let mut host = Firmware::new(&kernel, None::<Emulated>);
-        assert_eq!(host.global_lock(true), Ok(()));
+        assert_eq!(host.global_take(None), Ok(true));
         assert!(kernel.held.get());
-        assert_eq!(host.global_lock(false), Ok(()));
+        assert_eq!(host.global_release(), Ok(()));
         assert!(!kernel.held.get());
-        assert_eq!((host.takes, host.contended), (1, 0));
+        assert_eq!((host.takes, host.contended, host.given_back), (1, 0, 1));
+        assert!(kernel.waited.borrow().is_empty(), "a take the kernel answered taken waited");
         assert!(host.refused.is_empty());
     }
 
+    /// §5.2.10.1: a take that finds the firmware holding the lock leaves it
+    /// the pending bit and waits for the release that asks for; each release
+    /// is followed by a take again, which may find the firmware holding it
+    /// again.
     #[test]
-    fn a_lock_the_firmware_holds_is_denied_by_name_and_counted() {
+    fn a_lock_the_firmware_holds_is_waited_for_and_taken_after_its_release() {
         let kernel = machine();
         kernel.takes.borrow_mut().extend([Take::Pending, Take::Pending, Take::Taken]);
+        kernel.releases.borrow_mut().extend([true, true]);
         let mut host = Firmware::new(&kernel, None::<Emulated>);
-        for _ in 0..2 {
-            assert_eq!(host.global_lock(true), Err(Denied(HELD.into())));
-            assert!(!kernel.held.get(), "a lock the firmware holds was reported taken");
-        }
-        assert_eq!(kernel.takes.borrow().len(), 1, "a denied take asked the kernel again");
-        assert_eq!(host.refused.counts(), format!("{HELD} x2"));
-        // The firmware let go: the next take is the kernel's answer again.
-        assert_eq!(host.global_lock(true), Ok(()));
-        assert_eq!(host.global_lock(false), Ok(()));
-        assert_eq!((host.takes, host.contended), (3, 2));
+        let asked = Instant::now();
+        assert_eq!(host.global_take(None), Ok(true));
+        assert!(kernel.held.get());
+        assert!(kernel.takes.borrow().is_empty() && kernel.releases.borrow().is_empty());
+        let waited = kernel.waited.borrow();
+        assert_eq!(waited.len(), 2);
+        assert!(waited.iter().all(|&until| until == waited[0] && until >= asked + RELEASE), "{waited:?}: not one deadline RELEASE after the take");
+        assert_eq!(host.global_release(), Ok(()));
+        assert_eq!((host.takes, host.contended, host.given_back), (1, 1, 1));
+        assert!(host.refused.is_empty());
+    }
+
+    /// §19.6.2: an Acquire's TimeoutValue bounds the wait, and one that meets
+    /// it comes back untaken, holding nothing.
+    #[test]
+    fn an_acquires_own_bound_ends_the_wait_untaken() {
+        let kernel = machine();
+        kernel.takes.borrow_mut().push_back(Take::Pending);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
+        let asked = Instant::now();
+        assert_eq!(host.global_take(Some(5)), Ok(false));
+        assert!(!kernel.held.get());
+        let until = kernel.waited.borrow()[0];
+        assert!(until >= asked + Duration::from_millis(5) && until < asked + RELEASE, "{until:?} after {asked:?}");
+        assert_eq!((host.takes, host.contended, host.given_back), (1, 1, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "acpiserver: the firmware held the Global Lock 1s after a take left it the pending bit, and raised no GBL_STS")]
+    fn a_firmware_that_holds_the_lock_past_the_bound_ends_the_server() {
+        let kernel = machine();
+        kernel.takes.borrow_mut().push_back(Take::Pending);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
+        let _ = host.global_take(None);
     }
 
     #[test]
@@ -563,10 +634,11 @@ pub mod tests {
         kernel.takes.borrow_mut().push_back(Take::Unusable);
         let mut host = Firmware::new(&kernel, None::<Emulated>);
         assert_eq!(
-            host.global_lock(true),
+            host.global_take(None),
             Err(Denied("the Global Lock: the kernel exchanges no lock word in this machine's FACS".into()))
         );
         assert_eq!(host.contended, 0);
+        assert!(kernel.waited.borrow().is_empty());
     }
 
     #[test]
@@ -579,8 +651,8 @@ pub mod tests {
         let stopping = Denied(Refusal::Stopping.to_string());
         assert_eq!(host.read(Address::Memory(NVS), toyos_aml::Access::Byte), Err(stopping.clone()));
         assert!(host.stopping);
-        assert_eq!(host.global_lock(true), Err(stopping.clone()));
-        assert_eq!(host.global_lock(false), Err(stopping));
+        assert_eq!(host.global_take(None), Err(stopping.clone()));
+        assert_eq!(host.global_release(), Err(stopping));
         assert!(host.refused.is_empty(), "the stop was counted as something this machine's firmware was refused");
     }
 }

@@ -296,7 +296,8 @@ pub enum Event {
     Sleep(u64),
     Stall(u64),
     Notify(String, u64),
-    GlobalLock(bool),
+    GlobalTake(Option<u16>),
+    GlobalRelease,
 }
 
 /// A machine of bytes: every address space a sparse map, every request
@@ -306,6 +307,8 @@ pub struct Machine {
     pub bytes: BTreeMap<(u8, u64), u8>,
     pub log: Vec<Event>,
     pub refuse: bool,
+    /// The firmware holds the Global Lock past every bound a take names.
+    pub firmware_holds: bool,
 }
 
 fn key(a: Address) -> (u8, u64) {
@@ -389,8 +392,13 @@ impl Host for Machine {
         self.log.push(Event::Notify(object.into(), value));
     }
 
-    fn global_lock(&mut self, take: bool) -> Result<(), Denied> {
-        self.log.push(Event::GlobalLock(take));
+    fn global_take(&mut self, within: Option<u16>) -> Result<bool, Denied> {
+        self.log.push(Event::GlobalTake(within));
+        Ok(!self.firmware_holds)
+    }
+
+    fn global_release(&mut self) -> Result<(), Denied> {
+        self.log.push(Event::GlobalRelease);
         Ok(())
     }
 }
@@ -465,7 +473,10 @@ impl Host for Sink {
         0
     }
     fn notify(&mut self, _: &str, _: u64) {}
-    fn global_lock(&mut self, _: bool) -> Result<(), Denied> {
+    fn global_take(&mut self, _: Option<u16>) -> Result<bool, Denied> {
+        Ok(true)
+    }
+    fn global_release(&mut self) -> Result<(), Denied> {
         Ok(())
     }
 }

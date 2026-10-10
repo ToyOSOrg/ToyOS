@@ -27,7 +27,10 @@
 //! [`aml::query`] says, after the drain that took them. An event this server
 //! never enabled, a controller that does not answer, more queries in one
 //! drain than [`QUERIES`], and [`sci::EMPTY_SCIS`] SCIs in a row that carried
-//! nothing are each a panic naming the registers.
+//! nothing are each a panic naming the registers. Inside an evaluation, a
+//! take of the Global Lock the firmware holds waits on the SCI for its
+//! release alone ([`sci::await_release`]), and what else latched meanwhile is
+//! served after.
 //!
 //! **After the load the machine's batteries and AC adapters are found** in
 //! the namespace it kept, and read every [`battery::POLL`] between SCIs
@@ -60,7 +63,7 @@ use ec::{Do, Transaction, Wait};
 use aml::Aml;
 use battery::Power;
 use host::{Answer, Controller, Kernel, Stopping, Take};
-use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
+use sci::{Enables, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -101,7 +104,7 @@ fn main() {
         power_button: info.flags & FIXED_POWER_BUTTON != 0,
         ec_gpe: info.has_ec().then_some(info.ec_gpe),
     };
-    let claim = Claim(&dev);
+    let claim = Claim { dev: &dev, info };
     let mut server = Server {
         dev: &dev,
         info,
@@ -173,8 +176,12 @@ impl Controller for Ports {
 }
 
 /// The claim as the tables' fetch and their AML ask it for what lies outside
-/// its own ports.
-struct Claim<'a>(&'a AcpiDev);
+/// its own ports, and as the wait for the firmware's release of the Global
+/// Lock reads its event blocks and its SCI.
+struct Claim<'a> {
+    dev: &'a AcpiDev,
+    info: AcpiInfo,
+}
 
 impl Claim<'_> {
     /// The kernel's answer; a stopping machine's is the caller's to carry,
@@ -191,25 +198,84 @@ impl Claim<'_> {
 
 impl Kernel for Claim<'_> {
     fn access(&self, access: Access) -> Result<Answer, Stopping> {
-        Self::answered("a mediated access", self.0.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
+        Self::answered("a mediated access", self.dev.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
     }
 
     fn lock_take(&self) -> Result<Take, Stopping> {
-        match self.0.lock_take() {
+        match self.dev.lock_take() {
             Err(SyscallError::NotSupported) => Ok(Take::Unusable),
             answer => Self::answered("a take of the Global Lock", answer).map(|taken| if taken { Take::Taken } else { Take::Pending }),
         }
     }
 
     fn lock_release(&self) -> Result<(), Stopping> {
-        Self::answered("the Global Lock's release", self.0.lock_release())
+        Self::answered("the Global Lock's release", self.dev.lock_release())
+    }
+
+    fn released(&self, until: Instant) -> bool {
+        sci::await_release(&mut Waiting { claim: self, poller: Poller::new(1), watching: false }, until)
     }
 
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
-        match self.0.s5(slp_typ_a) {
+        match self.dev.s5(slp_typ_a) {
             Err(SyscallError::InvalidArgument) => Ok(false),
             answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
         }
+    }
+}
+
+/// The claim's event blocks and SCI for one wait for the firmware's release.
+struct Waiting<'c, 'a> {
+    claim: &'c Claim<'a>,
+    poller: Poller,
+    /// A watch answers once: one still registered from a wait that timed out
+    /// is not registered again.
+    watching: bool,
+}
+
+impl Fixed for Waiting<'_, '_> {
+    fn pm1_status(&mut self) -> u16 {
+        in16(self.claim.info.pm1_event.port)
+    }
+
+    fn pm1_clear(&mut self, bits: u16) {
+        out16(self.claim.info.pm1_event.port, bits);
+    }
+
+    fn enables(&mut self) -> Enables {
+        Enables {
+            pm1: in16(self.claim.info.pm1_event.enable()),
+            gpe0: bytes(self.claim.info.gpe0).map(|(_, enable)| in8(enable)).collect(),
+        }
+    }
+
+    fn enable(&mut self, enables: &Enables) {
+        out16(self.claim.info.pm1_event.enable(), enables.pm1);
+        for ((_, enable), &byte) in bytes(self.claim.info.gpe0).zip(&enables.gpe0) {
+            out8(enable, byte);
+        }
+    }
+
+    fn sci(&mut self, until: Instant) -> bool {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        if !self.watching {
+            self.poller.watch(self.claim.dev, READABLE, 0);
+            self.watching = true;
+        }
+        let mut answered = false;
+        self.poller.wait(1, left.as_nanos() as u64, |_| answered = true);
+        self.watching &= !answered;
+        match self.claim.dev.irq() {
+            Ok(_) | Err(SyscallError::WouldBlock) => true,
+            Err(other) => panic!("acpiserver: the claim's record answered {other:?} while the Global Lock was waited for"),
+        }
+    }
+
+    fn ack(&mut self) {
+        self.claim.dev.ack().expect("acpiserver: the claim's acknowledgement");
     }
 }
 

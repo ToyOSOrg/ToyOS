@@ -5335,8 +5335,9 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
 /// and at least one reading of it with the adapter's state; every method
-/// answered, and none of them took the Global Lock, which the controller's
-/// own fields carry no rule for. The lines are printed whole: their numbers
+/// answered, and the Global Lock, which the methods take through Lock-rule
+/// memory fields, taken and given back as often, the takes that found the
+/// firmware holding it included. The lines are printed whole: their numbers
 /// are what Linux's `/sys/class/power_supply` reads on the same machine are
 /// compared against, by whoever holds both.
 fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -5356,8 +5357,9 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let found = log.must_say(T14_POWER_SOURCES)?;
     let takes = number_between(found, "; the Global Lock taken ", " times on the way")?;
-    if takes != 0 {
-        return Err(format!("the battery's methods took the Global Lock {takes} times: {found}"));
+    let given_back = number_between(found, " times on the way and given back ", " times, the firmware found")?;
+    if takes == 0 || given_back != takes {
+        return Err(format!("the battery's methods took the Global Lock {takes} times and gave it back {given_back}: {found}"));
     }
     let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
     let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
