@@ -20,6 +20,11 @@ with nothing between them, and no launch was made, which these two clicks
 folded into one on the row of a launcher not yet open accounts for. The test
 now waits for the launcher on the panel before its second click.
 
+## Owner
+
+The compositor's input decisions, `userland/compositor/desktop/src/input.rs`,
+in the desktop track `issues/toyos-has-a-desktop.md`.
+
 ## Exit condition
 
 A host test of `fold_mouse` (or what replaces it) in which one read carrying
