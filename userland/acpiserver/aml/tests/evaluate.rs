@@ -405,7 +405,43 @@ fn mutexes_follow_sync_levels_and_are_released_by_the_end() {
     assert_eq!(ip.evaluate(&mut m, "\\GOOD", &[]), i(1));
     m.log.clear();
     ip.evaluate(&mut m, "\\GL", &[]).unwrap();
-    assert_eq!(m.log, vec![Event::GlobalLock(true), Event::GlobalLock(false)]);
+    assert_eq!(m.log, vec![Event::GlobalTake(None), Event::GlobalRelease]);
+}
+
+/// §19.6.2: an Acquire of `\_GL` waits for the firmware's side at most its
+/// TimeoutValue in milliseconds, 0xFFFF naming no bound; one that times out
+/// returns True, holds nothing and is charged as a wait, and one this
+/// evaluation already holds asks the host for nothing. The host waits no
+/// longer than the evaluation has left to wait.
+#[test]
+fn an_acquire_of_the_global_lock_waits_as_its_timeout_says() {
+    let acquire = |ms: u16| cat(&[&[0x5B, 0x23], &name("\\_GL"), &ms.to_le_bytes()]);
+    let release = cat(&[&[0x5B, 0x27], &name("\\_GL")]);
+    let (mut ip, mut m) = loaded(&cat(&[
+        &method("SOON", 0, &cat(&[&store(&acquire(5), &local(0)), &release, &ret(&local(0))])),
+        &method("LATE", 0, &ret(&acquire(5))),
+        &method("LONG", 0, &cat(&[&store(&acquire(6000), &local(0)), &ret(&acquire(6000))])),
+        &method("SPNT", 0, &cat(&[&[0x5B, 0x22], &int(10_000), &ret(&acquire(5))])),
+        &method("EVER", 0, &cat(&[&store(&acquire(0xFFFF), &local(0)), &store(&acquire(0), &local(1)), &release, &release, &ret(&add(&local(0), &local(1), ZERO))])),
+    ]));
+    assert_eq!(ip.evaluate(&mut m, "\\EVER", &[]), i(0));
+    assert_eq!(m.log, vec![Event::GlobalTake(None), Event::GlobalRelease], "the second Acquire asked the host again");
+    m.log.clear();
+    assert_eq!(ip.evaluate(&mut m, "\\SOON", &[]), i(0));
+    assert_eq!(m.log, vec![Event::GlobalTake(Some(5)), Event::GlobalRelease]);
+    assert_eq!(ip.usage().waited_us, 0, "an Acquire that took the lock was charged a wait");
+    m.firmware_holds = true;
+    m.log.clear();
+    assert_eq!(ip.evaluate(&mut m, "\\LATE", &[]), i(ONES), "an Acquire that timed out is True (§19.6.2)");
+    assert_eq!(m.log, vec![Event::GlobalTake(Some(5))], "a lock the take did not get was given back");
+    assert_eq!(ip.usage().waited_us, 5000);
+    m.log.clear();
+    assert_eq!(ip.evaluate(&mut m, "\\LONG", &[]), Err(Error::Bound("more time asleep than one evaluation may spend")));
+    assert_eq!(m.log, vec![Event::GlobalTake(Some(6000)), Event::GlobalTake(Some(4000))], "a take waited past what was left");
+    assert_eq!(ip.usage().waited_us, 12_000_000);
+    m.log.clear();
+    assert_eq!(ip.evaluate(&mut m, "\\SPNT", &[]), Err(Error::Bound("more time asleep than one evaluation may spend")));
+    assert_eq!(m.log, vec![Event::Sleep(10_000), Event::GlobalTake(Some(0))], "a take with nothing left waited");
 }
 
 #[test]

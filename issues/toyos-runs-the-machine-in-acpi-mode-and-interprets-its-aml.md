@@ -258,17 +258,32 @@ otherwise pay to find again:
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:
 
-- **The server waits for no release of the Global Lock** (the orchestrator's
-  ruling, not the owner's). A take that finds the firmware holding the lock
-  leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
-  name and counted in the server's ledger; the access under it is not made,
-  and the table or method that asked is refused. The wait that section
-  describes, for the SCI the firmware raises with `GBL_STS`, is not in the
-  tree: no tier reached it, and the T14's load took the lock 241 times and
-  found the firmware holding it in none. Owner: this stage. **Exit**: a
-  machine's log carries the denial, `the Global Lock: the firmware holds it`,
-  which the `acpi_tables_loaded` row reds on as on every refusal; the wait
-  comes back with the test that reaches its port sequence.
+- **The controller's `_REG(3, 1)` runs on a namespace no `_INI` has run in.**
+  The battery's read (`userland/acpiserver/src/battery.rs`) tells each
+  controller device its space is there and then reads the battery, and runs
+  no `_INI`: the T14's controller `_INI` calls the firmware through
+  `SMI_CMD`, which the host does not write. The scouts' dry run read that
+  the T14's `_REG` takes another branch before its `_INI` than after it,
+  reading and writing controller offset 0x03 where after it touches the
+  controller not at all; Linux runs it after. Owner: this stage. **Exit**:
+  the slice that runs the `_STA` and `_INI` walk runs it before `_REG`.
+
+- **A take of the Global Lock that the AML sets no bound on ends the server
+  where the firmware holds the lock past 1 s** (`RELEASE`,
+  `userland/acpiserver/src/host.rs`). The bound is this server's guess, not
+  a measurement. The firmware is meant to hold the lock for the run of one
+  SMI handler, and no hold has been seen. The T14's battery read took the
+  lock 3 times, and the firmware held it for none of them. Linux's
+  `ff_gbl_lock` counter there read 0 at 2 minutes of uptime, and a reading
+  after a longer session is still owed. A Lock field and an `Acquire(\_GL,
+  0xFFFF)` take with no bound. An Acquire with a TimeoutValue waits that
+  long, at most what the evaluation has left of its 10 s, and the
+  TimeoutValue is charged to it. Owner: this
+  stage. **Exit**: a hold measured on the T14, either by a contended take
+  in the server's own count or by `ff_gbl_lock` after a long Linux session.
+  That measurement sets the bound, or replaces it with no bound if the
+  firmware never holds the lock.
+
 - **A press during the load waits for it, and a power-off asked during it is
   refused.** The server arms the power button
   and then loads the tables before it serves an SCI, so a press in that time
@@ -325,8 +340,9 @@ mediated access, leaves open:
 
 What the firmware call, which the kernel makes for the server where its AML
 stores a byte to `SMI_CMD`, leaves open. The server's AML makes none yet: its
-host denies every write AML asks for and passes none to the kernel
-(`userland/acpiserver/src/host.rs`).
+host writes only the embedded controller's space, through the controller's
+own ports, and denies every other write AML asks for, passing none to the
+kernel (`userland/acpiserver/src/host.rs`).
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:

@@ -1,13 +1,21 @@
 //! What one SCI carried: every event whose status and enable bits are both
 //! set, read off the PM1 event block and the GPE0 block, and refused by name
-//! where it is one this server never enabled; and what a press is whose
-//! power-off came back refused ([`unstopped`]).
+//! where it is one this server never enabled; what a press is whose
+//! power-off came back refused ([`unstopped`]); and the wait for the
+//! firmware's release of the Global Lock ([`await_release`]).
+
+use std::time::Instant;
 
 use toyos::power::Refused;
 use toyos_abi::syscall::SyscallError;
 
 /// PM1 status and enable (ACPI 6.5 Tables 4.13, 4.14): the power button.
 pub const PWRBTN: u16 = 1 << 8;
+
+/// PM1 status and enable (Tables 4.13, 4.14): `GBL_STS`, which the firmware
+/// sets when it gives back a Global Lock it found its pending bit set in
+/// (§5.2.10.1), and `GBL_EN`, which lets that raise the SCI.
+pub const GBL: u16 = 1 << 5;
 
 /// PM1 status bits a write of one clears (Table 4.13): timer, bus master,
 /// global lock release, power button, sleep button, RTC, PCIe wake and wake.
@@ -58,6 +66,65 @@ pub fn events(served: &Served, pm1: (u16, u16), gpe0: &[(u8, u8)]) -> Result<Vec
         }
     }
     Ok(events)
+}
+
+/// PM1's status or enable bits, and each GPE0 byte's.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Bits {
+    pub pm1: u16,
+    pub gpe0: Vec<u8>,
+}
+
+/// The fixed hardware and the SCI, as the wait for the firmware's release
+/// drives them.
+pub trait Fixed {
+    fn status(&mut self) -> Bits;
+    /// Write `bits` to PM1 status, which clears each one set (Table 4.13).
+    fn pm1_clear(&mut self, bits: u16);
+    fn enables(&mut self) -> Bits;
+    fn enable(&mut self, enables: &Bits);
+    /// Waits for the SCI until `until` and takes its record: `false` is the
+    /// deadline, and a wake with no record is `true`.
+    fn sci(&mut self, until: Instant) -> bool;
+    /// Unmasks the SCI.
+    fn ack(&mut self);
+}
+
+/// Waits until `until` for `GBL_STS`, after a take of the Global Lock left
+/// the firmware the pending bit (§5.2.10.1): `true` where it was set, and is
+/// now clear. `GBL_EN` is set beside every enable kept; an event that
+/// latches meanwhile keeps its status for whoever serves it, and loses its
+/// enable until the wait ends, so the level SCI it raised falls. An enable
+/// is cleared only once its status has latched, so the wait holds whether a
+/// status latches under a clear enable (Table 4.13) or, as QEMU's ICH9 power
+/// button, only under a set one. A `GBL_STS` left from an earlier release
+/// ends the wait too, which costs the caller one take more and loses no
+/// release.
+pub fn await_release(fixed: &mut impl Fixed, until: Instant) -> bool {
+    let kept = fixed.enables();
+    let mut enabled = Bits { pm1: kept.pm1 | GBL, gpe0: kept.gpe0.clone() };
+    let released = loop {
+        let status = fixed.status();
+        let set = status.pm1 & GBL != 0;
+        if set {
+            fixed.pm1_clear(GBL);
+        }
+        enabled.pm1 &= !status.pm1;
+        for (enable, status) in enabled.gpe0.iter_mut().zip(&status.gpe0) {
+            *enable &= !status;
+        }
+        fixed.enable(&enabled);
+        // Acknowledged with every status latched disabled, and `GBL_STS` clear.
+        fixed.ack();
+        if set {
+            break true;
+        }
+        if !fixed.sci(until) {
+            break false;
+        }
+    };
+    fixed.enable(&kept);
+    released
 }
 
 /// SCIs in a row that carried no event this server serves, past which the
@@ -126,6 +193,111 @@ mod tests {
             Err(Unserved::Pm1 { status: PWRBTN, enable: PWRBTN }),
             "a power button that is not the fixed one is never enabled here"
         );
+    }
+
+    /// What the firmware or a device sets, at one wait for the SCI.
+    #[derive(Clone, Copy)]
+    enum Set {
+        Pm1(u16),
+        /// A GPE0 status byte, and its bits.
+        Gpe(usize, u8),
+    }
+
+    /// A PM1 event block and a GPE0 block, whose status bits a write of one
+    /// clears and whose SCI is level: asserted while any status bit and its
+    /// enable are both set (§4.8.3.1), so an acknowledgement then is one the
+    /// line answers at once. A PM1 status latches only under its enable, as
+    /// QEMU's ICH9 power button does. A wait for the SCI lets the script set
+    /// one thing after another until the line is raised; past the script the
+    /// wait meets its deadline.
+    struct Block {
+        status: u16,
+        gpe0: Vec<u8>,
+        enables: Bits,
+        script: Vec<Set>,
+        sets: usize,
+        acks: usize,
+    }
+
+    impl Block {
+        fn new(script: &[Set]) -> Self {
+            Block {
+                status: 0,
+                gpe0: vec![0; 3],
+                enables: Bits { pm1: PWRBTN, gpe0: vec![0x40, 0, 0x01] },
+                script: script.to_vec(),
+                sets: 0,
+                acks: 0,
+            }
+        }
+    }
+
+    impl Fixed for Block {
+        fn status(&mut self) -> Bits {
+            Bits { pm1: self.status, gpe0: self.gpe0.clone() }
+        }
+        fn pm1_clear(&mut self, bits: u16) {
+            self.status &= !bits;
+        }
+        fn enables(&mut self) -> Bits {
+            self.enables.clone()
+        }
+        fn enable(&mut self, enables: &Bits) {
+            self.enables = enables.clone();
+        }
+        fn sci(&mut self, _: Instant) -> bool {
+            while let Some(&set) = self.script.get(self.sets) {
+                match set {
+                    Set::Pm1(bits) => self.status |= bits & self.enables.pm1,
+                    Set::Gpe(byte, bits) => self.gpe0[byte] |= bits,
+                }
+                self.sets += 1;
+                if self.raised() {
+                    return true;
+                }
+            }
+            false
+        }
+        fn ack(&mut self) {
+            self.acks += 1;
+            assert!(!self.raised(), "acknowledged with PM1 status {:#06x} or GPE0 status {:x?} raising the line", self.status, self.gpe0);
+        }
+    }
+
+    impl Block {
+        fn raised(&self) -> bool {
+            self.status & self.enables.pm1 != 0 || self.gpe0.iter().zip(&self.enables.gpe0).any(|(status, enable)| status & enable != 0)
+        }
+    }
+
+    #[test]
+    fn the_wait_ends_on_the_firmwares_release_and_leaves_every_other_event_latched_and_enabled() {
+        // A press and the controller's GPE come while the firmware holds the
+        // lock; then it lets go.
+        let mut block = Block::new(&[Set::Pm1(PWRBTN), Set::Gpe(0, 0x40), Set::Pm1(GBL)]);
+        let kept = block.enables.clone();
+        assert!(await_release(&mut block, Instant::now()));
+        assert_eq!(block.status, PWRBTN, "GBL_STS left set, or an event the wait does not serve cleared");
+        assert_eq!(block.gpe0, [0x40, 0, 0], "the controller's GPE cleared by the wait");
+        assert_eq!(block.enables, kept, "an enable was not put back");
+        assert_eq!((block.sets, block.acks), (3, 4), "the wait woke other than once for each event");
+    }
+
+    #[test]
+    fn a_release_already_latched_ends_the_wait_without_one() {
+        let mut block = Block::new(&[]);
+        block.status = GBL;
+        assert!(await_release(&mut block, Instant::now()));
+        assert_eq!((block.status, block.sets, block.acks), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_firmware_that_never_lets_go_meets_the_deadline_with_its_enables_back() {
+        let mut block = Block::new(&[Set::Pm1(PWRBTN)]);
+        let kept = block.enables.clone();
+        assert!(!await_release(&mut block, Instant::now()));
+        assert_eq!(block.enables, kept);
+        assert_eq!(block.status, PWRBTN);
     }
 
     #[test]
