@@ -332,7 +332,17 @@ impl<K: Kernel, C: Controller> Host for Firmware<'_, K, C> {
                 self.ec_writes += 1;
                 return Ok(());
             }
-            Address::Memory(_) => "a write to SystemMemory: this server writes no memory for AML",
+            // YOGA HACK: a memory write goes to the kernel, which makes it only in firmware MMIO.
+            Address::Memory(address) => {
+                return match self.kernel.access(Access::write(Space::SystemMemory, address, wide(width), value)) {
+                    Err(Stopping) => Err(self.stopped()),
+                    Ok(Answer { made: Ok(_), .. }) => Ok(()),
+                    Ok(Answer { made: Err(refused), memory_type }) => Err(self.deny(
+                        format!("a SystemMemory write the kernel refused {refused:?}, in {}", type_name(memory_type)),
+                        format_args!("{width:?} {value:#x} to {at:x?}"),
+                    )),
+                };
+            }
             Address::PciConfig { .. } => "a write to PCI_Config: this server writes no configuration space for AML",
         };
         Err(self.deny(what.into(), format_args!("{width:?} {value:#x} to {at:x?}")))

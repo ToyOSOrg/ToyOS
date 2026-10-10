@@ -73,7 +73,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use core::sync::atomic::AtomicU32;
 
@@ -696,17 +696,46 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
             memory.decide(at, width, write.is_some())
         })
     });
+    // YOGA HACK: every access to memory firmware's map types MMIO (11) is
+    // logged, and a memory write is made only there.
+    let mmio = request.memory_type == 11;
+    if write.is_some() && !mmio {
+        return Err(Refused::MemoryType);
+    }
     match (verdict, write) {
-        (MemoryVerdict::Through(passed), None) => Ok(read_memory(&passed)),
+        (MemoryVerdict::Through(passed), None) => {
+            let value = read_memory(&passed);
+            if mmio {
+                yoga_mmio(at, width, "read", value, None);
+            }
+            Ok(value)
+        }
         (MemoryVerdict::Through(passed), Some(value)) => {
             write_memory(&passed, value);
+            if mmio {
+                yoga_mmio(at, width, "write", value, None);
+            }
             Ok(0)
+        }
+        (MemoryVerdict::Refused(refused), _) if mmio => {
+            yoga_mmio(at, width, if write.is_some() { "write" } else { "read" }, write.unwrap_or(0), Some(refused));
+            Err(refused)
         }
         (MemoryVerdict::AsConfig(function, offset), _) => {
             let segment = hardware.ecam.expect("the policy answered a configuration access from an ECAM window").segment;
             config(hardware, acting, segment, function, offset, width, write.is_some())
         }
         (MemoryVerdict::Refused(refused), _) => Err(refused),
+    }
+}
+
+/// YOGA HACK: one line per AML access to firmware MMIO.
+fn yoga_mmio(at: u64, width: Width, what: &str, value: u64, refused: Option<Refused>) {
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+    match refused {
+        None => log!("acpi: YOGA MMIO #{n} {what} {width:?} at {at:#x} value {value:#x}"),
+        Some(why) => log!("acpi: YOGA MMIO #{n} {what} {width:?} at {at:#x} value {value:#x} REFUSED {why:?}"),
     }
 }
 

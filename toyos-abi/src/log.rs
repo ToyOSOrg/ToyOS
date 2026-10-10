@@ -31,7 +31,7 @@ pub const RECORD_BYTES: usize = 1024;
 /// more CPUs than this is a kernel that cannot answer
 /// [`SYS_LOG_READ`](crate::syscall::SYS_LOG_READ) at all, which is a build-time
 /// disagreement rather than a runtime one.
-pub const MAX_LOG_SHARDS: usize = 8;
+pub const MAX_LOG_SHARDS: usize = 16;
 
 /// How much a record matters, in order: a reader may keep what is at or above
 /// a floor, and one that treats a severity specially compares against it.
