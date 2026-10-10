@@ -199,8 +199,7 @@ fn main() {
         "PT_TLS memsz = u64::MAX/2 gave {err:?}",
     );
 
-    // 3. PT_TLS vaddr far outside every PT_LOAD — the file offset it
-    //    extrapolates to is not in the image.
+    // 3. PT_TLS vaddr far outside every PT_LOAD.
     let err = spawn_err("tls_vaddr", &elf(Phdr {
         kind: PT_TLS, flags: 4, offset: 0x2000, vaddr: 0x8000_0000,
         filesz: 8, memsz: 16, align: 8,

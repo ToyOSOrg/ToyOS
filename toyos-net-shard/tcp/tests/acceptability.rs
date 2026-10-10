@@ -75,7 +75,8 @@ fn s_ac_004_zero_window_pure_ack() {
 fn s_ac_005_zero_window_rst() {
     let mut h = zero_window();
     nothing(&h.input(10, seg(70_536).rst()));
-    reset(&mut h);
+    let status = h.status();
+    assert_eq!((status.state, status.failure), (State::Closed, Some(Failure::Reset)));
 }
 
 #[test]
