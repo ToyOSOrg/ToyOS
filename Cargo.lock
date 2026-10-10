@@ -4095,7 +4095,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "toyos-manifest",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -5683,7 +5683,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -5940,6 +5940,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-sha2-hw"
+version = "0.1.0"
+dependencies = [
+ "toyos-sha2",
+]
+
+[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -5959,7 +5966,7 @@ name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
  "toyos-manifest",
- "toyos-sha2",
+ "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -6010,6 +6017,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-wallclock",
 ]
 
@@ -6268,7 +6276,7 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-fat32",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-update",
 ]
 
