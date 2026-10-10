@@ -22,6 +22,11 @@ const TS_RECENT_VALID: Duration = Duration::from_secs(24 * 24 * 3600);
 const HEADERS: u16 = 40;
 const TS_OPTION: u32 = 12;
 const MIN_MTU: u16 = 576;
+/// RFC 8985 §7.2's WCDelAckT: the longest a peer may delay the ACK of one segment.
+const WORST_DELAYED_ACK: Duration = Duration::from_millis(200);
+/// What a probe waits past two round trips with more than one segment out: Linux's
+/// `TCP_TIMEOUT_MIN`, so an ACK on time is never raced.
+const PROBE_SLACK: Duration = Duration::from_millis(2);
 
 /// A parsed segment as TCP reads it.
 #[derive(Clone, Copy, Debug)]
@@ -334,6 +339,11 @@ pub struct Sync {
     rto_pending: bool,
     timeout_rtx: bool,
     timing: Option<(Seq, Instant)>,
+    /// RFC 8985 §7: when the loss probe is due, whether it is, and the probe in flight: SND.NXT
+    /// once it left and whether it was a retransmission.
+    probe_at: Option<Instant>,
+    probe_due: bool,
+    probe: Option<(Seq, bool)>,
     persist: Option<Persist>,
     sws: Option<Instant>,
     sws_fired: bool,
@@ -380,7 +390,7 @@ impl Sync {
         let mut sync = Self {
             phase,
             tx,
-            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now),
+            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now, n.ts.is_some()),
             rtt,
             cc: Cc::new(smss, p.handshake_timeouts),
             peer_mss: u32::from(n.peer_mss),
@@ -399,6 +409,9 @@ impl Sync {
             rto_pending: false,
             timeout_rtx: false,
             timing: None,
+            probe_at: None,
+            probe_due: false,
+            probe: None,
             persist: None,
             sws: None,
             sws_fired: false,
@@ -533,6 +546,10 @@ impl Sync {
             if placed == Placed::RangeLimit {
                 ctx.log.count(Counter::OooRangeLimit);
             }
+            if matches!(placed, Placed::InOrder | Placed::Filled) {
+                let echo = self.ts.zip(seg.options.timestamps()).map(|(ts, t)| (t.echo, ts.echo_rtt(t.echo, now)));
+                self.rx.sample_rtt(us32(text.len()), self.smss(), echo, now);
+            }
             self.rx.owe_for_text(placed, now);
         }
         if fin && !peer_closed {
@@ -608,17 +625,31 @@ impl Sync {
             self.unsolicited(ctx);
             return false;
         }
-        let newly = if self.sack_ok {
+        let (newly, dsack) = if self.sack_ok {
             self.tx.read_sack(ack, &seg.options, ctx.log)
         } else {
             if seg.options.sack_blocks().len() > 0 {
                 ctx.log.count(Counter::SackUnnegotiated);
             }
-            false
+            (false, false)
         };
         let flight = self.tx.flight();
         let acked = ack.since(self.tx.una);
         let window = u32::from(seg.window).checked_shl(u32::from(self.tx.shift)).unwrap_or(u32::MAX);
+        // A duplicate ACK (RFC 5681 §2) or new SACK information leaves loss to recovery.
+        if newly || (acked == 0 && flight > 0 && seg.payload.is_empty() && !seg.syn() && !seg.fin() && window == self.tx.wnd) {
+            self.probe_at = None;
+        }
+        // RFC 8985 §7.4: a retransmitted probe acknowledged without a D-SACK repaired a loss.
+        if let Some((_, resent)) = self.probe.filter(|&(end, _)| ack.at_or_after(end) && acked <= flight) {
+            self.probe = None;
+            if resent && !dsack {
+                self.cc.on_loss(flight);
+                self.cc.cwnd = self.cc.cwnd.min(self.cc.ssthresh);
+                self.cc.end_recovery();
+                ctx.log.count(Counter::LossProbeRecovery);
+            }
+        }
         if acked > 0 && acked <= flight {
             self.new_ack(seg, ack, acked, flight, ctx);
             if newly {
@@ -698,6 +729,23 @@ impl Sync {
             self.rtx_timer = None;
             self.arm(now);
         }
+        self.probe_due = false;
+        self.schedule_probe(now);
+    }
+
+    /// RFC 8985 §7.2, on new data sent and on an ACK that moves SND.UNA: with SACK, outside
+    /// recovery, with nothing SACKed and no probe in flight, a probe is due two round trips on,
+    /// plus WCDelAckT when one segment is out or the slack when more are, and never after the
+    /// RTO, which it then stands in for.
+    fn schedule_probe(&mut self, now: Instant) {
+        self.probe_at = None;
+        let Some(srtt) = self.rtt.srtt() else { return };
+        let Some(rto) = self.rtx_timer else { return };
+        if !self.sack_ok || self.recovery != Recovery::None || !self.tx.sacked().is_empty() || self.probe.is_some() || self.persist.is_some() {
+            return;
+        }
+        let delayed = if self.tx.flight() <= self.smss() { WORST_DELAYED_ACK } else { PROBE_SLACK };
+        self.probe_at = Some(now.after(srtt.saturating_mul(2).saturating_add(delayed)).min(rto));
     }
 
     /// RFC 6298 (5.1): the timer runs while sequence space that left is outstanding, and never
@@ -756,6 +804,7 @@ impl Sync {
             }
             return;
         }
+        self.probe_at = None;
         let flight = self.tx.flight();
         self.cc.on_loss(flight.saturating_sub(self.lt_bytes));
         self.recover = self.tx.nxt.sub(1);
@@ -786,6 +835,7 @@ impl Sync {
                 let rto = self.rtt.rto();
                 self.persist = Some(Persist { at: now.after(rto), interval: rto, from: self.tx.nxt, due: false, unanswered: false });
                 self.rtx_timer = None;
+                self.probe_at = None;
             }
         } else if let Some(persist) = self.persist.take() {
             if self.tx.nxt.after(persist.from) {
@@ -854,7 +904,7 @@ impl Sync {
     pub fn recv(&mut self, out: &mut [u8], now: Instant) -> Result<Received, Error> {
         let n = self.rx.read(out);
         if n > 0 {
-            self.rx.after_read(n, now, self.rtt.srtt(), self.smss());
+            self.rx.after_read(n, now, self.smss());
             Ok(Received::Data(n))
         } else if self.rx.closed {
             Ok(Received::End)
@@ -872,7 +922,7 @@ impl Sync {
         }
         let n = self.rx.read_with(take);
         if n > 0 {
-            self.rx.after_read(n, now, self.rtt.srtt(), self.smss());
+            self.rx.after_read(n, now, self.smss());
         }
         Ok(Received::Data(n))
     }
@@ -935,6 +985,7 @@ impl Sync {
     pub fn deadline(&self, ctx: &Ctx<'_>) -> Option<Instant> {
         [
             self.rtx_timer,
+            self.probe_at,
             self.persist.filter(|p| !p.due).map(|p| p.at),
             self.keepalive_at(ctx),
             self.sws.filter(|_| !self.sws_fired),
@@ -956,6 +1007,10 @@ impl Sync {
         if self.orphan_since.is_some_and(|at| at.after(limits::ORPHAN_IDLE) <= now) {
             ctx.log.count(Counter::OrphanIdleAbort);
             return Tick::Orphan;
+        }
+        // RFC 8985 §7.3: the RTO runs again from the probe's leaving.
+        if self.probe_at.is_some_and(|at| at <= now) {
+            (self.probe_at, self.probe_due, self.rtx_timer) = (None, true, None);
         }
         if self.rtx_timer.is_some_and(|at| at <= now) {
             self.expire(ctx);
@@ -991,6 +1046,7 @@ impl Sync {
         self.rto_pending = true;
         self.rtt.back_off();
         self.timing = None;
+        (self.probe_at, self.probe_due, self.probe) = (None, false, None);
         let repeat = core::mem::replace(&mut self.timeout_rtx, true);
         self.cc.on_timeout(self.tx.flight(), repeat);
         self.recovery = Recovery::None;
@@ -1022,6 +1078,9 @@ impl Sync {
         if self.rx.dup_owed > 0 {
             self.emit_ack(ctx, exit, self.tx.nxt)?;
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
+            return Ok(true);
+        }
+        if self.probe_due && self.loss_probe(ctx, exit)? {
             return Ok(true);
         }
         if self.retransmission(ctx, exit)? || self.new_data(ctx, exit)? || self.probe(ctx, exit)? {
@@ -1106,6 +1165,9 @@ impl Sync {
             self.timing = Some((end, now));
         }
         self.arm(now);
+        if len > 0 && !resent {
+            self.schedule_probe(now);
+        }
         self.refresh(now);
         self.acknowledged();
     }
@@ -1283,6 +1345,33 @@ impl Sync {
             self.lt_bytes = self.lt_bytes.saturating_add(len);
             ctx.log.count(Counter::LimitedTransmit);
         }
+        Ok(true)
+    }
+
+    /// RFC 8985 §7.3: a segment of new data where the peer's window takes one whole, outside cwnd;
+    /// else the last segment sent again. Its ACK carries what the lost one would have: the window
+    /// reopened, or the tail's acknowledgment.
+    fn loss_probe<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
+        let blocks = self.blocks();
+        let room = self.room(&blocks);
+        let whole = self.tx.unsent().min(room);
+        let usable = u32::try_from(self.tx.usable().max(0)).unwrap_or(u32::MAX);
+        let (start, len) = if whole > 0 && usable >= whole {
+            (self.tx.nxt, whole)
+        } else {
+            let end = self.tx.nxt.earlier(self.tx.data_end());
+            let start = if end.since(self.tx.una) > room { end.sub(room) } else { self.tx.una };
+            (start, if start.before(end) { end.since(start) } else { 0 })
+        };
+        if len == 0 {
+            self.probe_due = false;
+            self.arm(ctx.now);
+            return Ok(false);
+        }
+        let resent = start.before(self.tx.nxt);
+        self.emit(ctx, exit, start, len, false, blocks)?;
+        (self.probe_at, self.probe_due, self.probe) = (None, false, Some((self.tx.nxt, resent)));
+        ctx.log.count(Counter::LossProbe);
         Ok(true)
     }
 

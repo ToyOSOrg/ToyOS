@@ -68,24 +68,32 @@ fn s_net_002_newreno_when_one_side_has_no_sack() {
     }
 }
 
-/// At netstack's buffer: at 65,535 the window, not cwnd, bounds the sender, and each round's
-/// window reopens on one update ACK, which this loss takes every second round.
+/// Every second pure ACK is lost, either parity. At 65,535 the window, not cwnd, bounds the sender,
+/// so a round's window reopens on the update its reader's read sends, and that update is sometimes
+/// the tail's only ACK; at netstack's buffer cwnd bounds it. No loss is ever inferred: no RTO
+/// fires, and what is sent twice is only a loss probe's segment, which the receiver reports as a
+/// duplicate.
 #[test]
 fn s_net_005_lost_acks() {
-    let mut net = Net::buffered(10, BUFFER);
-    net.connections(1, 80, [MIB, 0]);
-    let mut acks = 0;
-    net.impair = Box::new(move |_, o| {
-        if o.payload.is_empty() && o.flags & (SYN | FIN | RST) == 0 {
-            acks += 1;
-            if acks % 2 == 0 {
-                return Fate::Drop;
+    for (buffer, parity) in [(65_535, 0), (65_535, 1), (BUFFER, 0), (BUFFER, 1)] {
+        let mut net = Net::buffered(10, buffer);
+        net.connections(1, 80, [MIB, 0]);
+        let mut acks = 0;
+        net.impair = Box::new(move |_, o| {
+            if o.payload.is_empty() && o.flags & (SYN | FIN | RST) == 0 {
+                acks += 1;
+                if acks % 2 == parity {
+                    return Fate::Drop;
+                }
             }
-        }
-        Fate::Pass
-    });
-    finish(&mut net);
-    assert_eq!(net.count(0, Counter::RetransmitBytes), 0);
+            Fate::Pass
+        });
+        finish(&mut net);
+        let count = |c| net.count(0, c);
+        let (probes, arm) = (count(Counter::LossProbe), format!("buffer {buffer}, parity {parity}"));
+        assert_eq!((count(Counter::Rto), count(Counter::LossProbeRecovery)), (0, 0), "{arm}");
+        assert!(count(Counter::RetransmitBytes) <= probes * 1448 && count(Counter::DsackRcvd) >= probes, "{arm}: {probes} probes");
+    }
 }
 
 #[test]
@@ -406,4 +414,59 @@ fn a_receive_buffer_nobody_reads_never_grows() {
     assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
     net.assert_exact();
     assert!(read[1].window > 65_535, "{:?}", read[1]);
+}
+
+/// Node 0's SYN with its timestamps taken out: both ends scale and SACK, and neither stamps.
+fn syn_without_timestamps(from: usize, o: &O) -> Option<Vec<u8>> {
+    (from == 0 && o.flags & SYN != 0).then(|| {
+        let s = seg(o.seq).syn().wnd(o.wnd).mss(o.mss.unwrap()).sackok().ws(o.ws.unwrap());
+        s.bytes(o.src, o.dst, 0, 0)
+    })
+}
+
+/// The receive buffer grows to twice what its reader takes per round trip, by the receiver's own
+/// estimate of the round trip, with timestamps and without. The path's round trip quadruples once
+/// the handshake is done, so a downloader's SRTT, which only its own data samples, still says
+/// 20 ms. The reader takes a burst every millisecond twice per 20 ms: it is never offered more
+/// than twice its rate over the round trip it estimated, plus a burst and a segment, and once the
+/// window has grown it is never kept waiting.
+#[test]
+fn the_receive_window_grows_by_what_is_read_per_round_trip() {
+    const BURST: u64 = 40_000;
+    const PERIOD: u64 = 20;
+    const RATE: u64 = 2 * BURST / PERIOD;
+    for timestamps in [true, false] {
+        let mut net = Net::buffered(20, BUFFER);
+        net.auto_shut = false;
+        if !timestamps {
+            net.rewrite = Some(Box::new(syn_without_timestamps));
+        }
+        net.connections(1, 80, [64 * MIB, 0]);
+        assert!(net.run(100, |n| n.apps.len() == 2));
+        net.delay = ns(40);
+        let reader = net.apps.iter().position(|a| a.node == 1).unwrap();
+        let handshake = net.nodes[1].tcp.info(net.apps[reader].id).unwrap().srtt;
+        assert!(handshake < Some(std::time::Duration::from_millis(30)));
+        let (mut window, mut rtt, mut last, mut settled) = (0, std::time::Duration::ZERO, None, 0);
+        for ms in 0..4_000 {
+            if ms == 2_000 {
+                settled = net.apps[reader].received.1;
+            }
+            let burst = ms % PERIOD < 2;
+            (net.apps[reader].reading, net.apps[reader].read_limit) = (burst, burst.then_some(BURST as usize));
+            net.advance(1);
+            let info = net.nodes[1].tcp.info(net.apps[reader].id).unwrap();
+            assert_eq!(info.ts_recent.is_some(), timestamps);
+            window = window.max(u64::from(info.rcv_edge.since(info.rcv_nxt)));
+            rtt = rtt.max(info.rcv_rtt.unwrap_or_default());
+            last = info.rcv_rtt;
+            assert_eq!(info.srtt, handshake, "a downloader's SRTT keeps the handshake's");
+        }
+        let arm = format!("timestamps {timestamps}, window {window}, round trip {last:?}, at most {rtt:?}");
+        assert!(last.is_some_and(|r| (79_000..120_000).contains(&r.as_micros())), "{arm}");
+        let ms = rtt.as_micros().div_ceil(1000) as u64;
+        let bound = 2 * (RATE * ms + BURST) + 1448;
+        assert!(window <= bound, "{arm}: past {bound}");
+        assert_eq!(net.apps[reader].received.1 - settled, 2_000 * RATE, "{arm}");
+    }
 }

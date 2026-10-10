@@ -11,6 +11,13 @@
 //! buffer: enough that a reader keeping up never waits on the window while the sender's rate
 //! doubles. Text nobody reads grows nothing, so a peer alone cannot make a connection hold more
 //! than the initial capacity, and a connection whose round trip is unknown keeps it.
+//!
+//! **The round trip is the receiver's own** (Linux's `tcp_rcv_rtt_measure_ts` and
+//! `tcp_rcv_rtt_measure`): a downloader sends no data, so the sender's SRTT keeps the handshake's
+//! sample while queueing lengthens the path. With timestamps, a full-sized segment carrying a
+//! TSecr not yet seen samples the age of that echo, averaged with gain 1/8. Without them, the
+//! time the peer took to fill the window offered is at least one round trip, and the least such
+//! time is kept.
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -76,13 +83,23 @@ pub struct Rx {
     max: usize,
     /// When the current measurement began, and what the user has read since.
     round: (Instant, usize),
+    /// The receiver's round-trip estimate.
+    rtt: Option<Duration>,
+    /// The last TSecr sampled, or without timestamps the edge whose filling is timed, and since when.
+    sampler: Sampler,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Sampler {
+    Echo(Option<u32>),
+    Fill(Option<(Seq, Instant)>),
 }
 
 impl Rx {
     /// `next` is IRS + 1; the SYN or SYN-ACK offered `window`, unscaled; the capacity grows to
     /// `max`, or to the most a window field at `shift` offers if that is less: an edge past it
-    /// would be one the peer was never told of.
-    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant) -> Self {
+    /// would be one the peer was never told of. `timestamps` picks how the round trip is sampled.
+    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, timestamps: bool) -> Self {
         let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
         let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
         let max = max.min(offerable);
@@ -106,6 +123,40 @@ impl Rx {
             last_ack_sent: next,
             max,
             round: (now, 0),
+            rtt: None,
+            sampler: if timestamps { Sampler::Echo(None) } else { Sampler::Fill(None) },
+        }
+    }
+
+    /// The most the peer may have unread and in flight to us: the receive buffer's present size.
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
+    /// The receiver's round-trip estimate.
+    pub const fn rtt(&self) -> Option<Duration> {
+        self.rtt
+    }
+
+    /// After in-order text of `len` bytes arrived at `now`, with its TSecr and that echo's age
+    /// where it is one this end sent.
+    pub fn sample_rtt(&mut self, len: u32, mss: u32, echo: Option<(u32, Option<Duration>)>, now: Instant) {
+        match &mut self.sampler {
+            Sampler::Echo(last) => {
+                let Some((echo, Some(age))) = echo.filter(|&(echo, _)| len >= mss && *last != Some(echo)) else { return };
+                *last = Some(echo);
+                self.rtt = Some(self.rtt.map_or(age, |rtt| rtt.saturating_mul(7).saturating_add(age).checked_div(8).unwrap_or(age)));
+            }
+            Sampler::Fill(mark) => {
+                if let Some((edge, since)) = *mark {
+                    if self.next.before(edge) {
+                        return;
+                    }
+                    let took = now.since(since).max(Duration::from_micros(1));
+                    self.rtt = Some(self.rtt.map_or(took, |rtt| rtt.min(took)));
+                }
+                *mark = Some((self.edge, now));
+            }
         }
     }
 
@@ -384,11 +435,11 @@ impl Rx {
     /// After the user read `n` bytes: the capacity grows by the module's rule, and a window update
     /// is owed when the window offered was below the threshold and the edge would now move by at
     /// least it (RFC 9293 §3.8.6.2.2).
-    pub fn after_read(&mut self, n: usize, now: Instant, rtt: Option<Duration>, mss: u32) {
+    pub fn after_read(&mut self, n: usize, now: Instant, mss: u32) {
         let (began, read) = self.round;
         let read = read.saturating_add(n);
         self.round = (began, read);
-        if let Some(rtt) = rtt.filter(|&rtt| now.since(began) >= rtt) {
+        if let Some(rtt) = self.rtt.filter(|&rtt| now.since(began) >= rtt) {
             let read = u128::try_from(read).unwrap_or(u128::MAX);
             let per_rtt = read.saturating_mul(rtt.as_nanos()).checked_div(now.since(began).as_nanos()).unwrap_or(0);
             let want = usize::try_from(per_rtt.saturating_mul(2)).unwrap_or(usize::MAX);
