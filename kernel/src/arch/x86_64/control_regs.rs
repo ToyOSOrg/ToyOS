@@ -219,23 +219,52 @@ fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
 /// against it. Must run after [`init_cr0`] and before `arch::syscall::init`,
 /// which needs `SCE` set.
 pub fn init(cpu_id: u32) {
+    let step = |name: &str| if cpu_id == 0 { crate::blackbox::step(name) };
+    step("control_regs::init: declaration (cpuid, read cr4)");
     let declared = declaration(cpu_id);
     if !skipped(cpu_id) {
+        trail_value("control_regs::init: cr4 held", cpu::read_cr4(), cpu_id);
+        trail_value("control_regs::init: efer held", cpu::rdmsr(efer::MSR), cpu_id);
+        trail_value("control_regs::init: write cr4", declared, cpu_id);
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
         // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
         // bits `declaration` has just confirmed this CPU defines.
-        unsafe {
-            cpu::write_cr4(declared);
-            cpu::wrmsr(efer::MSR, EFER);
-        }
+        unsafe { cpu::write_cr4(declared) };
+        trail_value("control_regs::init: wrmsr efer", EFER, cpu_id);
+        // SAFETY: as above.
+        unsafe { cpu::wrmsr(efer::MSR, EFER) };
         if declared & cr4::SMAP != 0 {
+            step("control_regs::init: clac");
             // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
             // `clac` the kernel needs.
             cpu::clac();
         }
     }
+    step("control_regs::init: self_check");
     self_check(cpu_id, declared);
+}
+
+/// Yoga image: `step: <name> <value>` on the BSP, the value in hex.
+pub fn trail_value(name: &str, value: u64, cpu_id: u32) {
+    if cpu_id != 0 {
+        return;
+    }
+    let mut buf = [0u8; 96];
+    let mut at = 0;
+    for &b in name.as_bytes().iter().take(64) {
+        buf[at] = b;
+        at += 1;
+    }
+    for &b in b" 0x" {
+        buf[at] = b;
+        at += 1;
+    }
+    for shift in (0..16).rev() {
+        buf[at] = b"0123456789abcdef"[((value >> (shift * 4)) & 0xf) as usize];
+        at += 1;
+    }
+    crate::blackbox::step(core::str::from_utf8(&buf[..at]).unwrap_or("control_regs: unprintable"));
 }
 
 /// Puts this CPU's performance request into the declaration and checks it.

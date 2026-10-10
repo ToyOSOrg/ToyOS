@@ -494,32 +494,64 @@ pub fn ist1_report() {
 /// may not be loaded before the `wrmsr` below and must not be loaded after
 /// anything that can fault.
 pub fn init_bsp(lapic_id: u32) {
+    use crate::blackbox::step;
+    {
+        let rflags: u64;
+        let mut idtr = [0u8; 10];
+        // SAFETY: reads only: `pushfq; pop` and `sidt` into a local 10-byte buffer.
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", out(reg) rflags);
+            core::arch::asm!("sidt [{}]", in(reg) idtr.as_mut_ptr(), options(nostack));
+        }
+        let limit = u16::from_le_bytes([idtr[0], idtr[1]]) as u64;
+        let base = u64::from_le_bytes(idtr[2..10].try_into().unwrap());
+        super::control_regs::trail_value("init_bsp: rflags", rflags, 0);
+        super::control_regs::trail_value("init_bsp: firmware idtr base", base, 0);
+        super::control_regs::trail_value("init_bsp: firmware idtr limit", limit, 0);
+        super::control_regs::trail_value("init_bsp: cr0", cpu::read_cr0(), 0);
+        super::control_regs::trail_value("init_bsp: cr3", {
+            let cr3: u64;
+            // SAFETY: a read of CR3.
+            unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+            cr3
+        }, 0);
+    }
+    step("init_bsp: alloc_percpu");
     let ptr = alloc_percpu(0);
     // SAFETY: `alloc_percpu` just returned a live, initialised `PerCpu` with no other reference until the `wrmsr` below.
     let percpu = unsafe { &mut *ptr };
 
+    step("init_bsp: kernel_rsp, tss.rsp0");
     percpu.kernel_rsp = cpu::stack_pointer();
     // SAFETY: `Tss` is `repr(C, packed)`; `rsp0` may be unaligned.
     unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::stack_pointer()); }
+    step("init_bsp: alloc_idle_stack");
     alloc_idle_stack(percpu);
+    step("init_bsp: alloc_ist_stacks");
     alloc_ist_stacks(percpu);
 
+    step("init_bsp: load_gdt (lgdt, retfq, ds/es/fs/ss, ltr)");
     // SAFETY: `load_gdt`'s once-per-CPU contract — this is the BSP's call; `init_ap` is every AP's.
     unsafe { percpu.load_gdt(); }
 
+    step("init_bsp: wrmsr IA32_GS_BASE");
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
     // INVARIANT: the control registers precede the IDT. Every entry stub saves
     // SSE state, and `fxsave` without `CR4.OSFXSR` is `#UD`, so a fault taken
     // between the two would fault again inside its own handler.
+    step("init_bsp: control_regs::init");
     super::control_regs::init(0);
     // Then the IDT, before the first step that can fault. Until `lidt` runs the
     // loaded table is the one firmware left across `ExitBootServices`, whose
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
+    step("init_bsp: idt::init");
     super::idt::init();
+    step("init_bsp: control_regs::init_performance");
     super::control_regs::init_performance(0);
 
+    step("init_bsp: fpu::init");
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
     // established, on a CPU whose extended state QEMU and a Tiger Lake do not

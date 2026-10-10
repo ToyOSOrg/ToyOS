@@ -461,7 +461,9 @@ fn disable_pic() {
 }
 
 pub fn init() {
+    crate::blackbox::step("idt::init: disable_pic");
     disable_pic();
+    crate::blackbox::step("idt::init: install_gates");
 
     install_gates(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
@@ -478,6 +480,7 @@ pub fn init() {
         base: IDT.data_ptr() as u64,
     };
 
+    crate::blackbox::step("idt::init: lidt");
     // SAFETY: `ptr` is a valid IDT descriptor built from `size_of::<Idt>()` and the just-filled static IDT.
     unsafe {
         cpu::lidt(&ptr as *const IdtPointer as *const u8);
