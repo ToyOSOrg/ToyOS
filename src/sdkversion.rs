@@ -23,10 +23,12 @@ pub struct Crate {
 pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "toyos-abi" },
     Crate { name: "toyos-keymap", dir: "toyos-keymap" },
-    Crate { name: "toyos-osrelease", dir: "toyos-osrelease" },
     Crate { name: "toyos-font", dir: "userland/toyos-font" },
     Crate { name: "toyos", dir: "toyos" },
     Crate { name: "toyos-window", dir: "userland/toyos-window" },
+    // Last until crates.io holds it: its first publish needs the owner's token, and
+    // until then the run stops here with every crate above it up.
+    Crate { name: "toyos-osrelease", dir: "toyos-osrelease" },
 ];
 
 /// One crate at this tree: the version crates.io has or is owed, whether it is
