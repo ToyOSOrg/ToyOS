@@ -17,9 +17,11 @@
 //! machine goes on, because one process's bug taking the machine down is the
 //! thing moving a driver out of the kernel was for. A record that names no
 //! enumerated function is a device's input this kernel never took on: the
-//! unit has already refused it, so it is counted and logged and the machine
-//! goes on. Nothing here can clear such a requester's `BME`, so a backend
-//! bounds what it reads per interrupt by itself, never by the device.
+//! unit has already refused it, so it is counted and the machine goes on.
+//! Nothing here can clear such a requester's `BME`, so a backend bounds what
+//! it reads per interrupt by itself, never by the device, and only a stray's
+//! records whose count is a power of two are written, so the device cannot
+//! fill the log either.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -61,6 +63,29 @@ fn functions() -> &'static [Function] {
 /// [`Who::key`] of the first fault this machine took: what a later one says
 /// is decided by what the first one already broke.
 static FIRST: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// How many strays — requesters no enumerated function is — are counted
+/// apart; every one past them shares the last count.
+const STRAYS: usize = 8;
+
+/// [`Who::key`] plus one of each stray counted apart, in the order each first
+/// faulted; zero is free.
+static STRAY_KEYS: [AtomicU64; STRAYS] = [const { AtomicU64::new(0) }; STRAYS];
+
+/// The records read of each stray in [`STRAY_KEYS`], and of every later one.
+static STRAY_FAULTS: [AtomicU32; STRAYS + 1] = [const { AtomicU32::new(0) }; STRAYS + 1];
+
+/// This record's number among those of the stray `key`, from 1.
+fn stray_fault(key: u64) -> u32 {
+    let at = STRAY_KEYS
+        .iter()
+        .position(|slot| match slot.compare_exchange(0, key + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => true,
+            Err(held) => held == key + 1,
+        })
+        .unwrap_or(STRAYS);
+    STRAY_FAULTS[at].fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// Every function this machine enumerated, before any unit is armed: the
 /// handler reaches a faulting function's config space through this, with no lock.
@@ -175,7 +200,7 @@ pub struct Fault {
 
 /// `fault`, read off unit `unit`, whose count of reported faults is `count`:
 /// its function stopped, it is handed to whoever drives that function, and
-/// its line written. `true` only for an enumerated function this kernel
+/// its line written, a stray's only at a power of two. `true` only for an enumerated function this kernel
 /// drives, which the drain ends on with [`conclude`].
 pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
     let function = find(fault.who);
@@ -185,8 +210,11 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
     if let Some(function) = function {
         pci::stop_bus_mastering(config_window(function.config));
     }
-    let seen_here = function.map_or(0, |f| f.faults.fetch_add(1, Ordering::Relaxed) + 1);
     let key = fault.who.key();
+    let seen_here = match function {
+        Some(function) => function.faults.fetch_add(1, Ordering::Relaxed) + 1,
+        None => stray_fault(key),
+    };
     let _ = FIRST.compare_exchange(u64::MAX, key, Ordering::AcqRel, Ordering::Relaxed);
     // Before the line, so `owner=` in it is what was actually told.
     let owner = match function.map(|f| f.user_slot.load(Ordering::Acquire)) {
@@ -198,6 +226,11 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
         crate::pcidev::note_fault(slot);
     }
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
+    // A stray's line is bounded by its count, never by the device: the next
+    // line it writes says how many were read in between.
+    if function.is_none() && !seen_here.is_power_of_two() {
+        return false;
+    }
     log!(
         // `owner=` first, because it is the only field that decides whether
         // this machine is still running: `tests/common/serial.rs` reads

@@ -77,7 +77,7 @@ pub fn self_check() -> Result<(), String> {
                 "test capture",
                 "[ 0.001 cpu0 kernel] NVMe: found\n[ 4.100 cpu0 kernel] iommu: DMA FAULT \
                  owner=none unit0 stream=0x18 addr=0x0000000000000000 access=none reason=0x04 \
-                 domain=unknown bme=unknown-function unitfaults=1 streamfaults=0 first=y C_BAD_STE\n",
+                 domain=unknown bme=unknown-function unitfaults=1 streamfaults=1 first=y C_BAD_STE\n",
             )
             .must_be_clean()
         }),

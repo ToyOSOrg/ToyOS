@@ -7,15 +7,15 @@
 //! 2. on a domain of its own, it writes at an address the domain maps, and
 //!    lands at the memory mapped there and nowhere else;
 //! 3. the other, which [`super::init`] gives no route, as it gives none to a
-//!    function it never enumerated, writes twice under a StreamID inside the
-//!    stream table, and is refused and recorded twice, and the machine goes
-//!    on;
+//!    function it never enumerated, writes three times under a StreamID
+//!    inside the stream table, and is refused and counted three times, the
+//!    third record unwritten, and the machine goes on;
 //! 4. once the domain takes its address back, the first writes there again,
 //!    and is refused and recorded, and the machine halts: the function is
 //!    one this kernel drives.
 //!
 //! The writes of 3, and the write of 4, are each made with this CPU's
-//! interrupts masked, so one drain reads both of 3's and 4's verdict is on
+//! interrupts masked, so one drain reads all of 3's and 4's verdict is on
 //! the console before its event is taken, on this CPU, which the event SPI is
 //! routed to. Each step says what it saw on its own line; the harness judges
 //! them, and the records by the handler's, whose count says the first step
@@ -123,7 +123,7 @@ pub(super) fn run(devices: &[PciDevice]) {
 
     let before = super::fault::recorded();
     let masked = crate::arch::IrqGuard::close();
-    let stray_wrote = [write(stray_regs, phys, phys), write(stray_regs, phys, phys)];
+    let stray_wrote = [(); 3].map(|()| write(stray_regs, phys, phys));
     for (i, answer) in stray_wrote.into_iter().enumerate() {
         log!(
             "smmu-selftest: {unrouted}'s write {} at {phys:#x}, under no route, answered {answer:#x}: {}",
@@ -132,8 +132,8 @@ pub(super) fn run(devices: &[PciDevice]) {
         );
     }
     drop(masked);
-    events_reach_this_cpu(before + 2, "the unrouted function's two refused writes");
-    log!("smmu-selftest: the unrouted function's two events were read, and the machine goes on");
+    events_reach_this_cpu(before + 3, "the unrouted function's three refused writes");
+    log!("smmu-selftest: the unrouted function's three events were read, and the machine goes on");
 
     let masked = crate::arch::IrqGuard::close();
     let taken_back = write(regs, at + 0x40, phys + 0x40);
@@ -143,7 +143,7 @@ pub(super) fn run(devices: &[PciDevice]) {
         verdict(taken_back, REFUSED)
     );
     drop(masked);
-    events_reach_this_cpu(before + 3, "the kernel-driven function's refused write");
+    events_reach_this_cpu(before + 4, "the kernel-driven function's refused write");
     panic!("smmu-selftest: FAIL: the handler read the event of a function this kernel drives and the machine went on");
 }
 

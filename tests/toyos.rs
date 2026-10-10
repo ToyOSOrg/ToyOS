@@ -2042,15 +2042,15 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
 /// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
 /// a `CMD_SYNC` consumed; one device's write refused on the entry its stream
 /// starts with and nothing recorded, and landing where its own domain maps
-/// it; the other's two, under a StreamID no function is routed from inside
-/// the stream table, refused, recorded as no function's, and the machine
-/// going on; and the first's again once its domain takes that address back,
+/// it; the other's three, under a StreamID no function is routed from inside
+/// the stream table, refused, the first two recorded as no function's and the
+/// third counted and not written, and the machine going on; and the first's again once its domain takes that address back,
 /// refused, recorded as the kernel's, and the machine halted on it. Each
 /// record taken on the wired SPI and named. Read to the halt path's own line
 /// past the stop, so nothing the guest could still say is missed.
 fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     const FAULT: &str = "iommu: DMA FAULT owner=";
-    const WENT_ON: &str = "smmu-selftest: the unrouted function's two events were read, and the machine goes on";
+    const WENT_ON: &str = "smmu-selftest: the unrouted function's three events were read, and the machine goes on";
     // `panic_reboot::arm`'s line, which `halt_all_cpus` writes once every
     // other CPU is stopped: one of its two heads.
     let halted = |l: &str| l.contains("panic: rebooting") || l.contains("panic: holding this panel");
@@ -2114,6 +2114,7 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
         ("mapped to", "landed there"),
         ("'s write 1 at ", "refused"),
         ("'s write 2 at ", "refused"),
+        ("'s write 3 at ", "refused"),
         ("which its domain no longer maps", "refused"),
     ] {
         let Some(found) = line(said) else {
@@ -2137,14 +2138,15 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     for &fault in &faults {
         eprintln!("  [virt] {}", lines[fault]);
     }
-    // The unit's first three events, so the write on the entry its stream
-    // starts with was not recorded.
+    // The unit's first four events, so the write on the entry its stream
+    // starts with was not recorded; the stray's third is counted and, not
+    // being a power of two, not written.
     let wants = [
-        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=1 ", "C_BAD_STE"),
-        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=2 ", "C_BAD_STE"),
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=1 streamfaults=1 ", "C_BAD_STE"),
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=2 streamfaults=2 ", "C_BAD_STE"),
         (
             format!("owner=kernel unit0 stream={function} addr={address:#018x} access=write"),
-            " unitfaults=3 ",
+            " unitfaults=4 ",
             "F_TRANSLATION",
         ),
     ];

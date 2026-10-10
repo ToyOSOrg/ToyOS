@@ -327,7 +327,9 @@ pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
 }
 
 /// Pend the IOMMU's event SPI again, for records its handler left behind: the
-/// unit raises none for them. Taken once the handler's `end` deactivates it.
+/// unit raises none for them. Taken once the handler's `end` deactivates it:
+/// the write makes an active SPI active and pending, which is never signalled,
+/// and deactivation leaves it pending (IHI 0069D §8.9.16, §4.1.2, §4.1.1).
 pub(super) fn pend_iommu_events() {
     let intid = IOMMU_EVENTS.load(Relaxed);
     assert!(intid != 0, "GIC: the IOMMU's event SPI is pended before it is routed");
