@@ -18,6 +18,7 @@ mod shutdown;
 mod spin;
 mod stats;
 mod tone;
+mod wifi;
 
 macro_rules! commands {
     ($($name:ident),*) => {
@@ -30,7 +31,7 @@ macro_rules! commands {
     };
 }
 
-commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone);
+commands!(cat, cp, echo, free, grep, hexdump, locale, ls, mkdir, mv, net, ps, pwd, reboot, rm, screen, shutdown, spin, stats, tone, wifi);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -48,6 +48,7 @@ mod i219;
 mod pipes;
 mod serve;
 mod virtio_net;
+mod wifi;
 
 use card::Card;
 use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
@@ -304,10 +305,24 @@ fn main() {
     // connection is queued on it whether or not this program ever reaches
     // `accept`, and if netstack exits the queued client sees `Gone` rather
     // than silence.
-    let Some((open, claim)) = CARDS
-        .iter()
-        .find_map(|(id, open)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*open, c)))
-    else {
+    // YOGA WIFI HACK: the AX200 before every wired card; where there is none,
+    // its firmware is still read, so the file and its parse are measured.
+    const AX200: PciId = PciId { vendor: 0x8086, device: 0x2723 };
+    let wifi = endow::pci_function::<toyos::PciDev>(AX200);
+    if wifi.is_none() {
+        say!("wifi: no 8086:2723");
+        match wifi::Firmware::read() {
+            Ok(fw) => say!("wifi: {}", fw.summary()),
+            Err(why) => say!("wifi: firmware: {why}"),
+        }
+    }
+    let found = match wifi {
+        Some(claim) => Some((Card::wifi as fn(toyos::PciDev) -> Card, claim)),
+        None => CARDS
+            .iter()
+            .find_map(|(id, open)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*open, c))),
+    };
+    let Some((open, claim)) = found else {
         say!("netstack: no NIC on this machine, exiting");
         return;
     };
@@ -351,7 +366,10 @@ fn main() {
     let mut link_up = match &card {
         Card::Intel(intel) => intel.link().is_up(),
         Card::Virtio(_) => true,
+        Card::Wifi(_) => false,
     };
+    // `wifi scan` clients waiting for the scan that answers them.
+    let mut wifi_waiting: Vec<Client> = Vec::new();
     if link_up {
         node.link(clock(), true, draw);
     }
@@ -536,7 +554,25 @@ fn main() {
                 answer_inspect(&request, &card, &leases, &sockets, &node);
                 continue;
             }
+            if request.msg_type == wifi::MSG_WIFI_SCAN {
+                match &card {
+                    Card::Wifi(nic) => {
+                        nic.request(wifi::Mode::from_byte(request.payload().first().copied()));
+                        wifi_waiting.push(request.client);
+                    }
+                    _ => request.client.result_bytes(b"wifi: this machine has no 8086:2723\n"),
+                }
+                continue;
+            }
             sockets.request(&mut node, clock(), request, draw);
+        }
+
+        if let Card::Wifi(nic) = &card {
+            if let Some(text) = nic.take_finished() {
+                for client in wifi_waiting.drain(..) {
+                    client.result_bytes(text.as_bytes());
+                }
+            }
         }
     }
 }
