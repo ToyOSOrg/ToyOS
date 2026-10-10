@@ -5,10 +5,20 @@
 use toyos_abi::acpi::{Refused, Width};
 use toyos_abi::boot::MemoryMapEntry;
 use toyos_userbound::firmware::{
-    config, lock_word, port, sleep_type, type_word, CallRate, Ecam, Function, Memory, MemoryVerdict, NoLockWord, PortVerdict, Standing, CALLS,
+    config, lock_word, port, sleep_type, type_word, CallRate, Function, Memory, MemoryVerdict, NoLockWord, PortVerdict, Standing, CALLS,
     CALL_PERIOD_NS, FIXED_RANGE_END,
 };
+use toyos_acpi::EcamWindow;
 use toyos_userbound::{KeptCommands, Mediated};
+
+/// One window as an MCFG allocation structure of segment group 0 names it,
+/// through the decode that is the only maker of one.
+fn ecam(base: u64, first_bus: u8, last_bus: u8) -> &'static [EcamWindow] {
+    let mut entry = [0u8; 16];
+    entry[..8].copy_from_slice(&base.to_le_bytes());
+    (entry[10], entry[11]) = (first_bus, last_bus);
+    Box::leak(Box::new([EcamWindow::decode(&entry).expect("a well-formed window")]))
+}
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
     MemoryMapEntry { uefi_type, start, end }
@@ -31,7 +41,6 @@ const Q35: [MemoryMapEntry; 9] = [
     e(0, 0xe0000000, 0xf0000000),
     e(0, 0xfd00000000, 0x10000000000),
 ];
-const Q35_ECAM: Ecam = Ecam { base: 0xe000_0000, segment: 0, first_bus: 0, last_bus: 0xFF };
 /// The I/O APIC and the HPET, as the kernel maps them on q35.
 const Q35_DRIVEN: &[(u64, u64)] = &[(0xfec0_0000, 0xfec0_0020), (0xfed0_0000, 0xfed0_1000)];
 const Q35_FACS: (u64, u64) = (0x7ff7_7000, 0x7ff7_7040);
@@ -46,7 +55,7 @@ fn devices(decoded: &'static [(u64, u64)]) -> Devices {
 
 /// A machine of one map and nothing else: no ECAM window, no FACS.
 fn bare(map: &'static [MemoryMapEntry], decoded: &'static [(u64, u64)]) -> Mem {
-    Memory { map, mapped_end: 4 * GIB, ecam: None, devices: devices(decoded), facs: None, uncached: registers, registers_differ: false }
+    Memory { map, mapped_end: 4 * GIB, ecam: &[], devices: devices(decoded), facs: None, uncached: registers, registers_differ: false }
 }
 
 /// What the range registers type uncacheable on these machines: the hole
@@ -58,7 +67,7 @@ fn registers(at: u64, len: u64) -> bool {
 }
 
 fn q35() -> Mem {
-    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: Some(Q35_ECAM), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS), uncached: registers, registers_differ: false }
+    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: ecam(0xe000_0000, 0, 0xFF), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS), uncached: registers, registers_differ: false }
 }
 
 /// A map shaped as a laptop's is, at addresses of this test's own: RAM, a
@@ -78,8 +87,7 @@ const LAPTOP: [MemoryMapEntry; 9] = [
 ];
 
 fn laptop() -> Mem {
-    let ecam = Ecam { base: 0xc000_0000, segment: 0, first_bus: 0, last_bus: 0xFF };
-    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: Some(ecam), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)), uncached: registers, registers_differ: false }
+    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: ecam(0xc000_0000, 0, 0xFF), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)), uncached: registers, registers_differ: false }
 }
 
 fn passes(memory: &Mem, at: u64, width: Width, write: bool) -> bool {
@@ -267,8 +275,8 @@ fn memory_any_usable_range_holds_is_refused_whatever_lists_it_first() {
             // A usable range over the firmware range's second page and beyond.
             let over = [e(firmware, 0x1000, 0x3000), e(handed_out, 0x2000, 0x4000)];
             for write in [false, true] {
-                let twice = Memory { map: &twice, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
-                let over = Memory { map: &over, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
+                let twice = Memory { map: &twice, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
+                let over = Memory { map: &over, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
                 let why = MemoryVerdict::Refused(Refused::UsableMemory);
                 assert_eq!(twice.clone().decide(0x1000, Width::Byte, write), why, "type {firmware} listed before {handed_out}");
                 assert_eq!(twice.decide(0x2ff8, Width::QWord, write), why);
@@ -316,7 +324,7 @@ fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
     // Every type but the four the policy names, as the only range of a map.
     for ty in (0..=0x20u32).chain([0x7000_0000, 0x8000_0000, u32::MAX]) {
         let map = [e(ty, 0x1000, 0x2000)];
-        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: None, devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
+        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
         let read = memory.clone().decide(0x1000, Width::Byte, false);
         let write = memory.decide(0x1000, Width::Byte, true);
         let through = |verdict| matches!(verdict, MemoryVerdict::Through(_));
@@ -424,7 +432,7 @@ fn the_facs_is_read_and_its_bytes_are_never_written() {
 fn an_address_in_the_ecam_window_is_a_configuration_access_whatever_the_map_types_it() {
     // Typed reserved on q35 and memory-mapped I/O on the laptop's shape.
     for memory in [q35(), laptop()] {
-        let base = memory.ecam.expect("an ECAM window").base;
+        let base = memory.ecam[0].base();
         for write in [false, true] {
             assert_eq!(
                 memory.clone().decide(base + (3 << 20 | 0x1c << 15 | 5 << 12 | 0x48), Width::DWord, write),
@@ -441,15 +449,15 @@ fn an_address_in_the_ecam_window_is_a_configuration_access_whatever_the_map_type
     }
     // A window that begins at a later bus holds nothing below it.
     const WINDOW: &[MemoryMapEntry] = &[e(0, 0xe000_0000, 0xf000_0000)];
-    let ecam = Ecam { base: 0xe000_0000, segment: 0, first_bus: 0x10, last_bus: 0x1F };
-    let memory = Memory { ecam: Some(ecam), ..bare(WINDOW, &[]) };
+    let memory = Memory { ecam: ecam(0xe000_0000, 0x10, 0x1F), ..bare(WINDOW, &[]) };
     assert!(passes(&memory, 0xe000_0000, Width::Byte, false), "below the first bus is plain reserved memory");
     assert_eq!(memory.clone().decide(0xe100_0000, Width::Byte, false), MemoryVerdict::AsConfig(Function { bus: 0x10, device: 0, function: 0 }, 0));
     assert!(passes(&memory, 0xe200_0000, Width::Byte, false), "past the last bus too");
-    // A base firmware put at the top of the address space decides without overflow.
-    let ecam = Ecam { base: u64::MAX - 0xFFF, segment: 0, first_bus: 0, last_bus: 0xFF };
-    let memory = Memory { ecam: Some(ecam), ..bare(WINDOW, &[]) };
-    assert!(passes(&memory, 0xe000_0000, Width::Byte, false));
+    // A window ending on the address space's last byte decides its last byte
+    // without overflow.
+    let top = Memory { ecam: ecam(0xffff_ffff_fff0_0000, 0, 0), ..bare(WINDOW, &[]) };
+    assert_eq!(top.clone().decide(u64::MAX, Width::Byte, false), MemoryVerdict::AsConfig(Function { bus: 0, device: 0x1f, function: 7 }, 0xFFF));
+    assert_eq!(refused(&top, u64::MAX, Width::Word, false), Refused::Unmapped);
 }
 
 #[test]
@@ -647,7 +655,7 @@ const HOST_BRIDGE: Function = Function { bus: 0, device: 0, function: 0 };
 
 #[test]
 fn a_configuration_read_is_held_to_the_window_and_to_one_register() {
-    let ecam = Some(Ecam { base: 0xe000_0000, segment: 0, first_bus: 0, last_bus: 0x7F });
+    let ecam = ecam(0xe000_0000, 0, 0x7F);
     for (offset, width) in [(0, Width::DWord), (0xE, Width::Byte), (0x19, Width::Byte), (0x4A, Width::Word), (0xFFC, Width::DWord), (0xFFF, Width::Byte)] {
         let at = config(ecam, 0, HOST_BRIDGE, offset, width, false).expect("one register of a reachable function");
         assert_eq!((at.function(), at.offset(), at.width()), (HOST_BRIDGE, offset, width));
@@ -661,12 +669,12 @@ fn a_configuration_read_is_held_to_the_window_and_to_one_register() {
     assert_eq!(config(ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
     assert_eq!(config(ecam, 0, Function { bus: 0, device: 32, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
     assert_eq!(config(ecam, 0, Function { bus: 0, device: 0, function: 8 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
-    assert_eq!(config(None, 0, HOST_BRIDGE, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(&[], 0, HOST_BRIDGE, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
 }
 
 #[test]
 fn every_configuration_write_is_refused_by_one_name() {
-    let ecam = Some(Ecam { base: 0xe000_0000, segment: 0, first_bus: 0, last_bus: 0x7F });
+    let ecam = ecam(0xe000_0000, 0, 0x7F);
     // The header, a capability's place, the registers past them, extended
     // space: every register a read reaches.
     for offset in (0..0x1000u16).step_by(4) {
@@ -678,7 +686,7 @@ fn every_configuration_write_is_refused_by_one_name() {
     // And what no read reaches is a write all the same.
     assert_eq!(config(ecam, 0, HOST_BRIDGE, 0, Width::QWord, true), Err(Refused::ConfigWrite));
     assert_eq!(config(ecam, 1, HOST_BRIDGE, 0, Width::DWord, true), Err(Refused::ConfigWrite));
-    assert_eq!(config(None, 0, HOST_BRIDGE, 0x44, Width::Byte, true), Err(Refused::ConfigWrite));
+    assert_eq!(config(&[], 0, HOST_BRIDGE, 0x44, Width::Byte, true), Err(Refused::ConfigWrite));
 }
 
 /// `SLP_TYPx` is bits 12:10 of PM1 control and `SLP_EN` bit 13 (ACPI 6.5

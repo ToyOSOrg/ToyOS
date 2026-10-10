@@ -375,7 +375,7 @@ Each stage lands on its own, in this order.
    `boot-deadline=` boots, and to `arch::watchdog::init` on the others:
    through `mm::init`, ACPI, interrupts, HPET calibration, the RTC read, PCI
    enumeration, `pcidev::publish` and `iommu::init`.
-   - The kernel arms as its first act, before `mm::init`: `toyos_acpi::ecam_base`
+   - The kernel arms as its first act, before `mm::init`: `toyos_acpi::ecam_allocations`
      and the bus-0 scan `bootloader/src/watchdog.rs` does, through a boot map
      that maps bus 0's ECAM window. What stays unbounded is the loader's code
      from `ExitBootServices` to the jump.

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
-use toyos_acpi::Allocation;
-use toyos_pci::{bar, bridge, buses, caps, msi, msix};
+use toyos_acpi::EcamWindow;
+use toyos_pci::{bar, bridge, caps, msi, msix};
 
 use crate::mm::Mmio;
 use crate::mm::policy::MmioPolicy;
@@ -528,23 +528,17 @@ impl<'a> Iterator for CapabilityIter<'a> {
     }
 }
 
-/// One ECAM window, mapped over exactly the buses its allocation decodes.
+/// One ECAM window, mapped over exactly the buses it decodes.
 #[derive(Clone, Copy)]
 struct Window {
-    allocation: Allocation,
+    ecam: EcamWindow,
     mmio: Mmio,
 }
 
 impl Window {
     /// The configuration space of a function on a bus this window decodes.
     fn function(&self, bus: u8, dev: u8, func: u8) -> Option<Mmio> {
-        if !self.allocation.holds(bus) {
-            return None;
-        }
-        let offset = (u64::from(bus - self.allocation.buses().start()) << 20)
-            | (u64::from(dev) << 15)
-            | (u64::from(func) << 12);
-        Some(self.mmio.subregion(offset, CONFIG_BYTES))
+        Some(self.mmio.subregion(self.ecam.offset(bus, dev, func)?, CONFIG_BYTES))
     }
 }
 
@@ -559,27 +553,27 @@ pub fn function_window(bus: u8, dev: u8, func: u8) -> Option<Mmio> {
 }
 
 /// The ECAM windows [`enumerate`] walked, in the order it walked them.
-pub fn windows() -> Vec<Allocation> {
-    WINDOWS.lock().iter().map(|window| window.allocation).collect()
+pub fn windows() -> Vec<EcamWindow> {
+    WINDOWS.lock().iter().map(|window| window.ecam).collect()
 }
 
 /// The most functions [`enumerate`] will hand back; the rest are logged, not enumerated.
 const MAX_DEVICES: usize = 256;
 
-/// Every PCIe function on a bus something forwards configuration cycles to,
-/// window by window and in bus/device/function order within one; drivers
-/// must select all matches, not the first.
+/// Every PCIe function the windows decode, window by window and in
+/// bus/device/function order within one; drivers must select all matches,
+/// not the first.
 ///
-/// **Only the buses each window decodes are mapped, and only those a bridge
-/// forwards are read** ([`buses`]): past a window's end bus its addresses are
-/// other hardware's, which reads as functions that are not there.
-pub fn enumerate(allocations: &[Allocation]) -> Vec<PciDevice> {
+/// **Each window is mapped and read over the buses it decodes and no
+/// further**: past its end bus the addresses are other hardware's, which
+/// reads as functions that are not there.
+pub fn enumerate(ecam: &[EcamWindow]) -> Vec<PciDevice> {
     log!("PCI: Enumerating devices...");
-    let windows: Vec<Window> = allocations
+    let windows: Vec<Window> = ecam
         .iter()
-        .map(|&allocation| {
-            let (start, bytes) = allocation.decoded();
-            Window { allocation, mmio: crate::mm::paging::map_mmio(start, bytes, MmioPolicy::Uncacheable) }
+        .map(|&ecam| {
+            let (start, bytes) = ecam.decoded();
+            Window { ecam, mmio: crate::mm::paging::map_mmio(start, bytes, MmioPolicy::Uncacheable) }
         })
         .collect();
     *WINDOWS.lock() = windows.clone();
@@ -587,11 +581,10 @@ pub fn enumerate(allocations: &[Allocation]) -> Vec<PciDevice> {
     let mut found: Vec<PciDevice> = Vec::new();
     'scan: for window in &windows {
         let function = |bus: u8, dev: u8, func: u8| {
-            let mmio = window.function(bus, dev, func).expect("the walk enters only buses its window decodes");
+            let mmio = window.function(bus, dev, func).expect("the scan reads only buses its window decodes");
             PciDevice { mmio, bus, dev, func }
         };
-        let mut walk = buses::Buses::new(window.allocation.buses());
-        while let Some(bus) = walk.enter() {
+        for bus in window.ecam.buses() {
             for dev in 0..32u8 {
                 let root = function(bus, dev, 0);
                 if root.vendor_id() == INVALID_VENDOR { continue; }
@@ -606,13 +599,6 @@ pub fn enumerate(allocations: &[Allocation]) -> Vec<PciDevice> {
                         log!("PCI: more than {} functions decoded; the rest are not enumerated",
                             MAX_DEVICES);
                         break 'scan;
-                    }
-                    if pci.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION == bridge::HEADER_TYPE_BRIDGE {
-                        match walk.bridge(bus, pci.read_config_u32(buses::BUS_NUMBERS)) {
-                            Ok(reached) => log!("PCI {bus:02x}:{dev:02x}.{func}: forwards buses {:02x}..={:02x}",
-                                reached.start(), reached.end()),
-                            Err(why) => log!("PCI {bus:02x}:{dev:02x}.{func}: no bus below it is read: {why}"),
-                        }
                     }
                     found.push(pci);
                 }

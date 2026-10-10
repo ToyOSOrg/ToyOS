@@ -76,15 +76,16 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use core::sync::atomic::AtomicU32;
 
 use toyos_abi::acpi::{Access, AcpiInfo, Block, Refused, Space, Width, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::SyscallError;
-use toyos_acpi::{Ec, FixedHardware, LegacyMode, PowerButton};
+use toyos_acpi::{Ec, EcamWindow, FixedHardware, LegacyMode, PowerButton};
 use toyos_userbound::firmware::{
-    self, CallRate, Ecam, FirmwareCall, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
+    self, CallRate, FirmwareCall, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
 };
 use toyos_userbound::Ports;
 
@@ -119,8 +120,8 @@ struct Hardware {
     /// Or why it is none a holder can be handed.
     ec: Result<Ec, String>,
     rsdp: u64,
-    /// The window configuration space is reached through, as the MCFG bounds it.
-    ecam: Option<Ecam>,
+    /// The windows configuration space is reached through, as the MCFG bounds them.
+    ecam: Vec<EcamWindow>,
     lock: GlobalLock,
 }
 
@@ -285,18 +286,12 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(), global_lock(facs));
+    let (ecam, lock) = (crate::drivers::pci::windows(), global_lock(facs));
     let hardware = Hardware { fixed, control, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
 
-/// The first ECAM window PCI enumeration walked.
-fn ecam() -> Option<Ecam> {
-    let window = *crate::drivers::pci::windows().first()?;
-    let (first_bus, last_bus) = window.buses().into_inner();
-    Some(Ecam { base: window.base(), segment: window.segment(), first_bus, last_bus })
-}
 
 /// The Global Lock of the FACS the FADT names, said by name where there is
 /// none or it is none this kernel takes: a FACS that does not decode, and one
@@ -698,7 +693,7 @@ fn write_port(passed: &PortAt, value: u64) {
 /// One configuration access, decided and, where it is a read, made through
 /// the window the MCFG names, which the policy bounded the function by.
 fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunction, offset: u16, width: Width, write: bool) -> Result<u64, Refused> {
-    let at = firmware::config(hardware.ecam, segment, function, offset, width, write)?;
+    let at = firmware::config(&hardware.ecam, segment, function, offset, width, write)?;
     let PciFunction { bus, device, function } = at.function();
     let space = crate::drivers::pci::function_window(bus, device, function).expect("a machine with a claimable ACPI row enumerated its PCI functions");
     let offset = u64::from(at.offset());
@@ -734,7 +729,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
             let memory = Memory {
                 map,
                 mapped_end: crate::mm::direct_map_end().get(),
-                ecam: hardware.ecam,
+                ecam: &hardware.ecam,
                 devices: driven.iter().copied().chain(bars),
                 facs: hardware.lock.facs().map(|facs| facs.span),
                 uncached,
@@ -750,8 +745,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
             Ok(0)
         }
         (MemoryVerdict::AsConfig(function, offset), _) => {
-            let segment = hardware.ecam.expect("the policy answered a configuration access from an ECAM window").segment;
-            config(hardware, acting, segment, function, offset, width, write.is_some())
+            config(hardware, acting, toyos_acpi::SEGMENT_GROUP, function, offset, width, write.is_some())
         }
         (MemoryVerdict::Refused(refused), _) => Err(refused),
     }
