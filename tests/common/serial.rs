@@ -96,10 +96,11 @@ pub(crate) const DEATHS: &[(&str, Died, Died)] = &[
     // `machine_check_handler`, the one exception a Ring 3 frame does not make
     // the process's fault. Also `-> !`.
     ("MACHINE CHECK", Died::Kernel, Died::Kernel),
-    // kernel/src/arch/x86_64/vtd/fault.rs — a fault on a stream this kernel drives
-    // has nobody to hand it to, so the handler halts. One a *process* drives
-    // says `owner=slot<N>` and the machine goes on, which is why the needle is
-    // the owner rather than the fault.
+    // kernel/src/iommu/fault.rs — a fault on a function this kernel drives has
+    // nobody to hand it to, so the handler halts. One a *process* drives says
+    // `owner=slot<N>`, and one naming no enumerated function `owner=none`, and
+    // the machine goes on, which is why the needle is the owner rather than
+    // the fault.
     ("iommu: DMA FAULT owner=kernel", Died::Kernel, Died::Kernel),
     // kernel/src/main.rs — a panic that landed on a CPU already inside a fault
     // or a report. The rest of the line is `panic::last_words`: which of the
@@ -348,12 +349,15 @@ impl Serial {
 /// all — so the only capture allowed to hold one is the capture of the test
 /// that staged it, and every other boot in the estate reds.
 const NEVER_CLEAN: &[&str] = &[
-    // kernel/src/arch/x86_64/vtd/fault.rs — a function a *process* drives reached an
+    // kernel/src/iommu/fault.rs — a function a *process* drives reached an
     // address its own domain does not map. The machine goes on and the claim
     // refuses every later call, so this is not a death; it is a driver whose
     // descriptors are wrong, and a netstack that did it on every boot would
     // otherwise pass everywhere.
     "iommu: DMA FAULT owner=slot",
+    // The same file — a requester no enumerated function is: refused by the
+    // unit, and on a boot that staged none, a device nothing here accounts for.
+    "iommu: DMA FAULT owner=none",
     // kernel/src/log/console.rs — the stop waited out its whole budget for
     // `klogd` to let the console's wire go.
     super::power::WIRE_LATE,

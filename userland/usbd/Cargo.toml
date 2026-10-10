@@ -1,0 +1,14 @@
+[package]
+name = "usbd"
+description = "One xHCI controller driven from userland: the handoff, its reset and rings, its interrupt through the claim, and every root-hub device enumerated through toyos-xhci and named over inspect."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../toyos" }
+toyos-xhci = { path = "../../toyos-xhci" }
+toyos-inspect = { path = "../../toyos-inspect" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the xHCI controller ToyOS claims for it"

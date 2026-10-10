@@ -49,7 +49,7 @@ the machine's, and every device shares it.
 `kernel/src/irq_census.rs` counts every delivery per CPU per source in
 `PerCpu`, one `add qword ptr gs:[<off>], 1` for the source; a CPU's total is
 their sum. `irq: cpuN timer=… kick=… …` is printed per CPU once a boot, where
-the machine stops, and on the blocked-task dump. `irq_census_conservation`
+the machine stops. `irq_census_conservation`
 gates the present-state fact on the T14, off the stop's census on the
 black-box page, and prints cpu0's share of that boot.
 

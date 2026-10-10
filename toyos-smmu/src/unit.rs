@@ -20,16 +20,23 @@ pub const IRQ_CTRL: usize = 0x050;
 pub const IRQ_CTRLACK: usize = 0x054;
 pub const GERROR: usize = 0x060;
 pub const GERRORN: usize = 0x064;
+pub const GERROR_IRQ_CFG0: usize = 0x068;
 pub const STRTAB_BASE: usize = 0x080;
 pub const STRTAB_BASE_CFG: usize = 0x088;
 pub const CMDQ_BASE: usize = 0x090;
 pub const CMDQ_PROD: usize = 0x098;
 pub const CMDQ_CONS: usize = 0x09C;
 pub const EVENTQ_BASE: usize = 0x0A0;
+pub const EVENTQ_IRQ_CFG0: usize = 0x0B0;
+/// Present only where [`IDR0_PRI`] is set (§6.3.34).
+pub const PRIQ_IRQ_CFG0: usize = 0x0D0;
 /// The event queue's indexes are in register page 1, 64 KiB above page 0
 /// (§6.1, §6.2.2): `SMMU_EVENTQ_PROD` and `SMMU_EVENTQ_CONS` at 0xA8 and 0xAC of it.
 pub const EVENTQ_PROD: usize = 0x1_00A8;
 pub const EVENTQ_CONS: usize = 0x1_00AC;
+
+/// `SMMU_IDR0.PRI` [16] (§6.3.1): the unit has a PRI queue, and its registers.
+pub const IDR0_PRI: u32 = 1 << 16;
 
 /// `SMMU_CR0` (§6.3.9), and `SMMU_CR0ACK`, which reads each bit back once
 /// the unit has acted on it.
@@ -44,9 +51,10 @@ pub const CR0_CMDQEN: u32 = 1 << 3;
 pub const CR1_WRITE_BACK: u32 = 0b11 << 10 | 0b01 << 8 | 0b01 << 6 | 0b11 << 4 | 0b01 << 2 | 0b01;
 
 /// `SMMU_CR2` (§6.3.12): `RECINVSID` [1], so a transaction under a StreamID
-/// past the stream table is recorded as well as aborted, and `PTM` [2], so
-/// no CPU's broadcast TLB invalidation reaches the unit's entries: its ASIDs
-/// are its own. `E2H` [0] stays clear.
+/// past the stream table is recorded as well as aborted, as one under an
+/// invalid entry in it is, and `PTM` [2], so no CPU's broadcast TLB
+/// invalidation reaches the unit's entries: its ASIDs are its own. `E2H` [0]
+/// stays clear.
 pub const CR2_RECORD_PRIVATE: u32 = 1 << 1 | 1 << 2;
 
 /// `SMMU_GBPA` (§6.3.15): what happens to every transaction while `SMMUEN`

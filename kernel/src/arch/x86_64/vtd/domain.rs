@@ -78,15 +78,14 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     if u32::from(id) >= ceiling {
         return Err(IommuError::DomainsExhausted(ceiling));
     }
-    let mut domain = Domain::new(&mut TABLES.lock(), id, width, mgaw, &domains.reserved, room)?;
-    let first = domain.reserve(room).expect("`Domain::new` refuses a domain without the room");
+    let (domain, first) = Domain::new(&mut TABLES.lock(), id, width, mgaw, &domains.reserved, room)?;
     log!(
         "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x} to {:#x}",
         domain.root().phys(),
         width.bits(),
         mgaw,
-        domain.floor(),
-        domain.ceiling()
+        domain.window().floor(),
+        domain.window().ceiling()
     );
     domains.live.push(domain);
     Ok((DomainId::new(id), first))
@@ -98,7 +97,7 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     }
     let mut domains = DOMAINS.lock();
     let domain = domains.at(id);
-    let at = domain.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.ceiling()))?;
+    let at = domain.window_mut().reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.window().ceiling()))?;
     let (did, domain) = (domain.id(), *domain);
     let mut units = UNITS.lock();
     table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
@@ -138,7 +137,7 @@ pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<u16, Iommu
     let mut domains = DOMAINS.lock();
     let domain = *domains.at(id);
     assert!(
-        domain.handed_out(at, bytes),
+        domain.window().handed_out(at, bytes),
         "iommu: domain{} never handed out {:#x}+{bytes:#x}",
         domain.id(),
         at.raw()
@@ -169,7 +168,7 @@ pub fn attach(stream: StreamId, id: DomainId) {
     for unit in units.iter_mut() {
         unit.attach(stream, &domain);
     }
-    super::fault::attached(stream, domain.id());
+    crate::iommu::fault::attached(stream, domain.id());
     log!("iommu: {stream} moves to domain{}", domain.id());
 }
 
