@@ -265,8 +265,6 @@ impl core::fmt::Display for StreamId {
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
 /// No domain's addresses reach into one of `windows`, the memory firmware says the root bridges decode.
-///
-/// Calls `unit::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
 pub fn init(
     rsdp_addr: u64,
     devices: &[crate::drivers::pci::PciDevice],

@@ -6,10 +6,11 @@
 //!
 //! The PC platform's own devices live here too, because no other architecture
 //! has them: the i8042, the I/O APIC, the CMOS RTC, the chipset's TCO
-//! watchdog and VT-d. Generic code reaches each through the concept it serves
+//! watchdog, VT-d and AMD-Vi. Generic code reaches each through the concept it serves
 //! (`keyboard_controller`, `watchdog`, `iommu_unit`, …), never by its name.
 
 pub mod acpi_mode;
+pub mod amdvi;
 pub mod apic;
 pub mod barrier;
 pub mod boot;
@@ -25,6 +26,7 @@ pub mod hpet;
 pub mod hw;
 pub mod i8042;
 pub mod idt;
+pub mod iommu_unit;
 pub mod ioapic;
 pub mod mtrr;
 pub mod paging;
@@ -45,7 +47,6 @@ pub mod watchdog;
 pub use apic as irqchip;
 pub use i8042 as keyboard_controller;
 pub use idt as trap;
-pub use vtd as iommu_unit;
 
 pub use apic::{msi_message, MSI_DOORBELL};
 
