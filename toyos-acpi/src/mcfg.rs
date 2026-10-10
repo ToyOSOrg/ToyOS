@@ -10,8 +10,8 @@
 //! that arithmetic, and it answers only inside the range.
 //!
 //! **Segment group 0 alone is served** ([`SEGMENT_GROUP`]): it is the one every
-//! machine has, and a window on another is refused by name. Each of its buses
-//! is decoded by at most one window.
+//! machine has, and a window on another is refused by name. Each of its buses,
+//! and each byte of its configuration space, is decoded by at most one window.
 
 use core::ops::RangeInclusive;
 
@@ -162,8 +162,12 @@ pub enum AllocationRefused {
     Partial { bytes: usize },
     /// Buses an earlier window already decodes.
     Overlaps { start_bus: u8, end_bus: u8 },
+    /// Bytes an earlier window already decodes as other buses: one function
+    /// would answer under two bus numbers.
+    SharesBytes { start: u64, bytes: u64 },
     /// Its bytes start or end off the grain the kernel maps at, so a mapping
-    /// of it would take the neighbouring bytes too.
+    /// of it would take the neighbouring bytes too
+    /// (`issues/an-ecam-window-off-the-2-mib-grain-is-not-enumerated-on-x86.md`).
     OffGrain { start: u64, bytes: u64, grain: u64 },
     /// Its last byte is at or past the first address the kernel can map.
     PastLimit { last: u64, limit: u64 },
@@ -178,6 +182,8 @@ pub struct Allocations<P> {
     next: usize,
     /// One bit per bus a window already decodes.
     claimed: [u64; 4],
+    /// Where each claimed bus's configuration space starts.
+    bus_at: [u64; 256],
 }
 
 impl<P> Allocations<P> {
@@ -190,7 +196,7 @@ impl<P> Allocations<P> {
 /// The MCFG at `rsdp_addr`, opened for its first allocation structure.
 pub fn ecam_allocations<P: Phys>(phys: P, rsdp_addr: u64) -> Result<Allocations<P>, TableError> {
     let table = find_table(phys, rsdp_addr, b"MCFG", FIRST_ENTRY + ENTRY_LEN)?;
-    Ok(Allocations { table, next: FIRST_ENTRY, claimed: [0; 4] })
+    Ok(Allocations { table, next: FIRST_ENTRY, claimed: [0; 4], bus_at: [0; 256] })
 }
 
 impl<P: Phys> Iterator for Allocations<P> {
@@ -219,8 +225,16 @@ impl<P> Allocations<P> {
         if window.buses().any(claimed) {
             return Err(AllocationRefused::Overlaps { start_bus: window.start_bus, end_bus: window.end_bus });
         }
+        // Every bus is one megabyte on a megabyte boundary, so two windows
+        // share a byte exactly where a claimed bus starts inside this one.
+        let (start, bytes) = window.decoded();
+        let decodes = start..=start + (bytes - 1);
+        if (0..=u8::MAX).any(|bus| claimed(bus) && decodes.contains(&self.bus_at[usize::from(bus)])) {
+            return Err(AllocationRefused::SharesBytes { start, bytes });
+        }
         for bus in window.buses() {
             self.claimed[usize::from(bus / 64)] |= 1 << (bus % 64);
+            self.bus_at[usize::from(bus)] = window.base + (u64::from(bus) << BUS_SHIFT);
         }
         Ok(window)
     }

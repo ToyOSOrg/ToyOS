@@ -11,13 +11,21 @@ use toyos_userbound::firmware::{
 use toyos_acpi::EcamWindow;
 use toyos_userbound::{KeptCommands, Mediated};
 
-/// One window as an MCFG allocation structure of segment group 0 names it,
-/// through the decode that is the only maker of one.
+/// Windows as MCFG allocation structures of segment group 0 name them, each
+/// `(base, first bus, last bus)`, through the decode that is the only maker of
+/// one.
+fn windows(named: &[(u64, u8, u8)]) -> &'static [EcamWindow] {
+    let decode = |&(base, first_bus, last_bus): &(u64, u8, u8)| {
+        let mut entry = [0u8; 16];
+        entry[..8].copy_from_slice(&base.to_le_bytes());
+        (entry[10], entry[11]) = (first_bus, last_bus);
+        EcamWindow::decode(&entry).expect("a well-formed window")
+    };
+    named.iter().map(decode).collect::<Vec<_>>().leak()
+}
+
 fn ecam(base: u64, first_bus: u8, last_bus: u8) -> &'static [EcamWindow] {
-    let mut entry = [0u8; 16];
-    entry[..8].copy_from_slice(&base.to_le_bytes());
-    (entry[10], entry[11]) = (first_bus, last_bus);
-    Box::leak(Box::new([EcamWindow::decode(&entry).expect("a well-formed window")]))
+    windows(&[(base, first_bus, last_bus)])
 }
 
 const fn e(uefi_type: u32, start: u64, end: u64) -> MemoryMapEntry {
@@ -458,6 +466,33 @@ fn an_address_in_the_ecam_window_is_a_configuration_access_whatever_the_map_type
     let top = Memory { ecam: ecam(0xffff_ffff_fff0_0000, 0, 0), ..bare(WINDOW, &[]) };
     assert_eq!(top.clone().decide(u64::MAX, Width::Byte, false), MemoryVerdict::AsConfig(Function { bus: 0, device: 0x1f, function: 7 }, 0xFFF));
     assert_eq!(refused(&top, u64::MAX, Width::Word, false), Refused::Unmapped);
+}
+
+/// Every window is read for every access, the first no more than a later one:
+/// an address in the second is a configuration access with its own bus,
+/// refused as a write whatever the map types it, and a read reaches its buses.
+#[test]
+fn a_later_window_is_held_as_the_first_is() {
+    // Buses 0x40..=0x7f at their own base, after the laptop's 0..=0x3f; both
+    // typed reserved, as a plain write would pass.
+    const SECOND: u64 = 0xd000_0000;
+    const WINDOWS: &[MemoryMapEntry] = &[e(0, 0xc000_0000, 0xe000_0000)];
+    let memory = Memory { ecam: windows(&[(0xc000_0000, 0, 0x3f), (SECOND, 0x40, 0x7f)]), ..bare(WINDOWS, &[]) };
+    let function = Function { bus: 0x42, device: 3, function: 1 };
+    let at = SECOND + (0x42 << 20 | 3 << 15 | 1 << 12 | 0x10);
+    for write in [false, true] {
+        let verdict = memory.clone().decide(at, Width::DWord, write);
+        assert_eq!(verdict, MemoryVerdict::AsConfig(function, 0x10), "write={write}");
+        // What the kernel does with that verdict.
+        let MemoryVerdict::AsConfig(function, offset) = verdict else { unreachable!() };
+        let made = config(memory.ecam, 0, function, offset, Width::DWord, write).map(|at| (at.function(), at.offset()));
+        assert_eq!(made, if write { Err(Refused::ConfigWrite) } else { Ok((function, 0x10)) }, "write={write}");
+    }
+    for bus in [0x3f, 0x40, 0x7f] {
+        let function = Function { bus, device: 0, function: 0 };
+        assert!(config(memory.ecam, 0, function, 0, Width::DWord, false).is_ok(), "bus {bus:#x}");
+    }
+    assert_eq!(config(memory.ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
 }
 
 #[test]

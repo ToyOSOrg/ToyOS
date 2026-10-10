@@ -149,6 +149,34 @@ fn another_segment_and_an_overlap_are_refused() {
     );
 }
 
+/// Buses no window decodes, at bytes one already does, are refused: the same
+/// functions would answer under two bus numbers. A window that only touches
+/// one, either side, is accepted.
+#[test]
+fn a_window_over_another_windows_bytes_is_refused() {
+    // The base that puts `bus` at `at`.
+    let base = |at: u64, bus: u8| at - u64::from(bus) * MIB;
+    let found = walk(&mcfg(&[
+        (0xe000_0000, 0, 0, 0x3f),
+        (base(0xe000_0000, 0x40), 0, 0x40, 0x7f),
+        (base(0xe3f0_0000, 0x80), 0, 0x80, 0x80),
+        (base(0xdfe0_0000, 0xa0), 0, 0xa0, 0xa7),
+        (base(0xdff0_0000, 0x81), 0, 0x81, 0x81),
+        (base(0xe400_0000, 0x82), 0, 0x82, 0x82),
+    ]));
+    assert_eq!(
+        found,
+        [
+            Ok((0xe000_0000, 0, 0x3f)),
+            Err(AllocationRefused::SharesBytes { start: 0xe000_0000, bytes: 64 * MIB }),
+            Err(AllocationRefused::SharesBytes { start: 0xe3f0_0000, bytes: MIB }),
+            Err(AllocationRefused::SharesBytes { start: 0xdfe0_0000, bytes: 8 * MIB }),
+            Ok((base(0xdff0_0000, 0x81), 0x81, 0x81)),
+            Ok((base(0xe400_0000, 0x82), 0x82, 0x82)),
+        ]
+    );
+}
+
 /// A table that ends inside a structure ends the walk on a refusal of that
 /// structure, after every whole one.
 #[test]
