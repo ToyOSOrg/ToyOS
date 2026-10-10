@@ -72,18 +72,12 @@ changes.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
   suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
-- **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier. `4ad8875` made it `Sched::Serial`,
-  which shows what serialising buys and what it does not: within one run the
-  phase is quiet.
-- **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
-  tier.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
   the same tree eight minutes later: `gaps none`, `phase-breaks 16` — the
-  declared #88 failure and nothing else. It is `Sched::Serial`, so like
-  `dump_nmi_probe` the harness never re-runs it alone and the run simply reds.
+  declared #88 failure and nothing else. It is `Sched::Serial`, so the harness
+  never re-runs it alone and the run simply reds.
   The tree it was seen on differed
   from main only in `src/`, so the guest image was byte-identical to main's.
   **Three times the same day**, all three in landing gates of that one
@@ -481,7 +475,8 @@ A flaky test is deleted at once. Each commit below takes one out:
 - `metal_sim_pointer_churn` — `525e59ad1`;
 - `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
   sightings `issues/log-reserve-window-negative-times-out-beside-other-guests.md`
-  and `issues/process-stats-exits-101-beside-other-guests.md` record;
+  and `issues/process-stats-exits-101-beside-other-guests.md` record; nothing
+  restores it, since the kernel no longer has the Ctrl+Alt+D report it drove;
 - `metal_sim_input` — `415d9a102`;
 - `xhci_full_speed_device` — `5e4223525`, with `Profile::MetalFullSpeed`.
 

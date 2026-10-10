@@ -1,6 +1,6 @@
 //! The unit that decides what a device may reach.
 //!
-//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, remaps every interrupt source through a source-id-verified table entry, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
+//! Inventories the machine's IOMMU units, turns translation on, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above the backend stay backend-neutral, and what every backend decides alike is declared here once: a domain's addresses ([`window`]) and what a fault record ends ([`fault`]).
 //!
 //! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message it sends unremapped is any vector at any CPU; its message is its claim slot's own entry ([`Remapped`]).
 //!
@@ -10,6 +10,9 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use crate::arch::iommu_unit as unit;
+
+pub(crate) mod fault;
+pub(crate) mod window;
 
 /// The address width a device's translations cover.
 ///
@@ -428,7 +431,7 @@ pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<Pi
 /// the machine keeps running. Takes the triple rather than a [`StreamId`], like
 /// [`remap_msi`]: what a requester id is stays in this module.
 pub fn note_user_owned(bus: u8, device: u8, function: u8, slot: Option<usize>) {
-    unit::fault::user_owned(StreamId::pci(bus, device, function), slot);
+    fault::user_owned(StreamId::pci(bus, device, function), slot);
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.

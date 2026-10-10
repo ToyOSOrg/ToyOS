@@ -1,0 +1,12 @@
+[package]
+name = "toyos-sha2"
+description = "SHA-256 and SHA-512 from FIPS 180-4, scalar: what the loader, update, swap, pkg and the build hash with; pure."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dev-dependencies]
+# The differential oracle: RustCrypto's implementation, which shares no code
+# with this crate. Already resolved here, where `ed25519-dalek` hashes with it.
+sha2 = "0.10"

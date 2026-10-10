@@ -495,14 +495,12 @@ pub fn pass(dispose: Dispose) {
     crate::arch::cpu::df_witness_mutate();
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
-    // Read before this pass's own level goes on top of it.
-    let entered = super::dump::Entered::Pass { depth: crate::preempt::count() };
     crate::preempt::disable();
     #[cfg(feature = "boot-actuators")]
     crate::deadline::wedge_if_staged();
     // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
     crate::preempt::clear_need_resched();
-    drain_irqs(entered);
+    drain_irqs();
     // After `drain_irqs` and before the pass picks, so a wake this
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
@@ -584,7 +582,7 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
-    drain_irqs(super::dump::Entered::Blocking);
+    drain_irqs();
     let now = HW.now();
     let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
@@ -658,16 +656,9 @@ fn execute(action: Action<KernelPayload>) {
 }
 
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
-fn drain_irqs(entered: super::dump::Entered) {
+fn drain_irqs() {
     crate::drivers::xhci::poll_if_pending();
     crate::arch::keyboard_controller::service();
-    // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
-    super::dump::serve_request(entered);
-    // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
-    // by asking, and this is where each one answers.
-    super::dump::serve_if_owed();
-    // Repaints the panel if whoever owns the screen has drawn over the report.
-    crate::drivers::panic_console::hold_report();
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
@@ -686,12 +677,6 @@ pub fn enter_idle_loop() -> ! {
 
 extern "C" fn idle_loop() -> ! {
     loop {
-        // The idle loop, not a pass: the state it stages is a CPU that
-        // never reaches one.
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::dump_deaf_cpu() {
-            super::dump::deaf_window();
-        }
         // The first NMI; its handler stages the nested one.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::nmi_nested() {
@@ -774,30 +759,6 @@ pub fn current_is_rt() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.rt().is_rt())).unwrap_or(false)
 }
 
-pub fn ready_len() -> usize {
-    try_with_cpu(|cpu| cpu.ready_len()).unwrap_or(0)
-}
-
-/// Every thread on this CPU the machine's stop banded.
-pub fn for_each_stopped(mut f: impl FnMut(TaskId)) -> bool {
-    try_with_cpu(|cpu| {
-        for task in cpu.stopped() {
-            f(task.ext().id);
-        }
-    })
-    .is_some()
-}
-
-/// Every dying thread on this CPU, in the order the pick will take them.
-pub fn for_each_dying(mut f: impl FnMut(TaskId)) -> bool {
-    try_with_cpu(|cpu| {
-        for task in cpu.dying() {
-            f(task.ext().id);
-        }
-    })
-    .is_some()
-}
-
 /// Every thread on this CPU's run queue, in pick order, for a staging that
 /// says why a woken thread has not run. `false` means a pass owns the state.
 #[cfg(feature = "boot-actuators")]
@@ -805,37 +766,6 @@ pub fn for_each_ready(mut f: impl FnMut(TaskId)) -> bool {
     try_with_cpu(|cpu| {
         for task in cpu.rq().tasks() {
             f(task.ext().id);
-        }
-    })
-    .is_some()
-}
-
-/// The thread this CPU has loaded, if any.
-pub fn running_id() -> Option<TaskId> {
-    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().id)).flatten()
-}
-
-/// One parked task, flattened because a `ParkedView` borrows the `CpuSched`, which nothing outside this file may hold.
-pub struct ParkedInfo {
-    pub id: TaskId,
-    pub class: kernel::sched::task::WaitClass,
-    pub deadline: Option<u64>,
-    /// When the park began.
-    pub since: u64,
-    pub rt: bool,
-}
-
-/// Walk this CPU's parked tasks. `false` means a pass owns the state right now.
-pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
-    try_with_cpu(|cpu| {
-        for parked in cpu.parked() {
-            f(ParkedInfo {
-                id: parked.ext().id,
-                class: parked.class(),
-                deadline: parked.deadline().map(|n| n.0),
-                since: parked.since().0,
-                rt: parked.is_rt(),
-            });
         }
     })
     .is_some()

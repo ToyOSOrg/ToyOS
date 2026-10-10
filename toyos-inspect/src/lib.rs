@@ -91,6 +91,11 @@ pub const LOG: Owner = Owner { root: "log", port: "log" };
 /// The compositor: the panel, the windows it holds and its frame statistics.
 pub const DISPLAY: Owner = Owner { root: "display", port: "compositor" };
 
+/// usbd: the controller it drives, the devices it named and what its loop
+/// counted. Not among [`OWNERS`] while no image the reader ships in runs it:
+/// the reader refuses a whole answer over an owner it holds no connector for.
+pub const USB: Owner = Owner { root: "usb", port: "usb" };
+
 /// Every owner the reader knows, in the order it asks them.
 pub const OWNERS: [Owner; 4] = [NET, SOUND, LOG, DISPLAY];
 

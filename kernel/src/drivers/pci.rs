@@ -29,9 +29,6 @@ pub const MSIX_ENTRY: u16 = 0;
 // the message and for the unit to put in an entry.
 pub(crate) const MSG_DEST: u32 = 0;
 
-/// No requester id: a bus/device/function is sixteen bits, so this is none of them.
-pub(crate) const NO_FUNCTION: u32 = u32::MAX;
-
 /// Why a walk of a function's capability list answered no capability.
 pub enum NoCapability {
     /// The walk reached the list's terminator and nothing on it carried the id.

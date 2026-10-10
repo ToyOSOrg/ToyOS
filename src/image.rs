@@ -6,7 +6,7 @@ use std::path::Path;
 use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBlockIO};
 
 use crate::arch::Arch;
-use sha2::{Digest, Sha256};
+use toyos_sha2::Sha256;
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
