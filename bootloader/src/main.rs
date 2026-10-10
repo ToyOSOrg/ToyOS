@@ -429,14 +429,18 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     };
 
     let root = alloc_page();
-    let identity_pdpt = alloc_page();
-    let high_pdpt = alloc_page();
+    let mut pdpts = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_REGIONS];
+    for (at, region) in plan.regions().iter().enumerate() {
+        let pdpt = alloc_page();
+        pdpts[at] = pdpt;
+        *root.add(ROOT_IDENTITY + *region as usize) = table(pdpt as u64);
+        *root.add(ROOT_HIGH_HALF + *region as usize) = table(pdpt as u64);
+    }
     let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
-    for (slot, gib) in plan.directories().iter().enumerate() {
+    for (slot, (region, index)) in plan.directory_slots().enumerate() {
         let pd = alloc_page();
         directories[slot] = pd;
-        *identity_pdpt.add(*gib as usize) = table(pd as u64);
-        *high_pdpt.add(*gib as usize) = table(pd as u64);
+        *pdpts[region].add(index) = table(pd as u64);
     }
 
     let mut fine = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_PAGES];
@@ -454,9 +458,6 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
             Slot::Fine { table, index } => *fine[table].add(index) = page(entry.phys, entry.cache),
         }
     }
-
-    *root.add(ROOT_IDENTITY) = table(identity_pdpt as u64);
-    *root.add(ROOT_HIGH_HALF) = table(high_pdpt as u64);
 
     root as u64
 }
@@ -540,18 +541,26 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // pages by it. Before the exit, while the map can still be asked for; the
     // attributes a descriptor carries do not change across it.
     let write_back = write_back_memory(&system_table);
+    // Said before it is refused, for `report_reach`'s reason.
+    let physical_bits = arch::physical_bits().unwrap_or_else(|why| {
+        println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}");
+        panic!("{why}");
+    });
+    println!("Boot map: this CPU addresses {physical_bits} bits of physical memory");
     let planned = Plan::new(
         gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)),
         loader,
         arch::typing(&write_back),
+        physical_bits,
     );
     match &planned {
         Ok(plan) => {
             match plan.scanout() {
                 Some((at, len)) => println!(
                     "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
-                     PHYS_OFFSET, in {} page directories",
-                    plan.directories().len()
+                     PHYS_OFFSET, in {} page directories under {} second-level tables",
+                    plan.directories().len(),
+                    plan.regions().len()
                 ),
                 None => println!("Scanout: this machine has none"),
             }
