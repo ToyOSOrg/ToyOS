@@ -36,19 +36,14 @@ pub const COMMON_DEVICE_FEATURE_SELECT: u64 = 0x00;
 pub const COMMON_DEVICE_FEATURE: u64 = 0x04;
 pub const COMMON_DRIVER_FEATURE_SELECT: u64 = 0x08;
 pub const COMMON_DRIVER_FEATURE: u64 = 0x0C;
-const COMMON_MSIX_CONFIG: u64 = 0x10;
 pub const COMMON_DEVICE_STATUS: u64 = 0x14;
 const COMMON_QUEUE_SELECT: u64 = 0x16;
 pub const COMMON_QUEUE_SIZE: u64 = 0x18;
-const COMMON_QUEUE_MSIX: u64 = 0x1A;
 pub const COMMON_QUEUE_ENABLE: u64 = 0x1C;
 pub const COMMON_QUEUE_NOTIFY_OFF: u64 = 0x1E;
 pub const COMMON_QUEUE_DESC: u64 = 0x20;
 pub const COMMON_QUEUE_DRIVER: u64 = 0x28;
 pub const COMMON_QUEUE_DEVICE: u64 = 0x30;
-
-/// Sentinel a virtio device reads back for a vector it could not allocate (virtio 1.2 §4.1.5.1.2).
-const NO_VECTOR: u16 = 0xFFFF;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -92,7 +87,6 @@ struct VirtioPciConfig {
     notify_off_multiplier: u32,
     #[allow(dead_code)] // parsed from spec, used for interrupt-based operation
     isr: Mmio,
-    device: Mmio,
 }
 
 /// Why a virtio PCI capability names no config window, or the window it names.
@@ -262,13 +256,14 @@ impl VirtioPciConfig {
             }
         }
 
-        Ok(Self {
+        let config = Self {
             common: common.ok_or(MissingCap::Common)?,
             notify: notify.ok_or(MissingCap::Notify)?,
             notify_off_multiplier,
             isr: isr.ok_or(MissingCap::Isr)?,
-            device: device.ok_or(MissingCap::Device)?,
-        })
+        };
+        device.ok_or(MissingCap::Device)?;
+        Ok(config)
     }
 }
 
@@ -295,20 +290,6 @@ impl<'pool> VirtqueueRegions<'pool> {
             used: buf.subview(used_off, used_size),
         }
     }
-
-    /// Compute regions from three separate DMA pages.
-    pub fn from_separate(
-        desc: Dma<'pool>,
-        avail: Dma<'pool>,
-        used: Dma<'pool>,
-        queue_size: u16,
-    ) -> Self {
-        Self {
-            desc: desc.subview(0, queue_size as usize * DESC_BYTES),
-            avail: avail.subview(0, avail_bytes(queue_size)),
-            used: used.subview(0, used_bytes(queue_size)),
-        }
-    }
 }
 
 /// Proof a descriptor slot is available for submission; `id()` is always below the queue's size.
@@ -320,47 +301,6 @@ impl DescSlot {
 }
 
 
-/// Interrupt-context, lock-free consumer of a virtqueue's used ring; an ISR can drain while another CPU submits under a lock.
-/// Lock-free because it reads only device-written memory and its own `last_used_idx`, never shared driver state.
-pub struct UsedRingConsumer<'pool> {
-    used: Dma<'pool>,
-    size: u16,
-    last_used_idx: u16,
-    refused: u32,
-}
-
-impl UsedRingConsumer<'_> {
-    /// Non-blocking poll: the head descriptor id of a completed chain, or `None` if nothing new.
-    /// Never logs: the only caller is an ISR and the log backend's lock is one it cannot wait on.
-    pub fn poll(&mut self) -> Option<u16> {
-        loop {
-            let used_idx: u16 = self.used.read(USED_IDX_OFF);
-            if used_idx == self.last_used_idx {
-                return None;
-            }
-            // The device writes the element before it bumps the idx (virtio 1.2
-            // §2.7.8), so the element is read after the idx that counts it.
-            barrier::dma_rmb();
-            let slot = self.last_used_idx % self.size;
-            let id: Untrusted<u32> =
-                Untrusted::new(self.used.read(USED_RING_OFF + slot as usize * USED_ELEM_SIZE));
-            self.last_used_idx = self.last_used_idx.wrapping_add(1);
-            // A refused head is skipped, not returned: `None` here means the ring is empty.
-            let Ok(head) = id.index(self.size as usize) else {
-                self.refused = self.refused.saturating_add(1);
-                continue;
-            };
-            // Exact: `index` proved `head < self.size`, a `u16`.
-            return Some(head as u16);
-        }
-    }
-
-    /// How many used-ring elements this consumer has refused, for the life of the boot.
-    pub fn refused(&self) -> u32 {
-        self.refused
-    }
-}
-
 /// A VirtIO split virtqueue.
 pub struct Virtqueue<'pool> {
     desc: Dma<'pool>,
@@ -369,7 +309,6 @@ pub struct Virtqueue<'pool> {
     size: u16,
     last_used_idx: u16,
     notify_offset: u16,
-    used_split: bool,
     /// Bytes each chain's descriptor was given; the one bound a device-reported `len` is compared against. 0 means no chain.
     chain_bytes: alloc::vec::Vec<u32>,
 }
@@ -407,20 +346,7 @@ impl<'pool> Virtqueue<'pool> {
             size: queue_size,
             last_used_idx: 0,
             notify_offset: 0,
-            used_split: false,
             chain_bytes: alloc::vec![0u32; queue_size as usize],
-        }
-    }
-
-    /// Hand the used ring to a dedicated consumer; afterwards `poll_used`/`has_used` panic here.
-    pub fn split_used_consumer(&mut self) -> UsedRingConsumer<'pool> {
-        assert!(!self.used_split, "virtqueue: used ring already split");
-        self.used_split = true;
-        UsedRingConsumer {
-            used: self.used,
-            size: self.size,
-            last_used_idx: self.last_used_idx,
-            refused: 0,
         }
     }
 
@@ -432,30 +358,6 @@ impl<'pool> Virtqueue<'pool> {
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
     pub fn notify_bytes(&self, multiplier: u32) -> u64 {
         self.notify_offset as u64 * multiplier as u64
-    }
-
-    /// Write one descriptor chain without publishing it.
-    /// Addressed by index, not [`DescSlot`]: the in-flight proof a slot carries belongs to the publisher, not here.
-    pub fn write_chain(&mut self, first_desc: u16, bufs: &[(u64, u32, BufDir)]) {
-        assert!(
-            (first_desc as usize + bufs.len()) <= self.size as usize,
-            "virtqueue: chain at {first_desc} of {} descriptors runs past a queue of {}",
-            bufs.len(),
-            self.size
-        );
-        self.chain_bytes[first_desc as usize] = chain_bytes(bufs);
-        for (i, (addr, len, dir)) in bufs.iter().enumerate() {
-            let desc_idx = first_desc + i as u16;
-            let mut flags: u16 = match dir {
-                BufDir::Readable => 0,
-                BufDir::Writable => VIRTQ_DESC_F_WRITE,
-            };
-            if i != bufs.len() - 1 {
-                flags |= VIRTQ_DESC_F_NEXT;
-            }
-            let desc = VirtqDesc { addr: *addr, len: *len, flags, next: desc_idx + 1 };
-            self.desc.write(desc_idx as usize * core::mem::size_of::<VirtqDesc>(), desc);
-        }
     }
 
     /// Where the used element at ring position `i` sits.
@@ -541,7 +443,6 @@ impl<'pool> Virtqueue<'pool> {
 
     /// Check if the device has completed any request.
     pub fn has_used(&self) -> bool {
-        assert!(!self.used_split, "virtqueue: used ring split off");
         let used_idx: u16 = self.used.read(USED_IDX_OFF);
         used_idx != self.last_used_idx
     }
@@ -550,13 +451,13 @@ impl<'pool> Virtqueue<'pool> {
     /// A refused element is skipped, never returned, so one forged element cannot hide the ones behind it.
     /// Never logs: the caller may hold `serial::BackendGuard`, the lock the log backend itself takes.
     pub fn poll_used(&mut self) -> Option<(DescSlot, u32)> {
-        assert!(!self.used_split, "virtqueue: used ring split off");
         loop {
             let used_idx: u16 = self.used.read(USED_IDX_OFF);
             if used_idx == self.last_used_idx {
                 return None;
             }
-            // The element after the idx that counts it, as in `UsedRingConsumer::poll`.
+            // The device writes the element before it bumps the idx (virtio 1.2
+            // §2.7.8), so the element is read after the idx that counts it.
             barrier::dma_rmb();
             let slot = self.last_used_idx % self.size;
             let id = self.used_ring_id(slot);
@@ -571,8 +472,7 @@ impl<'pool> Virtqueue<'pool> {
 
     /// What a used-ring element must satisfy: a head inside this queue's table, at a published
     /// chain, written no further than that chain. Refused rather than clamped: there is nothing
-    /// here to recover from a forged completion, and userland maps virtio-sound's control and
-    /// event queues writable, so neither device-written field is trustworthy unchecked.
+    /// here to recover from a forged completion.
     fn parse_used(&self, id: Untrusted<u32>, len: Untrusted<u32>) -> Option<(DescSlot, u32)> {
         // `chain_bytes` is exactly `size` long: the descriptor table's own bound, not a constant beside it.
         let head = id.index(self.chain_bytes.len()).ok()?;
@@ -809,22 +709,6 @@ pub fn cap_selftest() {
     log!("virtio: pci cap selftest {passed}/{CASES}");
 }
 
-/// Which of a device's two interrupt sources it declined to bind — not a driver or kernel bug.
-#[derive(Debug, Clone, Copy)]
-pub enum NoVector {
-    Config,
-    Queue(u16),
-}
-
-impl core::fmt::Display for NoVector {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Config => write!(f, "its configuration-change interrupt"),
-            Self::Queue(queue) => write!(f, "queue {queue}'s interrupt"),
-        }
-    }
-}
-
 /// A fully initialized VirtIO device.
 pub struct VirtioDevice {
     config: VirtioPciConfig,
@@ -916,22 +800,6 @@ impl VirtioDevice {
         common.write_u16(COMMON_QUEUE_ENABLE, 1);
     }
 
-    /// Point the device's config-change and `queue`'s used-ring interrupt at `pci::MSIX_ENTRY`.
-    /// Kept separate from `PciDevice::enable_msix`: both calls are needed, neither implies the other.
-    pub fn bind_msix(&self, queue: u16) -> Result<(), NoVector> {
-        let common = self.config.common;
-        common.write_u16(COMMON_MSIX_CONFIG, super::pci::MSIX_ENTRY);
-        if common.read_u16(COMMON_MSIX_CONFIG) == NO_VECTOR {
-            return Err(NoVector::Config);
-        }
-        common.write_u16(COMMON_QUEUE_SELECT, queue);
-        common.write_u16(COMMON_QUEUE_MSIX, super::pci::MSIX_ENTRY);
-        if common.read_u16(COMMON_QUEUE_MSIX) == NO_VECTOR {
-            return Err(NoVector::Queue(queue));
-        }
-        Ok(())
-    }
-
     /// Set DRIVER_OK — device is now live.
     pub fn activate(&self) {
         let status = STATUS_ACKNOWLEDGE as u32
@@ -947,9 +815,5 @@ impl VirtioDevice {
 
     pub fn notify_off_multiplier(&self) -> u32 {
         self.config.notify_off_multiplier
-    }
-
-    pub fn device_config(&self) -> Mmio {
-        self.config.device
     }
 }

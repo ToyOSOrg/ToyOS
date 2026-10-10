@@ -533,7 +533,7 @@ mod tests {
                 state: PartState::Kernel,
             }),
             Record::Claim(Claim { on: Claimed::Pci(at), holder }),
-            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::HdaAudio), holder }),
             Record::Claim(Claim {
                 on: Claimed::Partition { device: 3, unique_guid: [0x11; 16] },
                 holder,

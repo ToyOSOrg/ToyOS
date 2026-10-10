@@ -1,0 +1,24 @@
+# A member of the host workspace (root `Cargo.toml`), like `toyos-mixer` beside
+# it: pure, and its tests run on the host against a model of the device that
+# answers on the doorbell, with the specification's tables as the oracle.
+
+[package]
+name = "toyos-virtio-sound"
+description = "soundserver's virtio-sound driver: the sound device's messages (VirtIO 1.2 §5.14) and its three queues over one grant, pure."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+# The transport's `Live`, which a doorbell is rung through, and the split
+# virtqueue every word the device writes back is bounded by.
+toyos-virtio = { path = "../../../toyos-virtio" }
+# `DmaBuffers`, the grant the three queues and every buffer are laid out in.
+toyos-device-memory = { path = "../../../toyos-device-memory" }
+
+[lints.rust]
+warnings = "deny"
