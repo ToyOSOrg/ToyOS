@@ -196,6 +196,18 @@ nothing these guests run before the stop begins.
   comparison across the fix above was of `main`'s `tests/virtsmpcase` image;
   theirs was not compared, so whether the fault reaches them is not known.
 
+The seventh: `virt_off_names_the_cpus_left_on`, in the whole suite on
+`wt/toyos-amdvi` at `192011511`, whose diff changes the x86-64 IOMMU and its
+test and nothing an AArch64 guest runs.
+
+- **The line.** `FAIL virt_off_names_the_cpus_left_on: STALLED: waiting for
+  the boot's last word — it went quiet` after 26 s; 54 of 55 passed.
+- **The load.** 1-minute load 117.86 90.29 60.54 moments after the run
+  ended, 14 cores; not read when it began. Liveness ceilings paid at 1.00x;
+  workers 837 s building against 1253 s testing.
+- **Not known.** It said nothing while it was waited on, and the run's kept
+  serial directory holds 24 UART logs and no PL011's. It was not run again.
+
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
 in https://github.com/ToyOSOrg/ToyOS/pull/719#issuecomment-5978643928, which

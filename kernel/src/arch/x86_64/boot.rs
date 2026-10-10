@@ -39,8 +39,8 @@ pub unsafe extern "C" fn _start(_kernel_args: &KernelArgs) -> ! {
 /// refusal has a channel to reach.
 /// The ACPI tables this architecture decodes: the MADT for its CPUs and I/O
 /// APICs, the FADT for reset, the PM1a control block and the century register, the HPET for
-/// the clock, the MCFG for ECAM and the DMAR for the IOMMU.
-pub const ACPI_TABLES: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR"];
+/// the clock, the MCFG for ECAM and the DMAR or IVRS for the IOMMU.
+pub const ACPI_TABLES: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR", b"IVRS"];
 
 pub fn before_panel() {
     pat::init();
