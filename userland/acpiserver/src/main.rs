@@ -75,14 +75,15 @@ const QUERIES: usize = 32;
 /// How often the log is told the queries' counts, where they moved.
 const COUNTS: Duration = Duration::from_secs(30);
 
-struct Server<'a> {
-    dev: &'a AcpiDev,
+struct Server<'a, K, P> {
+    kernel: &'a K,
+    ports: P,
     info: AcpiInfo,
     served: Served,
     /// The controller the namespace names, if it names one this server serves.
     ec: Option<Ec>,
     /// The namespace the load kept.
-    aml: Option<Aml<'a, Claim<'a>>>,
+    aml: Option<Aml<'a, K>>,
     /// Taken off the controller by the drain, run after it.
     queued: VecDeque<u8>,
     /// Every query number taken, and how often.
@@ -101,29 +102,46 @@ fn main() {
         return;
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
-    let served = Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ec_gpe: None };
     let claim = Claim(&dev);
-    let mut server = Server {
-        dev: &dev,
-        info,
-        served,
-        ec: None,
-        aml: None,
-        queued: VecDeque::new(),
-        counts: BTreeMap::new(),
-        counted: 0,
-        logged: 0,
-        scis: 0,
-        empty: 0,
-        power_off: false,
-    };
-    server.arm();
+    let mut server = Server::new(&claim, Machine, info);
+    server.arm(&dev);
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
     server.power_off = loaded.handed;
     server.aml = kept;
     server.arm_controller();
-    server.serve();
+    server.serve(&dev);
 }
+
+/// The row's PM1 event and GPE0 registers, which this server reads and writes
+/// itself.
+trait Ports {
+    fn in8(&self, port: u16) -> u8;
+    fn out8(&self, port: u16, byte: u8);
+    fn in16(&self, port: u16) -> u16;
+    fn out16(&self, port: u16, word: u16);
+}
+
+/// The machine's own ports, which the claim opened to this process.
+struct Machine;
+
+impl Ports for Machine {
+    fn in8(&self, port: u16) -> u8 {
+        in8(port)
+    }
+
+    fn out8(&self, port: u16, byte: u8) {
+        out8(port, byte)
+    }
+
+    fn in16(&self, port: u16) -> u16 {
+        in16(port)
+    }
+
+    fn out16(&self, port: u16, word: u16) {
+        out16(port, word)
+    }
+}
+
 /// The claim as the tables' fetch and their AML ask it for what lies outside
 /// its own ports.
 struct Claim<'a>(&'a AcpiDev);
@@ -172,17 +190,15 @@ enum Unmade {
     Refused(String),
 }
 
-impl Claim<'_> {
-    /// A byte of one of the controller's ports, which no row holds.
-    fn port_in(&self, port: u16) -> Result<u8, Unmade> {
-        let answer = self.access(Access::read(Space::SystemIo, u64::from(port), Width::Byte)).map_err(|Stopping| Unmade::Stopping)?;
-        answer.made.map(|byte| byte as u8).map_err(|refused| Unmade::Refused(format!("the kernel refused a read of its port {port:#x}, {refused:?}")))
-    }
+/// A byte of one of the controller's ports, which no row holds.
+fn port_in(kernel: &impl Kernel, port: u16) -> Result<u8, Unmade> {
+    let answer = kernel.access(Access::read(Space::SystemIo, u64::from(port), Width::Byte)).map_err(|Stopping| Unmade::Stopping)?;
+    answer.made.map(|byte| byte as u8).map_err(|refused| Unmade::Refused(format!("the kernel refused a read of its port {port:#x}, {refused:?}")))
+}
 
-    fn port_out(&self, port: u16, byte: u8) -> Result<(), Unmade> {
-        let answer = self.access(Access::write(Space::SystemIo, u64::from(port), Width::Byte, u64::from(byte))).map_err(|Stopping| Unmade::Stopping)?;
-        answer.made.map(drop).map_err(|refused| Unmade::Refused(format!("the kernel refused a write of its port {port:#x}, {refused:?}")))
-    }
+fn port_out(kernel: &impl Kernel, port: u16, byte: u8) -> Result<(), Unmade> {
+    let answer = kernel.access(Access::write(Space::SystemIo, u64::from(port), Width::Byte, u64::from(byte))).map_err(|Stopping| Unmade::Stopping)?;
+    answer.made.map(drop).map_err(|refused| Unmade::Refused(format!("the kernel refused a write of its port {port:#x}, {refused:?}")))
 }
 
 /// Each byte of a status-and-enable block: its status port and its enable port.
@@ -190,19 +206,37 @@ fn bytes(block: Block) -> impl Iterator<Item = (u16, u16)> {
     (0..block.len / 2).map(move |i| (block.port + i, block.enable() + i))
 }
 
-impl Server<'_> {
-    fn arm(&mut self) {
+impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
+    fn new(kernel: &'a K, ports: P, info: AcpiInfo) -> Self {
+        Server {
+            kernel,
+            ports,
+            info,
+            served: Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ec_gpe: None },
+            ec: None,
+            aml: None,
+            queued: VecDeque::new(),
+            counts: BTreeMap::new(),
+            counted: 0,
+            logged: 0,
+            scis: 0,
+            empty: 0,
+            power_off: false,
+        }
+    }
+
+    fn arm(&mut self, dev: &AcpiDev) {
         let pm1 = self.info.pm1_event;
-        out16(pm1.enable(), 0);
-        out16(pm1.port, PM1_STATUS);
+        self.ports.out16(pm1.enable(), 0);
+        self.ports.out16(pm1.port, PM1_STATUS);
         for (status, enable) in bytes(self.info.gpe0) {
-            out8(enable, 0);
-            out8(status, 0xFF);
+            self.ports.out8(enable, 0);
+            self.ports.out8(status, 0xFF);
         }
         if self.served.power_button {
-            out16(pm1.enable(), PWRBTN);
+            self.ports.out16(pm1.enable(), PWRBTN);
         }
-        self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+        dev.ack().expect("acpiserver: the claim's acknowledgement");
         println!(
             "acpiserver: armed: power button {}",
             if self.served.power_button { "served" } else { "a control method device, served once the namespace names it" },
@@ -228,15 +262,15 @@ impl Server<'_> {
         // Its status register, which a read leaves as it was; the data
         // register's read takes a byte, and a port refused later ends the
         // controller then ([`Server::unserve`]).
-        match Claim(self.dev).port_in(ec.command) {
+        match port_in(self.kernel, ec.command) {
             Err(Unmade::Stopping) => return,
             Err(Unmade::Refused(why)) => return println!("{CONTROLLER_NONE}{why}"),
             Ok(_) => {}
         }
         let n = ec.gpe;
         let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
-        out8(status, 1 << (n % 8));
-        out8(enable, in8(enable) | 1 << (n % 8));
+        self.ports.out8(status, 1 << (n % 8));
+        self.ports.out8(enable, self.ports.in8(enable) | 1 << (n % 8));
         println!("{CONTROLLER_SERVED}{n:#x} at {:#x}/{:#x}", ec.command, ec.data);
         self.served.ec_gpe = Some(n);
         self.ec = Some(ec);
@@ -244,7 +278,7 @@ impl Server<'_> {
         self.run_queued();
     }
 
-    fn serve(&mut self) -> ! {
+    fn serve(&mut self, dev: &AcpiDev) -> ! {
         let poller = Poller::new(1);
         let mut next_count = Instant::now() + COUNTS;
         // A watch answers once: one still registered from a wait that timed
@@ -252,7 +286,7 @@ impl Server<'_> {
         let mut watching = false;
         loop {
             if !watching {
-                poller.watch(self.dev, READABLE, 0);
+                poller.watch(dev, READABLE, 0);
                 watching = true;
             }
             let wait = next_count.saturating_duration_since(Instant::now());
@@ -261,21 +295,21 @@ impl Server<'_> {
                 self.log_counts();
                 next_count = Instant::now() + COUNTS;
             }
-            match self.dev.irq() {
+            match dev.irq() {
                 Ok(record) => self.scis += u64::from(record.count),
                 Err(SyscallError::WouldBlock) => continue,
                 Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
             }
             self.take();
-            self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+            dev.ack().expect("acpiserver: the claim's acknowledgement");
         }
     }
 
     /// Everything one SCI carried, each event served and its status cleared.
     fn take(&mut self) {
         let pm1 = self.info.pm1_event;
-        let gpe0: Vec<(u8, u8)> = bytes(self.info.gpe0).map(|(status, enable)| (in8(status), in8(enable))).collect();
-        let events = match sci::events(&self.served, (in16(pm1.port), in16(pm1.enable())), &gpe0) {
+        let gpe0: Vec<(u8, u8)> = bytes(self.info.gpe0).map(|(status, enable)| (self.ports.in8(status), self.ports.in8(enable))).collect();
+        let events = match sci::events(&self.served, (self.ports.in16(pm1.port), self.ports.in16(pm1.enable())), &gpe0) {
             Ok(events) => events,
             Err(Unserved::Pm1 { status, enable }) => panic!(
                 "acpiserver: PM1 status {status:#06x} under enable {enable:#06x} carries an event this server never enabled"
@@ -288,7 +322,7 @@ impl Server<'_> {
                 self.empty < sci::EMPTY_SCIS,
                 "acpiserver: {} SCIs in a row carried no event this server serves (PM1 {:#06x}, GPE0 {gpe0:x?})",
                 self.empty,
-                in16(pm1.port),
+                self.ports.in16(pm1.port),
             );
             return;
         }
@@ -296,7 +330,7 @@ impl Server<'_> {
         for event in events {
             match event {
                 Event::PowerButton => {
-                    out16(pm1.port, PWRBTN);
+                    self.ports.out16(pm1.port, PWRBTN);
                     self.press();
                 }
                 Event::Ec => {
@@ -304,7 +338,7 @@ impl Server<'_> {
                     // so an event the drain does not see raises it again.
                     let n = self.served.ec_gpe.expect("an event of the controller's GPE is one this server enabled");
                     let (status, _) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
-                    out8(status, 1 << (n % 8));
+                    self.ports.out8(status, 1 << (n % 8));
                     self.drain();
                 }
             }
@@ -334,14 +368,14 @@ impl Server<'_> {
 
     fn take_queries(&mut self) -> Result<(), Unmade> {
         let Some(ec) = &self.ec else { return Ok(()) };
-        let (claim, command, data) = (Claim(self.dev), ec.command, ec.data);
+        let (command, data) = (ec.command, ec.data);
         let mut taken = 0;
         loop {
-            let status = claim.port_in(command)?;
+            let status = port_in(self.kernel, command)?;
             if status & ec::SCI_EVT == 0 {
                 return Ok(());
             }
-            let q = transact(&claim, command, data, Transaction::query())?;
+            let q = transact(self.kernel, command, data, Transaction::query())?;
             if q == 0 {
                 return Ok(());
             }
@@ -356,7 +390,7 @@ impl Server<'_> {
     fn unserve(&mut self, why: &str) {
         let n = self.served.ec_gpe.take().expect("a controller served has its GPE enabled");
         let (_, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
-        out8(enable, in8(enable) & !(1 << (n % 8)));
+        self.ports.out8(enable, self.ports.in8(enable) & !(1 << (n % 8)));
         self.ec = None;
         self.queued.clear();
         println!("{CONTROLLER_NONE}{why}");
@@ -413,10 +447,10 @@ fn run_query<K: Kernel>(aml: Option<&mut Aml<'_, K>>, ec: Option<&Ec>, q: u8) ->
 
 /// One transaction on the controller at `command` and `data`, waiting on it at
 /// each step for at most [`EC_STEP`].
-fn transact(claim: &Claim, command: u16, data: u16, mut tx: Transaction) -> Result<u8, Unmade> {
+fn transact(kernel: &impl Kernel, command: u16, data: u16, mut tx: Transaction) -> Result<u8, Unmade> {
     let mut waiting: Option<(Wait, Instant)> = None;
     loop {
-        let status = claim.port_in(command)?;
+        let status = port_in(kernel, command)?;
         match tx.step(status) {
             Do::Wait(wait) => {
                 let since = match waiting {
@@ -429,11 +463,11 @@ fn transact(claim: &Claim, command: u16, data: u16, mut tx: Transaction) -> Resu
             }
             Do::WriteCommand(byte) => {
                 waiting = None;
-                claim.port_out(command, byte)?;
+                port_out(kernel, command, byte)?;
             }
             Do::ReadData => {
                 waiting = None;
-                tx.read(claim.port_in(data)?);
+                tx.read(port_in(kernel, data)?);
             }
             Do::Done(byte) => return Ok(byte),
         }
@@ -446,6 +480,72 @@ mod tests {
     use crate::aml::load;
     use crate::aml::tests::{crafted, sealed, CRAFTED_RSDP};
     use crate::devices::tests::{laptop_with_queries, GPE0};
+    use crate::host::tests::Scripted;
+    use std::cell::RefCell;
+
+    /// The row's registers as bytes a write leaves as written.
+    #[derive(Default)]
+    struct Bytes(RefCell<BTreeMap<u16, u8>>);
+
+    impl Ports for Bytes {
+        fn in8(&self, port: u16) -> u8 {
+            *self.0.borrow().get(&port).unwrap_or_else(|| panic!("a read of {port:#x}, which nothing wrote"))
+        }
+
+        fn out8(&self, port: u16, byte: u8) {
+            self.0.borrow_mut().insert(port, byte);
+        }
+
+        fn in16(&self, port: u16) -> u16 {
+            panic!("a PM1 read of {port:#x}, which no test here makes")
+        }
+
+        fn out16(&self, port: u16, _: u16) {
+            panic!("a PM1 write of {port:#x}, which no test here makes")
+        }
+    }
+
+    /// A controller port the kernel refuses, its status port or, inside a
+    /// query's transaction, its data port, ends the controller: its GPE
+    /// disabled and no other of the block's, what it had waiting dropped, and
+    /// nothing asked of the kernel for it again.
+    #[test]
+    fn a_controller_port_the_kernel_refuses_ends_the_controller() {
+        let (command, data, gpe) = (0x66, 0x62, 3);
+        let status = || Access::read(Space::SystemIo, command, Width::Byte);
+        for (ports, asked) in [
+            (vec![], vec![status()]),
+            (
+                // A query waits and its answer is ready, at a data port the kernel keeps.
+                vec![(command, u64::from(ec::SCI_EVT | ec::OBF))],
+                vec![
+                    status(),
+                    status(),
+                    Access::write(Space::SystemIo, command, Width::Byte, 0x84),
+                    status(),
+                    Access::read(Space::SystemIo, data, Width::Byte),
+                ],
+            ),
+        ] {
+            let kernel = Scripted { ports, ..Default::default() };
+            let info = AcpiInfo { rsdp: 0, pm1_event: Block::NONE, gpe0: GPE0, flags: 0, reserved: [0; 3] };
+            let mut server = Server::new(&kernel, Bytes::default(), info);
+            let enable = GPE0.enable();
+            server.ports.out8(enable, 0b1000_1001);
+            server.served.ec_gpe = Some(gpe);
+            server.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: command as u16, data: data as u16, gpe, queries: Default::default() });
+            // Taken by an earlier event of the same SCI, and not yet run.
+            server.queued.push_back(0x28);
+            server.drain();
+            assert_eq!(*kernel.asked.borrow(), asked);
+            assert_eq!(server.ec, None, "a refused controller is still served");
+            assert_eq!(server.served.ec_gpe, None);
+            assert_eq!(server.ports.in8(enable), 0b1000_0001, "the controller's GPE is left enabled, or another with it disabled");
+            assert!(server.queued.is_empty(), "a refused controller's queries are still run");
+            server.drain();
+            assert_eq!(kernel.asked.borrow().len(), asked.len(), "a refused controller was asked again");
+        }
+    }
 
     /// An AMD laptop's controller and `_Q28` under both kinds of power
     /// button: the method runs, writes the POST port and presses only where
