@@ -281,3 +281,18 @@ fn s_rx_027_half_close_keeps_receiving() {
     check(&last, "ACK=15001");
     assert_eq!(h.info().state, State::FinWait2);
 }
+
+/// At shift 7 a window below one unit reads as zero, and is offered as one unit only where the
+/// buffer has that unit free: with 100 bytes free and a hole open, a whole unit would let the peer
+/// send past the capacity, so the edge holds and the field stays 0.
+#[test]
+fn a_sub_unit_window_rounds_up_only_into_free_room() {
+    let mut h = client(4 << 20, seg(5000).ack(1001).syn().wnd(65_535).mss(1460).sackok().ws(7));
+    assert_eq!(h.info().rcv_shift, 7);
+    h.input(1, seg(5001).ack(1001).len(65_435));
+    let edge = h.info().rcv_edge;
+    assert_eq!(edge.since(h.info().rcv_nxt), 100);
+    expect(&h.input(2, seg(70_486).ack(1001).len(50)), &["ACK=70436 WND=0"]);
+    let info = h.info();
+    assert_eq!((info.rcv_edge, info.ooo_ranges, info.unread), (edge, 1, 65_435));
+}

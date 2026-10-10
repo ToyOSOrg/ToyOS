@@ -114,7 +114,8 @@ impl Checker {
         }
     }
 
-    /// PROP-01, 04, 05, 06 and 07 on every synchronized connection, and every refusal counted.
+    /// PROP-01, 04, 05, 06 and 07 and `rx`'s capacity invariant on every synchronized connection,
+    /// and every refusal counted.
     fn state(&mut self, node: usize, tcp: &mut Tcp, now: Instant) {
         for (tuple, sync) in tcp.each_sync() {
             let expiries = tcp.counters().get(Counter::Rto);
@@ -134,6 +135,8 @@ impl Checker {
                 assert!(tx.nxt.at_or_before(left), "SND.NXT {:?} past what left, {left:?}", tx.nxt);
             }
             let edge = sync.rx.edge();
+            let promised = sync.rx.unread().saturating_add(usize::try_from(edge.since(sync.rx.next)).unwrap_or(usize::MAX));
+            assert!(promised <= sync.rx.capacity(), "rx: unread + window {promised} past the capacity {}", sync.rx.capacity());
             if let Some(&(acked, offered)) = self.told.get(&(node, tuple)) {
                 let sent = sync.rx.last_ack_sent;
                 assert!(sent.at_or_before(acked), "acknowledged to {sent:?}, past what left, {acked:?}");
@@ -250,7 +253,8 @@ impl Run {
             judged: 0,
             sacked: [Vec::new(), Vec::new()],
         }));
-        let mut net = Net::new(10);
+        // Odd seeds run at netstack's buffer, which grows and is scaled.
+        let mut net = Net::buffered(10, if seed.is_multiple_of(2) { 65_535 } else { 4 << 20 });
         net.keep_streams = true;
         net.impair = link(Rng::new(seed ^ 0xaaaa), s);
         let shared = Rc::clone(&checker);

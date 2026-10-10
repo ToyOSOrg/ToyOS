@@ -11,6 +11,7 @@
 pub mod bot;
 pub mod call;
 pub mod configure;
+pub mod descriptor;
 pub mod enumerate;
 pub mod flush;
 pub mod identity;
@@ -26,6 +27,7 @@ pub mod reset_recovery;
 pub mod ring;
 pub mod scan;
 pub mod scsi;
+pub mod xecp;
 
 pub use job::{Await, Outcome, Outstanding};
 pub use port::{Effect, Gone, Nanos, PortState, Step};
