@@ -777,6 +777,11 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         for line in &finding.filed {
             loaderlog::line(format_args!("{}{line}", stamp::now()));
         }
+        if finding.died {
+            println!("Yoga image: the last boot died, its record is filed above, and this pass powers the machine off instead of booting it again");
+            loaderlog::close();
+            system_table.runtime_services().reset(uefi::table::runtime::ResetType::SHUTDOWN, Status::SUCCESS, None);
+        }
     }
     match firmware_watchdog {
         Ok(()) => println!(

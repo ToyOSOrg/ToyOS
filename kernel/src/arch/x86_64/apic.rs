@@ -68,6 +68,10 @@ const SVR: u64 = 1 << 8 | super::idt::spurious::SPURIOUS_VECTOR as u64;
 static X2APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 
 fn enable_x2apic() {
+    // Yoga image: a CPU without x2APIC would #GP on the write below with no IDT
+    // of ours loaded; a panic seals a record the next loader files instead.
+    let ecx = super::cpu::cpuid(1, 0).2;
+    assert!(ecx & (1 << 21) != 0, "LAPIC: CPUID.1:ECX[21] is clear, this CPU has no x2APIC and this kernel runs only in x2APIC mode");
     let mut base = Reg::ApicBase.read();
     base |= (1 << 11) | (1 << 10);
     Reg::ApicBase.write(base);

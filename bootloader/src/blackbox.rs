@@ -82,6 +82,9 @@ pub struct Finding {
     /// The record's tail: the log ring the last boot did not drain. It goes to
     /// `loader.log` and not to the firmware's console — see [`tail`].
     pub filed: Vec<String>,
+    /// Yoga image: the last boot died rather than ending itself, so this pass
+    /// files the record and powers off instead of looping.
+    pub died: bool,
 }
 
 /// Split a record's text into what a person at the machine reads and what only
@@ -215,7 +218,8 @@ pub fn harvest(
              the boot after this one will report the crash above a second time"
         ));
     }
-    (Some(Finding { lines, filed }), None)
+    let died = !matches!(state, State::Done);
+    (Some(Finding { lines, filed, died }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.

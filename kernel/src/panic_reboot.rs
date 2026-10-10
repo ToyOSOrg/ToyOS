@@ -80,7 +80,9 @@ fn deadline(bound: Budget) -> Option<(u64, Source)> {
     if crate::clock::calibrated() {
         return Some((crate::clock::tsc_deadline(bound.nanos()), Source::Calibrated));
     }
-    let hz = crate::arch::cpu::stated_counter_hz()?;
+    // Yoga image: a CPU that states no rate (AMD) is assumed to count at 5 GHz,
+    // an upper bound, so the hold is at least the bound and the machine resets.
+    let hz = crate::arch::cpu::stated_counter_hz().unwrap_or(5_000_000_000);
     // Nanoseconds first, so a bound under a second is not rounded to nothing.
     let cycles = (u128::from(bound.nanos()) * u128::from(hz) / 1_000_000_000) as u64;
     Some((cpu::counter().saturating_add(cycles), Source::Stated))
