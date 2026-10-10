@@ -2439,6 +2439,7 @@ serial:
         "test_rs_claim_unrouted",
         "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
     )?;
+    await_kernel_exit(&mut qemu, &mut serial, "test_rs_claim_unrouted")?;
     // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
     const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
                             DeviceID at this kernel's ITS behind the SMMUv3";
@@ -2453,6 +2454,7 @@ serial:
         "test_rs_claim_bar_fault",
         "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
     )?;
+    await_kernel_exit(&mut qemu, &mut serial, "test_rs_claim_bar_fault")?;
     let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
     if faults.len() != 2 {
         return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
@@ -2467,6 +2469,18 @@ serial:
         return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
     }
     Ok(())
+}
+
+/// Wait for the kernel's line of `job`'s own exit, its `code=0` telling it from
+/// a child of the same name a fault ended: the kernel's lines can reach the
+/// PL011 after test-runner's line of the job's end, so that line is no sign
+/// the kernel has said all it will of the job.
+fn await_kernel_exit(qemu: &mut QemuInstance, serial: &mut String, job: &str) -> Result<(), String> {
+    let exit = format!("exit: {job} pid=");
+    await_guest(qemu, serial, &format!("the kernel's line of {job}'s exit"), |log| {
+        log.lines().any(|l| l.contains(&exit) && l.contains(" code=0 "))
+    })
+    .map_err(|why| format!("{why}\nserial:\n{serial}"))
 }
 
 /// Everything the PL011 has carried on `qemu`'s boot: the capture each
