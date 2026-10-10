@@ -1037,6 +1037,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
+        "test_rs_spawn_cost",
         "test_rs_null_sink_client_exits",
         claims::RECLAIM,
     ],
