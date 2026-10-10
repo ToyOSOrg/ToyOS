@@ -1,4 +1,5 @@
 use crate::rect::Rect;
+use crate::window::Level;
 
 /// Share of physical memory the compositor will hold in window buffers.
 ///
@@ -62,8 +63,14 @@ pub enum Verdict {
 ///
 /// `requested` is `(0, 0)` for a client that did not name a size, which is a
 /// request for whatever the desktop gives it and can never be too large.
-pub fn create_verdict(requested: (u32, u32), screen: Rect, live: usize, max: usize) -> Verdict {
-    if live >= max {
+///
+/// **The prompt's window is outside the budget**: `clients`, the windows
+/// below the prompt layer, are held to `max`, and the prompt to the one its
+/// layer admits ([`crate::Stack::admits`]), so no client filling the desktop
+/// keeps the person at the screen from being asked. One window past the
+/// memory budget, as [`max_windows`]'s floor is.
+pub fn create_verdict(requested: (u32, u32), screen: Rect, level: Level, clients: usize, max: usize) -> Verdict {
+    if level != Level::Prompt && clients >= max {
         return Verdict::AtCapacity;
     }
     let (w, h) = requested;
@@ -71,6 +78,19 @@ pub fn create_verdict(requested: (u32, u32), screen: Rect, live: usize, max: usi
         return Verdict::TooLarge;
     }
     Verdict::Allow
+}
+
+/// Whether a connection just accepted may wait for its first frame, off
+/// `prompt` or off the clients' port, beside the ones already `waiting` (each
+/// `true` for one off `prompt`): **one off `prompt` has a slot of its own**,
+/// and the clients' share `max`, so no client filling the table keeps the
+/// prompt from being made.
+pub fn pending_admits(prompt: bool, waiting: impl IntoIterator<Item = bool>, max: usize) -> bool {
+    let mut waiting = waiting.into_iter();
+    match prompt {
+        true => !waiting.any(|p| p),
+        false => waiting.filter(|p| !p).count() < max,
+    }
 }
 
 #[cfg(test)]
@@ -107,20 +127,37 @@ mod tests {
 
     #[test]
     fn a_window_larger_than_the_screen_is_refused_by_name() {
-        assert_eq!(create_verdict((1921, 1080), HD, 0, 10), Verdict::TooLarge);
-        assert_eq!(create_verdict((1920, 1081), HD, 0, 10), Verdict::TooLarge);
-        assert_eq!(create_verdict((1920, 1080), HD, 0, 10), Verdict::Allow);
+        assert_eq!(create_verdict((1921, 1080), HD, Level::Ordinary, 0, 10), Verdict::TooLarge);
+        assert_eq!(create_verdict((1920, 1081), HD, Level::Ordinary, 0, 10), Verdict::TooLarge);
+        assert_eq!(create_verdict((1920, 1080), HD, Level::Ordinary, 0, 10), Verdict::Allow);
     }
 
     #[test]
     fn capacity_is_checked_before_size() {
         // Both would refuse; the one that names the compositor's own budget
         // wins, because it is the one a client can wait out.
-        assert_eq!(create_verdict((9999, 9999), HD, 10, 10), Verdict::AtCapacity);
+        assert_eq!(create_verdict((9999, 9999), HD, Level::Ordinary, 10, 10), Verdict::AtCapacity);
     }
 
     #[test]
     fn a_client_that_names_no_size_is_never_too_large() {
-        assert_eq!(create_verdict((0, 0), Rect::new(0, 0, 4, 4), 0, 10), Verdict::Allow);
+        assert_eq!(create_verdict((0, 0), Rect::new(0, 0, 4, 4), Level::Ordinary, 0, 10), Verdict::Allow);
+    }
+
+    /// **A desktop full of clients still lets the prompt in**: every client
+    /// window and every waiting client connection is spent, and the prompt's
+    /// window and its connection are each admitted; a second of either is not.
+    #[test]
+    fn the_prompt_is_admitted_past_every_client_ceiling() {
+        for level in [Level::Ordinary, Level::Topmost] {
+            assert_eq!(create_verdict((600, 400), HD, level, 10, 10), Verdict::AtCapacity, "{level:?}");
+        }
+        assert_eq!(create_verdict((600, 400), HD, Level::Prompt, 10, 10), Verdict::Allow);
+        assert_eq!(create_verdict((1921, 400), HD, Level::Prompt, 0, 10), Verdict::TooLarge);
+        let full = [false; 32];
+        assert!(!pending_admits(false, full, 32));
+        assert!(pending_admits(true, full, 32));
+        assert!(!pending_admits(true, full.iter().copied().chain([true]), 32));
+        assert!(pending_admits(false, [true; 1].into_iter().chain([false; 31]), 32));
     }
 }

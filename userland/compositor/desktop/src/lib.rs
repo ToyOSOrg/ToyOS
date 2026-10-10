@@ -32,7 +32,7 @@ pub mod stack;
 pub mod taskbar;
 pub mod window;
 
-pub use budget::{create_verdict, max_windows, window_bytes, Verdict};
+pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{

@@ -40,6 +40,11 @@ impl<C> Stack<C> {
         self.windows.is_empty()
     }
 
+    /// The windows below the prompt layer: what the window budget counts.
+    pub fn clients(&self) -> usize {
+        self.windows.iter().filter(|w| w.level != Level::Prompt).count()
+    }
+
     pub fn as_slice(&self) -> &[Window<C>] {
         &self.windows
     }
@@ -275,6 +280,7 @@ mod tests {
         let mut s = with_prompt(&[("a", false)]);
         assert!(!s.admits(Level::Prompt));
         assert!(s.admits(Level::Topmost) && s.admits(Level::Ordinary));
+        assert_eq!((s.len(), s.clients()), (2, 1));
         s.remove(1);
         assert!(s.admits(Level::Prompt));
     }

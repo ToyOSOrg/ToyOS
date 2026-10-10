@@ -35,7 +35,7 @@ use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::{FrameStats, FrameTotals};
 use crate::{
     launcher_apps, CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, STATS_INTERVAL,
+    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES, STATS_INTERVAL,
 };
 
 const _: () = assert!(
@@ -239,9 +239,9 @@ impl Session {
         // Sized for the slot ceiling rather than for `max_windows`: the batch
         // between two `wait` calls is the four fixed registrations, one per
         // live window
-        // and one per pending connection, and `MSG_SET_RESOLUTION` can raise
-        // `max_windows` mid-run.
-        let poller = Poller::new(FIXED_POLL_HANDLES + MAX_WINDOW_SLOTS + MAX_PENDING_CONNS);
+        // and one per pending connection, the prompt's two beside them, and
+        // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
+        let poller = Poller::new(FIXED_POLL_HANDLES + MAX_WINDOW_SLOTS + MAX_PENDING_CONNS + PROMPT_POLL_HANDLES);
         poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
         poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
@@ -695,12 +695,21 @@ impl Session {
         let acceptor = if prompt { &self.prompts } else { &self.acceptor };
         match acceptor.accept() {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
-            Ok(conn) if self.pending.len() >= MAX_PENDING_CONNS as usize => {
-                eprintln!(
-                    "compositor: refusing client {} — {MAX_PENDING_CONNS} connections are already \
-                     waiting to say what they want",
-                    conn.as_handle().0
-                );
+            Ok(conn)
+                if !toyos_desktop::pending_admits(
+                    prompt,
+                    self.pending.iter().map(|p| p.prompt),
+                    MAX_PENDING_CONNS as usize,
+                ) =>
+            {
+                match prompt {
+                    true => eprintln!("compositor: refusing a prompt's connection — another is waiting"),
+                    false => eprintln!(
+                        "compositor: refusing client {} — {MAX_PENDING_CONNS} connections are already \
+                         waiting to say what they want",
+                        conn.as_handle().0
+                    ),
+                }
             }
             Ok(conn) => {
                 self.poller.watch(&conn, READABLE, conn.as_handle().0 as u64);
@@ -924,7 +933,8 @@ impl Session {
         let refusal = match toyos_desktop::create_verdict(
             (req.width, req.height),
             self.desk.screen,
-            self.stack.len(),
+            level,
+            self.stack.clients(),
             self.max_windows,
         ) {
             Verdict::Allow => None,
@@ -938,7 +948,7 @@ impl Session {
                 req.width,
                 req.height,
                 handle.0,
-                self.stack.len(),
+                self.stack.clients(),
                 self.max_windows
             );
             let _ =
