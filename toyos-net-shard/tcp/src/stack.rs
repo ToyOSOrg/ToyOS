@@ -414,7 +414,7 @@ impl Tcp {
         Local {
             mss: mtu.saturating_sub(40),
             shift: self.shift,
-            window: u16::try_from(self.config.receive_buffer.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
+            window: u16::try_from(self.config.receive_buffer.min(limits::RECEIVE_BUFFER_INITIAL)).unwrap_or(u16::MAX),
             receive_buffer: usize::try_from(self.config.receive_buffer).unwrap_or(0),
             send_buffer: usize::try_from(self.config.send_buffer).unwrap_or(0),
             mtu,
@@ -1009,7 +1009,7 @@ impl Tcp {
         let conn = self.conn(id)?;
         let result = match &mut conn.state {
             Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
-            Tcb::Sync(sync) => sync.recv(out),
+            Tcb::Sync(sync) => sync.recv(out, now),
             Tcb::Ended(Ended { failure: Some(failure), .. }) => Err(Error::Failed(*failure)),
             Tcb::Ended(Ended { failure: None, rx }) => match rx.as_mut().map(|rx| rx.read(out)) {
                 Some(n) if n > 0 => Ok(Received::Data(n)),
@@ -1028,7 +1028,7 @@ impl Tcp {
         let conn = self.conn(id)?;
         let result = match &mut conn.state {
             Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
-            Tcb::Sync(sync) => sync.recv_with(take),
+            Tcb::Sync(sync) => sync.recv_with(take, now),
             Tcb::Ended(Ended { failure: Some(failure), .. }) => Err(Error::Failed(*failure)),
             Tcb::Ended(Ended { failure: None, rx }) => match rx.as_mut() {
                 Some(rx) if rx.unread() > 0 => Ok(Received::Data(rx.read_with(take))),

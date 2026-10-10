@@ -15,7 +15,7 @@ use std::path::Path;
 
 use flate2::read::GzDecoder;
 use pkg::{archive, sums};
-use sha2::{Digest, Sha256};
+use toyos_sha2::Sha256;
 use toyos_manifest::package::{self, Package};
 
 /// Answers the consent prompt in advance, for a caller with no terminal.

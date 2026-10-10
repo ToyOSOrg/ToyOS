@@ -3450,7 +3450,6 @@ fn libc_sockets() -> Result<(), String> {
 /// `ring` wrong at both ends.
 fn https_fetch() -> Result<(), String> {
     use common::https::{self, Authority, Seen, Server};
-    use sha2::Digest;
     const JOB: &str = "https_get";
     const KAT: &str = "ring_kat";
     /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
@@ -3461,7 +3460,8 @@ fn https_fetch() -> Result<(), String> {
     let trusted = Authority::new("ToyOS harness test authority");
     let stranger = Authority::new("ToyOS harness authority nothing trusts");
     let body = std::sync::Arc::new(https::body());
-    let want = format!("{JOB}: ok bytes={} sha256={:x}", body.len(), sha2::Sha256::digest(body.as_slice()));
+    let hex: String = toyos_sha2::Sha256::digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
+    let want = format!("{JOB}: ok bytes={} sha256={hex}", body.len());
     let fetched = Server::start(trusted.leaf(host), body.clone())?;
     let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
     let untrusted = Server::start(stranger.leaf(host), body)?;
@@ -3598,10 +3598,9 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
 /// taps F12, which the job waits on through its hostile window. Nothing here
 /// waits on a clock but the run's own ceiling.
 fn consent_prompt(profile: qemu::Profile) -> Result<(), String> {
-    use sha2::Digest as _;
     let case = compile::repo_root().join("tests/consentcase");
     let (_, job) = suite_bin(profile.arch(), "consent");
-    let digest: String = sha2::Sha256::digest(&job).iter().map(|b| format!("{b:02x}")).collect();
+    let digest: String = toyos_sha2::Sha256::digest(&job).iter().map(|b| format!("{b:02x}")).collect();
     let options = BootOptions { profile, qmp: true, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[("consent".to_string(), job)], options);
     let mut drive = Consent { digest, out: qemu.screendump_file(), ..Consent::default() };
