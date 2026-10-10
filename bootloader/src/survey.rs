@@ -5,7 +5,8 @@
 //!
 //! **It reads the machine and writes nothing to it.** Memory is read only
 //! where firmware's own map describes the whole range (`watchdog::described`),
-//! configuration space only on the buses the MCFG decodes and a bridge forwards, and nothing
+//! configuration space only on the buses the MCFG decodes and a bridge forwards,
+//! device registers only those an ACPI table places and no read changes, and nothing
 //! here calls a variable service, sets a GOP mode or writes a port. The one
 //! thing read and not copied is the MSDM table's body: it is the machine's
 //! Windows product key.
@@ -66,13 +67,15 @@ pub fn run(st: &SystemTable<Boot>, rsdp: u64, entry_counter: u64) {
         Ok(Err(why)) | Err(why) => return println!("{HEAD} no directory {name} ({why}), so nothing is surveyed"),
     };
     println!("{HEAD} this boot's description goes to {name}");
-    let stages: [Stage<'_>; 6] = [
+    let stages: [Stage<'_>; 8] = [
         ("firmware", &|| firmware(st)),
         ("cpuid", &cpuid),
         ("memory map", &|| memory_map(st)),
         ("smbios", &|| smbios(st)),
         ("acpi", &|| acpi(st, rsdp)),
         ("gop", &|| gop(st)),
+        ("pm", &|| pm(st, rsdp)),
+        ("amd-vi", &|| amd_vi(st, rsdp)),
     ];
     for (stage, survey) in stages {
         restart(st);
@@ -468,13 +471,21 @@ fn gop(st: &SystemTable<Boot>) -> (Files, String) {
     let handles = bs.find_handles::<GraphicsOutput>().unwrap_or_default();
     let mut current = String::new();
     for (n, handle) in handles.iter().enumerate() {
-        let Ok(gop) = protocol::get::<GraphicsOutput>(bs, *handle) else {
+        let Ok(mut gop) = protocol::get::<GraphicsOutput>(bs, *handle) else {
             let _ = writeln!(out, "gop {n}: would not open");
             continue;
         };
         let info = gop.current_mode_info();
         let (w, h) = info.resolution();
-        let _ = writeln!(out, "gop {n}: current {w}x{h} {:?} stride {}", info.pixel_format(), info.stride());
+        let mut fb = gop.frame_buffer();
+        let _ = writeln!(
+            out,
+            "gop {n}: current {w}x{h} {:?} stride {} framebuffer {:#x} size {:#x}",
+            info.pixel_format(),
+            info.stride(),
+            fb.as_mut_ptr() as u64,
+            fb.size()
+        );
         if current.is_empty() {
             current = alloc::format!("{w}x{h}");
         }
@@ -608,8 +619,8 @@ struct Ecam {
     last: u8,
 }
 
-/// Every ECAM window the MCFG names, found from the RSDP's root table.
-fn mcfg(st: &SystemTable<Boot>, rsdp: u64) -> Result<Vec<Ecam>, String> {
+/// The first table the RSDP's root table lists under `sig`.
+fn listed(st: &SystemTable<Boot>, rsdp: u64, sig: &[u8; 4]) -> Result<Vec<u8>, String> {
     let head = phys(st, rsdp, 36)?;
     let (root_at, width) = match (head[15] >= 2, u64_at(&head, 24)) {
         (true, x) if x != 0 => (x, 8usize),
@@ -619,19 +630,182 @@ fn mcfg(st: &SystemTable<Boot>, rsdp: u64) -> Result<Vec<Ecam>, String> {
     for i in 0..root.len().saturating_sub(36) / width {
         let p = 36 + i * width;
         let at = if width == 8 { u64_at(&root, p) } else { u64::from(u32_at(&root, p)) };
-        let Ok(t) = table(st, at) else { continue };
-        if &t[..4] != b"MCFG" {
-            continue;
+        match table(st, at) {
+            Ok(t) if &t[..4] == sig => return Ok(t),
+            _ => {}
         }
-        let mut out = Vec::new();
-        let mut e = 44;
-        while e + 16 <= t.len() {
-            out.push(Ecam { base: u64_at(&t, e), segment: u16_at(&t, e + 8), first: t[e + 10], last: t[e + 11] });
-            e += 16;
-        }
-        return Ok(out);
     }
-    Err(String::from("the root table names no MCFG"))
+    Err(alloc::format!("the root table names no {}", text(sig)))
+}
+
+/// Every ECAM window the MCFG names, found from the RSDP's root table.
+fn mcfg(st: &SystemTable<Boot>, rsdp: u64) -> Result<Vec<Ecam>, String> {
+    let t = listed(st, rsdp, b"MCFG")?;
+    let mut out = Vec::new();
+    let mut e = 44;
+    while e + 16 <= t.len() {
+        out.push(Ecam { base: u64_at(&t, e), segment: u16_at(&t, e + 8), first: t[e + 10], last: t[e + 11] });
+        e += 16;
+    }
+    Ok(out)
+}
+
+/// One 64-bit MMIO register, read once.
+///
+/// # Safety
+/// `at` is a register of a unit firmware's own table places there, inside the
+/// address space boot services identity-map, and a read of it has no effect.
+unsafe fn mmio64(at: u64) -> u64 {
+    // SAFETY: the caller's contract.
+    unsafe { core::ptr::read_volatile(at as *const u64) }
+}
+
+/// Every AMD-Vi unit the IVRS's IVHD blocks name (AMD IOMMU 3.10 §5.2.2), each
+/// unit's Control (0x18), Extended Feature (0x30) and Status (0x2020)
+/// registers read once at the base the block gives.
+fn amd_vi(st: &SystemTable<Boot>, rsdp: u64) -> (Files, String) {
+    let t = match listed(st, rsdp, b"IVRS") {
+        Ok(t) => t,
+        Err(why) => return (Vec::new(), why),
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "IVRS len {} IVinfo {:#010x}", t.len(), u32_at(&t, 36));
+    let mut bases: Vec<u64> = Vec::new();
+    let mut e = 48usize;
+    while e + 4 <= t.len() {
+        let (ty, len) = (t[e], usize::from(u16_at(&t, e + 2)));
+        if len < 4 || e + len > t.len() {
+            let _ = writeln!(out, "block at {e:#x}: type {ty:#x} len {len} runs past the table, so the walk stops");
+            break;
+        }
+        if matches!(ty, 0x10 | 0x11 | 0x40) && len >= 24 {
+            let base = u64_at(&t, e + 8);
+            let _ = write!(
+                out,
+                "IVHD type {ty:#x} flags {:#04x} device {:#06x} cap {:#x} base {base:#x} segment {:#x} info {:#06x} attr {:#010x}",
+                t[e + 1],
+                u16_at(&t, e + 4),
+                u16_at(&t, e + 6),
+                u16_at(&t, e + 16),
+                u16_at(&t, e + 18),
+                u32_at(&t, e + 20),
+            );
+            if ty != 0x10 && len >= 32 {
+                let _ = write!(out, " EFR image {:#018x}", u64_at(&t, e + 24));
+            }
+            let _ = writeln!(out);
+            if base != 0 && !bases.contains(&base) {
+                bases.push(base);
+            }
+        } else {
+            let _ = writeln!(out, "block type {ty:#x} len {len}");
+        }
+        e += len;
+    }
+    let mut said = String::new();
+    for base in &bases {
+        println!("{HEAD} amd-vi unit {base:#x} is read");
+        // SAFETY: the IVRS places the unit's registers at `base`; Control,
+        // Extended Feature and Status are plain registers no read changes.
+        let (control, efr, status) = unsafe { (mmio64(base + 0x18), mmio64(base + 0x30), mmio64(base + 0x2020)) };
+        let line = alloc::format!(
+            "unit {base:#x}: CONTROL {control:#018x} (IommuEn {}) EFR {efr:#018x} STATUS {status:#018x}",
+            control & 1
+        );
+        let _ = writeln!(out, "{line}");
+        let _ = write!(said, "{line}; ");
+    }
+    said.push_str(&alloc::format!("{} unit(s)", bases.len()));
+    (alloc::vec![(String::from("amd-vi.txt"), out.into_bytes())], said)
+}
+
+/// A FADT register block (ACPI 6.5 §5.2.9): its 64-bit Generic Address
+/// Structure where it names an address, else its 32-bit port.
+fn block(fadt: &[u8], gas: usize, legacy: usize, legacy_len: usize) -> Option<(u8, u64, usize)> {
+    let len = usize::from(*fadt.get(legacy_len)?);
+    match u64_at(fadt, gas + 4) {
+        0 => match u32_at(fadt, legacy) {
+            0 => None,
+            port => Some((1, u64::from(port), len)),
+        },
+        at => Some((fadt[gas], at, len)),
+    }
+}
+
+/// One register of `width` bytes at `at` in `space` (0 memory, 1 I/O), read
+/// once; `None` where the space is neither or this architecture has no ports.
+fn register(space: u8, at: u64, width: usize) -> Option<u32> {
+    match (space, width) {
+        (1, _) if !crate::arch::pio::EXISTS => None,
+        (1, 1) => Some(u32::from(crate::arch::pio::inb(u16::try_from(at).ok()?))),
+        (1, 2) => Some(u32::from(crate::arch::pio::inw(u16::try_from(at).ok()?))),
+        // SAFETY: the FADT places a fixed ACPI register at `at`, in the address
+        // space boot services identity-map; status and enable registers clear
+        // only on a write, never on a read.
+        (0, 1) => Some(u32::from(unsafe { core::ptr::read_volatile(at as *const u8) })),
+        (0, 2) => Some(u32::from(unsafe { core::ptr::read_volatile(at as *const u16) })),
+        _ => None,
+    }
+}
+
+/// Whether firmware hands over in ACPI mode, and the fixed and GPE0 event
+/// registers as found: each block the FADT names, its status half then its
+/// enable half, read in place.
+fn pm(st: &SystemTable<Boot>, rsdp: u64) -> (Files, String) {
+    let f = match listed(st, rsdp, b"FACP") {
+        Ok(f) => f,
+        Err(why) => return (Vec::new(), why),
+    };
+    let mut out = String::new();
+    let flags = u32_at(&f, 112);
+    let _ = writeln!(
+        out,
+        "FADT rev {} len {} flags {flags:#010x} (HW_REDUCED_ACPI {}) SCI_INT {} SMI_CMD {:#x} ACPI_ENABLE {:#x} ACPI_DISABLE {:#x}",
+        f[8],
+        f.len(),
+        (flags >> 20) & 1,
+        u16_at(&f, 46),
+        u32_at(&f, 48),
+        f.get(52).copied().unwrap_or(0),
+        f.get(53).copied().unwrap_or(0),
+    );
+    // Name, block, register width, and whether it is a status/enable pair
+    // rather than one control register.
+    let blocks = [
+        ("PM1a_EVT", block(&f, 148, 56, 88), 2, true),
+        ("PM1b_EVT", block(&f, 160, 60, 88), 2, true),
+        ("PM1a_CNT", block(&f, 172, 64, 89), 2, false),
+        ("PM1b_CNT", block(&f, 184, 68, 89), 2, false),
+        ("GPE0", block(&f, 220, 80, 92), 1, true),
+        ("GPE1", block(&f, 232, 84, 93), 1, true),
+    ];
+    let mut said = String::from("the FADT names no PM1a control block");
+    for (name, b, width, pair) in blocks {
+        let Some((space, at, len)) = b else {
+            let _ = writeln!(out, "{name}: none");
+            continue;
+        };
+        let _ = write!(out, "{name}: space {space} at {at:#x} len {len}");
+        let parts: &[(&str, usize, usize)] = if pair { &[("status", 0, len / 2), ("enable", len / 2, len / 2)] } else { &[("value", 0, len)] };
+        for &(what, from, n) in parts {
+            let _ = write!(out, " {what}");
+            for i in (0..n).step_by(width) {
+                let _ = match register(space, at + (from + i) as u64, width) {
+                    Some(v) => write!(out, " {v:0w$x}", w = width * 2),
+                    None => write!(out, " unread"),
+                };
+            }
+        }
+        if name == "PM1a_CNT" {
+            said = match register(space, at, 2) {
+                Some(v) => alloc::format!("SCI_EN {} (PM1a_CNT {v:#06x} at {at:#x}, space {space})", v & 1),
+                None => alloc::format!("PM1a_CNT at {at:#x} in space {space} is not read"),
+            };
+            let _ = write!(out, " -> {said}");
+        }
+        let _ = writeln!(out);
+    }
+    (alloc::vec![(String::from("pm.txt"), out.into_bytes())], said)
 }
 
 impl Ecam {

@@ -121,6 +121,10 @@ pub mod pio {
     pub fn inw(_port: u16) -> u16 {
         unreachable!("AArch64 has no I/O port space")
     }
+
+    pub fn inb(_port: u16) -> u8 {
+        unreachable!("AArch64 has no I/O port space")
+    }
 }
 
 /// Hand the CPU to the kernel at the exception level firmware ran it at, with

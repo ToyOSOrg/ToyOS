@@ -96,6 +96,16 @@ pub mod pio {
         }
         value
     }
+
+    /// One byte from an I/O port, safe as [`inw`] is.
+    pub fn inb(port: u16) -> u8 {
+        let value: u8;
+        // SAFETY: one instruction into the declared output, no memory operand.
+        unsafe {
+            core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
 }
 
 /// Switch to the boot map at `args.boot_pml4_addr` and jump to the kernel
