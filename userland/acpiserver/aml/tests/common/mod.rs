@@ -392,8 +392,13 @@ impl Host for Machine {
         self.log.push(Event::Notify(object.into(), value));
     }
 
-    fn global_take(&mut self, within: Option<u16>) -> Result<bool, Denied> {
-        self.log.push(Event::GlobalTake(within));
+    fn global_take(&mut self) -> Result<(), Denied> {
+        self.log.push(Event::GlobalTake(None));
+        Ok(())
+    }
+
+    fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied> {
+        self.log.push(Event::GlobalTake(Some(ms)));
         Ok(!self.firmware_holds)
     }
 
@@ -473,7 +478,10 @@ impl Host for Sink {
         0
     }
     fn notify(&mut self, _: &str, _: u64) {}
-    fn global_take(&mut self, _: Option<u16>) -> Result<bool, Denied> {
+    fn global_take(&mut self) -> Result<(), Denied> {
+        Ok(())
+    }
+    fn global_take_within(&mut self, _: u16) -> Result<bool, Denied> {
         Ok(true)
     }
     fn global_release(&mut self) -> Result<(), Denied> {

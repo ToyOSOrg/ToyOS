@@ -262,13 +262,17 @@ impl<'a> Machine<'a> {
 
     /// Holds the Global Lock once more, taking it from the host where this
     /// evaluation does not hold it yet: `Ok(false)` is a take `within` a
-    /// bound that timed out, and nothing held.
+    /// bound that timed out, charged as a wait, and nothing held.
     pub(crate) fn take_global(&mut self, within: Option<u16>) -> Result<bool, Error> {
-        if self.global == 0 && !self.host.global_take(within).map_err(|d| Error::Host(d.0))? {
-            if within.is_none() {
-                return Err(Error::Host("a take of the Global Lock with no bound came back untaken".into()));
+        if self.global == 0 {
+            match within {
+                None => self.host.global_take().map_err(|d| Error::Host(d.0))?,
+                Some(ms) if !self.host.global_take_within(ms).map_err(|d| Error::Host(d.0))? => {
+                    self.wait(u64::from(ms) * 1000)?;
+                    return Ok(false);
+                }
+                Some(_) => {}
             }
-            return Ok(false);
         }
         self.global += 1;
         Ok(true)

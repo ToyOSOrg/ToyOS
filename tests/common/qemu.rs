@@ -1092,6 +1092,10 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
+    /// Whole ACPI tables, header and checksum included, that QEMU lists
+    /// beside its own (`-acpitable`): firmware AML a guest's own tables do
+    /// not carry. q35's alone.
+    pub acpi_tables: Vec<Vec<u8>>,
 }
 
 impl BootOptions {
@@ -1130,6 +1134,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
+            acpi_tables: Vec::new(),
         }
     }
 }
@@ -1412,6 +1417,9 @@ impl QemuInstance {
         };
 
         let sockets = Sockets::new(&options);
+        for (i, table) in options.acpi_tables.iter().enumerate() {
+            fs::write(acpi_table(&sockets.dir, i), table).expect("[qemu] write an added ACPI table");
+        }
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: a screen test waits on this
@@ -1971,6 +1979,14 @@ impl Qmp {
         self.await_reply("\"return\"");
     }
 
+    /// Run `command` in the human monitor and return what it printed.
+    fn human(&mut self, command: &str) -> String {
+        self.execute_capturing(&format!(
+            "{{\"execute\":\"human-monitor-command\",\"arguments\":\
+             {{\"command-line\":\"{command}\"}}}}"
+        ))
+    }
+
     /// `execute`, keeping what the command answered with. Only the human
     /// monitor answers with anything; every other command here returns `{}`.
     fn execute_capturing(&mut self, command: &str) -> String {
@@ -2030,6 +2046,22 @@ impl QmpShutdown {
         self.0.execute("{\"execute\":\"system_powerdown\"}");
     }
 
+    /// A 16-bit read of the guest's I/O `port`, by the human monitor on the
+    /// one connection QEMU serves; asked before the stop, whose event a
+    /// command's reply would otherwise pass over, as [`Self::memory_word`].
+    pub fn port_word(&mut self, port: u16) -> u16 {
+        let said = self.0.human(&format!("i /h {port:#x}"));
+        let value = monitor_value(&said, "= ").and_then(|value| u16::try_from(value).ok());
+        value.unwrap_or_else(|| panic!("qmp: the monitor's read of port {port:#x} said {said:?}"))
+    }
+
+    /// A 32-bit read of the guest's physical memory at `phys`.
+    pub fn memory_word(&mut self, phys: u64) -> u32 {
+        let said = self.0.human(&format!("xp /1wx {phys:#x}"));
+        let value = monitor_value(&said, ": ").and_then(|value| u32::try_from(value).ok());
+        value.unwrap_or_else(|| panic!("qmp: the monitor's read of {phys:#x} said {said:?}"))
+    }
+
     /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
     /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
     pub fn reason(&mut self) -> Option<String> {
@@ -2046,6 +2078,12 @@ impl QmpShutdown {
             }
         }
     }
+}
+
+/// The hex value after the last `after` on what the human monitor said.
+fn monitor_value(said: &str, after: &str) -> Option<u64> {
+    let (_, value) = said.rsplit_once(after)?;
+    u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok()
 }
 
 /// The `reason` of the `SHUTDOWN` event in what QMP has sent so far.
@@ -2069,10 +2107,7 @@ impl QmpMonitor {
 
     /// Run `command` in the human monitor and return what it printed.
     pub fn human(&mut self, command: &str) -> String {
-        self.0.execute_capturing(&format!(
-            "{{\"execute\":\"human-monitor-command\",\"arguments\":\
-             {{\"command-line\":\"{command}\"}}}}"
-        ))
+        self.0.human(command)
     }
 }
 
@@ -2381,6 +2416,10 @@ fn qemu_command(
     if options.gdb_stub {
         qemu.arg("-s");
     }
+    assert!(options.acpi_tables.is_empty() || arch == Arch::X86_64, "an added ACPI table is q35's");
+    for i in 0..options.acpi_tables.len() {
+        qemu.arg("-acpitable").arg(format!("file={}", acpi_table(socket_dir, i).display()));
+    }
     if let Some(socket) = qmp_socket {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
@@ -2410,6 +2449,11 @@ impl Sockets {
         let qmp = qmp_socket(&dir, options);
         Sockets { dir, qmp }
     }
+}
+
+/// The `i`th of [`BootOptions::acpi_tables`], as a file in a boot's own `dir`.
+fn acpi_table(dir: &Path, i: usize) -> PathBuf {
+    dir.join(format!("acpi-{i}.aml"))
 }
 
 /// The QMP socket `options` asks for, named in `dir`.
