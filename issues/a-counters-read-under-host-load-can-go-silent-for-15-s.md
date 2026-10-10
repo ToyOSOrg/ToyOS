@@ -150,7 +150,15 @@ on, so the step each stopped in is not read; `virt_off_names_the_cpus_left_on`
 is also one of `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`'s
 waits. The branch removes the blocked-task dump from `drain_irqs`, which every
 pass runs. The three alone at that commit passed (load 56.98 to 54.99). Not
-known: whether the guests ran; no register capture was taken.
+known: whether the guests ran; no register capture was taken. Against that
+removal as the cause: at `2375834a6`, which already carries it and whose
+guest kernel differs from `22b7bb464`'s only by three `pub` methods with no
+caller, the whole suite passed 43 of 43, the same three among them, at load
+28.66 rising to 61.52; what it took out of a pass is three unarmed checks
+that each load an atomic and return; and the read is answered from the kick
+vector (`counters::serve_here`), not from a pass. The three images were
+built within 2 s of each other, after a 23 s wait on the artifact lock, and
+the three guests failed together.
 
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
 `src/miscompile.rs` now refuses a sysroot for) is not their cause.
