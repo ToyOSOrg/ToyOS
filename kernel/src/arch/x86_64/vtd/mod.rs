@@ -304,7 +304,10 @@ fn remappable(ready: &[(Unit, Plan)], described: usize, flags: u8) -> Option<boo
     }
     // Without `ECAP.EIM` on every unit an entry's destination is eight bits
     // wide, which is a bound on the ids in use and not a refusal of x2APIC.
-    Some(ready.iter().all(|(u, _)| u.caps.extended_interrupt_mode()))
+    // xAPIC local APICs take the eight-bit form alone (Section 9.9), so
+    // `EIME` waits on both.
+    let x2apic = super::control_regs::apic_mode() == super::control_regs::ApicMode::X2apic;
+    Some(x2apic && ready.iter().all(|(u, _)| u.caps.extended_interrupt_mode()))
 }
 
 /// A unit whose register window decodes, with its capabilities.

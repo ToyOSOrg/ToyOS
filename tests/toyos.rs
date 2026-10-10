@@ -378,6 +378,11 @@ const MACHINE_TESTS: &[&str] = &[
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The desktop on CPUs that offer no x2APIC, whose local APICs run in
+    // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
+    // which no host build has and the T14, whose CPUs offer x2APIC, never
+    // reaches; the AMD laptop that needs it is not on the bench.
+    "desktop_without_x2apic",
     // A machine whose one NVMe disk is all it has: its firmware boots the
     // image off it, and `/log` and `/home` are `diskserver`'s partitions of
     // it across a reset. The claim on the controller and the firmware that
@@ -660,7 +665,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            judge: |b| {
+                let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
+                smp_roster_and_tsc_trail(log.text(), cpus)?;
+                apic_mode_held(&log, cpus, "X2apic")
+            },
         },
     ),
     (
@@ -1973,6 +1983,57 @@ fn console_image_boots() -> Result<(), String> {
     let mut console = format!("{}\n", qemu.boot_log());
     await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
     serial::Serial::named("the console image's boot", console).must_be_clean()
+}
+
+/// Boot `tests/panelcase` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
+/// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
+/// declared its local APIC in xAPIC mode, every CPU the firmware named came
+/// up — started by an xAPIC ICR's two halves — and the desktop ran across
+/// them, which every timer re-arm, EOI and TLB shootdown on the way reached
+/// through the xAPIC's MMIO page.
+fn desktop_without_x2apic() -> Result<(), String> {
+    const CPUS: u32 = 4;
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/panelcase"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::MetalNoX2apic,
+            smp: CPUS,
+            qmp: true,
+            ready_marker: bootlog::COMPLETE,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "compositor: ready", "the compositor to take its panel")?;
+    let taken = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| d.fill() != FILL_BOOT);
+    if taken.fill() == FILL_BOOT {
+        return Err(format!("the compositor said it is ready and never took the screen\n{console}"));
+    }
+    let said = serial::Serial::named("the boot without x2APIC", console);
+    said.must_be_clean()?;
+    apic_mode_held(&said, CPUS, "Xapic")?;
+    smp_roster_and_tsc_trail(said.text(), CPUS)?;
+    eprintln!("  [xapic] {CPUS} CPUs in xAPIC mode, and the compositor holds the panel");
+    Ok(())
+}
+
+/// Every one of `cpus` CPUs declared its local APIC in `mode`, as
+/// `control_regs` names it, and the machine's report says the same.
+fn apic_mode_held(log: &serial::Serial, cpus: u32, mode: &str) -> Result<(), String> {
+    for cpu in 0..cpus {
+        let line = log.must_say(&format!("control_regs: cpu{cpu} apic_base="))?;
+        if !line.trim_end().ends_with(&format!(" {mode}")) {
+            return Err(format!("cpu{cpu} did not declare its local APIC {mode}: {line:?}"));
+        }
+    }
+    let held = log.must_say(&format!("control_regs: {cpus} of {cpus} cpus hold "))?;
+    if !held.trim_end().ends_with(&format!(" apic={mode}")) {
+        return Err(format!("the machine's declaration is not {mode}: {held:?}"));
+    }
+    log.must_say(&format!("LAPIC: {mode} enabled ("))?;
+    Ok(())
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -3697,6 +3758,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
+        "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
