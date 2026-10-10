@@ -76,6 +76,9 @@ declare_flags!(pub CARGO_RUN = {
     /// Write the image `ssh <machine> update` takes to this path, signed with
     /// the owner's key.
     pub UPDATE_IMAGE = "--update-image", Next;
+    /// Publish the packages this `packages.toml` lists into the package
+    /// repository of the key this run signs with (`src/publish.rs`).
+    pub PUBLISH = "--publish", Next;
 });
 
 /// What became of a command line, checked before anything else in `main` runs.
