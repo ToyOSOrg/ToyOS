@@ -22,8 +22,10 @@ back with no period.
 How often the window opens is unmeasured, and no metal machine runs
 virtio-sound. Nothing bounds the error but that rarity.
 
-Owned by whoever next changes what a claim's record carries
-(`kernel/src/pcidev/record.rs`) or how soundserver's DLL is fed. Exit: the
+Owned by stage 1 of `issues/every-driver-is-still-in-the-kernel.md`: the
+diff that moves HDA onto a `pci` claim feeds soundserver's DLL from a claim's
+record (`kernel/src/pcidev/record.rs`) on every machine, and lands this exit
+with it. Exit: the
 record ties a time to the used elements it answers for — or the driver holds
 back from a DLL update every period past those its record's notifications
 answer for — and `toyos-virtio-sound`'s interleaving test,

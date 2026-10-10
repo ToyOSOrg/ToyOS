@@ -36,7 +36,10 @@ What is left of the staged work:
    and soundserver's virtio-sound driver do, retiring the `hda-audio` class,
    its arms of `SYS_DEVICE_REG_READ`/`WRITE`, and `SYS_GPU_*`, which is an ABI
    change. GOP stays: it is memory the loader hands over, and the panic console
-   paints it.
+   paints it. HDA leaving feeds soundserver's DLL from a claim's record on
+   every machine, so that diff lands
+   `issues/soundservers-virtio-clock-can-take-a-period-one-notification-early.md`'s
+   exit.
    A virtio holder stands on `toyos-virtio`, which walks the capability list
    too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as
