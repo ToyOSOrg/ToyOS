@@ -131,17 +131,17 @@ impl Tx {
     }
 
     /// Reads an ACK's SACK blocks (RFC 2018 §3, RFC 2883 §4): whether a block covered bytes the
-    /// scoreboard did not hold, RFC 6675's duplicate acknowledgment, and whether one was a D-SACK.
-    pub fn read_sack(&mut self, ack: Seq, options: &TcpOptions<'_>, log: &mut Log) -> (bool, bool) {
+    /// scoreboard did not hold, RFC 6675's duplicate acknowledgment, and a D-SACK's right edge.
+    pub fn read_sack(&mut self, ack: Seq, options: &TcpOptions<'_>, log: &mut Log) -> (bool, Option<Seq>) {
         let second = options.sack_blocks().nth(1);
         let mut newly = false;
-        let mut dsack = false;
+        let mut dsack = None;
         for (i, block) in options.sack_blocks().enumerate() {
             let (left, right) = (Seq::from(block.left), Seq::from(block.right));
             let inside_second = second.is_some_and(|s| Seq::from(s.left).at_or_before(left) && right.at_or_before(Seq::from(s.right)));
             if i == 0 && (right.at_or_before(ack) || inside_second) {
                 log.count(Counter::DsackRcvd);
-                dsack = true;
+                dsack = Some(right);
                 continue;
             }
             if !(ack.before(left) && left.before(right) && right.at_or_before(self.nxt)) {

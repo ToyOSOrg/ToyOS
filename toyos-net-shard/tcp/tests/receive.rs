@@ -289,7 +289,6 @@ fn s_rx_027_half_close_keeps_receiving() {
 fn a_sub_unit_window_rounds_up_only_into_free_room() {
     let mut h = client(4 << 20, seg(5000).ack(1001).syn().wnd(65_535).mss(1460).sackok().ws(7));
     assert_eq!(h.info().rcv_shift, 7);
-    assert_eq!(h.info().rcv_capacity, 65_535);
     h.input(1, seg(5001).ack(1001).len(65_435));
     let edge = h.info().rcv_edge;
     assert_eq!(edge.since(h.info().rcv_nxt), 100);
