@@ -22,10 +22,6 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "call {windows_entered}",
         "call {flush}",
         "mov rsp, rbp",
-        "mov ecx, 0x80B",
-        "xor eax, eax",
-        "xor edx, edx",
-        "wrmsr",
         #[cfg(feature = "mask-windows")]
         "mov rdi, [rsp + 88]",
         #[cfg(feature = "mask-windows")]
@@ -67,4 +63,5 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
 fn flush() {
     crate::arch::percpu::irq_took!(Tlb);
     crate::arch::tlb::serve_ipi();
+    crate::arch::apic::eoi();
 }

@@ -1,9 +1,12 @@
-//! What `CR0`, `CR4`, `IA32_EFER` and the performance request hold on every
-//! CPU in this machine. One declaration, applied by the BSP and every AP and
-//! checked on each; nothing else may write any of them. Each register is
-//! written whole: `CR0` and `EFER` are constants, `CR4` is required bits plus
-//! whatever optional bits this CPU offers. `EFER.NXE` lets bit 63 of a paging
-//! entry mean *not executable* ([`Prot`](crate::mm::policy::Prot)).
+//! What `CR0`, `CR4`, `IA32_EFER`, `IA32_APIC_BASE` and the performance
+//! request hold on every CPU in this machine. One declaration, applied by the
+//! BSP and every AP and checked on each; nothing else may write any of them.
+//! Each register is written whole: `CR0` and `EFER` are constants, `CR4` is
+//! required bits plus whatever optional bits this CPU offers, and
+//! `IA32_APIC_BASE` is the local APIC at its architectural address in the one
+//! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
+//! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
+//! ([`Prot`](crate::mm::policy::Prot)).
 //!
 //! The performance request is HWP's: `IA32_HWP_INTERRUPT` where it exists,
 //! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `toyos_cpuvuln::hwp_request` derives
@@ -57,6 +60,38 @@ mod cr4 {
     pub const SMEP: u64 = 1 << 20;
     pub const SMAP: u64 = 1 << 21;
 }
+
+/// `IA32_APIC_BASE`: SDM Vol. 3A (325384-093US) §13.4.4 Figure 13-5 and
+/// §13.12.1 Figure 13-26; AMD APM Vol. 2 (24593 rev. 3.45) §16.3.1 Figure
+/// 16-2 and §16.9 Figure 16-31.
+mod apic_base {
+    pub const MSR: u32 = 0x1B;
+    /// The CPU's own: set on the one reset chose to boot.
+    pub const BSP: u64 = 1 << 8;
+    /// x2APIC mode, which only a CPU whose `CPUID.01H:ECX[21]` is set accepts.
+    pub const EXTD: u64 = 1 << 10;
+    pub const EN: u64 = 1 << 11;
+    /// Bits 12 up to `MAXPHYADDR`: where the xAPIC's registers decode.
+    pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+}
+
+/// Where every CPU's xAPIC registers decode: the address reset leaves them at
+/// (SDM §13.4.4, APM §16.3.1). A machine whose firmware moved them is
+/// refused, not followed.
+pub const APIC_REGISTERS: u64 = 0xFEE0_0000;
+
+/// How every local APIC in this machine is driven.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ApicMode {
+    /// Registers in a 4 KiB MMIO page at [`APIC_REGISTERS`], an 8-bit
+    /// destination in every message.
+    Xapic,
+    /// Registers as MSRs, a 32-bit destination.
+    X2apic,
+}
+
+/// The mode the BSP declared, as [`ApicMode`] plus one; zero until then.
+static DECLARED_APIC: AtomicU8 = AtomicU8::new(0);
 
 /// The performance request's registers, SDM Vol. 4.
 mod hwp {
@@ -242,6 +277,65 @@ pub fn envelope() -> Option<crate::counters::Envelope> {
         hwp_request_pkg: cpu::rdmsr(hwp::HWP_REQUEST_PKG),
         energy_perf_bias: cpu::rdmsr(hwp::ENERGY_PERF_BIAS),
     })
+}
+
+/// Puts this CPU's `IA32_APIC_BASE` into the declaration — the local APIC
+/// enabled, in [`ApicMode::X2apic`] where `CPUID.01H:ECX[21]` offers it and
+/// [`ApicMode::Xapic`] where it does not — checks it, and answers the mode.
+/// A CPU that reaches a different mode than the BSP declared is named.
+///
+/// One write reaches either mode from the enabled xAPIC firmware hands over,
+/// and x2APIC from x2APIC (SDM §13.12.5 Figure 13-27, APM §16.9 Figure
+/// 16-32); `INIT` changes neither (APM §16.10). The one illegal step, x2APIC
+/// to xAPIC, needs a CPU in x2APIC whose CPUID denies it.
+pub fn init_apic(cpu_id: u32) -> ApicMode {
+    let mine = if cpu::cpuid(1, 0).2 & (1 << 21) != 0 { ApicMode::X2apic } else { ApicMode::Xapic };
+    let code = mine as u8 + 1;
+    if let Err(machine) = DECLARED_APIC.compare_exchange(0, code, Ordering::Release, Ordering::Acquire) {
+        assert!(
+            machine == code,
+            "control_regs: cpu{cpu_id} offers the local APIC in {mine:?} and the BSP declared {:?}",
+            apic_mode(),
+        );
+    }
+    let live = cpu::rdmsr(apic_base::MSR);
+    assert!(
+        live & apic_base::ADDRESS_MASK == APIC_REGISTERS,
+        "control_regs: cpu{cpu_id} holds apic_base={live:#x}: firmware moved its local APIC's \
+         registers from {APIC_REGISTERS:#x}",
+    );
+    let declared = APIC_REGISTERS
+        | apic_base::EN
+        | if mine == ApicMode::X2apic { apic_base::EXTD } else { 0 }
+        | live & apic_base::BSP;
+    // SAFETY: the registers stay where they decode and `EXTD` is set only
+    // where CPUID offers x2APIC; an illegal transition is a `#GP`, never a
+    // state this kernel did not declare.
+    unsafe { cpu::wrmsr(apic_base::MSR, declared) };
+    let held = cpu::rdmsr(apic_base::MSR);
+    log!("control_regs: cpu{cpu_id} apic_base={held:#x} {mine:?}");
+    assert!(
+        held == declared,
+        "control_regs: cpu{cpu_id} holds apic_base={held:#x}, the declaration is {declared:#x}",
+    );
+    mine
+}
+
+/// The mode every local APIC was declared in. Panics before the BSP's
+/// [`init_apic`]: no register has an address until then.
+#[inline]
+pub fn apic_mode() -> ApicMode {
+    match DECLARED_APIC.load(Ordering::Relaxed) {
+        1 => ApicMode::Xapic,
+        2 => ApicMode::X2apic,
+        _ => undeclared_apic(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn undeclared_apic() -> ! {
+    panic!("control_regs: a local APIC register was reached before the BSP declared its mode")
 }
 
 /// Whether the declaration carries `PCIDE`, and therefore whether `INVPCID` is this machine's flush.
@@ -431,11 +525,12 @@ fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
 /// the CPUs it got rather than to crash on that one.
 pub fn report(cpus: u32) {
     log!(
-        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x}",
+        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x} apic={:?}",
         CHECKED.load(Ordering::Relaxed),
         CR0,
         DECLARED_CR4.load(Ordering::Acquire),
         EFER,
+        apic_mode(),
     );
 }
 
