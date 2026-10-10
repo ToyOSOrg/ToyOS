@@ -7,7 +7,7 @@ use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    century_of, definition_blocks, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
+    century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
     isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line,
     Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
@@ -80,12 +80,16 @@ fn the_madt_names_the_two_cpus_that_boot_and_the_chip_that_interrupts_them() {
     );
 }
 
-/// `ACPI: MCFG found at 0x7fb76000` and `ACPI: ECAM base address: 0xb0000000`.
+/// `ACPI: MCFG found at 0x7fb76000` and `ACPI: ECAM window: segment 0 buses
+/// 0x00..=0xff, bus 0 at 0xb0000000`: q35 publishes one allocation, of every bus.
 #[test]
 fn the_mcfg_names_the_ecam_window_the_pci_walk_used() {
-    let (mcfg, base) = ecam_base(machine(), RSDP).expect("MCFG");
-    assert_eq!(mcfg.base(), 0x7fb7_6000);
-    assert_eq!(base, 0xb000_0000);
+    let allocations = ecam_allocations(machine(), RSDP).expect("MCFG");
+    assert_eq!(allocations.table_base(), 0x7fb7_6000);
+    let windows: Vec<_> = allocations.collect();
+    let [Ok(window)] = windows[..] else { panic!("q35 publishes one allocation, and the walk found {windows:?}") };
+    assert_eq!((window.base(), window.segment(), window.buses()), (0xb000_0000, 0, 0..=0xff));
+    assert_eq!(window.decoded(), (0xb000_0000, 0x1000_0000));
 }
 
 /// `ACPI: HPET at 0xfed00000`.

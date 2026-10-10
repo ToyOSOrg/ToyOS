@@ -285,24 +285,17 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(rsdp_addr), global_lock(facs));
+    let (ecam, lock) = (ecam(), global_lock(facs));
     let hardware = Hardware { fixed, control, ec, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
 
-/// The ECAM window as the MCFG's first allocation bounds it (PCI Firmware
-/// Specification 3.3, Table 4-3: the segment group at +8 of the entry, the
-/// first and last bus at +10 and +11).
-fn ecam(rsdp_addr: u64) -> Option<Ecam> {
-    let (mcfg, base) = toyos_acpi::ecam_base(crate::drivers::acpi::direct_phys(), rsdp_addr).ok()?;
-    let entry = toyos_acpi::MCFG_FIRST_ENTRY;
-    let (segment, first_bus, last_bus) = (mcfg.u16_at(entry + 8)?, mcfg.byte(entry + 10)?, mcfg.byte(entry + 11)?);
-    if first_bus > last_bus {
-        log!("acpi: the MCFG's window ends at bus {last_bus:#x}, before its first, {first_bus:#x}: no configuration access is mediated");
-        return None;
-    }
-    Some(Ecam { base, segment, first_bus, last_bus })
+/// The first ECAM window PCI enumeration walked.
+fn ecam() -> Option<Ecam> {
+    let window = *crate::drivers::pci::windows().first()?;
+    let (first_bus, last_bus) = window.buses().into_inner();
+    Some(Ecam { base: window.base(), segment: window.segment(), first_bus, last_bus })
 }
 
 /// The Global Lock of the FACS the FADT names, said by name where there is
