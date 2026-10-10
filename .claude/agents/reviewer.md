@@ -113,21 +113,30 @@ if it meets the bar above; otherwise it is a NOTE.
   reader can check: that rule is a sentence in a prompt. What could be deleted, merged into what
   exists, or made smaller? An abstraction with one caller, a parameter with one value, dead code,
   code kept "just in case" or because nobody knows whether it is needed. Size is never bought with
-  a weaker check: a test is cut only when it tests nothing, when this prompt takes its rule, or
-  as **Guest tests** says. A compromise the branch found is removed or recorded in `issues/` with
-  an owner, evidence and an exit condition.
-- **Tests.** The refusals and the boundary, not the happy path.
+  a weaker check: a test is cut only when it tests nothing or is a measurement, when this prompt
+  takes its rule, or as **Guest tests** says. A compromise the branch found is removed or
+  recorded in `issues/` with an owner, evidence and an exit condition.
+- **Tests.** The refusals and the boundary, not the happy path. A test is hermetic, deterministic
+  and makes one claim, in setup, act and assert under a name that says the claim; it reaches no
+  internet and no other machine, compares against no other OS and depends on no host speed: its
+  only clock is a hang ceiling. A guest test's outcome never depends on host scheduling or load:
+  however loaded the host, no guest test goes red, and timing is valid only on metal. A measurement is not a test: throughput, latency and a comparison
+  against Ubuntu are taken on a measurement-only branch or by the orchestrator on demand, posted
+  as evidence, and never become a suite row. A test or row the diff adds or changes that breaks
+  this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
   `Untrusted` is an unwrap wearing a check's name.
-- **Guest tests.** A behaviour is tested on root `CLAUDE.md`'s cheapest tier that reaches it. A new
-  guest test, or one whose behaviour changes, whose pull request body does not say why a type, a
-  host test and a metal row cannot reach its behaviour is a BLOCKER, and so is one whose reason a
-  cheaper tier answers. A guest test is cut only where a cheaper tier already holds its behaviour,
-  named in the pull request body; where a stage of a track names it, in the same diff, with the
-  behaviour it guarded and an exit a build or test can fail; or as root `CLAUDE.md` deletes a red
-  or flaky test. Any other cut is a BLOCKER.
+- **Guest tests.** Guest tests run on demand, and CI's small tier holds only the tests that must
+  break when something important breaks. A behaviour is tested on root `CLAUDE.md`'s cheapest
+  tier that reaches it. A new guest test, or one whose behaviour changes, whose pull request body
+  does not say why a type, a host test and a metal row cannot reach its behaviour is a BLOCKER,
+  and so is one whose reason a cheaper tier answers. A guest test is cut only where it is a
+  measurement (**Tests**); where a cheaper tier already holds its behaviour, named in the pull
+  request body; where a stage of a track names it, in the same diff, with the behaviour it
+  guarded and an exit a build or test can fail; or as root `CLAUDE.md` deletes a red or flaky
+  test. Any other cut is a BLOCKER.
 - **Waits.** A flat wait, or defensive code that hides a failure instead of failing fast (root
   `CLAUDE.md`, "Fail fast"), is a BLOCKER, in code and in tests.
 - **Actuators.** A kernel static of any kind, atomic or `Lock`-wrapped, that an `actuator::` guard's

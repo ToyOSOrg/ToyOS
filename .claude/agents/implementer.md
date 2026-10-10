@@ -29,6 +29,9 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
   a metal row, `cargo test --test toyos-build -- --metal --metal-readback <dir> <row>`, from a
   committed tree and with the `<dir>` the brief names, builds its images and writes
   `<dir>/request.txt`; end your report with `T14 RUN REQUESTED: <dir>/request.txt`.
+- A test you write holds to `reviewer.md`'s **Tests**: hermetic, deterministic, one claim, and a guest test no host load can turn red. A
+  number your change needs is a measurement, taken on a measurement-only branch or asked of the
+  orchestrator, posted on the pull request as evidence and never added as a suite row.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the scratchpad the brief names.
