@@ -14,7 +14,6 @@
 //! reference whose `S + A` leaves the defining module's segment is refused.
 
 use super::{relocated_symbol, CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
-use crate::UserAddr;
 use toyos_elf::sym::{Sym, SymTab};
 use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef, TlsSegment};
 
@@ -111,30 +110,6 @@ pub fn resolve_dlopen_relocs(lib: &LoadedLib, other_libs: &[LoadedLib]) -> u64 {
     unresolved
 }
 
-/// Bind a startup library's `GLOB_DAT`/`JUMP_SLOT` slots, preferring the
-/// executable's own exports; answers how many it left unresolved.
-pub fn resolve_lib_bind_relocs(
-    lib: &LoadedLib,
-    exe_sym_map: &alloc::collections::BTreeMap<&str, UserAddr>,
-    libs: &[LoadedLib],
-) -> u64 {
-    let symbols = lib.symbols();
-    let mut unresolved = 0;
-    for (offset, sym) in lib.bind_entries() {
-        let name = relocated_symbol(symbols, sym).name_in(symbols.strings());
-        let resolved = exe_sym_map
-            .get(name)
-            .copied()
-            .or_else(|| libs.iter().find_map(|other| other.resolve(name)));
-        match resolved {
-            // SAFETY: rela::tables_outside_window refused any image whose tables meet the window these writes land in.
-            Some(addr) => unsafe { lib.write_at::<u64>(offset, addr.raw()) },
-            None => unresolved += 1,
-        }
-    }
-    unresolved
-}
-
 /// Apply `R_X86_64_TPOFF64` and `R_X86_64_TPOFF32`: the initial-exec TLS
 /// model, a fixed offset from the thread pointer. Answers how many references
 /// name a symbol no module defines; each is written as zero.
@@ -181,7 +156,7 @@ pub fn apply_tpoff_relocs(
 
 /// A `TPOFF32`'s field is 32 bits the instruction sign-extends; a value outside
 /// them names some other address than the one resolved.
-pub fn tpoff32_value(tpoff: i64) -> Result<i32, RelocError> {
+fn tpoff32_value(tpoff: i64) -> Result<i32, RelocError> {
     i32::try_from(tpoff).map_err(|_| RelocError::TpoffOverflows)
 }
 
@@ -284,7 +259,7 @@ fn resolve_tls_ref(
 }
 
 /// `S + A - tp` for one initial-exec reference, or `None` for a symbol no module defines.
-pub fn compute_tpoff(
+fn compute_tpoff(
     r: TlsRef,
     own_base_offset: usize,
     own_tls: Option<TlsSegment>,

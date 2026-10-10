@@ -553,7 +553,7 @@ mod tests {
                     name: "soundserver".into(),
                     path: "/system/bin/soundserver".into(),
                     serves: vec!["soundserver".into()],
-                    devices: vec!["hda-audio".into(), "virtio-sound".into()],
+                    devices: vec!["hda-audio".into(), "pci:1af4:1059".into()],
                     syscap: vec!["rt".into()],
                     service: true,
                     ..Program::default()

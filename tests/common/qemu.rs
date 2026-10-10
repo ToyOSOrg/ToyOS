@@ -694,6 +694,10 @@ pub enum Profile {
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
     HeadlessNoUsb,
+    /// [`Profile::Headless`] with a virtio-gpu behind the unit: a virtio
+    /// function the kernel still drives itself beside the console, which is
+    /// what `virtio-no-access-platform` withholds the bit from.
+    HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller, QEMU's `qemu-xhci`
     /// on MSI and with no MSI-X, carrying a stick and a keyboard: the
     /// controller `xhci-leave=1b36:000d` leaves to `usbd`, armed on MSI as
@@ -740,19 +744,24 @@ pub enum Profile {
     /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
     /// function that writes where it is told to through the unit.
     VirtSmmu,
+    /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
+    /// QEMU's `edu`, a function that sends an MSI when told to, and an
+    /// `e1000e` the IORT routes past the SMMUv3.
+    VirtIts,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu => {
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu | Self::VirtIts => {
                 Arch::Aarch64
             }
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
+            | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::Metal
             | Self::MetalNoX2apic => Arch::X86_64,
@@ -898,6 +907,8 @@ struct Shape {
     /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
     /// the protocol from RDRAND without one.
     rng: bool,
+    /// A virtio-gpu, which the kernel drives.
+    virtio_gpu: bool,
 }
 
 /// Whether `virt` has its SMMUv3. With it come two of QEMU's `iommu-testdev`,
@@ -907,6 +918,12 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
+    /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
+    /// With it comes one `edu`, whose message is the only one a guest of
+    /// this suite can raise on demand, and an `e1000e` behind a root port of
+    /// a `pxb-pcie` with `bypass_iommu=on`, which QEMU's IORT routes straight
+    /// to the ITS: a plain root port's buses it routes through the unit.
+    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -954,6 +971,7 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
+            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -966,6 +984,7 @@ impl Profile {
                 iommu: None,
                 smmu: Smmu::Absent,
                 rng: true,
+                virtio_gpu: false,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -979,6 +998,7 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
                 smmu: Smmu::Absent,
                 rng: false,
+                virtio_gpu: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -996,11 +1016,13 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
                 smmu: Smmu::Absent,
                 rng: false,
+                virtio_gpu: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
+            Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
                 usb: &[
@@ -1062,6 +1084,9 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
+    /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
+    /// it, and the host's own UTC with `None`.
+    pub rtc_base: Option<&'static str>,
 }
 
 impl BootOptions {
@@ -1100,6 +1125,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
+            rtc_base: None,
         }
     }
 }
@@ -2156,6 +2182,7 @@ fn qemu_command(
             match shape.smmu {
                 Smmu::Absent => machine,
                 Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
+                Smmu::WithIts => format!("{machine},iommu=smmuv3,its=on,kernel-irqchip=off"),
             }
         }
     };
@@ -2229,6 +2256,9 @@ fn qemu_command(
         (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
     }
     qemu.arg("-display").arg("none").arg("-no-reboot");
+    if let Some(base) = options.rtc_base {
+        qemu.arg("-rtc").arg(format!("base={base}"));
+    }
     if let Some((w, h)) = shape.panel {
         assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
@@ -2283,11 +2313,21 @@ fn qemu_command(
     if shape.rng {
         qemu.arg("-device").arg("virtio-rng-pci");
     }
+    if shape.virtio_gpu {
+        qemu.arg("-device").arg(format!("virtio-gpu-pci{platform}"));
+    }
     if shape.smmu == Smmu::WithTestdev {
         // Two, the first enumerated below the second: the kernel's selftest
         // routes nothing for the first, whose entry the table holds.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
+    }
+    if shape.smmu == Smmu::WithIts {
+        qemu.arg("-device").arg("edu");
+        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
+        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
+        // No option ROM: firmware has no use for the NIC.
+        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the

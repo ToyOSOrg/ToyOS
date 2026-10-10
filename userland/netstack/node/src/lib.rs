@@ -150,10 +150,15 @@ impl Node {
 
     // ---- the device ----
 
-    /// A frame the device received.
-    pub fn receive(&mut self, now: Instant, frame: &[u8], mut draw: impl FnMut() -> u32) {
-        self.stack.receive(now, frame);
-        self.settle(now, &mut draw);
+    /// The frames the device received since the last call, one by one: `next` hands its next
+    /// frame to the sink it is given and answers `false` once it had none. One pass over the
+    /// streams follows the last frame, so what the batch brought reaches each client in one write
+    /// and not one a frame.
+    pub fn receive(&mut self, now: Instant, mut next: impl FnMut(&mut dyn FnMut(&[u8])) -> bool, mut draw: impl FnMut() -> u32) {
+        while next(&mut |frame| {
+            self.stack.receive(now, frame);
+            self.settle(now, &mut draw);
+        }) {}
         self.bridge(now);
     }
 

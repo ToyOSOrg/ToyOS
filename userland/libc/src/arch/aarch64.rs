@@ -6,11 +6,15 @@
 /// the stack pointer 16-byte aligned:
 ///   [sp]   = argc
 ///   [sp+8] = argv[0], argv[1], ..., NULL
+/// The image relocates itself first, from its own header's address.
 #[cfg(not(feature = "std-runtime"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "adrp x0, __ehdr_start",
+        "add x0, x0, :lo12:__ehdr_start",
+        "bl {relocate}",
         "ldr x0, [sp]",        // argc
         "add x1, sp, #8",      // argv
         // The outermost frame record: a backtrace ends here.
@@ -18,6 +22,7 @@ unsafe extern "C" fn _start() -> ! {
         "mov x30, xzr",
         "bl {start_c}",
         "brk #0x1",
+        relocate = sym toyos::relocate::relocate_self,
         start_c = sym crate::runtime::start_c,
     );
 }

@@ -97,10 +97,19 @@ pub const fn narrow_destination(apic_id: u32) -> Result<u8, &'static str> {
     }
 }
 
-/// The compatibility-format message that raises `vector` on the CPU whose APIC
-/// ID is `dest`: the destination in address bits 19:12, the vector in the data.
-pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
-    Ok((MSI_DOORBELL | u32::from(narrow_destination(dest)?) << 12, vector as u32))
+/// Every device interrupt in this kernel targets cpu0, named as a destination
+/// for a message and for a remapping entry, with or without `EIME`.
+pub(crate) const MSG_DEST: u32 = 0;
+/// [`MSG_DEST`] in eight bits, so no message or entry naming it is refused.
+const MSG_DEST_NARROW: u8 = match narrow_destination(MSG_DEST) {
+    Ok(dest) => dest,
+    Err(_) => panic!("MSG_DEST does not fit an 8-bit destination"),
+};
+
+/// The compatibility-format message that raises `vector` on [`MSG_DEST`]: the
+/// destination in address bits 19:12, the vector in the data.
+pub(super) fn msi_message(vector: u8) -> (u32, u32) {
+    (MSI_DOORBELL | u32::from(MSG_DEST_NARROW) << 12, vector as u32)
 }
 
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs),
