@@ -77,7 +77,6 @@ from_handle! {
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
     crate::PartitionDev => |h| crate::PartitionDev(Device(h)),
     crate::HdaDev => |h| crate::HdaDev(Device(h)),
-    crate::VirtioSoundDev => |h| crate::VirtioSoundDev(Device(h)),
 }
 
 /// This process's endowment table, parsed once.
@@ -224,9 +223,7 @@ pub fn provided(labels: &mut [Option<(&'static str, Connector)>]) -> usize {
 ///
 /// `None` is a machine that had no such device when the supervisor asked, or a program
 /// the manifest gives none — the honest answer, and the one soundserver degrades
-/// on. It replaces a two-syscall probe: "did I get an HDA or a virtio-sound?"
-/// is now "which claims are in my endowment table?", which is the same question
-/// with the answer already in hand.
+/// on.
 pub fn device<T: FromHandle>(class: DeviceType) -> Option<T> {
     with_prefixed(DEV_PREFIX, class.class_name(), |label| Endowments::get().take::<T>(label))
 }

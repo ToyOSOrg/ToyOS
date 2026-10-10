@@ -24,7 +24,6 @@ pub enum DeviceInfo {
     /// own memory, so this mint installs nothing.
     PciFunction(toyos_abi::pci::PciFunctionInfo),
     Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
-    VirtioSound(toyos_abi::virtio_sound::VirtioSoundInfo, Arc<SharedMemObject>),
     /// Which partition, how long, and both its GUIDs; the view it moves blocks
     /// through is the claim's own (`device::Claim::partition`).
     Partition(toyos_abi::part::PartitionInfo),
@@ -80,11 +79,6 @@ impl DeviceInfo {
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
-                bytes(&info).into()
-            }
-            Self::VirtioSound(info, dma) => {
-                let mut info = *info;
-                info.dma = install_buffers(table, &[dma])?[0];
                 bytes(&info).into()
             }
         })

@@ -23,3 +23,6 @@ license = "MIT OR Apache-2.0"
 toyos-abi = { path = "../toyos-abi" }
 # Which memory types the kernel hands out as RAM.
 toyos-bootmap = { path = "../toyos-bootmap" }
+# The ECAM window, as the MCFG decode made it: the one declaration of which
+# addresses are configuration space, read by the policy and by the kernel.
+toyos-acpi = { path = "../toyos-acpi" }

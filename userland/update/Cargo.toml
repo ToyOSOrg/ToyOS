@@ -15,7 +15,7 @@ toyos-update = { path = "../../toyos-update" }
 # A slot's volume is FAT, written with the driver the kernel mounts FAT with.
 toyos-fat32 = { path = "../../toyos-fat32" }
 # ROOT is hashed as it streams onto its partition, never held whole.
-toyos-sha2 = { path = "../../toyos-sha2" }
+toyos-sha2-hw = { path = "../../toyos-sha2-hw" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor grants it"

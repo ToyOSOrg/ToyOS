@@ -7,12 +7,12 @@ use std::vec::Vec;
 use toyos_untrusted::Refused;
 
 use crate::pci::{
-    status, Layout, Live, Offer, Refusal, Setup, Source, VendorCap, VIRTIO_F_ACCESS_PLATFORM,
-    VIRTIO_F_VERSION_1,
+    status, Layout, Live, Offer, Refusal, Setup, Source, VendorCap, WalkRefusal,
+    VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
 };
 use crate::queue::{desc_bytes, Buffer, Parts, Used, UsedRefusal, Virtqueue};
 use crate::stub::{
-    Event, Machine, Ring, BAR_BYTES, COMMON_AT, DEVICE_BASE, FEATURE_OFFERED, FEATURE_WITHHELD,
+    Event, Machine, Ring, BAR_BYTES, COMMON_AT, DEVICE_AT, DEVICE_BASE, FEATURE_OFFERED, FEATURE_WITHHELD,
     GRANT_BYTES, NOTIFY_AT, NOTIFY_OFF_MULTIPLIER, QUEUES,
 };
 
@@ -139,6 +139,9 @@ fn a_structure_its_bar_does_not_hold_is_refused_and_never_reached() {
     // notification structure's.
     assert_eq!(refused(1, COMMON_AT + 2, 0x38), Some(Refusal::Misaligned("COMMON_CFG")));
     assert_eq!(refused(2, NOTIFY_AT + 1, 0x100), Some(Refusal::Misaligned("NOTIFY_CFG")));
+    // §4.1.4.6.1: "The offset for the device-specific configuration MUST be
+    // 4-byte aligned", which is what a 32-bit field read there rests on.
+    assert_eq!(refused(4, DEVICE_AT + 2, 6), Some(Refusal::Misaligned("DEVICE_CFG")));
     // A structure that ends on the BAR's last byte is inside it.
     assert_eq!(refused(2, bar - 0x1000, 0x1000), None);
 }
@@ -432,6 +435,163 @@ fn a_field_past_the_device_structure_is_refused_and_not_read() {
         );
         assert_eq!(machine.trace(), [Event::Status(11 | status::FAILED)]);
     }
+}
+
+/// §4.1.3.1: "32-bit wide and aligned accesses for 32-bit … wide fields". A
+/// field that is not a whole aligned dword of the structure is refused and not
+/// read.
+#[test]
+fn a_32_bit_field_is_read_32_bits_wide_and_only_inside_the_structure() {
+    let machine = Machine::new();
+    let device = setup(&machine);
+    machine.forget_trace();
+    let (_, word) = device.device_read32(0).unwrap_or_else(|why| panic!("dword 0 is inside: {why}"));
+    assert_eq!(word, 0x1200_5452);
+    assert_eq!(machine.trace(), [Event::DeviceConfig { at: 0 }]);
+    // Past the six bytes, straddling their end, off a dword, and wrapping.
+    for at in [8, 4, 2, usize::MAX - 1] {
+        let machine = Machine::new();
+        let device = setup(&machine);
+        machine.forget_trace();
+        assert_eq!(device.device_read32(at).err(), Some(Refusal::PastDeviceConfig { at, bytes: 6 }));
+        assert_eq!(machine.trace(), [Event::Status(11 | status::FAILED)]);
+    }
+}
+
+// --- PCI 3.0 §6.7: the capability list ---
+
+/// A function's configuration space: 256 bytes, and the offsets a claim
+/// refuses.
+struct Config {
+    bytes: [u8; 256],
+    refused: Vec<u16>,
+}
+
+impl Config {
+    /// Capabilities `at`, each linked to the next and the last to none, the
+    /// pointer at the first, and `Status` saying there is a list.
+    fn listing(at: &[u8]) -> Self {
+        let mut config = Self { bytes: [0; 256], refused: Vec::new() };
+        config.bytes[0x06] = 1 << 4;
+        config.bytes[0x34] = at.first().copied().unwrap_or(0);
+        for (nth, &cap) in at.iter().enumerate() {
+            config.bytes[cap as usize + 1] = at.get(nth + 1).copied().unwrap_or(0);
+        }
+        config
+    }
+
+    /// A vendor capability (§4.1.4) at `at`.
+    fn vendor(&mut self, at: u8, cfg_type: u8, bar: u8, offset: u32, length: u32, mult: u32) {
+        let at = at as usize;
+        self.bytes[at] = 0x09;
+        self.bytes[at + 3] = cfg_type;
+        self.bytes[at + 4] = bar;
+        self.bytes[at + 8..at + 12].copy_from_slice(&offset.to_le_bytes());
+        self.bytes[at + 12..at + 16].copy_from_slice(&length.to_le_bytes());
+        self.bytes[at + 16..at + 20].copy_from_slice(&mult.to_le_bytes());
+    }
+}
+
+/// What a claim answers for a read it refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClaimRefused;
+
+impl crate::pci::ConfigSpace for Config {
+    type Refused = ClaimRefused;
+
+    fn read8(&self, at: u16) -> Result<u8, ClaimRefused> {
+        if self.refused.contains(&at) {
+            return Err(ClaimRefused);
+        }
+        Ok(self.bytes[at as usize])
+    }
+
+    fn read32(&self, at: u16) -> Result<u32, ClaimRefused> {
+        assert_eq!(at % 4, 0, "a 32-bit read at {at:#x}, off its alignment");
+        if self.refused.contains(&at) {
+            return Err(ClaimRefused);
+        }
+        let at = at as usize;
+        Ok(u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap()))
+    }
+}
+
+/// The vendor capabilities in the list's order, any other capability passed
+/// over, and the multiplier read where §4.1.4.4 puts one and nowhere else.
+#[test]
+fn the_walk_answers_every_vendor_capability_in_the_lists_order() {
+    let mut config = Config::listing(&[0x98, 0x40, 0x70, 0x84]);
+    config.vendor(0x98, 1, 4, 0x0000, 0x1000, 0);
+    config.bytes[0x40] = 0x11; // MSI-X: not a vendor's.
+    config.vendor(0x70, 2, 4, 0x3000, 0x1000, 4);
+    config.vendor(0x84, 4, 4, 0x2000, 0x1000, 0xDEAD);
+    let caps = crate::pci::vendor_caps(&config).expect("a list that ends");
+    assert_eq!(
+        caps,
+        [
+            VendorCap { cfg_type: 1, bar: 4, offset: 0, length: 0x1000, notify_off_multiplier: 0 },
+            VendorCap { cfg_type: 2, bar: 4, offset: 0x3000, length: 0x1000, notify_off_multiplier: 4 },
+            VendorCap { cfg_type: 4, bar: 4, offset: 0x2000, length: 0x1000, notify_off_multiplier: 0 },
+        ]
+    );
+}
+
+/// §6.2.3: with `Status` bit 4 clear the pointer means nothing, and nothing
+/// behind it is read.
+#[test]
+fn a_function_without_a_capability_list_has_no_vendor_capability() {
+    let mut config = Config::listing(&[0x40]);
+    config.vendor(0x40, 1, 4, 0, 0x1000, 0);
+    config.bytes[0x06] = 0;
+    config.refused = (0x08..0x100).collect();
+    assert_eq!(crate::pci::vendor_caps(&config), Ok(Vec::new()));
+}
+
+/// A read the claim refused is that refusal, at that offset, and never a
+/// field of zeros another check refuses under a name of its own.
+#[test]
+fn a_refused_read_ends_the_walk_by_the_claims_own_word() {
+    for at in [0x06, 0x34, 0x40, 0x41, 0x43, 0x44, 0x48, 0x4C, 0x50] {
+        let mut config = Config::listing(&[0x40]);
+        config.vendor(0x40, 2, 4, 0x3000, 0x1000, 4);
+        config.refused = Vec::from([at]);
+        assert_eq!(
+            crate::pci::vendor_caps(&config),
+            Err(WalkRefusal::Read { at, why: ClaimRefused }),
+            "a refusal at {at:#x}"
+        );
+    }
+}
+
+/// §6.7: "the bottom two bits are Reserved and must be set to 00b. Software
+/// must mask these bits off before using this register as a pointer", of the
+/// pointer and of every link.
+#[test]
+fn every_link_is_masked_of_its_two_reserved_bits_before_it_is_an_offset() {
+    let mut config = Config::listing(&[0x40, 0x60]);
+    config.bytes[0x34] = 0x43;
+    config.bytes[0x41] = 0x62;
+    config.vendor(0x40, 1, 4, 0, 0x1000, 0);
+    config.vendor(0x60, 4, 4, 0x2000, 0x1000, 0);
+    let caps = crate::pci::vendor_caps(&config).expect("a list that ends");
+    assert_eq!(caps.iter().map(|cap| cap.cfg_type).collect::<Vec<_>>(), [1, 4]);
+}
+
+/// A link into the header and a list that comes back round are each refused
+/// by name, and neither is walked for ever.
+#[test]
+fn a_link_into_the_header_or_round_the_list_is_refused() {
+    let mut config = Config::listing(&[0x40]);
+    config.bytes[0x41] = 0x3C;
+    assert_eq!(crate::pci::vendor_caps(&config), Err(WalkRefusal::IntoHeader { at: 0x3C }));
+
+    let mut config = Config::listing(&[0x40, 0x50]);
+    config.bytes[0x51] = 0x40;
+    assert_eq!(crate::pci::vendor_caps(&config), Err(WalkRefusal::Looped));
+
+    // The longest list a header holds is no loop: a capability on every dword.
+    let every: Vec<u8> = (0x40..=0xFCu8).step_by(4).collect();
+    assert_eq!(crate::pci::vendor_caps(&Config::listing(&every)), Ok(Vec::new()));
 }
 
 // --- §2.7: the queue ---

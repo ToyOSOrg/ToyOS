@@ -10,6 +10,22 @@
 //! the claim's watch is posted from the handler.
 
 use super::device_irq::device_irq_entry;
+use super::Vector;
+
+/// The vector each claim slot's message carries, by slot: the vector is how
+/// the kernel knows which claim a message belongs to.
+const VECTORS: [Vector; crate::pcidev::MAX_FUNCTIONS] =
+    [Vector::UserDev0, Vector::UserDev1, Vector::UserDev2, Vector::UserDev3];
+
+/// The vector claim slot `slot`'s remapping entry delivers.
+pub(crate) fn claim_vector(slot: usize) -> u8 {
+    VECTORS[slot] as u8
+}
+
+/// What claim slot `slot`'s message raises, for the record.
+pub(crate) fn slot_interrupt(slot: usize) -> impl core::fmt::Display {
+    super::DriverIrq(VECTORS[slot])
+}
 
 fn took(slot: usize) {
     crate::arch::percpu::irq_took!(UserDev);

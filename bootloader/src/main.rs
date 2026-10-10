@@ -14,7 +14,7 @@ use efi::{
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
-use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, ROOT_HIGH_HALF, ROOT_IDENTITY};
+use toyos_bootmap::{Plan, Table, BOOT_MAP_BYTES, MAX_PAGES};
 use toyos_update::policy;
 use toyos_update::record::{self, Booted, Ended, Record};
 
@@ -40,6 +40,7 @@ mod rootimage;
 mod seed;
 mod slot;
 mod stamp;
+mod wallclock;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -302,7 +303,6 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     let rules = rela::Rules {
         extent,
         window: (0, mem_size as u64),
-        fill: None,
         tls: None,
     };
     let mut reloc_count = 0u64;
@@ -397,54 +397,6 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
     })
 }
 
-/// Write `plan` into `pt_mem` and return its root table's physical address.
-///
-/// # Safety
-/// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
-unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
-    use arch::encoding::{block, page, table};
-    use toyos_bootmap::Slot;
-
-    let mut next_page = 0usize;
-    let mut alloc_page = || -> *mut u64 {
-        let page = pt_mem.add(next_page * 4096) as *mut u64;
-        next_page += 1;
-        page
-    };
-
-    let root = alloc_page();
-    let identity_pdpt = alloc_page();
-    let high_pdpt = alloc_page();
-    let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
-    for (slot, gib) in plan.directories().iter().enumerate() {
-        let pd = alloc_page();
-        directories[slot] = pd;
-        *identity_pdpt.add(*gib as usize) = table(pd as u64);
-        *high_pdpt.add(*gib as usize) = table(pd as u64);
-    }
-
-    let mut fine = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_PAGES];
-    for (table_at, (directory, index)) in plan.fine_slots().enumerate() {
-        let leaves = alloc_page();
-        fine[table_at] = leaves;
-        *directories[directory].add(index) = table(leaves as u64);
-    }
-
-    for entry in plan.entries() {
-        match entry.slot {
-            Slot::Directory { directory, index } => {
-                *directories[directory].add(index) = block(entry.phys, entry.cache)
-            }
-            Slot::Fine { table, index } => *fine[table].add(index) = page(entry.phys, entry.cache),
-        }
-    }
-
-    *root.add(ROOT_IDENTITY) = table(identity_pdpt as u64);
-    *root.add(ROOT_HIGH_HALF) = table(high_pdpt as u64);
-
-    root as u64
-}
-
 /// Every range firmware's map says is write-back memory, `(base, length)`:
 /// a descriptor carrying `EFI_MEMORY_WB` and not one of the two I/O types,
 /// which a firmware may give the attribute without meaning memory.
@@ -481,7 +433,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -502,12 +454,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let free = gcd::free_mmio(&system_table, &mut root_bridge_windows[named..]);
     let root_bridge_window_count = (named + free) as u64;
 
-    // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
-    // it into 512-entry pages.
-    let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
-    // SAFETY: `layout` has non-zero size and its 4096 alignment is what every
-    // page-table page below needs — the low 12 bits of an entry are flags, not
-    // address bits.
+    // Allocated before exiting boot services, which takes the allocator away.
+    let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
+    // SAFETY: `pt_layout` has non-zero size.
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
@@ -534,8 +483,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             match plan.scanout() {
                 Some((at, len)) => println!(
                     "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
-                     PHYS_OFFSET, in {} page directories",
-                    plan.directories().len()
+                     PHYS_OFFSET, in {} page directories under {} second-level tables",
+                    plan.directories().len(),
+                    plan.regions().len()
                 ),
                 None => println!("Scanout: this machine has none"),
             }
@@ -547,9 +497,12 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let plan = planned
         .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
 
-    // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and a `Plan` never names more pages than that.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
+    // SAFETY: `pt_mem` is the zeroed allocation of `pt_layout` above, which
+    // nothing else holds, so it is a valid `[Table; MAX_PAGES]` of empty
+    // tables; firmware's map is identity, so its address is the pool's
+    // physical one.
+    let pool = unsafe { &mut *pt_mem.cast::<[Table; MAX_PAGES]>() };
+    let pml4_phys = plan.write(arch::encoding::ENCODING, pool, pt_mem as u64);
     println!("Boot map: root {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
     let kernel_phys = kernel.memory.as_ptr() as u64;
@@ -615,8 +568,16 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         // Read into this struct below, and nowhere else: the kernel zeroes it here.
         loader_seed: [0; toyos_abi::boot::SEED_LEN],
         loader_seed_len: 0,
+        wall_clock_secs: 0,
+        wall_clock_counter: 0,
+        wall_clock_known: 0,
     };
     kernel_args.loader_seed_len = seed::read(&system_table, &mut kernel_args.loader_seed);
+    if let Some((civil, counter)) = wall_clock {
+        kernel_args.wall_clock_secs = civil.to_unix_secs();
+        kernel_args.wall_clock_counter = counter;
+        kernel_args.wall_clock_known = 1;
+    }
     report_reach(
         "Kernel arguments",
         &kernel_args as *const KernelArgs as u64,
@@ -686,25 +647,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // range, and `image` is that image, relocated, with its entry at
     // `entry_offset`.
     unsafe { arch::enter_kernel(image, kernel.entry_offset as u64, &kernel_args) }
-}
-
-/// When this pass armed the page, in Unix seconds, or 0 where firmware would
-/// not say.
-///
-/// The zone is not applied and does not need to be: what a reader of the stick
-/// asks of this number is whether the record beside it is *this* boot's
-/// predecessor's or one left over, and an hour either way answers that.
-fn armed_at(system_table: &SystemTable) -> u64 {
-    let Ok(t) = system_table.runtime_services().get_time() else { return 0 };
-    toyos_wallclock::Civil {
-        year: u64::from(t.year),
-        month: u64::from(t.month),
-        day: u64::from(t.day),
-        hour: u64::from(t.hour),
-        min: u64::from(t.minute),
-        sec: u64::from(t.second),
-    }
-    .to_unix_secs()
 }
 
 /// End a pass that read the black box and boots no kernel, by resetting the
@@ -929,9 +871,22 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
+    // Read once, outside the watchdog's bound: the page is stamped with it, and
+    // the kernel carries it forward to its boot on the counter read beside it.
+    let wall_clock = match wallclock::now(&system_table) {
+        Ok((civil, counter)) => {
+            println!("Wall clock: firmware's GetTime reads {civil} UTC at counter {counter}");
+            Some((civil, counter))
+        }
+        Err(why) => {
+            println!("Wall clock: {why}, so the kernel is handed none");
+            None
+        }
+    };
+
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
-    blackbox::arm(page, armed_at(&system_table), log_guid);
+    blackbox::arm(page, wall_clock.map_or(0, |(civil, _)| civil.to_unix_secs()), log_guid);
     bootnext::point_at_us(handle, &system_table);
 
     // The last act before the jump, so the smallest possible span of this loader
@@ -940,5 +895,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, wall_clock, system_table);
 }

@@ -764,9 +764,8 @@ mod tests {
     /// resvg's, which no reading of this file can see.
     #[test]
     fn the_icons_are_the_pixels_compared_with_resvg() {
-        use toyos_sha2::Sha256;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut digest = Sha256::new();
+        let mut digest = toyos_sha2_hw::sha256();
         for (stem, _) in SIZES {
             let svg = std::fs::read(root.join(format!("assets/icons/{stem}.svg"))).expect("a committed icon");
             digest.update(rasterize(stem, &svg));
