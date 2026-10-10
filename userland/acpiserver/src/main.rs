@@ -8,10 +8,9 @@
 //! again.
 //!
 //! **At start** every fixed and general-purpose event is disabled and its
-//! status cleared, then the power button and the embedded controller's GPE
-//! are enabled, the controller's backlog is drained, and the SCI
-//! acknowledged: a press after the clear latches and is served, one
-//! before it is lost.
+//! status cleared, then the fixed power button is enabled where the FADT
+//! says the machine has one, and the SCI acknowledged: a press after the
+//! clear latches and is served, one before it is lost.
 //!
 //! **Then the machine's tables are loaded** ([`aml::load`]), through the
 //! kernel's mediated access ([`Claim`]): after the arming, so a press during
@@ -20,11 +19,21 @@
 //! way. The load hands the kernel `\_S5`'s sleep type, without which the
 //! kernel refuses every power-off.
 //!
+//! **Then the embedded controller is found in the namespace and armed**
+//! ([`devices::find`]): its GPE enabled and its backlog drained. Its two
+//! ports are no row's, so every access to them is the kernel's to make
+//! ([`Claim`]), and one it refuses ends the controller, said by name. A
+//! machine whose DSDT did not load has no controller served.
+//! **Where the FADT says the power button is a control method device**, the
+//! buttons the namespace names are found too, and where one is, each query
+//! is run as its method ([`run_query`]): a Notify of a press is a press.
+//! Elsewhere no query's method runs.
+//!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, or is said and dropped on a machine with
 //! no power-off, and the controller's GPE drains the
-//! controller of every query waiting, which are then run, one by one, as
-//! [`aml::query`] says, after the drain that took them. An event this server
+//! controller of every query waiting, which are then run, one by one, after
+//! the drain that took them. An event this server
 //! never enabled, a controller that does not answer, more queries in one
 //! drain than [`QUERIES`], and [`sci::EMPTY_SCIS`] SCIs in a row that carried
 //! nothing are each a panic naming the registers.
@@ -33,6 +42,7 @@
 //! of every one at [`COUNTS`] intervals, never a line per event.
 
 mod aml;
+mod devices;
 mod ec;
 mod host;
 mod ledger;
@@ -47,9 +57,12 @@ use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
+use toyos_abi::acpi::{Access, AcpiInfo, Block, Space, Width, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
+use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
+use aml::Aml;
+use devices::{Ec, Queried};
 use ec::{Do, Transaction, Wait};
 use host::{Answer, Kernel, Stopping, Take};
 use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
@@ -62,10 +75,14 @@ const QUERIES: usize = 32;
 /// How often the log is told the queries' counts, where they moved.
 const COUNTS: Duration = Duration::from_secs(30);
 
-struct Server {
-    dev: AcpiDev,
+struct Server<'a> {
+    dev: &'a AcpiDev,
     info: AcpiInfo,
     served: Served,
+    /// The controller the namespace names, if it names one this server serves.
+    ec: Option<Ec>,
+    /// The namespace the load kept.
+    aml: Option<Aml<'a, Claim<'a>>>,
     /// Taken off the controller by the drain, run after it.
     queued: VecDeque<u8>,
     /// Every query number taken, and how often.
@@ -84,14 +101,14 @@ fn main() {
         return;
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
-    let served = Served {
-        power_button: info.flags & FIXED_POWER_BUTTON != 0,
-        ec_gpe: info.has_ec().then_some(info.ec_gpe),
-    };
+    let served = Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ec_gpe: None };
+    let claim = Claim(&dev);
     let mut server = Server {
-        dev,
+        dev: &dev,
         info,
         served,
+        ec: None,
+        aml: None,
         queued: VecDeque::new(),
         counts: BTreeMap::new(),
         counted: 0,
@@ -101,10 +118,12 @@ fn main() {
         power_off: false,
     };
     server.arm();
-    server.power_off = aml::load(&Claim(&server.dev), server.info.rsdp).handed;
+    let (loaded, kept) = aml::load(&claim, server.info.rsdp);
+    server.power_off = loaded.handed;
+    server.aml = kept;
+    server.arm_controller();
     server.serve();
 }
-
 /// The claim as the tables' fetch and their AML ask it for what lies outside
 /// its own ports.
 struct Claim<'a>(&'a AcpiDev);
@@ -146,12 +165,32 @@ impl Kernel for Claim<'_> {
     }
 }
 
+/// Why an access to one of the controller's ports was not made.
+enum Unmade {
+    Stopping,
+    /// The kernel keeps the port from this server, said as it refused it.
+    Refused(String),
+}
+
+impl Claim<'_> {
+    /// A byte of one of the controller's ports, which no row holds.
+    fn port_in(&self, port: u16) -> Result<u8, Unmade> {
+        let answer = self.access(Access::read(Space::SystemIo, u64::from(port), Width::Byte)).map_err(|Stopping| Unmade::Stopping)?;
+        answer.made.map(|byte| byte as u8).map_err(|refused| Unmade::Refused(format!("the kernel refused a read of its port {port:#x}, {refused:?}")))
+    }
+
+    fn port_out(&self, port: u16, byte: u8) -> Result<(), Unmade> {
+        let answer = self.access(Access::write(Space::SystemIo, u64::from(port), Width::Byte, u64::from(byte))).map_err(|Stopping| Unmade::Stopping)?;
+        answer.made.map(drop).map_err(|refused| Unmade::Refused(format!("the kernel refused a write of its port {port:#x}, {refused:?}")))
+    }
+}
+
 /// Each byte of a status-and-enable block: its status port and its enable port.
 fn bytes(block: Block) -> impl Iterator<Item = (u16, u16)> {
     (0..block.len / 2).map(move |i| (block.port + i, block.enable() + i))
 }
 
-impl Server {
+impl Server<'_> {
     fn arm(&mut self) {
         let pm1 = self.info.pm1_event;
         out16(pm1.enable(), 0);
@@ -163,23 +202,46 @@ impl Server {
         if self.served.power_button {
             out16(pm1.enable(), PWRBTN);
         }
-        if let Some(n) = self.served.ec_gpe {
-            let (_, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the kernel bounded every GPE by the block");
-            out8(enable, in8(enable) | 1 << (n % 8));
-        }
-        if self.info.has_ec() {
-            self.drain();
-            self.run_queued();
-        }
         self.dev.ack().expect("acpiserver: the claim's acknowledgement");
         println!(
-            "acpiserver: armed: power button {}, embedded controller {}",
-            if self.served.power_button { "served" } else { "not the fixed one, so not served" },
-            match self.served.ec_gpe {
-                Some(gpe) => format!("on GPE {gpe:#x} at {:#x}/{:#x}", self.info.ec_command.port, self.info.ec_data.port),
-                None => "none".into(),
-            },
+            "acpiserver: armed: power button {}",
+            if self.served.power_button { "served" } else { "a control method device, served once the namespace names it" },
         );
+    }
+
+    /// Find the controller, and the buttons where they are control method
+    /// devices, in the namespace the load kept; enable the controller's GPE
+    /// and drain its backlog.
+    fn arm_controller(&mut self) {
+        let Some(aml) = &mut self.aml else {
+            if !self.served.power_button {
+                println!("acpiserver: no control-method power button served: no namespace was kept");
+            }
+            return println!("{CONTROLLER_NONE}no namespace was kept");
+        };
+        let found = devices::find(&mut aml.interpreter, &mut aml.host, self.info.gpe0, !self.served.power_button);
+        if !self.served.power_button {
+            println!("acpiserver: {} control-method power button(s) served, each by the queries' Notify", found.buttons.len());
+        }
+        aml.host.buttons = found.buttons;
+        let Some(ec) = found.ec else { return };
+        // Its status register, which a read leaves as it was; the data
+        // register's read takes a byte, and a port refused later ends the
+        // controller then ([`Server::unserve`]).
+        match Claim(self.dev).port_in(ec.command) {
+            Err(Unmade::Stopping) => return,
+            Err(Unmade::Refused(why)) => return println!("{CONTROLLER_NONE}{why}"),
+            Ok(_) => {}
+        }
+        let n = ec.gpe;
+        let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
+        out8(status, 1 << (n % 8));
+        out8(enable, in8(enable) | 1 << (n % 8));
+        println!("{CONTROLLER_SERVED}{n:#x} at {:#x}/{:#x}", ec.command, ec.data);
+        self.served.ec_gpe = Some(n);
+        self.ec = Some(ec);
+        self.drain();
+        self.run_queued();
     }
 
     fn serve(&mut self) -> ! {
@@ -190,7 +252,7 @@ impl Server {
         let mut watching = false;
         loop {
             if !watching {
-                poller.watch(&self.dev, READABLE, 0);
+                poller.watch(self.dev, READABLE, 0);
                 watching = true;
             }
             let wait = next_count.saturating_duration_since(Instant::now());
@@ -240,8 +302,8 @@ impl Server {
                 Event::Ec => {
                     // The controller's GPE is an edge: cleared before the drain,
                     // so an event the drain does not see raises it again.
-                    let n = self.info.ec_gpe;
-                    let (status, _) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the kernel bounded every GPE by the block");
+                    let n = self.served.ec_gpe.expect("an event of the controller's GPE is one this server enabled");
+                    let (status, _) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
                     out8(status, 1 << (n % 8));
                     self.drain();
                 }
@@ -261,65 +323,64 @@ impl Server {
         }
     }
 
-    /// Take every query the controller has waiting off it, queued for after.
+    /// Take every query the controller has waiting off it, queued for after;
+    /// a port the kernel refuses ends the controller by name.
     fn drain(&mut self) {
+        match self.take_queries() {
+            Ok(()) | Err(Unmade::Stopping) => {}
+            Err(Unmade::Refused(why)) => self.unserve(&why),
+        }
+    }
+
+    fn take_queries(&mut self) -> Result<(), Unmade> {
+        let Some(ec) = &self.ec else { return Ok(()) };
+        let (claim, command, data) = (Claim(self.dev), ec.command, ec.data);
         let mut taken = 0;
-        while in8(self.info.ec_command.port) & ec::SCI_EVT != 0 {
-            let q = self.transact(Transaction::query());
+        loop {
+            let status = claim.port_in(command)?;
+            if status & ec::SCI_EVT == 0 {
+                return Ok(());
+            }
+            let q = transact(&claim, command, data, Transaction::query())?;
             if q == 0 {
-                break;
+                return Ok(());
             }
             taken += 1;
-            assert!(
-                taken <= QUERIES,
-                "acpiserver: the embedded controller had more than {QUERIES} queries waiting at once (EC_SC {:#04x})",
-                in8(self.info.ec_command.port)
-            );
+            assert!(taken <= QUERIES, "acpiserver: the embedded controller had more than {QUERIES} queries waiting at once (EC_SC {status:#04x})");
             self.queued.push_back(q);
         }
     }
 
+    /// Serve the controller no more: its GPE disabled, what it had waiting
+    /// dropped, and why said.
+    fn unserve(&mut self, why: &str) {
+        let n = self.served.ec_gpe.take().expect("a controller served has its GPE enabled");
+        let (_, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the controller's GPE was bounded by the block");
+        out8(enable, in8(enable) & !(1 << (n % 8)));
+        self.ec = None;
+        self.queued.clear();
+        println!("{CONTROLLER_NONE}{why}");
+    }
+
+    /// Each query the drain took, run as its method where a control-method
+    /// power button is served ([`run_query`]), and counted.
     fn run_queued(&mut self) {
         while let Some(q) = self.queued.pop_front() {
-            aml::query(q);
+            let served = run_query(self.aml.as_mut(), self.ec.as_ref(), q);
             let count = self.counts.entry(q).or_insert(0);
             *count += 1;
             self.counted += 1;
             if *count == 1 {
-                println!("acpiserver: embedded controller query {q:#04x} taken for the first time, served by nothing: no query's method is evaluated yet");
+                let said = match &served {
+                    None => UNRUN.into(),
+                    Some((Queried::Ran, _)) => "its method ran".into(),
+                    Some((Queried::Absent, _)) => "the controller defines no method for it".into(),
+                    Some((Queried::Refused(why), _)) => format!("its method did not finish: {why}"),
+                };
+                println!("acpiserver: embedded controller query {q:#04x} taken for the first time; {said}");
             }
-        }
-    }
-
-    /// One transaction, waiting on the controller at each step for at most
-    /// [`EC_STEP`].
-    fn transact(&self, mut tx: Transaction) -> u8 {
-        let (command, data) = (self.info.ec_command.port, self.info.ec_data.port);
-        let mut waiting: Option<(Wait, Instant)> = None;
-        loop {
-            let status = in8(command);
-            match tx.step(status) {
-                Do::Wait(wait) => {
-                    let since = match waiting {
-                        Some((was, since)) if was == wait => since,
-                        _ => Instant::now(),
-                    };
-                    assert!(
-                        since.elapsed() < EC_STEP,
-                        "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})"
-                    );
-                    waiting = Some((wait, since));
-                    std::thread::yield_now();
-                }
-                Do::WriteCommand(byte) => {
-                    waiting = None;
-                    out8(command, byte);
-                }
-                Do::ReadData => {
-                    waiting = None;
-                    tx.read(in8(data));
-                }
-                Do::Done(byte) => return byte,
+            if served.is_some_and(|(_, presses)| presses != 0) {
+                self.press();
             }
         }
     }
@@ -331,5 +392,82 @@ impl Server {
         self.logged = self.counted;
         let counts: Vec<String> = self.counts.iter().map(|(q, n)| format!("{q:#04x} x{n}")).collect();
         println!("acpiserver: {} SCIs; {}{}", self.scis, acpiserver_api::QUERIES_COUNTED, counts.join(", "));
+    }
+}
+
+/// What a query no method runs for is said to be.
+const UNRUN: &str = "served by nothing: no query's method runs where no control-method power button is served";
+
+/// Query `q`'s method run, and the presses its Notifies made, where a
+/// control-method power button is served; `None` elsewhere.
+fn run_query<K: Kernel>(aml: Option<&mut Aml<'_, K>>, ec: Option<&Ec>, q: u8) -> Option<(Queried, u64)> {
+    match (aml, ec) {
+        (Some(aml), Some(ec)) if !aml.host.buttons.is_empty() => {
+            let queried = devices::query(&mut aml.interpreter, &mut aml.host, ec, q);
+            let presses = std::mem::take(&mut aml.host.presses);
+            Some((queried, presses))
+        }
+        _ => None,
+    }
+}
+
+/// One transaction on the controller at `command` and `data`, waiting on it at
+/// each step for at most [`EC_STEP`].
+fn transact(claim: &Claim, command: u16, data: u16, mut tx: Transaction) -> Result<u8, Unmade> {
+    let mut waiting: Option<(Wait, Instant)> = None;
+    loop {
+        let status = claim.port_in(command)?;
+        match tx.step(status) {
+            Do::Wait(wait) => {
+                let since = match waiting {
+                    Some((was, since)) if was == wait => since,
+                    _ => Instant::now(),
+                };
+                assert!(since.elapsed() < EC_STEP, "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})");
+                waiting = Some((wait, since));
+                std::thread::yield_now();
+            }
+            Do::WriteCommand(byte) => {
+                waiting = None;
+                claim.port_out(command, byte)?;
+            }
+            Do::ReadData => {
+                waiting = None;
+                tx.read(claim.port_in(data)?);
+            }
+            Do::Done(byte) => return Ok(byte),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aml::load;
+    use crate::aml::tests::{crafted, sealed, CRAFTED_RSDP};
+    use crate::devices::tests::{laptop_with_queries, GPE0};
+
+    /// An AMD laptop's controller and `_Q28` under both kinds of power
+    /// button: the method runs, writes the POST port and presses only where
+    /// the FADT says the button is a control method device; on a machine
+    /// whose button is the fixed one no query's method runs and nothing is
+    /// written.
+    #[test]
+    fn a_querys_method_runs_only_where_a_control_method_button_is_served() {
+        for control_method in [false, true] {
+            let mut kernel = crafted(&sealed(b"DSDT", &laptop_with_queries()), &[]);
+            kernel.ports = vec![(0x80, 0)];
+            let (_, kept) = load(&kernel, CRAFTED_RSDP);
+            let mut aml = kept.expect("the DSDT loads");
+            let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, control_method);
+            aml.host.buttons = found.buttons;
+            let ec = found.ec.expect("the controller");
+            let served = run_query(Some(&mut aml), Some(&ec), 0x28);
+            let wrote = kernel.asked.borrow().iter().filter(|access| access.write == 1).count();
+            match control_method {
+                true => assert_eq!((served, wrote), (Some((Queried::Ran, 1)), 1)),
+                false => assert_eq!((served, wrote), (None, 0), "a query's method ran on a machine whose power button is the fixed one"),
+            }
+        }
     }
 }

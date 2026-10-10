@@ -1,9 +1,9 @@
-//! The T14's fixed hardware, embedded controller and SCI, decoded from an
-//! extract of its FACP, ECDT and APIC and held against what Linux read on the
+//! The T14's fixed hardware and SCI, decoded from an
+//! extract of its FACP and APIC and held against what Linux read on the
 //! same machine (`fixtures/thinkpad-t14/SOURCE`).
 //!
 //! **An extract, never the tables**: each table here is laid out from the
-//! fields `fixed_hardware`, `pm1a_control`, `ecdt` and `sci_line` read, at their offsets and
+//! fields `fixed_hardware`, `pm1a_control` and `sci_line` read, at their offsets and
 //! with the machine's own bytes, and zeros everywhere else, then sealed. The
 //! whole tables are checked against these fields outside the tree.
 
@@ -12,8 +12,8 @@ mod common;
 use common::{entry, madt, sdt, Machine};
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    ecdt, fixed_hardware, madt_entries, pm1a_control, sci_line, Ec, FixedHardware, Line, MadtEntry,
-    Polarity, PowerButton, SmiCmd, SourceOverride, Table, Trigger, ECDT_NEEDED, FADT_FOR_FIXED_HARDWARE,
+    fixed_hardware, madt_entries, pm1a_control, sci_line, FixedHardware, Line, MadtEntry,
+    Polarity, PowerButton, SmiCmd, SourceOverride, Table, Trigger, FADT_FOR_FIXED_HARDWARE,
     MADT_ENTRIES,
 };
 
@@ -39,15 +39,6 @@ const FACP_FIELDS: &[(usize, &[u8])] = &[
     (184, &[0x01, 0x00, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0]),
     (220, &[0x01, 0x00, 0x00, 0x01, 0x60, 0x18, 0, 0, 0, 0, 0, 0]),
     (232, &[0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]),
-];
-
-/// The ECDT's `EC_CONTROL`, `EC_DATA`, `UID` and `GPE_BIT`.
-const ECDT_REVISION: u8 = 1;
-const ECDT_FIELDS: &[(usize, &[u8])] = &[
-    (36, &[0x01, 0x08, 0x00, 0x00, 0x66, 0, 0, 0, 0, 0, 0, 0]),
-    (48, &[0x01, 0x08, 0x00, 0x00, 0x62, 0, 0, 0, 0, 0, 0, 0]),
-    (60, &[0x00, 0x00, 0x00, 0x00]),
-    (64, &[0x6e]),
 ];
 
 /// The APIC's two interrupt source overrides, whole.
@@ -95,14 +86,6 @@ fn the_t14s_fadt_names_the_blocks_linux_served_its_sci_through() {
         })
     );
     assert_eq!(pm1a_control(&fadt), Ok(Block { port: 0x1804, len: 2 }));
-}
-
-/// Linux: `ACPI: EC: EC_CMD/EC_SC=0x66, EC_DATA=0x62` and `ACPI: EC: GPE=0x6e`.
-#[test]
-fn the_t14s_ecdt_names_the_controller_linux_used() {
-    let bytes = laid_out(b"ECDT", ECDT_REVISION, ECDT_NEEDED, ECDT_FIELDS);
-    let table = open(bytes, b"ECDT", ECDT_NEEDED);
-    assert_eq!(ecdt(&table), Ok(Ec { command: 0x66, data: 0x62, gpe: 0x6e }));
 }
 
 /// Linux: `ACPI: INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`.

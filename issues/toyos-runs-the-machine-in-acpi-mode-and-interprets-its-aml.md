@@ -124,16 +124,21 @@ in ACPI mode; that no T14 row reads it is
 Moving it out of this exit is the orchestrator's placement, not the owner's.
 
 **Ruled** (owner, 2026-10-04, "Stopgap, delete later"): "Stage 1 uses the
-extra table so the T14 switches to ACPI mode now." Stage 1 reads the
-embedded controller from the ECDT, and that path is a stopgap: it is deleted
-the day the interpreter reads the controller from the DSDT's own device. A
-machine without an ECDT stays in legacy mode until then; such a machine keeps
-its firmware interrupts, and this stage's exit cannot be met on it.
+extra table so the T14 switches to ACPI mode now." Stage 1 read the
+embedded controller from the ECDT as that stopgap, to be deleted the day the
+interpreter reads the controller from the DSDT's own device. It is deleted:
+the server finds the PNP0C09 device in the namespace its load kept and takes
+its ports from `_CRS` and its GPE from `_GPE`, and reaches the ports through
+the kernel's mediated access, since no row names them
+(`userland/acpiserver/src/devices.rs`); the kernel reads no ECDT.
 
-Stage 1's design, not a ruling: a machine whose power button is a control
-method device stays in legacy mode too, refused by name; and a machine its
-firmware hands over in ACPI mode is served whatever it has, since nothing is
-written.
+The design, not a ruling: a machine whose power button is a control method
+device is claimed too, and its button served by the Notify the controller's
+query method makes of it (ACPI 6.5 §4.8.2.2.1.2), which the server runs for
+every query only on such a machine and only once it found the button; a
+button raised by a GPE's own `_Lxx` or `_Exx` is not served, since the
+server enables no GPE but the controller's. A machine its firmware hands
+over in ACPI mode is served whatever it has, since the mint writes nothing.
 
 **Stage: the interpreter** (the orchestrator's placement of "The AML stage
 closes it"). ToyOS's own AML interpreter, written from the specification, run
@@ -283,16 +288,25 @@ mediated access, leaves open:
   power-off is made before the load ends, and what bounds the refusal is the
   load's time. That time is held on the T14 once the `acpi_tables_loaded` row
   reads it under a bound the owner names.
-- **A machine with no holder of the `acpi` claim has no power-off.** The
-  kernel reads no AML, so a machine whose claim it refuses, one in legacy
-  mode with no ECDT or with a control-method power button, has nobody to
-  evaluate `\_S5`: `SYS_SHUTDOWN` is refused there, where the kernel's own
-  scan of the DSDT powered such a machine off before. Neither the T14 nor q35
-  is one: the T14 has an ECDT and a fixed button, and OVMF hands q35 over in
-  ACPI mode. Owner: this stage. **Exit**: the ECDT stopgap is deleted, so a
-  machine is claimed for what its DSDT names; what a machine with a
-  control-method button does for a power-off is ruled with that button's
-  device.
+- **A control-method power button's press powers the machine off unruled.**
+  The claim is no longer refused for a missing ECDT or a control-method
+  button, so such a machine has a server to evaluate `\_S5`, and the
+  server's design makes the button's Notify a press, which stops the
+  machine through the one path. What such a machine does for a power-off
+  was to be "ruled with that button's device", and the owner has not ruled
+  it. Owner: this stage. **Exit**: the owner rules it, and the server does
+  what he rules.
+- **A control-method button the server does not serve is dead in ACPI
+  mode.** The kernel puts the machine in ACPI mode when it mints the claim,
+  before the server has read whether it serves the button. Where it then
+  serves none, because no namespace was kept, no controller is served, no
+  present PNP0C0C was found or the button's `_Qxx` is refused, a short press
+  reaches nothing; in legacy mode the firmware served it, and before #845
+  the kernel refused such a machine the claim and left it there. The server
+  says each of those by name. Owner: this stage. **Exit**: the owner rules
+  between that machine in ACPI mode with its press dead and the claim given
+  back so the firmware has the button again, and a host test reads the
+  server doing what he rules.
 
   Two more machines have no power-off, and that is the ruled state and no
   weakness with an exit. A boot whose config starts no server: "Power-off
@@ -324,9 +338,23 @@ mediated access, leaves open:
   then supplies a sleep type that is not the machine's and reads it refused.
 
 What the firmware call, which the kernel makes for the server where its AML
-stores a byte to `SMI_CMD`, leaves open. The server's AML makes none yet: its
-host denies every write AML asks for and passes none to the kernel
-(`userland/acpiserver/src/host.rs`).
+stores a byte to `SMI_CMD`, leaves open. No AML the server runs makes one
+now: its host asks the kernel for three port writes and denies every other
+write by name (`FORWARDED` in `userland/acpiserver/src/host.rs`), the
+index registers 0x72 and 0xCD6, a byte each, and the POST port's word.
+Those are what an AMD laptop's AML wrote, measured outside the tree on its
+tables with nothing cleared between the load, the device search and all
+102 of its query methods (#845): its DSDT writes both indexes at its load
+and is refused without either, the search writes nothing, and the queries
+write only the POST port.
+
+- **A port write outside the three ends what made it.** A machine whose
+  AML writes another port at its load has that table refused by name, and
+  a method that does has its evaluation refused. The T14's load writes
+  none: it loaded with every write denied. Owner: this stage. **Exit**: a
+  machine's reading of a write outside the three, which the list takes or
+  the owner refuses, and a slice that runs a method which stores to
+  `SMI_CMD` takes the call with the readings below.
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:

@@ -43,24 +43,21 @@ the one config whose claim a job mints, `tests/acpicase`, runs its job list
 unprompted. Such a test reads QEMU's model of the ICH9 and never the T14's
 firmware.
 
-**The mint refuses q35 in legacy mode**, so the test this exit names cannot
-be built yet. Measured on QEMU 11.1.1's q35 under OVMF and TCG, on
-`tests/acpicase` with the monitor's `o /b 0xb2 3` sent before the job
-claimed: the kernel logged `acpi: this machine stays in legacy mode — its
-firmware serves an embedded controller no holder could (the ECDT is unusable:
-Absent)` and the claim answered `NotSupported`. q35 has no ECDT, and
-`acpi_mode::enter` writes `ACPI_ENABLE` only for a machine whose embedded
-controller the ECDT names, the stopgap
-`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`
-records. That write also landed by a race, between the kernel's ACPI row line
-and the job's claim: `tests/acpicase` still runs its job list unprompted.
+**The mint refused q35 in legacy mode until the ECDT stopgap was deleted.**
+Measured on QEMU 11.1.1's q35 under OVMF and TCG, on `tests/acpicase` with
+the monitor's `o /b 0xb2 3` sent before the job claimed: the kernel logged
+`acpi: this machine stays in legacy mode — its firmware serves an embedded
+controller no holder could (the ECDT is unusable: Absent)` and the claim
+answered `NotSupported`. The kernel reads no ECDT now, and `acpi_mode::enter`
+writes `ACPI_ENABLE` for q35 as for any machine in legacy mode; nothing has
+read it do so. What the test still waits on is a job that waits to be asked:
+the monitor's write landed by a race, between the kernel's ACPI row line and
+the job's claim, and `tests/acpicase` still runs its job list unprompted.
 
 Owned by the stage "the interpreter" of
-`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose
-deletion of the ECDT stopgap is what lets a machine with no embedded
-controller be put in ACPI mode by the kernel. Moving it there is the
-placement of the power-off's slice, which found the refusal; it passed that
-slice's review and is not the owner's.
+`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`.
+Moving it there is the placement of the power-off's slice, which found the
+refusal; it passed that slice's review and is not the owner's.
 
 **Exit** (the orchestrator's placement, not the owner's; that it waits on the
 stopgap's deletion and on a job that waits to be asked is that slice's): once the ECDT

@@ -15,7 +15,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-mod ecdt;
 mod facs;
 mod fadt;
 mod gtdt;
@@ -26,13 +25,12 @@ mod spcr;
 
 use toyos_bootmap::DirectMapEnd;
 
-pub use ecdt::{ecdt, Ec, EcRefused, Register, ECDT_NEEDED};
 pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNED, PENDING};
 pub use fadt::{
     century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
     rtc_century,
     Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, SmiCmd, CMOS_RAM,
-    FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK,
+    FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
 };
 use fadt::FADT_DSDT;
 pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3};
@@ -41,7 +39,7 @@ pub use madt::{
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
-pub use resource::{memory_windows, ResourceError, MAX_LIST_BYTES};
+pub use resource::{io_ports, memory_windows, ResourceError, MAX_LIST_BYTES};
 pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};
 
 /// Physical memory, as this decoder reads it.
@@ -54,6 +52,18 @@ pub trait Phys: Copy {
     fn readable(self, phys: u64, len: usize) -> bool;
     /// One byte at `phys`.
     fn byte(self, phys: u64) -> u8;
+}
+
+/// Bytes an evaluation handed over, `_CRS`'s buffer among them, read as if
+/// they began at address 0.
+impl Phys for &[u8] {
+    fn readable(self, phys: u64, len: usize) -> bool {
+        usize::try_from(phys).ok().and_then(|at| at.checked_add(len)).is_some_and(|end| end <= self.len())
+    }
+
+    fn byte(self, phys: u64) -> u8 {
+        self[phys as usize]
+    }
 }
 
 /// Physical memory as a kernel reads it through its direct map, one byte at a

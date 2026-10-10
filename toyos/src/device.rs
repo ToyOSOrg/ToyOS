@@ -190,7 +190,7 @@ fn irq_record(dev: &Device) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallEr
 }
 
 /// The machine's ACPI fixed hardware, served by this process
-/// ([`toyos_abi::acpi`]): its event blocks and embedded controller as ports,
+/// ([`toyos_abi::acpi`]): its event blocks as ports,
 /// and its SCI as records.
 ///
 /// **Read once as a description, which binds the ports to this process, and
