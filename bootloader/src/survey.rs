@@ -743,6 +743,7 @@ fn register(space: u8, at: u64, width: usize) -> Option<u32> {
         // space boot services identity-map; status and enable registers clear
         // only on a write, never on a read.
         (0, 1) => Some(u32::from(unsafe { core::ptr::read_volatile(at as *const u8) })),
+        // SAFETY: as the byte-wide arm above.
         (0, 2) => Some(u32::from(unsafe { core::ptr::read_volatile(at as *const u16) })),
         _ => None,
     }
