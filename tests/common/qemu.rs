@@ -694,6 +694,10 @@ pub enum Profile {
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
     HeadlessNoUsb,
+    /// [`Profile::Headless`] with a virtio-gpu behind the unit: a virtio
+    /// function the kernel still drives itself beside the console, which is
+    /// what `virtio-no-access-platform` withholds the bit from.
+    HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller, QEMU's `qemu-xhci`
     /// on MSI and with no MSI-X, carrying a stick and a keyboard: the
     /// controller `xhci-leave=1b36:000d` leaves to `usbd`, armed on MSI as
@@ -761,6 +765,7 @@ impl Profile {
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
+            | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::Metal => Arch::X86_64,
         }
@@ -898,6 +903,8 @@ struct Shape {
     /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
     /// the protocol from RDRAND without one.
     rng: bool,
+    /// A virtio-gpu, which the kernel drives.
+    virtio_gpu: bool,
 }
 
 /// Whether `virt` has its SMMUv3. With it come two of QEMU's `iommu-testdev`,
@@ -966,6 +973,7 @@ impl Profile {
                 iommu: None,
                 smmu: Smmu::Absent,
                 rng: true,
+                virtio_gpu: false,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -979,6 +987,7 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
                 smmu: Smmu::Absent,
                 rng: false,
+                virtio_gpu: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -996,10 +1005,12 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
                 smmu: Smmu::Absent,
                 rng: false,
+                virtio_gpu: false,
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
+            Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
                 usb: &[
@@ -2282,6 +2293,9 @@ fn qemu_command(
     }
     if shape.rng {
         qemu.arg("-device").arg("virtio-rng-pci");
+    }
+    if shape.virtio_gpu {
+        qemu.arg("-device").arg(format!("virtio-gpu-pci{platform}"));
     }
     if shape.smmu == Smmu::WithTestdev {
         // Two, the first enumerated below the second: the kernel's selftest

@@ -328,8 +328,9 @@ Each stage names its exit; "measured" means a number from a run.
    stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
    track, which moves the driver out of the kernel:
    - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
-     HDA, virtio-sound, virtio-console and virtio-gpu drivers each
-     refuse their function by name.
+     HDA, virtio-console and virtio-gpu drivers each refuse their function by
+     name, and a process's claim on one (netstack's, soundserver's
+     virtio-sound) is refused with them.
    - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
      own, which a `ramfb` scanout carved out of RAM need not be.
 

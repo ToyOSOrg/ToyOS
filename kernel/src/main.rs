@@ -110,7 +110,7 @@ mod late_panic {
 
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
+use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
@@ -522,7 +522,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     virtio_console::init(&pci_devices);
 
-    virtio_sound::init(&pci_devices);
     drivers::hda::init(&pci_devices);
 
     if let Some((gpu_driver, gpu_info)) = virtio_gpu::init(&pci_devices) {
