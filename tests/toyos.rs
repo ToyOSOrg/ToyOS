@@ -990,6 +990,9 @@ fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
         if let Some(at) = line.find("netstack: tcp closed: ") {
             eprintln!("  [tcp] {}", &line[at + "netstack: tcp closed: ".len()..]);
         }
+        if let Some(at) = line.find("netstack: prof ") {
+            eprintln!("  [prof] {}", &line[at + "netstack: prof ".len()..]);
+        }
     }
     back.job_passed("test_rs_https_download")?;
     let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;

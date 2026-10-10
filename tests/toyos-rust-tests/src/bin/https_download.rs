@@ -24,8 +24,11 @@
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{ConnectionDetails, Connector, RustlsConnector, TcpConnector, Transport};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
@@ -34,6 +37,7 @@ use toyos_abi::syscall;
 use toyos_logstream::program_line;
 
 #[path = "../https_client.rs"]
+#[allow(dead_code)]
 mod https_client;
 #[path = "../served_log.rs"]
 mod served_log;
@@ -101,7 +105,15 @@ fn main() {
         for _ in 0..RUNS {
             *progress.lock().unwrap_or_else(PoisonError::into_inner) = Progress { bytes: 0, first: None, last: None };
             let url = format!("https://{HOST}{PATH}");
-            let response = https_client::agent(ROOTS).get(&url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
+            // MEASUREMENT ONLY: the agent marks when its TCP connection and then its TLS session
+            // are ready, measured from the call as curl's time_connect and time_appconnect are.
+            let (tcp, tls) = (Mark::default(), Mark::default());
+            let connector = ().chain(TcpConnector::default()).chain(tcp.clone()).chain(RustlsConnector::default()).chain(tls.clone());
+            let agent = ureq::Agent::with_parts(https_client::config(ROOTS), connector, DefaultResolver::default());
+            let called = Instant::now();
+            let response = agent.get(&url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
+            let ready = |mark: &Mark| mark.0.lock().unwrap().map_or(-1.0, |at| at.duration_since(called).as_secs_f64() * 1e3);
+            let (tcp_ms, tls_ms) = (ready(&tcp), ready(&tls));
             let mut body = response.into_body().into_reader();
             let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
             let mut chunk = vec![0u8; 64 * 1024];
@@ -124,10 +136,26 @@ fn main() {
             let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
             let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
             let sha256 = https_client::hex(digest.finish());
-            println!("https_download: {}", report("whole", Some(&sha256), &progress, &rtt, &cap));
+            println!("https_download: {} tcp_ms={tcp_ms:.1} tls_ms={tls_ms:.1}", report("whole", Some(&sha256), &progress, &rtt, &cap));
         }
         drop(transferring);
     });
+}
+
+/// MEASUREMENT ONLY: a link of an agent's connector chain that passes its
+/// transport on and keeps when it did.
+#[derive(Clone, Debug, Default)]
+struct Mark(Arc<Mutex<Option<Instant>>>);
+
+impl<In: Transport> Connector<In> for Mark {
+    type Out = In;
+
+    fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<In>, ureq::Error> {
+        if chained.is_some() {
+            *self.0.lock().unwrap() = Some(Instant::now());
+        }
+        Ok(chained)
+    }
 }
 
 /// Wait for netstack to say it holds a lease; panics where it says it took

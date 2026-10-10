@@ -42,6 +42,25 @@ use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
+/// Measurement only, never lands: counts of the pass's work.
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub const NAMES: [&str; 21] = [
+        "passes", "nic_ready", "frames_rx", "frames_tx", "pipe_w", "pipe_w_bytes", "pipe_w_refused", "pipe_r",
+        "pipe_r_empty", "bridges", "b0", "b1", "b2", "b3_4", "b5_8", "b9_16", "b17_64", "b65", "watches", "tx_calls", "owed",
+    ];
+    pub static C: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
+    pub fn add(i: usize, n: u64) {
+        C[i].fetch_add(n, Relaxed);
+    }
+    pub fn batch(n: u64) {
+        add(match n { 0 => 10, 1 => 11, 2 => 12, 3..=4 => 13, 5..=8 => 14, 9..=16 => 15, 17..=64 => 16, _ => 17 }, 1);
+    }
+    pub fn line() -> String {
+        NAMES.iter().zip(&C).map(|(n, c)| format!("{n}={}", c.swap(0, Relaxed))).collect::<Vec<_>>().join(" ")
+    }
+}
+
 mod card;
 mod client;
 mod device;
@@ -380,7 +399,18 @@ fn main() {
                 node.link(clock(), link_up, draw);
             }
         }
-        let owed = node.receive(clock(), |sink| card.rx(sink), draw);
+        prof::add(0, 1);
+        let mut got = 0u64;
+        let owed = node.receive(clock(), |sink| {
+            let one = card.rx(sink);
+            got += u64::from(one);
+            one
+        }, draw);
+        prof::add(2, got);
+        prof::batch(got);
+        if owed {
+            prof::add(20, 1);
+        }
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);
@@ -392,7 +422,10 @@ fn main() {
                 0 => card.wake_on_room(),
                 room => room,
             };
-            if room == 0 || node.transmit(now, room, |frame| card.tx(frame.len(), |slot| slot.copy_from_slice(frame)), draw) < room {
+            prof::add(19, 1);
+            let sent = if room == 0 { 0 } else { node.transmit(now, room, |frame| card.tx(frame.len(), |slot| slot.copy_from_slice(frame)), draw) };
+            prof::add(3, sent as u64);
+            if room == 0 || sent < room {
                 break;
             }
         }
@@ -438,6 +471,9 @@ fn main() {
 
         let mut ready: Vec<u64> = Vec::new();
         poller.wait_answers(1, timeout, |token, answer| {
+            if token == TOKEN_NIC {
+                prof::add(1, 1);
+            }
             if !sockets.answered(&mut node, clock(), token, answer) {
                 ready.push(token);
             }

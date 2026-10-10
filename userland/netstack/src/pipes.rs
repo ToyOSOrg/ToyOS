@@ -48,14 +48,24 @@ fn write_refused(why: SyscallError) -> WriteRefusal {
 
 impl ToClient for Held {
     fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
-        self.0.write_nonblock(bytes).map_err(write_refused)
+        crate::prof::add(4, 1);
+        let r = self.0.write_nonblock(bytes).map_err(write_refused);
+        match r {
+            Ok(n) => crate::prof::add(5, n as u64),
+            Err(_) => crate::prof::add(6, 1),
+        }
+        r
     }
 }
 
 impl FromClient for Held {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
+        crate::prof::add(7, 1);
         self.0.read_nonblock(out).map_err(|why| match why {
-            SyscallError::WouldBlock => ReadRefusal::Empty,
+            SyscallError::WouldBlock => {
+                crate::prof::add(8, 1);
+                ReadRefusal::Empty
+            }
             _ => ReadRefusal::Broken,
         })
     }
