@@ -303,6 +303,13 @@ section. Owner: the `isa` claim's author. Exit condition: the same, and
 deferred, a claim refused after its holder's exit is a defect that loop would
 hide for five seconds.
 
+**A third loop waits the same release out.**
+`tests/toyos-rust-tests/src/bin/usbd_spare.rs` asks for the xHCI controller's
+claim again after killing usbd while it is refused as `AlreadyExists`, for at
+most `CLAIM_RETURN`, one millisecond apart, `userland/supervisor`'s copied. Owner:
+usbd's author. Exit condition: the same, and that loop is deleted with
+`CLAIM_RETURN`.
+
 **Its tests are deleted**: `38a5064b6` took `handle_basic`, `handle_transfer`
 and `kill_while_blocked` out, and `009db6db3` retired `SYS_DEBUG` actions 17 and
 18, which only `handle_transfer` read. `02c35a85d` then moved `FILL`, which

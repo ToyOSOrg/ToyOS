@@ -141,6 +141,40 @@ times:
        and the T14's has none on its capability walk, whose end is not read
        (`issues/every-driver-is-still-in-the-kernel.md`). Its decoders are
        `toyos-xhci`'s Bulk-Only and SCSI modules and `toyos-usbhid`.
+
+       **Stage 1, usbd beside the kernel's driver**: the test-only
+       `xhci-leave=<vendor>:<device>` leaves one controller to a claim, and
+       `/system/bin/usbd` drives it — the handoff, a reset, its rings in one
+       grant, MSI through the claim, and every device enumerated and named
+       over `inspect`; no class is bound. QEMU's spare is
+       `qemu-xhci,msix=off,msi=on`: with MSI-X off and MSI left `auto` it
+       offers no MSI either, and the claim is refused for it. Read on the T14
+       (stage 0, `boot:testcases` readbacks): firmware owns neither
+       controller. 00:0d.0, 8086:9a13, the Type-C one (port 1 USB 2.0, ports
+       2..=5 USB 3.1) and 00:14.0, 8086:a0ed (ports 1..=12 USB 2.0, 13..=16
+       USB 3.1) each read `USBLEGSUP 0x01002201` and `USBLEGCTLSTS
+       0xe0000000` — firmware's semaphore clear, every SMI enable clear, the
+       three status bits latched — and each is armed on MSI. Neither
+       00:0d.0, whose release `usbd_drives_the_type_c_controller` reads as
+       `reset by nothing (Express: no capability; AF: no capability; PM:
+       No_Soft_Reset set)`, nor QEMU's `qemu-xhci` advertises a reset, so a
+       claim on either inherits the last holder's ranges as residue; which
+       00:14.0 advertises no boot has printed. The orchestrator's stage-0 rulings for the
+       stages after: pcidev arms MSI and keeps MSI-X Enable clear where the
+       table shares the register BAR, and one usbd runs per controller.
+       Two compromises until this step's whole-xHCI move, owned by it, whose
+       exit is the kernel's copy deleted with the kernel's driver.
+       `toyos-xhci`'s `descriptor` and the kernel's `parse_config`
+       (`kernel/src/drivers/xhci/device.rs`) are two decoders of the same
+       device-chosen bytes with different refusal rules — the kernel ends its
+       walk on a zero length and clamps, the crate refuses a length below 2;
+       its `xhci-descriptor-selftest` actuator goes with it.
+       `toyos-xhci`'s `xecp` and the kernel's
+       `kernel/src/drivers/xhci/legacy.rs` each carry the extended-capability
+       walk, the firmware handoff's verdict and the SMI-off word; the
+       orchestrator ruled the kernel's copy is not moved onto the crate's,
+       since it goes whole here, and its `xhci-xecp-selftest` actuator goes
+       with it.
 5. **USB by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
