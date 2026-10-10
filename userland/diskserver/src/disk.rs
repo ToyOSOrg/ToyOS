@@ -1,5 +1,6 @@
-//! Where a volume's blocks come from: a partition diskserver serves, a partition
-//! the kernel's own disk serves through a claim, or memory.
+//! A partition as a program that reads and writes its blocks holds it: one a
+//! block service serves ([`Served`]), or one the kernel's own disk serves
+//! through a claim ([`Claimed`]), until usbd serves the stick.
 //!
 //! **A block is 4 KiB here, on every source.** A partition that is not whole
 //! 4 KiB blocks is refused before it is served (diskserver's table read, the
@@ -12,9 +13,7 @@
 //! because a block write names its whole destination and means the same thing
 //! twice.
 
-use std::collections::BTreeMap;
-
-use diskserver::{Error as SessionError, Outcome, Session};
+use crate::{Error as SessionError, Outcome, Session};
 use toyos::PartitionDev;
 use toyos_abi::part::{Block, MAX_BLOCKS_PER_CALL};
 use toyos_blockring::MAX_REQUEST_BLOCKS;
@@ -31,6 +30,8 @@ pub enum DiskError {
     Gone,
     /// Past the end of the partition.
     Range,
+    /// A write the block service's grant to this holder does not make.
+    ReadOnly,
 }
 
 /// A partition, a block at a time or several.
@@ -44,56 +45,14 @@ pub trait Disk {
     fn flush(&mut self) -> Result<(), DiskError>;
 }
 
-fn span(first: u64, len: usize, blocks: u64) -> Result<u64, DiskError> {
-    assert!(len % BLOCK == 0, "fileserver: a transfer of {len} bytes is no whole blocks");
+/// How many blocks `len` bytes from `first` are, or `Range` past the end of
+/// a partition `blocks` long.
+pub fn span(first: u64, len: usize, blocks: u64) -> Result<u64, DiskError> {
+    assert!(len % BLOCK == 0, "a transfer of {len} bytes is no whole blocks");
     let count = (len / BLOCK) as u64;
     match first.checked_add(count) {
         Some(end) if end <= blocks => Ok(count),
         _ => Err(DiskError::Range),
-    }
-}
-
-/// A volume in memory: the DATA role on a machine with no DATA partition, as
-/// the kernel's tmpfs was. Sparse, so what nothing wrote costs nothing.
-pub struct Ram {
-    blocks: u64,
-    written: BTreeMap<u64, Box<[u8; BLOCK]>>,
-}
-
-impl Ram {
-    pub fn new(blocks: u64) -> Self {
-        Self { blocks, written: BTreeMap::new() }
-    }
-}
-
-impl Disk for Ram {
-    fn blocks(&self) -> u64 {
-        self.blocks
-    }
-
-    fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-        span(first, out.len(), self.blocks)?;
-        for (i, chunk) in out.chunks_exact_mut(BLOCK).enumerate() {
-            match self.written.get(&(first + i as u64)) {
-                Some(block) => chunk.copy_from_slice(&block[..]),
-                None => chunk.fill(0),
-            }
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-        span(first, data.len(), self.blocks)?;
-        for (i, chunk) in data.chunks_exact(BLOCK).enumerate() {
-            let mut block = Box::new([0u8; BLOCK]);
-            block.copy_from_slice(chunk);
-            self.written.insert(first + i as u64, block);
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), DiskError> {
-        Ok(())
     }
 }
 
@@ -173,9 +132,9 @@ impl Served {
                 Ok(answer) => return Ok(answer),
                 Err(SessionError::Ended) if reconnects < MAX_RECONNECTS => {
                     reconnects += 1;
-                    println!("fileserver: the block service ended; reconnecting ({reconnects} of {MAX_RECONNECTS})");
+                    println!("the block service ended; reconnecting ({reconnects} of {MAX_RECONNECTS})");
                     if let Err(why) = self.session.reconnect() {
-                        println!("fileserver: the block service would not take the session back: {why:?}");
+                        println!("the block service would not take the session back: {why:?}");
                         return Err(DiskError::Gone);
                     }
                 }
@@ -211,14 +170,15 @@ impl Disk for Served {
         let per = MAX_REQUEST_BLOCKS as usize;
         for (i, chunk) in data.chunks(BLOCK * per).enumerate() {
             let at = first + (i * per) as u64;
-            match self.asked(|s| s.write(at, chunk))? {
+            let mut outcome = self.asked(|s| s.write(at, chunk))?;
+            // On the wire when the session ended: the write names its whole
+            // destination, so it is written again rather than guessed at.
+            if outcome == Outcome::Refused {
+                outcome = self.asked(|s| s.write(at, chunk))?;
+            }
+            match outcome {
                 Outcome::Done => {}
-                // On the wire when the session ended: the write names its whole
-                // destination, so it is written again rather than guessed at.
-                Outcome::Refused => match self.asked(|s| s.write(at, chunk))? {
-                    Outcome::Done => {}
-                    _ => return Err(DiskError::Device),
-                },
+                Outcome::ReadOnly => return Err(DiskError::ReadOnly),
                 _ => return Err(DiskError::Device),
             }
         }
