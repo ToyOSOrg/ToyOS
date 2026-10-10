@@ -3022,6 +3022,7 @@ dependencies = [
  "toyos-tco",
  "toyos-tsc",
  "toyos-untrusted",
+ "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
  "toyos-xhci",
@@ -6000,6 +6001,10 @@ dependencies = [
  "sha2 0.10.9",
  "toyos-wallclock",
 ]
+
+[[package]]
+name = "toyos-usbhid"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-userbound"

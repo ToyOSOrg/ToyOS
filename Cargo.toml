@@ -71,6 +71,7 @@ members = [
     "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
+    "toyos-usbhid",
     "toyos-userbound",
     "toyos-virtio",
     "toyos-wallclock",
