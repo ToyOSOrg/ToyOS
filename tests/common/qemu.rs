@@ -754,10 +754,6 @@ pub enum Profile {
     /// buses: q35's is as long as firmware programs `PCIEXBAR`, which OVMF
     /// sets to 256 MiB and QEMU offers no option to change.
     VirtLowEcam,
-    /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
-    /// QEMU's `edu`, a function that sends an MSI when told to, and an
-    /// `e1000e` the IORT routes past the SMMUv3.
-    VirtIts,
 }
 
 impl Profile {
@@ -770,8 +766,7 @@ impl Profile {
             | Self::VirtEl2NoVhe
             | Self::VirtTcg
             | Self::VirtSmmu
-            | Self::VirtLowEcam
-            | Self::VirtIts => {
+            | Self::VirtLowEcam => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -948,12 +943,6 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
-    /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
-    /// With it comes one `edu`, whose message is the only one a guest of
-    /// this suite can raise on demand, and an `e1000e` behind a root port of
-    /// a `pxb-pcie` with `bypass_iommu=on`, which QEMU's IORT routes straight
-    /// to the ITS: a plain root port's buses it routes through the unit.
-    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -1001,7 +990,6 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
-            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -2215,7 +2203,6 @@ fn qemu_command(
             match shape.smmu {
                 Smmu::Absent => machine,
                 Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
-                Smmu::WithIts => format!("{machine},iommu=smmuv3,its=on,kernel-irqchip=off"),
             }
         }
     };
@@ -2360,13 +2347,6 @@ fn qemu_command(
         // routes nothing for the first, whose entry the table holds.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
-    }
-    if shape.smmu == Smmu::WithIts {
-        qemu.arg("-device").arg("edu");
-        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
-        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
-        // No option ROM: firmware has no use for the NIC.
-        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the

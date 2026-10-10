@@ -372,7 +372,12 @@ Each stage names its exit; "measured" means a number from a run.
    HVF's own refuses an ITS, so a `virt` with one is
    `its=on,kernel-irqchip=off`. QEMU's SMMUv3 translates the message as a
    write of the function's, so every domain maps the doorbell's page
-   (`virt_claim_lpi`, red without it on a `DMA FAULT` at `GITS_TRANSLATER`).
+   (`virt_claim_lpi` was red without it on a `DMA FAULT` at
+   `GITS_TRANSLATER`). **Owed**: no test reaches a claimed function's
+   LPI, nor the claim the IORT routes past the SMMUv3 nor a fault in a
+   claimed BAR: `b65ba04fe` deleted `virt_claim_lpi`, and
+   `issues/virt-claim-lpi-boot-stalled-in-firmware-once-under-load.md`
+   restores it.
    `irq()` holds the preempt count across every device arm, as x86-64's
    `device_irq_entry` does, and `pcidev::isr` asserts it.
    A released function's stream stays on its slot's domain, which maps
