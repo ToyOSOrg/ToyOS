@@ -502,8 +502,9 @@ fn pinned_fork(root: &Path) -> String {
 ///
 /// The primary's is its own `rust/`, used where it is not initialised yet, which
 /// whoever initialises it does at the pin. It is no workspace, so one whose
-/// `HEAD` is not the pin is moved there; refused by name if it has local
-/// changes, or does not hold the pinned commit.
+/// `HEAD` is not the pin is moved there, refused by name if it has local
+/// changes; a commit missing from it or from a nested submodule is fetched as
+/// rustc's bootstrap fetches one ([`submodule_update`]).
 ///
 /// A linked worktree's `rust/` starts as the empty stub `git worktree add`
 /// leaves; it is made here, the first time it is needed, as a git worktree of
@@ -516,9 +517,15 @@ fn pinned_fork(root: &Path) -> String {
 /// changes rather than moved out from under whoever made them.
 ///
 /// Every nested submodule checked out in it moves with it to the commit the pin
-/// records there, refused by name where it does not hold that commit, or is at
-/// a commit that neither the checkout's `HEAD` nor the pin records there, which
-/// only its own `HEAD` may record.
+/// records there, refused by name where it is at a commit that neither the
+/// checkout's `HEAD` nor the pin records there, which only its own `HEAD` may
+/// record — and in a linked worktree where it does not hold that commit, which
+/// [`submodule_update`] may not fetch there.
+///
+/// The checkout moves before its nested submodules, because git's update reads
+/// their URLs and commits from the moved checkout's `.gitmodules` and index; a
+/// move killed between the two is one [`moving`] says is in flight, which the
+/// next finishes.
 ///
 /// Every build in a worktree asks this at once, so the making and the move are
 /// each decided and done under the worktree's lock held exclusively
@@ -573,51 +580,38 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     .current_dir(&fork)
                     .status()
                     .is_ok_and(|s| s.success());
-            (head != pinned && !ahead).then_some(head)
+            (head != pinned && !ahead || moving(&fork).exists()).then_some(head)
         },
         |head| {
-            if !holds(&fork, &pinned) {
-                match &primary {
-                    Some(primary) => git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]),
-                    None => panic!(
-                        "{} is at {head}, and this tree pins the fork at {pinned}, which it does not hold: \
-                         `git -C {} fetch origin {pinned}` fetches it",
-                        fork.display(),
-                        fork.display(),
-                    ),
+            if let Some(primary) = &primary {
+                if !holds(&fork, &pinned) {
+                    git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
                 }
             }
-            let recorded: Vec<(String, String)> = git_out(&fork, &["ls-tree", "-r", &pinned])
-                .lines()
-                .filter_map(|entry| {
-                    let (meta, path) = entry.split_once('\t')?;
-                    match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
-                        _ => None,
-                    }
-                })
-                .collect();
-            let nested: Vec<(PathBuf, String)> = recorded
-                .iter()
-                .map(|(path, commit)| (fork.join(path), commit.clone()))
-                .filter(|(at, commit)| at.join(".git").exists() && git_out(at, &["rev-parse", "HEAD"]).trim() != commit)
-                .collect();
-            for (at, commit) in &nested {
-                assert!(
-                    holds(at, commit),
-                    "{} does not hold {commit}, which the fork's {pinned} records there: \
-                     `git -C {} fetch origin {commit}` fetches it",
-                    at.display(),
-                    at.display(),
-                );
+            // The primary's gets a pin it lacks with its move, so nothing it records is known yet.
+            let recorded = if holds(&fork, &pinned) { gitlinks(&fork, &pinned) } else { Vec::new() };
+            if primary.is_some() {
+                for (path, commit) in &recorded {
+                    let at = fork.join(path);
+                    assert!(
+                        !at.join(".git").exists() || holds(&at, commit),
+                        "{} does not hold {commit}, which the fork's {pinned} records there, and a linked worktree's \
+                         fork checkout gets a commit only from the primary's",
+                        at.display(),
+                    );
+                }
             }
-            // A nested submodule checked out at the commit the pin records there, and nothing more, is no work: a move
-            // killed before its last step leaves it so. One at any other commit may hold a commit nothing else records.
+            // A nested submodule checked out at the commit the pin records there, and nothing more, is no work, nor is
+            // one at any commit while a move is in flight. One at any other commit may hold a commit nothing else records.
+            let in_flight = moving(&fork).exists();
             let status = git_out(&fork, &["status", "--porcelain=v2", "--ignore-submodules=none"]);
             let work: Vec<String> = status
                 .lines()
                 .filter_map(|entry| {
                     let path = entry.strip_prefix("1 .M SC.. ").and_then(|rest| rest.splitn(6, ' ').nth(5));
+                    if path.is_some() && in_flight {
+                        return None;
+                    }
                     let Some((path, commit)) = path.and_then(|path| recorded.iter().find(|(p, _)| p == path)) else {
                         return Some(entry.to_string());
                     };
@@ -636,15 +630,71 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                 fork.display(),
                 work.join("\n"),
             );
-            for (at, commit) in &nested {
-                git_run(at, &["checkout", "--detach", "-q", commit]);
+            let moving = moving(&fork);
+            fs::write(&moving, "").unwrap_or_else(|e| panic!("write {}: {e}", moving.display()));
+            match (&primary, holds(&fork, &pinned)) {
+                (_, true) => git_run(&fork, &["checkout", "--detach", "-q", &pinned]),
+                (None, false) => submodule_update(root, "rust"),
+                (Some(_), false) => unreachable!("a linked worktree's fork checkout fetched {pinned} above"),
             }
-            // Last, so a move killed before it is asked for again: `HEAD` alone decides.
-            git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
+            for (path, commit) in gitlinks(&fork, "HEAD") {
+                let at = fork.join(&path);
+                if !at.join(".git").exists() || git_out(&at, &["rev-parse", "HEAD"]).trim() == commit {
+                    continue;
+                }
+                match (&primary, holds(&at, &commit)) {
+                    (_, true) => git_run(&at, &["checkout", "--detach", "-q", &commit]),
+                    (None, false) => submodule_update(&fork, &path),
+                    (Some(_), false) => unreachable!("{} lacks {commit}, which was refused above", at.display()),
+                }
+            }
+            fs::remove_file(&moving).unwrap_or_else(|e| panic!("remove {}: {e}", moving.display()));
             eprintln!("{} was at {head}, and this tree pins {pinned}: checked it out", fork.display());
         },
     );
     fork
+}
+
+/// The file in `fork`'s own git directory whose presence says a move of it to
+/// its pin is in flight: the checkout may be at the pin while a nested
+/// submodule is not yet.
+fn moving(fork: &Path) -> PathBuf {
+    fork.join(git_out(fork, &["rev-parse", "--git-path", "toyos-fork-move"]).trim())
+}
+
+/// The submodules `tree` in `repo` records, by path, each with its commit.
+fn gitlinks(repo: &Path, tree: &str) -> Vec<(String, String)> {
+    git_out(repo, &["ls-tree", "-r", tree])
+        .lines()
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The submodule at `path` in `repo` checked out at the commit `repo`'s index
+/// records there, fetched as rustc's bootstrap fetches its LLVM: `git submodule
+/// sync`, so its `origin` is the URL `repo`'s `.gitmodules` records, then `git
+/// submodule update --init`, one commit deep where `.gitmodules` declares it
+/// `shallow`. Its own fetch recurses into no submodule of its own, whose
+/// `origin` is synced only once it has moved.
+///
+/// `repo` must be the primary's superproject or its own fork checkout, whose
+/// submodules' git directories are their own: run in a linked worktree's fork
+/// checkout, whose nested one is a git worktree of the primary's, `update`
+/// writes that checkout's path as `core.worktree` into the config the
+/// primary's shares, and git in the primary's fails.
+fn submodule_update(repo: &Path, path: &str) {
+    let shallow = format!("submodule.{path}.shallow");
+    let shallow = git_out(repo, &["config", "--file", ".gitmodules", "--type", "bool", "--default", "false", "--get", &shallow]);
+    git_run(repo, &["submodule", "sync", "--", path]);
+    let depth: &[&str] = if shallow.trim() == "true" { &["--depth", "1"] } else { &[] };
+    let update = ["-c", "fetch.recurseSubmodules=false", "submodule", "update", "--init", "--checkout"];
+    git_run(repo, &[&update[..], depth, &["--", path]].concat());
 }
 
 /// Whether the repository at `dir` holds `commit`.
@@ -1607,6 +1657,48 @@ mod tests {
         twelve_build();
     }
 
+    /// **A linked worktree's fork checkout runs no `git submodule`**: one whose
+    /// pin records a nested commit no local repository holds, which only the
+    /// URL the pin's tree records holds, is refused by name and not moved, and
+    /// the primary's fork configuration is not written.
+    #[test]
+    fn a_linked_worktree_lacking_a_nested_commit_is_refused_and_the_primary_s_is_not_written() {
+        let base = TempDir::new("fork-linked-nested");
+        let (primary, linked, _c1, c2) = two_pins(&base);
+        let mut lock = buildlock::shared(&linked, "a build");
+        let fork = fork_checkout(&linked, &mut lock);
+        let theirs = primary.join("rust");
+        let configs = || {
+            let modules = primary.join(".git/modules/rust");
+            [modules.join("config"), modules.join("modules/library/backtrace/config")].map(|c| fs::read(c).unwrap())
+        };
+        // What git asks of a submodule's local path, and of no `https` URL.
+        git(&theirs.join("library/backtrace"), &["config", "protocol.file.allow", "always"]);
+        let before = configs();
+
+        let bt = base.join("backtrace-moved");
+        git(&base, &["clone", "-q", path_str(&base.join("backtrace-src")), path_str(&bt)]);
+        write(&bt.join("lib.rs"), "pub fn trace_most() {}\n");
+        git(&bt, &["commit", "-qam", "backtrace, moved"]);
+        let b3 = git(&bt, &["rev-parse", "HEAD"]);
+        let upstream = base.join("fork-src");
+        git(&upstream, &["config", "--file", ".gitmodules", "submodule.library/backtrace.url", path_str(&bt)]);
+        git(&upstream, &["update-index", "--cacheinfo", &format!("160000,{b3},library/backtrace")]);
+        git(&upstream, &["add", ".gitmodules"]);
+        git(&upstream, &["commit", "-qm", "C5"]);
+        let c5 = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&theirs, &["-c", "fetch.recurseSubmodules=false", "fetch", "-q", path_str(&upstream), &c5]);
+        git(&linked, &["update-index", "--cacheinfo", &format!("160000,{c5},rust")]);
+        git(&linked, &["commit", "-qm", "pins C5"]);
+
+        let said = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+
+        assert_eq!(configs(), before, "the primary's fork configuration was written");
+        git(&theirs, &["status", "--porcelain", "--ignore-submodules=none"]);
+        assert!(said.contains(&b3) && said.contains("linked worktree"), "{said}");
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "a checkout was moved over a nested commit it lacks");
+    }
+
     /// Where a linked worktree's `rust/` is a fork checkout that is not whole,
     /// [`crate::ensure_shallow_fork`] refuses, and git in the primary's fork
     /// still runs.
@@ -1627,10 +1719,12 @@ mod tests {
     /// **The primary's fork checkout is the commit its tree pins**: one behind
     /// the pin, as a `git pull` leaves it, and one ahead of it are moved there,
     /// each nested submodule checked out in it with it; one whose nested
-    /// gitlink alone is moved is no work and moves too; one with local changes,
-    /// or pinned at a commit it or a nested submodule does not hold, is refused
-    /// by name and not moved; one not initialised yet is left to whoever
-    /// initialises it, and git is run in no other repository.
+    /// gitlink alone is moved is no work and moves too; one with local changes
+    /// is refused by name and not moved; a commit it or a nested submodule does
+    /// not hold is fetched from the URL its pin's tree records, whatever its
+    /// `origin` names; a move killed half-way is finished by the next; one not
+    /// initialised yet is left to whoever initialises it, and git is run in no
+    /// other repository.
     #[test]
     fn the_primary_s_fork_checkout_is_moved_to_its_pin() {
         let base = TempDir::new("fork-primary");
@@ -1670,27 +1764,62 @@ mod tests {
         assert_eq!(head(), c1, "a checkout with local changes was moved");
         git(&fork, &["checkout", "-q", "--", "."]);
 
-        let upstream = base.join("fork-src");
-        write(&upstream.join("library/std/src/lib.rs"), "pub fn c() {}\n");
-        git(&upstream, &["commit", "-qam", "C3"]);
-        let c3 = git(&upstream, &["rev-parse", "HEAD"]);
-        pin(&c3);
-        let said = refusal(|| drop(fork_checkout(&primary, &mut lock)));
-        assert!(said.contains(&format!("`git -C {} fetch origin {c3}` fetches it", fork.display())), "{said}");
-        assert_eq!(head(), c1, "a checkout was moved to a commit it does not hold");
+        // The owner's case: each checkout's `origin` names a repository that holds none of the commits to come, as one
+        // made before `.gitmodules` named the fork's own does, and only the URL the pin's tree records holds them.
+        let stale = base.join("stale");
+        git(&base, &["init", "-q", "--bare", path_str(&stale)]);
+        git(&nested, &["push", "-q", path_str(&stale), "HEAD:refs/heads/stale-only"]);
+        for at in [&fork, &nested] {
+            git(at, &["remote", "set-url", "origin", path_str(&stale)]);
+            // What git asks of a submodule's local path, and of no `https` URL.
+            git(at, &["config", "protocol.file.allow", "always"]);
+        }
+        let origin = |at: &Path| git(at, &["remote", "get-url", "origin"]);
+        let worktree_of = |at: &Path| git(at, &["config", "core.worktree"]);
+        let worktrees = (worktree_of(&fork), worktree_of(&nested));
 
-        let bt = base.join("backtrace-src");
+        let moved = base.join("fork-moved");
+        git(&base, &["clone", "-q", path_str(&base.join("fork-src")), path_str(&moved)]);
+        write(&moved.join("library/std/src/lib.rs"), "pub fn c() {}\n");
+        git(&moved, &["commit", "-qam", "C3"]);
+        let c3 = git(&moved, &["rev-parse", "HEAD"]);
+        git(&primary, &["config", "--file", ".gitmodules", "submodule.rust.url", path_str(&moved)]);
+        git(&primary, &["add", ".gitmodules"]);
+        pin(&c3);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!(head(), c3, "a pin only the URL its tree records holds was not fetched");
+        assert_eq!(origin(&fork), path_str(&moved), "the fork checkout's origin is not the URL its pin's tree records");
+
+        let bt = base.join("backtrace-moved");
+        git(&base, &["clone", "-q", path_str(&base.join("backtrace-src")), path_str(&bt)]);
         write(&bt.join("lib.rs"), "pub fn trace_most() {}\n");
-        git(&bt, &["commit", "-qam", "backtrace, latest"]);
+        git(&bt, &["commit", "-qam", "backtrace, moved"]);
         let b3 = git(&bt, &["rev-parse", "HEAD"]);
-        git(&upstream.join("library/backtrace"), &["pull", "-q"]);
-        git(&upstream, &["commit", "-qam", "C4"]);
-        let c4 = git(&upstream, &["rev-parse", "HEAD"]);
-        git(&fork, &["-c", "fetch.recurseSubmodules=false", "fetch", "-q", path_str(&upstream), &c4]);
+        git(&moved, &["config", "--file", ".gitmodules", "submodule.library/backtrace.url", path_str(&bt)]);
+        git(&moved, &["config", "--file", ".gitmodules", "submodule.library/backtrace.shallow", "true"]);
+        git(&moved, &["update-index", "--cacheinfo", &format!("160000,{b3},library/backtrace")]);
+        git(&moved, &["add", ".gitmodules"]);
+        git(&moved, &["commit", "-qm", "C4"]);
+        let c4 = git(&moved, &["rev-parse", "HEAD"]);
         pin(&c4);
-        let said = refusal(|| drop(fork_checkout(&primary, &mut lock)));
-        assert!(said.contains(&format!("`git -C {} fetch origin {b3}` fetches it", nested.display())), "{said}");
-        assert_eq!((head(), nested_head()), (c1.clone(), recorded(&c1)), "a move half-made while a nested commit was missing");
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!((head(), nested_head()), (c4, b3), "a nested pin only its pin's URL holds was not fetched");
+        assert_eq!(origin(&nested), path_str(&bt), "the nested checkout's origin is not the URL its pin's tree records");
+        assert_eq!(git(&nested, &["rev-parse", "--is-shallow-repository"]), "true", "a shallow submodule was fetched whole");
+        assert_eq!((worktree_of(&fork), worktree_of(&nested)), worktrees, "a git directory was given another worktree");
+        assert!(
+            git_try(&nested, &["rev-parse", "--verify", "-q", "refs/remotes/origin/stale-only"]).is_err(),
+            "the fork's fetch recursed into a nested submodule, from the origin it had before its move"
+        );
+
+        // A move killed after the checkout moved and before its nested submodule did is finished by the next.
+        let b2 = recorded(&c3);
+        fs::write(moving(&fork), "").unwrap();
+        git(&fork, &["checkout", "-q", "--detach", &c3]);
+        pin(&c3);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!((head(), nested_head()), (c3, b2), "a move killed half-way was left half-made");
+        assert!(!moving(&fork).exists(), "a finished move is still in flight");
 
         fs::remove_dir_all(&fork).unwrap();
         fs::create_dir(&fork).unwrap();
