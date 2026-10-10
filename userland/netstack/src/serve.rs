@@ -750,6 +750,7 @@ impl Sockets {
         self.ends.retain(|socket_id, ends| {
             let held = ends.to_client.held().is_some() || ends.from_client.held().is_some();
             if !held {
+                say!("netstack: prof {}", crate::prof::line());
                 by_stream.remove(&ends.stream);
                 if matches!(ids.get(socket_id), Some(Socket::Stream(_))) {
                     ids.remove(socket_id);
@@ -771,6 +772,7 @@ impl Sockets {
             };
             let from = if watch.readable { READABLE } else { 0 } | if watch.writer { OTHER_END_GONE } else { 0 };
             if let (true, Some(pipe)) = (from != 0, ends.from_client.held()) {
+                crate::prof::add(18, 1);
                 poller.watch(&*pipe, from, TOKEN_FROM_CLIENT | u64::from(socket_id));
             }
             let to = if watch.writable { WRITABLE } else { 0 } | if watch.reader { OTHER_END_GONE } else { 0 };
@@ -865,6 +867,7 @@ impl Sockets {
     /// The pass over the streams the last wake's answers asked for, once.
     pub fn bridge(&mut self, node: &mut Node, now: Instant) {
         if std::mem::take(&mut self.bridge) {
+            crate::prof::add(9, 1);
             node.bridge(now);
         }
     }
