@@ -156,7 +156,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
 
     // Before any unit is armed: the handler reaches a faulting function's
     // config space through this and cannot take a lock to find it.
-    fault::describe(devices);
+    crate::iommu::fault::describe(devices);
 
     let mut units = 0usize;
     let mut regions = 0usize;
