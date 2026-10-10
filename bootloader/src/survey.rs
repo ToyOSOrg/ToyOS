@@ -5,7 +5,7 @@
 //!
 //! **It reads the machine and writes nothing to it.** Memory is read only
 //! where firmware's own map describes the whole range (`watchdog::described`),
-//! configuration space only through each root bridge's `Pci.Read`, and nothing
+//! configuration space only on the buses the MCFG decodes and a bridge forwards, and nothing
 //! here calls a variable service, sets a GOP mode or writes a port. The one
 //! thing read and not copied is the MSDM table's body: it is the machine's
 //! Windows product key.
@@ -28,7 +28,6 @@ use uefi::table::cfg::{SMBIOS3_GUID, SMBIOS_GUID};
 use uefi::prelude::*;
 use uefi::CString16;
 
-use crate::rootbridge::PciRootBridgeIo;
 use crate::{loaderlog, protocol, watchdog};
 
 const HEAD: &str = "Survey:";
@@ -67,14 +66,13 @@ pub fn run(st: &SystemTable<Boot>, rsdp: u64, entry_counter: u64) {
         Ok(Err(why)) | Err(why) => return println!("{HEAD} no directory {name} ({why}), so nothing is surveyed"),
     };
     println!("{HEAD} this boot's description goes to {name}");
-    let stages: [Stage<'_>; 7] = [
+    let stages: [Stage<'_>; 6] = [
         ("firmware", &|| firmware(st)),
         ("cpuid", &cpuid),
         ("memory map", &|| memory_map(st)),
         ("smbios", &|| smbios(st)),
         ("acpi", &|| acpi(st, rsdp)),
         ("gop", &|| gop(st)),
-        ("pci", &|| pci(st)),
     ];
     for (stage, survey) in stages {
         restart(st);
@@ -88,6 +86,17 @@ pub fn run(st: &SystemTable<Boot>, rsdp: u64, entry_counter: u64) {
             }
         }
         println!("{HEAD} {stage}: {said}; {} file(s), {bytes} bytes", files.len());
+    }
+    // Last, after every other stage is on the stick.
+    restart(st);
+    if skip_pci_set() {
+        println!("{HEAD} pci skipped: {SKIP_PCI} is on the log partition, left by a boot that began the PCI stage and never ended it, or put there by hand");
+    } else {
+        skip_pci_mark(true);
+        println!("{HEAD} pci begins");
+        let said = pci(st, rsdp, &mut dir);
+        skip_pci_mark(false);
+        println!("{HEAD} pci: {said}");
     }
     restart(st);
 }
@@ -520,7 +529,8 @@ fn speed(code: u32) -> &'static str {
 
 /// One function's line: its identity, class, BARs or bus numbers, and every
 /// capability the two lists name, walked within the function's own space.
-fn describe(cfg: &[u8], place: &str) -> String {
+/// Whether it carries a PCI Express capability is the second half.
+fn describe(cfg: &[u8], place: &str) -> (String, bool) {
     let mut line = alloc::format!(
         "{place} {:04x}:{:04x} class {:02x}{:02x}{:02x} rev {:02x} hdr {:02x}",
         u16_at(cfg, 0),
@@ -587,62 +597,181 @@ fn describe(cfg: &[u8], place: &str) -> String {
             p = next;
         }
     }
-    line
+    (line, pcie)
 }
 
-fn pci(st: &SystemTable<Boot>) -> (Files, String) {
-    let bs = st.boot_services();
-    let handles = match bs.find_handles::<PciRootBridgeIo>() {
-        Ok(handles) => handles,
-        Err(e) => return (Vec::new(), alloc::format!("no root bridge ({e})")),
+/// An MCFG allocation (PCI Firmware 3.3 Table 4-3): base for bus 0, segment, and the buses it decodes.
+struct Ecam {
+    base: u64,
+    segment: u16,
+    first: u8,
+    last: u8,
+}
+
+/// Every ECAM window the MCFG names, found from the RSDP's root table.
+fn mcfg(st: &SystemTable<Boot>, rsdp: u64) -> Result<Vec<Ecam>, String> {
+    let head = phys(st, rsdp, 36)?;
+    let (root_at, width) = match (head[15] >= 2, u64_at(&head, 24)) {
+        (true, x) if x != 0 => (x, 8usize),
+        _ => (u64::from(u32_at(&head, 16)), 4usize),
     };
-    let mut files = Files::new();
-    let mut out = String::new();
-    let mut found: BTreeSet<(u32, u8, u8, u8)> = BTreeSet::new();
-    let mut short = 0usize;
-    for handle in &handles {
-        let Ok(bridge) = protocol::get::<PciRootBridgeIo>(bs, *handle) else {
-            let _ = writeln!(out, "a root bridge would not open");
+    let root = table(st, root_at)?;
+    for i in 0..root.len().saturating_sub(36) / width {
+        let p = 36 + i * width;
+        let at = if width == 8 { u64_at(&root, p) } else { u64::from(u32_at(&root, p)) };
+        let Ok(t) = table(st, at) else { continue };
+        if &t[..4] != b"MCFG" {
             continue;
-        };
-        let seg = bridge.segment_number;
-        for bus in 0..=255u8 {
+        }
+        let mut out = Vec::new();
+        let mut e = 44;
+        while e + 16 <= t.len() {
+            out.push(Ecam { base: u64_at(&t, e), segment: u16_at(&t, e + 8), first: t[e + 10], last: t[e + 11] });
+            e += 16;
+        }
+        return Ok(out);
+    }
+    Err(String::from("the root table names no MCFG"))
+}
+
+impl Ecam {
+    /// One configuration dword, read straight from the window. Only a bus the
+    /// MCFG decodes is ever addressed: past `last` lies whatever else the
+    /// platform maps there, which is not configuration space.
+    fn read(&self, bus: u8, dev: u8, f: u8, offset: usize) -> u32 {
+        assert!((self.first..=self.last).contains(&bus) && dev < 32 && f < 8 && offset < 0x1000 && offset % 4 == 0);
+        let at = self.base + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(f) << 12) + offset as u64;
+        // SAFETY: boot services identity-map the address space, and the
+        // assert holds the address inside the window the MCFG declares.
+        unsafe { core::ptr::read_volatile(at as *const u32) }
+    }
+}
+
+/// A file opened once and appended to, each piece flushed before the next
+/// read, so a stage that stops leaves everything before the stop.
+struct Trail(Option<uefi::proto::media::file::RegularFile>);
+
+impl Trail {
+    fn open(dir: &mut Directory, name: &str) -> Self {
+        let file = CString16::try_from(name)
+            .ok()
+            .and_then(|n| dir.open(&n, FileMode::CreateReadWrite, FileAttribute::empty()).ok())
+            .and_then(|f| f.into_regular_file());
+        if file.is_none() {
+            println!("{HEAD} {name} would not open, so its lines are lost");
+        }
+        Self(file)
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        let Some(file) = self.0.as_mut() else { return };
+        if file.write(bytes).is_err() || file.flush().is_err() {
+            println!("{HEAD} a write would not flush, so the rest of this file is lost");
+            self.0 = None;
+        }
+    }
+}
+
+/// The file whose presence skips the PCI stage. It is made before the stage
+/// and deleted after it, so a boot that stops inside the stage leaves it, and
+/// the next boot goes on to the kernel without it.
+const SKIP_PCI: &str = "survey-skip-pci";
+
+fn skip_pci_set() -> bool {
+    let name = CString16::try_from(SKIP_PCI).expect("ASCII");
+    matches!(loaderlog::with_open_volume(|root| root.open(&name, FileMode::Read, FileAttribute::empty()).is_ok()), Ok(true))
+}
+
+fn skip_pci_mark(on: bool) {
+    let name = CString16::try_from(SKIP_PCI).expect("ASCII");
+    let done = loaderlog::with_open_volume(|root| {
+        let file = root.open(&name, FileMode::CreateReadWrite, FileAttribute::empty()).map_err(|e| e.status())?;
+        let mut file = file.into_regular_file().ok_or(Status::INVALID_PARAMETER)?;
+        if on {
+            file.flush().map_err(|e| e.status())
+        } else {
+            file.delete().map_err(|e| e.status())
+        }
+    });
+    if !matches!(done, Ok(Ok(()))) {
+        println!("{HEAD} {SKIP_PCI} would not be {}", if on { "made" } else { "deleted" });
+    }
+}
+
+/// Every function behind each MCFG window's first bus, walked down through
+/// the buses its bridges forward and no other, each line and dump flushed to
+/// the stick before the next function is read.
+fn pci(st: &SystemTable<Boot>, rsdp: u64, dir: &mut Directory) -> String {
+    let windows = match mcfg(st, rsdp) {
+        Ok(w) => w,
+        Err(why) => return alloc::format!("no ECAM window ({why}), so nothing is read"),
+    };
+    let mut lines = Trail::open(dir, "pci.txt");
+    let mut dumps = Trail::open(dir, "pci-config.txt");
+    let mut functions = 0usize;
+    for ecam in &windows {
+        let seg = ecam.segment;
+        lines.put(alloc::format!("MCFG segment {seg:04x} base {:#x} buses {:02x}-{:02x}\n", ecam.base, ecam.first, ecam.last).as_bytes());
+        if ecam.first > ecam.last {
+            continue;
+        }
+        let mut visited: BTreeSet<u8> = BTreeSet::new();
+        let mut buses: Vec<u8> = alloc::vec![ecam.first];
+        while let Some(bus) = buses.pop() {
+            if !visited.insert(bus) {
+                continue;
+            }
             for dev in 0..32u8 {
-                let present = |f: u8| bridge.config_u32(bus, dev, f, 0).ok().filter(|id| !matches!(id & 0xffff, 0 | 0xffff));
-                if present(0).is_none() {
+                let present = |f: u8| !matches!(ecam.read(bus, dev, f, 0) & 0xffff, 0 | 0xffff);
+                if !present(0) {
                     continue;
                 }
-                let multi = bridge.config_u32(bus, dev, 0, 0xc).map_or(0, |v| v >> 16) & 0x80 != 0;
+                let multi = (ecam.read(bus, dev, 0, 0xc) >> 16) & 0x80 != 0;
                 for f in 0..if multi { 8 } else { 1 } {
-                    if present(f).is_none() || !found.insert((seg, bus, dev, f)) {
+                    if !present(f) {
                         continue;
-                    }
-                    let mut cfg = Vec::with_capacity(0x1000);
-                    for offset in (0..0x1000u16).step_by(4) {
-                        match bridge.config_u32(bus, dev, f, offset) {
-                            Ok(v) => cfg.extend_from_slice(&v.to_le_bytes()),
-                            Err(_) => break,
-                        }
-                    }
-                    if cfg.len() < 0x100 {
-                        let _ = writeln!(out, "{seg:04x}:{bus:02x}:{dev:02x}.{f}: only {} bytes of its space read", cfg.len());
-                        continue;
-                    }
-                    if cfg.len() < 0x1000 {
-                        short += 1;
                     }
                     let place = alloc::format!("{seg:04x}:{bus:02x}:{dev:02x}.{f}");
-                    let _ = writeln!(out, "{}", describe(&cfg, &place));
-                    files.push((alloc::format!("pci-{seg:04x}-{bus:02x}-{dev:02x}-{f}.cfg"), cfg));
+                    let id = ecam.read(bus, dev, f, 0);
+                    println!("{HEAD} pci {place} {:04x}:{:04x} is read", id & 0xffff, id >> 16);
+                    let mut cfg = Vec::with_capacity(0x1000);
+                    for offset in (0..0x100).step_by(4) {
+                        cfg.extend_from_slice(&ecam.read(bus, dev, f, offset).to_le_bytes());
+                    }
+                    // Extended space only where a PCI Express capability says
+                    // the function has one.
+                    if describe(&cfg, &place).1 {
+                        for offset in (0x100..0x1000).step_by(4) {
+                            cfg.extend_from_slice(&ecam.read(bus, dev, f, offset).to_le_bytes());
+                        }
+                    }
+                    let (line, _) = describe(&cfg, &place);
+                    lines.put(alloc::format!("{line}\n").as_bytes());
+                    // `lspci -F` reads this shape.
+                    let mut dump = alloc::format!("{bus:02x}:{dev:02x}.{f} segment {seg:04x}\n");
+                    for (row, chunk) in cfg.chunks(16).enumerate() {
+                        let _ = write!(dump, "{:02x}:", row * 16);
+                        for b in chunk {
+                            let _ = write!(dump, " {b:02x}");
+                        }
+                        dump.push('\n');
+                    }
+                    dump.push('\n');
+                    dumps.put(dump.as_bytes());
+                    functions += 1;
+                    // A bridge's forwarded buses, those the window decodes.
+                    if cfg[0xe] & 0x7f == 1 {
+                        let (secondary, subordinate) = (cfg[0x19], cfg[0x1a]);
+                        if secondary > bus && secondary <= subordinate {
+                            for b in (secondary..=subordinate.min(ecam.last)).rev() {
+                                buses.push(b);
+                            }
+                        }
+                    }
                 }
             }
         }
+        lines.put(alloc::format!("segment {seg:04x}: {} bus(es) walked\n", visited.len()).as_bytes());
     }
-    files.insert(0, (String::from("pci.txt"), out.into_bytes()));
-    let said = alloc::format!(
-        "{} functions under {} root bridge(s), {short} with no extended space",
-        found.len(),
-        handles.len()
-    );
-    (files, said)
+    alloc::format!("{functions} functions under {} ECAM window(s)", windows.len())
 }
