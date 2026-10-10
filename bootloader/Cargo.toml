@@ -35,7 +35,8 @@ toyos-tsc = { path = "../toyos-tsc" }
 # The signed image, the slot table and the anti-rollback floor: every decision
 # this loader makes about which slot to boot, host-tested there.
 toyos-update = { path = "../toyos-update" }
-# `force-soft`, unified into the SHA-256 and SHA-512 `toyos-update` hashes
-# with: this target is soft-float, and the x86 backend reaches for SSE and
-# SHA-NI registers a UEFI application may not assume are its own.
+# Not hashed with here: `force-soft`, unified into the `sha2` that
+# `ed25519-dalek` takes its SHA-512 from inside a verification. This target is
+# soft-float, and the x86 backend reaches for SSE and SHA-NI registers a UEFI
+# application may not assume are its own.
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

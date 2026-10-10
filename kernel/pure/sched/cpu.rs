@@ -128,10 +128,7 @@ pub struct ParkedEntry<X: SchedPayload> {
     class: WaitClass,
 }
 
-/// One parked task as an outside reader sees it. The invariants want the key
-/// and the deadline; a blocked-task dump wants the payload and how long the
-/// park has lasted, and it is the only thing that can read them — a `CpuSched`
-/// is reachable from its own CPU alone.
+/// One parked task as an outside reader sees it.
 pub struct ParkedView<'a, X: SchedPayload> {
     key: TaskKey,
     entry: &'a ParkedEntry<X>,
@@ -144,19 +141,6 @@ impl<X: SchedPayload> ParkedView<'_, X> {
 
     pub fn deadline(&self) -> Option<Nanos> {
         self.entry.deadline
-    }
-
-    pub fn class(&self) -> WaitClass {
-        self.entry.class
-    }
-
-    /// When this park began.
-    pub fn since(&self) -> Nanos {
-        self.entry.task.since()
-    }
-
-    pub fn ext(&self) -> &X {
-        self.entry.task.ext()
     }
 
     pub fn is_rt(&self) -> bool {
@@ -446,12 +430,6 @@ impl<X: SchedPayload> CpuSched<X> {
     /// judged on.
     pub fn probe_outstanding(&self) -> bool {
         self.steal_probe.in_flight()
-    }
-
-    /// The number of ready tasks, republished to the handle every pass for
-    /// spawn placement.
-    pub fn ready_len(&self) -> usize {
-        self.rq.len()
     }
 
     /// Lend the running task an RT window: the path for a client

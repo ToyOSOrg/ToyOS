@@ -34,7 +34,7 @@ is charged to (`WaitClass` is the wait's now, named at the arm), not when.
 
 The fix has the same shape as `cpu_ns`'s and is not free: a reader would need
 the park's `since` stamp and its class from the owning CPU, and a `CpuSched` is
-`!Sync` — `sched::dump`'s `for_each_parked` reaches only the calling CPU.
+`!Sync` and reachable from its own CPU alone.
 `TaskHandle` is the cross-CPU face and could publish `(class, since)` at the
 park the way it publishes `running_since` at the dispatch, which is two relaxed
 stores on the park path. Whether that is worth two stores per park is the
@@ -47,13 +47,7 @@ parked thread's blocked time is invisible until the park ends, exactly
 backwards for reading a wedge in progress. A scoped fix is named. Owed to
 whoever next extends the diagnostics the T14 wedge investigation started.
 
-## Two corrections, 2026-09-01
-
-**The Ctrl+Alt+D report already answers this and is not the site.** `report_this_cpu`
-prints `task.class.name()` and `Ms(now.saturating_sub(task.since))` for a task
-that is still parked (`kernel/src/sched/dump.rs:376-381`), reading
-`ParkedInfo::since` — "When the park began" (`kernel/src/sched/driver.rs:830`).
-The live interval and its class are both there.
+## A correction, 2026-09-01
 
 **`SYS_PROCESS_STATS` misses more than the park in progress.**
 `ProcessData::accounting`'s five `blocked_*_ns` fields are written by
@@ -67,10 +61,3 @@ threads' parks only: every park a still-live thread has already finished is
 invisible too, not merely the one it is in. Publishing `(class, since)` at the
 park closes the smaller half; the larger half is a live thread's completed
 parks reaching a cross-CPU reader at all.
-
-**And the dump is not a substitute for the counters**, so "already answers this"
-above is about the *site*, not about the need. It paints the panel on
-Ctrl+Alt+D, never answers `SYS_PROCESS_STATS`; it prints at most
-`LINES_PER_CPU` = 16 ordinary parked lines per CPU (`kernel/src/sched/dump.rs:32`,
-truncating at `:370`) and counts the rest; and it reports a park's duration, not
-the per-class totals `ps` reads.

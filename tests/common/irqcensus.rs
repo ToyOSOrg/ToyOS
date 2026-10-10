@@ -3,7 +3,7 @@
 //!
 //! The kernel says `irq: cpuN timer=… kick=… …` per online CPU where the
 //! machine ends, as records at its stop and in the record its death seals
-//! (`kernel/src/census.rs`), and in the blocked-task dump; at no process's end. The counters are cumulative since boot, so the
+//! (`kernel/src/census.rs`); at no process's end. The counters are cumulative since boot, so the
 //! largest count each source reaches on a CPU's lines is that boot's whole
 //! census ([`Census::raise`]). `irq_census_conservation` asks whether one
 //! boot's census is internally consistent.
@@ -84,8 +84,7 @@ impl Census {
     /// Raise each source to its count in `read`, another line of this CPU.
     ///
     /// **Lines are in no read order.** The stop's census comes back on the
-    /// black-box page newest first, and a blocked-task dump reads the counters
-    /// before `log::emit` stamps its lines. The counters are monotonic, so the
+    /// black-box page newest first. The counters are monotonic, so the
     /// largest count per source is the newest read whatever the order of the
     /// lines.
     pub fn raise(&mut self, read: &Self) {

@@ -764,7 +764,7 @@ mod tests {
     /// resvg's, which no reading of this file can see.
     #[test]
     fn the_icons_are_the_pixels_compared_with_resvg() {
-        use sha2::{Digest, Sha256};
+        use toyos_sha2::Sha256;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut digest = Sha256::new();
         for (stem, _) in SIZES {

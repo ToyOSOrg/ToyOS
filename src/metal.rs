@@ -772,17 +772,19 @@ pub const FLASHABLE: &[&str] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     "usb-transport-break",
-    // It deafens one CPU for a window of its own clock and has the blocked-task
-    // dump kick it and probe it with an NMI. It reaches no device register and
-    // writes no firmware state; the CPU rejoins, and the boot goes on to
-    // userland and ends the way an unarmed one does.
-    "dump-deaf-cpu",
     // The kernel leaves the i8042 unprobed and a test process drives it through
     // an `isa` claim: it reads the configuration byte, has the keyboard
     // acknowledge `0xF4` and writes the byte back, each a command this kernel's
     // own driver sends the controller on every boot. It reaches no firmware
     // state, and firmware programs the controller again at the next power-on.
     "i8042-withheld",
+    // The kernel leaves the Type-C xHCI controller to a claim, and `usbd`
+    // drives it through the unit: the handoff, a reset and its own rings, as
+    // this kernel's driver does every boot. Firmware owns neither of the
+    // T14's two (each reads `USBLEGSUP 0x01002201`, every SMI enable clear),
+    // and firmware takes the controller back at the next power-on. Only this
+    // id: the other controller carries the boot stick.
+    "xhci-leave=8086:9a13",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
@@ -2343,7 +2345,7 @@ mod tests {
         declared.extend(crate::build::declared_params(root));
         for name in FLASHABLE {
             assert!(
-                declared.iter().any(|d| d == *name),
+                declared.iter().any(|d| crate::build::arms(d, name)),
                 "`FLASHABLE` rules on {name:?}, which the kernel declares as neither an \
                  actuator nor a boot parameter: {declared:?}"
             );
