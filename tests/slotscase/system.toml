@@ -1,0 +1,28 @@
+# The update, judged by `update_writes_the_idle_slot_through_the_block_service`:
+# a machine booted off its NVMe disk, whose slots are diskserver's partitions,
+# runs `update` as a login runs it. test-runner is a `login` row listing it,
+# so the job it runs launches `update` in a login session of its own.
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+login = true
+starts = ["update"]
+
+[programs.update]
+slots = true
+
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
