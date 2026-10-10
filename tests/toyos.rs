@@ -2271,7 +2271,8 @@ fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
-    await_marker(&mut qemu, &mut serial, "unmapped from slot ", "the claim's DeviceID unmapped at its end")?;
+    // The release's own line, its last: the DeviceID's unmapping comes before it.
+    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
     let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
     let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
         return Err(format!("the MADT's ITS was never armed
