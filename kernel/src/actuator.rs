@@ -144,6 +144,13 @@ actuators! {
     #[allow(dead_code)]
     psci_withheld = "psci-withheld";
 
+    /// Once the SMMUv3 is armed, have QEMU's `iommu-testdev` write on the
+    /// entry every stream starts with, on a domain at an address it maps, and
+    /// at one it does not. Judged by `virt_smmu`.
+    // The SMMUv3 is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    smmu_selftest = "smmu-selftest";
+
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
     control_regs_bench = "control-regs-bench";
 

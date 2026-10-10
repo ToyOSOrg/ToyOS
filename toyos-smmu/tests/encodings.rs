@@ -522,9 +522,38 @@ fn every_event_number_is_its_own_code_and_only_a_fault_carries_an_attempt() {
     ];
     for number in 0..=u8::MAX {
         let decoded = event(record(number, 7, 0x1000, false));
+        assert_eq!(decoded.code.name() == "unnamed", !named.iter().any(|(n, _)| *n == number), "event {number:#x}");
         let code = named.iter().find(|(n, _)| *n == number).map_or(Code::Other(number), |(_, code)| *code);
         assert_eq!((decoded.stream, decoded.code), (7, code), "event {number:#x}");
         assert_eq!(decoded.attempt.is_some(), (0x10..=0x13).contains(&number), "event {number:#x}");
+    }
+}
+
+#[test]
+fn each_event_is_named_by_its_own_mnemonic() {
+    let mnemonics = [
+        (0x01, "F_UUT"),
+        (0x02, "C_BAD_STREAMID"),
+        (0x03, "F_STE_FETCH"),
+        (0x04, "C_BAD_STE"),
+        (0x05, "F_BAD_ATS_TREQ"),
+        (0x06, "F_STREAM_DISABLED"),
+        (0x07, "F_TRANSL_FORBIDDEN"),
+        (0x08, "C_BAD_SUBSTREAMID"),
+        (0x09, "F_CD_FETCH"),
+        (0x0A, "C_BAD_CD"),
+        (0x0B, "F_WALK_EABT"),
+        (0x10, "F_TRANSLATION"),
+        (0x11, "F_ADDR_SIZE"),
+        (0x12, "F_ACCESS"),
+        (0x13, "F_PERMISSION"),
+        (0x20, "F_TLB_CONFLICT"),
+        (0x21, "F_CFG_CONFLICT"),
+        (0x24, "E_PAGE_REQUEST"),
+        (0x25, "F_VMS_FETCH"),
+    ];
+    for (number, mnemonic) in mnemonics {
+        assert_eq!(event(record(number, 7, 0x1000, false)).code.name(), mnemonic, "event {number:#x}");
     }
 }
 

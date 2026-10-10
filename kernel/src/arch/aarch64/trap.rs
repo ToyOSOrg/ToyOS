@@ -219,6 +219,14 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
             storm::sgi();
             irqchip::end(intid);
         }
+        // Zero until routed, which the kick's arm above takes first.
+        intid if intid == irqchip::iommu_events() => {
+            percpu::irq_took(Source::DmaFault);
+            percpu::preempt_count_up();
+            crate::iommu::fault_interrupt();
+            percpu::preempt_count_down();
+            irqchip::end(intid);
+        }
         _ => {
             percpu::irq_took(Source::Unclaimed);
             UNCLAIMED.fetch_add(1, Relaxed);

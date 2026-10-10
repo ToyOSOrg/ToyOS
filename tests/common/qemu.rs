@@ -727,13 +727,18 @@ pub enum Profile {
     /// `HVC`, as under HVF. `virt_el1_smp`'s machine while a boot's last word
     /// can miss the console under HVF.
     VirtTcg,
+    /// [`Profile::Virt`] with its SMMUv3 and QEMU's `iommu-testdev`, a function
+    /// that writes where it is told to through the unit.
+    VirtSmmu,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu => {
+                Arch::Aarch64
+            }
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
@@ -855,12 +860,23 @@ struct Shape {
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
     iommu: Option<Iommu>,
+    /// `virt`'s SMMUv3, which is a machine property rather than a device.
+    smmu: Smmu,
     /// A virtio-rng, which is firmware's alone: edk2's driver puts
     /// `EFI_RNG_PROTOCOL` behind it for the loader's seed, and the kernel
     /// drives no such device. `virt` has it because an HVF guest's CPU has no
     /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
     /// the protocol from RDRAND without one.
     rng: bool,
+}
+
+/// Whether `virt` has its SMMUv3. With it comes QEMU's `iommu-testdev`, whose
+/// writes are the only DMA a guest of this suite can aim at an address of its
+/// choosing: a unit no function writes through is a unit no test reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Smmu {
+    Absent,
+    WithTestdev,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -907,6 +923,7 @@ impl Profile {
         match self {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
+            Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -916,6 +933,7 @@ impl Profile {
                 usb: &[],
                 storage: Storage::Stick { nvme_bytes: 0 },
                 iommu: None,
+                smmu: Smmu::Absent,
                 rng: true,
             },
             Self::Headless => Shape {
@@ -927,6 +945,7 @@ impl Profile {
                 usb: &["usb-kbd,bus=xhci.0"],
                 storage: Storage::Disk { data_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
+                smmu: Smmu::Absent,
                 rng: false,
             },
             Self::Metal => Shape {
@@ -942,6 +961,7 @@ impl Profile {
                 usb: &[],
                 storage: Storage::Stick { nvme_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
+                smmu: Smmu::Absent,
                 rng: false,
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
@@ -2056,15 +2076,22 @@ fn qemu_command(
     // needs the userspace half of the irqchip, and a machine with no unit has
     // no reason to be built differently from the one it has always been.
     let mut machine = match arch {
-        Arch::X86_64 => arch.machine().to_string(),
+        Arch::X86_64 => {
+            assert!(shape.smmu == Smmu::Absent, "a q35 has no SMMUv3");
+            arch.machine().to_string()
+        }
         Arch::Aarch64 => {
             // The unit a profile declares is VT-d, which `virt` has none of.
             assert!(shape.iommu.is_none(), "`virt` has no VT-d");
-            match options.profile {
+            let machine = match options.profile {
                 Profile::VirtEl2 | Profile::VirtEl2NoVhe => {
                     format!("{},gic-version=3,virtualization=on", arch.machine())
                 }
                 _ => format!("{},gic-version=3", arch.machine()),
+            };
+            match shape.smmu {
+                Smmu::Absent => machine,
+                Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
             }
         }
     };
@@ -2183,6 +2210,9 @@ fn qemu_command(
     }
     if shape.rng {
         qemu.arg("-device").arg("virtio-rng-pci");
+    }
+    if shape.smmu == Smmu::WithTestdev {
+        qemu.arg("-device").arg("iommu-testdev");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the
