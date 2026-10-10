@@ -38,7 +38,7 @@ impl TlsBlock {
     /// the layout.
     pub fn build(modules: &[TlsModule], tls: Static) -> Option<TlsBlock> {
         if modules.is_empty() {
-            let alone = Static::new(VARIANT, 0, tls.max_align(), tls.max_align())?;
+            let alone = Static::new(VARIANT, 0, tls.align())?;
             return build_combined(&[TlsModule { template: None, memsz: 0, base_offset: 0, module_id: 1, is_static: true }], alone);
         }
         build_combined(modules, tls)
@@ -170,7 +170,7 @@ pub fn build_tls_layout(
     exe_tls_template: Option<&OwnedAlloc>,
 ) -> Option<(alloc::vec::Vec<TlsModule>, Static)> {
     let Some(tls) = layout.tls().and_then(TlsSegment::occupied) else {
-        return Some((alloc::vec::Vec::new(), Static::new(VARIANT, 0, 1, 1)?));
+        return Some((alloc::vec::Vec::new(), Static::new(VARIANT, 0, 1)?));
     };
     let (memsz, align) = (tls.memsz() as usize, tls.align() as usize);
     // Variant II's executable ends at the thread pointer at its extent, not its `memsz`:
@@ -179,8 +179,7 @@ pub fn build_tls_layout(
         Variant::II => toyos_elf::tls::exe_extent(memsz, align)?,
         Variant::I => memsz,
     };
-    let (base_offset, end) = toyos_elf::tls::place_module(0, placed, align)?;
     let template = exe_tls_template.map(|buf| buf.slice(tls.template().len() as usize));
-    let module = TlsModule { template, memsz, base_offset, module_id: 1, is_static: true };
-    Some((alloc::vec![module], Static::new(VARIANT, end, align.max(1), align)?))
+    let module = TlsModule { template, memsz, base_offset: 0, module_id: 1, is_static: true };
+    Some((alloc::vec![module], Static::new(VARIANT, placed, align)?))
 }

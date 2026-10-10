@@ -361,8 +361,7 @@ fn load(case: &Case, placement: Placement, reached: &mut Reached) -> Result<(), 
                 Variant::II => tls::exe_extent(memsz, align).ok_or(())?,
                 Variant::I => memsz,
             };
-            let (base, total) = tls::place_module(0, placed, align).ok_or(())?;
-            (Static::new(variant, total, align, align).ok_or(())?, base, t.memsz())
+            (Static::new(variant, placed, align).ok_or(())?, 0, t.memsz())
         }
         None => (Static::empty(variant), 0, 0),
     };

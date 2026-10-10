@@ -50,7 +50,7 @@ fn the_dtv_is_never_overwritten_by_tls_data() {
     let aligns = [0usize, 1, 2, 8, 16, 64, 4096, 65536, GRANULE];
     for &memsz in &sizes {
         for &align in &aligns {
-            let plan = Static::new(Variant::II, memsz, align, align)
+            let plan = Static::new(Variant::II, memsz, align)
                 .and_then(|s| s.plan(TCB, DTV, GRANULE))
                 .unwrap_or_else(|| panic!("no plan for memsz {memsz} align {align}"));
             let effective = if align > 1 { align } else { 8 };
@@ -73,7 +73,7 @@ fn the_dtv_is_never_overwritten_by_tls_data() {
 #[test]
 fn a_size_no_allocation_can_hold_has_no_plan() {
     for variant in [Variant::I, Variant::II] {
-        let plan = |memsz, align| Static::new(variant, memsz, align, align).unwrap().plan(TCB, DTV, GRANULE);
+        let plan = |memsz, align| Static::new(variant, memsz, align).unwrap().plan(TCB, DTV, GRANULE);
         assert_eq!(plan(usize::MAX, 8), None, "{variant:?}");
         assert_eq!(plan(usize::MAX - TCB, 8), None, "{variant:?}");
         assert_eq!(plan(usize::MAX - GRANULE, GRANULE), None, "{variant:?}");
@@ -86,35 +86,8 @@ fn a_size_no_allocation_can_hold_has_no_plan() {
 fn an_alignment_that_is_not_a_power_of_two_has_no_plan() {
     for align in [3usize, 5, 6, 100, usize::MAX] {
         for variant in [Variant::I, Variant::II] {
-            assert_eq!(Static::new(variant, 64, align, 8), None, "align {align}");
-            assert_eq!(Static::new(variant, 64, 8, align), None, "first align {align}");
+            assert_eq!(Static::new(variant, 64, align), None, "align {align}");
         }
-    }
-}
-
-#[test]
-fn modules_are_placed_in_order_with_the_first_at_zero() {
-    // The first module lands at 0 whatever its align; a later one rounds up to
-    // its own align, floored at 16.
-    let (base, cursor) = tls::place_module(0, 0x48, 8).unwrap();
-    assert_eq!((base, cursor), (0, 0x48));
-    let (base, cursor) = tls::place_module(cursor, 0x10, 16).unwrap();
-    assert_eq!((base, cursor), (0x50, 0x60));
-    let (base, cursor) = tls::place_module(cursor, 0, 8).unwrap();
-    assert_eq!((base, cursor), (0x60, 0x60));
-    assert_eq!(tls::place_module(0x60, usize::MAX, 16), None);
-}
-
-/// psABI variant II oracle (`std_tls`): a 160-byte lib ahead of a 64-aligned exe
-/// places it at `align_up(160, 64) == 192`; the old constant 16 gave 160.
-#[test]
-fn a_module_lands_on_its_own_declared_alignment() {
-    assert_eq!(tls::place_module(160, 152, 64), Some((192, 344)));
-    assert_eq!(tls::place_module(160, 152, 16), Some((160, 312)));
-    for &align in &[0usize, 1, 2, 8, 16, 32, 64, 4096, 65536] {
-        let (base, _) = tls::place_module(0xA5, 8, align).unwrap();
-        assert_eq!(base % align.max(16), 0, "align {align}: base {base}");
-        assert!(base >= 0xA5, "align {align}: base {base} overlaps the cursor");
     }
 }
 
@@ -122,8 +95,8 @@ fn a_module_lands_on_its_own_declared_alignment() {
 #[test]
 fn tpoff_carries_the_addend() {
     let total = 0x200usize;
-    let two = Static::new(Variant::II, total, 64, 64).unwrap();
-    let one = Static::new(Variant::I, total, 64, 64).unwrap();
+    let two = Static::new(Variant::II, total, 64).unwrap();
+    let one = Static::new(Variant::I, total, 64).unwrap();
     for &module_addr in &[0u64, 8, 0x40, 0x1F0] {
         assert_eq!(two.tpoff(0, datum(module_addr)), Some(module_addr as i64 - total as i64));
         assert_eq!(one.tpoff(0, datum(module_addr)), Some(module_addr as i64 + 64));
@@ -145,7 +118,7 @@ fn tpoff_carries_the_addend() {
 /// overflow panic; each is now no offset at all, or no thread-pointer offset.
 #[test]
 fn a_tpoff_no_segment_or_word_holds_is_refused() {
-    let s = Static::new(Variant::II, 16, 8, 8).unwrap();
+    let s = Static::new(Variant::II, 16, 8).unwrap();
     assert_eq!(tls_offset(0, i64::MIN, 16), None);
     assert_eq!(tls_offset(16, i64::MAX, 16), None);
     // A segment as large as a file can declare: the offset exists, the
@@ -153,7 +126,7 @@ fn a_tpoff_no_segment_or_word_holds_is_refused() {
     let huge = tls_offset(16, i64::MAX, u64::MAX).unwrap();
     assert_eq!(s.tpoff(0, huge), None);
     assert_eq!(s.tpoff(usize::MAX, datum(1)), None);
-    let wide = Static::new(Variant::II, usize::MAX, 8, 8).unwrap();
+    let wide = Static::new(Variant::II, usize::MAX, 8).unwrap();
     assert_eq!(wide.tpoff(0, datum(0)), None);
     // The inclusive end is a datum: one past the segment's last byte.
     assert_eq!(tls_offset(8, 8, 16).map(TlsOffset::get), Some(16));
@@ -162,28 +135,25 @@ fn a_tpoff_no_segment_or_word_holds_is_refused() {
 
 /// Variant I, as lld resolves an AArch64 executable's own local-exec access
 /// at link time: `TPOFF = align_up(16, p_align) + offset in its PT_TLS` —
-/// lld's `getTlsTpOffset`, and the AArch64 ELF ABI's 16-byte TCB. The
-/// executable is the module at offset 0, so its data has to start exactly
-/// that far above the thread pointer, whatever a later module asks for.
+/// lld's `getTlsTpOffset`, and the AArch64 ELF ABI's 16-byte TCB: the
+/// executable's data has to start exactly that far above the thread pointer.
 #[test]
-fn variant_i_puts_the_first_module_where_its_linker_put_it() {
+fn variant_i_puts_the_module_where_its_linker_put_it() {
     let sizes = [0usize, 1, 8, 0x48, 4096, DTV + 1, GRANULE - 1, GRANULE + 1];
     let aligns = [0usize, 1, 2, 8, 16, 64, 4096, GRANULE];
     for &memsz in &sizes {
-        for &first in &aligns {
-            for &max in aligns.iter().filter(|&&a| a.max(8) >= first.max(8)) {
-                let s = Static::new(Variant::I, memsz, max, first).unwrap();
-                let plan = s.plan(TCB, DTV, GRANULE).unwrap();
-                let gap = 16usize.max(first);
-                let at = format!("memsz {memsz} first {first} max {max}: {plan:?}");
-                assert_eq!(plan.tls_start - plan.tp_offset, gap, "{at}");
-                assert_eq!(s.tpoff(0, datum(0)), Some(gap as i64), "{at}");
-                assert!(plan.tp_offset >= DTV, "{at}: the TCB overlaps the DTV");
-                assert_eq!(plan.tp_offset % 16, 0, "{at}");
-                assert_eq!(plan.tls_start % max.max(16), 0, "{at}");
-                assert!(plan.tls_start + memsz <= plan.alloc_size, "{at}");
-                assert_eq!(plan.alloc_size % GRANULE, 0, "{at}");
-            }
+        for &align in &aligns {
+            let s = Static::new(Variant::I, memsz, align).unwrap();
+            let plan = s.plan(TCB, DTV, GRANULE).unwrap();
+            let gap = 16usize.max(align);
+            let at = format!("memsz {memsz} align {align}: {plan:?}");
+            assert_eq!(plan.tls_start - plan.tp_offset, gap, "{at}");
+            assert_eq!(s.tpoff(0, datum(0)), Some(gap as i64), "{at}");
+            assert!(plan.tp_offset >= DTV, "{at}: the TCB overlaps the DTV");
+            assert_eq!(plan.tp_offset % 16, 0, "{at}");
+            assert_eq!(plan.tls_start % align.max(16), 0, "{at}");
+            assert!(plan.tls_start + memsz <= plan.alloc_size, "{at}");
+            assert_eq!(plan.alloc_size % GRANULE, 0, "{at}");
         }
     }
 }
@@ -193,7 +163,7 @@ fn variant_i_puts_the_first_module_where_its_linker_put_it() {
 /// `.tdata`, `#0x80` for the one at 0x40.
 #[test]
 fn variant_i_agrees_with_what_lld_linked() {
-    let s = Static::new(Variant::I, 0xb0, 64, 64).unwrap();
+    let s = Static::new(Variant::I, 0xb0, 64).unwrap();
     assert_eq!(s.tpoff(0, datum(0)), Some(0x40));
     assert_eq!(s.tpoff(0x40, datum(0)), Some(0x80));
 }
@@ -217,13 +187,8 @@ fn the_executables_extent_is_its_size_rounded_to_its_alignment() {
     assert_eq!(tls::exe_extent(0x71, 0), Some(0x71));
     assert_eq!(tls::exe_extent(usize::MAX, 0x40), None);
 
-    // Placed after a library, the extent is what ends at the combined size, so
-    // `tp - base` is the offset the linker subtracted.
-    let (lib_base, cursor) = tls::place_module(0, 0x78, 8).unwrap();
-    assert_eq!(lib_base, 0);
-    let extent = tls::exe_extent(0xa8, 0x40).unwrap();
-    let (exe_base, total) = tls::place_module(cursor, extent, 0x40).unwrap();
-    let s = Static::new(Variant::II, total, 0x40, 8).unwrap();
-    assert_eq!(s.tpoff(exe_base, datum(0)), Some(-0xc0));
-    assert_eq!(exe_base % 0x40, 0);
+    // The extent is what ends at the thread pointer, so `tp - base` is the
+    // offset the linker subtracted.
+    let s = Static::new(Variant::II, tls::exe_extent(0xa8, 0x40).unwrap(), 0x40).unwrap();
+    assert_eq!(s.tpoff(0, datum(0)), Some(-0xc0));
 }
