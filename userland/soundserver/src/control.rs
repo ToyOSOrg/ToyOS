@@ -312,6 +312,9 @@ pub(crate) fn control_thread(
                             (master_percent as i64 + i64::from(req.step)).clamp(0, 100) as u32;
                         if req.toggle_mute != 0 {
                             master_muted = !master_muted;
+                        } else if req.step != 0 {
+                            // Turning the level is asking to hear it.
+                            master_muted = false;
                         }
                         master_changed = true;
                         say!("soundserver: master volume step {} mute-toggle {} -> {}%{}",

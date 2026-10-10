@@ -22,6 +22,12 @@ use toyos_mixer::{
     Gain, GainRamp, MixStats, Xorshift32,
 };
 
+use crate::backend::{Backend, Pipeline};
+use crate::client::{mix_client, ClientStream, Departure};
+use crate::command::{CommandRing, MixCommand};
+use crate::inspect::{Published, State, Totals};
+use crate::NULL_SINK_BUFFERS;
+
 /// The machine's output level, applied to the whole bus after every client is mixed.
 fn apply_master(bus: &mut [f32], channels: usize, master: &mut GainRamp) {
     for frame in bus.chunks_exact_mut(channels) {
@@ -31,12 +37,6 @@ fn apply_master(bus: &mut [f32], channels: usize, master: &mut GainRamp) {
         }
     }
 }
-
-use crate::backend::{Backend, Pipeline};
-use crate::client::{mix_client, ClientStream, Departure};
-use crate::command::{CommandRing, MixCommand};
-use crate::inspect::{Published, State, Totals};
-use crate::NULL_SINK_BUFFERS;
 
 const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
 /// Idle-wake lines said per idle window — the wake source a tripwire line

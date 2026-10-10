@@ -43,7 +43,7 @@ crate::ipc_payload! {
     }
 
     /// `step` percentage points added to the level, clamped to 0..=100;
-    /// `toggle_mute` nonzero flips mute.
+    /// `toggle_mute` nonzero flips mute, and otherwise a nonzero `step` unmutes.
     pub struct MasterAdjust {
         pub step: i32,
         pub toggle_mute: u32,
