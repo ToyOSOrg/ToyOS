@@ -835,7 +835,10 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
-    let table_bar = msix_bar(&pci);
+    // YOGA WIFI HACK (measurement image only, never lands): the AX200's MSI-X
+    // table is in BAR 0, its only BAR, so it keeps no BAR back and is armed
+    // with MSI, MSI-X left off.
+    let table_bar = if yoga_wifi { None } else { msix_bar(&pci) };
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
@@ -847,7 +850,17 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
         Some(remapping) => crate::iommu::claim_msi(remapping, slot, &pci, VECTORS[slot]),
         None => crate::iommu::direct_msi_hack(&pci, VECTORS[slot]).ok_or(Refusal::NoInterrupt)?,
     };
-    let armed = match arm_claimed_msix(&message) {
+    if yoga_wifi {
+        pci.disable_msix();
+        if !arm_claimed_msi(&message) {
+            return Err(Refusal::NoInterrupt);
+        }
+        log!("pcidev: YOGA WIFI HACK: 8086:2723 armed with MSI, BAR 0 handed over whole");
+    }
+    let armed = if yoga_wifi { Ok(Armed::Msi(message)) } else { Err(message) };
+    let armed = match armed {
+        Ok(armed) => armed,
+        Err(message) => match arm_claimed_msix(&message) {
         Ok(entry) => Armed::Msix(entry, message),
         Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
         Err(NoEntry::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
@@ -855,6 +868,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             Armed::Msi(message)
         }
         Err(NoEntry::NoTable(NoCapability::Absent)) => return Err(Refusal::NoInterrupt),
+        },
     };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
