@@ -268,6 +268,21 @@ mediated access, leaves open:
   controller not at all; Linux runs it after. Owner: this stage. **Exit**:
   the slice that runs the `_STA` and `_INI` walk runs it before `_REG`.
 
+- **A take of the Global Lock that the AML sets no bound on ends the server
+  where the firmware holds the lock past 1 s** (`RELEASE`,
+  `userland/acpiserver/src/host.rs`). The bound is this server's guess, not
+  a measurement. The firmware is meant to hold the lock for the run of one
+  SMI handler, and no hold has been seen. The T14's battery read took the
+  lock 3 times, and the firmware held it for none of them. Linux's
+  `ff_gbl_lock` counter there read 0 at 2 minutes of uptime, and a reading
+  after a longer session is still owed. A Lock field and an `Acquire(\_GL,
+  0xFFFF)` take with no bound. An Acquire with a TimeoutValue waits that
+  long, and the time is charged to the evaluation's 10 s. Owner: this
+  stage. **Exit**: a hold measured on the T14, either by a contended take
+  in the server's own count or by `ff_gbl_lock` after a long Linux session.
+  That measurement sets the bound, or replaces it with no bound if the
+  firmware never holds the lock.
+
 - **A press during the load waits for it, and a power-off asked during it is
   refused.** The server arms the power button
   and then loads the tables before it serves an SCI, so a press in that time
