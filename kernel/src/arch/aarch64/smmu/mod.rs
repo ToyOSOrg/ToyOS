@@ -30,7 +30,7 @@ mod selftest;
 
 use alloc::vec::Vec;
 
-use toyos_acpi::{IortRefused, Node, Route, TableError};
+use toyos_acpi::{IortRefused, ItsDevice, Node, Route, TableError};
 use toyos_phys::Phys;
 use toyos_smmu::config::Ste;
 use toyos_smmu::queue::{Command, Commands, Signal};
@@ -119,9 +119,10 @@ struct Live {
     prod: u32,
     streams: Mmio,
     memory: Memory,
-    /// Each enumerated function the IORT routes through this unit, and its
-    /// StreamID.
-    routes: Vec<(StreamId, u32)>,
+    /// Each enumerated function the IORT routes through this unit, its
+    /// StreamID, and the DeviceID the unit's own node maps that stream on to
+    /// at an ITS.
+    routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
     domains: Vec<domain::Domain>,
     /// What no domain's addresses may reach, as `(start, end)`.
     reserved: Vec<(u64, u64)>,
@@ -148,7 +149,7 @@ impl Live {
 
     /// The StreamID the IORT gives `function`'s requests through this unit.
     fn stream(&self, function: StreamId) -> u32 {
-        let route = self.routes.iter().find(|(rid, _)| *rid == function);
+        let route = self.routes.iter().find(|(rid, ..)| *rid == function);
         route.unwrap_or_else(|| panic!("SMMU: {function} is no function the IORT routes through this unit")).1
     }
 
@@ -264,7 +265,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::R
             {
                 log!("smmu-selftest: {function}, StreamID {stream:#x}, is given no route, as a function never enumerated is not");
             }
-            Ok(Route::Translated { smmu: by, stream, .. }) if by.base == smmu.base => routes.push((function, stream)),
+            Ok(Route::Translated { smmu: by, stream, its }) if by.base == smmu.base => routes.push((function, stream, its)),
             Ok(route) => log!("IOMMU: {function} is not routed through the SMMUv3: {route:?}"),
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
@@ -278,6 +279,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::R
     if crate::actuator::smmu_selftest() {
         selftest::run(devices);
     }
+}
+
+/// The DeviceID at an ITS that `function`'s messages reach it by, read off
+/// the routes [`domain::attach`] puts a stream on a domain by: `None` for a
+/// function this unit does not translate, whose stream is on no domain, and
+/// for one whose stream the IORT maps on to no ITS.
+pub fn its_device(function: StreamId) -> Option<ItsDevice> {
+    UNIT.lock().as_ref()?.routes.iter().find(|(rid, ..)| *rid == function)?.2
 }
 
 /// `GBPA` aborting, the unit disabled and none of its interrupts able to
@@ -318,7 +327,7 @@ fn program(
     base: u64,
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
-    routes: Vec<(StreamId, u32)>,
+    routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
     reserved: Vec<(u64, u64)>,
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
@@ -342,7 +351,7 @@ fn program(
         refused(format_args!("the IORT gives its event queue no wired interrupt"));
         return None;
     };
-    let highest = routes.iter().map(|(_, stream)| *stream).max().unwrap_or(0);
+    let highest = routes.iter().map(|(_, stream, _)| *stream).max().unwrap_or(0);
     let log2 = u32::BITS - highest.leading_zeros();
     if log2 > STREAMS_LOG2_MAX || log2 > u32::from(unit.stream_bits) {
         refused(format_args!("StreamID {highest:#x} needs a table of 2^{log2} entries"));
@@ -358,7 +367,7 @@ fn program(
     let streams = window(table, 64 << log2);
     // Every other entry stays zero, invalid: a stream no function is routed
     // from is recorded, as one past the table is.
-    for (_, stream) in &routes {
+    for (_, stream, _) in &routes {
         for (i, word) in Ste::ABORT.words().iter().enumerate() {
             streams.write_u64(u64::from(*stream) * 64 + 8 * i as u64, *word);
         }
@@ -400,7 +409,7 @@ fn program(
     regs.write64(reg::EVENTQ_BASE, events_base);
     regs.write(reg::EVENTQ_PROD, 0);
     regs.write(reg::EVENTQ_CONS, 0);
-    fault::arm(regs, window(events_at, 32 << events_log2), events, &live.routes);
+    fault::arm(regs, window(events_at, 32 << events_log2), events, live.routes.iter().map(|&(function, stream, _)| (function, stream)));
     regs.control(reg::CR0, reg::CR0_CMDQEN | reg::CR0_EVENTQEN, "its event queue enabled");
     regs.control(reg::IRQ_CTRL, reg::IRQ_EVENTQ, "its event interrupt enabled");
     regs.control(reg::CR0, reg::CR0_CMDQEN | reg::CR0_EVENTQEN | reg::CR0_SMMUEN, "SMMUEN");

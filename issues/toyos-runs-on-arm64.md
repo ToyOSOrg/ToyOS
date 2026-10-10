@@ -375,9 +375,16 @@ Each stage names its exit; "measured" means a number from a run.
    (`virt_claim_lpi`, red without it on a `DMA FAULT` at `GITS_TRANSLATER`).
    `irq()` holds the preempt count across every device arm, as x86-64's
    `device_irq_entry` does, and `pcidev::isr` asserts it.
-   Not yet tested: that a release's `DISCARD` and `MAPD` with `V` clear
-   leave the function's DeviceID translating nothing, which no function
-   QEMU offers can show, since a released function's MSI is disabled.
+   A released function's stream stays on its slot's domain, which maps
+   the doorbell; its bus mastering off and its message masked are what
+   stop its writes, and a write it makes regardless reaches the ITS, where
+   the release's `DISCARD` and `MAPD` with `V` clear leave its DeviceID
+   translating nothing. That last is read, not tested: no function QEMU
+   offers writes once mastering is off but `iommu-testdev`, which no claim
+   can tell to write. **Owed**: a `smmu-selftest` arm that puts an
+   `iommu-testdev` on a domain, maps its DeviceID to a slot and unmaps it as
+   a release does, has it write event 0 to `GITS_TRANSLATER`, and is red
+   when the slot's LPI is raised.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. Every program of `system.toml` builds

@@ -205,7 +205,7 @@ pub fn init(rsdp_addr: u64) -> Gic {
     let gic = Gic { cpus, ranges };
     let frame = gic.redistributor(cpu::hardware_id());
     init_cpu(frame);
-    its::init(&translators, frame, rsdp_addr);
+    its::init(&translators, frame);
     gic
 }
 

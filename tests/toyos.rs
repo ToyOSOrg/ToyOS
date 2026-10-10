@@ -114,8 +114,11 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
-    // It claims QEMU's `edu`, which only `virt_claim_lpi`'s machine has.
+    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
+    // machine has.
     "claim_lpi",
+    "claim_unrouted",
+    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
@@ -2209,18 +2212,29 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `tests/toyos-rust-tests`' binary that `tests/virtclaimcase` runs as its job
-/// `test_rs_claim_lpi`.
+/// `tests/toyos-rust-tests`' binaries that `tests/virtclaimcase` runs as its
+/// jobs, each `test_rs_` and its name.
 const VIRT_CLAIM_LPI: &str = "claim_lpi";
+const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
+const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
+
+/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
+/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
+/// the console only if the kernel read through the BAR for a crash report.
+const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
 
 /// A claimed function's message, translated by the ITS into its claim slot's
-/// LPI: `tests/virtclaimcase`'s one job claims QEMU's `edu` and reads every
-/// message it asks it for as one interrupt of its claim
-/// (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`). Judged beside it on the
-/// kernel's lines: the ITS armed from the MADT; the function handed over on
-/// a slot, its DeviceID the requester ID QEMU's IORT maps it to, its slot's
-/// LPI raised; and at the claim's end the DeviceID unmapped again, and no
-/// access of the function's refused at the SMMUv3.
+/// LPI, and the claims the kernel refuses beside it, on `tests/virtclaimcase`.
+/// Its first job claims QEMU's `edu` and reads every message it asks it for as
+/// one interrupt of its claim (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`),
+/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
+/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
+/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
+/// unmapped again. The second is refused the `e1000e` the IORT routes past
+/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
+/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
+/// crash report reads through it. And no access of a function's is refused
+/// at the SMMUv3.
 fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
     const JOB: &str = "test_rs_claim_lpi";
     const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
@@ -2233,11 +2247,15 @@ fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
         profile,
         smp: 1,
         ready_marker: "control registers: SCTLR_EL1=",
-        extra_root_files: vec![suite_bin(profile.arch(), VIRT_CLAIM_LPI)],
+        extra_root_files: vec![
+            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
+            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
+            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
+        ],
         ..Default::default()
     };
     let argv = qemu::profile_argv(&options);
-    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu"] {
+    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
         if !argv.iter().any(|a| a.contains(want)) {
             return Err(format!("the machine has no {want}: {argv:?}"));
         }
@@ -2290,10 +2308,39 @@ serial:
         };
         eprintln!("  [virt] {found}");
     }
-    if let Some(fault) = line("DMA FAULT") {
-        return Err(format!("the unit refused an access: {fault}
-serial:
-{serial}"));
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_unrouted",
+        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
+    )?;
+    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
+    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
+                            DeviceID at this kernel's ITS behind the SMMUv3";
+    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
+        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {refused}");
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_bar_fault",
+        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
+    )?;
+    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
+    if faults.len() != 2 {
+        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
+    }
+    let console = serial.to_lowercase();
+    for mark in BAR_MARKS {
+        if console.contains(&format!("{mark:x}")) {
+            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
+        }
+    }
+    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
+        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
     }
     Ok(())
 }

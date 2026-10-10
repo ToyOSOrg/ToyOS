@@ -19,19 +19,22 @@
 //! redistributor's `EnableLPIs`, so no `INV` is owed (§5.1.1).
 //!
 //! An ITS this kernel cannot drive is left disabled, and every claim is
-//! refused on its account ([`is_armed`]); a command the ITS refuses, or does
-//! not consume within [`TIMEOUT_PER_SECOND`]'s bound, is a kernel defect, and
-//! panics.
+//! refused on its account ([`is_armed`]); a refusal found once the
+//! redistributor's `EnableLPIs` is set, a command the ITS refuses, or one it
+//! does not consume within [`TIMEOUT_PER_SECOND`]'s bound, is a kernel
+//! defect, and panics.
+//!
+//! **A claim's DeviceID is the one the SMMUv3's own routes carry**
+//! (`super::super::smmu::its_device`): a function the unit would not put on a
+//! domain is refused before its claim reaches the unit.
 
 use alloc::vec::Vec;
 
-use toyos_acpi::Route;
 use toyos_its::command::Command;
 use toyos_its::lpi::{self, Layout, Lpi};
 use toyos_its::{Collection, CommandQueue, EventBits, Its, Table, Target};
 use toyos_phys::Phys;
 
-use crate::drivers::acpi::direct_phys;
 use crate::iommu::StreamId;
 use crate::log;
 use crate::mm::pmm::{self, PhysPage};
@@ -104,8 +107,6 @@ struct Live {
     held: [Option<u32>; MAX_FUNCTIONS],
     /// Each slot's LPI.
     lpis: [Lpi; MAX_FUNCTIONS],
-    /// Where the IORT is read from at each claim.
-    rsdp: u64,
     /// The pages every table is in: never given back, since the ITS and the
     /// redistributor may read any of them for the machine's life.
     _pages: Vec<PhysPage>,
@@ -184,7 +185,7 @@ pub(in crate::arch::aarch64) fn slot_of(intid: u32) -> Option<usize> {
 /// Bring the one ITS the MADT names up, on the boot CPU's redistributor at
 /// `frame`, once that CPU's GIC is, from the `(id, base)` of every ITS the
 /// MADT names: every refusal is logged and leaves no claim a message.
-pub(super) fn init(named: &[(u32, u64)], frame: u64, rsdp: u64) {
+pub(super) fn init(named: &[(u32, u64)], frame: u64) {
     let (id, base) = match *named {
         [] => {
             log!("ITS: the MADT names none, so no claimed function is given an interrupt");
@@ -196,7 +197,7 @@ pub(super) fn init(named: &[(u32, u64)], frame: u64, rsdp: u64) {
             return;
         }
     };
-    match bring_up(id, base, frame, rsdp) {
+    match bring_up(id, base, frame) {
         Ok(live) => {
             log!(
                 "ITS: {id} at {base:#x} armed: doorbell {:#x}, collection 0 on the boot CPU's redistributor at {frame:#x}, \
@@ -210,7 +211,7 @@ pub(super) fn init(named: &[(u32, u64)], frame: u64, rsdp: u64) {
     }
 }
 
-fn bring_up(id: u32, base: u64, frame: u64, rsdp: u64) -> Result<Live, alloc::string::String> {
+fn bring_up(id: u32, base: u64, frame: u64) -> Result<Live, alloc::string::String> {
     use alloc::format;
     let doorbell = base + FRAME + toyos_its::GITS_TRANSLATER;
     let doorbell = u32::try_from(doorbell)
@@ -287,14 +288,25 @@ fn bring_up(id: u32, base: u64, frame: u64, rsdp: u64) -> Result<Live, alloc::st
         .collection(0)
         .ok_or_else(|| format!("it holds no collection, and no GITS_BASER backs a table of them (GITS_TYPER {typer:#x})"))?;
 
+    // Each base register is read back whole: one that reduced the
+    // shareability or cacheability asked for would read a table this kernel
+    // writes through the cacheable direct map with no maintenance.
     let queue_phys = Phys::<16>::new(queue_at).expect("a 64 KiB-aligned page below 2^48");
-    regs.write_u64(toyos_its::GITS_CBASER as u64, commands.cbaser(queue_phys));
+    let cbaser = commands.cbaser(queue_phys);
+    regs.write_u64(toyos_its::GITS_CBASER as u64, cbaser);
+    let read = regs.read_u64(toyos_its::GITS_CBASER as u64);
+    if read != cbaser {
+        return Err(format!("GITS_CBASER reads {read:#x} after {cbaser:#x} was written"));
+    }
     regs.write_u64(toyos_its::GITS_CWRITER as u64, 0);
 
     let propbaser = layout.propbaser(Phys::new(configuration).expect("a 4 KiB-aligned page below 2^48"));
     rd.write_u64(lpi::GICR_PROPBASER as u64, propbaser);
     let read = rd.read_u64(lpi::GICR_PROPBASER as u64);
-    let space = layout.space(read).ok_or_else(|| format!("GICR_PROPBASER reads {read:#x} after {propbaser:#x} was written"))?;
+    let space = layout
+        .space(read)
+        .filter(|_| read == propbaser)
+        .ok_or_else(|| format!("GICR_PROPBASER reads {read:#x} after {propbaser:#x} was written"))?;
     // Every slot's LPI enabled, before the redistributor reads the table.
     let lpis: [Lpi; MAX_FUNCTIONS] = core::array::from_fn(|slot| {
         space.lpi(lpi::FIRST + slot as u32).expect("a claim slot's LPI is among the 8192 the layout holds")
@@ -303,16 +315,27 @@ fn bring_up(id: u32, base: u64, frame: u64, rsdp: u64) -> Result<Live, alloc::st
     for lpi in lpis {
         config.write_u8(lpi.configuration_index() as u64, lpi::configuration(PRIORITY, true));
     }
-    rd.write_u64(lpi::GICR_PENDBASER as u64, lpi::pendbaser(Phys::new(pending).expect("a 64 KiB-aligned page below 2^48")));
-    rd.write_u32(GICR_CTLR, rd.read_u32(GICR_CTLR) | lpi::CTLR_ENABLE_LPIS);
-    if rd.read_u32(GICR_CTLR) & lpi::CTLR_ENABLE_LPIS == 0 {
-        return Err("the boot CPU's redistributor reads EnableLPIs clear after it was set".into());
+    let pendbaser = lpi::pendbaser(Phys::new(pending).expect("a 64 KiB-aligned page below 2^48"));
+    rd.write_u64(lpi::GICR_PENDBASER as u64, pendbaser);
+    let read = rd.read_u64(lpi::GICR_PENDBASER as u64);
+    if read & !lpi::PENDBASER_PTZ != pendbaser & !lpi::PENDBASER_PTZ {
+        return Err(format!("GICR_PENDBASER reads {read:#x} after {pendbaser:#x} was written"));
     }
 
+    // From `EnableLPIs` on, the redistributor may read and write both tables
+    // for the machine's life, and whether it can be cleared again is
+    // IMPLEMENTATION DEFINED (`GICR_CTLR.EnableLPIs`): no refusal past here
+    // can give their pages back, so each is a panic.
+    rd.write_u32(GICR_CTLR, rd.read_u32(GICR_CTLR) | lpi::CTLR_ENABLE_LPIS);
+    assert!(
+        rd.read_u32(GICR_CTLR) & lpi::CTLR_ENABLE_LPIS != 0,
+        "ITS: the boot CPU's redistributor reads EnableLPIs clear after it was set"
+    );
     regs.write_u32(toyos_its::GITS_CTLR as u64, toyos_its::CTLR_ENABLED);
-    if regs.read_u32(toyos_its::GITS_CTLR as u64) & toyos_its::CTLR_ENABLED == 0 {
-        return Err("GITS_CTLR reads Enabled clear after it was set".into());
-    }
+    assert!(
+        regs.read_u32(toyos_its::GITS_CTLR as u64) & toyos_its::CTLR_ENABLED != 0,
+        "ITS: GITS_CTLR reads Enabled clear after it was set"
+    );
 
     let target = its.target(lpi::processor_number(rd_typer), Phys::new(frame).expect("a redistributor frame is 64 KiB aligned"));
     let itt_bytes = its.itt_bytes(events).next_multiple_of(ITT_ALIGN);
@@ -330,7 +353,6 @@ fn bring_up(id: u32, base: u64, frame: u64, rsdp: u64) -> Result<Live, alloc::st
         itts,
         held: [None; MAX_FUNCTIONS],
         lpis,
-        rsdp,
         _pages: memory.pages,
     };
     live.issue(&[Command::MapCollection { collection, target }]);
@@ -358,7 +380,7 @@ pub struct Msi {
 pub enum Refused {
     /// It is a driver in this kernel's.
     KernelDriver,
-    /// The IORT gives it no DeviceID at this ITS behind the SMMUv3.
+    /// The SMMUv3 translates it to no DeviceID at this ITS.
     NoDeviceId,
     /// Its DeviceID is past the device table's.
     DeviceIdTooWide(u32),
@@ -378,7 +400,8 @@ impl core::fmt::Display for Refused {
             Self::NoDeviceId => write!(
                 f,
                 "the IORT gives it no DeviceID at this kernel's ITS behind the SMMUv3, so no \
-                 table of its own would translate its message"
+                 table of its own would translate its message and no domain of its own would \
+                 confine its writes"
             ),
             Self::DeviceIdTooWide(id) => write!(f, "its DeviceID {id:#x} is past the ITS's device table"),
             Self::DeviceIdHeld(id) => write!(
@@ -397,18 +420,13 @@ pub fn msi(_source: StreamId, _irq: crate::arch::DriverIrq) -> Result<Msi, Refus
     Err(Refused::KernelDriver)
 }
 
-/// The DeviceID the IORT gives `source` at the ITS behind the SMMUv3.
-fn device_of(live: &Live, source: StreamId) -> Result<u32, Refused> {
-    let iort = toyos_acpi::iort(direct_phys(), live.rsdp).map_err(|_| Refused::NoDeviceId)?;
-    let segment = u32::from(crate::pcidev::segment());
-    match iort.route(segment, source.requester()) {
-        Ok(Route::Translated { its: Some(device), .. }) if device.its == live.id => {
-            if device.device >> DEVICE_BITS == 0 {
-                Ok(device.device)
-            } else {
-                Err(Refused::DeviceIdTooWide(device.device))
-            }
-        }
+/// The DeviceID `routed` names at this ITS: what the SMMUv3's own routes
+/// map the function's stream on to, so a function the unit would not put on
+/// a domain is refused here, before its claim reaches `attach`.
+fn device_of(live: &Live, routed: Option<toyos_acpi::ItsDevice>) -> Result<u32, Refused> {
+    match routed {
+        Some(device) if device.its == live.id && device.device >> DEVICE_BITS == 0 => Ok(device.device),
+        Some(device) if device.its == live.id => Err(Refused::DeviceIdTooWide(device.device)),
         _ => Err(Refused::NoDeviceId),
     }
 }
@@ -416,10 +434,12 @@ fn device_of(live: &Live, source: StreamId) -> Result<u32, Refused> {
 /// Map claim slot `slot`'s translation table to `source`'s DeviceID, its one
 /// event to the slot's LPI, and answer the message that raises it.
 pub fn claim(slot: usize, source: StreamId) -> Result<Msi, Refused> {
+    // Before this lock, so it never nests with the unit's.
+    let routed = super::super::smmu::its_device(source);
     let mut held = ITS.lock();
     let live = held.as_mut().unwrap_or_else(|| panic!("ITS: claim slot {slot} mapped with no ITS armed"));
     assert!(live.held[slot].is_none(), "ITS: claim slot {slot} is still mapped");
-    let device = device_of(live, source)?;
+    let device = device_of(live, routed)?;
     if live.held.contains(&Some(device)) {
         return Err(Refused::DeviceIdHeld(device));
     }

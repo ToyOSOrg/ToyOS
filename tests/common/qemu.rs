@@ -737,7 +737,8 @@ pub enum Profile {
     /// function that writes where it is told to through the unit.
     VirtSmmu,
     /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
-    /// and QEMU's `edu`, a function that sends an MSI when told to.
+    /// QEMU's `edu`, a function that sends an MSI when told to, and an
+    /// `e1000e` the IORT routes past the SMMUv3.
     VirtIts,
 }
 
@@ -900,7 +901,9 @@ enum Smmu {
     WithTestdev,
     /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
     /// With it comes one `edu`, whose message is the only one a guest of
-    /// this suite can raise on demand.
+    /// this suite can raise on demand, and an `e1000e` behind a root port of
+    /// a `pxb-pcie` with `bypass_iommu=on`, which QEMU's IORT routes straight
+    /// to the ITS: a plain root port's buses it routes through the unit.
     WithIts,
 }
 
@@ -2287,6 +2290,10 @@ fn qemu_command(
     }
     if shape.smmu == Smmu::WithIts {
         qemu.arg("-device").arg("edu");
+        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
+        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
+        // No option ROM: firmware has no use for the NIC.
+        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the
