@@ -136,6 +136,8 @@ impl Role {
 /// One file a client holds open.
 struct Fid {
     node: Node,
+    /// The file's [`Volume::identity`] when it was opened, which its renames keep.
+    identity: u64,
     write: bool,
     append: bool,
 }
@@ -190,8 +192,11 @@ fn main() {
         dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
+    let mut number = [0u8; 8];
+    toyos_abi::syscall::random(&mut number).expect("fileserver: the kernel would not draw the volume's number");
     Server {
         volume,
+        number: u64::from_le_bytes(number),
         acceptor,
         clients: BTreeMap::new(),
         next_client: 0,
@@ -325,6 +330,9 @@ fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>,
 
 struct Server {
     volume: Box<dyn Volume>,
+    /// The volume's number on the wire ([`HELLO`]), drawn at this start: a
+    /// restart numbers its files afresh, so it is another volume.
+    number: u64,
     /// The role's port, which every grant is minted on.
     acceptor: Acceptor,
     clients: BTreeMap<u64, Client>,
@@ -352,8 +360,8 @@ enum Answer {
     Refuse(SyscallError, String),
 }
 
-fn stat_reply(meta: Meta) -> Reply {
-    Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, ..Reply::ok() }
+fn stat_reply(meta: Meta, identity: u64) -> Reply {
+    Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, node: identity, ..Reply::ok() }
 }
 
 fn window_of(w: &SharedMemory) -> Window {
@@ -595,7 +603,7 @@ impl Server {
                 Err(_) => return Answer::Drop("its window would not map"),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
-            return Answer::Reply(Reply { value: granted, ..Reply::ok() });
+            return Answer::Reply(Reply { value: granted, value2: self.number, ..Reply::ok() });
         }
         if self.clients[&id].window.is_none() {
             return Answer::Drop("it asked before it lent a window");
@@ -649,8 +657,10 @@ impl Server {
                     truncate: r.flags & O_TRUNCATE != 0,
                 };
                 let node = self.volume.open(&path, how)?;
-                let meta = match self.volume.node_meta(node) {
-                    Ok(meta) => meta,
+                let (meta, identity) = match self.volume.node_meta(node).and_then(|meta| {
+                    self.volume.identity(&path).map(|identity| (meta, identity))
+                }) {
+                    Ok(answer) => answer,
                     Err(e) => {
                         let _ = self.volume.close(node);
                         return Err(e);
@@ -665,8 +675,8 @@ impl Server {
                 let write = r.flags & (O_WRITE | O_APPEND) != 0;
                 let append = r.flags & O_APPEND != 0;
                 let client = self.clients.get_mut(&id).expect("pumped");
-                client.fids.insert(fid, Fid { node, write, append });
-                Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta) }))
+                client.fids.insert(fid, Fid { node, identity, write, append });
+                Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta, identity) }))
             }
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
@@ -707,9 +717,9 @@ impl Server {
                 Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
             }
             FSTAT => {
-                let node = self.fid(id, r.fid)?.node;
+                let (node, identity) = self.fid(id, r.fid).map(|f| (f.node, f.identity))?;
                 let meta = self.volume.node_meta(node)?;
-                Ok(Answer::Reply(stat_reply(meta)))
+                Ok(Answer::Reply(stat_reply(meta, identity)))
             }
             TRUNCATE => {
                 let f = self.fid(id, r.fid)?;
@@ -756,7 +766,10 @@ impl Server {
                 let rel = self.path(id, 0, r.len)?;
                 match self.resolve(id, &rel, op == STAT)? {
                     Resolved::Absolute(p) => Ok(self.link(id, &p)),
-                    Resolved::Path(p) => Ok(Answer::Reply(stat_reply(self.volume.lstat(&p)?))),
+                    Resolved::Path(p) => {
+                        let meta = self.volume.lstat(&p)?;
+                        Ok(Answer::Reply(stat_reply(meta, self.volume.identity(&p)?)))
+                    }
                 }
             }
             READDIR => {

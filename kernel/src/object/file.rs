@@ -9,6 +9,8 @@ use super::{KObjectVariant, ObjectCore};
 
 pub struct OpenFileState {
     pub file_id: FileId,
+    /// The mount it was opened on (`vfs::Vfs::volume`).
+    pub volume: u64,
     pub position: usize,
     pub mtime: u64,
 }

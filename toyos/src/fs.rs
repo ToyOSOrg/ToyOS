@@ -96,8 +96,14 @@ pub const KIND_FILE: u64 = 1;
 pub const KIND_DIR: u64 = 2;
 pub const KIND_SYMLINK: u64 = 3;
 
-/// [`HELLO`]'s answer: the capability's rights.
+/// [`HELLO`]'s answer: the capability's rights in `value`, and in `value2` the
+/// volume the server's files are on, drawn at its start.
 pub const RIGHT_WRITE: u64 = 1;
+
+/// Set by the client on every volume a server answers ([`Stat::volume`]): a
+/// kernel mount's is below it, so no server can name one, whatever it says
+/// (`toyos_abi::syscall::Stat::volume`).
+pub const SERVED_VOLUME: u64 = 1 << 63;
 
 ipc_payload! {
     /// Every request's words; what each means is its frame type's. Paths are
@@ -118,6 +124,8 @@ ipc_payload! {
         pub value: u64,
         pub value2: u64,
         pub mtime: u64,
+        /// A stat-bearing reply's file on the server's volume (`Stat::node`).
+        pub node: u64,
     }
 }
 
@@ -129,11 +137,11 @@ impl Request {
 
 impl Reply {
     pub const fn ok() -> Self {
-        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0 }
+        Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
     pub const fn refused(e: SyscallError) -> Self {
-        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0 }
+        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
     fn result(self) -> Result<Self, SyscallError> {
@@ -246,12 +254,15 @@ pub fn window_take(window: Window, offset: usize, out: &mut [u8]) {
     unsafe { core::ptr::copy_nonoverlapping(source.as_ptr(), out.as_mut_ptr(), out.len()) }
 }
 
-/// What a file or directory is.
+/// What a file or directory is, and which: `volume` and `node` mean what
+/// `toyos_abi::syscall::Stat`'s do, `volume` with [`SERVED_VOLUME`] set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stat {
     pub kind: u64,
     pub size: u64,
     pub mtime: u64,
+    pub volume: u64,
+    pub node: u64,
 }
 
 /// A write answered.
@@ -297,6 +308,8 @@ pub struct Dir {
     window: SharedMemory,
     generation: u64,
     writable: bool,
+    /// The current connection's volume, [`SERVED_VOLUME`] set.
+    volume: u64,
 }
 
 impl Dir {
@@ -310,7 +323,7 @@ impl Dir {
         buf[..name.len()].copy_from_slice(name.as_bytes());
         let window = SharedMemory::create(WINDOW_BYTES)?;
         let mut dir =
-            Self { names, name: buf, name_len: name.len(), conn: None, window, generation: 0, writable: false };
+            Self { names, name: buf, name_len: name.len(), conn: None, window, generation: 0, writable: false, volume: 0 };
         dir.reconnect()?;
         Ok(dir)
     }
@@ -345,6 +358,7 @@ impl Dir {
         let conn = self.names.open(name)?;
         let reply = hello(&conn, &self.window)?;
         self.writable = reply.value & RIGHT_WRITE != 0;
+        self.volume = reply.value2 | SERVED_VOLUME;
         self.conn = Some(conn);
         self.generation += 1;
         Ok(())
@@ -413,7 +427,7 @@ impl Dir {
 
     pub fn open(&mut self, path: &str, flags: u64) -> Result<Opened, Refused> {
         let reply = self.path_call(OPEN, Request { flags, ..Request::new() }, path, "")?;
-        Ok(Opened { fid: reply.value, stat: stat_of(&reply), generation: self.generation })
+        Ok(Opened { fid: reply.value, stat: stat_of(&reply, self.volume), generation: self.generation })
     }
 
     pub fn close(&mut self, fid: u64, generation: u64) {
@@ -439,7 +453,8 @@ impl Dir {
     }
 
     pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, SyscallError> {
-        self.fid_call(FSTAT, generation, &Request { fid, ..Request::new() }).map(|r| stat_of(&r))
+        let volume = self.volume;
+        self.fid_call(FSTAT, generation, &Request { fid, ..Request::new() }).map(|r| stat_of(&r, volume))
     }
 
     pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<(), SyscallError> {
@@ -467,7 +482,8 @@ impl Dir {
 
     pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, Refused> {
         let op = if follow { STAT } else { LSTAT };
-        self.path_call(op, Request::new(), path, "").map(|r| stat_of(&r))
+        let reply = self.path_call(op, Request::new(), path, "")?;
+        Ok(stat_of(&reply, self.volume))
     }
 
     /// The listing of `path`, [`for_each_entry`]'s encoding, into `out` when it
@@ -558,8 +574,8 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
     Some(need)
 }
 
-fn stat_of(reply: &Reply) -> Stat {
-    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime }
+fn stat_of(reply: &Reply, volume: u64) -> Stat {
+    Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime, volume, node: reply.node }
 }
 
 /// Lend `window` to the server at the other end of `conn` ([`HELLO`]), and

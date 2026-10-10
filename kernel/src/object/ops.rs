@@ -112,6 +112,10 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
         }
+        let volume = match vfs.volume(&target) {
+            Ok(volume) => volume,
+            Err(e) => return e.to_u64(),
+        };
 
         let built = if truncate && create {
             let mtime = crate::clock::mtime_now();
@@ -138,15 +142,16 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Err(e) => Err(e),
             }
         };
-        built
+        built.map(|(file_id, mtime, position)| (file_id, volume, mtime, position))
     };
 
-    let (file_id, mtime, position) = match opened {
+    let (file_id, volume, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
         file_id,
+        volume,
         position,
         mtime,
     }));
@@ -642,17 +647,22 @@ toyos_abi::user_safe! {
         pub file_type: u64,
         pub size: u64,
         pub mtime: u64,
+        pub volume: u64,
+        pub node: u64,
     }
 }
 
-/// What kind of thing this is, and how big.
+/// What kind of thing this is, how big, and which file: a file's node is its
+/// `FileId`, one per file for as long as it exists (`vfs::FileSystem::open_file`).
 pub fn fstat(object: &KObjectRef) -> Stat {
-    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0 };
+    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0, volume: 0, node: 0 };
     match object {
         KObjectRef::File(f) => f.with(|state| Stat {
             file_type: FileType::File as u64,
             size: file_cache::size(state.file_id),
             mtime: state.mtime,
+            volume: state.volume,
+            node: state.file_id,
         }),
         KObjectRef::PipeRead(r) => {
             plain(if r.is_tty() { FileType::Tty } else { FileType::Pipe })
@@ -667,6 +677,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             file_type: FileType::SharedMemory as u64,
             size: m.size(),
             mtime: 0,
+            volume: 0,
+            node: 0,
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)

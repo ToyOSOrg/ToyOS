@@ -25,7 +25,7 @@ use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
 use diskserver::disk::{Disk, BLOCK};
-use crate::volume::{parent, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
+use crate::volume::{parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -106,6 +106,9 @@ pub struct FatVolume<D: Disk> {
     /// slice, and a client's window is never one. Kept, so a read allocates
     /// nothing.
     scratch: Vec<u8>,
+    /// By where the entry lies (`Fat32::entry_offset`), which every spelling
+    /// of a name shares and a rename moves.
+    ids: Identities<u64>,
 }
 
 fn word(e: Error) -> SyscallError {
@@ -155,6 +158,7 @@ impl<D: Disk> FatVolume<D> {
             next: 1,
             clock,
             scratch: Vec::new(),
+            ids: Identities::new(),
         })
     }
 
@@ -198,6 +202,13 @@ impl<D: Disk> FatVolume<D> {
                 open.gone = true;
             }
         }
+    }
+
+    fn entry_offset(&mut self, path: &str) -> Result<u64, SyscallError> {
+        self.fs.entry_offset(path).map_err(|e| match e {
+            Error::NotADirectory => SyscallError::NotFound,
+            e => logged("entry_offset", path, e),
+        })
     }
 }
 
@@ -314,6 +325,11 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(Meta { kind: Kind::File, size, mtime: mtime * NANOS_PER_SEC })
     }
 
+    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+        let key = self.entry_offset(path)?;
+        Ok(self.ids.of(key))
+    }
+
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
         let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
         if open.gone {
@@ -356,17 +372,22 @@ impl<D: Disk> Volume for FatVolume<D> {
         if path.is_empty() {
             return Err(SyscallError::PermissionDenied);
         }
-        self.fs.remove_dir(path).map_err(|e| logged("rmdir", path, e))
+        let key = self.entry_offset(path)?;
+        self.fs.remove_dir(path).map_err(|e| logged("rmdir", path, e))?;
+        self.ids.forget(&key);
+        Ok(())
     }
 
     fn unlink(&mut self, path: &str) -> Result<(), SyscallError> {
         if self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.is_dir {
             return Err(SyscallError::InvalidArgument);
         }
+        let key = self.entry_offset(path)?;
         // Asked of the volume first: a delete the device refused leaves every
         // holder of the file its file.
         self.fs.remove(path).map_err(|e| logged("unlink", path, e))?;
         self.orphan(path);
+        self.ids.forget(&key);
         Ok(())
     }
 
@@ -381,6 +402,12 @@ impl<D: Disk> Volume for FatVolume<D> {
         if let Some(node) = self.by_path.get(from).copied() {
             self.level(node)?;
         }
+        let from_key = self.entry_offset(from)?;
+        let displaced = match self.entry_offset(to) {
+            Ok(key) => Some(key),
+            Err(SyscallError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
         let replaced = self.fs.replace_rename(from, to).map_err(|e| {
             if let Some(stranded) = &e.stranded {
                 println!("fileserver: {to} could not be put back and is under {stranded}");
@@ -392,6 +419,15 @@ impl<D: Disk> Volume for FatVolume<D> {
         if let Some(node) = self.by_path.remove(from) {
             self.open.get_mut(&node).expect("indexed").path = to.to_string();
             self.by_path.insert(to.to_string(), node);
+        }
+        if let Some(key) = displaced {
+            self.ids.forget(&key);
+        }
+        // An entry the device will not show again is a file whose number goes
+        // with it: renumbered, never another file's.
+        match self.entry_offset(to) {
+            Ok(to_key) => self.ids.moved(&from_key, to_key),
+            Err(_) => self.ids.forget(&from_key),
         }
         released
     }
@@ -583,6 +619,41 @@ mod tests {
 
         assert_eq!(v.lstat("a.txt"), Err(SyscallError::Io));
         assert_eq!(v.node_meta(a), Err(SyscallError::Io));
+    }
+
+    /// A file's number is one through every spelling of its name and across a
+    /// rename, another file's is another, and a name removed or renamed over
+    /// comes back as a new file.
+    #[test]
+    fn a_file_is_one_number_through_spellings_and_renames() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat();
+        for path in ["a.txt", "sub/b.txt", "c.txt"] {
+            let n = v.open(path, CREATE).unwrap();
+            v.close(n).unwrap();
+        }
+        let a = v.identity("a.txt").unwrap();
+        let b = v.identity("sub/b.txt").unwrap();
+        let c = v.identity("c.txt").unwrap();
+        let sub = v.identity("sub").unwrap();
+        let root = v.identity("").unwrap();
+        let all = [a, b, c, sub, root];
+        assert!(all.iter().all(|&n| n != 0 && all.iter().filter(|&&m| m == n).count() == 1), "{all:?}");
+        assert_eq!(v.identity("A.TXT"), Ok(a), "FAT names one entry by either case");
+        assert_eq!(v.identity("SUB/b.TXT"), Ok(b));
+        assert_eq!(v.identity("missing.txt"), Err(SyscallError::NotFound));
+
+        v.rename("a.txt", "moved.txt").unwrap();
+        assert_eq!(v.identity("moved.txt"), Ok(a), "a rename keeps the file's number");
+        v.rename("sub/b.txt", "c.txt").unwrap();
+        assert_eq!(v.identity("c.txt"), Ok(b), "a rename over another file takes its name, not its number");
+        assert_eq!(v.identity("sub"), Ok(sub), "a directory is one file whatever moves out of it");
+
+        v.unlink("moved.txt").unwrap();
+        let n = v.open("moved.txt", CREATE).unwrap();
+        v.close(n).unwrap();
+        let again = v.identity("moved.txt").unwrap();
+        assert!(!all.contains(&again), "a file made where one was removed is a new one: {again} of {all:?}");
     }
 
     /// A disk whose grant does not write: every write and flush is refused.

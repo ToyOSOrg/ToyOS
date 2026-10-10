@@ -405,6 +405,15 @@ impl Vfs {
         self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)
     }
 
+    /// The volume `target` is on, as `toyos_abi::syscall::Stat::volume` says:
+    /// its mount's index plus one, so 0 stays "no volume" and every kernel
+    /// mount is below a file server's bit 63.
+    pub fn volume(&self, target: &OpenTarget) -> Result<u64, SyscallError> {
+        let (mount, _) = self.resolve_path("/", target.as_str());
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
+        Ok(point.fs as u64 + 1)
+    }
+
     pub fn open_target(&mut self, target: &OpenTarget) -> Result<FileId, SyscallError> {
         let (fs, fs_path) = self.fs_for_target(target)?;
         let (file_id, backing) = fs.open_file(&fs_path)?;
