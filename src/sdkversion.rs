@@ -26,6 +26,7 @@ pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-font", dir: "userland/toyos-font" },
     Crate { name: "toyos", dir: "toyos" },
     Crate { name: "toyos-window", dir: "userland/toyos-window" },
+    Crate { name: "toyos-osrelease", dir: "toyos-osrelease" },
 ];
 
 /// One crate at this tree: the version crates.io has or is owed, whether it is
@@ -268,7 +269,8 @@ mod tests {
         std::fs::write(tmp.join("fork/src/lib.rs"), "").unwrap();
         let fork = format!(
             "[package]\nname = \"fork\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\n\
-             toyos-abi = \">=0.12, <1\"\ntoyos = \">=0.13, <1\"\ntoyos-window = \">=0.15, <1\"\n\n\
+             toyos-abi = \">=0.12, <1\"\ntoyos = \">=0.13, <1\"\ntoyos-window = \">=0.15, <1\"\n\
+             toyos-osrelease = \">=0.1, <1\"\n\n\
              [patch.crates-io]\n{patch}"
         );
         std::fs::write(tmp.join("fork/Cargo.toml"), fork).unwrap();

@@ -1,0 +1,9 @@
+[package]
+name = "toyfetch"
+description = "Prints what the system it runs on says of itself — OS and build, kernel, CPU, memory, uptime, shell and terminal — beside the system's logo, through sysinfo on every OS."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }

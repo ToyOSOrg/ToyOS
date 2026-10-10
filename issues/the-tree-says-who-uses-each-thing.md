@@ -128,9 +128,9 @@ apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windo
           calc editor files paint snake doom/ (doomgeneric/ DOOM1.WAD soundfont licences);
           toyfetch when built
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
-          abi/ toyos/ std/ keymap/ font/ window/ filepicker/ libc/ (arch/)
+          abi/ toyos/ std/ keymap/ font/ window/ filepicker/ osrelease/ libc/ (arch/)
 lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda i219 inspect
-          logstream manifest osrelease quiesce rootimage swap symbols tco tmpdir tsc untrusted
+          logstream manifest quiesce rootimage swap symbols tco tmpdir tsc untrusted
           update userbound wallclock xhci
 share/    mirrors /system/share: fonts/ (+ OFL) icons/ (+ MIT)
 images/   system.toml console.toml diag.toml
@@ -156,8 +156,9 @@ Where this differs from the tree the owner adopted:
   ruling `files` stops using it, which leaves the compositor its one user
   (rule step 4).
 - `apps/` names toyfetch, by the Apps ruling.
-- `lib/osrelease` is `toyos-osrelease`, which #722 added after the design;
-  the build, `libc` and the supervisor use it (rule step 5).
+- `sdk/osrelease` is `toyos-osrelease`, which #722 added after the design;
+  the sysinfo fork, outside this repository, uses it from crates.io (rule
+  step 3).
 - `lib/tsc` is `toyos-tsc`, which #721 added after the design; the kernel
   and the loader use it (rule step 5).
 - `sdk/std/` is std's ToyOS backend, which left the `rust` fork after the
@@ -186,7 +187,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
 3. **One workspace.** Landed in #746.
 4. **std off repository paths:** `issues/std-names-the-sdk-crates-by-path.md`.
    **Exit:** that file's.
-5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker and libc (with
+5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker, osrelease and libc (with
    `tests/libc-arch` as `sdk/libc/arch/`); `src/sysroot.rs`,
    `src/sdkversion.rs` and `src/release.rs` read the directory instead of a
    list. A branch that bumps the `rust` gitlink merges the fork change with
