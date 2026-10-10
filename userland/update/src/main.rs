@@ -38,7 +38,6 @@ use toyos::endow::{self, Endowments};
 use toyos::PartitionDev;
 use toyos_update::image::{Header, HEADER_BYTES, SIGNED_BYTES};
 use toyos_update::slots::{self, Which};
-use toyos_fat32::BlockAccess as _;
 use toyos_update::{policy, sig};
 
 /// The key an image must be signed with: the same the loader embeds.
@@ -212,8 +211,8 @@ fn write_volume(boot: &mut dyn Disk, kernel: &[u8], cmdline: &[u8], signed: &[u8
         fs.write(&mut file, 0, bytes).map_err(|e| format!("writing {path}: {e:?}"))?;
         fs.flush_meta(&mut file, time).map_err(|e| format!("recording {path}: {e:?}"))?;
     }
-    fs.sync().map_err(|e| format!("the idle volume's metadata: {e:?}"))?;
-    fs.into_device().flush().map_err(|e| format!("the idle volume's blocks: {e:?}"))
+    // Writes every block the volume holds (`Cached::flush`).
+    fs.sync().map_err(|e| format!("the idle volume's blocks: {e:?}"))
 }
 
 mod volume;
