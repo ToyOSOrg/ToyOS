@@ -398,10 +398,11 @@ impl Net {
         (answer, client)
     }
 
-    /// The client writes `text`, and the pass netstack runs when its pipe has bytes.
-    fn says(&mut self, client: &Client, text: &[u8]) {
+    /// The client of stream `id` writes `text`, and the pass netstack runs when its pipe has
+    /// bytes.
+    fn says(&mut self, id: StreamId, client: &Client, text: &[u8]) {
         client.borrow_mut().outbox.extend(text);
-        self.node.bridge(self.now);
+        self.node.bridge(self.now, [id]);
         self.pump();
     }
 
@@ -454,7 +455,7 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
     assert_eq!(client.borrow().inbox, b"hello", "what arrived before the accept moves in it");
     assert_eq!((net.node.streams(), net.node.listeners(), net.node.held()), (1, 1, 2));
     client.borrow_mut().outbox.extend(b"welcome");
-    net.node.bridge(net.now);
+    net.node.bridge(net.now, [accepted.id]);
     net.pump();
     let said = net.last(P1);
     assert_eq!((said.text.as_slice(), said.seq), (&b"welcome"[..], synack.seq.wrapping_add(1)));
@@ -855,16 +856,16 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     let (second, b) = net.accept(id).unwrap();
     assert_eq!((first.remote, first.nodelay, second.remote, second.nodelay), (P1.endpoint(), false, P2.endpoint(), true));
     let (first, second) = (first.id, second.id);
-    for client in [&a, &b] {
-        net.says(client, b"a");
-        net.says(client, b"b");
+    for (stream, client) in [(first, &a), (second, &b)] {
+        net.says(stream, client, b"a");
+        net.says(stream, client, b"b");
     }
     assert_eq!(net.texts(P1), [b"a".to_vec()], "the second write waits for the first's acknowledgment");
     assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
 
     // An accepted stream's options are its own from then on, and the listener's its own.
     assert!(net.node.set_nodelay(net.now, second, false));
-    net.says(&b, b"c");
+    net.says(second, &b, b"c");
     assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the third write waits");
     assert!(net.node.set_nodelay(net.now, first, true));
     net.pump();
@@ -874,8 +875,8 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     net.handshake(P3);
     let (third, c) = net.accept(id).unwrap();
     assert_eq!((third.remote, third.nodelay), (P3.endpoint(), false));
-    net.says(&c, b"a");
-    net.says(&c, b"b");
+    net.says(third.id, &c, b"a");
+    net.says(third.id, &c, b"b");
     assert_eq!(net.texts(P3), [b"a".to_vec()]);
 
     assert!(net.node.close_listener(net.now, id));
@@ -892,8 +893,8 @@ fn a_listener_holds_the_option_its_listen_named_from_its_first_connection() {
     net.handshake(P1);
     let (accepted, client) = net.accept(id).unwrap();
     assert!(accepted.nodelay);
-    net.says(&client, b"a");
-    net.says(&client, b"b");
+    net.says(accepted.id, &client, b"a");
+    net.says(accepted.id, &client, b"b");
     assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
 
     assert!(net.node.set_listener_nodelay(id, false));

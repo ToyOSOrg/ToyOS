@@ -40,6 +40,12 @@
 //! Every call that can move a stream ends in a pass: a batch of frames, a deadline, and each call
 //! here. A transmit opportunity can only fail a connect, whose next hop it found to answer
 //! nobody, and ends in a pass over the connects.
+//!
+//! **A send pipe found empty is read again only once the kernel says it holds bytes**
+//! ([`Node::bridge`]'s `readable`), or once its client writes no more, when an empty pipe is the
+//! end. netstack watches such a pipe for bytes as long as [tcp] has room for them
+//! ([`Watch::readable`]), and the kernel answers a watch of a pipe that already holds some at
+//! once, so no byte waits on a pass that never reads.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -178,6 +184,9 @@ struct Stream {
     held: bool,
     /// [tcp] had room for the client's bytes when the last pass ended.
     room: bool,
+    /// The last read of the from-client pipe found it empty, and the kernel has not said since
+    /// that it holds bytes.
+    drained: bool,
     /// The options last written to [tcp].
     options: Options,
 }
@@ -199,6 +208,7 @@ impl Stream {
             extended: false,
             held: false,
             room: false,
+            drained: false,
             options,
         }
     }
@@ -266,6 +276,9 @@ impl Stream {
 
         let mut gave_up = false;
         while let Some(pipe) = self.from_client.as_mut() {
+            if self.drained && !self.done_writing {
+                break;
+            }
             // Never more than [tcp] has room for, and so never a read of no bytes, whose answer
             // would be the end's; [tcp] has none once the FIN is queued.
             let room = stack.tcp_status(conn).writable.min(CHUNK);
@@ -278,7 +291,10 @@ impl Stream {
             let (read, writer_gone) = match pipe.read(space) {
                 Ok(read) => (read, read == 0),
                 Err(ReadRefusal::Empty) if self.done_writing => (0, false),
-                Err(ReadRefusal::Empty) => break,
+                Err(ReadRefusal::Empty) => {
+                    self.drained = true;
+                    break;
+                }
                 Err(ReadRefusal::Broken) => {
                     stack.tcp_abort(now, conn);
                     return false;
@@ -377,8 +393,15 @@ impl Node {
         Ok(self.streams.hold(Stream { connecting: true, deadline, ..Stream::established(conn, remote.addr, Options::default(), pipes) }))
     }
 
-    /// One pass over every stream: netstack calls it when a pipe it watches is ready.
-    pub fn bridge(&mut self, now: Instant) {
+    /// One pass over every stream: netstack calls it once the kernel has answered pipes it
+    /// watches ready as [`Self::watches`] asked, and `readable` are the streams whose from-client
+    /// pipe it said holds bytes.
+    pub fn bridge(&mut self, now: Instant, readable: impl IntoIterator<Item = StreamId>) {
+        for id in readable {
+            if let Some(stream) = self.streams.live.get_mut(&id) {
+                stream.drained = false;
+            }
+        }
         self.pass(now, false);
     }
 
@@ -409,7 +432,7 @@ impl Node {
         stream.to_client = None;
         stream.done_writing = true;
         stream.left = true;
-        self.bridge(now);
+        self.pass(now, false);
     }
 
     /// The client sends no more: what its pipe still holds is sent, then the FIN. `false` is an
@@ -417,7 +440,7 @@ impl Node {
     pub fn shutdown_write(&mut self, now: Instant, id: StreamId) -> bool {
         let Some(stream) = self.streams.live.get_mut(&id).filter(|stream| !stream.connecting) else { return false };
         stream.done_writing = true;
-        self.bridge(now);
+        self.pass(now, false);
         true
     }
 
@@ -442,7 +465,7 @@ impl Node {
             PipeEnd::FromClient if stream.fin_queued => stream.from_client = None,
             PipeEnd::FromClient => stream.done_writing = true,
         }
-        self.bridge(now);
+        self.pass(now, false);
     }
 
     /// The kernel refused netstack's watch of a pipe end the node still holds: the handle is no

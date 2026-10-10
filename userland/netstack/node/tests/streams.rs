@@ -362,6 +362,8 @@ struct Net {
     far: Far,
     /// The peers the test turned from, each with its connection.
     parked: Vec<Far>,
+    /// Each stream's client, for the kernel's answers [`Self::bridge`] gives.
+    clients: Vec<(StreamId, Client)>,
 }
 
 fn draw(draws: &mut u32) -> impl FnMut() -> u32 + '_ {
@@ -375,7 +377,7 @@ impl Net {
     /// The node holding its lease of 192.0.2.1/24 for an hour.
     fn new() -> Self {
         let Wire { node, now, .. } = Wire::leased(&terms(3_600, Some(R)));
-        Self { node, now, draws: 0x7c00_0000, far: Far::new(), parked: Vec::new() }
+        Self { node, now, draws: 0x7c00_0000, far: Far::new(), parked: Vec::new(), clients: Vec::new() }
     }
 
     /// Leaves the present peer with the connection it has and makes `next` the peer the test
@@ -433,9 +435,19 @@ impl Net {
         self.pump();
     }
 
-    /// A pass, as netstack runs one when a pipe it watches is ready, and what it sends.
+    /// A pass, as netstack runs one when a pipe it watches is ready, and what it sends. The
+    /// kernel answers a send pipe readable that holds bytes, has no writer left or is no pipe.
     fn bridge(&mut self) {
-        self.node.bridge(self.now);
+        let readable: Vec<StreamId> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| {
+                let ends = client.borrow();
+                !ends.outbox.is_empty() || ends.writer_gone || ends.read_broken
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        self.node.bridge(self.now, readable);
         self.pump();
     }
 
@@ -498,6 +510,7 @@ impl Net {
         let (client, pipes) = client();
         let remote = Endpoint { addr: self.far.addr, ..peer() };
         let id = self.node.connect(self.now, remote, timeout, pipes).expect("a route to the peer");
+        self.clients.push((id, client.clone()));
         self.pump();
         (id, client)
     }
@@ -640,7 +653,8 @@ fn a_connect_closed_before_its_answer_is_answered_closed() {
 
 // A batch of frames and a deadline each end in a pass of their own: an opportunity's pass is over
 // the connects only, so neither test offers one. The batch's pass is one, after its last frame:
-// what the batch brought is one write to the client's pipe, and its send pipe is asked once.
+// what the batch brought is one write to the client's pipe, and its send pipe, found empty as the
+// connect was answered, is not asked.
 #[test]
 fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_it() {
     let (mut net, _, client) = established();
@@ -649,7 +663,27 @@ fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_
     net.node.receive(net.now, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
     let ends = client.borrow();
     assert_eq!(ends.inbox, b"all at once");
-    assert_eq!((ends.writes - writes, ends.reads - reads), (1, 1), "the pipes' calls in the batch's pass");
+    assert_eq!((ends.writes - writes, ends.reads - reads), (1, 0), "the pipes' calls in the batch's pass");
+}
+
+// A send pipe found empty is asked again only once the kernel says it holds bytes: a batch of
+// frames, a deadline and the to-client pipe's room each pass over the stream without reading it.
+#[test]
+fn a_send_pipe_found_empty_is_read_again_only_once_the_kernel_says_it_holds_bytes() {
+    let (mut net, id, client) = established();
+    let reads = client.borrow().reads;
+    client.borrow_mut().outbox.extend(b"request");
+    let frame = net.far.text(b"response");
+    net.deliver(&frame);
+    net.fire(net.now.after(Duration::from_secs(1)));
+    net.node.bridge(net.now, []);
+    net.pump();
+    assert_eq!((client.borrow().reads - reads, net.far.received.len()), (0, 0));
+
+    net.node.bridge(net.now, [id]);
+    net.pump();
+    assert_eq!(net.far.received, b"request");
+    assert_eq!(client.borrow().reads - reads, 2, "the request, then the pipe found empty again");
 }
 
 #[test]
@@ -670,7 +704,7 @@ fn nothing_leaves_the_pipe_that_the_stack_will_not_take() {
     let sent = text(100_000);
     client.borrow_mut().outbox.extend(&sent);
     // A pass with no transmit opportunity after it: the send buffer fills and nothing leaves it.
-    net.node.bridge(net.now);
+    net.node.bridge(net.now, [id]);
     assert_eq!(client.borrow().outbox.len(), sent.len() - SEND_BUFFER, "what [tcp] had no room for is still the pipe's");
     assert_eq!(net.watch(id), Some(Watch { readable: false, ..IDLE }));
 
@@ -757,7 +791,7 @@ fn room_in_the_pipe_opens_the_window_at_the_next_opportunity() {
     assert!(net.run_until(Duration::from_secs(1), shut), "all of it acknowledged, and the window shut: {} {}", net.far.acked, net.far.window);
 
     client.borrow_mut().room = 65_536;
-    net.node.bridge(net.now);
+    net.node.bridge(net.now, []);
     assert!(client.borrow().inbox == sent);
     assert_eq!(net.opportunity(), 1, "the window update");
     let update = net.far.segments.last().expect("a segment");
@@ -1037,9 +1071,10 @@ fn a_client_that_left_is_finished_by_the_stack() {
     let (mut net, id, client) = established();
     client.borrow_mut().outbox.extend(b"last words");
     client.borrow_mut().writer_gone = true;
+    // The kernel's two answers to a client's leaving, one an end.
     net.node.pipe_gone(net.now, id, PipeEnd::ToClient);
-    assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0), "nothing of the client's is left to serve");
     net.node.pipe_gone(net.now, id, PipeEnd::FromClient);
+    assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0), "nothing of the client's is left to serve");
     net.pump();
     assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"last words"[..], true));
     let frame = net.far.fin();

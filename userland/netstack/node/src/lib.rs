@@ -159,7 +159,7 @@ impl Node {
             self.stack.receive(now, frame);
             self.settle(now, &mut draw);
         }) {}
-        self.bridge(now);
+        self.pass(now, false);
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.
@@ -207,7 +207,7 @@ impl Node {
         let out = self.client.timer(now, &mut draw);
         self.carry_out(now, out, None, &mut draw);
         self.settle(now, &mut draw);
-        self.bridge(now);
+        self.pass(now, false);
     }
 
     /// Hands the client what the shard reported and what reached its socket, and carries out

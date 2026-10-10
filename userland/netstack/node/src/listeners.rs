@@ -156,7 +156,7 @@ impl Node {
         listener.unspent = listener.unspent.saturating_sub(1);
         let bound = listener.bound;
         let answer = self.take(bound, pipes);
-        self.bridge(now);
+        self.pass(now, false);
         answer
     }
 

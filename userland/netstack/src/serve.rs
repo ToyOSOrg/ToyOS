@@ -115,6 +115,8 @@ pub struct Sockets {
     /// A stream's pipe was answered ready in this wake: one pass over the
     /// streams follows the wake, however many answers it carried.
     bridge: bool,
+    /// The streams whose send pipe was answered readable in this wake.
+    readable: Vec<StreamId>,
 }
 
 /// The two ends a connect or an accept moves, each split into the node's half
@@ -216,6 +218,7 @@ impl Sockets {
             receiving: BTreeMap::new(),
             places,
             bridge: false,
+            readable: Vec::new(),
         }
     }
 
@@ -785,7 +788,12 @@ impl Sockets {
                         node.pipe_broken(now, ends.stream, end);
                     }
                     Ok(met) if met & OTHER_END_GONE != 0 => node.pipe_gone(now, ends.stream, end),
-                    Ok(_) => self.bridge = true,
+                    Ok(_) => {
+                        if end == PipeEnd::FromClient {
+                            self.readable.push(ends.stream);
+                        }
+                        self.bridge = true;
+                    }
                 }
             }
             TOKEN_LISTENER => {
@@ -829,7 +837,7 @@ impl Sockets {
     /// The pass over the streams the last wake's answers asked for, once.
     pub fn bridge(&mut self, node: &mut Node, now: Instant) {
         if std::mem::take(&mut self.bridge) {
-            node.bridge(now);
+            node.bridge(now, self.readable.drain(..));
         }
     }
 
