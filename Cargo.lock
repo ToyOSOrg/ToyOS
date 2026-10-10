@@ -3024,6 +3024,7 @@ dependencies = [
  "toyos-tco",
  "toyos-tsc",
  "toyos-untrusted",
+ "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
  "toyos-xhci",
@@ -5681,6 +5682,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
@@ -5937,6 +5939,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-ssh"
+version = "0.1.0"
+dependencies = [
+ "ring",
+]
+
+[[package]]
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
@@ -5994,6 +6003,10 @@ dependencies = [
  "sha2 0.10.9",
  "toyos-wallclock",
 ]
+
+[[package]]
+name = "toyos-usbhid"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-userbound"

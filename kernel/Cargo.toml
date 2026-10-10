@@ -503,6 +503,7 @@ toyos-quiesce = { path = "../toyos-quiesce" }
 toyos-random = { path = "../toyos-random" }
 toyos-symbols = { path = "../toyos-symbols" }
 toyos-untrusted = { path = "../toyos-untrusted" }
+toyos-usbhid = { path = "../toyos-usbhid" }
 toyos-userbound = { path = "../toyos-userbound" }
 toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-xhci = { path = "../toyos-xhci" }
