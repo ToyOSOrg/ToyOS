@@ -445,6 +445,13 @@ pub fn hard_lockup_chain(
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
     let stuck = after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
     sp_is_a_kernel_stack(stuck)?;
+    // And the NMI frame's `rip` is where that CPU stood: inside the lock's
+    // spin, resolved by the kernel against its own symbols. A `pc` read off
+    // any other word of the frame resolves to nothing, or to somewhere else.
+    let pc = after.must_say_after(bootlog::LOCKED_UP, bootlog::LOCKUP_PC)?;
+    if !bootlog::LOCK_SPIN.iter().all(|part| pc.contains(part)) {
+        return Err(format!("the record puts the stuck cpu outside the lock's spin {:?}: {pc:?}", bootlog::LOCK_SPIN));
+    }
     // The staged control's own witness, carried by the mechanism rather than by
     // a log line that may not survive: the lock the stuck cpu is inside was
     // taken at the control's own source line, which no other boot can say.

@@ -59,8 +59,9 @@ aims all of them at a dead device on one event.
   exactly as it already does across a debounce, and a teardown now takes one
   further scheduler pass.
 - **The metal claim is still the owner's to make.** Everything above is the
-  guest-side proxy — no pass blocks — and the acceptance test is a stick pulled
-  out of a running T14 with the desktop still answering typing.
+  guest-side proxy — no pass blocks. The acceptance test was a stick pulled
+  out of a running T14 with Ctrl+Alt+D still answering; that hotkey is removed,
+  so what the pull must leave answering is the owner's to name again.
 - `log_file`'s flush still holds `SINK` and the VFS across device I/O. The doc's
   "unbounded and uninterruptible" is half right, and the precise reading is
   **bounded in acquisition, unbounded in work**: `poll` is `try_lock` on both and

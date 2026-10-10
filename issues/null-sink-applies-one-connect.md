@@ -51,12 +51,13 @@ closed `io_uring::cancel_by_source` lost wake is *not* this: the mix loop's only
 registration is on the command pipe, which soundd owns both ends of and nobody
 closes.
 
-**What settles it is where soundd's mix thread is parked, and nothing in the
-tree reads that off a running T14.** soundd's mix thread parked with a sane
+**What settles it is where soundd's mix thread is parked and on what
+deadline, and nothing in the tree reads the deadline off a running T14.** soundd's mix thread parked with a sane
 deadline says the timer did not fire; parked with an absurd one says the
 timeout was computed wrong; held by no CPU says nothing ever held it, which
 would move this into #142's family rather than audio's. The kernel's trace
-diary (`kernel/src/trace.rs`) records every park and wake, read by
-`SYS_TRACE_READ` on `Rights::TRACE`, and no shipped program reads it; a park's
+diary (`kernel/src/trace.rs`) records every park and wake, and
+`/system/bin/trace` prints it: that says whether the mix thread parked and was
+never woken, but no record carries the deadline it parked with. A park's
 blocked time is invisible to `ps` until the park ends
 (`issues/blocked-time-is-invisible-while-the-park-lasts.md`).

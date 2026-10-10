@@ -73,7 +73,8 @@ times:
    path and exec from it. USB storage stays in the kernel until stage 5 moves
    the whole xHCI out, because its one IOMMU domain is shared with the
    keyboard, and the panic console never depends on a userland USB program.
-   The kernel recognises no hotkey (owner, 2026-10-10). No swap, declared.
+   Ctrl+Alt+D is removed (owner, 2026-10-10: "i dont want it. i want it
+   removed."). No swap, declared.
    `SYS_DEVICE_DMA_MAP` for zero-copy block I/O. FAT32 on `/log` in the installed product is deferred.
 
    Stages 3 and 4 are built as these steps, one pull request each:

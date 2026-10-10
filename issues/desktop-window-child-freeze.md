@@ -170,9 +170,15 @@ written about.
 confirms no CPU stopped taking scheduler passes during the freeze — nothing
 short of that distinguishes this signature from a green run, which this entry
 has already shown proves nothing either way. The instrument this exit named,
-the blocked-task dump's NMI probe, is removed with its hotkey; `info registers
--a` over QMP shows where every vCPU stands and not whether it is passing, so
-no instrument in the tree meets this exit today. Owner: `kernel::sched`, the placement track that closed the
+the blocked-task dump's NMI probe, is removed with its hotkey. What can read it
+now is the kernel's trace diary (`kernel/src/trace.rs`), which every CPU writes
+from its timer and its scheduler, printed by `/system/bin/trace`: a CPU whose
+newest record stands behind the others' at the read stopped passing then, and
+an `IdleEnter` as that record says it went to halt. Its rings hold 8192
+records a CPU, so a CPU that kept passing has overwritten what it said before
+the freeze, and the read has to be taken by a program spawned after it, which
+a reproduction whose desktop stopped answering may not allow. It has never
+been taken on one. Owner: `kernel::sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
 `kernel/pure/sched/cpu.rs`) and is nearest the remaining half; held by the
 orchestrator.

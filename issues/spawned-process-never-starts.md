@@ -126,8 +126,11 @@ nothing in it explains it. In a guest, `info registers -a` over QMP
 injecting anything, since a keystroke revives a halted CPU. On metal, a CPU
 that has stopped taking interrupts is ended by `crate::hardlockup` on a boot
 armed with a deadline and a CPU that states a PMU, and its record in the black
-box (`kernel/src/blackbox.rs`) names where it stood. Neither has been fired at
-a machine in this state.
+box (`kernel/src/blackbox.rs`) names where it stood. That reaches one of the
+three causes the removed dump's NMI probe told apart, a CPU spinning with `IF`
+clear: its header excludes a halted CPU, which its counter never samples, and
+a CPU with `IF` set, which it never ends. Neither has been fired at a machine
+in this state.
 
 **The one task per silent CPU.** The rule cannot do better without a liveness
 beat the idle path does not have, and adding one is an audio change
