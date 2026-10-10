@@ -295,7 +295,32 @@ impl Sockets {
             return;
         };
         match self.ids.remove(&req.socket_id) {
-            Some(Socket::Stream(id)) => node.close(now, id),
+            Some(Socket::Stream(id)) => {
+                // MEASUREMENT ONLY: what the connection grew to, and the stack's recovery counts.
+                if let Some(i) = node.tcp_info(id) {
+                    let c = node.shard().tcp_counters();
+                    let n = |counter| c.get(counter);
+                    use toyos_net_tcp::Counter as K;
+                    say!(
+                        "netstack: tcp closed: snd_shift={} rcv_shift={} rcv_capacity={} rcv_wnd={} rcv_rtt={:?} srtt={:?} cwnd={} smss={} | stack rto={} loss_probe={} loss_probe_recovery={} retransmit_bytes={} dsack={} sack_recovery={}",
+                        i.snd_shift,
+                        i.rcv_shift,
+                        i.rcv_capacity,
+                        i.rcv_edge.since(i.rcv_nxt),
+                        i.rcv_rtt,
+                        i.srtt,
+                        i.cwnd,
+                        i.smss,
+                        n(K::Rto),
+                        n(K::LossProbe),
+                        n(K::LossProbeRecovery),
+                        n(K::RetransmitBytes),
+                        n(K::DsackRcvd),
+                        n(K::SackRecovery),
+                    );
+                }
+                node.close(now, id)
+            }
             Some(Socket::Listener { id, .. }) => {
                 node.close_listener(now, id);
             }
