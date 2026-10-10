@@ -354,4 +354,7 @@ const NEVER_CLEAN: &[&str] = &[
     // descriptors are wrong, and a netstack that did it on every boot would
     // otherwise pass everywhere.
     "iommu: DMA FAULT owner=slot",
+    // kernel/src/log/console.rs — the stop waited out its whole budget for
+    // `klogd` to let the console's wire go.
+    super::power::WIRE_LATE,
 ];
