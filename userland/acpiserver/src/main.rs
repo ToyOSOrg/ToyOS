@@ -27,12 +27,21 @@
 //! [`aml::query`] says, after the drain that took them. An event this server
 //! never enabled, a controller that does not answer, more queries in one
 //! drain than [`QUERIES`], and [`sci::EMPTY_SCIS`] SCIs in a row that carried
-//! nothing are each a panic naming the registers.
+//! nothing are each a panic naming the registers. Inside an evaluation, a
+//! take of the Global Lock the firmware holds waits on the SCI for its
+//! release alone ([`sci::await_release`]), and what else latched meanwhile is
+//! served after.
+//!
+//! **After the load the machine's batteries and AC adapters are found** in
+//! the namespace it kept, and read every [`battery::POLL`] between SCIs
+//! ([`battery`]): the controller's space is reached only there, never inside
+//! a drain.
 //!
 //! The log carries each query number the first time it is taken and a count
 //! of every one at [`COUNTS`] intervals, never a line per event.
 
 mod aml;
+mod battery;
 mod ec;
 mod host;
 mod ledger;
@@ -51,8 +60,10 @@ use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
-use host::{Answer, Kernel, Stopping, Take};
-use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
+use aml::Aml;
+use battery::Power;
+use host::{Answer, Controller, Kernel, Stopping, Take};
+use sci::{Enables, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -62,10 +73,15 @@ const QUERIES: usize = 32;
 /// How often the log is told the queries' counts, where they moved.
 const COUNTS: Duration = Duration::from_secs(30);
 
-struct Server {
-    dev: AcpiDev,
+struct Server<'a> {
+    dev: &'a AcpiDev,
     info: AcpiInfo,
     served: Served,
+    /// The controller the row names, if it names one.
+    ec: Option<Ports>,
+    /// The namespace the load kept, and the power sources found in it.
+    aml: Option<Aml<'a, Claim<'a>, Ports>>,
+    power: Option<Power>,
     /// Taken off the controller by the drain, run after it.
     queued: VecDeque<u8>,
     /// Every query number taken, and how often.
@@ -88,10 +104,14 @@ fn main() {
         power_button: info.flags & FIXED_POWER_BUTTON != 0,
         ec_gpe: info.has_ec().then_some(info.ec_gpe),
     };
+    let claim = Claim { dev: &dev, info };
     let mut server = Server {
-        dev,
+        dev: &dev,
         info,
         served,
+        ec: info.has_ec().then_some(Ports { command: info.ec_command.port, data: info.ec_data.port }),
+        aml: None,
+        power: None,
         queued: VecDeque::new(),
         counts: BTreeMap::new(),
         counted: 0,
@@ -101,13 +121,67 @@ fn main() {
         power_off: false,
     };
     server.arm();
-    server.power_off = aml::load(&Claim(&server.dev), server.info.rsdp).handed;
+    let (loaded, kept) = aml::load(&claim, server.ec, server.info.rsdp);
+    server.power_off = loaded.handed;
+    server.aml = kept;
+    if let Some(aml) = &mut server.aml {
+        server.power = Power::find(aml, server.ec.is_some());
+    }
     server.serve();
 }
 
+/// The embedded controller's two ports, which this server's row holds.
+#[derive(Clone, Copy)]
+struct Ports {
+    command: u16,
+    data: u16,
+}
+
+impl Controller for Ports {
+    /// One transaction, waiting on the controller at each step for at most
+    /// [`EC_STEP`].
+    fn transact(&mut self, mut tx: Transaction) -> u8 {
+        let mut waiting: Option<(Wait, Instant)> = None;
+        loop {
+            let status = in8(self.command);
+            match tx.step(status) {
+                Do::Wait(wait) => {
+                    let since = match waiting {
+                        Some((was, since)) if was == wait => since,
+                        _ => Instant::now(),
+                    };
+                    assert!(
+                        since.elapsed() < EC_STEP,
+                        "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})"
+                    );
+                    waiting = Some((wait, since));
+                    std::thread::yield_now();
+                }
+                Do::WriteCommand(byte) => {
+                    waiting = None;
+                    out8(self.command, byte);
+                }
+                Do::WriteData(byte) => {
+                    waiting = None;
+                    out8(self.data, byte);
+                }
+                Do::ReadData => {
+                    waiting = None;
+                    tx.read(in8(self.data));
+                }
+                Do::Done(byte) => return byte,
+            }
+        }
+    }
+}
+
 /// The claim as the tables' fetch and their AML ask it for what lies outside
-/// its own ports.
-struct Claim<'a>(&'a AcpiDev);
+/// its own ports, and as the wait for the firmware's release of the Global
+/// Lock reads its event blocks and its SCI.
+struct Claim<'a> {
+    dev: &'a AcpiDev,
+    info: AcpiInfo,
+}
 
 impl Claim<'_> {
     /// The kernel's answer; a stopping machine's is the caller's to carry,
@@ -124,25 +198,84 @@ impl Claim<'_> {
 
 impl Kernel for Claim<'_> {
     fn access(&self, access: Access) -> Result<Answer, Stopping> {
-        Self::answered("a mediated access", self.0.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
+        Self::answered("a mediated access", self.dev.access(access)).map(|(made, memory_type)| Answer { made, memory_type })
     }
 
     fn lock_take(&self) -> Result<Take, Stopping> {
-        match self.0.lock_take() {
+        match self.dev.lock_take() {
             Err(SyscallError::NotSupported) => Ok(Take::Unusable),
             answer => Self::answered("a take of the Global Lock", answer).map(|taken| if taken { Take::Taken } else { Take::Pending }),
         }
     }
 
     fn lock_release(&self) -> Result<(), Stopping> {
-        Self::answered("the Global Lock's release", self.0.lock_release())
+        Self::answered("the Global Lock's release", self.dev.lock_release())
+    }
+
+    fn released(&self, until: Instant) -> bool {
+        sci::await_release(&mut Waiting { claim: self, poller: Poller::new(1), watching: false }, until)
     }
 
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
-        match self.0.s5(slp_typ_a) {
+        match self.dev.s5(slp_typ_a) {
             Err(SyscallError::InvalidArgument) => Ok(false),
             answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
         }
+    }
+}
+
+/// The claim's event blocks and SCI for one wait for the firmware's release.
+struct Waiting<'c, 'a> {
+    claim: &'c Claim<'a>,
+    poller: Poller,
+    /// A watch answers once: one still registered from a wait that timed out
+    /// is not registered again.
+    watching: bool,
+}
+
+impl Fixed for Waiting<'_, '_> {
+    fn pm1_status(&mut self) -> u16 {
+        in16(self.claim.info.pm1_event.port)
+    }
+
+    fn pm1_clear(&mut self, bits: u16) {
+        out16(self.claim.info.pm1_event.port, bits);
+    }
+
+    fn enables(&mut self) -> Enables {
+        Enables {
+            pm1: in16(self.claim.info.pm1_event.enable()),
+            gpe0: bytes(self.claim.info.gpe0).map(|(_, enable)| in8(enable)).collect(),
+        }
+    }
+
+    fn enable(&mut self, enables: &Enables) {
+        out16(self.claim.info.pm1_event.enable(), enables.pm1);
+        for ((_, enable), &byte) in bytes(self.claim.info.gpe0).zip(&enables.gpe0) {
+            out8(enable, byte);
+        }
+    }
+
+    fn sci(&mut self, until: Instant) -> bool {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        if !self.watching {
+            self.poller.watch(self.claim.dev, READABLE, 0);
+            self.watching = true;
+        }
+        let mut answered = false;
+        self.poller.wait(1, left.as_nanos() as u64, |_| answered = true);
+        self.watching &= !answered;
+        match self.claim.dev.irq() {
+            Ok(_) | Err(SyscallError::WouldBlock) => true,
+            Err(other) => panic!("acpiserver: the claim's record answered {other:?} while the Global Lock was waited for"),
+        }
+    }
+
+    fn ack(&mut self) {
+        self.claim.dev.ack().expect("acpiserver: the claim's acknowledgement");
     }
 }
 
@@ -151,7 +284,7 @@ fn bytes(block: Block) -> impl Iterator<Item = (u16, u16)> {
     (0..block.len / 2).map(move |i| (block.port + i, block.enable() + i))
 }
 
-impl Server {
+impl Server<'_> {
     fn arm(&mut self) {
         let pm1 = self.info.pm1_event;
         out16(pm1.enable(), 0);
@@ -185,15 +318,28 @@ impl Server {
     fn serve(&mut self) -> ! {
         let poller = Poller::new(1);
         let mut next_count = Instant::now() + COUNTS;
+        let mut next_read = Instant::now() + battery::POLL;
         // A watch answers once: one still registered from a wait that timed
         // out is not registered again.
         let mut watching = false;
         loop {
+            if let (Some(power), Some(aml)) = (&mut self.power, &mut self.aml)
+                && Instant::now() >= next_read
+            {
+                for line in power.read(aml) {
+                    println!("{line}");
+                }
+                next_read = Instant::now() + battery::POLL;
+                if aml.host.stopping {
+                    self.power = None;
+                }
+            }
             if !watching {
-                poller.watch(&self.dev, READABLE, 0);
+                poller.watch(self.dev, READABLE, 0);
                 watching = true;
             }
-            let wait = next_count.saturating_duration_since(Instant::now());
+            let until = if self.power.is_some() { next_count.min(next_read) } else { next_count };
+            let wait = until.saturating_duration_since(Instant::now());
             poller.wait(1, wait.as_nanos() as u64, |_| watching = false);
             if Instant::now() >= next_count {
                 self.log_counts();
@@ -263,9 +409,10 @@ impl Server {
 
     /// Take every query the controller has waiting off it, queued for after.
     fn drain(&mut self) {
+        let mut ec = self.ec.expect("a drain runs only where the row names a controller");
         let mut taken = 0;
-        while in8(self.info.ec_command.port) & ec::SCI_EVT != 0 {
-            let q = self.transact(Transaction::query());
+        while in8(ec.command) & ec::SCI_EVT != 0 {
+            let q = ec.transact(Transaction::query());
             if q == 0 {
                 break;
             }
@@ -273,7 +420,7 @@ impl Server {
             assert!(
                 taken <= QUERIES,
                 "acpiserver: the embedded controller had more than {QUERIES} queries waiting at once (EC_SC {:#04x})",
-                in8(self.info.ec_command.port)
+                in8(ec.command)
             );
             self.queued.push_back(q);
         }
@@ -287,39 +434,6 @@ impl Server {
             self.counted += 1;
             if *count == 1 {
                 println!("acpiserver: embedded controller query {q:#04x} taken for the first time, served by nothing: no query's method is evaluated yet");
-            }
-        }
-    }
-
-    /// One transaction, waiting on the controller at each step for at most
-    /// [`EC_STEP`].
-    fn transact(&self, mut tx: Transaction) -> u8 {
-        let (command, data) = (self.info.ec_command.port, self.info.ec_data.port);
-        let mut waiting: Option<(Wait, Instant)> = None;
-        loop {
-            let status = in8(command);
-            match tx.step(status) {
-                Do::Wait(wait) => {
-                    let since = match waiting {
-                        Some((was, since)) if was == wait => since,
-                        _ => Instant::now(),
-                    };
-                    assert!(
-                        since.elapsed() < EC_STEP,
-                        "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})"
-                    );
-                    waiting = Some((wait, since));
-                    std::thread::yield_now();
-                }
-                Do::WriteCommand(byte) => {
-                    waiting = None;
-                    out8(command, byte);
-                }
-                Do::ReadData => {
-                    waiting = None;
-                    tx.read(in8(data));
-                }
-                Do::Done(byte) => return byte,
             }
         }
     }

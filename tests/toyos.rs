@@ -592,6 +592,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The T14's battery and AC adapter as the server read them through
+        // its AML and its embedded controller: `battery_on_metal` says what
+        // is held, and prints the readings for Linux's on the same machine.
+        // The same boot as `acpi_server_events`, held past several polls.
+        "battery_read",
+        metal::Metal {
+            arms: TESTCASES_HELD,
+            judge: |b| battery_on_metal(b[0]),
+        },
+    ),
+    (
         // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
         // and `SCI_EN` reads clear after it.
         "acpi_server_death",
@@ -5319,6 +5330,53 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     for line in [took, bytes, aml] {
         eprintln!("  [acpi] {}", line.trim());
+    }
+    Ok(())
+}
+
+/// What the T14's tables name, by a census of them read outside the tree:
+/// one control-method battery, one AC adapter, one embedded controller.
+const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-method batteries present, 1 AC adapter(s), 1 embedded controller device(s) told their space is there; the Global Lock taken ";
+
+/// The T14's battery as the server read it: the one battery its tables name
+/// found present once the controller's `_REG` ran, its information read,
+/// and at least one reading of it with the adapter's state; every method
+/// answered, and the Global Lock, which the methods take through Lock-rule
+/// memory fields, taken and given back as often, the takes that found the
+/// firmware holding it included. The lines are printed whole: their numbers
+/// are what Linux's `/sys/class/power_supply` reads on the same machine are
+/// compared against, by whoever holds both.
+fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_hold")?;
+    let log = back.log();
+    let lines: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_some_and(|said| said.tag == "acpiserver"))
+        .collect();
+    if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
+        return Err(format!("the server died: {fired}"));
+    }
+    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
+    if !refused.is_empty() {
+        return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
+    }
+    let found = log.must_say(T14_POWER_SOURCES)?;
+    let takes = number_between(found, "; the Global Lock taken ", " times on the way")?;
+    let given_back = number_between(found, " times on the way and given back ", " times, the firmware found")?;
+    if takes == 0 || given_back != takes {
+        return Err(format!("the battery's methods took the Global Lock {takes} times and gave it back {given_back}: {found}"));
+    }
+    let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
+    let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
+    if read.is_empty() {
+        return Err("the server said no reading of the battery".into());
+    }
+    if let Some(unknown) = read.iter().find(|l| l.contains("unknown") || !(l.ends_with("; AC online") || l.ends_with("; AC offline"))) {
+        return Err(format!("a reading with a value unknown: {unknown}"));
+    }
+    for line in [found, info].into_iter().chain(read.iter().map(|l| **l)) {
+        eprintln!("  [battery] {}", line.trim());
     }
     Ok(())
 }

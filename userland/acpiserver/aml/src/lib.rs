@@ -21,7 +21,8 @@
 //! SystemIO, PCI_Config and EmbeddedControl space; an access in any other
 //! space is refused as [`Error::Unsupported`], as are `Load`, `LoadTable`
 //! and `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
-//! never contended and an Event is never signalled by anyone else.
+//! never contended and an Event is never signalled by anyone else; `\_GL`'s
+//! other owner is the firmware, whose side the [`Host`] waits out.
 //!
 //! The predefined objects are the operating system's (§5.7), answered as
 //! Windows answers them, by the owner's rulings ("Like Windows, not Linux";
@@ -181,9 +182,14 @@ pub trait Host {
     fn timer(&mut self) -> u64;
     /// Notify (§19.6.94) of the object at this absolute path.
     fn notify(&mut self, object: &str, value: u64);
-    /// Takes (`true`) or gives back (`false`) the firmware's Global Lock
-    /// (§5.2.10.1), around a Lock field's access and `\_GL`'s ownership.
-    fn global_lock(&mut self, take: bool) -> Result<(), Denied>;
+    /// Takes the firmware's Global Lock (§5.2.10.1), for a Lock field's
+    /// access or `\_GL`'s first Acquire, waiting where the firmware holds it
+    /// for its release at most `within` milliseconds, an Acquire's
+    /// TimeoutValue below 0xFFFF (§19.6.2); `None` is no bound of the AML's,
+    /// and is never answered `Ok(false)`, a take that timed out.
+    fn global_take(&mut self, within: Option<u16>) -> Result<bool, Denied>;
+    /// Gives back the Global Lock a take took.
+    fn global_release(&mut self) -> Result<(), Denied>;
 }
 
 /// An object as the caller receives or passes it.

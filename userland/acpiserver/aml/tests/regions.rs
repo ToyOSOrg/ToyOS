@@ -361,10 +361,10 @@ fn a_lock_field_holds_the_global_lock_across_its_access() {
     assert_eq!(
         m.log,
         vec![
-            Event::GlobalLock(true),
+            Event::GlobalTake(None),
             Event::Read(mem(0x1000), Access::Byte),
             Event::Read(mem(0x1001), Access::Byte),
-            Event::GlobalLock(false),
+            Event::GlobalRelease,
         ]
     );
 }
