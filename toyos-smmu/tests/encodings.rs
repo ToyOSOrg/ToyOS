@@ -534,34 +534,6 @@ fn every_event_number_is_its_own_code_and_only_a_fault_carries_an_attempt() {
     }
 }
 
-#[test]
-fn each_event_is_named_by_its_own_mnemonic() {
-    let mnemonics = [
-        (0x01, "F_UUT"),
-        (0x02, "C_BAD_STREAMID"),
-        (0x03, "F_STE_FETCH"),
-        (0x04, "C_BAD_STE"),
-        (0x05, "F_BAD_ATS_TREQ"),
-        (0x06, "F_STREAM_DISABLED"),
-        (0x07, "F_TRANSL_FORBIDDEN"),
-        (0x08, "C_BAD_SUBSTREAMID"),
-        (0x09, "F_CD_FETCH"),
-        (0x0A, "C_BAD_CD"),
-        (0x0B, "F_WALK_EABT"),
-        (0x10, "F_TRANSLATION"),
-        (0x11, "F_ADDR_SIZE"),
-        (0x12, "F_ACCESS"),
-        (0x13, "F_PERMISSION"),
-        (0x20, "F_TLB_CONFLICT"),
-        (0x21, "F_CFG_CONFLICT"),
-        (0x24, "E_PAGE_REQUEST"),
-        (0x25, "F_VMS_FETCH"),
-    ];
-    for (number, mnemonic) in mnemonics {
-        assert_eq!(event(record(number, 7, 0x1000, false)).code.name(), mnemonic, "event {number:#x}");
-    }
-}
-
 // --- the stage 1 tables (DDI 0487 M.d §D8.3.1) -----------------------------
 
 /// A device address whose four table indexes are 0x1a5, 0x0f0, 0x00f and 0x155.

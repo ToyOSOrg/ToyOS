@@ -2041,13 +2041,19 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
 /// `iommu-testdev` can and cannot write through it
 /// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
 /// a `CMD_SYNC` consumed; one device's write refused on the entry its stream
-/// starts with and nothing recorded, landing where its own domain maps it,
-/// and refused once the domain takes that address back; the other's, under a
-/// StreamID no function is routed from inside the stream table, refused.
-/// Those two are recorded, the unit's first and second events, taken on the
-/// wired SPI, named, and the machine halted for functions no process drives.
+/// starts with and nothing recorded, and landing where its own domain maps
+/// it; the other's two, under a StreamID no function is routed from inside
+/// the stream table, refused, recorded as no function's, and the machine
+/// going on; and the first's again once its domain takes that address back,
+/// refused, recorded as the kernel's, and the machine halted on it. Each
+/// record taken on the wired SPI and named. Read to the halt path's own line
+/// past the stop, so nothing the guest could still say is missed.
 fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
-    const FAULT: &str = "iommu: DMA FAULT owner=kernel";
+    const FAULT: &str = "iommu: DMA FAULT owner=";
+    const WENT_ON: &str = "smmu-selftest: the unrouted function's two events were read, and the machine goes on";
+    // `panic_reboot::arm`'s line, which `halt_all_cpus` writes once every
+    // other CPU is stopped: one of its two heads.
+    let halted = |l: &str| l.contains("panic: rebooting") || l.contains("panic: holding this panel");
     let options = BootOptions {
         profile,
         kernel_params: &["smmu-selftest"],
@@ -2061,10 +2067,18 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
         }
     }
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(FAULT) && l.contains(" unitfaults=2 "));
+    let rest = qemu.drain_until(Duration::from_secs(30), halted);
     let serial = format!("{}\n{rest}", qemu.boot_log());
-    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
+    let lines: Vec<&str> = serial.lines().collect();
+    let at = |want: &str| lines.iter().position(|l| l.contains(want));
+    let line = |want: &str| at(want).map(|i| lines[i].to_string());
     let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    if let Some(failed) = line("smmu-selftest: FAIL") {
+        return Err(format!("{failed}\nserial:\n{serial}"));
+    }
+    let Some(stop) = lines.iter().position(|l| halted(l)) else {
+        return Err(format!("the machine never reached the halt path's line past the stop\nserial:\n{serial}"));
+    };
     let Some(armed) = line("armed, CR0ACK") else {
         return Err(format!("the SMMUv3 was never armed\nserial:\n{serial}"));
     };
@@ -2098,8 +2112,9 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     for (said, verdict) in [
         ("on the entry its stream starts with", "refused"),
         ("mapped to", "landed there"),
+        ("'s write 1 at ", "refused"),
+        ("'s write 2 at ", "refused"),
         ("which its domain no longer maps", "refused"),
-        ("under no route", "refused"),
     ] {
         let Some(found) = line(said) else {
             return Err(format!("the selftest never said {said:?}\nserial:\n{serial}"));
@@ -2113,27 +2128,48 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
         return Err(format!("the selftest never wrote where its domain took a mapping back\nserial:\n{serial}"));
     };
     let aimed = again.split_once("smmu-selftest: ").and_then(|(_, said)| said.split_once("'s write at "));
-    let Some((function, Some(at))) = aimed.map(|(function, rest)| (function, rest.split(' ').next().and_then(hex)))
+    let Some((function, Some(address))) =
+        aimed.map(|(function, rest)| (function, rest.split(' ').next().and_then(hex)))
     else {
         return Err(format!("{again:?} names no function and address"));
     };
-    let faults: Vec<&str> = serial.lines().filter(|l| l.contains(FAULT)).collect();
-    for fault in &faults {
-        eprintln!("  [virt] {fault}");
+    let faults: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(FAULT)).collect();
+    for &fault in &faults {
+        eprintln!("  [virt] {}", lines[fault]);
     }
-    // The unit's first and second events, so the write on the entry its
-    // stream starts with was not recorded.
+    // The unit's first three events, so the write on the entry its stream
+    // starts with was not recorded.
     let wants = [
-        (format!("stream={function} addr={at:#018x} access=write"), " unitfaults=1 ", "F_TRANSLATION"),
-        (format!("stream={stream:#x} "), " unitfaults=2 ", "C_BAD_STE"),
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=1 ", "C_BAD_STE"),
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=2 ", "C_BAD_STE"),
+        (
+            format!("owner=kernel unit0 stream={function} addr={address:#018x} access=write"),
+            " unitfaults=3 ",
+            "F_TRANSLATION",
+        ),
     ];
     if faults.len() != wants.len() {
         return Err(format!("{} events reached the handler, not {}\nserial:\n{serial}", faults.len(), wants.len()));
     }
-    for (fault, (named, count, name)) in faults.iter().zip(&wants) {
+    for (&fault, (named, count, name)) in faults.iter().zip(&wants) {
+        let fault = lines[fault];
         if !fault.contains(named.as_str()) || !fault.contains(count) || !fault.ends_with(name) {
             return Err(format!("the event does not name {named:?},{count}and {name}: {fault}"));
         }
+    }
+    // The machine went on past the unrouted records and stopped at the
+    // kernel's: the selftest's line between them, and the stop after the last.
+    let went_on = at(WENT_ON).ok_or_else(|| format!("the selftest never said {WENT_ON:?}\nserial:\n{serial}"))?;
+    if !(faults[1] < went_on && went_on < faults[2] && faults[2] < stop) {
+        return Err(format!(
+            "the unrouted records, the selftest going on, the kernel's record and the stop are out of order: \
+             lines {}, {went_on}, {} and {stop}\nserial:\n{serial}",
+            faults[1], faults[2]
+        ));
+    }
+    // A halt, which writes the record and the stop's line and no panic.
+    if let Some(death) = lines.iter().find(|l| serial::died(l).is_some() && !l.contains("owner=kernel")) {
+        return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
     }
     Ok(())
 }

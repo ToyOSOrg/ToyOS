@@ -6,9 +6,12 @@
 //! is atomics. What a record ends is `crate::iommu::fault`'s, the policy every
 //! backend applies; this reads the queue into it.
 //!
-//! The unit pulses its interrupt only as the queue goes from empty to
-//! non-empty (IHI 0070 H.a §3.18.2), so a drain ends only on a queue it read
-//! empty: a record left behind raises nothing.
+//! One interrupt reads at most a queue's worth of records, so a device that
+//! never stops writing, which nothing here can stop when no enumerated
+//! function is behind its stream, cannot hold the CPU. The unit pulses its
+//! interrupt only as the queue goes from empty to non-empty (IHI 0070 H.a
+//! §3.18.2), so a record left behind raises nothing: a drain that stops short
+//! of empty pends the interrupt again itself.
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
@@ -64,7 +67,10 @@ pub fn service() {
     let mut kernel_owned = 0usize;
     let mut cons = regs.read(reg::EVENTQ_CONS);
     let mut prod = regs.read(reg::EVENTQ_PROD);
-    while !events.is_empty(prod, cons) {
+    for _ in 0..events.entries() {
+        if events.is_empty(prod, cons) {
+            break;
+        }
         if events.overflowed(prod, cons) {
             log!("iommu: the SMMUv3's event queue overflowed: earlier events are lost");
         }
@@ -85,6 +91,9 @@ pub fn service() {
         cons = events.after(cons, prod);
         regs.write(reg::EVENTQ_CONS, cons);
         prod = regs.read(reg::EVENTQ_PROD);
+    }
+    if !events.is_empty(prod, cons) {
+        super::super::irqchip::pend_iommu_events();
     }
     let errors = reg::active_errors(regs.read(reg::GERROR), regs.read(reg::GERRORN));
     if errors & reg::GERROR_EVENTQ_ABORT != 0 {

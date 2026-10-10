@@ -6,17 +6,20 @@
 //!    with nothing recorded;
 //! 2. on a domain of its own, it writes at an address the domain maps, and
 //!    lands at the memory mapped there and nowhere else;
-//! 3. once the domain takes that address back, it writes there again, and is
-//!    refused and recorded;
-//! 4. the other, which [`super::init`] gives no route, as it gives none to a
-//!    function it never enumerated, writes under a StreamID inside the stream
-//!    table, and is refused and recorded.
+//! 3. the other, which [`super::init`] gives no route, as it gives none to a
+//!    function it never enumerated, writes twice under a StreamID inside the
+//!    stream table, and is refused and recorded twice, and the machine goes
+//!    on;
+//! 4. once the domain takes its address back, the first writes there again,
+//!    and is refused and recorded, and the machine halts: the function is
+//!    one this kernel drives.
 //!
-//! The last two are made with this CPU's interrupts masked, so one drain reads
-//! both: the event interrupt reaches the handler, which names each and, their
-//! functions being no process's, halts the machine. Each step says what it
-//! saw on its own line; the harness judges them, and the records by the
-//! handler's, whose count says the first step recorded nothing.
+//! The writes of 3, and the write of 4, are each made with this CPU's
+//! interrupts masked, so one drain reads both of 3's and 4's verdict is on
+//! the console before its event is taken, on this CPU, which the event SPI is
+//! routed to. Each step says what it saw on its own line; the harness judges
+//! them, and the records by the handler's, whose count says the first step
+//! recorded nothing.
 
 use crate::drivers::pci::PciDevice;
 use crate::iommu::OwnSpace;
@@ -46,7 +49,8 @@ const BAR_BYTES: u64 = 0x1000;
 const LANDED: u32 = 0;
 const REFUSED: u32 = 0xdead_0002;
 
-/// How long the two events are given to reach this CPU once it unmasks.
+/// How long a refused write's events are given to reach this CPU once it
+/// unmasks.
 const EVENT_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
     "the unit records each event and pulses its interrupt while the refused write is still being made",
@@ -119,26 +123,40 @@ pub(super) fn run(devices: &[PciDevice]) {
 
     let before = super::fault::recorded();
     let masked = crate::arch::IrqGuard::close();
+    let stray_wrote = [write(stray_regs, phys, phys), write(stray_regs, phys, phys)];
+    for (i, answer) in stray_wrote.into_iter().enumerate() {
+        log!(
+            "smmu-selftest: {unrouted}'s write {} at {phys:#x}, under no route, answered {answer:#x}: {}",
+            i + 1,
+            verdict(answer, REFUSED)
+        );
+    }
+    drop(masked);
+    events_reach_this_cpu(before + 2, "the unrouted function's two refused writes");
+    log!("smmu-selftest: the unrouted function's two events were read, and the machine goes on");
+
+    let masked = crate::arch::IrqGuard::close();
     let taken_back = write(regs, at + 0x40, phys + 0x40);
-    let stray_wrote = write(stray_regs, phys, phys);
     log!(
         "smmu-selftest: {function}'s write at {:#x} again, which its domain no longer maps, answered {taken_back:#x}: {}",
         at + 0x40,
         verdict(taken_back, REFUSED)
     );
-    log!(
-        "smmu-selftest: {unrouted}'s write at {phys:#x}, under no route, answered {stray_wrote:#x}: {}",
-        verdict(stray_wrote, REFUSED)
-    );
     drop(masked);
+    events_reach_this_cpu(before + 3, "the kernel-driven function's refused write");
+    panic!("smmu-selftest: FAIL: the handler read the event of a function this kernel drives and the machine went on");
+}
+
+/// Spin until the handler has read `want` events in all, which `what` made;
+/// `FAIL` past [`EVENT_TIMEOUT`].
+fn events_reach_this_cpu(want: u32, what: &str) {
     let deadline = crate::clock::nanos_since_boot() + EVENT_TIMEOUT.nanos();
-    while super::fault::recorded() < before + 2 {
+    while super::fault::recorded() < want {
         assert!(
             crate::clock::nanos_since_boot() < deadline,
-            "smmu-selftest: FAIL: {} of the two refused writes' events reached this CPU within {EVENT_TIMEOUT}",
-            super::fault::recorded() - before
+            "smmu-selftest: FAIL: the handler had read {} events, not {want}, {EVENT_TIMEOUT} after {what}",
+            super::fault::recorded()
         );
         core::hint::spin_loop();
     }
-    panic!("smmu-selftest: FAIL: the handler read the events of functions no process drives and the machine went on");
 }

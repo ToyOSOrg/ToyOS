@@ -119,8 +119,8 @@ pub fn service() {
     crate::arch::apic::eoi();
 }
 
-/// Records drained, of which the answer counts only the ones on a stream this
-/// kernel drives — the ones with nobody to hand the fault to.
+/// Records drained, of which the answer counts only the ones on an enumerated
+/// function this kernel drives — the ones the machine halts on.
 fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     let status = regs.read_u32(FSTS_REG);
     if status & FSTS_OVERFLOW != 0 {
@@ -151,9 +151,9 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
             reason,
             name: reason_name(reason),
         };
-        let unowned = policy::report(index, &UNITS[index].faults, fault);
+        let halts = policy::report(index, &UNITS[index].faults, fault);
         clear_record(regs, record);
-        if unowned {
+        if halts {
             seen += 1;
         }
     }

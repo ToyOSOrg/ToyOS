@@ -74,6 +74,11 @@ const OVERFLOW: u32 = 1 << 31;
 pub struct Events(pub(crate) Indexes);
 
 impl Events {
+    /// The records a full queue holds.
+    pub const fn entries(self) -> u32 {
+        1 << self.0.log2size
+    }
+
     /// The entry the next record is read from.
     pub const fn slot(self, cons: u32) -> usize {
         self.0.slot(cons)

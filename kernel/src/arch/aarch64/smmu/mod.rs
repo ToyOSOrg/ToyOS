@@ -11,8 +11,8 @@
 //! mastering the bus until its driver resets it. **Every stream no
 //! enumerated function is routed from has one answer**, inside the stream
 //! table or past it: it aborts and is recorded — `C_BAD_STE` on an entry left
-//! invalid, `C_BAD_STREAMID` under `CR2.RECINVSID` — and, nobody driving it,
-//! halts the machine, as an unenumerated requester does on VT-d. A unit this
+//! invalid, `C_BAD_STREAMID` under `CR2.RECINVSID` — and the machine goes on,
+//! as it does for an unenumerated requester on VT-d. A unit this
 //! kernel cannot program, and every unit of a machine whose IORT names more
 //! than one, is left aborting every transaction, and no domain is given.
 //!

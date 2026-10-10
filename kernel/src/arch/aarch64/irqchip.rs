@@ -72,6 +72,7 @@ const GICD_TYPER: u64 = 0x0004;
 const GICD_IGROUPR: u64 = 0x0080;
 const GICD_ISENABLER: u64 = 0x0100;
 const GICD_ICENABLER: u64 = 0x0180;
+const GICD_ISPENDR: u64 = 0x0200;
 const GICD_ICPENDR: u64 = 0x0280;
 const GICD_IPRIORITYR: u64 = 0x0400;
 const GICD_ICFGR: u64 = 0x0C00;
@@ -323,6 +324,15 @@ pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
     IOMMU_EVENTS.store(intid, Relaxed);
     gicd.write_u32(GICD_ISENABLER + word, bit);
     Ok(())
+}
+
+/// Pend the IOMMU's event SPI again, for records its handler left behind: the
+/// unit raises none for them. Taken once the handler's `end` deactivates it.
+pub(super) fn pend_iommu_events() {
+    let intid = IOMMU_EVENTS.load(Relaxed);
+    assert!(intid != 0, "GIC: the IOMMU's event SPI is pended before it is routed");
+    let gicd = Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME);
+    gicd.write_u32(GICD_ISPENDR + u64::from(intid / 32) * 4, 1 << (intid % 32));
 }
 
 /// The IOMMU's event SPI, or zero where [`route_iommu_events`] routed none.

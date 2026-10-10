@@ -9,13 +9,17 @@
 //! ceiling on a storm, since a function that cannot master the bus cannot
 //! raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`).
 //!
-//! **What differs is who the fault is handed to.** A stream every driver of
-//! which is in this kernel has nobody, so the terminal action is a halt — the
-//! last thing that happens rather than the first. A stream a process drives has
-//! an owner: `pcidev` is told, that claim refuses every later call, and the
+//! **What differs is who the fault is handed to.** An enumerated function
+//! every driver of which is in this kernel has nobody, and its fault is a
+//! defect of this kernel, so the terminal action is a halt — the last thing
+//! that happens rather than the first. A function a process drives has an
+//! owner: `pcidev` is told, that claim refuses every later call, and the
 //! machine goes on, because one process's bug taking the machine down is the
-//! thing moving a driver out of the kernel was for.
-
+//! thing moving a driver out of the kernel was for. A record that names no
+//! enumerated function is a device's input this kernel never took on: the
+//! unit has already refused it, so it is counted and logged and the machine
+//! goes on. Nothing here can clear such a requester's `BME`, so a backend
+//! bounds what it reads per interrupt by itself, never by the device.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -171,8 +175,8 @@ pub struct Fault {
 
 /// `fault`, read off unit `unit`, whose count of reported faults is `count`:
 /// its function stopped, it is handed to whoever drives that function, and
-/// its line written. `true` where that is nobody, which the drain ends on
-/// with [`conclude`].
+/// its line written. `true` only for an enumerated function this kernel
+/// drives, which the drain ends on with [`conclude`].
 pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
     let function = find(fault.who);
     // First, before anything that can be slow or say no: a function that
@@ -185,23 +189,24 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
     let key = fault.who.key();
     let _ = FIRST.compare_exchange(u64::MAX, key, Ordering::AcqRel, Ordering::Relaxed);
     // Before the line, so `owner=` in it is what was actually told.
-    let owner = function.and_then(|f| match f.user_slot.load(Ordering::Acquire) {
-        NO_SLOT => None,
-        slot => Some(slot as usize),
-    });
-    if let Some(slot) = owner {
+    let owner = match function.map(|f| f.user_slot.load(Ordering::Acquire)) {
+        None => Owner::Nobody,
+        Some(NO_SLOT) => Owner::Kernel,
+        Some(slot) => Owner::Slot(slot as usize),
+    };
+    if let Owner::Slot(slot) = owner {
         crate::pcidev::note_fault(slot);
     }
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
     log!(
         // `owner=` first, because it is the only field that decides whether
         // this machine is still running: `tests/common/serial.rs` reads
-        // `iommu: DMA FAULT owner=kernel` as a death and the other form as
-        // a record. The reason's name is the last word: every gate takes it
+        // `iommu: DMA FAULT owner=kernel` as a death and the other forms as
+        // records. The reason's name is the last word: every gate takes it
         // from there.
         "iommu: DMA FAULT owner={} unit{unit} stream={} addr={:#018x} access={} reason={:#04x} \
          domain={} bme={} unitfaults={count} streamfaults={seen_here} first={} {}",
-        Owner(owner),
+        owner,
         fault.who,
         fault.address,
         fault.access,
@@ -211,11 +216,11 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
         if FIRST.load(Ordering::Relaxed) == key { 'y' } else { 'n' },
         fault.name,
     );
-    owner.is_none()
+    matches!(owner, Owner::Kernel)
 }
 
-/// The end of a drain that read `kernel_owned` faults nobody owns: any at all
-/// halts the machine.
+/// The end of a drain that read `kernel_owned` faults on functions this kernel
+/// drives: any at all halts the machine.
 ///
 /// The halt is the whole response and there is no recovery missing from it: a
 /// faulting device reached an address this kernel never gave it, and nothing
@@ -223,10 +228,11 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
 /// — a report of one carries the fault record and `panic_reboot`'s arm line,
 /// and no `panicked at` line; `capture` puts the fault on the panel first.
 ///
-/// **Only for a stream this kernel drives.** A function a process drives has
+/// **Only for a function this kernel drives.** A function a process drives has
 /// an owner to refuse: its bus mastering is already gone by the time this is
 /// reached, its claim answers every later call `Io`, and the machine — whose
-/// other drivers are untouched — goes on.
+/// other drivers are untouched — goes on. A requester nobody enumerated has
+/// no driver here to be wrong, and the unit already refused what it sent.
 pub fn conclude(kernel_owned: usize) {
     if kernel_owned > 0 {
         crate::drivers::panic_console::capture();
@@ -243,14 +249,23 @@ fn config_window(phys: u64) -> Mmio {
 }
 
 /// Who a fault was handed to, in the line. A word rather than a number, because
-/// which of the two it is decides whether this machine is still running.
-struct Owner(Option<usize>);
+/// which of them it is decides whether this machine is still running.
+#[derive(Clone, Copy)]
+enum Owner {
+    /// An enumerated function only this kernel drives: the halt.
+    Kernel,
+    /// An enumerated function the process on this `pcidev` slot drives.
+    Slot(usize),
+    /// No enumerated function: a requester this kernel never took on.
+    Nobody,
+}
 
 impl core::fmt::Display for Owner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.0 {
-            None => write!(f, "kernel"),
-            Some(slot) => write!(f, "slot{slot}"),
+        match self {
+            Self::Kernel => write!(f, "kernel"),
+            Self::Slot(slot) => write!(f, "slot{slot}"),
+            Self::Nobody => write!(f, "none"),
         }
     }
 }
