@@ -799,7 +799,18 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
-    let remapping = crate::iommu::remapping().map_err(|_| Refusal::NotRemapped)?;
+    // YOGA WIFI HACK (measurement image only, never lands): the Intel AX200
+    // alone is handed over on a machine whose unit neither remaps nor
+    // translates, with a direct message and physical device addresses.
+    let yoga_wifi = id.vendor == 0x8086 && id.device == 0x2723;
+    let remapping = match crate::iommu::remapping() {
+        Ok(remapping) => Some(remapping),
+        Err(_) if yoga_wifi => {
+            log!("pcidev: YOGA WIFI HACK: 8086:2723 handed over unremapped and untranslated");
+            None
+        }
+        Err(_) => return Err(Refusal::NotRemapped),
+    };
 
     // What the slot's previous holder left mapped goes before anything attaches
     // to its domain, and whatever is left of a reset [`release`] started on this
@@ -814,7 +825,13 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // descriptors. It is asked for here rather than after the BARs because a
     // refusal that had already armed a vector and moved a function's BARs would
     // leave the machine changed by a hand-over that did not happen.
-    let Space { space, lend } = slot_space(slot).map_err(Refusal::Untranslated)?;
+    let Space { space, lend } = match remapping {
+        Some(_) => slot_space(slot).map_err(Refusal::Untranslated)?,
+        None => {
+            let (space, lend) = OwnSpace::untranslated_hack();
+            Space { space, lend }
+        }
+    };
 
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
@@ -826,7 +843,10 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // mechanism can be armed on is one no holder could ever be told anything
     // about. Every refusal from here drops `message`, which puts the slot's
     // entry back to not present.
-    let message = crate::iommu::claim_msi(remapping, slot, &pci, VECTORS[slot]);
+    let message = match remapping {
+        Some(remapping) => crate::iommu::claim_msi(remapping, slot, &pci, VECTORS[slot]),
+        None => crate::iommu::direct_msi_hack(&pci, VECTORS[slot]).ok_or(Refusal::NoInterrupt)?,
+    };
     let armed = match arm_claimed_msix(&message) {
         Ok(entry) => Armed::Msix(entry, message),
         Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
@@ -1651,6 +1671,9 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     let slot = binding.slot;
     with_bound(binding, |bound| {
+        if bound.space.is_untranslated_hack() {
+            return Err(SyscallError::InvalidArgument);
+        }
         let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the

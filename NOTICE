@@ -428,6 +428,21 @@ toyos-microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
 
 
+assets/firmware/iwlwifi-cc-a0-77.ucode — Intel AX200 Wi-Fi firmware (YOGA WIFI HACK)
+-------------------------------------------------------------------------------
+
+    1,368,100 bytes, firmware API 77, build 77.563a6e92.0
+      sha256 1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `intel/iwlwifi/iwlwifi-cc-a0-77.ucode`, byte for byte
+    Licence text: licenses/LICENCE.iwlwifi_firmware.txt (upstream's
+    `LICENSES/LICENCE.iwlwifi_firmware`,
+    sha256 16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5)
+    SPDX-License-Identifier: LicenseRef-LICENCE.iwlwifi_firmware
+
+Shipped only in the measurement image for the borrowed AMD laptop; loaded by
+netstack into the AX200 over DMA and executed on the card, never the CPU.
+
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 ----------------------------------------------------
 

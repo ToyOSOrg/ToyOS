@@ -84,7 +84,7 @@ syscap = ["rt"]
 [programs.netstack]
 service = true
 serves = ["netstack"]
-devices = ["pci:1af4:1041"]
+devices = ["pci:8086:2723", "pci:1af4:1041"]
 
 # Every launch it makes is in a login session, the one `update` and `swap`
 # below start in: one it opens when it runs in the machine's session, and the
@@ -176,7 +176,7 @@ receives = ["compositor", "filepicker"]
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
 [programs.toybox]
-receives = ["compositor", "soundserver", "surface", "power"]
+receives = ["compositor", "soundserver", "surface", "power", "netstack"]
 syscap = ["roster"]
 starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
 
@@ -203,6 +203,7 @@ starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "pai
 "bin/spin" = "/system/bin/toybox"
 "bin/stats" = "/system/bin/toybox"
 "bin/tone" = "/system/bin/toybox"
+"bin/wifi" = "/system/bin/toybox"
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes

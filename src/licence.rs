@@ -212,6 +212,13 @@ pub const EXCEPTIONS: &[Exception] = &[
          where the samples came from (NOTICE); doom alone opens it, and it leaves with doom",
     ),
     Exception {
+        subject: Subject::File("assets/firmware/iwlwifi-cc-a0-77.ucode"),
+        licence: "LicenseRef-LICENCE.iwlwifi_firmware",
+        standing: Standing::PendingOwner(DOOM_LEAVES),
+        reason: "YOGA WIFI HACK, measurement image only: Intel AX200 firmware, redistributable \
+         unmodified (NOTICE); never lands",
+    },
+    Exception {
         subject: Subject::Crate("windows-sys"),
         licence: "",
         standing: Standing::OnlyUnder("cfg(target_os = \"windows\")"),
@@ -555,6 +562,13 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
         Terms::Spdx("LicenseRef-Intel-Microcode"),
+    ),
+    // YOGA WIFI HACK (measurement image only): the AX200 firmware, unmodified.
+    (
+        "assets/firmware/iwlwifi-cc-a0-77.ucode",
+        "1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-LICENCE.iwlwifi_firmware"),
     ),
 ];
 

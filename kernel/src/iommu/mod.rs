@@ -203,7 +203,7 @@ impl DeviceSpace {
     /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         if let Self::Own(id) = self {
-            OwnSpace(id).attach(bus, device, function);
+            OwnSpace(Some(id)).attach(bus, device, function);
         }
     }
 }
@@ -212,42 +212,67 @@ impl DeviceSpace {
 /// untranslated form, so nothing holding one can hand that process a physical
 /// address to write into a descriptor.
 #[derive(Clone, Copy)]
-pub struct OwnSpace(DomainId);
+pub struct OwnSpace(Option<DomainId>);
 
 impl OwnSpace {
     /// One with `room` bytes of it handed out at the address answered, or the
     /// reason there is none: a machine with no unit and a machine out of
     /// domains are both refusals.
     pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
-        unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
+        unit::domain::create(room).map(|(id, at)| (Self(Some(id)), at.raw()))
+    }
+
+    /// YOGA WIFI HACK (measurement image only, never lands): no unit, so a
+    /// device address is the physical address. Only `pcidev` hands this out,
+    /// and only for 8086:2723.
+    pub fn untranslated_hack() -> (Self, u64) {
+        (Self(None), 0)
+    }
+
+    pub fn is_untranslated_hack(self) -> bool {
+        self.0.is_none()
     }
 
     /// [`DeviceSpace::map`].
     pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
-        unit::domain::map(self.0, phys, bytes).map(Iova::raw)
+        match self.0 {
+            Some(id) => unit::domain::map(id, phys, bytes).map(Iova::raw),
+            None => Ok(phys),
+        }
     }
 
     /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
     /// from a mapping this space took back.
     pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::map_at(self.0, Iova::translated(at), phys, bytes)
+        match self.0 {
+            Some(id) => unit::domain::map_at(id, Iova::translated(at), phys, bytes),
+            None => Ok(()),
+        }
     }
 
     /// Put `bytes` at `phys` at `at`, inside room [`Self::create`] handed out,
     /// and write no record of it: for a mapping its holder makes and takes back
     /// as often as it likes.
     pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::place(self.0, Iova::translated(at), phys, bytes).map(|_| ())
+        match self.0 {
+            Some(id) => unit::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
+            None => Err(IommuError::NotMapped(Iova::translated(at))),
+        }
     }
 
     /// [`DeviceSpace::unmap`].
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::unmap(self.0, Iova::translated(at), bytes)
+        match self.0 {
+            Some(id) => unit::domain::unmap(id, Iova::translated(at), bytes),
+            None => Ok(()),
+        }
     }
 
     /// [`DeviceSpace::attach`].
     pub fn attach(self, bus: u8, device: u8, function: u8) {
-        unit::domain::attach(StreamId::pci(bus, device, function), self.0);
+        if let Some(id) = self.0 {
+            unit::domain::attach(StreamId::pci(bus, device, function), id);
+        }
     }
 }
 
@@ -349,7 +374,7 @@ pub fn remapping() -> Result<Remapping, NotRemapped> {
 /// entry back to not present, so no refusal after it is written leaves the
 /// function an entry it can reach.
 pub struct Remapped {
-    slot: usize,
+    slot: Option<usize>,
     function: crate::drivers::pci::PciDevice,
     address: u32,
     data: u32,
@@ -375,7 +400,9 @@ impl Remapped {
 
 impl Drop for Remapped {
     fn drop(&mut self) {
-        unit::interrupt::release(self.slot, self.stream());
+        if let Some(slot) = self.slot {
+            unit::interrupt::release(slot, self.stream());
+        }
     }
 }
 
@@ -388,7 +415,14 @@ pub fn claim_msi(
 ) -> Remapped {
     let stream = StreamId::pci(function.bus, function.dev, function.func);
     let msi = unit::interrupt::claim(slot, stream, vector);
-    Remapped { slot, function: *function, address: msi.address, data: msi.data }
+    Remapped { slot: Some(slot), function: *function, address: msi.address, data: msi.data }
+}
+
+/// YOGA WIFI HACK (measurement image only, never lands): a compatibility-format
+/// message for a claimed function on a machine whose unit does not remap.
+pub fn direct_msi_hack(function: &crate::drivers::pci::PciDevice, vector: u8) -> Option<Remapped> {
+    let (address, data) = crate::arch::msi_message(crate::drivers::pci::MSG_DEST, vector).ok()?;
+    Some(Remapped { slot: None, function: *function, address, data })
 }
 
 /// Where a kernel driver's `bus:device.function`'s message-signalled interrupt
