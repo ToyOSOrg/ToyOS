@@ -137,7 +137,7 @@ impl Listed {
 pub struct Grant {
     pub scope: Scope,
     /// A session it opens takes writes; one that does not answers every
-    /// write `Invalid`, unissued.
+    /// write `ReadOnly`, unissued.
     pub writes: bool,
 }
 

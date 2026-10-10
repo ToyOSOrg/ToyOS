@@ -100,11 +100,11 @@ fn main() {
     // The bytes it holds: a write let through changes nothing.
     assert_eq!(
         volume.write(0, &first),
-        Ok(Outcome::Invalid),
+        Ok(Outcome::ReadOnly),
         "a session whose grant does not write wrote the boot volume"
     );
     drop(volume);
-    println!("partition_grant: the boot volume's read-only grant read it and was refused a write Invalid");
+    println!("partition_grant: the boot volume's read-only grant read it and was refused a write ReadOnly");
 
     assert_eq!(listed(&bare), Err(Error::Refused(Refusal::NotGranted)), "the port's own connector listed");
     assert_eq!(open(&bare, log).err(), Some(Error::Refused(Refusal::NotGranted)), "the port's own connector opened");

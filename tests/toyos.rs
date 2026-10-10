@@ -189,6 +189,14 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It claims the NVMe controller a boot off that disk starts no server
+    // for, and reads the inventory: `block_grants_reach_their_partitions`
+    // runs it on tests/blockgrantcase.
+    "partition_grant",
+    // It installs the image its machine test staged into a second slot on
+    // the disk diskserver drives: `update_writes_the_idle_slot_through_the_block_service`
+    // runs it on tests/slotscase.
+    "update_idle_slot",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -3659,7 +3667,7 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
 const GRANTS_SAID: [&str; 5] = [
     "partition_grant: the log's grant opened the log and was refused the boot volume NotGranted",
     "partition_grant: DATA's grant opened DATA and was refused the log NotGranted",
-    "partition_grant: the boot volume's read-only grant read it and was refused a write Invalid",
+    "partition_grant: the boot volume's read-only grant read it and was refused a write ReadOnly",
     "partition_grant: the port's own connector was refused a listing and an open NotGranted",
     "partition_grant: the running ROOT was refused Held to the grant naming it",
 ];
@@ -3673,7 +3681,7 @@ fn block_grants_reach_their_partitions() -> Result<(), String> {
     let case = compile::repo_root().join("tests/blockgrantcase");
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
-    let result = qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_partition_grant", Duration::from_secs(60));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -3696,12 +3704,14 @@ fn block_grants_reach_their_partitions() -> Result<(), String> {
 /// The update image `update_writes_the_idle_slot_through_the_block_service`
 /// stages: a ROOT of one file, signed with this run's key at a version past
 /// any a build signs; the ROOT's length, which the second slot is made to
-/// hold exactly, so the host mounts the partition whole; and its file.
+/// hold exactly, so the host mounts the partition whole; its file; and the
+/// three files the slot's FAT volume is to carry, each with its bytes.
 struct StagedUpdate {
     image: Vec<u8>,
     version: u64,
     root_bytes: u64,
     marker: Vec<u8>,
+    volume: [(&'static str, Vec<u8>); 3],
 }
 
 /// Where the staged ROOT's one file is, and the path the guest reads the
@@ -3716,15 +3726,24 @@ fn staged_update() -> StagedUpdate {
     // Past every version a build signs, which is its Unix time.
     let version = u64::from(u32::MAX) << 8;
     let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version };
-    let image = toyos_build::image::update_image(b"update test kernel", &root, "", signing);
-    StagedUpdate { image, version, root_bytes: root.len() as u64, marker }
+    let kernel = b"update test kernel";
+    let image = toyos_build::image::update_image(kernel, &root, "", signing);
+    // The image is the signed header, the kernel, the boot parameter and
+    // ROOT, end to end (`toyos_update::image`).
+    let signed = toyos_update::image::SIGNED_BYTES;
+    let volume = [
+        (toyos_update::slots::SIGNED_FILE, image[..signed].to_vec()),
+        (toyos_update::slots::KERNEL_FILE, kernel.to_vec()),
+        (toyos_update::slots::CMDLINE_FILE, image[signed + kernel.len()..image.len() - root.len()].to_vec()),
+    ];
+    StagedUpdate { image, version, root_bytes: root.len() as u64, marker, volume }
 }
 
 /// `update` on a machine booted off its NVMe disk: the supervisor reads the
 /// slot table through a session on diskserver and grants `update` the idle
 /// slot's partitions as connectors minted for each, and `update` writes the
-/// signed image there and marks it — read back off the disk by the host's own
-/// partition table and bcachefs readers, not by anything that wrote it.
+/// signed image there and marks it — read back off the disk by the host, and
+/// its FAT volume judged by toyos-fat32-check, which shares no code with it.
 fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String> {
     const JOB: &str = "update_idle_slot";
     let staged = staged_update();
@@ -3737,7 +3756,7 @@ fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String>
         ..Default::default()
     };
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
-    let result = qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(120));
+    let result = qemu.run_test("test_rs_update_idle_slot", Duration::from_secs(120));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -3762,6 +3781,27 @@ fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String>
         return Err(format!("slot B's ROOT carries {:?} at {UPDATE_MARKER}, and the update carried {:?}", String::from_utf8_lossy(&read_back), String::from_utf8_lossy(&staged.marker)));
     }
     eprintln!("  [update] the disk's slot table marks B at version {}, and B's ROOT mounts carrying the update's {UPDATE_MARKER}", staged.version);
+
+    use std::io::{Read as _, Seek as _};
+    // B's FAT volume: judged whole by the checker that is no part of the
+    // driver `update` wrote it with, then each file read back byte for byte.
+    let (at, len) = toyos_build::image::partition_extent(&mut disk, marked.boot)?;
+    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
+    disk.seek(std::io::SeekFrom::Start(at))
+        .and_then(|_| disk.read_exact(&mut volume))
+        .map_err(|e| format!("slot B's volume at byte {at}: {e}"))?;
+    let complaints = toyos_fat32_check::check(&volume);
+    if !complaints.is_empty() {
+        return Err(format!("toyos-fat32-check refuses slot B's volume:\n{}", toyos_fat32_check::describe(&complaints)));
+    }
+    for (name, staged) in &staged.volume {
+        let read = toyos_build::image::read_file_on(&mut disk, marked.boot, name)
+            .map_err(|why| format!("slot B's volume: {why}"))?;
+        if read != *staged {
+            return Err(format!("slot B's {name} is {} bytes that are not the {} the update carried", read.len(), staged.len()));
+        }
+    }
+    eprintln!("  [update] slot B's volume checks out, carrying the update's {} byte for byte", staged.volume.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
     Ok(())
 }
 

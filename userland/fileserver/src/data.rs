@@ -150,6 +150,7 @@ fn disk_word(e: DiskError) -> SyscallError {
     match e {
         DiskError::Device | DiskError::Range => SyscallError::Io,
         DiskError::Gone => SyscallError::Gone,
+        DiskError::ReadOnly => SyscallError::PermissionDenied,
     }
 }
 

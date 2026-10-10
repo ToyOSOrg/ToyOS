@@ -14,7 +14,7 @@ A claim carries `Rights::WRITE` and no `DUP` (`initial_rights`,
 narrowed to reading: the volume the loader reads the kernel from stays
 unwritten only by that server's promise to mount it read-only. On a disk the
 block service serves, the same server's grant does not write, and diskserver
-answers a write through it `Invalid` (`block_grants_reach_their_partitions`).
+answers a write through it `ReadOnly` (`block_grants_reach_their_partitions`).
 
 **Exit**: the boot volume's server on the boot stick holds a partition it
 cannot write — a read-only session once usbd serves the stick, or a claim the

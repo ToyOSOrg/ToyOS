@@ -1882,11 +1882,9 @@ fn claimed_slots(
             .map_err(|e| refused(&format!("the {what}"), e))
     };
     let table_claim = claim(table_part.unique_guid, "slot table")?;
-    let mut copies: [toyos_abi::part::Block; 2] = [[0; toyos_abi::part::BLOCK_BYTES]; 2];
-    toyos_abi::syscall::partition_read(table_claim.as_handle(), 0, &mut copies)
-        .map_err(|e| format!("the slot table would not read: {e:?}"))?;
-    let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
-        .map_err(|why| format!("the slot table's partition holds {why}"))?;
+    let (table, _) =
+        toyos_update::slots::read(|copies| toyos_abi::syscall::partition_read(table_claim.as_handle(), 0, copies))
+            .map_err(|why| why.to_string())?;
     let listed = |p: &Partition| toyos_update::slots::Listed {
         device: p.device,
         type_guid: p.type_guid,
@@ -1912,6 +1910,8 @@ const SLOT_KINDS: toyos_update::slots::Kinds =
 /// What the block service serves of the slots: the slot table, read through
 /// a session on `tables`, its unique GUID, and every partition `tables`,
 /// `boots` and `roots` list — each a connector minted for one type, read-only.
+/// Its session on the table ends when this returns, and diskserver reads
+/// that end before it judges `update`'s open of the same partition.
 ///
 /// **Made on the supervisor's file worker** ([`Supervisor::files`]): a call into a
 /// service the supervisor restarts, from its loop alone, would wait in the
@@ -1921,6 +1921,7 @@ fn served_slots(
     boots: Connector,
     roots: Connector,
 ) -> Result<(toyos_update::slots::Table, [u8; 16], Vec<toyos_update::slots::Listed>), String> {
+    use diskserver::disk::Disk as _;
     let names = |connector: &Connector| {
         namespace::build()
             .add(toyos_blockring::PORT, connector)
@@ -1935,17 +1936,11 @@ fn served_slots(
     let [table_part] = table_parts[..] else {
         return Err(format!("the block service serves {} slot tables, and a grant needs one", table_parts.len()));
     };
-    let mut session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
+    let session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
         .map_err(|why| format!("the slot table would not open: {why:?}"))?;
-    let read = session.read(0, toyos_update::slots::COPIES as u32);
-    let data = match read {
-        Ok((diskserver::Outcome::Done, Some(data))) => data,
-        other => return Err(format!("the slot table would not read: {other:?}")),
-    };
-    let (first, second) = data.split_at(toyos_update::slots::BLOCK);
-    let copies = [first, second].map(|copy| <&[u8; toyos_update::slots::BLOCK]>::try_from(copy).expect("one block each"));
+    let mut disk = diskserver::disk::Served::new(session);
     let (table, _) =
-        toyos_update::slots::current(copies).map_err(|why| format!("the slot table's partition holds {why}"))?;
+        toyos_update::slots::read(|copies| disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
     let mut listed = table_parts;
     listed.extend(list(&boots)?);
     listed.extend(list(&roots)?);

@@ -37,7 +37,7 @@ use diskserver::disk::{Claimed, Disk, Served, BLOCK};
 use toyos::endow::{self, Endowments};
 use toyos::PartitionDev;
 use toyos_update::image::{Header, HEADER_BYTES, SIGNED_BYTES};
-use toyos_update::slots::{self, Table, Which};
+use toyos_update::slots::{self, Which};
 use toyos_fat32::BlockAccess as _;
 use toyos_update::{policy, sig};
 
@@ -86,7 +86,8 @@ fn held(label: &str) -> Result<Held, String> {
 
 fn run(began: Instant) -> Result<String, String> {
     let (mut table_part, mut boot, mut root) = (held(slots::TABLE_LABEL)?, held(slots::BOOT_LABEL)?, held(slots::ROOT_LABEL)?);
-    let (table, current) = read_table(&mut *table_part.disk)?;
+    let (table, current) =
+        slots::read(|copies| table_part.disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
     let idle = [Which::A, Which::B]
         .into_iter()
         .find(|&w| table.slot(w).is_some_and(|s| s.boot == boot.unique && s.root == root.unique))
@@ -152,15 +153,6 @@ fn run(began: Instant) -> Result<String, String> {
         header.root().len,
         began.elapsed().as_millis()
     ))
-}
-
-/// The slot table and which copy of it is current.
-fn read_table(disk: &mut dyn Disk) -> Result<(Table, usize), String> {
-    let mut copies = [0u8; 2 * BLOCK];
-    disk.read(0, &mut copies).map_err(|e| format!("the slot table would not read: {e:?}"))?;
-    let (first, second) = copies.split_at(BLOCK);
-    let copies = [first, second].map(|copy| <&[u8; BLOCK]>::try_from(copy).expect("one block each"));
-    slots::current(copies).map_err(|why| format!("the slot table's partition holds {why}"))
 }
 
 /// Exactly `len` bytes of the input, held to `sha256`.

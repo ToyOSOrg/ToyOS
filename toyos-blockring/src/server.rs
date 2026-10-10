@@ -32,7 +32,7 @@ pub struct ServerSession {
     /// The span of the device this session holds, which is its writer.
     first: u64,
     /// Its grant lets it write; a write on a session whose grant does not is
-    /// answered `Invalid` and never reaches the device.
+    /// answered `ReadOnly` and never reaches the device.
     writes: bool,
     /// Each request in flight, in the order it was taken: a tag is only ever
     /// compared for equality.
@@ -77,10 +77,10 @@ impl ServerSession {
 
     /// Decide what one entry the client published is.
     ///
-    /// A malformed entry, a write its grant does not let it make, and a tag
-    /// already in flight, are answered at once and never reach the device:
-    /// the last would make one tag two requests, and the client could not
-    /// tell which answer was whose.
+    /// A malformed entry, a tag already in flight, and a write its grant does
+    /// not let it make, are answered at once and never reach the device: the
+    /// second would make one tag two requests, and the client could not tell
+    /// which answer was whose.
     pub fn take(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
@@ -88,11 +88,11 @@ impl ServerSession {
                 return Taken::Answer(Completion { tag, status: Status::Invalid })
             }
         };
-        if !self.writes && matches!(request.op, Op::Write { .. }) {
-            return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
-        }
         if self.inflight.iter().any(|&(tag, _)| tag == request.tag) {
             return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
+        }
+        if !self.writes && matches!(request.op, Op::Write { .. }) {
+            return Taken::Answer(Completion { tag: request.tag, status: Status::ReadOnly });
         }
         self.inflight.push((request.tag, request.op));
         Taken::Issue(request)
@@ -193,12 +193,12 @@ mod tests {
         assert_eq!(session.complete(3, true, &mut holds, 1).unwrap().status, Status::Ok);
     }
 
-    /// A session whose grant does not write answers a write `Invalid` and
+    /// A session whose grant does not write answers a write `ReadOnly` and
     /// holds nothing for the device, and still reads and flushes.
     #[test]
     fn a_read_only_session_refuses_a_write_unissued() {
         let mut session = ServerSession::new(0, 10, false);
-        assert_eq!(session.take(write(1)), Taken::Answer(Completion { tag: 1, status: Status::Invalid }));
+        assert_eq!(session.take(write(1)), Taken::Answer(Completion { tag: 1, status: Status::ReadOnly }));
         assert_eq!(session.inflight().len(), 0);
         let read = Request { op: Op::Read { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag: 2 };
         assert!(matches!(session.take(read.encode().map(Untrusted::new)), Taken::Issue(_)));

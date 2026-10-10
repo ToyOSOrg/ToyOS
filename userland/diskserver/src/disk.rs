@@ -30,6 +30,8 @@ pub enum DiskError {
     Gone,
     /// Past the end of the partition.
     Range,
+    /// A write the block service's grant to this holder does not make.
+    ReadOnly,
 }
 
 /// A partition, a block at a time or several.
@@ -168,14 +170,15 @@ impl Disk for Served {
         let per = MAX_REQUEST_BLOCKS as usize;
         for (i, chunk) in data.chunks(BLOCK * per).enumerate() {
             let at = first + (i * per) as u64;
-            match self.asked(|s| s.write(at, chunk))? {
+            let mut outcome = self.asked(|s| s.write(at, chunk))?;
+            // On the wire when the session ended: the write names its whole
+            // destination, so it is written again rather than guessed at.
+            if outcome == Outcome::Refused {
+                outcome = self.asked(|s| s.write(at, chunk))?;
+            }
+            match outcome {
                 Outcome::Done => {}
-                // On the wire when the session ended: the write names its whole
-                // destination, so it is written again rather than guessed at.
-                Outcome::Refused => match self.asked(|s| s.write(at, chunk))? {
-                    Outcome::Done => {}
-                    _ => return Err(DiskError::Device),
-                },
+                Outcome::ReadOnly => return Err(DiskError::ReadOnly),
                 _ => return Err(DiskError::Device),
             }
         }
