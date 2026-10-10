@@ -136,6 +136,22 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
+Three in one run, `wt/toyos-nohotkey` at `22b7bb464`, the whole suite, 41 of
+44: `virt_smp` (`waiting for the job test_rs_counters_read to end`),
+`virt_mask_windows` and `virt_off_names_the_cpus_left_on` (each `waiting for
+the boot's last word`), all three verdicts within 4 s of the host's clock.
+Load 54.08 60.22 55.97 when the suite began and 71.66 62.30 57.69 when it
+ended, 14 cores; fastest boot 716 ms against the reference 1424 ms, ceilings
+at 1.00x; workers 1309 s building against 1181 s testing. `virt_smp`'s last
+three lines are this file's profile: `===TEST_END unmap_touch exit=0===` and
+`===TEST_START test_rs_counters_read===` at 11.606 and 11.607, the spawn of
+`pid=13` at 11.616 on cpu4. The other two said nothing while they were waited
+on, so the step each stopped in is not read; `virt_off_names_the_cpus_left_on`
+is also one of `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`'s
+waits. The branch removes the blocked-task dump from `drain_irqs`, which every
+pass runs. The three alone at that commit passed (load 56.98 to 54.99). Not
+known: whether the guests ran; no register capture was taken.
+
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
 `src/miscompile.rs` now refuses a sysroot for) is not their cause.
 `tests/virtsmpcase`'s image was built and `virt_el1_smp` run by the compiler
