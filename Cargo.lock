@@ -5253,6 +5253,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "supervisor"
 version = "0.1.0"
 dependencies = [
+ "diskserver",
  "toyos",
  "toyos-abi",
  "toyos-blockring",
@@ -6271,8 +6272,8 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "update"
 version = "0.1.0"
 dependencies = [
+ "diskserver",
  "toyos",
- "toyos-abi",
  "toyos-fat32",
  "toyos-sha2-hw",
  "toyos-update",

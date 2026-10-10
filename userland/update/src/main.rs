@@ -7,9 +7,12 @@
 //! signature over them is the whole of its authority to install anything.
 //!
 //! **What it holds is the whole of what it can write** (`slots` in its
-//! `system.toml` row): the supervisor claims the slot table's partition and the idle
-//! slot's FAT volume and ROOT and endows them, and the slot this boot runs is
-//! never among them (`toyos_update::slots::idle`). So it writes, in order:
+//! `system.toml` row): the slot table's partition and the idle slot's FAT
+//! volume and ROOT, as claims the supervisor endows under their labels on a
+//! disk the kernel drives, or as connectors in its namespace under the same
+//! names, each minted for its one partition on the block service's port; the
+//! slot this boot runs is never among them (`toyos_update::slots::idle`). So
+//! it writes, in order:
 //!
 //! 1. nothing, until the signed header's signature is this machine's key's and
 //!    its version is newer than the running image and no older than the idle
@@ -18,7 +21,7 @@
 //!    the header's hash once whole;
 //! 3. the kernel, its boot parameter and the signed header onto the idle FAT
 //!    volume, each held to its hash before it is written;
-//! 4. an fsync of each claim, which answers for these writes and no other
+//! 4. a flush of each partition, which answers for these writes and no other
 //!    process's;
 //! 5. the slot table, marking the idle slot — the copy that is not current,
 //!    so a torn write leaves the old mark — and its fsync.
@@ -30,12 +33,11 @@
 use std::io::Read;
 use std::time::Instant;
 
-use toyos::endow::Endowments;
+use diskserver::disk::{Claimed, Disk, Served, BLOCK};
+use toyos::endow::{self, Endowments};
 use toyos::PartitionDev;
-use toyos_abi::part::{Block, BLOCK_BYTES, MAX_BLOCKS_PER_CALL};
 use toyos_update::image::{Header, HEADER_BYTES, SIGNED_BYTES};
-use toyos_update::slots::{self, Table, Which};
-use toyos_fat32::BlockAccess as _;
+use toyos_update::slots::{self, Which};
 use toyos_update::{policy, sig};
 
 /// The key an image must be signed with: the same the loader embeds.
@@ -55,24 +57,39 @@ fn main() {
     }
 }
 
-/// The three claims the supervisor endowed, or why this process holds none.
-fn grant() -> Result<(PartitionDev, PartitionDev, PartitionDev), String> {
-    let take = |label: &str| {
-        Endowments::get()
-            .take::<PartitionDev>(label)
-            .ok_or_else(|| format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none"))
+/// One partition of the grant: its blocks, and its unique GUID.
+struct Held {
+    disk: Box<dyn Disk>,
+    unique: [u8; 16],
+}
+
+/// The partition endowed under `label`: a claim, or a session through the
+/// connector of that name, which reaches one partition and lists it.
+fn held(label: &str) -> Result<Held, String> {
+    let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none");
+    if let Some(claim) = Endowments::get().take::<PartitionDev>(label) {
+        let unique = claim.describe().map_err(|e| format!("the `{label}` claim: {e:?}"))?.unique_guid;
+        let disk = Claimed::new(claim).map_err(|e| format!("the `{label}` claim: {e:?}"))?;
+        return Ok(Held { disk: Box::new(disk), unique });
+    }
+    let names = endow::namespace().ok_or_else(none)?;
+    let own = toyos::namespace::build().keep(names, &[label]).finish().map_err(|_| none())?;
+    let listed = diskserver::list(&own, label).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;
+    let [one] = listed[..] else {
+        return Err(format!("`{label}` lists {} partitions, and is minted for one", listed.len()));
     };
-    Ok((take(slots::TABLE_LABEL)?, take(slots::BOOT_LABEL)?, take(slots::ROOT_LABEL)?))
+    let session = diskserver::Session::open(own, label, one.unique)
+        .map_err(|why| format!("`{label}`'s partition would not open: {why:?}"))?;
+    Ok(Held { disk: Box::new(Served::new(session)), unique: one.unique })
 }
 
 fn run(began: Instant) -> Result<String, String> {
-    let (table_claim, boot, root) = grant()?;
-    let (table, current) = read_table(&table_claim)?;
-    let boot_guid = boot.describe().map_err(|e| format!("the idle volume's claim: {e:?}"))?.unique_guid;
-    let root_info = root.describe().map_err(|e| format!("the idle ROOT's claim: {e:?}"))?;
+    let (mut table_part, mut boot, mut root) = (held(slots::TABLE_LABEL)?, held(slots::BOOT_LABEL)?, held(slots::ROOT_LABEL)?);
+    let (table, current) =
+        slots::read(|copies| table_part.disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
     let idle = [Which::A, Which::B]
         .into_iter()
-        .find(|&w| table.slot(w).is_some_and(|s| s.boot == boot_guid && s.root == root_info.unique_guid))
+        .find(|&w| table.slot(w).is_some_and(|s| s.boot == boot.unique && s.root == root.unique))
         .ok_or("the partitions this process holds are no slot the table names")?;
     let running = table.slot(idle.other()).ok_or("the table carries no running slot")?;
 
@@ -84,12 +101,12 @@ fn run(began: Instant) -> Result<String, String> {
     sig::verify(&KEY, header_bytes, &toyos_update::image::signature_of(&signed)).map_err(|why| why.to_string())?;
     let idle_version = table.slot(idle).map(|s| s.version).filter(|&v| v != 0);
     policy::installable(header.version, running.version, idle_version).map_err(|why| why.to_string())?;
-    if header.root().len > root_info.blocks * BLOCK_BYTES as u64 {
+    if header.root().len > root.disk.blocks() * BLOCK as u64 {
         return Err(format!(
             "ROOT is {} bytes and slot {}'s ROOT partition holds {}",
             header.root().len,
             idle.letter(),
-            root_info.blocks * BLOCK_BYTES as u64
+            root.disk.blocks() * BLOCK as u64
         ));
     }
     println!(
@@ -103,7 +120,7 @@ fn run(began: Instant) -> Result<String, String> {
     let kernel = take(&mut input, header.kernel().len, header.kernel().sha256, "kernel")?;
     let cmdline = take(&mut input, header.cmdline().len, header.cmdline().sha256, "cmdline")?;
     let streamed = Instant::now();
-    stream_root(&mut input, &root, header.root().len, header.root().sha256)?;
+    stream_root(&mut input, &mut *root.disk, header.root().len, header.root().sha256)?;
     let root_ms = streamed.elapsed().as_millis();
     let mut rest = [0u8; 1];
     match input.read(&mut rest) {
@@ -112,9 +129,9 @@ fn run(began: Instant) -> Result<String, String> {
         Err(e) => return Err(format!("the input's end would not read: {e}")),
     }
 
-    write_volume(&boot, &kernel, &cmdline, &signed)?;
-    root.sync().map_err(|e| format!("slot {}'s ROOT is not durable: {e:?}", idle.letter()))?;
-    boot.sync().map_err(|e| format!("slot {}'s volume is not durable: {e:?}", idle.letter()))?;
+    write_volume(&mut *boot.disk, &kernel, &cmdline, &signed)?;
+    root.disk.flush().map_err(|e| format!("slot {}'s ROOT is not durable: {e:?}", idle.letter()))?;
+    boot.disk.flush().map_err(|e| format!("slot {}'s volume is not durable: {e:?}", idle.letter()))?;
 
     let mut next = table;
     next.marked = idle;
@@ -122,10 +139,11 @@ fn run(began: Instant) -> Result<String, String> {
     slot.version = header.version;
     next.slots[idle.index()] = Some(slot);
     let (copy, block) = slots::next_write((table, current), next);
-    table_claim
-        .write(copy as u64, &[block])
+    table_part
+        .disk
+        .write(copy as u64, &block)
         .map_err(|e| format!("the slot table's copy {copy} would not write: {e:?}"))?;
-    table_claim.sync().map_err(|e| format!("the slot table is not durable: {e:?}"))?;
+    table_part.disk.flush().map_err(|e| format!("the slot table is not durable: {e:?}"))?;
 
     Ok(format!(
         "{INSTALLED} version {} in slot {} ({} bytes of ROOT in {root_ms} ms, {} ms in all); it boots at the next reboot",
@@ -134,13 +152,6 @@ fn run(began: Instant) -> Result<String, String> {
         header.root().len,
         began.elapsed().as_millis()
     ))
-}
-
-/// The slot table and which copy of it is current.
-fn read_table(claim: &PartitionDev) -> Result<(Table, usize), String> {
-    let mut copies: [Block; 2] = [[0; BLOCK_BYTES]; 2];
-    claim.read(0, &mut copies).map_err(|e| format!("the slot table would not read: {e:?}"))?;
-    slots::current([&copies[0], &copies[1]]).map_err(|why| format!("the slot table's partition holds {why}"))
 }
 
 /// Exactly `len` bytes of the input, held to `sha256`.
@@ -153,20 +164,22 @@ fn take(input: &mut impl Read, len: u64, sha256: toyos_update::Digest, section: 
     Ok(bytes)
 }
 
-/// ROOT onto the idle ROOT partition as it arrives, a call's worth of blocks
-/// at a time, and held to `sha256` once whole.
-fn stream_root(input: &mut impl Read, root: &PartitionDev, len: u64, sha256: toyos_update::Digest) -> Result<(), String> {
+/// The blocks of ROOT [`stream_root`] reads and writes at a time.
+const STREAM_BLOCKS: usize = 32;
+
+/// ROOT onto the idle ROOT partition as it arrives, [`STREAM_BLOCKS`] at a
+/// time, and held to `sha256` once whole.
+fn stream_root(input: &mut impl Read, root: &mut dyn Disk, len: u64, sha256: toyos_update::Digest) -> Result<(), String> {
     let mut hasher = toyos_sha2_hw::sha256();
-    let mut run: Vec<Block> = vec![[0; BLOCK_BYTES]; MAX_BLOCKS_PER_CALL];
-    let blocks = len / BLOCK_BYTES as u64;
+    let mut run = vec![0u8; STREAM_BLOCKS * BLOCK];
+    let blocks = len / BLOCK as u64;
     let mut at = 0u64;
     while at < blocks {
-        let n = (blocks - at).min(MAX_BLOCKS_PER_CALL as u64) as usize;
-        for block in &mut run[..n] {
-            input.read_exact(block).map_err(|e| format!("the input ended inside ROOT, at block {at}: {e}"))?;
-            hasher.update(&block[..]);
-        }
-        root.write(at, &run[..n]).map_err(|e| format!("ROOT's blocks from {at} would not write: {e:?}"))?;
+        let n = (blocks - at).min(STREAM_BLOCKS as u64) as usize;
+        let bytes = &mut run[..n * BLOCK];
+        input.read_exact(bytes).map_err(|e| format!("the input ended inside ROOT, at block {at}: {e}"))?;
+        hasher.update(&*bytes);
+        root.write(at, bytes).map_err(|e| format!("ROOT's blocks from {at} would not write: {e:?}"))?;
         at += n as u64;
     }
     if hasher.finalize() != sha256 {
@@ -177,9 +190,8 @@ fn stream_root(input: &mut impl Read, root: &PartitionDev, len: u64, sha256: toy
 
 /// The kernel, its boot parameter and the signed header onto the idle slot's
 /// FAT volume, replacing whatever was there.
-fn write_volume(boot: &PartitionDev, kernel: &[u8], cmdline: &[u8], signed: &[u8]) -> Result<(), String> {
-    let blocks = boot.describe().map_err(|e| format!("the idle volume's claim: {e:?}"))?.blocks;
-    let mut fs = toyos_fat32::Fat32::mount(volume::Cached::new(boot, blocks))
+fn write_volume(boot: &mut dyn Disk, kernel: &[u8], cmdline: &[u8], signed: &[u8]) -> Result<(), String> {
+    let mut fs = toyos_fat32::Fat32::mount(volume::Cached::new(boot))
         .map_err(|e| format!("the idle slot's volume does not mount: {e:?}"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -198,8 +210,8 @@ fn write_volume(boot: &PartitionDev, kernel: &[u8], cmdline: &[u8], signed: &[u8
         fs.write(&mut file, 0, bytes).map_err(|e| format!("writing {path}: {e:?}"))?;
         fs.flush_meta(&mut file, time).map_err(|e| format!("recording {path}: {e:?}"))?;
     }
-    fs.sync().map_err(|e| format!("the idle volume's metadata: {e:?}"))?;
-    fs.into_device().flush().map_err(|e| format!("the idle volume's blocks: {e:?}"))
+    // Writes every block the volume holds (`Cached::flush`).
+    fs.sync().map_err(|e| format!("the idle volume's blocks: {e:?}"))
 }
 
 mod volume;

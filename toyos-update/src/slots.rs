@@ -183,6 +183,33 @@ pub fn current(copies: [&[u8; BLOCK]; 2]) -> Result<(Table, usize), Unreadable> 
     }
 }
 
+/// [`current`] of a slot table's partition whose first [`COPIES`] blocks
+/// `fill` reads, whatever reaches the partition.
+pub fn read<E: core::fmt::Debug>(
+    fill: impl FnOnce(&mut [[u8; BLOCK]; COPIES as usize]) -> Result<(), E>,
+) -> Result<(Table, usize), NotRead<E>> {
+    let mut copies = [[0; BLOCK]; COPIES as usize];
+    fill(&mut copies).map_err(NotRead::Read)?;
+    current([&copies[0], &copies[1]]).map_err(NotRead::Unreadable)
+}
+
+/// Why [`read`] has no table.
+#[derive(Debug)]
+pub enum NotRead<E> {
+    /// The blocks would not read, in the reader's word.
+    Read(E),
+    Unreadable(Unreadable),
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for NotRead<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read(why) => write!(f, "the slot table would not read: {why:?}"),
+            Self::Unreadable(why) => write!(f, "the slot table's partition holds {why}"),
+        }
+    }
+}
+
 /// What a writer puts where, to make `next` the table: the copy that is not
 /// `current`'s, one sequence past it.
 pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOCK]) {
@@ -192,7 +219,7 @@ pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOC
 
 /// The labels `/system/bin/supervisor` endows a `slots` grant under, and
 /// `/system/bin/update` takes it by: the slot table's partition, and the idle
-/// slot's FAT volume and ROOT, each a partition claim.
+/// slot's FAT volume and ROOT.
 pub const TABLE_LABEL: &str = "slots:table";
 pub const BOOT_LABEL: &str = "slots:boot";
 pub const ROOT_LABEL: &str = "slots:root";
@@ -205,7 +232,7 @@ pub const HOLDER: &str = "update";
 pub enum NoIdle {
     /// The table carries one slot, and that is the one running.
     OneSlot,
-    /// Neither slot's ROOT is the one the kernel holds: this table is not
+    /// Neither slot's ROOT is the one this boot runs: this table is not
     /// the one this boot came from.
     NotThisBoot,
     /// The idle slot names a partition that is no idle slot's.
@@ -262,7 +289,7 @@ pub struct Kinds {
     pub root: [u8; 16],
 }
 
-/// The idle slot a grant may claim, given the ROOT the kernel holds
+/// The idle slot a grant may claim, given the ROOT this boot runs
 /// (`running`) and every partition the machine lists.
 ///
 /// **The table is the grantee's to write**, so nothing it names is taken on
@@ -290,7 +317,7 @@ pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -
     Ok((idle, slot))
 }
 
-/// The slot the machine is not running, given the ROOT the kernel holds —
+/// The slot the machine is not running, given the ROOT this boot runs —
 /// **what makes the running slot unwritable by construction**: the grant is
 /// only ever the other one.
 pub fn idle(table: &Table, running_root: &[u8; 16]) -> Result<(Which, Slot), NoIdle> {

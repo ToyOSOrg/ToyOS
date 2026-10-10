@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+# A slot's partitions, claimed on a disk the kernel drives or opened through
+# the block service.
+diskserver = { path = "../diskserver" }
 # The format, the verifier and the slot table the loader reads the same way.
 toyos-update = { path = "../../toyos-update" }
 # A slot's volume is FAT, written with the driver the kernel mounts FAT with.
@@ -16,4 +18,4 @@ toyos-fat32 = { path = "../../toyos-fat32" }
 toyos-sha2-hw = { path = "../../toyos-sha2-hw" }
 
 [package.metadata.toyos.host]
-exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor claims for it"
+exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor grants it"
