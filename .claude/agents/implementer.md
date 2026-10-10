@@ -32,6 +32,9 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the scratchpad the brief names.
+  Every scratch file of yours, scripts, saved bodies and patches included, lives under the log
+  directory your brief names, never at the shared scratchpad's top level, where another agent's
+  overwrites it.
   Stay inside one turn while anything runs: block in the foreground on `n=0; until <it is done> ||
   [ $((n+=1)) -gt 50 ]; do sleep 2; done`, print a line, repeat; a long `sleep` is refused. Ten
   minutes of silence kills you, and ending a turn to announce a wait strands the work.
