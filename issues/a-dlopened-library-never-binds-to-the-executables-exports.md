@@ -8,13 +8,10 @@ opened: 2026-09-29
 
 `resolve_dlopen_relocs` (`kernel/src/elf/reloc.rs`) resolves a `dlopen`ed
 module's `GLOB_DAT`/`JUMP_SLOT` slots against the other loaded libraries only.
-Its startup sibling, `resolve_lib_bind_relocs`, tries the executable's
-dynamic exports first (`kernel/src/loader/mod.rs` builds `exe_sym_map` for
-it). glibc's `dlopen` searches the global scope, which starts with the
+glibc's `dlopen` searches the global scope, which starts with the
 executable, so on ToyOS a plugin that calls back into a symbol its host
 exports is left with an unresolved slot and faults when it uses it.
 
 **Exit**: `resolve_dlopen_relocs` binds a slot against the executable's dynamic
-exports before the other loaded libraries, as `resolve_lib_bind_relocs` does,
-and a guest case `dlopen`s a library that calls a function its executable
+exports before the other loaded libraries, and a guest case `dlopen`s a library that calls a function its executable
 exports, and the call lands.

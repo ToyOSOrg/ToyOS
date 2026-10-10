@@ -23,6 +23,21 @@ binary can only corrupt itself. Five syscalls retire, and
 the crafted-ELF corpus becomes the negative gate against a kernel that no longer
 parses most of it.
 
+**Stage 1 is built: an executable relocates itself** (`toyos::relocate`,
+called first by std's and libc's `_start`), and the kernel reads no
+executable's dynamic section, symbol tables or relocations, and loads no
+library at spawn. Left in Ring 0: `dlopen` and its four sibling syscalls, the
+TLS block, and the program-header parse. **The interval it opens, owed by the
+stage that brings the userland loader:** an executable with a `DT_NEEDED`
+does not start (its own `_start` refuses it: exit 127 and a line on slot 2,
+or, holding no slot 2, the kernel's handle-fault exit), so `std_tls`, the
+guest test of a startup library's TLS beside the executable's, is deleted at
+the commit that lands stage 1 and comes back with that stage. Nothing shipped
+links a library at load time. The kernel's static TLS block holds the
+executable's module alone, at offset 0, so `TlsModule::base_offset` and
+`Static::tpoff`'s offset are 0 at every caller; that stage places modules in
+userland and deletes them with the kernel's TLS build.
+
 The evidence that it is worth doing: nine dated commits over eleven days fixed
 userland-reachable kernel defects in this code, six of them machine-wide panics;
 seven of the loader's twelve bounds are over quantities a workload sets and two

@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Its product is how long a spawn of `toybox` takes to its exit, which a
+    // guest's host sets: the `spawn_cost` metal row runs it.
+    "spawn_cost",
     // Its verdict is a duration: whether a shootdown waits for every other CPU
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
@@ -623,6 +626,20 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // How long a spawn of `toybox` takes to its exit, printed by the job and
+        // read off the stick for an A/B against another build: that it ran, and
+        // what it said, are the verdict.
+        "spawn_cost",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_spawn_cost")?;
+                b[0].log().must_say("spawn_cost: /system/bin/toybox min ")?;
+                Ok(())
+            },
+        },
+    ),
+    (
         // `SYS_DEBUG` holds each other CPU's shootdown acknowledgement back,
         // so the kernel that carries it; the verdict is the guest's own exit,
         // and every wait it asserts is a floor, which no load shortens.
@@ -1033,6 +1050,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
+        "test_rs_spawn_cost",
         "test_rs_null_sink_client_exits",
         claims::RECLAIM,
     ],

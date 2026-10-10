@@ -122,27 +122,4 @@ impl<'a> SectionTable<'a> {
         }
         Ok(self.iter().filter(|sh| sh.kind == SHT_RELA))
     }
-
-    /// The `.rela.dyn` section, for a file with no `PT_DYNAMIC`.
-    ///
-    /// Identified by shape rather than by name: `.shstrtab` would have to be
-    /// located first to read section names, and `e_shstrndx` is not in this
-    /// table. `first_entry` reads the section's first `Elf64_Rela` off the
-    /// file, and only a table whose first entry is a `R_X86_64_RELATIVE`
-    /// qualifies — a `SHT_RELA` of any other shape belongs to something else.
-    pub fn rela_dyn(
-        self,
-        first_entry: &mut dyn FnMut(u64) -> Option<crate::rela::Rela>,
-    ) -> Option<(u64, u64)> {
-        for sh in self.iter() {
-            if sh.kind != SHT_RELA || sh.entry_size != crate::rela::ENTRY_SIZE as u64 || sh.size == 0
-            {
-                continue;
-            }
-            if first_entry(sh.offset).is_some_and(|r| r.kind() == crate::rela::RelocKind::Relative) {
-                return Some((sh.offset, sh.size));
-            }
-        }
-        None
-    }
 }

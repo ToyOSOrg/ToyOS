@@ -147,9 +147,6 @@ pub struct Rules {
     pub extent: Extent,
     /// Where writes may land, `[lo, hi)` in `r_offset`'s own coordinates.
     pub window: (u64, u64),
-    /// `Some` for a chunked writer (the exe), which drops a write crossing a
-    /// fill page and so has it refused; `None` for a contiguous one.
-    pub fill: Option<FillLattice>,
     /// The module's own `PT_TLS`, which a TLS relocation with `r_sym == 0`
     /// offsets into; `None` for a module with none.
     pub tls: Option<TlsSegment>,
@@ -165,7 +162,7 @@ pub struct Reloc {
 
 impl Reloc {
     /// `r_offset`: `[offset, offset + width)` lies inside the window it was
-    /// parsed against, and inside one fill page for a chunked writer.
+    /// parsed against.
     pub const fn offset(&self) -> u64 {
         self.offset
     }
@@ -244,17 +241,6 @@ pub fn parse(rela: Rela, rules: &Rules, symbols: SymTab<'_>) -> Result<Option<Re
     if rela.offset < lo || end > hi {
         return Err(RelocError::OutsideWindow);
     }
-    if let Some(fill) = rules.fill {
-        let within = rela
-            .offset
-            .wrapping_sub(fill.base)
-            .checked_rem(fill.granule)
-            .ok_or(RelocError::StraddlesFillPage)?;
-        if within.checked_add(width).is_none_or(|e| e > fill.granule) {
-            return Err(RelocError::StraddlesFillPage);
-        }
-    }
-
     let sym = || SymIndex::below(rela.sym, symbols.count()).ok_or(RelocError::SymbolPastTable);
     let tls = || -> Result<TlsRef, RelocError> {
         if rela.sym != 0 {
@@ -330,26 +316,6 @@ impl RelaCounts {
         kinds.iter().map(|&k| self.count_of(k)).max().unwrap_or(0)
     }
 
-    /// What an executable's loader reserves for each group it keeps, at `width`
-    /// bytes an entry, or why it keeps none: a TLS descriptor, which only a
-    /// resolver this loader does not have can fill, or a group that would
-    /// not fit `max_bytes`. The reservation is had only through this refusal.
-    pub fn for_executable(&self, width: usize, max_bytes: usize) -> Result<ExeReservation, ExeRefusal> {
-        if self.tlsdesc != 0 {
-            return Err(ExeRefusal::TlsDescriptor);
-        }
-        let kept = [RelocKind::Relative, RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32];
-        if self.max_of(&kept).checked_mul(width).is_none_or(|b| b > max_bytes) {
-            return Err(ExeRefusal::TooLarge);
-        }
-        Ok(ExeReservation {
-            relative: self.relative,
-            bind: self.bind,
-            tpoff64: self.tpoff64,
-            tpoff32: self.tpoff32,
-        })
-    }
-
     pub fn count_of(&self, kind: RelocKind) -> usize {
         match kind {
             RelocKind::Relative => self.relative,
@@ -364,49 +330,6 @@ impl RelaCounts {
     }
 }
 
-/// The lattice a chunked writer applies relocations in: a write must land
-/// wholly within one page, since the page-at-a-time applier never revisits a
-/// tail handed to the next page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FillLattice {
-    /// Based at the image's `vaddr_min`; each write lies within one `granule`.
-    pub base: u64,
-    pub granule: u64,
-}
-
-/// The demand-fault page an executable's relocations are filled in.
-pub const FILL_GRANULE: u64 = 4096;
-
-/// How many entries of each group an executable's loader keeps: made only by
-/// [`RelaCounts::for_executable`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct ExeReservation {
-    pub relative: usize,
-    /// `GLOB_DAT` and `JUMP_SLOT`.
-    pub bind: usize,
-    pub tpoff64: usize,
-    pub tpoff32: usize,
-}
-
-/// Why an executable's relocations are refused before any is kept.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExeRefusal {
-    /// [`RelocError::TlsDescriptor`]'s reason.
-    TlsDescriptor,
-    /// A group would not fit one allocation.
-    TooLarge,
-}
-
-impl ExeRefusal {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ExeRefusal::TlsDescriptor => RelocError::TlsDescriptor.as_str(),
-            ExeRefusal::TooLarge => "ELF: a relocation group does not fit one allocation",
-        }
-    }
-}
-
 /// Why a relocation cannot be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelocError {
@@ -416,8 +339,6 @@ pub enum RelocError {
     OutsideWindow,
     /// `r_sym` names an entry past the end of `.dynsym`.
     SymbolPastTable,
-    /// The write would cross a fill page, so a chunked writer would drop it.
-    StraddlesFillPage,
     /// A TLS descriptor, which only a resolver this loader does not have can
     /// fill.
     TlsDescriptor,
@@ -438,7 +359,6 @@ impl RelocError {
             RelocError::OffsetOverflows => "ELF: relocation r_offset + width overflows",
             RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
             RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
-            RelocError::StraddlesFillPage => "ELF: relocation crosses a fill-page boundary",
             RelocError::TlsDescriptor => "ELF: R_AARCH64_TLSDESC has no resolver in this loader",
             RelocError::RelativeOutsideImage => "ELF: RELATIVE addend is no address inside the image",
             RelocError::TlsOutsideSegment => "ELF: TLS relocation names an offset outside its PT_TLS",

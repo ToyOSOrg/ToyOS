@@ -11,14 +11,12 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod cache;
-mod index;
 mod reloc;
 
 pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
-pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
-    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, compute_tpoff,
-    rebase_relative_relocs, resolve_dlopen_relocs, resolve_lib_bind_relocs, tpoff32_value,
+    apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, rebase_relative_relocs,
+    resolve_dlopen_relocs,
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
@@ -87,8 +85,6 @@ pub struct TlsModuleInfo<'a> {
 pub struct LoadedLib {
     pub memory: LibMemory,
     pub user_base: UserAddr,
-    /// Physical base address, for page table mappings.
-    pub phys_base: u64,
     /// Bounds-checked view of the whole loaded image.
     pub image: KernelSlice,
     /// `.dynsym`, clamped to the entries it actually holds.
@@ -469,8 +465,6 @@ pub fn load_shared_lib(
     let rules = rela::Rules {
         extent,
         window,
-        // A library's image is written contiguously, with no fill-page edge.
-        fill: None,
         tls: layout.tls(),
     };
     // Every entry is parsed here, and a refusal drops the image this pass has
@@ -491,7 +485,6 @@ pub fn load_shared_lib(
         LoadedLib {
             memory: LibMemory::Owned(alloc),
             user_base: UserAddr::new(base_phys),
-            phys_base: base_phys,
             image,
             dynsym,
             dynstr,

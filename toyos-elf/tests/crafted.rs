@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 use toyos_elf::header::PROGRAM_HEADER_SIZE;
-use toyos_elf::{Error, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
+use toyos_elf::{Error, ImageRange, Layout, Machine, StackedImage, MAX_LOAD_SEGMENTS};
 
 fn refused(bytes: Vec<u8>) -> Error {
     match Layout::parse(&bytes, Machine::X86_64) {
@@ -302,49 +302,39 @@ fn segments_that_share_a_page_are_an_overlap() {
     assert_eq!(huge.overlapping_load_pages(4096), None);
 }
 
-#[test]
-fn a_vaddr_below_every_segment_has_no_file_offset() {
-    let layout = accepted(
-        Elf::new(0x4000)
-            .ph(Phdr::load(0x1000, 0x1000, 0x3000, 0x3000, PF_R | PF_W))
-            .entry(0x1000)
-            .build(),
-    );
-    assert_eq!(layout.vaddr_to_file_offset(0), None);
-    assert_eq!(layout.vaddr_to_file_offset(0xFFF), None);
-    assert_eq!(layout.vaddr_to_file_offset(0x1000), Some(0x1000));
-    assert_eq!(layout.vaddr_to_file_offset(0x2000), Some(0x2000));
-    // Past the file image of the only segment, extrapolated — what `.rela.dyn`
-    // needs when the linker places it outside any `PT_LOAD`.
-    assert_eq!(layout.vaddr_to_file_offset(0x9000), Some(0x9000));
+/// `[vaddr, vaddr + len)` in `layout`'s image, which the caller knows it is.
+fn range(layout: &Layout, vaddr: u64, len: u64) -> ImageRange {
+    layout.extent().range(vaddr, len).expect("inside the image")
 }
 
 #[test]
-fn an_extrapolated_file_offset_that_overflows_has_no_answer() {
-    let layout = accepted(
-        Elf::new(0x1000)
-            .ph(Phdr::load(u64::MAX - 0x1000, 0, 0x1000, 0x1000, PF_R))
-            .build(),
-    );
-    assert_eq!(layout.vaddr_to_file_offset(0), Some(u64::MAX - 0x1000));
-    assert_eq!(layout.vaddr_to_file_offset(0x2000), None);
-}
-
-/// `.gnu.hash` declares its length nowhere, so its bound is the file image of
-/// the segment holding it.
-#[test]
-fn the_file_bytes_behind_a_vaddr_are_the_containing_segments() {
+fn only_a_segments_file_bytes_have_a_file_offset() {
     let layout = accepted(
         Elf::new(0x4000)
-            .ph(Phdr::load(0, 0, 0x1000, 0x2000, PF_R | PF_X))
-            .ph(Phdr::load(0x2000, 0x2000, 0x800, 0x2000, PF_R | PF_W))
+            .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+            .ph(Phdr::load(0x2000, 0x2000, 0x800, 0x3000, PF_R | PF_W))
             .build(),
     );
-    assert_eq!(layout.file_bytes_from(0), Some(0x1000));
-    assert_eq!(layout.file_bytes_from(0xF00), Some(0x100));
-    // Inside the segment's memory image but past its file image: no bytes.
-    assert_eq!(layout.file_bytes_from(0x1800), None);
-    assert_eq!(layout.file_bytes_from(0x2400), Some(0x400));
+    assert_eq!(layout.file_offset_of(range(&layout, 0x2000, 0x800)), Some(0x2000));
+    assert_eq!(layout.file_offset_of(range(&layout, 0x2800, 0)), Some(0x2800));
+    // Between the segments, in the second's `.bss`, and across its file end.
+    assert_eq!(layout.file_offset_of(range(&layout, 0x1800, 8)), None);
+    assert_eq!(layout.file_offset_of(range(&layout, 0x2800, 8)), None);
+    assert_eq!(layout.file_offset_of(range(&layout, 0x27F8, 0x10)), None);
+}
+
+/// A template in `.bss` names no file bytes: the file offset its distance
+/// into the segment gives is another segment's.
+#[test]
+fn a_tls_template_starting_in_bss_has_no_file_offset() {
+    let layout = accepted(
+        Elf::new(0x2000)
+            .ph(Phdr::load(0, 0, 0x1000, 0x2000, PF_R | PF_W))
+            .ph(Phdr::load(0x1800, 0x3800, 0x800, 0x800, PF_R))
+            .ph(Phdr::tls(0x1800, 0x100, 0x100, 8))
+            .build(),
+    );
+    assert_eq!(layout.file_offset_of(layout.tls().unwrap().template()), None);
 }
 
 /// `(image offset, bytes, count)` of the table a layout places, for comparing.
