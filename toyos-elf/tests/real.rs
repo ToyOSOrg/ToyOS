@@ -50,9 +50,10 @@ fn a_linked_binary_parses_to_what_readelf_says() {
     // No two segments contend for a page, and a vaddr resolves to its file
     // offset — the two derived answers `spawn` refuses a binary over.
     assert_eq!(layout.overlapping_load_pages(4096), None);
-    assert_eq!(layout.vaddr_to_file_offset(0xc0620), Some(0xbe620));
-    assert_eq!(layout.vaddr_to_file_offset(0xc1800), Some(0xbe800));
-    assert_eq!(layout.vaddr_to_file_offset(0x2a8), Some(0x2a8));
+    let file_offset = |vaddr| layout.file_offset_of(layout.extent().range(vaddr, 1).unwrap());
+    assert_eq!(file_offset(0xc0620), Some(0xbe620));
+    assert_eq!(file_offset(0xc1800), Some(0xbe800));
+    assert_eq!(file_offset(0x2a8), Some(0x2a8));
 }
 
 /// The build-id `object` reads out of `file`'s program headers.

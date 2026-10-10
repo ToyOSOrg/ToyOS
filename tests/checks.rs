@@ -1120,25 +1120,25 @@ mod checks {
         assert!(xhci_xecp(&silent).is_err());
     }
 
-    /// `dlopen_dedup` reads `test_rs_std_tls` by path.
+    /// A member that reads another test binary by path.
     #[test]
     fn a_shared_chunk_stages_every_binary_its_members_name() {
-        let source = "const NEEDS_A_LIB: &str = \"/system/bin/test_rs_std_tls\";\n";
-        let bins: Vec<(String, Vec<u8>)> = ["dlopen_dedup", "std_tls", "fs_large_file", "libfoo.so"]
+        let source = "const CHILD: &str = \"/system/bin/test_rs_child\";\n";
+        let bins: Vec<(String, Vec<u8>)> = ["parent", "child", "fs_large_file", "libfoo.so"]
             .iter()
             .map(|name| ((*name).to_string(), Vec::new()))
             .collect();
-        let jobs = vec!["test_rs_dlopen_dedup".to_string()];
+        let jobs = vec!["test_rs_parent".to_string()];
         let staged = |text: &str| -> Vec<String> {
             metal::reached(text, &jobs, &bins).into_iter().map(|(path, _)| path).collect()
         };
         assert_eq!(
-            staged(&format!("test_rs_dlopen_dedup\n{source}")),
-            ["bin/test_rs_std_tls", "lib/libfoo.so"]
+            staged(&format!("test_rs_parent\n{source}")),
+            ["bin/test_rs_child", "lib/libfoo.so"]
         );
         // A longer name is another binary's.
-        let longer = source.replace("test_rs_std_tls", "test_rs_std_tls_dlopen");
-        assert_eq!(staged(&format!("test_rs_dlopen_dedup\n{longer}")), ["lib/libfoo.so"]);
+        let longer = source.replace("test_rs_child", "test_rs_child_two");
+        assert_eq!(staged(&format!("test_rs_parent\n{longer}")), ["lib/libfoo.so"]);
     }
 
     /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus

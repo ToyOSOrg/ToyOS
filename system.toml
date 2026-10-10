@@ -92,7 +92,7 @@ devices = ["pci:1af4:1041"]
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "/apps"]
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
@@ -143,7 +143,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -155,6 +155,10 @@ receives = ["compositor", "filepicker"]
 # compositor is the whole of its authority.
 [programs.calc]
 receives = ["compositor"]
+
+# toyfetch reads only what every process may: the machine's ambient header,
+# CPUID and `/system/etc/os-release`.
+[programs.toyfetch]
 
 [programs.editor]
 receives = ["compositor", "filepicker"]
@@ -178,7 +182,7 @@ receives = ["compositor", "filepicker"]
 [programs.toybox]
 receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "/apps"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.

@@ -346,11 +346,12 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
 
 /// The clock: the generic timer's count, at the rate firmware states in
 /// `CNTFRQ_EL0`, which the Arm ARM makes firmware's to program and which is
-/// what the counter counts at. No wall clock: `super::rtc` says why.
-pub fn clock(_args: &KernelArgs) {
+/// what the counter counts at; and the wall clock the loader handed over.
+pub fn clock(args: &KernelArgs) {
     let hz = super::cpu::stated_counter_hz().expect("clock: CNTFRQ_EL0 states no rate for the generic timer");
     crate::clock::set_counter(super::cpu::counter(), 1_000_000_000_000_000 / hz);
-    log!("clock: the generic timer counts at {hz} Hz; no wall clock is read on this architecture");
+    log!("clock: the generic timer counts at {hz} Hz");
+    crate::clock::init_wall(super::rtc::read(args));
 }
 
 /// Nothing: where the generic timer counts from is firmware's, and no

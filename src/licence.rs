@@ -536,6 +536,42 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "toyos/tests/relocate/aarch64-applied.elf",
+        "a2d2c6bf84693da880f1389d9d3c59ceba5dee8cc4cb6dba94aa6fcc1c7eff77",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos/tests/relocate/aarch64-tls.elf",
+        "035ac304d710439db036c944ba9e468a749bea15b6c6943debbcb759e6aba9a2",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos/tests/relocate/aarch64.elf",
+        "629fd3a391821ea9113b3028eec23f50f7e204442b0be16f8cf7593955bc5dd6",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos/tests/relocate/x86_64-applied.elf",
+        "d9fbd54a6d22e7a5c235075951b3a162d59b818c48c0a898e826d9a123c5eefb",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos/tests/relocate/x86_64-tls.elf",
+        "9fe7bf2c16810153d0d19af0799f3612ef6305a0e09f25c6aa93fe4f226b1abe",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos/tests/relocate/x86_64.elf",
+        "61ddae0382bafa0c4f76c23ac9608e7a53281d57a8439fe05d4f43390d2eee46",
+        "ours: rust-lld's link of toyos/tests/relocate/fixture.rs (toyos/src/relocate/tests.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "toyos-microcode/intel-ucode/06-8c-01",
         "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
         "NOTICE",

@@ -27,6 +27,7 @@ pub mod log;
 pub mod net;
 pub mod port;
 pub mod process;
+pub mod relocate;
 pub mod surface;
 pub mod shm;
 pub mod syscap;
