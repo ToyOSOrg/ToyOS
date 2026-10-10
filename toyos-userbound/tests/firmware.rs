@@ -493,8 +493,8 @@ fn the_lock_word_is_exchanged_only_where_all_four_bytes_are_the_firmwares_own() 
 }
 
 /// What a crafted FADT names for `SMI_CMD`: `ACPI_ENABLE`, `ACPI_DISABLE`,
-/// `S4BIOS_REQ` and `CST_CNT`, and no `PSTATE_CNT`.
-const KEPT: KeptCommands = KeptCommands([Some(0xF0), Some(0xF1), Some(0xF2), None, Some(0x85)]);
+/// `S4BIOS_REQ` and `CST_CNT`, no `PSTATE_CNT`, and a reset register elsewhere.
+const KEPT: KeptCommands = KeptCommands([Some(0xF0), Some(0xF1), Some(0xF2), None, Some(0x85), None]);
 
 /// The kernel's declarations as q35 boots with them, with [`KEPT`] for
 /// `SMI_CMD`'s, and the i8042's row.
@@ -560,14 +560,33 @@ fn a_byte_for_smi_cmd_is_a_firmware_call_unless_the_fadt_names_it() {
         }
     }
     // A FADT that names none keeps none.
-    let unnamed = |_| Standing::Declared(Mediated::Command(KeptCommands([None; 5])));
+    let unnamed = |_| Standing::Declared(Mediated::Command(KeptCommands([None; 6])));
     for value in [0u64, 0xF0, 0xFF] {
         assert!(matches!(port(unnamed, 0xB2, Width::Byte, Some(value)), PortVerdict::FirmwareCall(call) if u64::from(call.value()) == value));
     }
     // And one that names zero keeps zero.
-    let zero = |_| Standing::Declared(Mediated::Command(KeptCommands([None, None, Some(0), None, None])));
+    let zero = |_| Standing::Declared(Mediated::Command(KeptCommands([None, None, Some(0), None, None, None])));
     assert_eq!(port(zero, 0xB2, Width::Byte, Some(0)), refused_port(Refused::KernelCommand));
     assert!(matches!(port(zero, 0xB2, Width::Byte, Some(1)), PortVerdict::FirmwareCall(_)));
+}
+
+/// An AMD laptop's `SMI_CMD` is its reset register too, 0xb0 with
+/// `RESET_VALUE` 0xfb beside `ACPI_ENABLE` 0xa0 and `ACPI_DISABLE` 0xa1: the
+/// one declaration keeps the reset's byte with the FADT's own, so no write
+/// asked of the port resets the machine, and every other byte is a call.
+#[test]
+fn a_smi_cmd_that_is_the_reset_register_keeps_the_resets_byte() {
+    let shared = |port| match port {
+        0xB0 => Standing::Declared(Mediated::Command(KeptCommands([Some(0xA0), Some(0xA1), None, None, None, Some(0xFB)]))),
+        _ => Standing::Free,
+    };
+    for kept in [0xA0u64, 0xA1, 0xFB] {
+        assert_eq!(port(shared, 0xB0, Width::Byte, Some(kept)), refused_port(Refused::KernelCommand), "{kept:#04x}");
+    }
+    for called in [0x00u64, 0x28, 0xFA, 0xFC, 0xFF] {
+        assert!(matches!(port(shared, 0xB0, Width::Byte, Some(called)), PortVerdict::FirmwareCall(call) if u64::from(call.value()) == called), "{called:#04x}");
+    }
+    assert_eq!(through(port(shared, 0xB0, Width::Byte, None)), Some((0xB0, Width::Byte)));
 }
 
 /// A command is one byte to the one port: a wider write that reaches it,

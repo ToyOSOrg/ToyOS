@@ -12,10 +12,10 @@ use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    definition_blocks, dsdt_address, ecam_allocations, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
-    EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
-    Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
+    Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
+    Reset, SourceOverride, Table, TableError, Trigger,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN,
 };
 
@@ -865,8 +865,8 @@ fn the_values_the_fadt_names_for_smi_cmd_are_each_read_from_their_own_byte() {
     .smi_cmd
     .expect("a port");
     assert_eq!(all, SmiCmd { port: 0xb2, acpi_enable: 0xa0, acpi_disable: 0xa1, s4bios_req: 0xa2, pstate_cnt: 0xa3, cst_cnt: 0xa4 });
-    assert_eq!(all.named(true), [Some(0xa0), Some(0xa1), Some(0xa2), Some(0xa3), Some(0xa4)]);
-    assert_eq!(all.named(false), [Some(0xa0), Some(0xa1), None, Some(0xa3), Some(0xa4)]);
+    assert_eq!(all.named(true, Reset::Absent), [Some(0xa0), Some(0xa1), Some(0xa2), Some(0xa3), Some(0xa4), None]);
+    assert_eq!(all.named(false, Reset::Absent), [Some(0xa0), Some(0xa1), None, Some(0xa3), Some(0xa4), None]);
     for (at, named) in [(52, 0), (53, 1), (54, 2), (55, 3), (95, 4)] {
         let one = fixed(|t| {
             t[52..56].fill(0);
@@ -876,16 +876,16 @@ fn the_values_the_fadt_names_for_smi_cmd_are_each_read_from_their_own_byte() {
         .expect("a FADT naming one")
         .smi_cmd
         .expect("a port");
-        let mut want = [None; 5];
+        let mut want = [None; 6];
         want[named] = Some(0x5a);
         // With the flag set `S4BIOS_REQ` names the byte it holds, a zero where it holds one.
         let mut flagged = want;
         flagged[2] = Some(if named == 2 { 0x5a } else { 0 });
-        assert_eq!(one.named(true), flagged, "the byte at {at}, S4BIOS_F set");
+        assert_eq!(one.named(true, Reset::Absent), flagged, "the byte at {at}, S4BIOS_F set");
         if named == 2 {
             want[2] = None;
         }
-        assert_eq!(one.named(false), want, "the byte at {at}, S4BIOS_F clear");
+        assert_eq!(one.named(false, Reset::Absent), want, "the byte at {at}, S4BIOS_F clear");
     }
 }
 
@@ -904,44 +904,6 @@ fn a_revision_1_fadt_is_read_at_its_32_bit_fields_alone() {
     let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
     let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT");
     assert_eq!(fixed_hardware(&fadt).map(|f| f.pm1a_event), Ok(Block { port: 0x600, len: 4 }));
-}
-
-fn ec_table(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::Ec, EcRefused> {
-    let mut body = vec![0u8; ECDT_NEEDED - 36];
-    body[..12].copy_from_slice(&[1, 8, 0, 0, 0x66, 0, 0, 0, 0, 0, 0, 0]);
-    body[12..24].copy_from_slice(&[1, 8, 0, 0, 0x62, 0, 0, 0, 0, 0, 0, 0]);
-    body[28] = 0x6e;
-    edit(&mut body);
-    let t = sdt(b"ECDT", 1, &body);
-    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
-    ecdt(&Table::open(Machine { regions }, TABLE_AT, b"ECDT", 36).expect("ECDT"))
-}
-
-#[test]
-fn an_ecdt_naming_no_port_controller_is_refused_by_name() {
-    assert_eq!(ec_table(|_| {}), Ok(toyos_acpi::Ec { command: 0x66, data: 0x62, gpe: 0x6e }));
-    assert_eq!(
-        ec_table(|b| b[0] = 0),
-        Err(EcRefused::NotSystemIo { register: Register::Command, space: 0 }),
-        "a controller in memory"
-    );
-    assert_eq!(
-        ec_table(|b| b[13] = 16),
-        Err(EcRefused::Width { register: Register::Data, bit_width: 16, bit_offset: 0 })
-    );
-    assert_eq!(
-        ec_table(|b| b[4] = 0),
-        Err(EcRefused::Address { register: Register::Command, address: 0 }),
-        "an ECDT of zeros, which some firmware publishes"
-    );
-    assert_eq!(
-        ec_table(|b| b[16 + 2] = 1),
-        Err(EcRefused::Address { register: Register::Data, address: 0x1_0062 })
-    );
-    let short = sdt(b"ECDT", 1, &[1, 8, 0, 0, 0x66, 0, 0, 0, 0, 0, 0, 0]);
-    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &short)];
-    let table = Table::open(Machine { regions }, TABLE_AT, b"ECDT", 36).expect("ECDT");
-    assert_eq!(ecdt(&table), Err(EcRefused::Short { len: 48 }));
 }
 
 /// Table 5.9: the OS treats the SCI as level and active low. Where no override

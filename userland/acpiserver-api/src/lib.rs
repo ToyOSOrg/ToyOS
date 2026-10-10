@@ -20,3 +20,9 @@ pub const BATTERY_READ: &str = "battery read: ";
 
 /// No battery is read on this machine, and why.
 pub const NO_BATTERY: &str = "no battery: ";
+
+/// The server's word on the embedded controller, once, after the tables'
+/// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,
+/// [`CONTROLLER_NONE`] and why where it serves none.
+pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
+pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";

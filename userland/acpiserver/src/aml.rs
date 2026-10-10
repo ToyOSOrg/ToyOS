@@ -23,7 +23,9 @@
 //! not hold — and that is said once, loudly ([`NO_S5_HANDED`]); the server
 //! goes on serving. **A namespace whose DSDT loaded is kept** ([`Aml`]),
 //! with the host that answered its load, for what the server evaluates in it
-//! after ([`crate::battery`]); no embedded-controller query's method is run.
+//! after: the devices it serves ([`crate::devices`]), its batteries
+//! ([`crate::battery`]), and, where the power button is a control method
+//! device, each embedded-controller query's method.
 //!
 //! A table's line says its place, whether it is the DSDT or an SSDT, and a
 //! refusal by its kind; what the firmware chose — a name, an offset, an
@@ -42,11 +44,6 @@ pub struct Aml<'k, K, C> {
     pub interpreter: Interpreter,
     pub host: Firmware<'k, K, C>,
 }
-
-/// An embedded-controller query, taken off the controller, run once the
-/// drain that took it has ended: a query's method may itself talk to the
-/// controller.
-pub fn query(_q: u8) {}
 
 /// What became of the machine's definition blocks: the load's verdict, which
 /// its lines say. Whoever evaluates a method after the load asks `blocks`
@@ -105,7 +102,7 @@ pub const NO_S5_HANDED: &str =
 
 /// Load the machine's definition blocks from the RSDP at `rsdp`, and
 /// evaluate `\_S5`; the namespace, where its DSDT loaded, is kept with `ec`,
-/// the controller the machine's row names.
+/// a controller already known, if any.
 pub fn load<'k, K: Kernel, C: Controller>(kernel: &'k K, ec: Option<C>, rsdp: u64) -> (Loaded, Option<Aml<'k, K, C>>) {
     let mut host = Firmware::new(kernel, ec);
     let mut interpreter = Interpreter::new();
@@ -302,17 +299,17 @@ pub mod tests {
         table
     }
 
-    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+    pub fn cat(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
     }
 
     /// `Name (<name>, <value>)` for a four-character name and a byte.
-    fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
+    pub fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
         cat(&[&[0x08], name, &[0x0A, value]])
     }
 
     /// `Name (_S5_, Package (2) { a, b })`.
-    fn s5_package(a: u8, b: u8) -> Vec<u8> {
+    pub fn s5_package(a: u8, b: u8) -> Vec<u8> {
         cat(&[&[0x08], b"_S5_", &[0x12, 0x06, 0x02, 0x0A, a, 0x0A, b]])
     }
 

@@ -5340,11 +5340,12 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The T14's ACPI row as the kernel filled it from the machine's FACP, ECDT
-/// and APIC (Linux on the same machine: `EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
-/// `GPE=0x6e`, `INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`), the
-/// server armed on it, at least one embedded-controller query taken and a
-/// count of them logged, and no guard of the server's fired.
+/// The T14's ACPI row as the kernel filled it from the machine's FACP and
+/// APIC (Linux on the same machine: `INT_SRC_OVR (bus 0 bus_irq 9 global_irq
+/// 9 high level)`), the server armed on it, the embedded controller it found
+/// in the DSDT the one Linux used (`EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
+/// `GPE=0x6e`), at least one of its queries taken and a count of them
+/// logged, and no guard of the server's fired.
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (log, kernel) = (back.log(), back.kernel());
@@ -5353,12 +5354,10 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     eprintln!("  [acpi] {}", enabled.trim());
     kernel.must_say(
         "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
-         fixed-hardware power button, embedded controller at 0x66/0x62 on GPE 0x6e; the firmware \
-         handed over in legacy mode",
+         fixed-hardware power button; the firmware handed over in legacy mode",
     )?;
-    log.must_say(
-        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
-    )?;
+    log.must_say("acpiserver: armed: power button served")?;
+    log.must_say(&format!("{}0x6e at 0x66/0x62", acpiserver_api::CONTROLLER_SERVED))?;
     let lines: Vec<&str> = log
         .text()
         .lines()
