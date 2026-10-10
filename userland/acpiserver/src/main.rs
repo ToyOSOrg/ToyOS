@@ -64,7 +64,7 @@ use ec::{Do, Transaction, Wait};
 use aml::Aml;
 use battery::Power;
 use host::{Answer, Controller, Kernel, Stopping, Take};
-use sci::{Enables, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
+use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
@@ -243,22 +243,25 @@ impl Kernel for Claim<'_> {
 struct Waiting<'c, 'a>(&'c Claim<'a>);
 
 impl Fixed for Waiting<'_, '_> {
-    fn pm1_status(&mut self) -> u16 {
-        in16(self.0.info.pm1_event.port)
+    fn status(&mut self) -> Bits {
+        Bits {
+            pm1: in16(self.0.info.pm1_event.port),
+            gpe0: bytes(self.0.info.gpe0).map(|(status, _)| in8(status)).collect(),
+        }
     }
 
     fn pm1_clear(&mut self, bits: u16) {
         out16(self.0.info.pm1_event.port, bits);
     }
 
-    fn enables(&mut self) -> Enables {
-        Enables {
+    fn enables(&mut self) -> Bits {
+        Bits {
             pm1: in16(self.0.info.pm1_event.enable()),
             gpe0: bytes(self.0.info.gpe0).map(|(_, enable)| in8(enable)).collect(),
         }
     }
 
-    fn enable(&mut self, enables: &Enables) {
+    fn enable(&mut self, enables: &Bits) {
         out16(self.0.info.pm1_event.enable(), enables.pm1);
         for ((_, enable), &byte) in bytes(self.0.info.gpe0).zip(&enables.gpe0) {
             out8(enable, byte);
