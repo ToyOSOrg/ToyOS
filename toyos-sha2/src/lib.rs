@@ -7,10 +7,10 @@
 //! message is the same however it was split. A message is whole bytes: FIPS
 //! 180-4 also hashes a trailing partial byte, and nothing here needs one.
 //!
-//! **Scalar, on every target.** The loader runs as a UEFI application on a
-//! soft-float target and may not assume the SIMD or SHA-extension registers
-//! are its own, and an instruction path is `unsafe`, which this crate
-//! forbids.
+//! **Scalar, on every target.** An instruction path is `unsafe`, which this
+//! crate forbids: `toyos-sha2-hw`'s compresses SHA-256's blocks on a CPU that
+//! has the instructions, through [`Sha256::with`], and this crate buffers and
+//! pads around it.
 //!
 //! [`update`]: Sha256::update
 //! [`finalize`]: Sha256::finalize
@@ -21,9 +21,9 @@
 #[cfg(test)]
 mod tests;
 
-/// SHA-256's round constants, §4.2.2.
+/// SHA-256's round constants, §4.2.2: an instruction path's too.
 #[rustfmt::skip]
-const K256: [u32; 64] = [
+pub const K256: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -171,6 +171,9 @@ macro_rules! hash {
         $(#[$doc])*
         pub struct $name {
             state: [$word; 8],
+            /// What compresses whole blocks: this crate's, or the instruction
+            /// path [`Sha256::with`] was given.
+            compress: fn(&mut [$word; 8], &[[u8; $block]]),
             block: [u8; $block],
             /// How much of `block` holds message bytes not yet compressed.
             filled: usize,
@@ -180,7 +183,7 @@ macro_rules! hash {
 
         impl $name {
             pub const fn new() -> Self {
-                Self { state: $init, block: [0; $block], filled: 0, bytes: 0 }
+                Self { state: $init, compress: $compress, block: [0; $block], filled: 0, bytes: 0 }
             }
 
             /// The digest of `message`.
@@ -205,11 +208,11 @@ macro_rules! hash {
                     if self.filled < $block {
                         return;
                     }
-                    $compress(&mut self.state, core::slice::from_ref(&self.block));
+                    (self.compress)(&mut self.state, core::slice::from_ref(&self.block));
                     self.filled = 0;
                 }
                 let (blocks, rest) = bytes.as_chunks::<$block>();
-                $compress(&mut self.state, blocks);
+                (self.compress)(&mut self.state, blocks);
                 self.block[..rest.len()].copy_from_slice(rest);
                 self.filled = rest.len();
             }
@@ -252,4 +255,16 @@ hash! {
 hash! {
     /// SHA-512, §6.4: a 64-byte digest.
     Sha512: u64, block 128, length 16, digest 64, H512, compress512
+}
+
+/// What compresses whole blocks into SHA-256's hash value, as §6.2.2 does.
+pub type Compress256 = fn(&mut [u32; 8], &[[u8; 64]]);
+
+impl Sha256 {
+    /// A hash whose blocks `compress` computes: an instruction path's, which
+    /// must give §6.2.2's hash value for every run of blocks, the empty one
+    /// among them.
+    pub const fn with(compress: Compress256) -> Self {
+        Self { compress, ..Self::new() }
+    }
 }

@@ -3611,7 +3611,7 @@ fn https_fetch() -> Result<(), String> {
     let trusted = Authority::new("ToyOS harness test authority");
     let stranger = Authority::new("ToyOS harness authority nothing trusts");
     let body = std::sync::Arc::new(https::body());
-    let hex: String = toyos_sha2::Sha256::digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = toyos_sha2_hw::sha256_digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
     let want = format!("{JOB}: ok bytes={} sha256={hex}", body.len());
     let fetched = Server::start(trusted.leaf(host), body.clone())?;
     let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
