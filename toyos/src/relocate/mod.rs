@@ -16,7 +16,8 @@
 //! all this applies. Every other form is refused by name: a library this
 //! process would have to load (`DT_NEEDED`), a symbol it would have to bind
 //! (`DT_JMPREL` with entries, any other type), a table form it does not read
-//! (`DT_REL`, `DT_RELR`), and a write into text (`DT_TEXTREL`, `DF_TEXTREL`).
+//! (`DT_REL`, every `RELR`, Android's packed tables, and every one's size),
+//! and a write into text (`DT_TEXTREL`, `DF_TEXTREL`).
 //! A write lands only inside a writable `PT_LOAD` and never in the `PT_TLS`
 //! template, which the kernel copies from the file into every thread's block
 //! and which a write here would never reach.
@@ -47,12 +48,17 @@ enum Refusal {
     Dynamic,
     /// `DT_NEEDED`: a library this process would have to load.
     Needed,
-    /// `DT_JMPREL` with entries: slots this process would have to bind.
+    /// `DT_JMPREL` with entries, or with no `DT_PLTRELSZ` to say it has none:
+    /// slots this process would have to bind.
     JmpRel,
-    /// `DT_REL`: a table form this does not read.
+    /// `DT_REL` or its size or entry size: a table form this does not read.
     Rel,
-    /// `DT_RELR`: a table form this does not read.
+    /// `DT_RELR`, Android's or AArch64's signed one, or any of their sizes: a
+    /// table form this does not read.
     Relr,
+    /// Android's packed `DT_ANDROID_REL` or `DT_ANDROID_RELA`, or either's
+    /// size: a table form this does not read.
+    AndroidPacked,
     /// `DT_TEXTREL` or `DF_TEXTREL`: a write into text.
     TextRel,
     /// `DT_RELA` without its size, a size that is no whole number of entries,
@@ -111,7 +117,7 @@ unsafe fn apply_to_self(header: *const u8) -> Result<(), Refusal> {
         )
     };
     let image = Image::new(shape, phdrs)?;
-    let bias = (header.addr() as u64).wrapping_sub(image.header_vaddr);
+    let bias = image.bias(header.addr() as u64);
     let Some(dynamic) = image.dynamic()? else { return Ok(()) };
     let rela = {
         // SAFETY: inside a `PT_LOAD`'s file bytes, which the kernel mapped at
@@ -158,9 +164,25 @@ const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
 const DT_RELAENT: u64 = 9;
 const DT_REL: u64 = 17;
+const DT_RELSZ: u64 = 18;
+const DT_RELENT: u64 = 19;
 const DT_TEXTREL: u64 = 22;
+const DT_JMPREL: u64 = 23;
 const DT_FLAGS: u64 = 30;
+const DT_RELRSZ: u64 = 35;
 const DT_RELR: u64 = 36;
+const DT_RELRENT: u64 = 37;
+const DT_ANDROID_REL: u64 = 0x6000_000f;
+const DT_ANDROID_RELSZ: u64 = 0x6000_0010;
+const DT_ANDROID_RELA: u64 = 0x6000_0011;
+const DT_ANDROID_RELASZ: u64 = 0x6000_0012;
+const DT_ANDROID_RELR: u64 = 0x6fff_e000;
+const DT_ANDROID_RELRSZ: u64 = 0x6fff_e001;
+const DT_ANDROID_RELRENT: u64 = 0x6fff_e003;
+/// Processor-specific: these numbers mean this only in an AArch64 image.
+const DT_AARCH64_AUTH_RELRSZ: u64 = 0x7000_0011;
+const DT_AARCH64_AUTH_RELR: u64 = 0x7000_0012;
+const DT_AARCH64_AUTH_RELRENT: u64 = 0x7000_0013;
 const DF_TEXTREL: u64 = 4;
 
 /// A run of the image's bytes, at its link-time address.
@@ -264,6 +286,11 @@ impl<'a> Image<'a> {
         Ok(image)
     }
 
+    /// What every link-time address is moved by, for the header found at `header`.
+    fn bias(&self, header: u64) -> u64 {
+        header.wrapping_sub(self.header_vaddr)
+    }
+
     fn headers(&self) -> impl Iterator<Item = Phdr> + 'a {
         self.phdrs.chunks_exact(PHDR_SIZE).filter_map(Phdr::parse)
     }
@@ -293,24 +320,35 @@ impl<'a> Image<'a> {
 
     /// The `DT_RELA` table `dynamic` names, or `None` when it names none.
     fn rela(&self, dynamic: &[u8]) -> Result<Option<Span>, Refusal> {
-        let (mut rela, mut size, mut plt) = (None, None, 0);
+        let (mut rela, mut size, mut jmprel, mut plt) = (None, None, false, None);
+        let aarch64 = self.relative == R_AARCH64_RELATIVE;
         for entry in dynamic.chunks_exact(DYN_SIZE) {
             let (Some(tag), Some(value)) = (u64_at(entry, 0), u64_at(entry, 8)) else { break };
             match tag {
                 DT_NULL => break,
                 DT_NEEDED => return Err(Refusal::Needed),
-                DT_PLTRELSZ => plt = value,
+                DT_PLTRELSZ => plt = Some(value),
+                DT_JMPREL => jmprel = true,
                 DT_RELA => rela = Some(value),
                 DT_RELASZ => size = Some(value),
                 DT_RELAENT if value != RELA_SIZE as u64 => return Err(Refusal::RelaShape),
-                DT_REL => return Err(Refusal::Rel),
-                DT_RELR => return Err(Refusal::Relr),
+                DT_REL | DT_RELSZ | DT_RELENT => return Err(Refusal::Rel),
+                DT_RELR | DT_RELRSZ | DT_RELRENT | DT_ANDROID_RELR | DT_ANDROID_RELRSZ | DT_ANDROID_RELRENT => {
+                    return Err(Refusal::Relr);
+                }
+                DT_AARCH64_AUTH_RELRSZ | DT_AARCH64_AUTH_RELR | DT_AARCH64_AUTH_RELRENT if aarch64 => {
+                    return Err(Refusal::Relr);
+                }
+                DT_ANDROID_REL | DT_ANDROID_RELSZ | DT_ANDROID_RELA | DT_ANDROID_RELASZ => {
+                    return Err(Refusal::AndroidPacked);
+                }
                 DT_TEXTREL => return Err(Refusal::TextRel),
                 DT_FLAGS if value & DF_TEXTREL != 0 => return Err(Refusal::TextRel),
                 _ => {}
             }
         }
-        if plt != 0 {
+        // A `DT_JMPREL` whose size is missing is no table of known length.
+        if plt.is_some_and(|plt| plt != 0) || (jmprel && plt.is_none()) {
             return Err(Refusal::JmpRel);
         }
         let (vaddr, size) = match (rela, size) {

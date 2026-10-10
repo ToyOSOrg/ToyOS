@@ -35,16 +35,16 @@ const AARCH64: &[u8] = include_bytes!("../../tests/relocate/aarch64.elf");
 const AARCH64_APPLIED: &[u8] = include_bytes!("../../tests/relocate/aarch64-applied.elf");
 const AARCH64_TLS: &[u8] = include_bytes!("../../tests/relocate/aarch64-tls.elf");
 
-/// The image `file` loads as, from vaddr 0, which every fixture starts at.
+/// The image `file` loads as, from its header's link address.
 fn memory(file: &[u8]) -> Vec<u8> {
     let image = image_of(file);
     let mut memory = Vec::new();
     for p in image.loads() {
-        let end = (p.vaddr + p.memsz) as usize;
+        let end = (p.vaddr - image.header_vaddr + p.memsz) as usize;
         if memory.len() < end {
             memory.resize(end, 0);
         }
-        let (at, len) = (p.vaddr as usize, p.filesz as usize);
+        let (at, len) = ((p.vaddr - image.header_vaddr) as usize, p.filesz as usize);
         memory[at..at + len].copy_from_slice(&file[p.offset as usize..p.offset as usize + len]);
     }
     memory
@@ -60,7 +60,8 @@ fn image_of(file: &[u8]) -> Image<'_> {
 fn writes(file: &[u8], bias: u64) -> Result<Vec<(u64, u64)>, Refusal> {
     let image = image_of(file);
     let memory = memory(file);
-    let slice = |span: Span| &memory[span.vaddr as usize..span.vaddr as usize + span.len];
+    let at = |span: Span| (span.vaddr - image.header_vaddr) as usize;
+    let slice = |span: Span| &memory[at(span)..at(span) + span.len];
     let dynamic = image.dynamic()?.expect("a PT_DYNAMIC");
     let rela = image.rela(slice(dynamic))?.expect("a DT_RELA");
     let mut out = Vec::new();
@@ -100,6 +101,24 @@ fn aarch64_writes_what_lld_writes() {
     agrees_with_lld(AARCH64, AARCH64_APPLIED, 9);
 }
 
+/// The `-applied` fixtures' header is linked at [`BASE`]: the bias is where it
+/// is found less that, so at its own link address nothing moves.
+#[test]
+fn the_bias_is_where_the_header_is_found_less_its_link_address() {
+    for applied in [X86_64_APPLIED, AARCH64_APPLIED] {
+        let image = image_of(applied);
+        assert_eq!(image.header_vaddr, BASE);
+        for found in [BASE, BASE + 0x2000_0000] {
+            let writes = writes(applied, image.bias(found)).expect("lld's own output applies");
+            assert_eq!(writes.len(), 9);
+            for (vaddr, value) in writes {
+                let lld = word(applied, file_offset(applied, vaddr));
+                assert_eq!(value, lld + (found - BASE), "the word at {vaddr:#x}, header found at {found:#x}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_pointer_in_the_tls_template_is_refused() {
     // `readelf -lr x86_64-tls.elf`: `TLS 0x000478 0x2478 … 0x10` and a
@@ -134,11 +153,27 @@ fn x86_tables(tags: &[(u64, u64)]) -> Result<Option<Span>, Refusal> {
 fn every_dynamic_form_it_does_not_apply_is_refused_by_name() {
     assert_eq!(x86_tables(&[]), Ok(Some(Span { vaddr: 0x210, len: 216 })));
     assert_eq!(x86_tables(&[(DT_NEEDED, 1)]), Err(Refusal::Needed));
-    assert_eq!(x86_tables(&[(23, 0x210), (DT_PLTRELSZ, 24)]), Err(Refusal::JmpRel));
+    assert_eq!(x86_tables(&[(DT_JMPREL, 0x210), (DT_PLTRELSZ, 24)]), Err(Refusal::JmpRel));
+    assert_eq!(x86_tables(&[(DT_PLTRELSZ, 24)]), Err(Refusal::JmpRel));
+    // A `DT_JMPREL` whose size is missing is no table of known length.
+    assert_eq!(x86_tables(&[(DT_JMPREL, 0x210)]), Err(Refusal::JmpRel));
     // A `DT_JMPREL` with no entries binds nothing.
-    assert!(x86_tables(&[(23, 0x210), (DT_PLTRELSZ, 0)]).is_ok());
-    assert_eq!(x86_tables(&[(DT_REL, 0x210)]), Err(Refusal::Rel));
-    assert_eq!(x86_tables(&[(DT_RELR, 0x210)]), Err(Refusal::Relr));
+    assert!(x86_tables(&[(DT_JMPREL, 0x210), (DT_PLTRELSZ, 0)]).is_ok());
+    for tag in [DT_REL, DT_RELSZ, DT_RELENT] {
+        assert_eq!(x86_tables(&[(tag, 0x210)]), Err(Refusal::Rel), "{tag:#x}");
+    }
+    for tag in [DT_RELR, DT_RELRSZ, DT_RELRENT, DT_ANDROID_RELR, DT_ANDROID_RELRSZ, DT_ANDROID_RELRENT] {
+        assert_eq!(x86_tables(&[(tag, 0x210)]), Err(Refusal::Relr), "{tag:#x}");
+    }
+    for tag in [DT_ANDROID_REL, DT_ANDROID_RELSZ, DT_ANDROID_RELA, DT_ANDROID_RELASZ] {
+        assert_eq!(x86_tables(&[(tag, 0x210)]), Err(Refusal::AndroidPacked), "{tag:#x}");
+    }
+    // AArch64's signed `RELR`: a processor-specific number, which says so only
+    // in an AArch64 image.
+    for tag in [DT_AARCH64_AUTH_RELRSZ, DT_AARCH64_AUTH_RELR, DT_AARCH64_AUTH_RELRENT] {
+        assert_eq!(image_of(AARCH64).rela(&dynamic(&[(tag, 0)])), Err(Refusal::Relr), "{tag:#x}");
+        assert_eq!(image_of(X86_64).rela(&dynamic(&[(tag, 0)])), Ok(None), "{tag:#x}");
+    }
     assert_eq!(x86_tables(&[(DT_TEXTREL, 0)]), Err(Refusal::TextRel));
     assert_eq!(x86_tables(&[(DT_FLAGS, DF_TEXTREL)]), Err(Refusal::TextRel));
     // `DF_BIND_NOW` alone is no write into text.
