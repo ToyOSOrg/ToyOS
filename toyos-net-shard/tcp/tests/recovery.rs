@@ -480,11 +480,12 @@ fn rfc_8985_7_4_a_dsack_of_another_segment_still_infers_the_loss() {
 }
 
 /// RFC 8985 §7.4.2 and §7.1 on one ACK: it passes the resent probe's end and SACKs three
-/// segments above a hole, so it both infers the probe's loss and enters SACK recovery. That is one
-/// congestion event and cwnd is cut once, from the flight before the ACK, as Linux's
-/// `tcp_enter_recovery` takes no second reduction in CWR.
+/// segments above a hole, so it both infers the probe's loss and enters SACK recovery, and cwnd is
+/// cut twice: the probe's cut, then recovery's from the flight after the ACK. Linux v6.12 does the
+/// same: `tcp_process_tlp_ack` reduces and leaves CWR through `tcp_try_keep_open`, so
+/// `tcp_enter_recovery` finds no reduction in progress and reduces again.
 #[test]
-fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_once() {
+fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_twice() {
     let mut h = fixture_ef();
     ten_out(&mut h);
     expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
@@ -494,7 +495,7 @@ fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_once
     let info = h.info();
     assert!(info.in_recovery);
     assert_eq!((h.count(Counter::LossProbeRecovery), h.count(Counter::SackRecovery)), (1, 1));
-    assert_eq!((info.ssthresh, info.cwnd), (7240 * 7 / 10, 7240 * 7 / 10));
+    assert_eq!((info.ssthresh, info.cwnd), (4 * 1448 * 7 / 10, 4 * 1448 * 7 / 10));
 }
 
 /// RFC 8985 §7.4.2, Case 2: after the ACK at the resent probe's end, a duplicate ACK without SACK
