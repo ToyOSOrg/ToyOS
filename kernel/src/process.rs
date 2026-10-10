@@ -788,7 +788,12 @@ pub fn stats_of(
     if let Some(stats) = object.final_stats() {
         return Some(stats);
     }
-    let pid = object.pid();
+    stats_of_live(object.pid())
+}
+
+/// MEASUREMENT ONLY: accounting for a live process by its pid, the caller's own
+/// for `SYS_PROCESS_STATS` on [`toyos_abi::syscall::SELF_PROCESS`].
+pub fn stats_of_live(pid: Pid) -> Option<toyos_abi::syscall::ProcessStats> {
     // The other two locks are taken after this one is dropped, so no ordering edge.
     let (data_arc, cpu_ns, threads) = {
         let guard = PROCESS_TABLE.lock();

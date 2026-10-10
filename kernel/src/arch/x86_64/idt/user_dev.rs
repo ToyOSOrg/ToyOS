@@ -12,10 +12,12 @@
 use super::device_irq::device_irq_entry;
 
 fn took(slot: usize) {
+    let t0 = crate::counters::soft::now();
     crate::arch::percpu::irq_took!(UserDev);
     crate::pcidev::isr(slot);
     crate::preempt::set_need_resched();
     crate::arch::apic::eoi();
+    crate::counters::soft::since(toyos_abi::counters::Counter::IrqCycles, t0);
 }
 
 /// One handler and one entry per slot. A macro because the slot has to be an

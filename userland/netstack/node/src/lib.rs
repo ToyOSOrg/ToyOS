@@ -167,8 +167,13 @@ impl Node {
                 break true;
             }
             if !next(&mut |frame| {
+                // MEASUREMENT ONLY: a frame's cycles in the stack and in settling.
+                let t0 = toyos_net_wire::prof::now();
                 self.stack.receive(now, frame);
+                let t1 = toyos_net_wire::prof::now();
                 self.settle(now, &mut draw);
+                toyos_net_wire::prof::add(toyos_net_wire::prof::Slot::CyNodeFrame, t1.wrapping_sub(t0));
+                toyos_net_wire::prof::since(toyos_net_wire::prof::Slot::CyNodeSettle, t1);
             }) {
                 break false;
             }

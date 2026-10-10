@@ -2559,6 +2559,8 @@ mod tests {
         "default",
         "flaws",
         "loom",
+        // MEASUREMENT ONLY, never lands: netstack's cycle counts, no control.
+        "prof",
         "rustc-dep-of-std",
         "sign",
         "std",
@@ -2914,6 +2916,8 @@ mod tests {
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
+        // MEASUREMENT ONLY, never lands: `netperf_qemu`'s.
+        "tests/netperfcase/system.toml",
         "tests/panelcase/system.toml",
         "tests/proctreecase/system.toml",
         "tests/testcases/system.toml",

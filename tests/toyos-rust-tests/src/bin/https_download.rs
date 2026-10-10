@@ -21,26 +21,29 @@
 //! transfer (`busy=unread` where no CPU counts MPERF). An I/O or TLS error
 //! panics.
 
-use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
-
-use ureq::unversioned::resolver::DefaultResolver;
-use ureq::unversioned::transport::{ConnectionDetails, Connector, RustlsConnector, TcpConnector, Transport};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos_abi::counters::{Counter, RawRecord, Record};
-use toyos_abi::syscall;
+use toyos_abi::syscall::{self, ProcessStats, SELF_PROCESS};
 use toyos_logstream::program_line;
 
 #[path = "../https_client.rs"]
 #[allow(dead_code)]
 mod https_client;
+#[path = "../netperf.rs"]
+mod netperf;
+#[path = "../netperf_table.rs"]
+#[allow(dead_code)]
+mod netperf_table;
 #[path = "../served_log.rs"]
 mod served_log;
+
+use netperf::{Machine, Snap};
 
 /// A release archive Rust's distribution server never rewrites; the row holds
 /// its length and SHA-256.
@@ -72,13 +75,65 @@ struct Progress {
     last: Option<Instant>,
 }
 
+/// MEASUREMENT ONLY: the idle window before anything of the job's runs.
+const IDLE_SECS: f64 = 2.0;
+
+/// MEASUREMENT ONLY: every CPU's counters summed, and this process's own
+/// accounting.
+struct Toy<'a>(&'a SysCap);
+
+impl Machine for Toy<'_> {
+    fn snap(&self) -> Snap {
+        let mut snap = Snap::new();
+        for r in round(self.0) {
+            for counter in Counter::ALL {
+                let Some(v) = r.get(counter) else { continue };
+                let key = match counter {
+                    Counter::Stamp | Counter::Aperf | Counter::Mperf => counter.name().to_string(),
+                    Counter::Smi
+                    | Counter::HwpRequest
+                    | Counter::HwpRequestPkg
+                    | Counter::EnergyPerfBias
+                    | Counter::FirmwareCalls
+                    | Counter::FirmwareNanos => continue,
+                    _ => format!("k.{}", counter.name()),
+                };
+                *snap.entry(key).or_default() += v;
+            }
+        }
+        let mut stats = ProcessStats::default();
+        syscall::process_stats(SELF_PROCESS, &mut stats).expect("the job reads its own accounting");
+        snap.insert("app.cpu_ns".into(), stats.cpu_ns);
+        snap.insert("app.syscalls".into(), stats.syscall_total);
+        snap.insert("app.syscall_ns".into(), stats.syscall_total_ns);
+        snap.insert("app.runq_ns".into(), stats.runqueue_wait_ns);
+        snap
+    }
+
+    fn tsc(&self) -> u64 {
+        // SAFETY: reads the time-stamp counter, which Ring 3 may.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+}
+
 fn main() {
-    let bound_ms: u64 = std::env::var(toyos_tco::LIST_BOUND_ENV)
-        .unwrap_or_else(|e| panic!("{}: {e}; this job runs only in a job list", toyos_tco::LIST_BOUND_ENV))
-        .parse()
-        .unwrap_or_else(|e| panic!("{}: {e}", toyos_tco::LIST_BOUND_ENV));
-    let since_boot_ms = toyos_abi::clock::nanos_since_boot() / 1_000_000;
-    let window = Duration::from_millis(bound_ms.saturating_sub(MARGIN_MS).saturating_sub(since_boot_ms));
+    // MEASUREMENT ONLY: `<url> <roots>` is the QEMU check's server, its lease
+    // already waited on and a window of ten minutes.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (url, roots) = match &args[..] {
+        [url, roots] => (url.clone(), roots.clone()),
+        _ => (format!("https://{HOST}{PATH}"), ROOTS.to_string()),
+    };
+    let window = if args.is_empty() {
+        let bound_ms: u64 = std::env::var(toyos_tco::LIST_BOUND_ENV)
+            .unwrap_or_else(|e| panic!("{}: {e}; this job runs only in a job list", toyos_tco::LIST_BOUND_ENV))
+            .parse()
+            .unwrap_or_else(|e| panic!("{}: {e}", toyos_tco::LIST_BOUND_ENV));
+        let since_boot_ms = toyos_abi::clock::nanos_since_boot() / 1_000_000;
+        Duration::from_millis(bound_ms.saturating_sub(MARGIN_MS).saturating_sub(since_boot_ms))
+    } else {
+        Duration::from_secs(600)
+    };
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
     let progress = Mutex::new(Progress { bytes: 0, first: None, last: None });
     let rtt = Mutex::new(String::from("unread"));
@@ -98,63 +153,59 @@ fn main() {
                 std::process::exit(0);
             }
         });
-        leased();
-        *rtt.lock().unwrap_or_else(PoisonError::into_inner) = handshakes();
+        let (host, port) = authority(&url);
+        if args.is_empty() {
+            leased();
+        }
+        *rtt.lock().unwrap_or_else(PoisonError::into_inner) = handshakes(&host, port);
+
+        // MEASUREMENT ONLY: the machine idle, the suite this client's offer
+        // gets, and what the job's own kernels cost on this CPU.
+        let machine = Toy(cap);
+        let cpus = syscall::cpu_count() as usize;
+        let idle = netperf::idle(&machine, cpus, IDLE_SECS);
+        println!("https_download: {idle}");
+        let pem = std::fs::read(&roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
+        let path = url.splitn(4, '/').nth(3).map_or("/".to_string(), |p| format!("/{p}"));
+        let suite = netperf::suite(&pem, &host, port, &path);
+        println!("https_download: {}", netperf::benches(&machine, &suite, &idle));
 
         // MEASUREMENT ONLY: the file twice, back to back, so a CDN's cold first fetch is told apart.
-        for _ in 0..RUNS {
+        for run in 1..=RUNS {
             *progress.lock().unwrap_or_else(PoisonError::into_inner) = Progress { bytes: 0, first: None, last: None };
-            let url = format!("https://{HOST}{PATH}");
-            // MEASUREMENT ONLY: the agent marks when its TCP connection and then its TLS session
-            // are ready, measured from the call as curl's time_connect and time_appconnect are.
-            let (tcp, tls) = (Mark::default(), Mark::default());
-            let connector = ().chain(TcpConnector::default()).chain(tcp.clone()).chain(RustlsConnector::default()).chain(tls.clone());
-            let agent = ureq::Agent::with_parts(https_client::config(ROOTS), connector, DefaultResolver::default());
-            let called = Instant::now();
-            let response = agent.get(&url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
-            let ready = |mark: &Mark| mark.0.lock().unwrap().map_or(-1.0, |at| at.duration_since(called).as_secs_f64() * 1e3);
-            let (tcp_ms, tls_ms) = (ready(&tcp), ready(&tls));
-            let mut body = response.into_body().into_reader();
-            let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-            let mut chunk = vec![0u8; 64 * 1024];
-            let mut bytes = 0u64;
-            loop {
-                let n = body.read(&mut chunk).unwrap_or_else(|e| panic!("the body of {url} after {bytes} bytes: {e}"));
-                if n == 0 {
-                    break;
-                }
-                digest.update(&chunk[..n]);
-                bytes += n as u64;
+            let before = machine.snap();
+            let at = Instant::now();
+            let fetched = netperf::fetch(https_client::config(&roots), &url, |bytes| {
                 let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
                 progress.bytes = bytes;
                 progress.last = Some(Instant::now());
                 if progress.first.is_none() {
-                    progress.first = Some((Instant::now(), round(&cap), bytes));
+                    progress.first = Some((Instant::now(), round(cap), bytes));
                 }
-            }
-            drop(body);
+            });
+            let secs = at.elapsed().as_secs_f64();
+            let d = netperf::delta(&before, &machine.snap());
             let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
             let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
-            let sha256 = https_client::hex(digest.finish());
-            println!("https_download: {} tcp_ms={tcp_ms:.1} tls_ms={tls_ms:.1}", report("whole", Some(&sha256), &progress, &rtt, &cap));
+            println!(
+                "https_download: {} tcp_ms={:.1} tls_ms={:.1}",
+                report("whole", Some(&fetched.sha256), &progress, &rtt, cap),
+                fetched.tcp_ms,
+                fetched.tls_ms
+            );
+            println!("https_download: perf run={run} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
         }
         drop(transferring);
     });
 }
 
-/// MEASUREMENT ONLY: a link of an agent's connector chain that passes its
-/// transport on and keeps when it did.
-#[derive(Clone, Debug, Default)]
-struct Mark(Arc<Mutex<Option<Instant>>>);
-
-impl<In: Transport> Connector<In> for Mark {
-    type Out = In;
-
-    fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<In>, ureq::Error> {
-        if chained.is_some() {
-            *self.0.lock().unwrap() = Some(Instant::now());
-        }
-        Ok(chained)
+/// MEASUREMENT ONLY: `url`'s host and port.
+fn authority(url: &str) -> (String, u16) {
+    let rest = url.strip_prefix("https://").unwrap_or_else(|| panic!("{url} is no https URL"));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match authority.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse().unwrap_or_else(|e| panic!("{url}'s port: {e}"))),
+        None => (authority.to_string(), 443),
     }
 }
 
@@ -168,18 +219,18 @@ fn leased() {
     });
 }
 
-/// [`PROBES`] handshakes with [`HOST`]'s first address, each closed as it is
+/// [`PROBES`] handshakes with `host`'s first address, each closed as it is
 /// made, as the `rtt_ms` the module header gives.
-fn handshakes() -> String {
-    let addr = (HOST, 443)
+fn handshakes(host: &str, port: u16) -> String {
+    let addr = (host, port)
         .to_socket_addrs()
-        .unwrap_or_else(|e| panic!("look up {HOST}: {e}"))
+        .unwrap_or_else(|e| panic!("look up {host}: {e}"))
         .next()
-        .unwrap_or_else(|| panic!("{HOST} has no address"));
+        .unwrap_or_else(|| panic!("{host} has no address"));
     let each: Vec<String> = (0..PROBES)
         .map(|_| {
             let at = Instant::now();
-            drop(TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect to {HOST}: {e}")));
+            drop(TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect to {host}: {e}")));
             format!("{:.1}", at.elapsed().as_secs_f64() * 1e3)
         })
         .collect();

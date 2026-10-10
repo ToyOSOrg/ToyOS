@@ -4,7 +4,8 @@
 //! address classes and prefixes, and the declaration of a crate's counters.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "prof"), forbid(unsafe_code))]
+#![cfg_attr(feature = "prof", deny(unsafe_code))]
 #![cfg_attr(
     not(test),
     forbid(
@@ -395,4 +396,126 @@ mod compile_fail {
     /// ```
     #[allow(non_camel_case_types)]
     pub struct write_payload_and_write_frame_body_are_sealed;
+}
+
+/// MEASUREMENT ONLY, never lands: netstack's per-stage cycle counts, one
+/// registry every crate of its stack adds to, read and cleared by netstack.
+/// Without the `prof` feature, which netstack alone enables, it counts nothing.
+pub mod prof {
+    macro_rules! slots {
+        ($($name:ident = $text:literal,)*) => {
+            #[allow(non_camel_case_types)]
+            #[derive(Clone, Copy)]
+            #[repr(usize)]
+            pub enum Slot { $($name,)* }
+            pub const NAMES: &[&str] = &[$($text,)*];
+        };
+    }
+
+    slots! {
+        Passes = "passes",
+        NicReady = "nic_ready",
+        FramesRx = "frames_rx",
+        FramesTx = "frames_tx",
+        PipeW = "pipe_w",
+        PipeWBytes = "pipe_w_bytes",
+        PipeWRefused = "pipe_w_refused",
+        PipeR = "pipe_r",
+        PipeREmpty = "pipe_r_empty",
+        Bridges = "bridges",
+        B0 = "b0",
+        B1 = "b1",
+        B2 = "b2",
+        B3_4 = "b3_4",
+        B5_8 = "b5_8",
+        B9_16 = "b9_16",
+        B17_64 = "b17_64",
+        B65 = "b65",
+        Watches = "watches",
+        TxCalls = "tx_calls",
+        Owed = "owed",
+        EmptyPasses = "empty_passes",
+        CyPass = "cy_pass",
+        CyBeginPass = "cy_begin_pass",
+        CyReceive = "cy_receive",
+        CyPollRx = "cy_poll_rx",
+        CyRxDone = "cy_rx_done",
+        RxDone = "rx_done",
+        CyNodeFrame = "cy_node_frame",
+        CyNodeSettle = "cy_node_settle",
+        CyChecksum = "cy_checksum",
+        ChecksumBytes = "checksum_bytes",
+        CyRingWrite = "cy_ring_write",
+        RingWriteBytes = "ring_write_bytes",
+        CyFire = "cy_fire",
+        CyTransmit = "cy_transmit",
+        CyCardTx = "cy_card_tx",
+        CySettle = "cy_settle",
+        CyWatch = "cy_watch",
+        CyPipeW = "cy_pipe_w",
+        CyPipeR = "cy_pipe_r",
+        CyWait = "cy_wait",
+        CyAnswers = "cy_answers",
+        CyBridge = "cy_bridge",
+    }
+
+    #[cfg(feature = "prof")]
+    pub use on::{add, now, since, take};
+
+    #[cfg(feature = "prof")]
+    #[allow(unsafe_code, clippy::arithmetic_side_effects, clippy::indexing_slicing, clippy::as_conversions)]
+    mod on {
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        use super::{Slot, NAMES};
+
+        static C: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
+
+        /// The CPU's free-running counter: the TSC, `CNTVCT_EL0`.
+        #[inline]
+        pub fn now() -> u64 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: reads the time-stamp counter, which CR4.TSD leaves to Ring 3.
+            unsafe {
+                core::arch::x86_64::_rdtsc()
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let v: u64;
+                // SAFETY: reads the virtual counter, which EL0 may.
+                unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+                v
+            }
+        }
+
+        #[inline]
+        pub fn add(slot: Slot, n: u64) {
+            C[slot as usize].fetch_add(n, Relaxed);
+        }
+
+        /// Ticks since `t0` to `slot`.
+        #[inline]
+        pub fn since(slot: Slot, t0: u64) {
+            add(slot, now().wrapping_sub(t0));
+        }
+
+        /// Each slot's name and count, each cleared as it is read.
+        pub fn take() -> impl Iterator<Item = (&'static str, u64)> {
+            NAMES.iter().zip(&C).map(|(name, c)| (*name, c.swap(0, Relaxed)))
+        }
+    }
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn now() -> u64 {
+        0
+    }
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn add(_: Slot, _: u64) {}
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn since(_: Slot, _: u64) {}
 }

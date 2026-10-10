@@ -18,9 +18,9 @@ toyos-inspect = { path = "../../toyos-inspect" }
 toyos-net-node = { path = "node" }
 toyos-net-ip = { path = "../../toyos-net-ip" }
 toyos-net-shard = { path = "../../toyos-net-shard" }
-toyos-net-tcp = { path = "../../toyos-net-shard/tcp" }
+toyos-net-tcp = { path = "../../toyos-net-shard/tcp", features = ["prof"] }
 toyos-net-udp = { path = "../../toyos-net-udp" }
-toyos-net-wire = { path = "../../toyos-net-wire" }
+toyos-net-wire = { path = "../../toyos-net-wire", features = ["prof"] }
 
 [package.metadata.toyos.host]
 exempt.owns = "the NIC ToyOS claims for it"

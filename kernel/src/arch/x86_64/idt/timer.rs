@@ -107,6 +107,7 @@ extern "sysv64" fn ring0_tick(pc: u64) {
 }
 
 extern "sysv64" fn timer_handler() {
+    let t0 = crate::counters::soft::now();
     // From Ring 3, so interrupts were open; `exit_to_user` opens them again.
     #[cfg(feature = "mask-windows")]
     {
@@ -131,6 +132,7 @@ extern "sysv64" fn timer_handler() {
         kind: TraceKind::TimerFire,
     });
     crate::arch::apic::eoi();
+    crate::counters::soft::since(toyos_abi::counters::Counter::IrqCycles, t0);
 
     // The handler ends here: the pass that follows is the interrupted thread's.
     #[cfg(feature = "mask-windows")]

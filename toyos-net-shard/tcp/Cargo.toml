@@ -8,3 +8,7 @@ publish = false
 
 [dependencies]
 toyos-net-wire = { path = "../../toyos-net-wire" }
+
+[features]
+# MEASUREMENT ONLY, never lands: Ring::write_at's cycles, in toyos-net-wire's registry.
+prof = ["toyos-net-wire/prof"]

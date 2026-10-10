@@ -2630,6 +2630,9 @@ crate::user_safe! {
     }
 }
 
+/// MEASUREMENT ONLY: the handle [`process_stats`] reads as the caller itself.
+pub const SELF_PROCESS: RawHandle = RawHandle(u32::MAX);
+
 /// Read accounting for the process a `Process` handle names, alive or exited.
 ///
 /// Repeatable: the numbers are the object's, so sampling one does not spend it.

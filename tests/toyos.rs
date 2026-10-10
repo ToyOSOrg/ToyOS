@@ -2,6 +2,8 @@
 extern crate toyos_build;
 
 mod common;
+#[path = "toyos-rust-tests/src/netperf_table.rs"]
+mod netperf_table;
 #[path = "toyos-rust-tests/src/stream_ends.rs"]
 mod stream_ends;
 
@@ -320,6 +322,9 @@ const MACHINE_TESTS: &[&str] = &[
     // certificate by and the sockets under it exist in a ToyOS guest alone,
     // and the T14's row is the next stage's, against a server on the bench.
     "https_fetch",
+    // MEASUREMENT ONLY, never lands: `https_download`'s counters and table
+    // against a server on the host.
+    "netperf_qemu",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -994,6 +999,8 @@ fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
             eprintln!("  [prof] {}", &line[at + "netstack: prof ".len()..]);
         }
     }
+    // MEASUREMENT ONLY: the per-MB table.
+    eprint!("{}", netperf_table::table(log.text()));
     back.job_passed("test_rs_https_download")?;
     let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
     let field = |name: &str| said.split_whitespace().find_map(|word| word.strip_prefix(name)?.strip_prefix('='));
@@ -3547,6 +3554,46 @@ fn https_fetch() -> Result<(), String> {
     Ok(())
 }
 
+/// MEASUREMENT ONLY, never lands: `https_download` on `tests/netperfcase`
+/// against a server on this host, its lines and netstack's printed, and the
+/// per-MB table rendered from them: green when the job ended 0 having said a
+/// line of each kind and netstack a prof line of each download.
+fn netperf_qemu() -> Result<(), String> {
+    use common::https::{self, Authority, Server};
+    let host: std::net::IpAddr = https::HOST.parse().expect("an address");
+    let trusted = Authority::new("ToyOS harness test authority");
+    let body: Vec<u8> = (0..16).flat_map(|_| https::body()).collect();
+    let server = Server::start(trusted.leaf(host), std::sync::Arc::new(body))?;
+    const ROOTS: &str = "etc/ssl/harness-cert.pem";
+    let mut roots = toyos_build::build::trust_roots();
+    roots.extend_from_slice(trusted.pem().as_bytes());
+    let crate_path = compile::repo_root().join("tests/toyos-rust-tests");
+    let bins = [("https_download".to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, "https_download"))];
+    let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
+    let case = compile::repo_root().join("tests/netperfcase");
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, toyos_tco::LEASE_SAID, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let url = format!("https://{}:{}/body", https::HOST, server.port);
+    let result = qemu.run_test(&format!("test_rs_https_download {url} /system/{ROOTS}"), Duration::from_secs(900));
+    for line in result.stdout.lines() {
+        eprintln!("  [netperf] {line}");
+    }
+    eprint!("{}", netperf_table::table(&result.stdout));
+    if let Some(why) = &result.error {
+        return Err(format!("https_download: {why}"));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("https_download ended {:?}", result.exit_code));
+    }
+    for said in ["https_download: perf idle ", "https_download: bench ", "https_download: perf run=2 ", "netstack: prof "] {
+        if !result.stdout.contains(said) {
+            return Err(format!("nothing said {said:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
@@ -3557,6 +3604,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
         "https_fetch" => https_fetch(),
+        "netperf_qemu" => netperf_qemu(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),

@@ -62,6 +62,18 @@ impl Ring {
 
     /// Stores `data` at `offset` without counting it held; what lies past the capacity is not stored.
     pub fn write_at(&mut self, offset: usize, data: &[u8]) -> usize {
+        #[cfg(feature = "prof")]
+        let t0 = toyos_net_wire::prof::now();
+        let n = self.write_at_unprofiled(offset, data);
+        #[cfg(feature = "prof")]
+        {
+            toyos_net_wire::prof::since(toyos_net_wire::prof::Slot::CyRingWrite, t0);
+            toyos_net_wire::prof::add(toyos_net_wire::prof::Slot::RingWriteBytes, n as u64);
+        }
+        n
+    }
+
+    fn write_at_unprofiled(&mut self, offset: usize, data: &[u8]) -> usize {
         let fits = self.capacity.saturating_sub(offset).min(data.len());
         if fits == 0 {
             return 0;

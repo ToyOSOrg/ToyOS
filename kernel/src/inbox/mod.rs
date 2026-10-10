@@ -171,7 +171,10 @@ pub struct PollEntry {
 impl Ring for PollEntry {
     fn fire(&self, how: Fire) {
         match how {
-            Fire::Ready => self.poll.fire(self.direction.raw()),
+            Fire::Ready => {
+                crate::counters::soft::add(toyos_abi::counters::Counter::InboxFires, 1);
+                self.poll.fire(self.direction.raw())
+            }
             Fire::Gone => self.poll.end(),
         }
     }
@@ -614,6 +617,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
     }
 
     fn look(&self, poll: &Arc<Poll>) -> Look {
+        crate::counters::soft::add(toyos_abi::counters::Counter::InboxLooks, 1);
         let object = match resolve(poll.handle) {
             Ok(object) => object,
             // Closed since it was watched, which is no bug of the process's:
@@ -634,6 +638,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
         if now.any() {
             return Look::Ready(now.result_flags());
         }
+        crate::counters::soft::add(toyos_abi::counters::Counter::InboxRearms, 1);
         let again = Poll::new(self.clone(), poll.user_data, poll.handle, poll.flags);
         match arm(self, again, Some(poll), &object) {
             Ok(()) => Look::Waits,

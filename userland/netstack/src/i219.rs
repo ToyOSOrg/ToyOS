@@ -260,6 +260,11 @@ impl Nic {
         self.driver.borrow().pass_due_in()
     }
 
+    /// MEASUREMENT ONLY.
+    pub fn rdt_writes(&self) -> u32 {
+        self.driver.borrow().counters().rdt_writes
+    }
+
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
         self.driver.borrow_mut().poll_rx()
     }

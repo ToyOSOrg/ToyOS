@@ -50,10 +50,33 @@ pub enum Counter {
     /// its return: the firmware's handler, where a write raises an interrupt
     /// to it.
     FirmwareNanos,
+    /// MEASUREMENT ONLY, the kernel's own work on this CPU, counted by software:
+    /// context switches onto any context, idle included.
+    Switches,
+    /// Syscalls entered.
+    Syscalls,
+    /// Halts the idle loop came back from.
+    IdleExits,
+    /// Stamp ticks from each halt's return to the next switch or halt.
+    IdleExitCycles,
+    /// Stamp ticks inside the timer, kick and claimed-device handlers.
+    IrqCycles,
+    /// Posts that reached an inbox poll.
+    InboxFires,
+    /// Looks an inbox's submitter took at a fired poll.
+    InboxLooks,
+    /// Polls a look found nothing for and armed again.
+    InboxRearms,
+    /// Stamp ticks spent taking the pipe table's lock.
+    PipeLockSpinCycles,
+    /// Stamp ticks the pipe table's lock was held.
+    PipeLockHoldCycles,
+    /// Bytes pipe reads and writes copied.
+    PipeCopyBytes,
 }
 
 impl Counter {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 21;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -65,6 +88,17 @@ impl Counter {
         Self::EnergyPerfBias,
         Self::FirmwareCalls,
         Self::FirmwareNanos,
+        Self::Switches,
+        Self::Syscalls,
+        Self::IdleExits,
+        Self::IdleExitCycles,
+        Self::IrqCycles,
+        Self::InboxFires,
+        Self::InboxLooks,
+        Self::InboxRearms,
+        Self::PipeLockSpinCycles,
+        Self::PipeLockHoldCycles,
+        Self::PipeCopyBytes,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -79,6 +113,17 @@ impl Counter {
             Self::EnergyPerfBias => "energy_perf_bias",
             Self::FirmwareCalls => "firmware_calls",
             Self::FirmwareNanos => "firmware_nanos",
+            Self::Switches => "switches",
+            Self::Syscalls => "syscalls",
+            Self::IdleExits => "idle_exits",
+            Self::IdleExitCycles => "idle_exit_cycles",
+            Self::IrqCycles => "irq_cycles",
+            Self::InboxFires => "inbox_fires",
+            Self::InboxLooks => "inbox_looks",
+            Self::InboxRearms => "inbox_rearms",
+            Self::PipeLockSpinCycles => "pipe_lock_spin_cycles",
+            Self::PipeLockHoldCycles => "pipe_lock_hold_cycles",
+            Self::PipeCopyBytes => "pipe_copy_bytes",
         }
     }
 
@@ -91,7 +136,18 @@ impl Counter {
             | Self::Kicks
             | Self::HwpRequest
             | Self::HwpRequestPkg
-            | Self::EnergyPerfBias => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::EnergyPerfBias
+            | Self::Switches
+            | Self::Syscalls
+            | Self::IdleExits
+            | Self::IdleExitCycles
+            | Self::IrqCycles
+            | Self::InboxFires
+            | Self::InboxLooks
+            | Self::InboxRearms
+            | Self::PipeLockSpinCycles
+            | Self::PipeLockHoldCycles
+            | Self::PipeCopyBytes => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }
@@ -186,7 +242,9 @@ impl Record {
 mod tests {
     use super::*;
 
-    fn record(stale: bool, values: [Option<u64>; Counter::COUNT]) -> Record {
+    fn record(stale: bool, first: [Option<u64>; 10]) -> Record {
+        let mut values = [None; Counter::COUNT];
+        values[..10].copy_from_slice(&first);
         Record { cpu: 7, hardware_id: 0x0102_0304, stale, values }
     }
 
@@ -195,7 +253,7 @@ mod tests {
         for r in [
             record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0), Some(2), Some(31_936)]),
             record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None, Some(0), None]),
-            record(true, [None; Counter::COUNT]),
+            record(true, [None; 10]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));
         }
@@ -211,7 +269,7 @@ mod tests {
 
     #[test]
     fn a_flag_no_counter_names_is_refused() {
-        let mut raw = record(false, [Some(1); Counter::COUNT]).encode();
+        let mut raw = record(false, [Some(1); 10]).encode();
         raw.0[8] |= 1 << 1;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Flags(1 << 1)));
         let mut raw = RawRecord::EMPTY;

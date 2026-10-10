@@ -80,7 +80,9 @@ impl Machine for KernelHw {
         }
         #[cfg(feature = "mask-windows")]
         crate::windows::halting();
+        crate::counters::soft::idle_left();
         self.halt();
+        crate::counters::soft::woke();
         #[cfg(feature = "mask-windows")]
         crate::windows::woken();
         // **A CPU that is executing has a one-shot armed, and this is where
@@ -112,6 +114,8 @@ static RUNNING_CTX: [AtomicU64; crate::sched::MAX_CPUS] =
 
 /// This CPU is about to stand on `ctx`: `Hw::switch`'s last word before the stack moves.
 pub(crate) fn note_running(ctx: *const KernelCtx) {
+    crate::counters::soft::add(toyos_abi::counters::Counter::Switches, 1);
+    crate::counters::soft::idle_left();
     RUNNING_CTX[percpu::cpu_id() as usize].store(ctx as u64, Relaxed);
 }
 

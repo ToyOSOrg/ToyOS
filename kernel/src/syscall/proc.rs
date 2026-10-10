@@ -202,6 +202,16 @@ pub(super) fn sys_process_stats(
     h: RawHandle,
     out: UserAddr,
 ) -> u64 {
+    // MEASUREMENT ONLY: the caller's own accounting, by a handle no table holds.
+    if h == toyos_abi::syscall::SELF_PROCESS {
+        let Some(stats) = process::stats_of_live(process::current_process()) else {
+            return SyscallError::NotFound.to_u64();
+        };
+        return match ctx.copy_out(out, &stats) {
+            Ok(()) => 0,
+            Err(e) => e.to_u64(),
+        };
+    }
     let object = match process::with_process_data(|data| {
         data.handles.get::<crate::object::process::ProcessObject>(h, Rights::READ)
     }) {

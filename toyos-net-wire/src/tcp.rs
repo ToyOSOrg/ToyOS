@@ -245,7 +245,15 @@ impl<'a> TcpSegment<'a> {
         let (full_header, payload) = bytes.split_at_checked(header_len).ok_or(TcpError::HeaderOverrun)?;
         let length = u16::try_from(bytes.len()).map_err(|_| TcpError::Checksum)?;
         let pseudo = PseudoHeader { source: ip.source(), destination: ip.destination(), protocol: Protocol::Tcp, length };
-        if !pseudo.accumulator().feed(bytes).sum().verifies() {
+        #[cfg(feature = "prof")]
+        let t0 = crate::prof::now();
+        let verified = pseudo.accumulator().feed(bytes).sum().verifies();
+        #[cfg(feature = "prof")]
+        {
+            crate::prof::since(crate::prof::Slot::CyChecksum, t0);
+            crate::prof::add(crate::prof::Slot::ChecksumBytes, bytes.len() as u64);
+        }
+        if !verified {
             return Err(TcpError::Checksum);
         }
         let (source, destination) = Port::new(u16::from_be_bytes([header[0], header[1]]))
