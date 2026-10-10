@@ -97,7 +97,7 @@ const _: () = {
     assert!(PERIODS <= u32::BITS as usize);
     // §5.14.6.6.3.2: `buffer_bytes % period_bytes == 0`, and every period
     // whole 16-bit stereo frames.
-    assert!(PERIOD_BYTES % 4 == 0);
+    assert!(PERIOD_BYTES.is_multiple_of(4));
 };
 
 /// The rates this driver can encode, best first. 44100 leads because it is

@@ -128,6 +128,9 @@ fn words(bytes: &[u8]) -> Vec<u32> {
     bytes.chunks(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect()
 }
 
+/// How the model answers each control request it reads.
+type Answering = Box<dyn FnMut(&[u32]) -> Answer>;
+
 struct State {
     /// Per queue: the available entries taken so far, and the used ones
     /// written.
@@ -140,7 +143,7 @@ struct State {
     /// Chains the device holds: the transmit queue's until played, the
     /// event queue's until an event.
     held: [Vec<(u16, Vec<Desc>)>; 3],
-    answer: Box<dyn FnMut(&[u32]) -> Answer>,
+    answer: Answering,
 }
 
 #[derive(Clone)]
