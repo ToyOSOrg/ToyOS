@@ -298,6 +298,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
+    ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -2067,6 +2068,47 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
     Ok(())
 }
 
+/// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
+/// maps those sixteen buses' megabytes and no more, and enumerates the
+/// functions QEMU put there and nothing else, and the boot goes on.
+fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    const WINDOW: &str = "ACPI: ECAM window: segment 0 buses 0x00..=0x0f, bus 0 at 0x3f000000";
+    const MAPPED: &str = "mmio: 0x3f000000+0x1000000 ";
+    const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
+    /// What QEMU puts on bus 0 of this profile: the host bridge, the xHCI and
+    /// the virtio-rng, as `vendor=… device=…`.
+    const FUNCTIONS: &[&str] = &[
+        "00:00.0 [0600] vendor=1b36 device=0008",
+        "00:01.0 [0c03] vendor=1033 device=0194",
+        "00:02.0 [00ff] vendor=1af4 device=1005",
+    ];
+    let options = BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
+    let argv = qemu::profile_argv(&options);
+    if !argv.iter().any(|a| a.contains("highmem-ecam=off")) {
+        return Err(format!("the machine keeps its ECAM high: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    // What was read and what was mapped before what was said about it.
+    pci_inventory(&serial).map_err(|why| format!("{why}\nserial:\n{serial}"))?;
+    let rows: Vec<&str> = serial.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
+    let found: Vec<&str> = rows.iter().map(|row| row.split(" prog_if=").next().unwrap_or(row)).collect();
+    if found != FUNCTIONS {
+        return Err(format!("the kernel enumerated {found:#?}, and QEMU put {FUNCTIONS:#?} on the window's buses"));
+    }
+    if let Some(wider) = serial.lines().find(|l| l.contains("mmio: 0x3f000000+") && !l.contains(MAPPED)) {
+        return Err(format!("the window was mapped wider than its buses: {wider:?}\nserial:\n{serial}"));
+    }
+    for want in [MAPPED, WINDOW, SPAWNED] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    eprintln!("  [virt] {WINDOW}; {} functions: {found:?}", found.len());
+    Ok(())
+}
+
 /// The SMMUv3 armed from the IORT, judged by what two of QEMU's
 /// `iommu-testdev` can and cannot write through it
 /// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
@@ -2937,6 +2979,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_random_differs" => virt_random_differs(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
+        "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
@@ -5463,7 +5506,7 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
         ("APIC", "ACPI: MADT cpus="),
         ("FACP", "ACPI: reset register "),
         ("HPET", "clock: HPET at "),
-        ("MCFG", "ACPI: ECAM base address: "),
+        ("MCFG", "ACPI: ECAM window: "),
     ];
     for (signature, decoded) in NEEDED {
         if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))

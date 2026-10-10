@@ -121,22 +121,32 @@ fn refuse<T>(what: &str, error: TableError) -> Option<T> {
     None
 }
 
-/// Given the RSDP address from UEFI, parse XSDT -> MCFG -> return the ECAM
-/// base address and the PCI segment group it serves.
-pub fn find_ecam_base(rsdp_addr: u64) -> Option<(u64, u16)> {
+/// Every ECAM window the MCFG names that this kernel walks, each structure it
+/// refuses said by name; none where the MCFG is unusable.
+pub fn ecam_windows(rsdp_addr: u64) -> Vec<toyos_acpi::Allocation> {
     log!("ACPI: RSDP at {rsdp_addr:#x}");
-    let (mcfg, base) = match toyos_acpi::ecam_base(direct_phys(), rsdp_addr) {
+    let allocations = match toyos_acpi::ecam_allocations(direct_phys(), rsdp_addr) {
         Ok(found) => found,
-        Err(e) => return refuse("MCFG", e),
+        Err(e) => return refuse("MCFG", e).unwrap_or_default(),
     };
-    // PCI Firmware Specification 3.3, Table 4-3: the entry's segment group
-    // follows its base, inside the entry `ecam_base` already bounded.
-    let segment = mcfg
-        .u16_at(toyos_acpi::MCFG_FIRST_ENTRY + 8)
-        .expect("ecam_base bounded the whole first allocation structure");
-    log!("ACPI: MCFG found at {:#x}", mcfg.base());
-    log!("ACPI: ECAM base address: {base:#x}");
-    Some((base, segment))
+    log!("ACPI: MCFG found at {:#x}", allocations.table_base());
+    let mut windows = Vec::new();
+    for (index, item) in allocations.enumerate() {
+        match item {
+            Ok(window) => {
+                log!(
+                    "ACPI: ECAM window: segment {} buses {:#04x}..={:#04x}, bus 0 at {:#x}",
+                    window.segment(),
+                    window.buses().start(),
+                    window.buses().end(),
+                    window.base()
+                );
+                windows.push(window);
+            }
+            Err(why) => log!("ACPI: MCFG allocation {index} refused: {why:?}"),
+        }
+    }
+    windows
 }
 
 /// FADT revision and the IA-PC boot architecture flags.
