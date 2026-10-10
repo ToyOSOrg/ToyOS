@@ -1990,14 +1990,6 @@ impl Qmp {
         self.await_reply("\"return\"");
     }
 
-    /// Run `command` in the human monitor and return what it printed.
-    fn human(&mut self, command: &str) -> String {
-        self.execute_capturing(&format!(
-            "{{\"execute\":\"human-monitor-command\",\"arguments\":\
-             {{\"command-line\":\"{command}\"}}}}"
-        ))
-    }
-
     /// `execute`, keeping what the command answered with. Only the human
     /// monitor answers with anything; every other command here returns `{}`.
     fn execute_capturing(&mut self, command: &str) -> String {
@@ -2057,22 +2049,6 @@ impl QmpShutdown {
         self.0.execute("{\"execute\":\"system_powerdown\"}");
     }
 
-    /// A 16-bit read of the guest's I/O `port`, by the human monitor on the
-    /// one connection QEMU serves; asked before the stop, whose event a
-    /// command's reply would otherwise pass over, as [`Self::memory_word`].
-    pub fn port_word(&mut self, port: u16) -> u16 {
-        let said = self.0.human(&format!("i /h {port:#x}"));
-        let value = monitor_value(&said, "= ").and_then(|value| u16::try_from(value).ok());
-        value.unwrap_or_else(|| panic!("qmp: the monitor's read of port {port:#x} said {said:?}"))
-    }
-
-    /// A 32-bit read of the guest's physical memory at `phys`.
-    pub fn memory_word(&mut self, phys: u64) -> u32 {
-        let said = self.0.human(&format!("xp /1wx {phys:#x}"));
-        let value = monitor_value(&said, ": ").and_then(|value| u32::try_from(value).ok());
-        value.unwrap_or_else(|| panic!("qmp: the monitor's read of {phys:#x} said {said:?}"))
-    }
-
     /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
     /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
     pub fn reason(&mut self) -> Option<String> {
@@ -2089,12 +2065,6 @@ impl QmpShutdown {
             }
         }
     }
-}
-
-/// The hex value after the last `after` on what the human monitor said.
-fn monitor_value(said: &str, after: &str) -> Option<u64> {
-    let (_, value) = said.rsplit_once(after)?;
-    u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok()
 }
 
 /// The `reason` of the `SHUTDOWN` event in what QMP has sent so far.
@@ -2118,7 +2088,10 @@ impl QmpMonitor {
 
     /// Run `command` in the human monitor and return what it printed.
     pub fn human(&mut self, command: &str) -> String {
-        self.0.human(command)
+        self.0.execute_capturing(&format!(
+            "{{\"execute\":\"human-monitor-command\",\"arguments\":\
+             {{\"command-line\":\"{command}\"}}}}"
+        ))
     }
 }
 

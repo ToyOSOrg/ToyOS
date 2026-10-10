@@ -68,9 +68,9 @@ pub fn events(served: &Served, pm1: (u16, u16), gpe0: &[(u8, u8)]) -> Result<Vec
     Ok(events)
 }
 
-/// Every enable this server sets: PM1's and each GPE0 byte's.
+/// PM1's status or enable bits, and each GPE0 byte's.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Enables {
+pub struct Bits {
     pub pm1: u16,
     pub gpe0: Vec<u8>,
 }
@@ -78,11 +78,11 @@ pub struct Enables {
 /// The fixed hardware and the SCI, as the wait for the firmware's release
 /// drives them.
 pub trait Fixed {
-    fn pm1_status(&mut self) -> u16;
+    fn status(&mut self) -> Bits;
     /// Write `bits` to PM1 status, which clears each one set (Table 4.13).
     fn pm1_clear(&mut self, bits: u16);
-    fn enables(&mut self) -> Enables;
-    fn enable(&mut self, enables: &Enables);
+    fn enables(&mut self) -> Bits;
+    fn enable(&mut self, enables: &Bits);
     /// Waits for the SCI until `until` and takes its record: `false` is the
     /// deadline, and a wake with no record is `true`.
     fn sci(&mut self, until: Instant) -> bool;
@@ -92,20 +92,29 @@ pub trait Fixed {
 
 /// Waits until `until` for `GBL_STS`, after a take of the Global Lock left
 /// the firmware the pending bit (§5.2.10.1): `true` where it was set, and is
-/// now clear. While it waits `GBL_EN` is the one enable set, so no other
-/// event raises the SCI it waits on, whose line is level; each enable is put
-/// back as it was, so an event latched meanwhile raises the SCI again for
-/// whoever serves it. A `GBL_STS` left from an earlier release ends the wait
-/// too, which costs the caller one take more and loses no release.
+/// now clear. `GBL_EN` is set beside every enable kept; an event that
+/// latches meanwhile keeps its status for whoever serves it, and loses its
+/// enable until the wait ends, so the level SCI it raised falls. An enable
+/// is cleared only once its status has latched, so the wait holds whether a
+/// status latches under a clear enable (Table 4.13) or, as QEMU's ICH9 power
+/// button, only under a set one. A `GBL_STS` left from an earlier release
+/// ends the wait too, which costs the caller one take more and loses no
+/// release.
 pub fn await_release(fixed: &mut impl Fixed, until: Instant) -> bool {
     let kept = fixed.enables();
-    fixed.enable(&Enables { pm1: GBL, gpe0: vec![0; kept.gpe0.len()] });
+    let mut enabled = Bits { pm1: kept.pm1 | GBL, gpe0: kept.gpe0.clone() };
     let released = loop {
-        let set = fixed.pm1_status() & GBL != 0;
+        let status = fixed.status();
+        let set = status.pm1 & GBL != 0;
         if set {
             fixed.pm1_clear(GBL);
         }
-        // Acknowledged with nothing but `GBL_STS` enabled, and that clear.
+        enabled.pm1 &= !status.pm1;
+        for (enable, status) in enabled.gpe0.iter_mut().zip(&status.gpe0) {
+            *enable &= !status;
+        }
+        fixed.enable(&enabled);
+        // Acknowledged with every status latched disabled, and `GBL_STS` clear.
         fixed.ack();
         if set {
             break true;
@@ -197,13 +206,14 @@ mod tests {
     /// A PM1 event block and a GPE0 block, whose status bits a write of one
     /// clears and whose SCI is level: asserted while any status bit and its
     /// enable are both set (§4.8.3.1), so an acknowledgement then is one the
-    /// line answers at once. A wait for the SCI lets the script set one thing
-    /// after another until the line is raised; past the script the wait
-    /// meets its deadline.
+    /// line answers at once. A PM1 status latches only under its enable, as
+    /// QEMU's ICH9 power button does. A wait for the SCI lets the script set
+    /// one thing after another until the line is raised; past the script the
+    /// wait meets its deadline.
     struct Block {
         status: u16,
         gpe0: Vec<u8>,
-        enables: Enables,
+        enables: Bits,
         script: Vec<Set>,
         sets: usize,
         acks: usize,
@@ -214,7 +224,7 @@ mod tests {
             Block {
                 status: 0,
                 gpe0: vec![0; 3],
-                enables: Enables { pm1: PWRBTN, gpe0: vec![0x40, 0, 0x01] },
+                enables: Bits { pm1: PWRBTN, gpe0: vec![0x40, 0, 0x01] },
                 script: script.to_vec(),
                 sets: 0,
                 acks: 0,
@@ -223,22 +233,22 @@ mod tests {
     }
 
     impl Fixed for Block {
-        fn pm1_status(&mut self) -> u16 {
-            self.status
+        fn status(&mut self) -> Bits {
+            Bits { pm1: self.status, gpe0: self.gpe0.clone() }
         }
         fn pm1_clear(&mut self, bits: u16) {
             self.status &= !bits;
         }
-        fn enables(&mut self) -> Enables {
+        fn enables(&mut self) -> Bits {
             self.enables.clone()
         }
-        fn enable(&mut self, enables: &Enables) {
+        fn enable(&mut self, enables: &Bits) {
             self.enables = enables.clone();
         }
         fn sci(&mut self, _: Instant) -> bool {
             while let Some(&set) = self.script.get(self.sets) {
                 match set {
-                    Set::Pm1(bits) => self.status |= bits,
+                    Set::Pm1(bits) => self.status |= bits & self.enables.pm1,
                     Set::Gpe(byte, bits) => self.gpe0[byte] |= bits,
                 }
                 self.sets += 1;
@@ -270,7 +280,7 @@ mod tests {
         assert_eq!(block.status, PWRBTN, "GBL_STS left set, or an event the wait does not serve cleared");
         assert_eq!(block.gpe0, [0x40, 0, 0], "the controller's GPE cleared by the wait");
         assert_eq!(block.enables, kept, "an enable was not put back");
-        assert_eq!((block.sets, block.acks), (3, 2), "the wait woke for an event it had disabled");
+        assert_eq!((block.sets, block.acks), (3, 4), "the wait woke other than once for each event");
     }
 
     #[test]
