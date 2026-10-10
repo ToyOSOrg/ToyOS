@@ -580,7 +580,7 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     .current_dir(&fork)
                     .status()
                     .is_ok_and(|s| s.success());
-            (head != pinned && !ahead || moving(&fork).exists()).then_some(head)
+            ((head != pinned || moving(&fork).exists()) && !ahead).then_some(head)
         },
         |head| {
             if let Some(primary) = &primary {
@@ -1583,6 +1583,11 @@ mod tests {
         let c3 = git(&fork, &["rev-parse", "HEAD"]);
         assert_eq!(fork_checkout(&linked, &mut lock), fork);
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c3, "a checkout ahead of its pin was moved");
+        // Even where a move of it was killed before the agent committed.
+        fs::write(moving(&fork), "").unwrap();
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c3, "a checkout ahead of its pin was moved to finish a move");
+        fs::remove_file(moving(&fork)).unwrap();
 
         // A clean checkout behind what the tree pins is moved to the pin itself.
         git(&fork, &["checkout", "-q", &c1]);
