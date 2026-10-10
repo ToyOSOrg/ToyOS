@@ -47,6 +47,9 @@ const ROOTS: &str = "/system/etc/ssl/cert.pem";
 /// Handshakes timed before the transfer, one after another.
 const PROBES: usize = 5;
 
+/// MEASUREMENT ONLY: downloads of the file, one after another.
+const RUNS: usize = 2;
+
 /// The ceiling on netstack's word reaching this job: its own bound on saying
 /// it, and two of logkeeper's rounds at its write budget
 /// (`userland/logkeeper/src/policy.rs`, 5 s), since a served line is one the
@@ -94,31 +97,36 @@ fn main() {
         leased();
         *rtt.lock().unwrap_or_else(PoisonError::into_inner) = handshakes();
 
-        let url = format!("https://{HOST}{PATH}");
-        let response = https_client::agent(ROOTS).get(&url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
-        let mut body = response.into_body().into_reader();
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        let mut chunk = vec![0u8; 64 * 1024];
-        let mut bytes = 0u64;
-        loop {
-            let n = body.read(&mut chunk).unwrap_or_else(|e| panic!("the body of {url} after {bytes} bytes: {e}"));
-            if n == 0 {
-                break;
+        // MEASUREMENT ONLY: the file twice, back to back, so a CDN's cold first fetch is told apart.
+        for _ in 0..RUNS {
+            *progress.lock().unwrap_or_else(PoisonError::into_inner) = Progress { bytes: 0, first: None, last: None };
+            let url = format!("https://{HOST}{PATH}");
+            let response = https_client::agent(ROOTS).get(&url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
+            let mut body = response.into_body().into_reader();
+            let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+            let mut chunk = vec![0u8; 64 * 1024];
+            let mut bytes = 0u64;
+            loop {
+                let n = body.read(&mut chunk).unwrap_or_else(|e| panic!("the body of {url} after {bytes} bytes: {e}"));
+                if n == 0 {
+                    break;
+                }
+                digest.update(&chunk[..n]);
+                bytes += n as u64;
+                let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
+                progress.bytes = bytes;
+                progress.last = Some(Instant::now());
+                if progress.first.is_none() {
+                    progress.first = Some((Instant::now(), round(&cap), bytes));
+                }
             }
-            digest.update(&chunk[..n]);
-            bytes += n as u64;
-            let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
-            progress.bytes = bytes;
-            progress.last = Some(Instant::now());
-            if progress.first.is_none() {
-                progress.first = Some((Instant::now(), round(&cap), bytes));
-            }
+            drop(body);
+            let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
+            let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
+            let sha256 = https_client::hex(digest.finish());
+            println!("https_download: {}", report("whole", Some(&sha256), &progress, &rtt, &cap));
         }
-        let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
         drop(transferring);
-        let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
-        let sha256 = https_client::hex(digest.finish());
-        println!("https_download: {}", report("whole", Some(&sha256), &progress, &rtt, &cap));
     });
 }
 
@@ -174,15 +182,21 @@ fn report(word: &str, sha256: Option<&str>, progress: &Progress, rtt: &str, cap:
             Some(ran as f64 / stamp as f64)
         })
         .collect();
+    let mb = (progress.bytes - first) as f64 / 1e6;
     let busy = match busy {
-        Some(each) => format!(
-            "busy={:.3} cpus=[{}]",
-            each.iter().sum::<f64>() / each.len() as f64,
-            each.iter().map(|b| format!("{b:.3}")).collect::<Vec<_>>().join(" ")
-        ),
+        // MEASUREMENT ONLY: cpu_s, every CPU's busy fraction times the transfer's time, summed.
+        Some(each) => {
+            let cpu_s = each.iter().sum::<f64>() * secs;
+            format!(
+                "busy={:.3} cpus=[{}] cpu_s={cpu_s:.3} cpu_ms_per_mb={:.2}",
+                each.iter().sum::<f64>() / each.len() as f64,
+                each.iter().map(|b| format!("{b:.3}")).collect::<Vec<_>>().join(" "),
+                cpu_s * 1e3 / mb
+            )
+        }
         None => "busy=unread".to_string(),
     };
-    let mbps = (progress.bytes - first) as f64 * 8.0 / secs / 1e6;
+    let mbps = mb * 8.0 / secs;
     let sha256 = sha256.map(|hex| format!(" sha256={hex}")).unwrap_or_default();
     format!("{word} bytes={}{sha256} secs={secs:.3} mbps={mbps:.1} rtt_ms={rtt} {busy}", progress.bytes)
 }

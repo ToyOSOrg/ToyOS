@@ -578,6 +578,11 @@ impl Shard {
         done
     }
 
+    /// MEASUREMENT ONLY: a connection's variables.
+    pub fn tcp_info(&mut self, id: ConnId) -> Option<toyos_net_tcp::Info> {
+        self.tcp.info(id)
+    }
+
     pub fn status(&mut self, id: ConnId) -> Result<Status, toyos_net_tcp::Error> {
         self.tcp.status(id)
     }
