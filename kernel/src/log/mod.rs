@@ -208,6 +208,7 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     // SAFETY: seq came from this shard's own reserve, committed exactly once under this guard.
     unsafe { origin.shard.commit(seq, &record, &guard) };
     drop(guard);
+    crate::blackbox::trail(record.cpu, &record.msg[..usize::from(record.len)]);
 
     // The two `Drain` modes are boot phases, not interchangeable fallbacks,
     // and `console::mode` is the single word read for it rather than a flag

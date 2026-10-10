@@ -230,6 +230,22 @@ const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as 
 /// `uefi`'s `set_watchdog_timer` refuses a reserved one outright.
 const WATCHDOG_CODE: u64 = 0x0001_0000;
 
+/// Yoga image: how many of a dead boot's trail lines the screen gets.
+const TRAIL_ON_SCREEN: usize = 40;
+
+/// Yoga image: wait for one key on the firmware's console input.
+fn wait_for_key(system_table: &mut SystemTable<Boot>) {
+    let _ = system_table.stdin().reset(false);
+    loop {
+        let event = system_table.stdin().wait_for_key_event().expect("the console's key event");
+        let mut events = [event];
+        let _ = system_table.boot_services().wait_for_event(&mut events);
+        if let Ok(Some(_)) = system_table.stdin().read_key() {
+            return;
+        }
+    }
+}
+
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
@@ -720,8 +736,32 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         for line in &finding.filed {
             loaderlog::line(format_args!("{}{line}", stamp::now()));
         }
+        if !finding.trail.is_empty() {
+            // Every line to the file, the newest to the screen as well.
+            println!(
+                "Yoga trail: that boot appended {} bytes of log and steps after the page; its {} recovered lines are in loader.log, the newest {} follow",
+                finding.trail_written,
+                finding.trail.len(),
+                finding.trail.len().min(TRAIL_ON_SCREEN)
+            );
+            for line in &finding.trail {
+                loaderlog::line(format_args!("{}{line}", stamp::now()));
+            }
+            let newest = finding.trail.len().saturating_sub(TRAIL_ON_SCREEN);
+            for line in &finding.trail[newest..] {
+                uefi_services::println!("{line}");
+            }
+            if let Some(last) = finding.trail.last() {
+                println!("Yoga trail: the last line that boot wrote: {last}");
+            }
+        }
         if finding.died {
             println!("Yoga image: the last boot died, its record is filed above, and this pass powers the machine off instead of booting it again");
+            // A key, so the screen can be photographed: the firmware's
+            // watchdog is off for the wait, which has no bound of its own.
+            println!("Yoga image: press any key to power off");
+            let _ = system_table.boot_services().set_watchdog_timer(0, WATCHDOG_CODE, None);
+            wait_for_key(&mut system_table);
             loaderlog::close();
             system_table.runtime_services().reset(uefi::table::runtime::ResetType::SHUTDOWN, Status::SUCCESS, None);
         }

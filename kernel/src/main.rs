@@ -269,6 +269,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         )
     });
 
+    blackbox::step("kernel_main: armed; serial::init");
     serial::init(kernel_args.rsdp_addr);
 
     // After both channels exist, before the first actuator site.
@@ -289,6 +290,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     actuator::init(cmdline);
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
+    blackbox::step("kernel_main: after_console");
     arch::boot::after_console(&kernel_args, maps);
 
     // percpu, the allocator and our own paging aren't up yet, so a fault here only reaches the early-panic branch.
@@ -356,6 +358,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     );
     // After the boot's own lines, so its refusal reaches a channel that says
     // what machine this is, and while the loader's arguments are still mapped.
+    blackbox::step("kernel_main: random::key");
     random::key(loader_args, &mut kernel_args);
     let kernel_args = &kernel_args;
 
@@ -407,23 +410,31 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
 
+    blackbox::step("kernel_main: mm::init");
     mm::init(maps, &reserved);
+    blackbox::step("kernel_main: panic_console::remap");
     drivers::panic_console::remap();
+    blackbox::step("kernel_main: acpi::inventory");
 
     // Before the first table is decoded for its contents: what a machine owner
     // reads off a refusal below is which tables the firmware published at all.
     acpi::inventory(kernel_args.rsdp_addr);
 
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
+    blackbox::step("kernel_main: counters::bring_up");
     counters::bring_up();
+    blackbox::step("kernel_main: symbols");
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {
         symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
     }
 
+    blackbox::step("kernel_main: clock");
     arch::boot::clock(kernel_args);
     trace::enable();
+    blackbox::step("kernel_main: timer");
     arch::boot::timer();
+    blackbox::step("kernel_main: deadline::start");
     // After both halves of what it needs: a TSC period to convert its bound
     // with, and a timer whose every tick polls it.
     deadline::start();
@@ -433,7 +444,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let t_periph = clock::nanos_since_boot();
 
     let ecam_windows = acpi::ecam_windows(kernel_args.rsdp_addr);
+    blackbox::step("kernel_main: pci::enumerate");
     let pci_devices = pci::enumerate(&ecam_windows);
+    blackbox::step("kernel_main: pcidev::publish");
     // Every window is on one segment group; a machine with no window has no
     // function to name one for.
     let pci_segment = ecam_windows.first().map_or(0, |window| window.segment());
@@ -447,7 +460,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
+    blackbox::step("kernel_main: iommu::init");
     iommu::init(kernel_args.rsdp_addr, &pci_devices, kernel_args.root_bridge_windows());
+    blackbox::step("kernel_main: watchdog, file_cache, gpt");
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
@@ -458,7 +473,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     let t_subsys = clock::nanos_since_boot();
 
+    blackbox::step("kernel_main: start_other_cpus");
     arch::boot::start_other_cpus(&platform, kernel_args);
+    blackbox::step("kernel_main: other cpus started");
     vfs::init();
     process::init();
     scheduler::init();

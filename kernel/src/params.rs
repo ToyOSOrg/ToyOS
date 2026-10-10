@@ -10,8 +10,19 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Each parameter beside the flag it sets, so a name cannot be claimed and then handled by nothing.
-pub const PARAMS: &[(&str, &AtomicBool)] =
-    &[(toyos_tco::PARAM, &WATCHDOG_NAMED), ("early-panel", &EARLY_PANEL_NAMED)];
+pub const PARAMS: &[(&str, &AtomicBool)] = &[
+    (toyos_tco::PARAM, &WATCHDOG_NAMED),
+    ("early-panel", &EARLY_PANEL_NAMED),
+    ("yoga-triple-fault", &YOGA_TRIPLE_FAULT_NAMED),
+];
+
+/// Yoga image: triple-fault before the IDT loads, which seals nothing, so the
+/// next loader pass has only the trail to say where the boot died.
+static YOGA_TRIPLE_FAULT_NAMED: AtomicBool = AtomicBool::new(false);
+
+pub fn yoga_triple_fault() -> bool {
+    YOGA_TRIPLE_FAULT_NAMED.load(Ordering::Relaxed)
+}
 
 static WATCHDOG_NAMED: AtomicBool = AtomicBool::new(false);
 static EARLY_PANEL_NAMED: AtomicBool = AtomicBool::new(false);

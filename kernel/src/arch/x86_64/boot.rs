@@ -83,19 +83,36 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
     // allows: a fault in any later phase then diagnoses instead of stopping in
     // a handler the firmware left behind.
+    use crate::blackbox::step;
+    step("interrupts: parse_madt");
     let madt = acpi::parse_madt(rsdp_addr).expect("ACPI: MADT not found");
     // Off the same tables as the MADT, and before the IDT below makes a panic
     // reportable: a panic that can be reported but not ended leaves the machine
     // holding its panel for a hand that may not be in the room.
+    step("interrupts: power::init_reset");
     super::power::init_reset(rsdp_addr);
+    if crate::params::yoga_triple_fault() {
+        step("interrupts: yoga-triple-fault: an empty IDT and ud2");
+        let empty = [0u8; 10];
+        // SAFETY: none; the machine resets here on purpose. An IDT of limit 0
+        // makes the #UD a #DF and the #DF a triple fault.
+        unsafe { core::arch::asm!("lidt [{0}]", "ud2", in(reg) empty.as_ptr(), options(noreturn)) };
+    }
+    step("interrupts: percpu::init_bsp (loads the IDT)");
     percpu::init_bsp(super::cpu::hardware_id());
     // After the IDT: an xAPIC's register page is mapped here, and a fault
     // there must diagnose rather than triple-fault.
+    step("interrupts: apic::init");
     apic::init();
+    step("interrupts: power::init_control");
     super::power::init_control(rsdp_addr);
+    step("interrupts: ioapic::init");
     ioapic::init(&madt);
+    step("interrupts: idt::enable_interrupts");
     idt::enable_interrupts();
+    step("interrupts: syscall::init");
     super::syscall::init();
+    step("interrupts: done");
     Platform { madt }
 }
 

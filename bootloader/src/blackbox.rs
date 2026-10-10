@@ -57,7 +57,7 @@ pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>)
     match system_table.boot_services().allocate_pages(
         AllocateType::Address(PHYS),
         MemoryType::LOADER_DATA,
-        toyos_blackbox::PAGES,
+        toyos_blackbox::PAGES + toyos_blackbox::trail::PAGES,
     ) {
         Ok(at) => {
             // `AllocateType::Address` allocates that address or fails; firmware
@@ -85,6 +85,11 @@ pub struct Finding {
     /// Yoga image: the last boot died rather than ending itself, so this pass
     /// files the record and powers off instead of looping.
     pub died: bool,
+    /// Yoga image: the last boot's trail, oldest line first, where the page
+    /// says it died with no report of its own (`ARMED` or `FAULT`).
+    pub trail: Vec<String>,
+    /// How many bytes that boot appended to its trail in all.
+    pub trail_written: u64,
 }
 
 /// Split a record's text into what a person at the machine reads and what only
@@ -219,7 +224,8 @@ pub fn harvest(
         ));
     }
     let died = !matches!(state, State::Done);
-    (Some(Finding { lines, filed, died }), None)
+    let (trail_written, trail) = if matches!(state, State::Armed | State::Fault) { read_trail(at) } else { (0, Vec::new()) };
+    (Some(Finding { lines, filed, died, trail, trail_written }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.
@@ -285,6 +291,8 @@ fn fault_lines(fault: &toyos_blackbox::Fault) -> Vec<String> {
 /// finding, stamped with the time this pass armed it.
 pub fn arm(page: Option<Page>, stamp: u64, identity: toyos_blackbox::Identity) {
     let Some(page) = page else { return };
+    toyos_blackbox::trail::reset(trail(page));
+    crate::arch::write_back(page.0 + BYTES as u64, toyos_blackbox::trail::BYTES);
     toyos_blackbox::seal(bytes(page), State::Armed, stamp, identity, &[]);
     // Written back before the handoff: everything after this point either ends
     // in a reset or hands the machine to a kernel, and neither writes this line
@@ -308,6 +316,29 @@ fn bytes(page: Page) -> &'static mut [u8; BYTES] {
     // memory. Nothing else in this image names the address, and the one page
     // asked for is exactly `BYTES`.
     unsafe { &mut *(page.0 as *mut [u8; BYTES]) }
+}
+
+/// Yoga image: the trail after the page, as lines, oldest first; its first
+/// line may be one the ring's wrap cut at its head.
+fn read_trail(page: Page) -> (u64, Vec<String>) {
+    let Some((written, [older, newer])) = toyos_blackbox::trail::read(trail(page)) else {
+        return (0, alloc::vec![alloc::format!("{HEAD} the trail after the page carries no magic, so that boot left no lines")]);
+    };
+    let mut all = Vec::with_capacity(older.len() + newer.len());
+    all.extend_from_slice(older);
+    all.extend_from_slice(newer);
+    let lines = all
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| alloc::format!("trail| {}", Ascii(line)))
+        .collect();
+    (written, lines)
+}
+
+fn trail(page: Page) -> &'static mut [u8; toyos_blackbox::trail::BYTES] {
+    // SAFETY: as `bytes`: `claim` allocated the box and the trail after it in
+    // one `AllocatePages`, and boot services identity-map physical memory.
+    unsafe { &mut *((page.0 + BYTES as u64) as *mut [u8; toyos_blackbox::trail::BYTES]) }
 }
 
 /// One recovered line as a log file may carry it: the panel's own alphabet,

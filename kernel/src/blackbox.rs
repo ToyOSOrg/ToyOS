@@ -34,6 +34,11 @@ static PAGE: AtomicU64 = AtomicU64::new(0);
 /// wants the physical one and the writers want the mapped one.
 static PHYS: AtomicU64 = AtomicU64::new(0);
 
+/// Yoga image: the trail after the box in the kernel's view, or 0, and the
+/// bytes this boot has appended to it ([`toyos_blackbox::trail`]).
+static TRAIL: AtomicU64 = AtomicU64::new(0);
+static TRAIL_WRITTEN: AtomicU64 = AtomicU64::new(0);
+
 /// The physical page `mm::init` must keep out of the allocator, or an empty
 /// region where there is none.
 ///
@@ -42,7 +47,7 @@ static PHYS: AtomicU64 = AtomicU64::new(0);
 pub fn reserved_region() -> Region {
     match PHYS.load(Relaxed) {
         0 => Region { start: 0, end: 0 },
-        at => Region { start: at, end: at.saturating_add(BYTES as u64) },
+        at => Region { start: at, end: at.saturating_add((BYTES + toyos_blackbox::trail::BYTES) as u64) },
     }
 }
 
@@ -68,6 +73,7 @@ pub fn arm(cmdline: &[u8]) {
     };
     PHYS.store(at, Relaxed);
     PAGE.store(DirectMap::from_phys(at).as_mut_ptr::<u8>() as u64, Relaxed);
+    TRAIL.store(DirectMap::from_phys(at + BYTES as u64).as_mut_ptr::<u8>() as u64, Relaxed);
     log!("black box: {at:#x} is this boot's, {TEXT_BYTES} bytes for the next boot's loader");
 }
 
@@ -245,4 +251,68 @@ fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64, toyos_blackbox::Identity)
 /// exactly like a seal that never happened.
 fn flush(at: u64) {
     crate::arch::cache::write_back(at, BYTES);
+}
+
+/// Yoga image: append one log line, `c<cpu> <message>`, to the trail.
+///
+/// Atomics, volatile stores and `CLFLUSH` alone, so any context that may log
+/// may call it; concurrent writers each fill the span their `fetch_add`
+/// reserved.
+pub fn trail(cpu: u16, message: &[u8]) {
+    let mut digits = [0u8; 5];
+    let mut n = cpu;
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    trail_append(&[b"c", &digits[at..], b" ", message, b"\n"]);
+}
+
+/// Yoga image: append `step: <name>` to the trail, for an early step that logs
+/// nothing of its own: the last one the next loader prints is where a silent
+/// death happened.
+pub fn step(name: &str) {
+    trail_append(&[b"step: ", name.as_bytes(), b"\n"]);
+}
+
+fn trail_append(parts: &[&[u8]]) {
+    use toyos_blackbox::trail::{HEADER, RING, WRITTEN_AT};
+    let base = TRAIL.load(Relaxed);
+    if base == 0 {
+        return;
+    }
+    let len: u64 = parts.iter().map(|part| part.len() as u64).sum();
+    let start = TRAIL_WRITTEN.fetch_add(len, Relaxed);
+    let ring = (base + HEADER as u64) as *mut u8;
+    let mut at = start;
+    for part in parts {
+        for &byte in *part {
+            // SAFETY: `TRAIL` is non-zero only where `arm` found the loader's
+            // claim, which spans the box and the trail and which `mm::init`
+            // keeps out of the allocator; the offset is inside the ring.
+            unsafe { ring.add((at % RING as u64) as usize).write_volatile(byte) };
+            at += 1;
+        }
+    }
+    // SAFETY: the header's count is an aligned `u64` inside the same claim.
+    let written = unsafe { &*((base + WRITTEN_AT as u64) as *const AtomicU64) };
+    written.fetch_max(start + len, Relaxed);
+    let from = (start % RING as u64) as usize;
+    let len = len as usize;
+    if from + len <= RING {
+        flush_span(ring as u64 + from as u64, len);
+    } else {
+        flush_span(ring as u64 + from as u64, RING - from);
+        flush_span(ring as u64, from + len - RING);
+    }
+    flush_span(base, HEADER);
+}
+
+fn flush_span(at: u64, len: usize) {
+    crate::arch::cache::write_back(at, len);
 }

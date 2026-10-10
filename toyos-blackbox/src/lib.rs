@@ -936,6 +936,85 @@ const _: () = {
     assert!(HEADER.is_multiple_of(4));
 };
 
+/// Yoga image: the boot's trail, a byte ring right after the box that the
+/// kernel appends every log line and early step to as it happens, written back
+/// out of the caches each time — so a boot that dies with no seal at all (a
+/// triple fault, a reset nothing in the kernel asked for) still leaves its last
+/// words for the next loader pass, which prints them under an `ARMED` page.
+///
+/// Unchecked beyond its magic: the box's own record says whose boot it was,
+/// and a torn line at a reset is still the last thing that boot said.
+pub mod trail {
+    /// Where the trail is: the pages after the box, in the same claim.
+    pub const PHYS: u64 = super::PHYS + super::BYTES as u64;
+    pub const PAGES: usize = 16;
+    pub const BYTES: usize = PAGES * super::PAGE_BYTES;
+    /// Magic, then the count of bytes ever appended, a `u64` at [`WRITTEN_AT`].
+    pub const HEADER: usize = 16;
+    pub const WRITTEN_AT: usize = 8;
+    /// The ring's bytes.
+    pub const RING: usize = BYTES - HEADER;
+    /// `TRL1`, big-endian ASCII.
+    const MAGIC: u32 = 0x5452_4C31;
+
+    /// An empty trail, as the loader leaves it for the kernel it hands over to.
+    pub fn reset(trail: &mut [u8; BYTES]) {
+        trail.fill(0);
+        trail[..4].copy_from_slice(&MAGIC.to_le_bytes());
+    }
+
+    /// The trail's bytes, oldest first, and how many were ever appended; `None`
+    /// where it carries no magic.
+    pub fn read(trail: &[u8; BYTES]) -> Option<(u64, [&[u8]; 2])> {
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&trail[..4]);
+        if u32::from_le_bytes(magic) != MAGIC {
+            return None;
+        }
+        let mut written = [0u8; 8];
+        written.copy_from_slice(&trail[WRITTEN_AT..WRITTEN_AT + 8]);
+        let written = u64::from_le_bytes(written);
+        let ring = &trail[HEADER..];
+        if written <= RING as u64 {
+            return Some((written, [&ring[..written as usize], &[]]));
+        }
+        let start = (written % RING as u64) as usize;
+        Some((written, [&ring[start..], &ring[..start]]))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn append(trail: &mut [u8; BYTES], bytes: &[u8]) {
+            let (written, _) = read(trail).expect("reset");
+            for (i, b) in bytes.iter().enumerate() {
+                trail[HEADER + ((written as usize + i) % RING)] = *b;
+            }
+            trail[WRITTEN_AT..WRITTEN_AT + 8].copy_from_slice(&(written + bytes.len() as u64).to_le_bytes());
+        }
+
+        #[test]
+        fn the_ring_reads_oldest_first_across_its_wrap() {
+            let mut trail = [0u8; BYTES];
+            assert!(read(&trail).is_none());
+            reset(&mut trail);
+            append(&mut trail, b"one\n");
+            let (n, [a, b]) = read(&trail).unwrap();
+            assert_eq!((n, a, b), (4, &b"one\n"[..], &b""[..]));
+            let filler = [b'x'; RING - 2];
+            append(&mut trail, &filler);
+            append(&mut trail, b"last\n");
+            let (n, [a, b]) = read(&trail).unwrap();
+            assert_eq!(n, (4 + RING - 2 + 5) as u64);
+            let mut whole = a.to_vec();
+            whole.extend_from_slice(b);
+            assert_eq!(whole.len(), RING);
+            assert!(whole.ends_with(b"xxlast\n"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
