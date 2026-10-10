@@ -55,8 +55,14 @@ pub enum KeyAction {
 /// Releases are forwarded whatever they are. A chord is a press; a client that
 /// saw the press of a key it is holding needs the release of it too, and
 /// swallowing that leaves the window believing the key is still down.
-pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: bool) -> KeyAction {
-    if !ev.pressed() {
+///
+/// **While a prompt is up every transition is the prompt's**, the focused
+/// window's, and no chord is the desktop's: nothing closes, cycles,
+/// minimizes or opens a window under it, and nothing is pasted into it, the
+/// clipboard being any client's to write. [`PromptGate`] says which of them
+/// reach it.
+pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: bool, prompt: bool) -> KeyAction {
+    if prompt || !ev.pressed() {
         return KeyAction::Forward;
     }
     if launcher_open && ev.keycode == usage::ESCAPE {
@@ -395,11 +401,68 @@ pub fn cursor_style<C>(
     }
 }
 
+/// Which input a prompt is given: **only a transition whose press arrived
+/// after the prompt's first frame was on the panel**, and the release of that
+/// press.
+///
+/// A key typed, or a button pressed, before the question could be read never
+/// answers it: a press made before the first frame is swallowed with its
+/// release, and so is the release of a key or button already down when the
+/// prompt came up. The kernel delivers transitions and no repeats, so a key
+/// held across the prompt's arrival never presses again until it is let go.
+/// One per prompt, made when it is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PromptGate {
+    presented: bool,
+    /// Usages whose press the prompt was given, by bit.
+    keys: [u64; 4],
+    /// The left button's press the prompt was given.
+    button: bool,
+}
+
+impl PromptGate {
+    /// The prompt's first frame is on the panel: presses from now on reach it.
+    pub fn presented(&mut self) {
+        self.presented = true;
+    }
+
+    /// Whether `ev` reaches the prompt.
+    pub fn key(&mut self, ev: RawKeyEvent) -> bool {
+        let (word, bit) = (usize::from(ev.keycode / 64), 1u64 << (ev.keycode % 64));
+        if ev.pressed() {
+            if self.presented {
+                self.keys[word] |= bit;
+            }
+            return self.presented;
+        }
+        let given = self.keys[word] & bit != 0;
+        self.keys[word] &= !bit;
+        given
+    }
+
+    /// Whether a press of the left button reaches the prompt.
+    pub fn press(&mut self) -> bool {
+        self.button = self.presented;
+        self.button
+    }
+
+    /// Whether a release of the left button reaches the prompt.
+    pub fn release(&mut self) -> bool {
+        core::mem::take(&mut self.button)
+    }
+
+    /// Once the prompt is gone: whether `ev` is the release of a key it was
+    /// given, which reaches no other window either.
+    pub fn owed(&mut self, ev: RawKeyEvent) -> bool {
+        !ev.pressed() && self.key(ev)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::Chrome;
-    use crate::window::Window;
+    use crate::window::{Level, Window};
     use alloc::string::ToString;
     use toyos_abi::input::{MOD_ALT, MOD_CTRL, MOD_GUI, MOD_RELEASED};
 
@@ -421,7 +484,7 @@ mod tests {
                 i,
                 Rect::new(100 + 20 * i as i32, 100 + 20 * i as i32, 400, 300),
                 "w".to_string(),
-                false,
+                Level::Ordinary,
                 CursorStyle::Default,
             ));
         }
@@ -432,15 +495,15 @@ mod tests {
     fn a_release_is_always_the_window_s() {
         for code in [usage::Q, usage::LEFT, usage::TAB, usage::ESCAPE] {
             let ev = key(code, MOD_GUI | MOD_ALT | MOD_RELEASED);
-            assert_eq!(key_action(ev, Some(WindowMode::Normal), true), KeyAction::Forward);
+            assert_eq!(key_action(ev, Some(WindowMode::Normal), true, false), KeyAction::Forward);
         }
     }
 
     #[test]
     fn escape_closes_the_launcher_only_while_it_is_open() {
         let esc = key(usage::ESCAPE, 0);
-        assert_eq!(key_action(esc, None, true), KeyAction::CloseLauncher);
-        assert_eq!(key_action(esc, Some(WindowMode::Normal), false), KeyAction::Forward);
+        assert_eq!(key_action(esc, None, true, false), KeyAction::CloseLauncher);
+        assert_eq!(key_action(esc, Some(WindowMode::Normal), false, false), KeyAction::Forward);
     }
 
     #[test]
@@ -457,13 +520,13 @@ mod tests {
         ];
         for (code, from, want) in cases {
             assert_eq!(
-                key_action(key(code, MOD_GUI), Some(from), false),
+                key_action(key(code, MOD_GUI), Some(from), false, false),
                 KeyAction::SetMode(want),
                 "{code:#x} from {from:?}"
             );
         }
         assert_eq!(
-            key_action(key(usage::DOWN, MOD_GUI), Some(WindowMode::Normal), false),
+            key_action(key(usage::DOWN, MOD_GUI), Some(WindowMode::Normal), false, false),
             KeyAction::Minimize
         );
     }
@@ -471,28 +534,101 @@ mod tests {
     #[test]
     fn no_window_means_no_super_chord_does_anything() {
         for code in [usage::LEFT, usage::RIGHT, usage::UP, usage::DOWN, usage::Q, usage::V] {
-            assert_eq!(key_action(key(code, MOD_GUI), None, false), KeyAction::Ignore);
+            assert_eq!(key_action(key(code, MOD_GUI), None, false, false), KeyAction::Ignore);
         }
     }
 
     #[test]
     fn an_unclaimed_super_chord_reaches_the_window() {
         assert_eq!(
-            key_action(key(0x04, MOD_GUI), Some(WindowMode::Normal), false),
+            key_action(key(0x04, MOD_GUI), Some(WindowMode::Normal), false, false),
             KeyAction::Forward
         );
     }
 
     #[test]
     fn alt_tab_cycles_even_with_nothing_focused_and_ctrl_n_spawns() {
-        assert_eq!(key_action(key(usage::TAB, MOD_ALT), None, false), KeyAction::CycleFocus);
-        assert_eq!(key_action(key(usage::N, MOD_CTRL), None, false), KeyAction::SpawnTerminal);
+        assert_eq!(key_action(key(usage::TAB, MOD_ALT), None, false, false), KeyAction::CycleFocus);
+        assert_eq!(key_action(key(usage::N, MOD_CTRL), None, false, false), KeyAction::SpawnTerminal);
         // Without the modifier both are the window's.
         assert_eq!(
-            key_action(key(usage::TAB, 0), Some(WindowMode::Normal), false),
+            key_action(key(usage::TAB, 0), Some(WindowMode::Normal), false, false),
             KeyAction::Forward
         );
-        assert_eq!(key_action(key(usage::N, 0), Some(WindowMode::Normal), false), KeyAction::Forward);
+        assert_eq!(key_action(key(usage::N, 0), Some(WindowMode::Normal), false, false), KeyAction::Forward);
+    }
+
+    /// **While a prompt is up no chord is the desktop's**: closing, cycling,
+    /// snapping, minimizing, a terminal, the launcher's Escape and paste are
+    /// all the prompt's keys, pressed or released.
+    #[test]
+    fn a_prompt_gets_every_key_and_no_chord_or_paste_acts() {
+        let chords = [
+            (usage::Q, MOD_GUI),
+            (usage::V, MOD_GUI),
+            (usage::DOWN, MOD_GUI),
+            (usage::UP, MOD_GUI),
+            (usage::LEFT, MOD_GUI),
+            (usage::TAB, MOD_ALT),
+            (usage::N, MOD_CTRL),
+            (usage::ESCAPE, 0),
+            (0x04, 0),
+        ];
+        for (code, mods) in chords {
+            for released in [0, MOD_RELEASED] {
+                for launcher in [false, true] {
+                    let ev = key(code, mods | released);
+                    assert_eq!(
+                        key_action(ev, Some(WindowMode::Normal), launcher, true),
+                        KeyAction::Forward,
+                        "{code:#x} {mods:#x} {released:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A key or button pressed before the prompt's first frame never reaches
+    /// it, press or release; one pressed after reaches it with its release.
+    #[test]
+    fn a_press_before_the_prompt_was_presented_never_reaches_it() {
+        let (enter, tab) = (0x28, usage::TAB);
+        let mut gate = PromptGate::default();
+        // Held when the prompt came up, and typed before its first frame.
+        assert!(!gate.key(key(tab, 0)), "a press before the first frame reached the prompt");
+        assert!(!gate.press(), "a click before the first frame reached the prompt");
+        gate.presented();
+        assert!(!gate.key(key(tab, MOD_RELEASED)), "the release of an early press reached the prompt");
+        assert!(!gate.key(key(enter, MOD_RELEASED)), "the release of a key held from before reached it");
+        assert!(!gate.release(), "the release of an early click reached the prompt");
+        // Pressed after: the press and its release, once.
+        assert!(gate.key(key(enter, 0)));
+        assert!(gate.key(key(enter, MOD_RELEASED)));
+        assert!(!gate.key(key(enter, MOD_RELEASED)), "a release reached it twice");
+        assert!(gate.press());
+        assert!(gate.release());
+        assert!(!gate.release());
+        // Every usage is its own bit.
+        for code in [0u8, 63, 64, 127, 128, 255] {
+            assert!(gate.key(key(code, 0)));
+        }
+        for code in [0u8, 63, 64, 127, 128, 255] {
+            assert!(gate.key(key(code, MOD_RELEASED)), "{code}");
+        }
+    }
+
+    /// Once the prompt is gone, the release of a key it was given is owed to
+    /// nobody: not the window under it, which never saw the press.
+    #[test]
+    fn the_release_of_a_key_that_answered_the_prompt_reaches_no_window() {
+        let (escape, a) = (usage::ESCAPE, 0x04);
+        let mut gate = PromptGate::default();
+        gate.presented();
+        assert!(gate.key(key(escape, 0)));
+        assert!(!gate.owed(key(a, MOD_RELEASED)), "a key the prompt never had was taken");
+        assert!(!gate.owed(key(escape, 0)), "a press after the prompt was taken");
+        assert!(gate.owed(key(escape, MOD_RELEASED)));
+        assert!(!gate.owed(key(escape, MOD_RELEASED)), "a release was taken twice");
     }
 
     fn report(buttons: u8, scroll: i8, x: u16, y: u16) -> [u8; 6] {

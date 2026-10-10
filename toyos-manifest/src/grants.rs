@@ -3,23 +3,29 @@
 //!
 //! **The supervisor is the only writer of [`STORE`].** A grant reaches it as a
 //! request on [`PORT`], which the build gives to [`HOLDER`] alone and the
-//! supervisor honours only from a login session, by the caller's badge.
+//! supervisor honours only from a login session, by the caller's badge, or as
+//! the person at the screen's answer to a launch's question
+//! ([`crate::consent`]).
 //!
-//! **A grant is keyed on the exact binary**: the session's user, the package's
-//! name and the SHA-256 of the program the supervisor starts. A package
-//! replaced under `/apps`, an update included, holds none until it is granted
-//! again.
+//! **An answer is keyed on the exact binary**: the session's user, the
+//! package's name and the SHA-256 of the program the supervisor starts. A
+//! package replaced under `/apps`, an update included, holds none until it is
+//! answered again. A stored answer is a folder granted, or Deny, which is kept
+//! until it is revoked.
 //!
 //! **A folder is a directory inside the session user's home** ([`folder`]):
 //! never the home itself, nor `Apps` or anything in it, where every app keeps
 //! its own folder.
 //!
-//! **What a launch gets** is [`decide`]'s: the stored grant for that exact
-//! binary, at most the image's `[apps] folder` ceiling, or nothing.
+//! **What a launch gets** is [`decide`]'s: the stored answer for that exact
+//! binary, a granted folder at most the image's `[apps] folder` ceiling; with
+//! none, a question where the launch's session holds the screen, and nothing
+//! otherwise.
 //!
 //! ```text
 //! toyos-grants 1
 //! grant <user> <package> <sha256> <read-only|read-write> <folder>
+//! deny <user> <package> <sha256>
 //! ```
 
 use std::fmt;
@@ -93,14 +99,21 @@ pub struct Folder {
     pub access: Access,
 }
 
-/// One stored grant.
+/// One stored answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub user: String,
     pub package: String,
-    /// The SHA-256 of the program it was granted to, lowercase hex.
+    /// The SHA-256 of the program it was given to, lowercase hex.
     pub binary: String,
-    pub folder: Folder,
+    pub answer: Answer,
+}
+
+/// What the user answered for a package, kept until it is revoked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Granted(Folder),
+    Denied,
 }
 
 /// Why `path` may not be a package's folder, as a whole sentence; `Ok` for
@@ -128,13 +141,29 @@ pub fn folder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The folder a launch of `binary` is granted: the stored grant for that exact
-/// binary, at most `ceiling`, the image's `[apps] folder`. `None` with no
-/// ceiling, no grant, or a grant to another binary.
-pub fn decide(stored: Option<&Entry>, binary: &str, ceiling: Option<Access>) -> Option<Folder> {
-    let ceiling = ceiling?;
-    let entry = stored.filter(|entry| entry.binary == binary)?;
-    Some(Folder { path: entry.folder.path.clone(), access: entry.folder.access.min(ceiling) })
+/// What a launch is given before it starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// It starts, holding this folder or none.
+    Start(Option<Folder>),
+    /// The person at the screen is asked first.
+    Ask,
+}
+
+/// What a launch of `binary` is given: the stored answer for that exact
+/// binary, a folder at most `ceiling`, the image's `[apps] folder`; with
+/// none, the question where the launch's session holds the screen. No
+/// ceiling is no folder and no question.
+pub fn decide(stored: Option<&Entry>, binary: &str, ceiling: Option<Access>, at_screen: bool) -> Decision {
+    let Some(ceiling) = ceiling else { return Decision::Start(None) };
+    match stored.filter(|entry| entry.binary == binary).map(|entry| &entry.answer) {
+        Some(Answer::Granted(folder)) => {
+            Decision::Start(Some(Folder { path: folder.path.clone(), access: folder.access.min(ceiling) }))
+        }
+        Some(Answer::Denied) => Decision::Start(None),
+        None if at_screen => Decision::Ask,
+        None => Decision::Start(None),
+    }
 }
 
 /// The working directory a launch granted `folder` starts in: the caller's
@@ -185,7 +214,12 @@ impl Store {
     pub fn render(&self) -> String {
         let mut out = format!("{HEADER}\n");
         for e in &self.entries {
-            out.push_str(&format!("grant {} {} {} {} {}\n", e.user, e.package, e.binary, e.folder.access, e.folder.path));
+            out.push_str(&match &e.answer {
+                Answer::Granted(folder) => {
+                    format!("grant {} {} {} {} {}\n", e.user, e.package, e.binary, folder.access, folder.path)
+                }
+                Answer::Denied => format!("deny {} {} {}\n", e.user, e.package, e.binary),
+            });
         }
         out
     }
@@ -203,18 +237,18 @@ impl Store {
         let mut store = Store::default();
         for line in lines {
             let mut words = line.splitn(6, ' ');
-            let [Some("grant"), Some(user), Some(package), Some(binary), Some(access), Some(path)] =
-                [(); 6].map(|()| words.next())
-            else {
-                return Err(format!("{STORE}: {line:?} is not a grant"));
+            let (user, package, binary, answer) = match [(); 6].map(|()| words.next()) {
+                [Some("grant"), Some(user), Some(package), Some(binary), Some(access), Some(path)] => {
+                    let access = Access::parse(access).ok_or_else(|| format!("{STORE}: {access:?} is no access"))?;
+                    (user, package, binary, Answer::Granted(Folder { path: path.to_string(), access }))
+                }
+                [Some("deny"), Some(user), Some(package), Some(binary), None, None] => {
+                    (user, package, binary, Answer::Denied)
+                }
+                _ => return Err(format!("{STORE}: {line:?} is not a grant")),
             };
-            let access = Access::parse(access).ok_or_else(|| format!("{STORE}: {access:?} is no access"))?;
-            let entry = Entry {
-                user: user.to_string(),
-                package: package.to_string(),
-                binary: binary.to_string(),
-                folder: Folder { path: path.to_string(), access },
-            };
+            let entry =
+                Entry { user: user.to_string(), package: package.to_string(), binary: binary.to_string(), answer };
             if store.find(user, package).is_some() {
                 return Err(format!("{STORE}: {user}'s {package} is granted twice"));
             }
@@ -236,7 +270,10 @@ fn check(e: &Entry) -> Result<(), String> {
     if e.binary.len() != DIGEST_LEN || !e.binary.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err(format!("{:?} is not a SHA-256 in lowercase hex", e.binary));
     }
-    folder(&e.folder.path)
+    match &e.answer {
+        Answer::Granted(granted) => folder(&granted.path),
+        Answer::Denied => Ok(()),
+    }
 }
 
 /// A request on [`PORT`]: the message type is the verb.
@@ -287,7 +324,10 @@ impl Request {
 
 /// One line of a [`Request::List`] answer.
 pub fn listed(entry: &Entry) -> String {
-    format!("{} {} {}\n", entry.package, entry.folder.access, entry.folder.path)
+    match &entry.answer {
+        Answer::Granted(folder) => format!("{} {} {}\n", entry.package, folder.access, folder.path),
+        Answer::Denied => format!("{} denied\n", entry.package),
+    }
 }
 
 #[cfg(test)]
@@ -301,8 +341,12 @@ mod tests {
             user: "toy".into(),
             package: package.into(),
             binary: BIN.into(),
-            folder: Folder { path: path.into(), access },
+            answer: Answer::Granted(Folder { path: path.into(), access }),
         }
+    }
+
+    fn denied(package: &str) -> Entry {
+        Entry { user: "toy".into(), package: package.into(), binary: BIN.into(), answer: Answer::Denied }
     }
 
     /// The deepest and longest folder a grant carries, at the longest package
@@ -317,6 +361,7 @@ mod tests {
         store.put(entry(&"n".repeat(MAX_PROGRAM_NAME), &longest, Access::ReadWrite)).unwrap();
         store.put(entry("gbae", deepest, Access::ReadOnly)).unwrap();
         store.put(entry("spaced", "/home/toy/My Games", Access::ReadWrite)).unwrap();
+        store.put(denied("refused")).unwrap();
         for i in store.entries().len()..MAX_ENTRIES {
             store.put(entry(&format!("p{i}"), &longest, Access::ReadWrite)).unwrap();
         }
@@ -328,7 +373,10 @@ mod tests {
         assert_eq!(store.put(entry("one-more", deepest, Access::ReadOnly)), Err(format!("the store already holds {MAX_ENTRIES} grants")));
         // A grant to a package already granted replaces it, past the bound too.
         store.put(entry("gbae", "/home/toy/Games", Access::ReadWrite)).unwrap();
-        assert_eq!(store.find("toy", "gbae").unwrap().folder.path, "/home/toy/Games");
+        assert_eq!(
+            store.find("toy", "gbae").unwrap().answer,
+            Answer::Granted(Folder { path: "/home/toy/Games".into(), access: Access::ReadWrite })
+        );
         assert_eq!(store.entries().len(), MAX_ENTRIES);
     }
 
@@ -381,6 +429,11 @@ mod tests {
             (format!("{HEADER}\ngrant toy gbae abc read-write /home/toy/Games\n"), "lowercase hex"),
             (format!("{HEADER}\ngrant toy gbae {BIN} read-write /home/toy/Apps/gbae\n"), "keeps its own folder"),
             (format!("{good}grant toy gbae {BIN} read-only /home/toy/Music\n"), "granted twice"),
+            (format!("{good}deny toy gbae {BIN}\n"), "granted twice"),
+            (format!("{HEADER}\ndeny toy gbae {BIN} /home/toy/Games\n"), "is not a grant"),
+            (format!("{HEADER}\ndeny toy gbae\n"), "is not a grant"),
+            (format!("{HEADER}\ndeny toy gbae abc\n"), "lowercase hex"),
+            (format!("{HEADER}\ndeny root gbae {BIN}\n"), "not this image's user"),
             (format!("{HEADER}\n{}", "x".repeat(MAX_STORE_BYTES)), "past the"),
         ] {
             match Store::parse(&text) {
@@ -396,33 +449,51 @@ mod tests {
         let mut store = Store::default();
         store.put(entry("gbae", "/home/toy/Games", Access::ReadWrite)).unwrap();
         store.put(entry("paint", "/home/toy/Pictures", Access::ReadOnly)).unwrap();
+        store.put(denied("snake")).unwrap();
         assert!(store.revoke("toy", "gbae"));
         assert!(!store.revoke("toy", "gbae"));
+        assert!(store.revoke("toy", "snake"), "a Deny is revoked as a grant is");
         assert_eq!(store.entries(), [entry("paint", "/home/toy/Pictures", Access::ReadOnly)]);
     }
 
-    /// The decision, as a table: the stored grant for the exact binary, at
-    /// most the ceiling, and nothing otherwise.
+    /// The decision, as a table: the stored answer for the exact binary, a
+    /// folder at most the ceiling; with none, the question at the screen
+    /// alone; no ceiling, never a folder nor a question.
     #[test]
-    fn a_launch_gets_the_grant_for_its_exact_binary_at_most_the_ceiling() {
-        let (rw, ro) = (entry("gbae", "/home/toy/Games", Access::ReadWrite), entry("gbae", "/home/toy/Games", Access::ReadOnly));
+    fn a_launch_gets_the_answer_for_its_exact_binary_and_is_asked_only_at_the_screen() {
+        let (rw, ro, deny) = (
+            entry("gbae", "/home/toy/Games", Access::ReadWrite),
+            entry("gbae", "/home/toy/Games", Access::ReadOnly),
+            denied("gbae"),
+        );
         let other = "0".repeat(DIGEST_LEN);
-        let games = |access| Some(Folder { path: "/home/toy/Games".into(), access });
+        let games = |access| Decision::Start(Some(Folder { path: "/home/toy/Games".into(), access }));
+        let (none, ask) = (Decision::Start(None), Decision::Ask);
         use Access::*;
-        type Row<'a> = (Option<&'a Entry>, &'a str, Option<Access>, Option<Folder>);
+        type Row<'a> = (Option<&'a Entry>, &'a str, Option<Access>, bool, Decision);
         #[rustfmt::skip]
-        let table: [Row; 8] = [
-            (Some(&rw), BIN, Some(ReadWrite), games(ReadWrite)),
-            (Some(&ro), BIN, Some(ReadWrite), games(ReadOnly)),
-            (Some(&rw), BIN, Some(ReadOnly), games(ReadOnly)),
-            (Some(&rw), BIN, None, None),
-            (Some(&rw), &other, Some(ReadWrite), None),
-            (None, BIN, Some(ReadWrite), None),
-            (None, BIN, None, None),
-            (Some(&ro), &other, Some(ReadOnly), None),
+        let table: [Row; 18] = [
+            (Some(&rw), BIN, Some(ReadWrite), false, games(ReadWrite)),
+            (Some(&rw), BIN, Some(ReadWrite), true, games(ReadWrite)),
+            (Some(&ro), BIN, Some(ReadWrite), true, games(ReadOnly)),
+            (Some(&rw), BIN, Some(ReadOnly), true, games(ReadOnly)),
+            (Some(&rw), BIN, None, true, none.clone()),
+            (Some(&rw), &other, Some(ReadWrite), false, none.clone()),
+            (Some(&rw), &other, Some(ReadWrite), true, ask.clone()),
+            (None, BIN, Some(ReadWrite), false, none.clone()),
+            (None, BIN, Some(ReadWrite), true, ask.clone()),
+            (None, BIN, Some(ReadOnly), true, ask.clone()),
+            (None, BIN, None, false, none.clone()),
+            (None, BIN, None, true, none.clone()),
+            (Some(&ro), &other, Some(ReadOnly), false, none.clone()),
+            (Some(&deny), BIN, Some(ReadWrite), true, none.clone()),
+            (Some(&deny), BIN, Some(ReadWrite), false, none.clone()),
+            (Some(&deny), BIN, None, true, none.clone()),
+            (Some(&deny), &other, Some(ReadWrite), true, ask),
+            (Some(&deny), &other, Some(ReadWrite), false, none),
         ];
-        for (i, (stored, binary, ceiling, want)) in table.into_iter().enumerate() {
-            assert_eq!(decide(stored, binary, ceiling), want, "row {i}");
+        for (i, (stored, binary, ceiling, at_screen, want)) in table.into_iter().enumerate() {
+            assert_eq!(decide(stored, binary, ceiling, at_screen), want, "row {i}");
         }
     }
 

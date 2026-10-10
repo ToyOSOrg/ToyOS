@@ -1441,6 +1441,7 @@ dependencies = [
  "filepicker-api",
  "toyos",
  "toyos-font",
+ "toyos-manifest",
  "toyos-window",
 ]
 
@@ -5778,6 +5779,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-desktop",
  "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",

@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::layout::Desk;
 use crate::rect::Rect;
 use crate::stack::Stack;
-use crate::window::Window;
+use crate::window::{Level, Window};
 
 /// One thing to draw into the back buffer, in the order it must be drawn.
 ///
@@ -36,8 +36,9 @@ pub fn compose<C>(desk: &Desk, stack: &Stack<C>, region: Rect, launcher_open: bo
         out.push(Layer::Wallpaper(uncovered));
     }
 
+    let shown = |win: &Window<C>| !win.minimized && region.overlaps(win.frame(&desk.chrome));
     for (index, win) in stack.iter().enumerate() {
-        if !win.minimized && region.overlaps(win.frame(&desk.chrome)) {
+        if win.level != Level::Prompt && shown(win) {
             out.push(Layer::Window { index, clip: region });
         }
     }
@@ -46,12 +47,18 @@ pub fn compose<C>(desk: &Desk, stack: &Stack<C>, region: Rect, launcher_open: bo
         out.push(Layer::Taskbar { clip: region });
     }
 
-    // Last, so it is over every window: it is a menu and not a window.
+    // Over every window a client asked for: it is a menu and not a window.
     if launcher_open {
         let l = bar.launcher();
         if region.overlaps(l) {
             out.push(Layer::Launcher(l));
         }
+    }
+
+    // Over the taskbar and the launcher too: nothing a client draws or opens
+    // covers the question.
+    if let Some(index) = stack.prompt().filter(|&index| shown(&stack[index])) {
+        out.push(Layer::Window { index, clip: region });
     }
 
     out
@@ -97,7 +104,7 @@ mod tests {
     fn stack_of(contents: &[Rect]) -> Stack<usize> {
         let mut s = Stack::default();
         for (i, c) in contents.iter().enumerate() {
-            s.insert(Window::new(i, *c, "w".to_string(), false, CursorStyle::Default));
+            s.insert(Window::new(i, *c, "w".to_string(), Level::Ordinary, CursorStyle::Default));
         }
         s
     }
@@ -184,7 +191,7 @@ mod tests {
     #[test]
     fn a_blit_never_reads_outside_the_buffer() {
         let mut w: Window<()> =
-            Window::new((), Rect::new(100, 100, 400, 300), "w".to_string(), false, CursorStyle::Default);
+            Window::new((), Rect::new(100, 100, 400, 300), "w".to_string(), Level::Ordinary, CursorStyle::Default);
         // Dragged 200 pixels wider than the memory behind it.
         w.content = Rect::new(100, 100, 600, 300);
         let b = content_blit(&w, Rect::new(0, 0, 1920, 1080)).unwrap();
@@ -201,7 +208,7 @@ mod tests {
     #[test]
     fn a_clip_that_misses_the_window_blits_nothing() {
         let w: Window<()> =
-            Window::new((), Rect::new(100, 100, 400, 300), "w".to_string(), false, CursorStyle::Default);
+            Window::new((), Rect::new(100, 100, 400, 300), "w".to_string(), Level::Ordinary, CursorStyle::Default);
         assert!(content_blit(&w, Rect::new(0, 0, 50, 50)).is_none());
         assert!(content_blit(&w, Rect::EMPTY).is_none());
     }
@@ -221,5 +228,24 @@ mod tests {
             let plan = compose(&DESK, &s, region, false);
             assert!(!plan.is_empty(), "{region:?}");
         }
+    }
+
+    /// **The prompt is drawn last**: over a fullscreen topmost window, the
+    /// taskbar and the open launcher, wherever its frame meets the region.
+    #[test]
+    fn a_prompt_is_drawn_over_the_taskbar_the_launcher_and_every_window() {
+        let mut s: Stack<usize> = Stack::default();
+        s.insert(Window::new(0, DESK.screen, "hostile".to_string(), Level::Topmost, CursorStyle::Default));
+        let ask = Rect::new(20, DESK.work_area().y1 - 100, 400, 300);
+        s.insert(Window::new(1, ask, "ask".to_string(), Level::Prompt, CursorStyle::Default));
+        s.insert(Window::new(2, Rect::new(0, 0, 50, 50), "late".to_string(), Level::Topmost, CursorStyle::Default));
+        let plan = compose(&DESK, &s, DESK.screen, true);
+        let last = plan.last().copied();
+        assert_eq!(last, Some(Layer::Window { index: 2, clip: DESK.screen }), "{plan:?}");
+        assert_eq!(s.prompt(), Some(2));
+        let taskbar = plan.iter().position(|l| matches!(l, Layer::Taskbar { .. })).expect("the bar is drawn");
+        let launcher = plan.iter().position(|l| matches!(l, Layer::Launcher(_))).expect("the launcher is drawn");
+        assert!(taskbar < plan.len() - 1 && launcher < plan.len() - 1, "{plan:?}");
+        assert_eq!(plan.iter().filter(|l| matches!(l, Layer::Window { index: 2, .. })).count(), 1);
     }
 }

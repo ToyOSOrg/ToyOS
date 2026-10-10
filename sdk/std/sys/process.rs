@@ -29,6 +29,10 @@ pub struct Command {
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
+    /// The program [`Command::prepare`] read off a file server, and the path
+    /// it read: kept across a later working directory, so a spawn starts the
+    /// bytes the caller saw ([`Command::prepared_image`]).
+    image: Option<(OsString, toyos::process::Image)>,
 }
 
 /// Whom a child is placed under, whose end takes it down.
@@ -46,8 +50,6 @@ enum Parent {
 struct Prepared {
     program: OsString,
     cwd: String,
-    /// The program, when it is on a file server.
-    image: Option<toyos::process::Image>,
 }
 
 /// Where a spawn goes once the launcher has been asked, or could not be.
@@ -98,6 +100,7 @@ impl Command {
             parent: Parent::Caller,
             image_path: None,
             prepared: None,
+            image: None,
         }
     }
 
@@ -110,6 +113,7 @@ impl Command {
     pub fn image_from(&mut self, path: &OsStr) {
         self.image_path = Some(path.to_owned());
         self.prepared = None;
+        self.image = None;
     }
 
     pub fn env_mut(&mut self) -> &mut CommandEnv {
@@ -122,17 +126,30 @@ impl Command {
     }
 
     /// Find the program, judge the working directory and read a program on a
-    /// file server, so that [`Self::spawn`] calls no file server for them.
+    /// file server, so that [`Self::spawn`] calls no file server for them. A
+    /// program already read from the same path is kept, not read again.
     pub fn prepare(&mut self) -> io::Result<()> {
         let program = self.resolve_program()?;
         let cwd = self.child_cwd()?;
-        let source = Path::new(self.image_path.as_deref().unwrap_or(&program));
-        let image = match crate::sys::fs::is_served(source) {
-            true => Some(crate::sys::fs::read_image(source)?),
-            false => None,
-        };
-        self.prepared = Some(Prepared { program, cwd, image });
+        let source = self.image_path.clone().unwrap_or_else(|| program.clone());
+        let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
+        if !kept {
+            self.image = None;
+            if crate::sys::fs::is_served(Path::new(&source)) {
+                let image = crate::sys::fs::read_image(Path::new(&source))?;
+                self.image = Some((source, image));
+            }
+        }
+        self.prepared = Some(Prepared { program, cwd });
         Ok(())
+    }
+
+    /// The program a prepared spawn starts, as [`Self::prepare`] read it off a
+    /// file server: `None` before a prepare, and for a program the kernel
+    /// opens itself.
+    pub fn prepared_image(&self) -> Option<&[u8]> {
+        self.prepared.as_ref()?;
+        self.image.as_ref().map(|(_, image)| image.bytes())
     }
 
     pub fn stdin(&mut self, stdin: Stdio) {
@@ -284,8 +301,9 @@ impl Command {
             ));
         }
         let prepared = self.prepared.take();
+        let image = self.image.take().map(|(_, image)| image);
         let (resolved, cwd, prepared_image) = match prepared {
-            Some(Prepared { program, cwd, image }) => (program, cwd, image),
+            Some(Prepared { program, cwd }) => (program, cwd, image),
             None => (self.resolve_program()?, self.child_cwd()?, None),
         };
         let mut argv_buf = Vec::new();

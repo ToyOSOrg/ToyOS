@@ -34,9 +34,10 @@
 //!
 //! [`package`] is the other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
-//! [`launch`] is who may start what, and [`grants`] which folder of the home a
-//! package is granted.
+//! [`launch`] is who may start what, [`grants`] which folder of the home a
+//! package is granted, and [`consent`] how the person at the screen is asked.
 
+pub mod consent;
 pub mod grants;
 pub mod launch;
 pub mod package;

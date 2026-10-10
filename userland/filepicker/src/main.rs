@@ -1,3 +1,5 @@
+mod consent;
+
 use filepicker_api::{
     PickerMode, MAX_REQUEST_BYTES, MSG_FILEPICKER_REQUEST, MSG_FILEPICKER_RESULT,
 };
@@ -37,6 +39,7 @@ const KEY_BACKSPACE: u8 = 0x2A;
 const KEY_ENTER: u8 = 0x28;
 const KEY_TAB: u8 = 0x2B;
 const KEY_ESCAPE: u8 = 0x29;
+const KEY_SPACE: u8 = 0x2C;
 
 // --- Directory entry ---
 
@@ -483,12 +486,16 @@ struct Pending {
     conn: Connection,
     rx: RequestRx,
     since: Instant,
+    /// It came in on `consent`, so it is the supervisor's question.
+    consent: bool,
 }
 
 const TOKEN_ACCEPTOR: u64 = 0;
-const TOKEN_PENDING_BASE: u64 = 1;
+const TOKEN_CONSENT_ACCEPTOR: u64 = 1;
+const TOKEN_PENDING_BASE: u64 = 2;
 
-/// Serve `filepicker` for the rest of the machine's life.
+/// Serve `filepicker`, and the supervisor's questions on `consent`
+/// ([`consent`]), for the rest of the machine's life.
 ///
 /// **A server never blocks on a client.** Accept and the request frame are two
 /// events and a frame is buffered until whole before anything acts on it, so a
@@ -502,12 +509,17 @@ fn main() {
     // instruction.
     let acceptor = endow::acceptor("filepicker")
         .expect("the manifest declares this program serves `filepicker`");
+    let questions = endow::acceptor(toyos_manifest::consent::PORT)
+        .expect("the manifest declares this program serves `consent`");
+    let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("Failed to load font");
+    let font = Font::from_prebuilt(&font_data);
 
-    let poller = Poller::new(1 + MAX_PENDING_REQUESTS as u32);
+    let poller = Poller::new(2 + MAX_PENDING_REQUESTS as u32);
     let mut pending: Vec<Pending> = Vec::new();
     let mut ready: Vec<u64> = Vec::new();
     loop {
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
+        poller.watch(&questions, READABLE, TOKEN_CONSENT_ACCEPTOR);
         for p in &pending {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }
@@ -531,7 +543,11 @@ fn main() {
         }
         pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if ready.contains(&TOKEN_ACCEPTOR) {
+        for (token, question) in [(TOKEN_ACCEPTOR, false), (TOKEN_CONSENT_ACCEPTOR, true)] {
+            if !ready.contains(&token) {
+                continue;
+            }
+            let acceptor = if question { &questions } else { &acceptor };
             // An accept that fails costs one connection and never the picker.
             match acceptor.accept() {
                 Err(e) => eprintln!("filepicker: a connection could not be accepted ({e:?})"),
@@ -540,9 +556,7 @@ fn main() {
                      already waiting to say what they want",
                     conn.as_handle().0
                 ),
-                Ok(conn) => {
-                    pending.push(Pending { conn, rx: RequestRx::new(), since: Instant::now() })
-                }
+                Ok(conn) => pending.push(Pending { conn, rx: RequestRx::new(), since: Instant::now(), consent: question }),
             }
         }
 
@@ -576,7 +590,12 @@ fn main() {
                 }
                 RxStep::Frame { msg_type, payload_len } => {
                     let p = pending.remove(i);
-                    if msg_type == MSG_FILEPICKER_REQUEST {
+                    if p.consent {
+                        match consent::question(p.rx.payload(payload_len), msg_type) {
+                            Ok(ask) => consent::ask(ask, &p.conn, &font),
+                            Err(why) => eprintln!("filepicker: dropping the supervisor's question — {why}"),
+                        }
+                    } else if msg_type == MSG_FILEPICKER_REQUEST {
                         let data = p.rx.payload(payload_len);
                         let mode = if data.first() == Some(&(PickerMode::Save as u8)) {
                             PickerMode::Save

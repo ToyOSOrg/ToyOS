@@ -233,6 +233,9 @@ toyos-xhci = { path = "toyos-xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
 acpiserver-api = { path = "userland/acpiserver-api" }
+# The desktop's geometry and the prompt's colour, so `consent_prompt` clicks
+# where the compositor draws and finds the prompt by what the compositor paints.
+toyos-desktop = { path = "userland/compositor/desktop" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

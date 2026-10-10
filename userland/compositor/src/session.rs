@@ -8,6 +8,7 @@
 //! to the panel.
 
 use std::process::Command;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow;
@@ -20,8 +21,8 @@ use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
-    CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Point, Rect, Released, Stack, TabAction,
-    Verdict, Window, WindowMode,
+    CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, PromptGate, Rect, Released,
+    Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
 use window::Screen;
 
@@ -82,6 +83,18 @@ impl Wallpaper {
 
 pub struct Session {
     acceptor: Acceptor,
+    /// The prompt layer's port ([`toyos_manifest::consent::PROMPT`]), which
+    /// one program alone holds: a window made on it goes above every other.
+    prompts: Acceptor,
+    /// The prompt while one is up, and which of the input reaches it.
+    prompt: Option<(WindowId, PromptGate)>,
+    /// The last prompt's gate once it is gone: the releases of what it was
+    /// given, which no other window saw the press of.
+    owed: PromptGate,
+    /// Where a launch is made: off the loop, since the supervisor answers one
+    /// whose package asks a question only once the question is answered,
+    /// through this loop.
+    launcher: mpsc::Sender<String>,
     kb: Keyboard,
     mouse: Mouse,
     poller: Poller,
@@ -147,6 +160,8 @@ impl Session {
         // take.
         let acceptor = endow::acceptor("compositor")
             .expect("the manifest declares this program serves `compositor`");
+        let prompts = endow::acceptor(toyos_manifest::consent::PROMPT)
+            .expect("the manifest declares this program serves `prompt`");
         let kb: Keyboard = endow::device(DeviceType::Keyboard)
             .expect("the manifest gives this program the keyboard");
         let mouse: Mouse = endow::device(DeviceType::Mouse)
@@ -222,7 +237,7 @@ impl Session {
         );
 
         // Sized for the slot ceiling rather than for `max_windows`: the batch
-        // between two `wait` calls is the three fixed registrations, one per
+        // between two `wait` calls is the four fixed registrations, one per
         // live window
         // and one per pending connection, and `MSG_SET_RESOLUTION` can raise
         // `max_windows` mid-run.
@@ -230,6 +245,7 @@ impl Session {
         poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
         poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
+        poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
         if hw_cursor {
@@ -239,6 +255,7 @@ impl Session {
         let mut damage = Damage::default();
         damage.add(desk.screen);
 
+        let launcher = launcher();
         println!("compositor: ready");
 
         let now = Instant::now();
@@ -246,6 +263,10 @@ impl Session {
             reported_traffic: screen.traffic(),
             reported_composed: back.surface.traffic(),
             acceptor,
+            prompts,
+            prompt: None,
+            owed: PromptGate::default(),
+            launcher,
             kb,
             mouse,
             poller,
@@ -311,6 +332,7 @@ impl Session {
         }
         self.tick_taskbar();
         self.present();
+        self.prompt_gone();
     }
 
     /// One turn of the drain, or `false` when nothing was ready.
@@ -323,6 +345,7 @@ impl Session {
         let kb_ready = self.is_ready(self.kb.as_handle());
         let mouse_ready = self.is_ready(self.mouse.as_handle());
         let accept_ready = self.is_ready(self.acceptor.as_handle());
+        let prompt_ready = self.is_ready(self.prompts.as_handle());
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()));
 
@@ -340,7 +363,7 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready && !mouse_ready && !accept_ready && !client_ready {
+        if !kb_ready && !mouse_ready && !accept_ready && !prompt_ready && !client_ready {
             return false;
         }
 
@@ -352,12 +375,16 @@ impl Session {
             self.pointer();
         }
         if accept_ready {
-            self.accept();
+            self.accept(false);
+        }
+        if prompt_ready {
+            self.accept(true);
         }
         let frames = self.take_frames();
         self.dispatch(frames);
         self.reap();
-        self.rearm(kb_ready, mouse_ready, accept_ready);
+        self.prompt_gone();
+        self.rearm(kb_ready, mouse_ready, accept_ready, prompt_ready);
         true
     }
 
@@ -383,11 +410,24 @@ impl Session {
             let event = ipc::decode_payload::<window::KeyEvent>(raw)
                 .expect("a chunk is exactly one event long");
             let focused = self.stack.focused();
-            let action =
-                key_action(event.into(), focused.map(|i| self.stack[i].mode), self.launcher_open);
+            let action = key_action(
+                event.into(),
+                focused.map(|i| self.stack[i].mode),
+                self.launcher_open,
+                self.prompt.is_some(),
+            );
             match action {
                 KeyAction::Ignore => {}
                 KeyAction::Forward => {
+                    // While a prompt is up it is the focused window, and is
+                    // given what its gate lets through and nothing else is.
+                    let given = match &mut self.prompt {
+                        Some((_, gate)) => gate.key(event.into()),
+                        None => !self.owed.owed(event.into()),
+                    };
+                    if !given {
+                        continue;
+                    }
                     if let Some(i) = focused {
                         deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
                     }
@@ -401,9 +441,7 @@ impl Session {
                         self.damage_all();
                     }
                 }
-                KeyAction::SpawnTerminal => {
-                    Command::new("/system/bin/terminal").spawn().ok();
-                }
+                KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
                 KeyAction::Paste => {
                     if let Some(i) = focused {
                         self.paste(i);
@@ -540,6 +578,13 @@ impl Session {
                 self.damage_all();
             }
             Hit::Content(idx) => {
+                // The one content a press reaches while a prompt is up is the
+                // prompt's, and only a press its gate lets through.
+                if let Some((_, gate)) = &mut self.prompt {
+                    if !gate.press() {
+                        return;
+                    }
+                }
                 if self.launcher_open {
                     self.launcher_open = false;
                     self.damage.add(self.launcher_rect());
@@ -579,11 +624,13 @@ impl Session {
             }
             Hit::LauncherItem(idx) => {
                 if let Some((_, program)) = self.apps.get(idx) {
-                    Command::new(program).spawn().ok();
+                    let program = program.clone();
+                    self.launch(&program);
                 }
                 self.launcher_open = false;
                 self.damage.add(self.launcher_rect());
             }
+            Hit::Blocked => {}
             Hit::Desktop => {
                 if self.launcher_open {
                     self.launcher_open = false;
@@ -594,7 +641,11 @@ impl Session {
     }
 
     fn release(&mut self, buttons: u8) {
-        if let Some(i) = self.stack.focused() {
+        let given = match &mut self.prompt {
+            Some((_, gate)) => gate.release(),
+            None => !self.owed.release(),
+        };
+        if let (Some(i), true) = (self.stack.focused(), given) {
             let ev =
                 mouse_event(&self.stack[i], self.cursor, buttons, window::MOUSE_RELEASE, 1, 0);
             deliver(&mut self.dead, &self.stack[i], window::MSG_MOUSE_INPUT, &ev);
@@ -636,11 +687,13 @@ impl Session {
         }
     }
 
-    fn accept(&mut self) {
+    /// One connection off `compositor`, or off `prompt` where `prompt`.
+    fn accept(&mut self, prompt: bool) {
         // `accept` installs a descriptor, so it answers `ResourceExhausted` on
         // a full handle table — and clients drive that table, one handle per
         // connection. The connection is lost either way; the desktop is not.
-        match self.acceptor.accept() {
+        let acceptor = if prompt { &self.prompts } else { &self.acceptor };
+        match acceptor.accept() {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
             Ok(conn) if self.pending.len() >= MAX_PENDING_CONNS as usize => {
                 eprintln!(
@@ -656,6 +709,7 @@ impl Session {
                     rx: ClientRx::new(),
                     since: Instant::now(),
                     copy: None,
+                    prompt,
                 });
             }
         }
@@ -699,6 +753,7 @@ impl Session {
                     let p = self.pending.remove(i);
                     frame.conn = Some(p.conn);
                     frame.copy = p.copy;
+                    frame.prompt = p.prompt;
                     out.push(frame);
                     break;
                 }
@@ -754,6 +809,11 @@ impl Session {
                     continue;
                 }
                 (None, _) => {}
+            }
+            // A connection on the prompt port is for its window and nothing else.
+            if frame.prompt && frame.msg_type != window::MSG_CREATE_WINDOW {
+                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                continue;
             }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
@@ -846,6 +906,19 @@ impl Session {
             return;
         };
 
+        let level = match (frame.prompt, req.flags & window::WINDOW_FLAG_TOPMOST != 0) {
+            (true, _) => Level::Prompt,
+            (false, true) => Level::Topmost,
+            (false, false) => Level::Ordinary,
+        };
+        // One prompt at a time: the prompt layer is full.
+        if !self.stack.admits(level) {
+            eprintln!("compositor: refusing a prompt from client {} — one is already up", handle.0);
+            let reason = window::REFUSED_AT_CAPACITY;
+            let _ = ipc::try_send(handle, window::MSG_WINDOW_REFUSED, &window::WindowRefused { reason });
+            return;
+        }
+
         // Every refusal below is an answer to untrusted input, so none of them
         // is a panic and none is a silent shrink of what was asked for.
         let refusal = match toyos_desktop::create_verdict(
@@ -926,10 +999,20 @@ impl Session {
             Client { conn, shm, rx: ClientRx::new(), presents: 0, frames: 0 },
             content,
             title,
-            req.flags & window::WINDOW_FLAG_TOPMOST != 0,
+            level,
             CursorStyle::Default,
         ));
         note_opened(handle, content, self.stack.len());
+        if level == Level::Prompt {
+            // Whatever the pointer was doing ends here, and the launcher
+            // closes: nothing under the prompt moves on input it is given.
+            self.prompt = Some((self.stack[at].id, PromptGate::default()));
+            self.grab = Grab::None;
+            if self.launcher_open {
+                self.launcher_open = false;
+                self.damage.add(self.launcher_rect());
+            }
+        }
 
         self.poller.watch(&self.stack[at].client.conn, READABLE, handle.0 as u64);
         let pixel_format = self.pixel_format();
@@ -1001,6 +1084,7 @@ impl Session {
             rx: ClientRx::new(),
             since: Instant::now(),
             copy: Some(CopyRegion::new(region)),
+            prompt: false,
         });
     }
 
@@ -1123,7 +1207,10 @@ impl Session {
     }
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
-    fn rearm(&mut self, kb: bool, mouse: bool, acceptor: bool) {
+    fn rearm(&mut self, kb: bool, mouse: bool, acceptor: bool, prompts: bool) {
+        if prompts {
+            self.poller.watch(&self.prompts, READABLE, self.prompts.as_handle().0 as u64);
+        }
         if kb {
             self.poller.watch(&self.kb, READABLE, self.kb.as_handle().0 as u64);
         }
@@ -1284,6 +1371,14 @@ impl Session {
                 deliver_signal(&mut dead, &self.stack[i], window::MSG_FRAME);
                 self.stack[i].client.frames += 1;
                 self.stack[i].presented = false;
+                // The prompt's own first frame is on the panel: from here a
+                // press can be an answer.
+                if let Some((id, gate)) = &mut self.prompt {
+                    if *id == self.stack[i].id && self.stack[i].client.frames == 1 {
+                        gate.presented();
+                        println!("compositor: the prompt is on the panel");
+                    }
+                }
             }
         }
         announce(&dead);
@@ -1318,6 +1413,22 @@ impl Session {
 
     fn launcher_rect(&self) -> Rect {
         self.desk.taskbar(self.stack.len()).launcher()
+    }
+
+    /// Say so once the prompt is gone, however it went.
+    fn prompt_gone(&mut self) {
+        if let Some((id, gate)) = self.prompt {
+            if self.stack.position(id).is_none() {
+                self.prompt = None;
+                self.owed = gate;
+                println!("compositor: the prompt is down");
+            }
+        }
+    }
+
+    /// Start `program` through the launcher, off the loop.
+    fn launch(&self, program: &str) {
+        self.launcher.send(program.to_string()).expect("compositor: its launcher thread has ended");
     }
 
     fn retarget(&mut self, idx: usize, mode: WindowMode) {
@@ -1377,6 +1488,23 @@ impl Session {
             &window::ClipboardShmMsg { len: self.clipboard.len() as u32 },
         );
     }
+}
+
+/// The thread every launch is made on, and the channel to it: one at a time,
+/// in order, since a launch waits as long as its question does.
+fn launcher() -> mpsc::Sender<String> {
+    let (launches, queue) = mpsc::channel::<String>();
+    std::thread::Builder::new()
+        .name("launcher".into())
+        .spawn(move || {
+            for program in queue {
+                if let Err(e) = Command::new(&program).spawn() {
+                    eprintln!("compositor: {program} did not start: {e}");
+                }
+            }
+        })
+        .expect("compositor: no thread to launch on");
+    launches
 }
 
 fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {

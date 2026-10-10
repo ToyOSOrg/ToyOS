@@ -15,6 +15,13 @@
 //! its rows' `starts` reach, gives it more of a server: only the machine's
 //! session opens one.
 //!
+//! **A login session holds the screen only where the screen's row opened it**
+//! ([`Screen`]): the row serving [`consent::PROMPT`], the one whose launches a
+//! person at the screen made. Every launch in that session holds it, but for
+//! one made by another `login` row, whose launches are never that person's:
+//! sshserver's shells, even one a desktop shell started, never hold it. Only a
+//! launch in a session holding it may ask the person at the screen anything.
+//!
 //! **The caller is the badge on its connection, not its word** ([`Authority`]):
 //! the supervisor mints it on the launcher it endows a row, the kernel stamps it
 //! on every connection made through that launcher, and a holder passes the
@@ -27,7 +34,7 @@ use std::fmt;
 
 use toyos_abi::syscall::MAX_BADGE;
 
-use crate::{package, Program, MAX_PROGRAM_NAME};
+use crate::{consent, package, Program, MAX_PROGRAM_NAME};
 
 /// The `starts` entry naming every installed package. A program key has no
 /// `/`, so it names no key.
@@ -41,7 +48,26 @@ pub enum Session {
     Machine(Share),
     /// One a `login` row's launch from the machine's session opened, and every
     /// launch made in it.
-    Login(Share),
+    Login(Share, Screen),
+}
+
+/// Whether a login session's launches were made by the person at the screen,
+/// and may ask them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Held,
+    Not,
+}
+
+impl Screen {
+    /// What a session `opener`'s launch opens holds: the screen where `opener`
+    /// serves the prompt layer.
+    pub fn of(opener: &Program) -> Self {
+        match opener.serves.iter().any(|name| name == consent::PROMPT) {
+            true => Self::Held,
+            false => Self::Not,
+        }
+    }
 }
 
 /// Which share of each file server's bounds: a number only [`Sessions`] makes
@@ -58,8 +84,13 @@ impl Session {
     /// The number a file grant names this session's share of a server by.
     pub fn share(self) -> u64 {
         match self {
-            Self::Machine(Share(n)) | Self::Login(Share(n)) => n,
+            Self::Machine(Share(n)) | Self::Login(Share(n), _) => n,
         }
+    }
+
+    /// Whether a launch in this session may ask the person at the screen.
+    pub fn at_screen(self) -> bool {
+        matches!(self, Self::Login(_, Screen::Held))
     }
 }
 
@@ -67,7 +98,7 @@ impl fmt::Display for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Machine(_) => f.write_str("the machine's session"),
-            Self::Login(_) => f.write_str("a login session"),
+            Self::Login(..) => f.write_str("a login session"),
         }
     }
 }
@@ -91,8 +122,8 @@ impl Sessions {
     }
 
     /// A login session none before it was.
-    pub fn open(&mut self) -> Session {
-        Session::Login(self.share())
+    pub fn open(&mut self, screen: Screen) -> Session {
+        Session::Login(self.share(), screen)
     }
 
     fn share(&mut self) -> Share {
@@ -112,6 +143,7 @@ pub struct Authority {
 
 const MACHINE: u8 = 0;
 const LOGIN: u8 = 1;
+const LOGIN_AT_SCREEN: u8 = 2;
 
 const _: () = assert!(1 + 8 + MAX_PROGRAM_NAME <= MAX_BADGE, "an authority, a kind byte, a share and a row, must fit one badge");
 
@@ -121,7 +153,8 @@ impl Authority {
         let mut out = Vec::with_capacity(1 + 8 + self.row.len());
         out.push(match self.session {
             Session::Machine(_) => MACHINE,
-            Session::Login(_) => LOGIN,
+            Session::Login(_, Screen::Not) => LOGIN,
+            Session::Login(_, Screen::Held) => LOGIN_AT_SCREEN,
         });
         out.extend_from_slice(&self.session.share().to_le_bytes());
         out.extend_from_slice(self.row.as_bytes());
@@ -138,7 +171,8 @@ impl Authority {
         };
         let session = match kind {
             MACHINE => Session::Machine(share),
-            LOGIN => Session::Login(share),
+            LOGIN => Session::Login(share, Screen::Not),
+            LOGIN_AT_SCREEN => Session::Login(share, Screen::Held),
             _ => return None,
         };
         if row.is_empty() || row.len() > MAX_PROGRAM_NAME {
@@ -177,8 +211,8 @@ impl fmt::Display for Refusal {
 pub enum Starts {
     /// Its caller's.
     In(Session),
-    /// A login session it opens.
-    Opening,
+    /// A login session it opens, holding the screen or not.
+    Opening(Screen),
 }
 
 impl Starts {
@@ -186,7 +220,7 @@ impl Starts {
     pub fn session(self, sessions: &mut Sessions) -> Session {
         match self {
             Self::In(session) => session,
-            Self::Opening => sessions.open(),
+            Self::Opening(screen) => sessions.open(screen),
         }
     }
 }
@@ -202,9 +236,14 @@ pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Resu
         return Err(Refusal::NotListed);
     }
     // Only from the machine's session: a login session reaching a `login` row
-    // through `starts` would otherwise hold a share per launch of it.
+    // through `starts` would otherwise hold a share per launch of it. A
+    // `login` row's launch in one keeps its share and holds the screen only
+    // where the row is the screen's.
     let starts = match (caller.login, session) {
-        (true, Session::Machine(_)) => Starts::Opening,
+        (true, Session::Machine(_)) => Starts::Opening(Screen::of(caller)),
+        (true, Session::Login(share, Screen::Held)) if Screen::of(caller) == Screen::Not => {
+            Starts::In(Session::Login(share, Screen::Not))
+        }
         _ => Starts::In(session),
     };
     if program.login_only() && matches!(starts, Starts::In(Session::Machine(_))) {
@@ -250,7 +289,7 @@ mod tests {
         let (ordinary, unlisted, own, package) = (row("ordinary"), row("unlisted"), caller(false), row("gbae"));
         let (swap, update) = (swap(), update());
         let mut sessions = Sessions::default();
-        let (machine, login) = (sessions.machine(), sessions.open());
+        let (machine, login) = (sessions.machine(), sessions.open(Screen::Not));
         use Refusal::*;
         use Starts::*;
         #[rustfmt::skip]
@@ -267,17 +306,17 @@ mod tests {
             (false, login, Target::Row(&swap), Ok(In(login))),
             (false, machine, Target::Row(&update), Err(OutsideLogin)),
             (false, login, Target::Row(&update), Ok(In(login))),
-            (true, machine, Target::Row(&ordinary), Ok(Opening)),
+            (true, machine, Target::Row(&ordinary), Ok(Opening(Screen::Not))),
             (true, login, Target::Row(&ordinary), Ok(In(login))),
             (true, machine, Target::Row(&unlisted), Err(NotListed)),
             (true, login, Target::Row(&unlisted), Err(NotListed)),
-            (true, machine, Target::Row(&own), Ok(Opening)),
+            (true, machine, Target::Row(&own), Ok(Opening(Screen::Not))),
             (true, login, Target::Row(&own), Ok(In(login))),
-            (true, machine, Target::Package(&package), Ok(Opening)),
+            (true, machine, Target::Package(&package), Ok(Opening(Screen::Not))),
             (true, login, Target::Package(&package), Ok(In(login))),
-            (true, machine, Target::Row(&swap), Ok(Opening)),
+            (true, machine, Target::Row(&swap), Ok(Opening(Screen::Not))),
             (true, login, Target::Row(&swap), Ok(In(login))),
-            (true, machine, Target::Row(&update), Ok(Opening)),
+            (true, machine, Target::Row(&update), Ok(Opening(Screen::Not))),
             (true, login, Target::Row(&update), Ok(In(login))),
         ];
         for (i, (opens, session, target, want)) in table.into_iter().enumerate() {
@@ -295,11 +334,18 @@ mod tests {
     /// on each launch; every launch in that session spends its share, down a
     /// chain of shells and through sshserver, a `login` row it reaches, and
     /// the shell sshserver launches. No two of those shares are one, nor any
-    /// the supervisor's.
+    /// the supervisor's. The session the compositor, the screen's row, opens
+    /// holds the screen down the chain of shells, and sshserver's launches in
+    /// it never do.
     #[test]
     fn a_sessions_launches_spend_its_one_share() {
         let runner = Program { starts: vec!["toybox".into()], ..row("test-runner") };
-        let compositor = Program { starts: vec!["terminal".into()], login: true, ..row("compositor") };
+        let compositor = Program {
+            starts: vec!["terminal".into()],
+            login: true,
+            serves: vec![consent::PROMPT.into()],
+            ..row("compositor")
+        };
         let terminal = Program { starts: vec!["shell".into()], ..row("terminal") };
         let shell = Program { starts: vec!["shell".into(), "sshserver".into()], ..row("shell") };
         let sshserver = Program { starts: vec!["shell".into()], login: true, ..row("sshserver") };
@@ -309,17 +355,26 @@ mod tests {
         let mut shares = vec![SUPERVISOR_SHARE, desktop.share(), tests.share()];
         for _ in 0..2 {
             let opened = launch(&mut sessions, &compositor, desktop, &terminal);
+            assert!(opened.at_screen(), "the compositor's launch opened {opened:?}");
             let mut session = launch(&mut sessions, &terminal, opened, &shell);
             for _ in 0..8 {
                 session = launch(&mut sessions, &shell, session, &shell);
             }
-            session = launch(&mut sessions, &shell, session, &sshserver);
-            session = launch(&mut sessions, &sshserver, session, &shell);
             assert_eq!(session, opened, "a login session's launches left it");
+            session = launch(&mut sessions, &shell, session, &sshserver);
+            assert_eq!(session, opened, "sshserver was not started in the desktop's session");
+            session = launch(&mut sessions, &sshserver, session, &shell);
+            assert_eq!(session.share(), opened.share(), "sshserver's launch left the session's share");
+            assert!(!session.at_screen(), "sshserver's launch holds the screen: {session:?}");
+            assert!(!launch(&mut sessions, &shell, session, &shell).at_screen(), "a shell regained the screen");
             shares.push(opened.share());
         }
         let distinct: BTreeSet<u64> = shares.iter().copied().collect();
         assert_eq!(distinct.len(), shares.len(), "two shares are one: {shares:?}");
+        // sshserver started by the machine, and any `login` row but the
+        // screen's, opens a session that never holds it.
+        let ssh = launch(&mut sessions, &sshserver, tests, &shell);
+        assert!(matches!(ssh, Session::Login(_, Screen::Not)), "{ssh:?}");
     }
 
     /// A row that lists nothing starts nothing, a package included, and `/apps`
@@ -342,8 +397,8 @@ mod tests {
         let mut sessions = Sessions::default();
         for authority in [
             Authority { row: "terminal".into(), session: sessions.machine() },
-            Authority { row: "x".repeat(MAX_PROGRAM_NAME), session: Session::Login(Share(u64::MAX)) },
-            Authority { row: "s".into(), session: sessions.open() },
+            Authority { row: "x".repeat(MAX_PROGRAM_NAME), session: Session::Login(Share(u64::MAX), Screen::Held) },
+            Authority { row: "s".into(), session: sessions.open(Screen::Not) },
             Authority { row: "m".into(), session: Session::Machine(Share(u64::MAX)) },
         ] {
             let bytes = authority.encode();
@@ -356,15 +411,15 @@ mod tests {
     /// authority reads back as it.
     #[test]
     fn what_encode_cannot_have_written_is_refused() {
-        let whole = Authority { row: "shell".into(), session: Sessions::default().open() };
+        let whole = Authority { row: "shell".into(), session: Sessions::default().open(Screen::Held) };
         let bytes = whole.encode();
         for end in 0..bytes.len() {
             assert_ne!(Authority::decode(&bytes[..end]).as_ref(), Some(&whole), "a prefix of {end} bytes");
         }
         let with = |kind: u8, share: u64, row: &[u8]| [&[kind][..], &share.to_le_bytes(), row].concat();
         assert_eq!(Authority::decode(&[]), None);
-        assert_eq!(Authority::decode(&with(2, FIRST_SHARE, b"s")), None);
-        for kind in [MACHINE, LOGIN] {
+        assert_eq!(Authority::decode(&with(3, FIRST_SHARE, b"s")), None);
+        for kind in [MACHINE, LOGIN, LOGIN_AT_SCREEN] {
             assert_eq!(Authority::decode(&[kind]), None);
             // Its share cut short.
             assert_eq!(Authority::decode(&[kind, 1, 0, 0, 0, 0, 0, 0]), None);

@@ -80,7 +80,8 @@ use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
-use toyos_manifest::grants::{self, Store};
+use toyos_manifest::consent;
+use toyos_manifest::grants::{self, Answer, Decision, Store};
 use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program, View};
@@ -172,8 +173,9 @@ struct Minted {
     grants: Acceptor,
 }
 
-/// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, and for the
-/// one connection whose swap has been answered and whose hang-up is awaited. A
+/// The poll tokens for the `launcher`, `swap`, `power` and `grants` acceptors, for the
+/// one connection whose swap has been answered and whose hang-up is awaited, and
+/// for the two of the launch waiting on an answer. A
 /// pending connection's token is [`TOKEN_PENDING_BASE`] plus its handle, which
 /// is unique among the connections the supervisor holds at once.
 const TOKEN_ACCEPTOR: u64 = 0;
@@ -182,7 +184,10 @@ const TOKEN_HANGUP: u64 = 2;
 const TOKEN_POWER_ACCEPTOR: u64 = 3;
 const TOKEN_WAKE: u64 = 4;
 const TOKEN_GRANTS_ACCEPTOR: u64 = 5;
-const TOKEN_PENDING_BASE: u64 = 6;
+/// The parked launch's caller, and its question's connection ([`Parked`]).
+const TOKEN_PARKED_CALLER: u64 = 6;
+const TOKEN_CONSENT: u64 = 7;
+const TOKEN_PENDING_BASE: u64 = 8;
 
 /// How long a stop waits for `logkeeper` to say the log is whole.
 ///
@@ -433,11 +438,20 @@ fn main() {
     let grants_port = acceptors
         .remove(grants::PORT)
         .expect("supervisor: the manifest declares the supervisor serves `grants`");
+    // The supervisor alone holds a connector to it, so a connection on it is
+    // the supervisor's question and nobody else's.
+    let consent = connectors.remove(consent::PORT).map(|connector| {
+        namespace::build()
+            .add(consent::PORT, &connector)
+            .finish()
+            .expect("supervisor: no namespace for the consent port")
+    });
     let (wake_read, wake_write) = toyos::pipe_pair().expect("supervisor: no pipe to hear a service end");
     let mut supervisor = Supervisor {
         system,
         minted: Minted { launcher, grants: grants_port },
         store: Store::default(),
+        consent,
         syscap: &syscap,
         acceptors,
         connectors,
@@ -541,8 +555,11 @@ struct Supervisor<'a> {
     /// What every launcher and every grants connector is minted on, and every
     /// launch and grants request accepted from.
     minted: Minted,
-    /// Every grant of a folder of the home, as [`grants::STORE`] holds them.
+    /// Every answer about a folder of the home, as [`grants::STORE`] holds them.
     store: Store,
+    /// [`consent::PORT`], where its server runs: what a launch asks the person at
+    /// the screen on.
+    consent: Option<Namespace>,
     syscap: &'a SysCap,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
@@ -892,7 +909,7 @@ impl<'a> Supervisor<'a> {
     /// and the machine's session is every service's.
     fn grant(&mut self, caller: &Caller, msg_type: u32, payload: &[u8]) -> Result<String, String> {
         let request = grants::Request::decode(msg_type, payload).ok_or("the request is not one this port reads")?;
-        if !matches!(caller.session, Session::Login(_)) {
+        if !matches!(caller.session, Session::Login(..)) {
             return Err("only a login session may ask for grants".to_string());
         }
         let user = toyos_manifest::USER;
@@ -918,7 +935,7 @@ impl<'a> Supervisor<'a> {
                     binary_digest(&program)
                 })??;
                 let said = format!("{package} is granted {} {}", folder.path, folder.access);
-                store.put(grants::Entry { user: user.to_string(), package, binary, folder })?;
+                store.put(grants::Entry { user: user.to_string(), package, binary, answer: Answer::Granted(folder) })?;
                 said
             }
         };
@@ -1032,9 +1049,10 @@ impl<'a> Supervisor<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
-        let poller = Poller::new(6 + MAX_PENDING_LAUNCHES as u32);
+        let poller = Poller::new(8 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
+        let mut parked: Option<Parked> = None;
         let mut ready: Vec<u64> = Vec::new();
         loop {
             poller.watch(&self.minted.launcher, READABLE, TOKEN_ACCEPTOR);
@@ -1044,6 +1062,10 @@ impl<'a> Supervisor<'a> {
             poller.watch(&self.wake, READABLE, TOKEN_WAKE);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
+            }
+            if let Some(asked) = &parked {
+                poller.watch(&asked.launch.conn, READABLE, TOKEN_PARKED_CALLER);
+                poller.watch(&asked.consent, READABLE, TOKEN_CONSENT);
             }
             for p in &pending {
                 poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
@@ -1139,7 +1161,8 @@ impl<'a> Supervisor<'a> {
                         let p = pending.remove(i);
                         match p.port {
                             Port::Launcher(caller) => {
-                                self.serve_launch(&p.conn, &caller, msg_type, p.rx.payload(payload_len))
+                                let payload = p.rx.payload(payload_len).to_vec();
+                                self.serve_launch(p.conn, &caller, msg_type, &payload, &mut parked)
                             }
                             Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
                             Port::Power => self.stop(&p.conn, msg_type),
@@ -1169,6 +1192,8 @@ impl<'a> Supervisor<'a> {
             pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
             flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
+            let (caller_ready, consent_ready) = (ready.contains(&TOKEN_PARKED_CALLER), ready.contains(&TOKEN_CONSENT));
+            parked = parked.and_then(|asked| self.advance_parked(asked, caller_ready, consent_ready));
 
             if ready.contains(&TOKEN_WAKE) {
                 let mut sink = [0u8; 64];
@@ -1603,7 +1628,8 @@ fn forget(path: &str) {
 }
 
 impl Supervisor<'_> {
-    /// One `MSG_LAUNCH`, from the frame to the `Process` handle that answers it.
+    /// One `MSG_LAUNCH`, from the frame to the `Process` handle that answers it,
+    /// or to the question an installed package's launch waits on ([`Parked`]).
     ///
     /// **Everything in the request is a client's claim about itself; `caller` is
     /// not.** A program nothing declares is refused by name; a frame that does
@@ -1613,7 +1639,14 @@ impl Supervisor<'_> {
     /// connectors the caller transferred, and the caller could only transfer
     /// what it already had — so a launch confers exactly the manifest row and
     /// nothing beyond it.
-    fn serve_launch(&mut self, conn: &Connection, caller: &Caller, msg_type: u32, payload: &[u8]) {
+    fn serve_launch(
+        &mut self,
+        conn: Connection,
+        caller: &Caller,
+        msg_type: u32,
+        payload: &[u8],
+        parked: &mut Option<Parked>,
+    ) {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
@@ -1648,17 +1681,18 @@ impl Supervisor<'_> {
         let (extra_handles, place_handle) = rest.split_at(request.extra_count);
         let slots = Moved(slot_handles.to_vec());
         let place = Moved(place_handle.to_vec());
-        // Owned, so they close when this call returns: `SYS_NAMESPACE_BUILD` copies
-        // a connector into the namespace and leaves the caller's handle, and the supervisor's
-        // copy of a client's connector has no life beyond this launch.
-        let extras: Vec<(&str, Connector)> = names
+        // Owned, so they close when the launch is done with: `SYS_NAMESPACE_BUILD`
+        // copies a connector into the namespace and leaves the caller's handle,
+        // and the supervisor's copy of a client's connector has no life beyond
+        // this launch.
+        let extras: Vec<(String, Connector)> = names
             .into_iter()
             .zip(extra_handles.iter().copied())
             // SAFETY: the kernel moved these into the supervisor's table with the frame, and
             // nothing else answers for them. **Not a claim about the type** — a
             // client sends what it likes, and everything below treats a wrong one
             // as a refused launch rather than as the supervisor's own bug.
-            .map(|(name, handle)| (name, unsafe { Connector::from_raw(handle) }))
+            .map(|(name, handle)| (name.to_string(), unsafe { Connector::from_raw(handle) }))
             .collect();
 
         // std joins a relative `current_dir` onto the supervisor's own cwd, so passing one
@@ -1715,16 +1749,22 @@ impl Supervisor<'_> {
         // read off its package, and the program and its working directory may
         // be a file server's, which the supervisor supervises. Whether the
         // caller may start it is asked between the two, so a refused launch
-        // reads no image and judges no directory. A package's binary is
-        // hashed there too: its grant is keyed on it.
+        // reads no image and judges no directory. **A package's grant is keyed
+        // on the bytes its spawn starts**: the image `prepare` read, hashed
+        // where it lies, with no second read between the hash and the start.
         let (system, path) = (self.system, request.program.to_string());
         let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
                 let starts = authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
-                let binary = matches!(target, Target::Package(_)).then(|| binary_digest(&program.path));
                 let prepared = command.image_from(Path::new(&program.path)).prepare().map(drop);
+                let binary = matches!(target, Target::Package(_)).then(|| {
+                    command
+                        .prepared_image()
+                        .map(|bytes| toyos_swap::hex(&toyos_swap::digest(bytes)))
+                        .ok_or_else(|| format!("{} was not read before its start, so no grant can name it", program.path))
+                });
                 Ok((starts, binary, prepared.map(|()| command)))
             })
         });
@@ -1736,7 +1776,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let (mut program, verdict) = match resolved {
+        let (program, verdict) = match resolved {
             Resolved::Row(row, verdict) => (row.clone(), verdict),
             Resolved::Package(row, verdict) => (row, verdict),
             Resolved::NotDeclared => {
@@ -1764,7 +1804,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let mut command = match prepared {
+        let command = match prepared {
             Ok(command) => command,
             Err(e) => {
                 say!("supervisor: launcher: cannot start {}: {e}", program.name);
@@ -1772,23 +1812,177 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        if let Some(binary) = binary {
-            match self.granted(&program.name, binary, command, request.cwd) {
-                Ok((granted, prepared)) => {
-                    program.folder = granted;
-                    command = prepared;
+        let binary = match binary.transpose() {
+            Ok(binary) => binary,
+            Err(why) => {
+                say!("supervisor: launcher: {} was not started: {why}", program.name);
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+        let session = starts.session(&mut self.sessions);
+        let caller_slots: Vec<(u32, toyos::RawHandle)> =
+            request.slot_numbers().zip(slots.0.iter().copied()).collect();
+        let launch = Launch {
+            conn,
+            program,
+            command,
+            session,
+            slots,
+            caller_slots,
+            _place: place,
+            placed: under.is_some(),
+            extras,
+            cwd: request.cwd.to_string(),
+        };
+        let Some(binary) = binary else {
+            return self.start_launch(launch, None);
+        };
+        let stored = self.store.find(toyos_manifest::USER, &launch.program.name);
+        match grants::decide(stored, &binary, self.system.folder, session.at_screen()) {
+            Decision::Start(folder) => {
+                if folder.is_none() && self.system.folder.is_some() {
+                    let name = &launch.program.name;
+                    match stored.filter(|entry| entry.binary == binary).map(|entry| &entry.answer) {
+                        Some(Answer::Denied) => {
+                            say!("supervisor: launcher: {name} is denied a folder; `grants revoke {name}` asks again")
+                        }
+                        _ => say!("supervisor: launcher: {name} holds no folder; `grants add {name} <folder>` grants it one"),
+                    }
                 }
+                self.start_launch(launch, folder);
+            }
+            Decision::Ask => self.ask(launch, binary, parked),
+        }
+    }
+
+    /// Ask the person at the screen about `launch`, and park it until they
+    /// answer ([`Parked`]). One question is up at a time: a launch that would
+    /// ask a second is refused by name. A machine with no consent server to
+    /// ask starts it with no folder.
+    fn ask(&mut self, launch: Launch, binary: String, parked: &mut Option<Parked>) {
+        let name = launch.program.name.clone();
+        if let Some(up) = parked {
+            say!("supervisor: consent: {name} was not started: the question about {} is up", up.launch.program.name);
+            let _ = launch.conn.try_signal(launch::MSG_REFUSED);
+            return;
+        }
+        let access = self.system.folder.expect("a launch is asked only under a ceiling");
+        let asked = self
+            .consent
+            .as_ref()
+            .ok_or_else(|| format!("this image serves no `{}`", consent::PORT))
+            .and_then(|names| names.open(consent::PORT).map_err(|e| format!("its server is gone ({e:?})")))
+            .and_then(|conn| {
+                let ask = consent::Ask { package: name.clone(), access };
+                conn.try_send_bytes(consent::MSG_ASK, &ask.encode())
+                    .map(|()| conn)
+                    .map_err(|e| format!("the question could not be sent ({e:?})"))
+            });
+        match asked {
+            Ok(consent) => {
+                say!("supervisor: consent: {name} asks for a folder {access}; the question is up");
+                *parked = Some(Parked { launch, binary, consent, rx: ipc::FrameRx::new(), hangup: ipc::FrameRx::new() });
+            }
+            Err(why) => {
+                say!("supervisor: consent: {name} starts with no folder: nobody was asked, {why}");
+                self.start_launch(launch, None);
+            }
+        }
+    }
+
+    /// The parked launch moved on by what woke the loop: withdrawn when its
+    /// caller hung up, started on the answer, or started with no folder when
+    /// the consent server ended or said something no answer is.
+    fn advance_parked(&mut self, parked: Parked, caller_ready: bool, consent_ready: bool) -> Option<Parked> {
+        let Parked { launch, binary, consent, mut rx, mut hangup } = parked;
+        let name = launch.program.name.clone();
+        // The caller first: a launch nobody waits for any more is not started.
+        if caller_ready && !matches!(hangup.pump(&launch.conn), RxStep::Idle) {
+            say!("supervisor: consent: the question about {name} is withdrawn: its caller hung up");
+            return None;
+        }
+        if !consent_ready {
+            return Some(Parked { launch, binary, consent, rx, hangup });
+        }
+        let reply = match rx.pump(&consent) {
+            RxStep::Idle => return Some(Parked { launch, binary, consent, rx, hangup }),
+            RxStep::Frame { msg_type: consent::MSG_REPLY, payload_len } if payload_len > consent::MAX_REPLY => {
+                Err(format!("its answer is longer than the {} bytes any answer is", consent::MAX_REPLY))
+            }
+            RxStep::Frame { msg_type: consent::MSG_REPLY, payload_len } => consent::Reply::decode(rx.payload(payload_len))
+                .ok_or_else(|| "its answer is not one the protocol has".to_string()),
+            RxStep::Frame { msg_type, .. } => Err(format!("it sent message {msg_type}, which is no answer")),
+            RxStep::Eof => Err("the consent server ended before it answered".to_string()),
+            RxStep::Malformed => Err("it sent a frame the protocol cannot describe".to_string()),
+        };
+        drop(consent);
+        let reply = reply.and_then(|reply| self.judged(reply));
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(why) => {
+                say!("supervisor: consent: {name} starts with no folder: {why}");
+                consent::Reply::Skip
+            }
+        };
+        say!("supervisor: consent: {name}: {}", said(&reply));
+        if let Some(answer) = reply.kept() {
+            if let Err(why) = self.keep(&name, binary, answer) {
+                say!("supervisor: consent: {name}'s answer is not kept, so its next launch asks again: {why}");
+            }
+        }
+        self.start_launch(launch, reply.folder().cloned());
+        None
+    }
+
+    /// `reply`, its folder held to the rules a stored grant is ([`grants::folder`])
+    /// and to the image's ceiling: the consent server is a program like any.
+    fn judged(&self, reply: consent::Reply) -> Result<consent::Reply, String> {
+        if let Some(folder) = reply.folder() {
+            grants::folder(&folder.path)?;
+            let ceiling = self.system.folder.expect("a launch is asked only under a ceiling");
+            if folder.access > ceiling {
+                return Err(format!("{} is past this image's {ceiling}", folder.access));
+            }
+        }
+        Ok(reply)
+    }
+
+    /// `answer` stored for the session user's `package` at `binary`, in place
+    /// of any other.
+    fn keep(&mut self, package: &str, binary: String, answer: Answer) -> Result<(), String> {
+        let mut store = self.store.clone();
+        store.put(grants::Entry { user: toyos_manifest::USER.to_string(), package: package.to_string(), binary, answer })?;
+        let text = store.render();
+        self.files("the grants", move || write_store(&text))??;
+        self.store = store;
+        Ok(())
+    }
+
+    /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
+    /// holds one, and answer its caller.
+    fn start_launch(&mut self, launch: Launch, folder: Option<grants::Folder>) {
+        let Launch { conn, mut program, mut command, session, slots, caller_slots, _place, placed, extras, cwd } = launch;
+        if let Some(folder) = folder {
+            // The image `prepare` read is kept: only the working directory is
+            // judged again.
+            let (path, cwd) = (folder.path.clone(), grants::cwd(&folder.path, &cwd));
+            let prepared = self.files("a granted folder", move || -> Result<Command, String> {
+                is_folder(&path)?;
+                command.current_dir(&cwd).prepare().map_err(|e| format!("{cwd} is no working directory: {e}"))?;
+                Ok(command)
+            });
+            match prepared.and_then(|prepared| prepared) {
+                Ok(prepared) => command = prepared,
                 Err(why) => {
                     say!("supervisor: launcher: {} was not started: {why}", program.name);
                     let _ = conn.try_signal(launch::MSG_REFUSED);
                     return;
                 }
             }
+            program.folder = Some(folder);
         }
         let program = &program;
-        let session = starts.session(&mut self.sessions);
-        let caller_slots: Vec<(u32, toyos::RawHandle)> =
-            request.slot_numbers().zip(slots.0.iter().copied()).collect();
 
         // `inherit_handle` duplicates into the child, so the supervisor's own copies go with
         // `slots` when this returns.
@@ -1813,6 +2007,7 @@ impl Supervisor<'_> {
             (&self.minted, session),
             Output::Launch { log: &mut self.log, slots: &caller_slots },
         );
+        drop(slots);
         match started {
             Ok((child, _)) => {
                 // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
@@ -1829,7 +2024,7 @@ impl Supervisor<'_> {
             // here answers it: the command is prepared, so its spawn calls no
             // file server, and every refusal `start` makes before the spawn is
             // `Other`.
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && under.is_some() => {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && placed => {
                 say!("supervisor: launcher: {} was not started: the place it names is ending", program.name);
                 let _ = conn.try_signal(launch::MSG_GONE);
             }
@@ -1841,32 +2036,54 @@ impl Supervisor<'_> {
     }
 }
 
-impl Supervisor<'_> {
-    /// The folder package `name`'s launch of `binary` is granted
-    /// ([`grants::decide`]), and `command` prepared again to start in it
-    /// ([`grants::cwd`]) once it is still a directory. `Err` refuses the
-    /// launch: a grant whose folder is gone names nothing.
-    fn granted(
-        &mut self,
-        name: &str,
-        binary: Result<String, String>,
-        mut command: Command,
-        cwd: &str,
-    ) -> Result<(Option<grants::Folder>, Command), String> {
-        let binary = binary?;
-        let Some(folder) = grants::decide(self.store.find(toyos_manifest::USER, name), &binary, self.system.folder) else {
-            if self.system.folder.is_some() {
-                say!("supervisor: launcher: {name} holds no folder; `grants add {name} <folder>` grants it one");
-            }
-            return Ok((None, command));
-        };
-        let (path, cwd) = (folder.path.clone(), grants::cwd(&folder.path, cwd));
-        let prepared = self.files("a granted folder", move || -> Result<Command, String> {
-            is_folder(&path)?;
-            command.current_dir(&cwd).prepare().map_err(|e| format!("{cwd} is no working directory: {e}"))?;
-            Ok(command)
-        })??;
-        Ok((Some(folder), prepared))
+/// A launch decided up to whether it asks: everything its start needs, owned,
+/// so it can wait for an answer ([`Parked`]) as well as start at once.
+struct Launch {
+    /// The caller's, answered with the process or the refusal.
+    conn: Connection,
+    program: Program,
+    /// Prepared: its image read and hashed, its working directory judged.
+    command: Command,
+    session: Session,
+    /// The caller's stdio and extra slots, owned until the spawn duplicates them.
+    slots: Moved,
+    caller_slots: Vec<(u32, toyos::RawHandle)>,
+    /// The place the child is spawned under, owned until then.
+    _place: Moved,
+    /// Whether it names a place, or the supervisor.
+    placed: bool,
+    extras: Vec<(String, Connector)>,
+    /// The caller's working directory, which a granted folder's launch keeps
+    /// where it lies inside the folder.
+    cwd: String,
+}
+
+/// A launch waiting on the person at the screen ([`toyos_manifest::consent`]).
+///
+/// **Ended by events and never by a clock**: the person may take minutes. The
+/// caller hanging up withdraws it and closes the question's connection, which
+/// takes the prompt down; the consent server's answer starts it; the consent
+/// server ending, or saying anything else, starts it with no folder.
+struct Parked {
+    launch: Launch,
+    /// The SHA-256 of the image it starts, which a kept answer is keyed on.
+    binary: String,
+    /// The question's connection, which the supervisor alone holds.
+    consent: Connection,
+    /// One byte past the longest answer, so a longer one is refused and never
+    /// read as the prefix kept.
+    rx: ipc::FrameRx<{ consent::MAX_REPLY + 1 }>,
+    /// The caller's connection after its frame: anything on it is its hang-up.
+    hangup: ipc::FrameRx<8>,
+}
+
+/// The supervisor's word for an answer, in its line in the log.
+fn said(reply: &consent::Reply) -> String {
+    match reply {
+        consent::Reply::Once(folder) => format!("once, {} {}", folder.path, folder.access),
+        consent::Reply::Always(folder) => format!("always, {} {}", folder.path, folder.access),
+        consent::Reply::Deny => "denied, until `grants revoke`".to_string(),
+        consent::Reply::Skip => "skipped, so its next launch asks again".to_string(),
     }
 }
 
@@ -2106,7 +2323,7 @@ fn start<'a>(
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
     grants: &Grants<'_>,
-    extras: &[(&str, Connector)],
+    extras: &[(String, Connector)],
     storage: Storage,
     launcher: (&Minted, Session),
     output: Output<'_>,
@@ -2436,7 +2653,7 @@ fn build_namespace(
     system: &Manifest,
     connectors: &BTreeMap<&str, Connector>,
     view: Vec<(String, Connector)>,
-    extras: &[(&str, Connector)],
+    extras: &[(String, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port nor the grants port: [`swap_namespace`] and
     // [`grants_namespace`] say why.

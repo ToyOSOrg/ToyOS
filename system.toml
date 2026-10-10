@@ -68,10 +68,12 @@ receives = ["power"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
 # makes the local desktop a login session, so `swap` and `update` run from its
-# shell.
+# shell. `prompt` is the layer above every window, which `filepicker` alone
+# reaches: serving it makes the sessions its launches open the screen's, whose
+# packages may ask the person at it for a folder.
 [programs.compositor]
 service = true
-serves = ["compositor"]
+serves = ["compositor", "prompt"]
 receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
@@ -143,10 +145,13 @@ syscap = ["trace"]
 # it reads the files a record names and holds nothing else.
 [programs.symbolize]
 
+# The file picker, and the consent server: `consent` is the supervisor's
+# question before a package's launch, which no row receives, and `prompt` the
+# layer it asks it in, which no other row may hold (`src/build.rs`).
 [programs.filepicker]
 service = true
-serves = ["filepicker"]
-receives = ["compositor"]
+serves = ["filepicker", "consent"]
+receives = ["compositor", "prompt"]
 
 [programs.terminal]
 provides = ["surface"]

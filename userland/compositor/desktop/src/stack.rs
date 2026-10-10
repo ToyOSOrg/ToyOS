@@ -1,15 +1,15 @@
 use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
 
-use crate::window::{Window, WindowId};
+use crate::window::{Level, Window, WindowId};
 
 /// The windows, bottom to top.
 ///
 /// The order *is* the Z-order, and one invariant holds over it: **every
-/// topmost window sits above every ordinary one**. A window that asked to stay
-/// on top is a file picker over the application that opened it, and an
+/// window sits above every window of a lower [`Level`]**. A window that asked
+/// to stay on top is a file picker over the application that opened it, and an
 /// ordinary window appearing above it is that dialog lost behind its own
-/// parent. [`is_ordered`](Self::is_ordered) states it; [`insert`](Self::insert)
+/// parent; and nothing a client asks for appears above a prompt. [`is_ordered`](Self::is_ordered) states it; [`insert`](Self::insert)
 /// and [`raise`](Self::raise) are the only ways in, and both maintain it.
 ///
 /// The `Vec` is private for that reason: `push` was the way in until this
@@ -67,7 +67,7 @@ impl<C> Stack<C> {
         self.windows.iter().position(|w| w.id == id)
     }
 
-    /// Put `w` as high as its topmost flag entitles it to be, and say where it
+    /// Put `w` as high as its level entitles it to be, and say where it
     /// landed.
     ///
     /// A window with [`WindowId::UNASSIGNED`](crate::window::WindowId) — one
@@ -80,11 +80,7 @@ impl<C> Stack<C> {
             w.id = WindowId(self.next_id);
             self.next_id += 1;
         }
-        let at = if w.topmost {
-            self.windows.len()
-        } else {
-            self.windows.iter().position(|o| o.topmost).unwrap_or(self.windows.len())
-        };
+        let at = self.windows.iter().position(|o| o.level > w.level).unwrap_or(self.windows.len());
         self.windows.insert(at, w);
         at
     }
@@ -104,10 +100,20 @@ impl<C> Stack<C> {
         self.insert(w)
     }
 
-    /// The window that has the keyboard: the topmost one that is not
-    /// minimized.
+    /// The window that has the keyboard: the prompt while one is up, and the
+    /// topmost one that is not minimized otherwise.
     pub fn focused(&self) -> Option<usize> {
-        self.windows.iter().rposition(|w| !w.minimized)
+        self.prompt().or_else(|| self.windows.iter().rposition(|w| !w.minimized))
+    }
+
+    /// The prompt, while one is up.
+    pub fn prompt(&self) -> Option<usize> {
+        self.windows.iter().position(|w| w.level == Level::Prompt)
+    }
+
+    /// Whether a window of `level` may be made: a second prompt may not.
+    pub fn admits(&self, level: Level) -> bool {
+        level != Level::Prompt || self.prompt().is_none()
     }
 
     /// Send the top ordinary window to the bottom and reveal the next.
@@ -117,7 +123,7 @@ impl<C> Stack<C> {
     /// screen changed. Topmost windows do not take part: cycling through one
     /// would either move it below an ordinary window or do nothing visible.
     pub fn cycle(&mut self) -> bool {
-        let ordinary = self.windows.iter().position(|w| w.topmost).unwrap_or(self.windows.len());
+        let ordinary = self.windows.iter().position(|w| w.level > Level::Ordinary).unwrap_or(self.windows.len());
         if ordinary < 2 {
             return false;
         }
@@ -127,11 +133,10 @@ impl<C> Stack<C> {
         true
     }
 
-    /// Whether the topmost windows form a suffix — the invariant this type
-    /// exists to keep.
+    /// Whether the levels never fall from bottom to top — the invariant this
+    /// type exists to keep.
     pub fn is_ordered(&self) -> bool {
-        let first = self.windows.iter().position(|w| w.topmost).unwrap_or(self.windows.len());
-        self.windows[first..].iter().all(|w| w.topmost)
+        self.windows.windows(2).all(|pair| pair[0].level <= pair[1].level)
     }
 }
 
@@ -159,7 +164,7 @@ mod tests {
         let mut s = Stack::default();
         for (name, topmost) in spec {
             let name: &'static str = alloc::boxed::Box::leak(name.to_string().into_boxed_str());
-            s.insert(Window::new(name, Rect::new(0, 0, 100, 100), name.to_string(), *topmost, CursorStyle::Default));
+            s.insert(Window::new(name, Rect::new(0, 0, 100, 100), name.to_string(), if *topmost { Level::Topmost } else { Level::Ordinary }, CursorStyle::Default));
         }
         s
     }
@@ -238,5 +243,48 @@ mod tests {
         assert!(s.cycle());
         assert_eq!(names(&s), ["b", "a", "p"]);
         assert!(s.is_ordered());
+    }
+
+    fn with_prompt(spec: &[(&str, bool)]) -> Stack<&'static str> {
+        let mut s = stack(spec);
+        assert!(s.admits(Level::Prompt));
+        s.insert(Window::new("ask", Rect::new(0, 0, 100, 100), "ask".to_string(), Level::Prompt, CursorStyle::Default));
+        s
+    }
+
+    /// **The prompt is above every window a client can ask for**, a topmost
+    /// one opened after it and one raised included, and has the keyboard.
+    #[test]
+    fn a_prompt_sits_above_every_topmost_window_and_has_the_keyboard() {
+        let mut s = with_prompt(&[("a", false), ("picker", true)]);
+        assert_eq!(names(&s), ["a", "picker", "ask"]);
+        s.insert(Window::new("hostile", Rect::new(0, 0, 100, 100), "h".to_string(), Level::Topmost, CursorStyle::Default));
+        assert_eq!(names(&s), ["a", "picker", "hostile", "ask"]);
+        let raised = s.raise(2);
+        assert_eq!(names(&s)[raised], "hostile");
+        assert_eq!(names(&s), ["a", "picker", "hostile", "ask"]);
+        assert!(s.is_ordered());
+        assert_eq!(s.prompt(), Some(3));
+        assert_eq!(s.focused(), Some(3));
+    }
+
+    /// One prompt at a time: a second is refused while the first is up, and
+    /// admitted once it is gone.
+    #[test]
+    fn a_second_prompt_is_refused_while_one_is_up() {
+        let mut s = with_prompt(&[("a", false)]);
+        assert!(!s.admits(Level::Prompt));
+        assert!(s.admits(Level::Topmost) && s.admits(Level::Ordinary));
+        s.remove(1);
+        assert!(s.admits(Level::Prompt));
+    }
+
+    /// Cycling moves ordinary windows alone and leaves the prompt on top.
+    #[test]
+    fn cycling_never_moves_a_prompt() {
+        let mut s = with_prompt(&[("a", false), ("b", false), ("p", true)]);
+        assert!(s.cycle());
+        assert_eq!(names(&s), ["b", "a", "p", "ask"]);
+        assert_eq!(s.focused(), Some(3));
     }
 }

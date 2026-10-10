@@ -41,13 +41,13 @@ pub const DRAIN_BUDGET: Duration = FRAME_INTERVAL;
 
 pub const FLAG_HARDWARE_CURSOR: u32 = 1 << 0;
 
-/// Handles the compositor watches that are not windows: keyboard, mouse,
-/// listener.
-pub const FIXED_POLL_HANDLES: u32 = 3;
+/// Handles the compositor watches that are not windows: keyboard, mouse, and
+/// the two listeners, `compositor` and `prompt`.
+pub const FIXED_POLL_HANDLES: u32 = 4;
 
 /// Hard ceiling on live windows, from the poller rather than from memory.
 ///
-/// Every window's handle is registered in the same batch as the three fixed
+/// Every window's handle is registered in the same batch as the four fixed
 /// ones
 /// and the pending connections, and [`Poller::MAX_HANDLES`] is the widest set
 /// one poller can carry. Unlike the memory budget this does not move when the

@@ -694,6 +694,13 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-desktop"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-font"
 version = "0.2.0"
 
@@ -727,6 +734,7 @@ dependencies = [
  "memmap2",
  "toyos",
  "toyos-abi",
+ "toyos-desktop",
  "toyos-inspect",
  "toyos-logstream",
  "toyos-tco",

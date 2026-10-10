@@ -129,6 +129,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
     // not give: the `app_view` metal row runs it on tests/proctreecase.
     "app_view",
+    // Needs a desktop driven by a person's keys and pointer: `consent_prompt`
+    // runs it on tests/consentcase.
+    "consent",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
@@ -272,6 +275,13 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
+    // A package's launch from the desktop asks the person at the screen, in
+    // the prompt layer, over a hostile fullscreen window: the supervisor
+    // parking a launch, filepicker drawing through `prompt` and the compositor
+    // giving it every key, run together. Driven through the desktop's own
+    // keyboard and tablet and read off the panel, neither of which the T14's
+    // loop can do; each rule alone is a host test.
+    ("consent_prompt", qemu::Profile::Desktop),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -2734,6 +2744,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_reboot" => virt_reboot(profile),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
+        "consent_prompt" => consent_prompt(profile),
         "screen_fatal_behind_a_painter" => {
             // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
@@ -3237,6 +3248,287 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
         ));
     }
     Ok(())
+}
+
+/// `consent`'s steps, driven through the desktop's own keyboard and tablet
+/// (`tests/toyos-rust-tests/src/bin/consent.rs`), and each held to what the
+/// panel, the supervisor and the package said.
+///
+/// **Every step is the guest's line and the host's answer to it**: the job
+/// says `CONSENT <step>`, and the host clicks the package in the launcher;
+/// the compositor says its prompt is on the panel, and the host reads the
+/// panel and answers with keys; the package says what it saw, and the host
+/// taps F12, which the job waits on through its hostile window. Nothing here
+/// waits on a clock but the run's own ceiling.
+fn consent_prompt(profile: qemu::Profile) -> Result<(), String> {
+    use sha2::Digest as _;
+    let case = compile::repo_root().join("tests/consentcase");
+    let (_, job) = suite_bin(profile.arch(), "consent");
+    let digest: String = sha2::Sha256::digest(&job).iter().map(|b| format!("{b:02x}")).collect();
+    let options = BootOptions { profile, qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[("consent".to_string(), job)], options);
+    let mut drive = Consent { digest, out: qemu.screendump_file(), ..Consent::default() };
+    let result = qemu.run_test_paced("test_rs_consent", Duration::from_secs(300), |qmp, line| {
+        drive.line(qmp.expect("consent_prompt boots with QMP"), line)
+    });
+    if let Some(why) = &result.error {
+        drive.red.push(format!("the job did not finish: {why}"));
+    } else if result.exit_code != Some(0) {
+        drive.red.push(format!("the job ended {:?}", result.exit_code));
+    }
+    let all = ["always", "again", "deny", "denied", "skip", "once", "ssh"];
+    if drive.done != all {
+        drive.red.push(format!("the steps finished were {:?}, not {all:?}", drive.done));
+    }
+    match drive.red.is_empty() {
+        true => Ok(()),
+        false => Err(format!("{:#?}\nthe job said:\n{}", drive.red, result.stdout)),
+    }
+}
+
+/// [`consent_prompt`]'s side of the conversation.
+#[derive(Default)]
+struct Consent {
+    /// The SHA-256 of the binary the job installs as the package, computed
+    /// here, which an answer the supervisor keeps is keyed on.
+    digest: String,
+    out: std::path::PathBuf,
+    /// The panel's size, from the first dump.
+    screen: Option<(usize, usize)>,
+    step: Option<ConsentStep>,
+    done: Vec<String>,
+    /// The panel above the taskbar before the launch off the screen.
+    before: Option<Vec<[u8; 3]>>,
+    red: Vec<String>,
+}
+
+#[derive(Default)]
+struct ConsentStep {
+    name: String,
+    /// Where Games is in the prompt's list, from the job.
+    games: usize,
+    /// The supervisor's word on the answer.
+    answer: Option<String>,
+    /// What the package saw.
+    saw: Option<String>,
+    /// The prompt came up, and went.
+    up: bool,
+    down: bool,
+}
+
+/// What the hostile window paints.
+const HOSTILE_RGB: [u8; 3] = [0xff, 0x00, 0xff];
+const ROM_SEEN: &str = "cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok";
+const NOTHING_SEEN: &str = "cwd=/ roms=[] saved=Err";
+
+impl ConsentStep {
+    /// Whether this step asks, the keys that answer it, the supervisor's word
+    /// on the answer, and what the package sees.
+    fn expected(&self) -> (bool, Vec<&'static str>, Option<&'static str>, &'static str) {
+        let down = || std::iter::repeat_n("down", self.games);
+        let tabs = |n| std::iter::repeat_n("tab", n);
+        match self.name.as_str() {
+            "always" => (
+                true,
+                down().chain(tabs(3)).chain(["ret"]).collect(),
+                Some("always, /home/toy/Games read-write"),
+                ROM_SEEN,
+            ),
+            "again" => (false, Vec::new(), None, ROM_SEEN),
+            "deny" => (true, tabs(4).chain(["ret"]).collect(), Some("denied, until `grants revoke`"), NOTHING_SEEN),
+            "denied" => (false, Vec::new(), None, NOTHING_SEEN),
+            "skip" => (true, vec!["esc"], Some("skipped, so its next launch asks again"), NOTHING_SEEN),
+            "once" => (
+                true,
+                down().chain(tabs(2)).chain(["ret"]).collect(),
+                Some("once, /home/toy/Games read-write"),
+                ROM_SEEN,
+            ),
+            other => panic!("consent_prompt: the job asked for a step `{other}` this side has no answer for"),
+        }
+    }
+}
+
+impl Consent {
+    fn line(&mut self, qmp: &Path, line: &str) {
+        let after = |marker: &str| line.find(marker).map(|at| line[at + marker.len()..].trim().to_string());
+        if let Some(step) = after("CONSENT ") {
+            self.begin(qmp, &step);
+        } else if line.contains("compositor: the prompt is on the panel") {
+            self.prompt_up(qmp);
+        } else if line.contains("compositor: the prompt is down") {
+            match &mut self.step {
+                Some(step) => step.down = true,
+                None => self.red.push("the prompt went down outside any step".to_string()),
+            }
+        } else if let Some(answer) = after("supervisor: consent: consentee: ") {
+            match &mut self.step {
+                Some(step) => step.answer = Some(answer),
+                None => self.red.push(format!("the supervisor took an answer outside any step: {answer}")),
+            }
+        } else if let Some(saw) = after("CONSENTEE ") {
+            match &mut self.step {
+                Some(step) => step.saw = Some(saw),
+                None => self.red.push(format!("the package ran outside any step and saw {saw}")),
+            }
+        } else if let Some(stored) = after("STORE ") {
+            self.stored(&stored);
+        }
+        self.finish(qmp);
+    }
+
+    fn dump(&mut self, qmp: &Path) -> screen::Ppm {
+        let dump = qemu::QmpInput::open(qmp).screendump(&self.out);
+        self.screen.get_or_insert((dump.width, dump.height));
+        dump
+    }
+
+    fn begin(&mut self, qmp: &Path, said: &str) {
+        let mut words = said.split_whitespace();
+        let name = words.next().unwrap_or_default().to_string();
+        let games = words.find_map(|w| w.strip_prefix("down=")).map_or(0, |n| n.parse().unwrap_or(0));
+        match name.as_str() {
+            // Off the screen: the panel above the taskbar is unchanged across
+            // it, and no prompt comes up (`prompt_up` reds one outside a step).
+            "ssh" if said == "ssh" => self.before = Some(self.above_taskbar(qmp)),
+            "ssh" => {
+                let after = self.above_taskbar(qmp);
+                if self.before.take().is_none_or(|before| before != after) {
+                    self.red.push("the panel changed across the launch off the screen".to_string());
+                }
+                self.done.push(name);
+                Self::tap_done(qmp);
+            }
+            _ => {
+                if self.screen.is_none() {
+                    self.dump(qmp);
+                }
+                let (w, h) = self.screen.expect("the first dump measured the panel");
+                // The `+`, then the launcher's last row, which is the one
+                // package installed: built-in rows come first.
+                let desk = toyos_desktop::Desk {
+                    chrome: toyos_desktop::Chrome::DEFAULT,
+                    screen: toyos_desktop::Rect::new(0, 0, w as i32, h as i32),
+                    font_w: 8,
+                    apps: 1,
+                };
+                let bar = desk.taskbar(1);
+                let centre = |r: toyos_desktop::Rect| (i32::midpoint(r.x0, r.x1), i32::midpoint(r.y0, r.y1));
+                let mut input = qemu::QmpInput::open(qmp);
+                input.click(centre(bar.new_button()), (w, h));
+                input.click(centre(bar.launcher_item(0)), (w, h));
+                self.step = Some(ConsentStep { name, games, ..ConsentStep::default() });
+            }
+        }
+    }
+
+    fn above_taskbar(&mut self, qmp: &Path) -> Vec<[u8; 3]> {
+        let dump = self.dump(qmp);
+        let rows = dump.height - toyos_desktop::Chrome::DEFAULT.taskbar as usize;
+        dump.pixels[..rows * dump.width].to_vec()
+    }
+
+    /// The prompt is on the panel: it is drawn over the hostile window, and a
+    /// press outside it and the keys that answer it go in.
+    fn prompt_up(&mut self, qmp: &Path) {
+        let asks = match &self.step {
+            Some(step) => step.expected().0,
+            None => false,
+        };
+        if !asks {
+            let name = self.step.as_ref().map_or("none", |s| s.name.as_str()).to_string();
+            self.red.push(format!("a prompt came up in step {name}, which asks nothing"));
+            return;
+        }
+        let dump = self.dump(qmp);
+        let framed: Vec<(usize, usize)> = (0..dump.height)
+            .flat_map(|y| (0..dump.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| dump.pixels[y * dump.width + x] == toyos_desktop::PROMPT_FRAME)
+            .collect();
+        let at = |x: usize, y: usize| dump.pixels[y * dump.width + x];
+        let (x0, x1) = match (framed.iter().map(|p| p.0).min(), framed.iter().map(|p| p.0).max()) {
+            (Some(x0), Some(x1)) if x1 - x0 >= 600 => (x0, x1),
+            other => {
+                self.red.push(format!("no prompt's frame on the panel: {} pixels, across {other:?}", framed.len()));
+                return;
+            }
+        };
+        let y0 = framed.iter().map(|p| p.1).min().unwrap_or(0);
+        let y1 = framed.iter().map(|p| p.1).max().unwrap_or(0);
+        if at(usize::midpoint(x0, x1), usize::midpoint(y0, y1)) == HOSTILE_RGB || at(x0, y0 + 2) != toyos_desktop::PROMPT_FRAME {
+            self.red.push(format!("the prompt at ({x0}, {y0})-({x1}, {y1}) is under the hostile window"));
+        }
+        if at(8, 40) != HOSTILE_RGB {
+            self.red.push(format!("the hostile window is not on the panel beside the prompt: {:?}", at(8, 40)));
+        }
+        let screen = (dump.width, dump.height);
+        let prompt = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
+            (y0..=y1).flat_map(|y| dump.pixels[y * dump.width + x0..=y * dump.width + x1].to_vec()).collect()
+        };
+        let mut shown = prompt(&dump);
+        let mut input = qemu::QmpInput::open(qmp);
+        // A press on the hostile window around the prompt, which nothing takes.
+        input.click((8, 40), screen);
+        // **Each key is paced against the prompt it changes.** QEMU's keyboard
+        // loses a press or a release sent behind another before the guest has
+        // read it, so the next key goes only once the panel shows the last.
+        let keys = self.step.as_ref().map(|s| s.expected().1).unwrap_or_default();
+        for key in keys {
+            input.keys(&[(key, true), (key, false)]);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let now = prompt(&input.screendump(&self.out));
+                if now != shown {
+                    shown = now;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    self.red.push(format!("`{key}` changed nothing on the prompt in 20 s"));
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if let Some(step) = &mut self.step {
+            step.up = true;
+        }
+    }
+
+    /// A step that has said all it will: held to what it should have said,
+    /// and its F12 tapped.
+    fn finish(&mut self, qmp: &Path) {
+        let Some(step) = &self.step else { return };
+        let (asks, _, answer, seen) = step.expected();
+        if step.saw.is_none() || (asks && !(step.up && step.down)) {
+            return;
+        }
+        let step = self.step.take().expect("a step is under way");
+        if step.answer.as_deref() != answer {
+            self.red.push(format!("{}: the supervisor said {:?}, not {answer:?}", step.name, step.answer));
+        }
+        if step.saw.as_deref() != Some(seen) {
+            self.red.push(format!("{}: the package saw {:?}, not {seen:?}", step.name, step.saw));
+        }
+        self.done.push(step.name);
+        Self::tap_done(qmp);
+    }
+
+    /// The store's line after a step, held to the binary's own digest.
+    fn stored(&mut self, said: &str) {
+        let (step, line) = said.split_once(':').unwrap_or((said, ""));
+        let want = match step {
+            "always" => format!("grant toy consentee {} read-write /home/toy/Games", self.digest),
+            "deny" => format!("deny toy consentee {}", self.digest),
+            _ => String::new(),
+        };
+        if line.trim() != want {
+            self.red.push(format!("{step}: the store holds {:?}, not {want:?}", line.trim()));
+        }
+    }
+
+    fn tap_done(qmp: &Path) {
+        qemu::QmpInput::open(qmp).keys(&[("f12", true), ("f12", false)]);
+    }
 }
 
 /// Run `command` as a job of the boot, to exit 0: what it said.

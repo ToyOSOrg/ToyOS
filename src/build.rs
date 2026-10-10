@@ -586,27 +586,40 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 /// row receives it.
 const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
 
-/// The supervisor's ports that one row alone may receive, each with that row:
-/// the swap port, whose holder replaces any service's binary, and the grants
-/// port, whose holder writes which folder of the home a package sees.
-const HELD_ALONE: &[(&str, &str)] =
-    &[(toyos_swap::PORT, toyos_swap::HOLDER), (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER)];
+/// The ports that one row alone may receive, each with that row: the swap
+/// port, whose holder replaces any service's binary, the grants port, whose
+/// holder writes which folder of the home a package sees, and the prompt
+/// port, whose holder draws above every window and has every key while it does.
+const HELD_ALONE: &[(&str, &str)] = &[
+    (toyos_swap::PORT, toyos_swap::HOLDER),
+    (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
+    (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
+];
 
 /// Who may hold the authorities that change what the machine runs or what a
 /// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
-/// — no other `[programs]` row and never `[apps]` — and the idle slot,
-/// [`toyos_update::slots::HOLDER`] alone.
+/// — no other `[programs]` row and never `[apps]` — the idle slot,
+/// [`toyos_update::slots::HOLDER`] alone, and the consent port, which no row
+/// receives and its server alone serves.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
 /// because the swap port's holder can replace any service's binary, the
-/// grants port's hands a package part of the home, and the idle slot's
-/// holder writes the image the machine boots next.
+/// grants port's hands a package part of the home, the prompt port's and the
+/// consent port's ask the person at the screen and answer for them, and the
+/// idle slot's holder writes the image the machine boots next.
 fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
+    use toyos_manifest::consent;
     for (name, program) in &config.programs {
         for (port, holder) in HELD_ALONE {
             if name != holder && program.receives.iter().any(|r| r == port) {
                 return Err(format!("`{name}` receives `{port}`, which only `{holder}` may hold"));
             }
+        }
+        if program.receives.iter().any(|r| r == consent::PORT) {
+            return Err(format!("`{name}` receives `{}`, which only the supervisor may hold", consent::PORT));
+        }
+        if name != consent::SERVER && program.serves.iter().any(|s| s == consent::PORT) {
+            return Err(format!("`{name}` serves `{}`, which only `{}` may serve", consent::PORT, consent::SERVER));
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
@@ -616,6 +629,9 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         if config.apps.receives.iter().any(|r| r == port) {
             return Err(format!("`[apps] receives` names `{port}`, which only `{holder}` may hold"));
         }
+    }
+    if config.apps.receives.iter().any(|r| r == consent::PORT) {
+        return Err(format!("`[apps] receives` names `{}`, which only the supervisor may hold", consent::PORT));
     }
     apps_folder(config).map(drop)
 }
@@ -2908,6 +2924,7 @@ mod tests {
         "diag/system.toml",
         "console/system.toml",
         "tests/acpicase/system.toml",
+        "tests/consentcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
@@ -2986,6 +3003,31 @@ mod tests {
         assert!(held_by_their_holders_alone(&shell).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+    }
+
+    /// The prompt port reaches its server alone, and the consent port no row,
+    /// nor `[apps]`, and is served by its server alone.
+    #[test]
+    fn only_the_consent_server_holds_the_prompt_and_serves_consent() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert_eq!(
+            gate("[programs.filepicker]\nserves = [\"filepicker\", \"consent\"]\nreceives = [\"prompt\"]\n\
+                  [programs.compositor]\nserves = [\"prompt\"]\n"),
+            Ok(())
+        );
+        for (text, said) in [
+            ("[programs.paint]\nreceives = [\"prompt\"]\n", "`paint` receives `prompt`, which only `filepicker` may hold"),
+            ("[apps]\nreceives = [\"prompt\"]\n", "`[apps] receives` names `prompt`"),
+            ("[programs.filepicker]\nreceives = [\"consent\"]\n", "`filepicker` receives `consent`, which only the supervisor"),
+            ("[programs.shell]\nreceives = [\"consent\"]\n", "`shell` receives `consent`"),
+            ("[apps]\nreceives = [\"consent\"]\n", "`[apps] receives` names `consent`"),
+            ("[programs.paint]\nserves = [\"consent\"]\n", "`paint` serves `consent`, which only `filepicker` may serve"),
+        ] {
+            match gate(text) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{text:?}: {other:?}, not {said:?}"),
+            }
+        }
     }
 
     /// `[apps] folder` is one of the two accesses, spelled as the manifest
