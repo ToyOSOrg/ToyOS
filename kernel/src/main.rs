@@ -595,6 +595,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
 
+    // After klogd: its lines are this test image's whole evidence.
+    #[cfg(target_arch = "x86_64")]
+    arch::i2chid::start(kernel_args.rsdp_addr);
+
     smp::set_ready();
 
     // After the release, because a shootdown waits on CPUs that are not

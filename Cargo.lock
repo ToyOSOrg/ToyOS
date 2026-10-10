@@ -3013,6 +3013,7 @@ dependencies = [
  "toyos-gicv3",
  "toyos-gpt",
  "toyos-hda",
+ "toyos-i2chid",
  "toyos-pci",
  "toyos-phys",
  "toyos-ps2",
@@ -5788,6 +5789,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
 ]
+
+[[package]]
+name = "toyos-i2chid"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-inspect"

@@ -2039,6 +2039,11 @@ fn desktop_without_x2apic() -> Result<(), String> {
     said.must_be_clean()?;
     apic_mode_held(&said, CPUS, "Xapic")?;
     smp_roster_and_tsc_trail(said.text(), CPUS)?;
+    // The AMD laptop image's touchpad poller stands down where no DSDT names its controller.
+    eprintln!("  [i2c-hid] {}", said.must_say("i2c-hid: no AMDI0010 in the DSDT")?.trim());
+    if said.text().contains("kthread: i2chid") {
+        return Err("the touchpad poller started on a machine with no AMDI0010".into());
+    }
     eprintln!("  [xapic] {CPUS} CPUs in xAPIC mode, and the compositor holds the panel");
     Ok(())
 }

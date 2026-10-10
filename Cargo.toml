@@ -44,6 +44,7 @@ members = [
     "toyos-gpt",
     "toyos-hda",
     "toyos-i219",
+    "toyos-i2chid",
     "toyos-inspect",
     "toyos-its",
     "toyos-keymap",

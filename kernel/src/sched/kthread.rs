@@ -18,8 +18,8 @@ use kernel::proclife::Processes;
 
 use super::payload::ThreadSched;
 
-/// `klogd`.
-const MAX_KERNEL_TASKS: usize = 1;
+/// `klogd`, and the AMD laptop test image's `i2chid`.
+const MAX_KERNEL_TASKS: usize = 2;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;

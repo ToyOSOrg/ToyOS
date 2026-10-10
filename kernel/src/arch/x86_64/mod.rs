@@ -24,6 +24,7 @@ pub mod entry;
 pub mod fpu;
 pub mod hpet;
 pub mod hw;
+pub mod i2chid;
 pub mod i8042;
 pub mod idt;
 pub mod iommu_unit;

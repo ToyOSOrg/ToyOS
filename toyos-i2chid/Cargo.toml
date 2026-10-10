@@ -1,0 +1,9 @@
+# A member of the host workspace (root `Cargo.toml`): the kernel depends on it
+# by path and its tests run on the host.
+
+[package]
+name = "toyos-i2chid"
+description = "HID over I2C, pure: the HID descriptor, a report descriptor's mouse collection, and that collection's input reports read; every malformed byte refused by name."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
