@@ -207,17 +207,13 @@ pub fn mouse(descriptor: &[u8]) -> Result<Mouse, Refused> {
                     any_id = true;
                 }
                 0x9 => g.count = unsigned,
-                0xA => {
-                    if pushed < stack.len() {
-                        stack[pushed] = g;
-                        pushed += 1;
-                    }
+                0xA if pushed < stack.len() => {
+                    stack[pushed] = g;
+                    pushed += 1;
                 }
-                0xB => {
-                    if pushed > 0 {
-                        pushed -= 1;
-                        g = stack[pushed];
-                    }
+                0xB if pushed > 0 => {
+                    pushed -= 1;
+                    g = stack[pushed];
                 }
                 _ => {}
             },

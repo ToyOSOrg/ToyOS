@@ -282,7 +282,7 @@ pub mod tests {
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
         let kernel = machine(QEMU);
-        let (loaded, kept) = load(&kernel, RSDP);
+        let (loaded, kept) = load(&kernel, None::<Emulated>, RSDP);
         assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
         let Aml { mut interpreter, mut host } = kept.expect("QEMU's DSDT loads");
         for control_method in [false, true] {

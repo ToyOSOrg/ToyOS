@@ -442,7 +442,7 @@ impl Pad {
         let asserted = level(raw) != self.idle_level;
         // Once a second for the first minute, a read the line did not ask
         // for, logged and never applied: what this device answers unasked.
-        let blind = !asserted && self.ticks % 100 == 0 && self.blind_logged < 60;
+        let blind = !asserted && self.ticks.is_multiple_of(100) && self.blind_logged < 60;
         if !asserted && !blind {
             return;
         }

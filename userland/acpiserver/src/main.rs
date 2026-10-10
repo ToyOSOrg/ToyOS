@@ -571,7 +571,7 @@ mod tests {
         for control_method in [false, true] {
             let mut kernel = crafted(&sealed(b"DSDT", &laptop_with_queries()), &[]);
             kernel.ports = vec![(0x80, 0)];
-            let (_, kept) = load(&kernel, None::<Ports>, CRAFTED_RSDP);
+            let (_, kept) = load(&kernel, None::<crate::ec::tests::Emulated>, CRAFTED_RSDP);
             let mut aml = kept.expect("the DSDT loads");
             let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, control_method);
             aml.host.buttons = found.buttons;
