@@ -465,8 +465,7 @@ mod tests {
     /// The first: the NMI handler must not log. It would reenter its own CPU's
     /// log shard — the reservation is sound only because the CPU that owns the
     /// shard has `IF` and `TF` masked through publication, and an NMI is the one
-    /// interrupt that ignores `IF`. `dump_nmi_probe` is what makes the handler
-    /// *useful*; this is what keeps it silent.
+    /// interrupt that ignores `IF`. This is what keeps it silent.
     ///
     /// The second: no log producer in `kernel/` carries `!!!` in its format
     /// string. `panic_console::has_alert` used to scan every display row for

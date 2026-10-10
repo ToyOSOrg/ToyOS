@@ -35,8 +35,7 @@ zero instead of a fault.
 record it writes with zero for as long as it trails, and those records read as
 the oldest thing the machine has: `log/read.rs`'s merge sorts them last, and its
 per-shard descent — which relies on `at_ns` descending with the sequence number
-— stops at the first of them. A bracketed report (Ctrl+Alt+D) would then carry
-nothing from that CPU. Every other consumer of `nanos_since_boot` on that CPU is
+— stops at the first of them. Every other consumer of `nanos_since_boot` on that CPU is
 wrong by the same amount: deadlines, the scheduler's accounting, `at_ns` in
 `/log`.
 

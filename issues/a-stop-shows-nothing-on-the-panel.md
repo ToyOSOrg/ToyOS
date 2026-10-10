@@ -8,7 +8,7 @@ opened: 2026-10-04
 
 A shutdown or reboot a press or a program asks for puts nothing on the
 screen: the kernel's panel console (`kernel/src/drivers/panic_console/`) paints
-only a panic and the Ctrl+Alt+D report, and on a machine without a compositor,
+only boot progress and a panic, and on a machine without a compositor,
 which is every test image, nothing else paints at all. On the T14 the owner
 pressed the power button and saw nothing happen, which is also what a machine
 that ignored the press looks like.

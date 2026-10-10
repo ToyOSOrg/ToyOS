@@ -694,6 +694,12 @@ pub enum Profile {
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
     HeadlessNoUsb,
+    /// [`Profile::Headless`] with a second controller, QEMU's `qemu-xhci`
+    /// on MSI and with no MSI-X, carrying a stick and a keyboard: the
+    /// controller `xhci-leave=1b36:000d` leaves to `usbd`, armed on MSI as
+    /// the T14's two are, because a claim never maps the BAR that holds an
+    /// MSI-X table and QEMU puts this one's in its registers' BAR.
+    HeadlessUsbSpare,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -738,6 +744,7 @@ impl Profile {
             | Self::HeadlessNoIommu
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
+            | Self::HeadlessUsbSpare
             | Self::Metal => Arch::X86_64,
         }
     }
@@ -795,6 +802,14 @@ pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true, eim: false
 /// crowded set rather than one.
 const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
 
+/// [`Profile::HeadlessUsbSpare`]'s second controller, and the stick on it,
+/// whose bytes are zeros and whose writes go nowhere: what is on it is no
+/// question this machine asks. `msi=on` stated, because with MSI-X off and
+/// MSI left `auto` this QEMU's `qemu-xhci` offers neither, and the kernel
+/// refuses the claim for it.
+const XHCI_SPARE: &str = "qemu-xhci,id=spare,msix=off,msi=on";
+const SPARE_STICK: &str = "driver=null-co,node-name=spare-stick,size=67108864,read-zeroes=on";
+
 /// Whether a machine has the virtio console and sound block. Which NIC it has
 /// is [`Nic`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -850,6 +865,9 @@ struct Shape {
     /// one input handler per device class, so with a usb-kbd present every
     /// injected keystroke goes to it.
     usb: &'static [&'static str],
+    /// The `-blockdev` behind each device in [`Shape::usb`] that names a
+    /// `drive=`, and nothing else: one no device names is refused.
+    blockdevs: &'static [&'static str],
     storage: Storage,
     /// The unit that decodes this machine's DMA, or its absence. Stated per
     /// profile because absence is a shape and because the unit's own
@@ -914,6 +932,7 @@ impl Profile {
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
+                blockdevs: &[],
                 storage: Storage::Stick { nvme_bytes: 0 },
                 iommu: None,
                 rng: true,
@@ -925,6 +944,7 @@ impl Profile {
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 usb: &["usb-kbd,bus=xhci.0"],
+                blockdevs: &[],
                 storage: Storage::Disk { data_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
                 rng: false,
@@ -940,6 +960,7 @@ impl Profile {
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
+                blockdevs: &[],
                 storage: Storage::Stick { nvme_bytes: NVME_SMALL },
                 iommu: Some(IOMMU_DEFAULT),
                 rng: false,
@@ -947,6 +968,16 @@ impl Profile {
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
+            Self::HeadlessUsbSpare => Shape {
+                xhci: &[XHCI_DEFAULT, XHCI_SPARE],
+                usb: &[
+                    "usb-kbd,bus=xhci.0",
+                    "usb-storage,bus=spare.0,drive=spare-stick",
+                    "usb-kbd,bus=spare.0",
+                ],
+                blockdevs: &[SPARE_STICK],
+                ..Self::Headless.shape()
+            },
         }
     }
 
@@ -1040,6 +1071,9 @@ pub struct TestResult {
     pub name: String,
     pub exit_code: Option<i32>,
     pub stdout: String,
+    /// The window as the guest wrote it: [`Self::stdout`]'s lines and the
+    /// kernel's records of the same span, which `stdout` leaves out.
+    pub serial: String,
     /// Why the run did not finish, when it did not.
     ///
     /// A [`WaitVerdict`] and not a `String`, so that the sentence and the
@@ -1127,7 +1161,7 @@ fn build_boot_image_with(
         PARAMS.get_or_init(|| toyos_build::build::declared_params(&compile::repo_root()));
     for name in kernel_params {
         assert!(
-            actuators.iter().chain(params).any(|a| a == name)
+            actuators.iter().chain(params).any(|a| toyos_build::build::arms(a, name))
                 || toyos_build::build::is_valued_param(name),
             "{name:?} is a `kernel_params` and the kernel declares no such actuator or parameter"
         );
@@ -1635,6 +1669,7 @@ impl QemuInstance {
                     name: name.to_string(),
                     exit_code: None,
                     stdout,
+                    serial,
                     error: Some(error),
                 };
             }
@@ -1713,6 +1748,7 @@ impl QemuInstance {
                             name: name.to_string(),
                             exit_code,
                             stdout,
+                            serial,
                             error,
                         };
                     } else if !in_test {
@@ -1742,6 +1778,7 @@ impl QemuInstance {
                         name: name.to_string(),
                         exit_code: None,
                         stdout,
+                        serial,
                         error: Some(error),
                     };
                 }
@@ -2177,6 +2214,14 @@ fn qemu_command(
             .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
+    }
+    for blockdev in shape.blockdevs {
+        let node = blockdev.split(',').find_map(|kv| kv.strip_prefix("node-name=")).expect("a blockdev names its node");
+        assert!(
+            shape.usb.iter().any(|dev| dev.split(',').any(|kv| kv == format!("drive={node}"))),
+            "the blockdev {node:?} backs no USB device this machine has"
+        );
+        qemu.arg("-blockdev").arg(*blockdev);
     }
     for dev in shape.usb {
         qemu.arg("-device").arg(*dev);

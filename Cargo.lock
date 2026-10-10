@@ -6297,6 +6297,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "usbd"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+ "toyos-xhci",
+]
+
+[[package]]
 name = "usvg"
 version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

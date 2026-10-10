@@ -36,7 +36,7 @@ pub enum Source {
     Hda,
     /// Vector 0xFE, the TLB shootdown IPI.
     Tlb,
-    /// Vector 0x02, and `sched::dump` is its only sender.
+    /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
     Nmi,
     /// Vector 0xFF, the local APIC's spurious vector.
     /// A non-zero count on a machine that staged nothing is an interrupt-routing defect.
@@ -127,7 +127,7 @@ pub fn taken_here() -> u64 {
 }
 
 /// One `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.
-/// The machine's reading, so the machine's to take: `crate::census`'s, and the blocked-task dump's, never one process's end.
+/// The machine's reading, so the machine's to take: `crate::census`'s, never one process's end.
 /// Allocates nothing, takes no lock, touches no device.
 pub fn census(say: &mut impl FnMut(fmt::Arguments<'_>)) {
     for cpu in 0..crate::smp::cpu_count() {

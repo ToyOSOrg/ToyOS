@@ -324,6 +324,7 @@ pub fn send_self(vector: u8) {
 
 /// A pseudo-NMI: an interrupt at a priority `DAIF.I` does not mask, which
 /// needs `ICC_PMR_EL1` priority masking in place of `DAIF` everywhere.
+#[cfg(feature = "boot-actuators")]
 pub fn send_nmi(_cpu: u32) {
     owed!("a pseudo-NMI", "no stage yet")
 }
