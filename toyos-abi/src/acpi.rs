@@ -3,8 +3,8 @@
 //!
 //! The kernel puts the machine in ACPI mode when it mints the claim and back
 //! in the mode its firmware handed over when the claim goes; the holder gets
-//! the register blocks the FADT and the ECDT name, as ports it may `in` and
-//! `out`, and the SCI as records on its own claim handle.
+//! the register blocks the FADT names, as ports it may `in` and `out`, and
+//! the SCI as records on its own claim handle.
 //!
 //! **The SCI is a level line, masked by the kernel each time it is taken.** The
 //! holder clears the status bits behind it and then acknowledges the claim
@@ -64,20 +64,8 @@ crate::user_safe! {
         pub pm1_event: Block,
         /// The GPE0 block, its status half then its enable half.
         pub gpe0: Block,
-        /// The embedded controller's command/status and data ports, as the ECDT
-        /// names them; `len` 0 where the machine named none.
-        pub ec_command: Block,
-        pub ec_data: Block,
-        /// The GPE the embedded controller raises, inside [`Self::gpe0`].
-        pub ec_gpe: u16,
         pub flags: u16,
-        pub reserved: u32,
-    }
-}
-
-impl AcpiInfo {
-    pub fn has_ec(&self) -> bool {
-        self.ec_command.len != 0
+        pub reserved: [u16; 3],
     }
 }
 
@@ -216,7 +204,8 @@ pub enum Refused {
     RangeRegistersDiffer = 16,
     /// A byte for `SMI_CMD` that the FADT gives a meaning (ACPI 6.5 Table
     /// 5.9: `ACPI_ENABLE`, `ACPI_DISABLE`, `S4BIOS_REQ`, `PSTATE_CNT`,
-    /// `CST_CNT`): the kernel's to write, or nobody's.
+    /// `CST_CNT`, and `RESET_VALUE` where the reset register is `SMI_CMD`):
+    /// the kernel's to write, or nobody's.
     KernelCommand = 17,
     /// A write that reaches `SMI_CMD` and is not one byte to it.
     CommandSpan = 18,
