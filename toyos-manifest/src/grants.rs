@@ -141,6 +141,19 @@ pub fn folder(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why `granted` may not be given under the image's `ceiling`, its
+/// `[apps] folder`, as a whole sentence: a folder [`folder`] refuses, one past
+/// the ceiling, or any under none. Every grant the supervisor gives or keeps,
+/// by command or by the person's answer, is held to it.
+pub fn admit(granted: &Folder, ceiling: Option<Access>) -> Result<(), String> {
+    let ceiling = ceiling.ok_or("this image grants no package a folder")?;
+    folder(&granted.path)?;
+    if granted.access > ceiling {
+        return Err(format!("{} is past this image's {ceiling}", granted.access));
+    }
+    Ok(())
+}
+
 /// What a launch is given before it starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {

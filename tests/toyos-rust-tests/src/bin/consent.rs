@@ -27,7 +27,8 @@
 //!
 //! First, std's half of the hash being of what runs: a prepared spawn starts
 //! the bytes its prepare read, past a later working directory and a rewrite
-//! of the file ([`prepared`]).
+//! of the file ([`prepared`]); and a grant of a file is refused and never
+//! kept ([`not_a_folder`]).
 //!
 //! The package is this binary installed as `consentee`, which, started under
 //! that name, does what `app_view`'s `game` does: list the ROMs in its
@@ -82,6 +83,7 @@ fn job() {
 
     let mut red = Vec::new();
     prepared(&mut red);
+    not_a_folder(&mut red);
     let mut hostile = Command::new(SELF)
         .arg("hostile")
         .stdout(Stdio::piped())
@@ -178,6 +180,23 @@ fn prepared(red: &mut Vec<String>) {
         )),
     }
     let _ = fs::remove_file(&copy);
+}
+
+/// **A grant is kept only of a folder**: one of a file the folder rules
+/// admit is refused by name and nothing is stored. The supervisor holds the
+/// person's Always to the same check, in the one function that stores both.
+fn not_a_folder(red: &mut Vec<String>) {
+    let note = format!("{HOME}/Note");
+    fs::write(&note, b"a file, not a folder").expect("write a file in the home");
+    let out = in_login(&format!("/system/bin/grants add consentee {note}"));
+    let said = String::from_utf8_lossy(&out.stdout);
+    let refused = format!("{note} is no directory");
+    let kept = fs::read_to_string(STORE).unwrap_or_default().lines().any(|l| l.contains(" consentee "));
+    match (said.contains(&refused), kept) {
+        (true, false) => println!("  a grant of a file was refused and nothing was kept"),
+        _ => red.push(format!("a grant of {note}: the supervisor said {said:?}, and the store holds a line for it: {kept}")),
+    }
+    let _ = fs::remove_file(&note);
 }
 
 /// Ask the host for `step`, and wait for its F12.

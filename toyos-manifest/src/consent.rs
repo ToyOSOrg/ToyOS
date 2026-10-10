@@ -104,7 +104,7 @@ impl Reply {
     }
 
     /// `None` for bytes [`encode`](Self::encode) cannot have written. The path
-    /// is not judged here: the supervisor holds it to [`crate::grants::folder`].
+    /// is not judged here: [`judge`] holds it to [`crate::grants::admit`].
     pub fn decode(payload: &[u8]) -> Option<Self> {
         let (&kind, rest) = payload.split_first()?;
         let folder = || {
@@ -136,6 +136,63 @@ impl Reply {
             Self::Once(_) | Self::Skip => None,
         }
     }
+}
+
+/// What one end of a parked question said since it was last read.
+#[derive(Clone, Copy, Debug)]
+pub enum Heard<'a> {
+    Nothing,
+    /// A whole frame: its type, and its payload as the receiver kept it.
+    Frame(u32, &'a [u8]),
+    /// It hung up, or sent what no frame is: why, in words.
+    Ended(&'static str),
+}
+
+/// Where a parked launch goes on what its `caller` and the consent `server`
+/// said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Settled {
+    /// Neither said anything: it stays parked.
+    Waiting,
+    /// Its caller hung up: it is not started, whatever was answered.
+    Withdrawn,
+    /// It starts, holding what the answer gives, or no folder for why it is
+    /// none ([`judge`]).
+    Answered(Result<Reply, String>),
+}
+
+/// A parked launch's next step. **The caller first**: anything on its
+/// connection after its launch is its hang-up, and a launch nobody waits for
+/// any more is not started, even on an answer already waiting.
+pub fn settle(caller: Heard<'_>, server: Heard<'_>, ceiling: Option<Access>) -> Settled {
+    if !matches!(caller, Heard::Nothing) {
+        return Settled::Withdrawn;
+    }
+    match server {
+        Heard::Nothing => Settled::Waiting,
+        Heard::Frame(msg_type, payload) => Settled::Answered(judge(msg_type, payload, ceiling)),
+        Heard::Ended(why) => Settled::Answered(Err(why.to_string())),
+    }
+}
+
+/// The server's frame on a question's connection, as the supervisor honours
+/// it: a [`Reply`] whose folder [`crate::grants::admit`] gives under the
+/// image's `ceiling`, or why it is none. `payload` is what the receiver kept,
+/// a byte past [`MAX_REPLY`] at most, so a longer frame is refused rather than
+/// read as the prefix kept. **The server is a program like any**: nothing it
+/// says is trusted past this.
+pub fn judge(msg_type: u32, payload: &[u8], ceiling: Option<Access>) -> Result<Reply, String> {
+    if msg_type != MSG_REPLY {
+        return Err(format!("it sent message {msg_type}, which is no answer"));
+    }
+    if payload.len() > MAX_REPLY {
+        return Err(format!("its answer is longer than the {MAX_REPLY} bytes any answer is"));
+    }
+    let reply = Reply::decode(payload).ok_or("its answer is not one the protocol has")?;
+    if let Some(folder) = reply.folder() {
+        crate::grants::admit(folder, ceiling)?;
+    }
+    Ok(reply)
 }
 
 #[cfg(test)]
@@ -194,6 +251,74 @@ mod tests {
             assert_eq!(reply.kept(), kept, "{reply:?}");
             assert_eq!(reply.folder(), holds, "{reply:?}");
         }
+    }
+
+    /// **An answer is honoured only as a grant the image could give**: a
+    /// folder inside the home and outside `Apps`, canonical, at most the
+    /// ceiling, under a ceiling at all; never a frame longer than any answer,
+    /// nor another message. Each refusal is by name.
+    #[test]
+    fn an_answer_is_judged_as_a_grant_the_image_could_give() {
+        let rw = Some(Access::ReadWrite);
+        let ro = Some(Access::ReadOnly);
+        let judged = |reply: &Reply, ceiling| judge(MSG_REPLY, &reply.encode(), ceiling);
+        for (reply, ceiling) in [
+            (Reply::Always(games(Access::ReadWrite)), rw),
+            (Reply::Once(games(Access::ReadOnly)), rw),
+            (Reply::Always(games(Access::ReadOnly)), ro),
+            (Reply::Deny, rw),
+            (Reply::Skip, None),
+        ] {
+            assert_eq!(judged(&reply, ceiling), Ok(reply.clone()), "{reply:?} under {ceiling:?}");
+        }
+        let at = |path: &str| Folder { path: path.into(), access: Access::ReadWrite };
+        for (reply, ceiling, said) in [
+            (Reply::Always(games(Access::ReadWrite)), ro, "read-write is past this image's read-only"),
+            (Reply::Once(games(Access::ReadWrite)), ro, "read-write is past this image's read-only"),
+            (Reply::Once(games(Access::ReadOnly)), None, "this image grants no package a folder"),
+            (Reply::Always(at("/home/toy/Apps")), rw, "where every app keeps its own folder"),
+            (Reply::Once(at("/home/toy/Apps/gbae")), rw, "where every app keeps its own folder"),
+            (Reply::Always(at("/home/toy/Games/../Apps")), rw, "is not a canonical path"),
+            (Reply::Once(at("/home/toy//Games")), rw, "is not a canonical path"),
+            (Reply::Always(at("/state/supervisor")), rw, "is not inside /home/toy"),
+            (Reply::Once(at("/home/toy")), rw, "is the home itself"),
+        ] {
+            match judged(&reply, ceiling) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{reply:?} under {ceiling:?}: {other:?}, not {said:?}"),
+            }
+        }
+        // A frame past the longest answer, the receiver keeping a byte more:
+        // refused for its length, and not read as the answer it begins with.
+        let mut long = Reply::Deny.encode();
+        long.resize(MAX_REPLY + 1, 0);
+        assert_eq!(judge(MSG_REPLY, &long, rw), Err(format!("its answer is longer than the {MAX_REPLY} bytes any answer is")));
+        let mut kept = Reply::Always(games(Access::ReadWrite)).encode();
+        kept.resize(MAX_REPLY + 1, b'x');
+        assert_eq!(judge(MSG_REPLY, &kept, rw), Err(format!("its answer is longer than the {MAX_REPLY} bytes any answer is")));
+        assert_eq!(judge(MSG_ASK, &Reply::Deny.encode(), rw), Err(format!("it sent message {MSG_ASK}, which is no answer")));
+        assert_eq!(judge(MSG_REPLY, b"\x03x", rw), Err("its answer is not one the protocol has".to_string()));
+    }
+
+    /// **A launch whose caller hung up is withdrawn**, an answer waiting
+    /// beside the hang-up included; with the caller still there, the server's
+    /// word decides, and silence waits.
+    #[test]
+    fn a_hang_up_withdraws_the_launch_before_any_answer() {
+        let rw = Some(Access::ReadWrite);
+        let always = Reply::Always(games(Access::ReadWrite)).encode();
+        let answer = Heard::Frame(MSG_REPLY, &always);
+        for caller in [Heard::Ended("its caller hung up"), Heard::Frame(9, b"x")] {
+            for server in [Heard::Nothing, answer, Heard::Ended("the server ended")] {
+                assert_eq!(settle(caller, server, rw), Settled::Withdrawn, "{caller:?}, {server:?}");
+            }
+        }
+        assert_eq!(settle(Heard::Nothing, Heard::Nothing, rw), Settled::Waiting);
+        assert_eq!(settle(Heard::Nothing, answer, rw), Settled::Answered(Ok(Reply::Always(games(Access::ReadWrite)))));
+        assert_eq!(
+            settle(Heard::Nothing, Heard::Ended("the server ended"), rw),
+            Settled::Answered(Err("the server ended".to_string()))
+        );
     }
 
     #[test]

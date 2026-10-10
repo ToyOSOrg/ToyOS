@@ -875,18 +875,21 @@ impl<'a> Supervisor<'a> {
 
     /// [`grants::STORE`], read on the worker once DATA's server runs. A store
     /// refused, which any declared row can write, is said and the boot starts
-    /// with no grant; the next grant written replaces it.
+    /// with no grant; the next grant written replaces it. **Read through its
+    /// bound, never sized first**: a writer can grow it between the two.
     fn load_grants(&mut self) {
         let read = self.files("the grants", || -> Result<Option<String>, String> {
-            match std::fs::metadata(grants::STORE) {
+            use std::io::Read as _;
+            let file = match std::fs::File::open(grants::STORE) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e.to_string()),
-                Ok(meta) if meta.len() > grants::MAX_STORE_BYTES as u64 => {
-                    return Err(format!("it is {} bytes, past the {} its grants fill", meta.len(), grants::MAX_STORE_BYTES));
-                }
-                Ok(_) => {}
+                opened => opened.map_err(|e| e.to_string())?,
+            };
+            let mut text = String::new();
+            file.take(grants::MAX_STORE_BYTES as u64 + 1).read_to_string(&mut text).map_err(|e| e.to_string())?;
+            match text.len() > grants::MAX_STORE_BYTES {
+                true => Err(format!("it is longer than the {} bytes its grants fill", grants::MAX_STORE_BYTES)),
+                false => Ok(Some(text)),
             }
-            std::fs::read_to_string(grants::STORE).map(Some).map_err(|e| e.to_string())
         });
         let store = read.and_then(|read| read).and_then(|text| text.map_or(Ok(Store::default()), |t| Store::parse(&t)));
         match store {
@@ -915,38 +918,52 @@ impl<'a> Supervisor<'a> {
         if !matches!(caller.session, Session::Login(..)) {
             return Err("only a login session may ask for grants".to_string());
         }
-        let user = toyos_manifest::USER;
-        let mut store = self.store.clone();
         let done = match request {
-            grants::Request::List => return Ok(store.entries().iter().map(grants::listed).collect()),
+            grants::Request::List => return Ok(self.store.entries().iter().map(grants::listed).collect()),
             grants::Request::Revoke { package } => {
-                if !store.revoke(user, &package) {
+                let mut store = self.store.clone();
+                if !store.revoke(toyos_manifest::USER, &package) {
                     return Err(format!("{package} holds no grant"));
                 }
+                self.commit(store)?;
                 format!("{package}'s grant is revoked; its next launch holds no folder")
             }
             grants::Request::Add { package, folder } => {
-                grants::folder(&folder.path)?;
-                let ceiling = self.system.folder.ok_or("this image grants no package a folder")?;
-                if folder.access > ceiling {
-                    return Err(format!("{} is past this image's {ceiling}", folder.access));
-                }
-                let (system, name, path) = (self.system, package.clone(), folder.path.clone());
+                let (system, name) = (self.system, package.clone());
                 let binary = self.files("a grant's files", move || -> Result<String, String> {
-                    let program = installed(system, &name)?;
-                    is_folder(&path)?;
-                    binary_digest(&program)
+                    binary_digest(&installed(system, &name)?.path)
                 })??;
                 let said = format!("{package} is granted {} {}", folder.path, folder.access);
-                store.put(grants::Entry { user: user.to_string(), package, binary, answer: Answer::Granted(folder) })?;
+                self.keep(&package, binary, Answer::Granted(folder))?;
                 said
             }
         };
+        say!("supervisor: grants: {done}");
+        Ok(done)
+    }
+
+    /// `answer` stored for the session user's `package` at `binary`, in place
+    /// of any other: **the one way an answer reaches [`grants::STORE`]**, a
+    /// command's and the person's alike. A folder is held to
+    /// [`grants::admit`], and is a directory and not a link when it is
+    /// stored, so nothing kept names what no launch could hold.
+    fn keep(&mut self, package: &str, binary: String, answer: Answer) -> Result<(), String> {
+        if let Answer::Granted(folder) = &answer {
+            grants::admit(folder, self.system.folder)?;
+            let path = folder.path.clone();
+            self.files("a granted folder", move || is_folder(&path))??;
+        }
+        let mut store = self.store.clone();
+        store.put(grants::Entry { user: toyos_manifest::USER.to_string(), package: package.to_string(), binary, answer })?;
+        self.commit(store)
+    }
+
+    /// `store` written whole over [`grants::STORE`], and then held.
+    fn commit(&mut self, store: Store) -> Result<(), String> {
         let text = store.render();
         self.files("the grants", move || write_store(&text))??;
-        say!("supervisor: grants: {done}");
         self.store = store;
-        Ok(done)
+        Ok(())
     }
 
     fn make_session_home(&mut self) {
@@ -1558,17 +1575,16 @@ impl<'a> Supervisor<'a> {
     }
 }
 
-/// The program installed package `name` launches, as its manifest names it
-/// and the image would start it: a package named after a declared row is none.
-fn installed(system: &Manifest, name: &str) -> Result<String, String> {
+/// Installed package `name`'s row, its program as its manifest names it: a
+/// package named after a declared row is none.
+fn installed(system: &Manifest, name: &str) -> Result<Program, String> {
     let file = Package::path(name);
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{file} cannot be read: {e}"))?;
     let package = Package::parse(&text)?;
     if package.name != name {
         return Err(format!("{file} calls itself {:?}", package.name));
     }
-    system.app_row(name, &package.program)?;
-    Ok(package.program)
+    system.app_row(name, &package.program)
 }
 
 /// `Ok` where `path` is a directory, and not a link to one.
@@ -1597,15 +1613,26 @@ fn write_store(text: &str) -> Result<(), String> {
 }
 
 /// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
-/// before any of it is read. Made from the loop: a swap's files are under
-/// [`toyos_swap::STAGING`], which the kernel serves.
+/// before any of it is read, and read through that bound: a file grown
+/// between the two is refused, never read whole. Made from the loop: a swap's
+/// files are under [`toyos_swap::STAGING`], which the kernel serves.
 fn read_binary(path: &str) -> Result<Vec<u8>, Refusal> {
+    use std::io::Read as _;
     let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
-    let len = std::fs::metadata(path).map_err(unreadable)?.len();
+    let file = std::fs::File::open(path).map_err(unreadable)?;
+    let len = file.metadata().map_err(unreadable)?.len();
     if len > toyos_swap::MAX_BINARY_BYTES {
         return Err(Refusal::TooLarge(len));
     }
-    std::fs::read(path).map_err(unreadable)
+    let mut bytes = Vec::new();
+    file.take(toyos_swap::MAX_BINARY_BYTES + 1).read_to_end(&mut bytes).map_err(unreadable)?;
+    match bytes.len() as u64 > toyos_swap::MAX_BINARY_BYTES {
+        true => Err(Refusal::Unreadable {
+            path: path.to_string(),
+            why: format!("it grew past {} bytes while it was read", toyos_swap::MAX_BINARY_BYTES),
+        }),
+        false => Ok(bytes),
+    }
 }
 
 /// Write verified bytes where a service is started from: a temporary name
@@ -1900,27 +1927,23 @@ impl Supervisor<'_> {
     fn advance_parked(&mut self, parked: Parked, caller_ready: bool, consent_ready: bool) -> Option<Parked> {
         let Parked { launch, binary, consent, mut rx, mut hangup } = parked;
         let name = launch.program.name.clone();
-        // The caller first: a launch nobody waits for any more is not started.
-        if caller_ready && !matches!(hangup.pump(&launch.conn), RxStep::Idle) {
-            say!("supervisor: consent: the question about {name} is withdrawn: its caller hung up");
-            return None;
-        }
-        if !consent_ready {
-            return Some(Parked { launch, binary, consent, rx, hangup });
-        }
-        let reply = match rx.pump(&consent) {
-            RxStep::Idle => return Some(Parked { launch, binary, consent, rx, hangup }),
-            RxStep::Frame { msg_type: consent::MSG_REPLY, payload_len } if payload_len > consent::MAX_REPLY => {
-                Err(format!("its answer is longer than the {} bytes any answer is", consent::MAX_REPLY))
+        let caller = match caller_ready {
+            true => heard(hangup.pump(&launch.conn), &hangup, "its caller hung up"),
+            false => consent::Heard::Nothing,
+        };
+        let server = match consent_ready {
+            true => heard(rx.pump(&consent), &rx, "the consent server ended before it answered"),
+            false => consent::Heard::Nothing,
+        };
+        let reply = match consent::settle(caller, server, self.system.folder) {
+            consent::Settled::Waiting => return Some(Parked { launch, binary, consent, rx, hangup }),
+            consent::Settled::Withdrawn => {
+                say!("supervisor: consent: the question about {name} is withdrawn: its caller hung up");
+                return None;
             }
-            RxStep::Frame { msg_type: consent::MSG_REPLY, payload_len } => consent::Reply::decode(rx.payload(payload_len))
-                .ok_or_else(|| "its answer is not one the protocol has".to_string()),
-            RxStep::Frame { msg_type, .. } => Err(format!("it sent message {msg_type}, which is no answer")),
-            RxStep::Eof => Err("the consent server ended before it answered".to_string()),
-            RxStep::Malformed => Err("it sent a frame the protocol cannot describe".to_string()),
+            consent::Settled::Answered(reply) => reply,
         };
         drop(consent);
-        let reply = reply.and_then(|reply| self.judged(reply));
         let reply = match reply {
             Ok(reply) => reply,
             Err(why) => {
@@ -1936,30 +1959,6 @@ impl Supervisor<'_> {
         }
         self.start_launch(launch, reply.folder().cloned());
         None
-    }
-
-    /// `reply`, its folder held to the rules a stored grant is ([`grants::folder`])
-    /// and to the image's ceiling: the consent server is a program like any.
-    fn judged(&self, reply: consent::Reply) -> Result<consent::Reply, String> {
-        if let Some(folder) = reply.folder() {
-            grants::folder(&folder.path)?;
-            let ceiling = self.system.folder.expect("a launch is asked only under a ceiling");
-            if folder.access > ceiling {
-                return Err(format!("{} is past this image's {ceiling}", folder.access));
-            }
-        }
-        Ok(reply)
-    }
-
-    /// `answer` stored for the session user's `package` at `binary`, in place
-    /// of any other.
-    fn keep(&mut self, package: &str, binary: String, answer: Answer) -> Result<(), String> {
-        let mut store = self.store.clone();
-        store.put(grants::Entry { user: toyos_manifest::USER.to_string(), package: package.to_string(), binary, answer })?;
-        let text = store.render();
-        self.files("the grants", move || write_store(&text))??;
-        self.store = store;
-        Ok(())
     }
 
     /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
@@ -2080,6 +2079,17 @@ struct Parked {
     hangup: ipc::FrameRx<8>,
 }
 
+/// What `rx`'s `step` heard, in [`consent::settle`]'s words: `ended` where
+/// its peer hung up.
+fn heard<'a, const KEEP: usize>(step: RxStep, rx: &'a ipc::FrameRx<KEEP>, ended: &'static str) -> consent::Heard<'a> {
+    match step {
+        RxStep::Idle => consent::Heard::Nothing,
+        RxStep::Frame { msg_type, payload_len } => consent::Heard::Frame(msg_type, rx.payload(payload_len)),
+        RxStep::Eof => consent::Heard::Ended(ended),
+        RxStep::Malformed => consent::Heard::Ended("it sent a frame the protocol cannot describe"),
+    }
+}
+
 /// The supervisor's word for an answer, in its line in the log.
 fn said(reply: &consent::Reply) -> String {
     match reply {
@@ -2166,28 +2176,13 @@ fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_
             None => Resolved::NotDeclared,
         };
     };
-    let file = Package::path(name);
-    let text = match std::fs::read_to_string(&file) {
-        Ok(text) => text,
-        Err(e) => return Resolved::Refused(format!("{file} cannot be read: {e}")),
-    };
-    let installed = match Package::parse(&text) {
-        Ok(installed) => installed,
-        Err(why) => return Resolved::Refused(why),
-    };
-    if installed.name != name {
-        return Resolved::Refused(format!("{file} calls itself {:?}", installed.name));
-    }
-    if installed.program != path {
-        return Resolved::Refused(format!(
-            "{file} launches {:?} and this asks for {path:?}",
-            installed.program
-        ));
-    }
-    let row = match system.app_row(name, path) {
+    let row = match installed(system, name) {
         Ok(row) => row,
         Err(why) => return Resolved::Refused(why),
     };
+    if row.path != path {
+        return Resolved::Refused(format!("{} launches {:?} and this asks for {path:?}", Package::path(name), row.path));
+    }
     let verdict = judge(Target::Package(&row));
     Resolved::Package(row, verdict)
 }
