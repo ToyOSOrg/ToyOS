@@ -14,7 +14,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
 
 use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
@@ -63,7 +62,8 @@ pub fn hosted_clang_hello() -> Result<(), String> {
     stage("src/hello.c", &case.join("hello.c"));
     for (name, product) in [("hello.o", &object), ("hello", &linked)] {
         let bytes = fs::read(product).map_err(|e| format!("read {}: {e}", product.display()))?;
-        eprintln!("  [{JOB}] the host's {name}: {} bytes, sha256 {:x}", bytes.len(), Sha256::digest(&bytes));
+        let sha256: String = toyos_sha2_hw::sha256_digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("  [{JOB}] the host's {name}: {} bytes, sha256 {sha256}", bytes.len());
         stage(&format!("host/{name}"), product);
     }
     // clang finds its resource headers beside itself, `../lib/clang`.
