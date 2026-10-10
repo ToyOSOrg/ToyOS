@@ -13,19 +13,16 @@
 //! disable again. Neither is written once the stop has begun: `smi_cmd`
 //! refuses it.
 //!
-//! **A machine stays in legacy mode where its firmware serves something no
-//! holder could**: an embedded controller the ECDT does not name, or a power
-//! button that is a control method device, which only AML serves. Both are
-//! refused at the mint, by name; a machine the firmware handed over in ACPI
-//! mode is claimed whatever it has, since nothing is written.
+//! **What only the firmware's AML names is the holder's to find**: the
+//! embedded controller is a device of the DSDT, and a power button that is a
+//! control method device is served by the AML that notifies it. This kernel
+//! reads no AML, so neither keeps a machine in legacy mode; the controller's
+//! ports are the holder's to reach as [`access`] reaches any port no row
+//! names, and no table this kernel reads names them.
 //!
-//! **The ECDT is a stopgap**: the embedded controller is read from it until the
-//! interpreter reads the controller's own device from the DSDT, and then this
-//! path and `toyos_acpi::ecdt` go
-//! (`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
-//!
-//! The row is the FADT's PM1a event and GPE0 blocks and the ECDT's two
-//! ports, filled once at boot; the SCI is its one line, level.
+//! The row is the FADT's PM1a event and GPE0 blocks, filled once at boot;
+//! the SCI is its one line, level. `SMI_CMD` is declared before it, with the
+//! reset register (`power::init_reset`).
 //!
 //! **What the firmware's AML names outside the row, this kernel reads and
 //! writes for the claim's holder, one access at a time** ([`access`]): memory
@@ -82,7 +79,7 @@ use core::sync::atomic::AtomicU32;
 
 use toyos_abi::acpi::{Access, AcpiInfo, Block, Refused, Space, Width, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::SyscallError;
-use toyos_acpi::{Ec, FixedHardware, LegacyMode, PowerButton};
+use toyos_acpi::{FixedHardware, LegacyMode, PowerButton};
 use toyos_userbound::firmware::{
     self, CallRate, Ecam, FirmwareCall, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
 };
@@ -116,8 +113,6 @@ const HANDBACK: Duration = Duration::from_millis(100);
 struct Hardware {
     fixed: FixedHardware,
     control: Declared,
-    /// Or why it is none a holder can be handed.
-    ec: Result<Ec, String>,
     rsdp: u64,
     /// The window configuration space is reached through, as the MCFG bounds it.
     ecam: Option<Ecam>,
@@ -222,9 +217,9 @@ fn hardware() -> Option<&'static Hardware> {
     (!at.is_null()).then(|| unsafe { &*at })
 }
 
-/// Decode the fixed hardware, declare `SMI_CMD`, and fill the row; or say by
-/// name why this machine has none. After the i8042's row, whose lines the
-/// SCI may not share.
+/// Decode the fixed hardware and fill the row; or say by name why this
+/// machine has none. After the i8042's row, whose lines the SCI may not
+/// share.
 pub fn init(rsdp_addr: u64) {
     let fadt = match toyos_acpi::find_table(
         crate::drivers::acpi::direct_phys(),
@@ -242,17 +237,9 @@ pub fn init(rsdp_addr: u64) {
     let Some(control) = super::power::pm1a_control() else {
         return log!("acpi: no ACPI row — no PM1a control block declared");
     };
-    let facs = toyos_acpi::facs(fadt.phys(), &fadt);
-    // A FACS this kernel cannot read leaves `S4BIOS_F` unread, and the byte kept.
-    let s4bios = match facs {
-        Ok(facs) => facs.s4bios,
-        Err(toyos_acpi::FacsRefused::Absent) => false,
-        Err(_) => true,
-    };
-    if let Some(Err(why)) = fixed.smi_cmd.map(|named| smi_cmd::declare(named.port, named.named(s4bios))) {
-        return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}");
+    if fixed.smi_cmd.is_some() && smi_cmd::declared().is_none() {
+        return log!("acpi: no ACPI row — the FADT's SMI_CMD was not declared");
     }
-    let ec = embedded_controller(rsdp_addr, fixed.gpe0);
     let Some(sci) = super::ioapic::sci(fixed.sci_int) else {
         return log!("acpi: no ACPI row — no I/O APIC carries the SCI");
     };
@@ -264,11 +251,8 @@ pub fn init(rsdp_addr: u64) {
     if fixed.gpe0.len != 0 {
         runs.push(run(fixed.gpe0));
     }
-    if let Ok(ec) = &ec {
-        runs.extend([Ports::one(ec.command), Ports::one(ec.data)]);
-    }
     log!(
-        "acpi: the ACPI row: PM1a events {:#x}+{}, GPE0 {:#x}+{}, SCI {}, {}, embedded controller {}; the firmware handed over in {} mode",
+        "acpi: the ACPI row: PM1a events {:#x}+{}, GPE0 {:#x}+{}, SCI {}, {}; the firmware handed over in {} mode",
         fixed.pm1a_event.port,
         fixed.pm1a_event.len,
         fixed.gpe0.port,
@@ -278,15 +262,11 @@ pub fn init(rsdp_addr: u64) {
             PowerButton::Fixed => "the fixed-hardware power button",
             PowerButton::ControlMethod => "a control-method power button",
         },
-        match &ec {
-            Ok(ec) => format!("at {:#x}/{:#x} on GPE {:#x}", ec.command, ec.data, ec.gpe),
-            Err(why) => format!("none ({why})"),
-        },
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(rsdp_addr), global_lock(facs));
-    let hardware = Hardware { fixed, control, ec, rsdp: rsdp_addr, ecam, lock };
+    let (ecam, lock) = (ecam(rsdp_addr), global_lock(toyos_acpi::facs(fadt.phys(), &fadt)));
+    let hardware = Hardware { fixed, control, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -338,17 +318,6 @@ fn run(block: Block) -> Ports {
     Ports::new(block.port, block.len).expect("`fixed_hardware` bounded every block by the port space")
 }
 
-fn embedded_controller(rsdp_addr: u64, gpe0: Block) -> Result<Ec, String> {
-    let ecdt = toyos_acpi::find_table(crate::drivers::acpi::direct_phys(), rsdp_addr, b"ECDT", toyos_acpi::ECDT_NEEDED)
-        .map_err(|e| format!("the ECDT is unusable: {e:?}"))?;
-    let ec = toyos_acpi::ecdt(&ecdt).map_err(|refused| format!("the ECDT names none: {refused:?}"))?;
-    // §5.2.9: a GPE block's status half holds eight GPEs a byte.
-    if u16::from(ec.gpe) >= gpe0.len / 2 * 8 {
-        return Err(format!("the ECDT puts it on GPE {:#x}, outside GPE0's {}", ec.gpe, gpe0.len / 2 * 8));
-    }
-    Ok(ec)
-}
-
 /// The row, claimed, with the machine in ACPI mode; or the refusal that
 /// leaves it in legacy mode, said by name.
 pub fn claim() -> Result<(isa::Row, AcpiInfo), ClaimError> {
@@ -360,19 +329,12 @@ pub fn claim() -> Result<(isa::Row, AcpiInfo), ClaimError> {
 }
 
 fn info(hardware: &Hardware) -> AcpiInfo {
-    let (ec_command, ec_data, ec_gpe) = match &hardware.ec {
-        Ok(ec) => (Block { port: ec.command, len: 1 }, Block { port: ec.data, len: 1 }, u16::from(ec.gpe)),
-        Err(_) => (Block::NONE, Block::NONE, 0),
-    };
     AcpiInfo {
         rsdp: hardware.rsdp,
         pm1_event: hardware.fixed.pm1a_event,
         gpe0: hardware.fixed.gpe0,
-        ec_command,
-        ec_data,
-        ec_gpe,
         flags: if hardware.fixed.power_button == PowerButton::Fixed { FIXED_POWER_BUTTON } else { 0 },
-        reserved: 0,
+        reserved: [0; 3],
     }
 }
 
@@ -404,15 +366,6 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         return refuse("the FADT names no SMI_CMD, ACPI_ENABLE and ACPI_DISABLE to leave it and come back with");
     };
     let enable = legacy.acpi_enable.get();
-    if let Err(why) = &hardware.ec {
-        return refuse(&format!(
-            "its firmware serves an embedded controller no holder could ({why})"
-        ));
-    }
-    if hardware.fixed.power_button == PowerButton::ControlMethod {
-        return refuse("its power button is a control method device, which only AML serves");
-    }
-
     let Some(write) = smi_cmd::write(enable) else {
         return refuse("the machine is stopping");
     };

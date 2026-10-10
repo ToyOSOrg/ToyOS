@@ -676,8 +676,8 @@ pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String
 }
 
 /// What `/system/bin/acpiserver` says once it serves q35's power button,
-/// whole: q35 has no embedded controller.
-const ACPI_ARMED: &str = "acpiserver: armed: power button served, embedded controller none";
+/// whole, before it loads the tables.
+const ACPI_ARMED: &str = "acpiserver: armed: power button served";
 
 /// The server's line for the press, naming the SCI it came on.
 const ACPI_PRESSED: &str =
@@ -757,6 +757,8 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     let whole = serial::Serial::named("the boot and the press", console);
     acpi_tables_loaded(&whole, &whole, Q35_S5_SUPPLIED)?;
     whole.must_say_after(ACPI_S5_HANDED, ACPI_PRESSED)?;
+    // QEMU's DSDT names no embedded controller, which the server finds there.
+    whole.must_say_after(&format!("{}no PNP0C09 device is present", acpiserver_api::CONTROLLER_NONE), ACPI_PRESSED)?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())
 }

@@ -3,17 +3,23 @@
 //! mediated access ([`toyos_abi::acpi`]), and [`Kernel`] is that access as
 //! this server asks for it, so a host test answers in the kernel's place.
 //!
-//! **Nothing is written.** Loading a machine's tables writes nothing, and
-//! this server evaluates nothing that does yet: a write in any space is
-//! denied by name, and so is every access to the embedded controller's
-//! space, which no transaction serves for AML yet. SystemCMOS never arrives:
-//! the interpreter refuses that space itself. A read of memory, of a port or
-//! of a function's configuration space is the kernel's to make or refuse, and
-//! a refusal it names is denied under that name.
+//! **A port is the only thing written.** A read of memory, of a port or of a
+//! function's configuration space, and a write to a port, is the kernel's to
+//! make or refuse, and a refusal it names is denied under that name: the
+//! kernel keeps every port it drives, and makes a byte for `SMI_CMD` a call
+//! into the firmware or refuses it. A write to memory or to configuration
+//! space is denied by name, and so is every access to the embedded
+//! controller's space, which no transaction serves for AML yet. SystemCMOS
+//! never arrives: the interpreter refuses that space itself.
 //!
 //! **The Global Lock is the kernel's to exchange** (ACPI 6.5 §5.2.10.1). A
 //! take that finds the firmware holding it is denied by name ([`HELD`]) and
 //! counted: this server waits for no release of the firmware's yet.
+//!
+//! **A Notify of 0x80 to a control-method power button is a press** (ACPI
+//! 6.5 §4.8.2.2.1.2), counted in [`Firmware::presses`] for the server to
+//! serve, once [`Firmware::buttons`] names the button; every other Notify is
+//! said the first time and served by nothing.
 //!
 //! **The power-off's sleep type is the one thing handed to the kernel**
 //! ([`Kernel::s5`]): the kernel writes the register, and reads no AML.
@@ -156,6 +162,10 @@ pub struct Firmware<'k, K> {
     pub notifies: u64,
     pub refused: Ledger,
     notified: Ledger,
+    /// The paths of the control-method power buttons this server serves.
+    pub buttons: Vec<String>,
+    /// Presses of one of them notified and not yet served.
+    pub presses: u64,
     /// The kernel answered that the machine is stopping.
     pub stopping: bool,
 }
@@ -172,6 +182,8 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             notifies: 0,
             refused: Ledger::default(),
             notified: Ledger::default(),
+            buttons: Vec::new(),
+            presses: 0,
             stopping: false,
         }
     }
@@ -226,9 +238,18 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
         let what = match at {
-            Address::Memory(_) => "a write to SystemMemory: this server writes nothing for AML yet".into(),
-            Address::Io(_) => "a write to SystemIO: this server writes nothing for AML yet".into(),
-            Address::PciConfig { .. } => "a write to PCI_Config: this server writes nothing for AML yet".into(),
+            Address::Io(port) => {
+                return match self.kernel.access(Access::write(Space::SystemIo, u64::from(port), wide(width), value)) {
+                    Err(Stopping) => Err(self.stopped()),
+                    Ok(Answer { made: Ok(_), .. }) => Ok(()),
+                    Ok(Answer { made: Err(refused), .. }) => Err(self.deny(
+                        format!("a SystemIO write the kernel refused {refused:?}"),
+                        format_args!("{width:?} {value:#x} to {at:x?}"),
+                    )),
+                };
+            }
+            Address::Memory(_) => "a write to SystemMemory: this server writes no memory for AML".into(),
+            Address::PciConfig { .. } => "a write to PCI_Config: this server writes no configuration space for AML".into(),
             Address::EmbeddedControl(_) => format!("a write to {NO_CONTROLLER}"),
         };
         Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
@@ -253,8 +274,14 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn notify(&mut self, object: &str, value: u64) {
         self.notifies += 1;
+        // §5.6.6's notification values of a power button: 0x80 is a press in S0.
+        let press = value == 0x80 && self.buttons.iter().any(|button| button == object);
+        if press {
+            self.presses += 1;
+        }
         if self.notified.see(&format!("{object} {value:#x}")) {
-            println!("{OWN}Notify({object}, {value:#x}) for the first time; nothing serves a Notify yet");
+            let served = if press { "a press of the power button" } else { "served by nothing" };
+            println!("{OWN}Notify({object}, {value:#x}) for the first time: {served}");
         }
     }
 
@@ -322,7 +349,7 @@ pub mod tests {
         fn access(&self, access: Access) -> Result<Answer, Stopping> {
             self.stopping()?;
             self.asked.borrow_mut().push(access);
-            assert_eq!(access.write, 0, "this server asks the kernel for no write");
+            assert!(access.write == 0 || access.space == Space::SystemIo as u8, "this server asks the kernel for no write but a port's");
             let width = Width::from_raw(access.width).expect("a width").bytes();
             let listed = |values: &[(u64, u64)]| values.iter().find(|(at, _)| *at == access.address).map(|&(_, value)| value);
             Ok(match Space::from_raw(access.space).expect("a space") {
@@ -439,20 +466,54 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
+    /// A port is written as the kernel answers, its refusal under its name;
+    /// memory and configuration space are never written, and the
+    /// controller's space is not reached, none of them asked of the kernel.
     #[test]
-    fn nothing_is_written_and_the_controllers_space_is_not_reached() {
+    fn only_a_port_is_written_and_the_controllers_space_is_not_reached() {
         let kernel = machine();
         let mut host = Firmware::new(&kernel);
+        // An AMD laptop's `_Q28` writes its query's number to the POST port as a word.
+        assert_eq!(host.write(Address::Io(0xB2), toyos_aml::Access::Word, 0x28), Ok(()));
+        let refused = host.write(Address::Io(0x70), toyos_aml::Access::Byte, 1);
+        assert_eq!(refused, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
+        assert_eq!(
+            *kernel.asked.borrow(),
+            [
+                Access::write(Space::SystemIo, 0xB2, Width::Word, 0x28),
+                Access::write(Space::SystemIo, 0x70, Width::Byte, 1),
+            ]
+        );
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
-        for (at, space) in [(Address::Memory(NVS), "SystemMemory"), (Address::Io(0xB2), "SystemIO"), (function, "PCI_Config")] {
-            let denied = host.write(at, toyos_aml::Access::Byte, 0).expect_err("a write was made");
-            assert_eq!(denied.0, format!("a write to {space}: this server writes nothing for AML yet"));
+        for (at, denied) in [
+            (Address::Memory(NVS), "a write to SystemMemory: this server writes no memory for AML"),
+            (function, "a write to PCI_Config: this server writes no configuration space for AML"),
+        ] {
+            assert_eq!(host.write(at, toyos_aml::Access::Byte, 0), Err(Denied(denied.into())));
         }
         let controller = Address::EmbeddedControl(0x38);
         assert_eq!(host.write(controller, toyos_aml::Access::Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
         assert_eq!(host.read(controller, toyos_aml::Access::Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert!(kernel.asked.borrow().is_empty(), "the kernel was asked for an access this server denies itself");
+        assert_eq!(kernel.asked.borrow().len(), 2, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
+    }
+
+    /// A Notify of 0x80 to a button the server serves is a press, and to
+    /// anything else, or of another value, is none.
+    #[test]
+    fn only_a_notify_of_a_press_to_a_served_button_is_a_press() {
+        let kernel = machine();
+        let mut host = Firmware::new(&kernel);
+        host.notify("\\_SB_.PWRB", 0x80);
+        assert_eq!(host.presses, 0, "a press of a button the server does not serve yet");
+        host.buttons.push("\\_SB_.PWRB".into());
+        for (object, value) in [("\\_SB_.PWRB", 0x02), ("\\_SB_.SLPB", 0x80), ("\\_SB_.PWRB_", 0x80), ("\\_SB_.LID_", 0x80)] {
+            host.notify(object, value);
+        }
+        assert_eq!(host.presses, 0);
+        host.notify("\\_SB_.PWRB", 0x80);
+        host.notify("\\_SB_.PWRB", 0x80);
+        assert_eq!((host.presses, host.notifies), (2, 7));
     }
 
     #[test]

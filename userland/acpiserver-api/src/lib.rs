@@ -7,3 +7,9 @@
 /// count interval where a count moved: after its count of SCIs, and before
 /// each query number with how often it was taken.
 pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
+
+/// The server's word on the embedded controller, once, after the tables'
+/// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,
+/// [`CONTROLLER_NONE`] and why where it serves none.
+pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
+pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
