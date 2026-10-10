@@ -35,6 +35,6 @@ pub fn now() -> Head<'static> {
 /// One line, stamped, to the console and then to `loader.log`.
 pub fn say(args: fmt::Arguments) {
     let head = now();
-    uefi_services::println!("{head} {args}");
+    crate::efi::print(format_args!("{head} {args}\n"));
     crate::loaderlog::line(format_args!("{head} {args}"));
 }

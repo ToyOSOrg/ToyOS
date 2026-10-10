@@ -24,6 +24,7 @@ char *getcwd(char *buf, size_t size);
 int chdir(const char *path);
 int access(const char *path, int mode);
 unsigned int sleep(unsigned int seconds);
+unsigned int alarm(unsigned int seconds);
 int usleep(unsigned int usec);
 int isatty(int fd);
 int execvp(const char *file, char *const argv[]);
@@ -34,6 +35,8 @@ int pipe(int pipefd[2]);
 void _exit(int status);
 int fsync(int fd);
 int ftruncate(int fd, off_t length);
+int truncate(const char *path, off_t length);
+long pathconf(const char *path, int name);
 ssize_t readlink(const char *path, char *buf, size_t size);
 int symlink(const char *target, const char *linkpath);
 int link(const char *existing, const char *newpath);
@@ -58,6 +61,8 @@ long sysconf(int name);
 #define _SC_GETPW_R_SIZE_MAX 70
 #define _SC_CLK_TCK          2
 #define _SC_NPROCESSORS_ONLN 84
+
+#define _PC_PATH_MAX 4
 
 #define F_OK 0
 #define R_OK 4

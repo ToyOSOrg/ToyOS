@@ -1,7 +1,9 @@
 /* What libc does for the names LLVM builds against: a directory listed with
    the name and kind of each entry; dladdr naming the image and the exported
-   symbol an address lies in; and strnlen, strsignal, modf, logb and the
-   <endian.h> conversions. */
+   symbol an address lies in; a file truncated by its path; a stream on a
+   buffer of its caller's, or none, sought and told by off_t; SIGALRM's
+   action, read back whole, and an alarm armed and disarmed; and strnlen, strsignal, modf,
+   lround, logb, pathconf and the <endian.h> conversions. */
 #include <dirent.h>
 #include <dlfcn.h>
 #include <endian.h>
@@ -46,6 +48,7 @@ int main(void);
 
 static const char *errno_name(int e) {
     switch (e) {
+    case EDOM: return "EDOM";
     case EEXIST: return "EEXIST";
     case EINVAL: return "EINVAL";
     case ENOENT: return "ENOENT";
@@ -83,6 +86,64 @@ static void links(void) {
     refused("readlink into 0", readlink(LINK, buf, 0));
     refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
     refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
+}
+
+static void truncated(void) {
+    struct stat st;
+    int answer = truncate(TARGET, 2);
+    printf("truncate to 2: %d; stat size: %ld\n", answer, stat(TARGET, &st) == 0 ? (long)st.st_size : -1L);
+    refused("truncate of nothing", truncate(DIR_PATH "/none", 0));
+}
+
+/* setbuf's buffer holds what is written until the stream is told or sought;
+   with none, a write reaches the file at once. */
+static void buffered(void) {
+    static char buf[BUFSIZ];
+    struct stat st;
+    FILE *f = fopen(DIR_PATH "/buffered", "w+");
+    if (!f) {
+        printf("fopen buffered failed\n");
+        return;
+    }
+    setbuf(f, buf);
+    fputs("0123456789", f);
+    long held = stat(DIR_PATH "/buffered", &st) == 0 ? (long)st.st_size : -1L;
+    printf("setbuf: file %ld bytes, the buffer %s\n", held, memcmp(buf, "0123456789", 10) == 0 ? "holds them" : "not");
+    long told = (long)ftello(f);
+    int sought = fseeko(f, 3, SEEK_SET);
+    long at = (long)ftello(f);
+    int c = fgetc(f);
+    printf("ftello: %ld; fseeko 3: %d; ftello: %ld; fgetc: %c\n", told, sought, at, c);
+    fclose(f);
+
+    f = fopen(DIR_PATH "/unbuffered", "w");
+    if (!f) {
+        printf("fopen unbuffered failed\n");
+        return;
+    }
+    setbuf(f, NULL);
+    fputs("abc", f);
+    printf("setbuf NULL: file %ld bytes\n", stat(DIR_PATH "/unbuffered", &st) == 0 ? (long)st.st_size : -1L);
+    fclose(f);
+}
+
+static void alarms(void) {
+    void (*was)(int) = signal(SIGALRM, SIG_IGN);
+    void (*then)(int) = signal(SIGALRM, SIG_DFL);
+    printf("signal SIGALRM: was %s, then %s\n", was == SIG_DFL ? "SIG_DFL" : "another",
+           then == SIG_IGN ? "SIG_IGN" : "another");
+    struct sigaction ignore = { .sa_handler = SIG_IGN, .sa_flags = SA_RESTART }, old = { .sa_handler = SIG_DFL };
+    sigemptyset(&ignore.sa_mask);
+    sigaddset(&ignore.sa_mask, SIGUSR1);
+    int set = sigaction(SIGALRM, &ignore, NULL);
+    int got = sigaction(SIGALRM, NULL, &old);
+    printf("sigaction SIGALRM: %d %d, %s, flags 0x%lx, mask 0x%lx\n", set, got,
+           old.sa_handler == SIG_IGN ? "SIG_IGN" : "another", old.sa_flags, (unsigned long)old.sa_mask);
+    signal(SIGALRM, SIG_DFL);
+    unsigned first = alarm(5);
+    unsigned left = alarm(0);
+    unsigned again = alarm(0);
+    printf("alarm 5: %u; alarm 0: %s; again: %u\n", first, left >= 1 && left <= 5 ? "1 to 5" : "another", again);
 }
 
 static void listing(void) {
@@ -154,6 +215,9 @@ int main(void) {
         return 1;
     }
     links();
+    truncated();
+    buffered();
+    alarms();
     listing();
     dl();
 
@@ -166,6 +230,13 @@ int main(void) {
     errno = 0;
     double pole = logb(0.0);
     printf("logb(0): %g, %s\n", pole, errno == ERANGE ? "ERANGE" : errno_name(errno));
+    /* Volatile, so the compiler folds none of them. */
+    volatile double halves[] = { 2.5, -2.5, 0.49999999999999994, 1e19 };
+    printf("lround: %ld %ld %ld\n", lround(halves[0]), lround(halves[1]), lround(halves[2]));
+    errno = 0;
+    long far = lround(halves[3]);
+    printf("lround(1e19): %ld, %s\n", far, errno == EDOM ? "EDOM" : errno_name(errno));
+    printf("pathconf _PC_PATH_MAX: %ld\n", pathconf(DIR_PATH, _PC_PATH_MAX));
     printf("sysconf _SC_PAGE_SIZE: %ld\n", sysconf(_SC_PAGE_SIZE));
     return 0;
 }

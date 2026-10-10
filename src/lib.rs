@@ -12,11 +12,15 @@ pub mod cicache;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;
+pub mod fatformat;
 pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;
+pub mod gptwrite;
+pub mod hostedclang;
 pub mod flags;
 pub mod hostws;
+pub mod icons;
 pub mod identity;
 pub mod image;
 pub mod kernelconsole;

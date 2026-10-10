@@ -30,7 +30,7 @@ fn guid(n: u8) -> Guid {
 }
 
 fn entry(index: u32, type_guid: Guid, unique: Guid, first: u64, last: u64) -> RawEntry {
-    RawEntry { index, type_guid, unique, first, last }
+    RawEntry { index, type_guid, unique, first, last, name: [0; 36] }
 }
 
 /// The disk every test here breaks one thing of, `edit`ed, with no backup

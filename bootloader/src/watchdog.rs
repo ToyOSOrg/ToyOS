@@ -12,7 +12,6 @@
 //! Every machine this cannot arm is refused by name on the console and boots
 //! anyway.
 
-use core::mem::{align_of, size_of};
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
@@ -20,8 +19,7 @@ use toyos_tco::{
     Chipset, TCO1_CNT, TCO1_CNT_LOCK, TCO1_CNT_NO_REBOOT, TCO1_CNT_RUN, TCO1_STS, TCO2_STS,
     TCO1_STS_TIMEOUT, TCO_RLD, TCO_TMR,
 };
-use uefi::prelude::*;
-use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
+use crate::efi::{SystemTable, PAGE_SIZE};
 
 /// x86-64's 52-bit physical-address ceiling.
 const MAX_PHYS: u64 = 1 << 52;
@@ -49,7 +47,7 @@ impl Phys for Identity {
 
 /// Arm the watchdog when `cmdline` names it, and say on the console what was
 /// armed or why nothing was.
-pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
+pub fn arm(system_table: &SystemTable, rsdp_addr: u64, cmdline: &str) {
     if !toyos_abi::boot::actuators(cmdline).any(|token| token == toyos_tco::PARAM) {
         return;
     }
@@ -152,21 +150,14 @@ fn chipset(ecam: u64) -> Option<(&'static Chipset, u32, u32)> {
 }
 
 /// Whether firmware's own map describes `[at, at + len)` inside one region.
-fn described(system_table: &SystemTable<Boot>, at: u64, len: u64) -> bool {
+fn described(system_table: &SystemTable, at: u64, len: u64) -> bool {
     let bs = system_table.boot_services();
-    let size = bs.memory_map_size();
+    let (map_size, entry_size) = bs.memory_map_size();
     // Eight descriptors of slack: the map can grow between the two calls, and
     // this one allocates in between.
-    let bytes = size.map_size + 8 * size.entry_size;
+    let bytes = map_size + 8 * entry_size;
     let mut words: alloc::vec::Vec<u64> = alloc::vec![0; bytes.div_ceil(size_of::<u64>())];
-    const _: () = assert!(align_of::<MemoryDescriptor>() <= align_of::<u64>());
-    // SAFETY: `words` is a live allocation of exactly this many bytes, aligned
-    // for `u64` and so for `MemoryDescriptor`, and nothing else names it while
-    // the slice is alive.
-    let buffer = unsafe {
-        core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8)
-    };
-    let Ok(map) = bs.memory_map(buffer) else { return false };
+    let Ok(map) = bs.memory_map(&mut words) else { return false };
     let Some(end) = at.checked_add(len) else { return false };
     // Every field here is firmware's, so a region whose own end overflows
     // describes nothing rather than wrapping into one that covers `at`.

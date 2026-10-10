@@ -1,7 +1,7 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
-   says why, and nothing is done: ENOSYS where ToyOS lacks the function, and
-   the errno POSIX names for a lock or a mapping it cannot take, or memory it
-   cannot give. */
+   says why, and nothing is done: ENOSYS where ToyOS lacks the function, ECHILD
+   for a wait on the child libc cannot start, and the errno POSIX names for a
+   lock, a limit or a mapping it cannot take, or memory it cannot give. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -12,6 +12,8 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define FILE_PATH "/tmp/206_libc_refusals"
@@ -19,6 +21,7 @@
 static const char *errno_name(int e) {
     switch (e) {
     case 0: return "no errno";
+    case ECHILD: return "ECHILD";
     case ENOSYS: return "ENOSYS";
     case EINVAL: return "EINVAL";
     case ENODEV: return "ENODEV";
@@ -81,6 +84,11 @@ int main(void) {
     said("msync", msync(page, 4096, MS_SYNC));
     said("mprotect", mprotect(page, 4096, PROT_READ));
     said("realpath", realpath("/tmp", NULL) == NULL ? -1 : 0);
+    said("utimes", utimes(FILE_PATH, NULL));
+    int status = 0;
+    said("wait", wait(&status));
+    said("wait4", wait4(-1, &status, 0, NULL));
+    said("pathconf 12345", pathconf(FILE_PATH, 12345));
     said("fcntl F_SETLK", fcntl(fd, F_SETLK, &lock));
     said("fcntl F_SETLKW", fcntl(fd, F_SETLKW, &lock));
     said("fcntl F_GETLK", fcntl(fd, F_GETLK, &lock));

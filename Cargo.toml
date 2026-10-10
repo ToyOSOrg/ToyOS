@@ -160,12 +160,9 @@ license = "MIT OR Apache-2.0"
 default-run = "toyos-build"
 
 [dependencies]
-fatfs = "0.3.6"
 fontdue = "0.9"
-gpt = "3.1.0"
 libc = "0.2"
 toml = "0.8"
-uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcachefs = { path = "bcachefs" }
@@ -202,15 +199,18 @@ toyos-blackbox = { path = "toyos-blackbox" }
 # The signed image, the slot table and the signer: `src/signing.rs` signs with
 # the same crate the loader and `/system/bin/update` verify with.
 toyos-update = { path = "toyos-update", features = ["sign"] }
-# A throwaway key's seed, from the operating system. Already resolved here.
+# A throwaway key's seed and every GUID a partition table names, from the
+# operating system.
 getrandom = "0.3"
+# The wallpaper's `powf` and `expf`, in Rust and the same on every host, where
+# `f32`'s own call the host's C library and ROOT's UUID is derived from its bytes.
+libm = "0.2.16"
 # The one `openssh-key-v1` reader and writer, shared with the SSH server's
 # host key, and the `SHA256:` fingerprint the owner's key is named by.
 toyos-ssh = { path = "toyos-ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
 # store key, a ROOT's name, a release asset's digest, and the harness's of a
 # body a guest fetches over TLS.
@@ -224,15 +224,16 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # takes (`issues/the-internet-clients-work-unchanged.md`), whose C
 # and assembly the host's `cc` compiles.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
-# The commit an image is built from, its time and whether the tree is that
-# commit's, where `git` is a host's C tool (`src/build.rs`'s `release`).
-gix = { version = "0.88", default-features = false, features = ["status", "sha1"] }
 # The authorities `build::trust_roots` writes to ROOT, as the rustls project
 # publishes the Mozilla root program, and the PEM it writes them in.
 webpki-root-certs = "1"
 pem = "4"
 
 [dev-dependencies]
+# The FAT implementation `src/fatformat.rs` is judged against, byte for byte.
+fatfs = "0.3.6"
+# The GPT writer `src/gptwrite.rs` is judged against, byte for byte.
+gpt = "3.1.0"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }

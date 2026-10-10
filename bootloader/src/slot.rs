@@ -27,10 +27,7 @@ use toyos_update::policy::{self, Refusal};
 use toyos_update::record::{self, Booted, Record};
 use toyos_update::slots::{self, Slot, Which};
 use toyos_update::{sig, Digest};
-use uefi::prelude::*;
-use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
-use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::CString16;
+use crate::efi::{BootServices, CString16, Handle, Mode, SimpleFileSystem, Status, SystemTable};
 
 use crate::rootimage::{Disk, RootImage};
 
@@ -57,7 +54,7 @@ pub struct Chosen {
 /// The slot to boot, or every refusal and why there is nothing to boot.
 pub fn choose(
     handle: Handle,
-    system_table: &SystemTable<Boot>,
+    system_table: &SystemTable,
     floor: u64,
     record: &Record,
 ) -> Result<Chosen, String> {
@@ -192,7 +189,7 @@ fn signed_header(bs: &BootServices, which: Which, slot: &Slot) -> Result<(Header
 /// The version the image the record says the last boot proved carries, read
 /// out of its slot's signed header, verified in this pass; or why no version
 /// is.
-pub fn proven(handle: Handle, system_table: &SystemTable<Boot>, booted: &Booted) -> Result<u64, String> {
+pub fn proven(handle: Handle, system_table: &SystemTable, booted: &Booted) -> Result<u64, String> {
     let bs = system_table.boot_services();
     let letter = booted.slot.letter();
     let mut disk = Disk::open(bs, crate::rootimage::boot_disk(handle, bs)?)?;
@@ -246,21 +243,22 @@ enum FileRefused {
 /// `max` bytes.
 fn read_file(bs: &BootServices, guid: &[u8; 16], path: &str, max: u64) -> Result<Vec<u8>, FileRefused> {
     let handle = crate::loaderlog::volume_handle(bs, guid).map_err(FileRefused::Other)?;
-    let mut fs = crate::protocol::exclusive::<SimpleFileSystem>(bs, handle)
+    let mut fs = bs
+        .exclusive::<SimpleFileSystem>(handle)
         .map_err(|e| FileRefused::Other(alloc::format!("would not open its volume ({e})")))?;
     let mut root = fs.open_volume().map_err(|e| FileRefused::Other(alloc::format!("has no volume ({e})")))?;
-    let name = CString16::try_from(path.replace('/', "\\").as_str())
-        .map_err(|_| FileRefused::Other(String::from("is no UCS-2 path")))?;
-    let file = match root.open(&name, FileMode::Read, FileAttribute::empty()) {
+    let name = CString16::new(&path.replace('/', "\\"))
+        .ok_or_else(|| FileRefused::Other(String::from("is no UCS-2 path")))?;
+    let file = match root.open(&name, Mode::Read) {
         Ok(file) => file,
-        Err(e) if e.status() == Status::NOT_FOUND => return Err(FileRefused::Missing),
+        Err(Status::NOT_FOUND) => return Err(FileRefused::Missing),
         Err(e) => return Err(FileRefused::Other(alloc::format!("would not open ({e})"))),
     };
     let mut file = file.into_regular_file().ok_or(FileRefused::Other(String::from("is a directory")))?;
-    let info = file
-        .get_boxed_info::<FileInfo>()
-        .map_err(|e| FileRefused::Other(alloc::format!("would not say its size ({e})")))?;
-    let size = info.file_size();
+    let size = file
+        .info()
+        .map_err(|e| FileRefused::Other(alloc::format!("would not say its size ({e})")))?
+        .file_size;
     if size > max {
         return Err(FileRefused::Other(alloc::format!("is {size} bytes, past the {max} expected")));
     }
