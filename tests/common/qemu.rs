@@ -994,6 +994,10 @@ pub struct BootOptions {
     /// calling CPU's affinity: the firmware side's own account of what the
     /// kernel asked of it.
     pub psci_trace: Option<PathBuf>,
+    /// A second slot beside the one the image boots, with room for an
+    /// update's ROOT of this many bytes: a machine that updates itself.
+    /// `None` for every guest whose subject is not the update.
+    pub second_slot: Option<u64>,
 }
 
 impl BootOptions {
@@ -1031,6 +1035,7 @@ impl Default for BootOptions {
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
             psci_trace: None,
+            second_slot: None,
         }
     }
 }
@@ -1109,6 +1114,7 @@ fn build_boot_image_with(
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
+    second_slot: Option<u64>,
 ) -> Vec<u8> {
     // **The two fields have the same type, so swapping them compiles.** It
     // happened once, in this file's own conversion: the shared boot handed
@@ -1179,7 +1185,8 @@ fn build_boot_image_with(
     );
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let plan = toyos_build::build::Plan::new(arch, &config_path, kernel_features, kernel_params);
+    let mut plan = toyos_build::build::Plan::new(arch, &config_path, kernel_features, kernel_params);
+    plan.second = second_slot.map(|root_bytes| toyos_build::image::SecondSlot { root_bytes });
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
@@ -1261,6 +1268,7 @@ impl QemuInstance {
             &features,
             &params,
             options.debug_wait,
+            options.second_slot,
         );
         let storage = options.profile.shape().storage;
         match storage {
@@ -1566,6 +1574,12 @@ impl QemuInstance {
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
         self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
+    }
+
+    /// The disk this guest booted from, which it writes: read back while the
+    /// guest runs, since the instance's end deletes it.
+    pub fn boot_image(&self) -> &Path {
+        &self.boot_image
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {

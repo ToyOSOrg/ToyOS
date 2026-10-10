@@ -58,7 +58,8 @@ pub enum Outcome {
     /// A flush: every write acknowledged before it was asked for is on the
     /// medium.
     Durable,
-    /// The server refused it as malformed.
+    /// The server refused it as malformed, or as a write its grant does not
+    /// make.
     Invalid,
     /// The device did not do it. A write answered this may or may not have
     /// reached the medium; a flush answered this left writes the device would

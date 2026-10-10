@@ -36,7 +36,7 @@ use bcachefs::{Extent, Formatted, FsError, Mounted, ReadWrite};
 use toyos_abi::syscall::SyscallError;
 
 use crate::cache::{Cache, Shared};
-use crate::disk::{Disk, DiskError, BLOCK};
+use diskserver::disk::{Disk, DiskError, BLOCK};
 use crate::volume::{join, parent, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
@@ -767,7 +767,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::disk::Ram;
+    use crate::ram::Ram;
     use crate::volume::Buf;
 
     fn clock() -> u64 {

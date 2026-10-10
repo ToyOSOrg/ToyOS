@@ -24,7 +24,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
-use crate::disk::{Disk, BLOCK};
+use diskserver::disk::{Disk, BLOCK};
 use crate::volume::{parent, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
@@ -438,7 +438,8 @@ mod tests {
 
     use super::*;
     use crate::cache::CLEAN_LIMIT;
-    use crate::disk::{DiskError, Ram};
+    use crate::ram::Ram;
+    use diskserver::disk::DiskError;
 
     /// A disk that refuses every read of one block, after the fixture's own
     /// bytes are on it.

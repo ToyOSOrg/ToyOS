@@ -98,7 +98,8 @@ pub enum Status {
     /// Done. For a flush, every write of its writer's acknowledged before it
     /// was submitted is on the medium.
     Ok,
-    /// Refused unread: the request was malformed ([`Refused`]).
+    /// Refused unread: the request was malformed ([`Refused`]), or is a write
+    /// on a session whose grant does not write.
     Invalid,
     /// The device did not do it, or was reset under it. A write answered this
     /// may or may not have reached the medium.

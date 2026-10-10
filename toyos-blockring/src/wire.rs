@@ -6,6 +6,12 @@
 //! [`Refusal`]. After `MSG_OPENED` the connection carries nothing but doorbell
 //! bytes, each way.
 //!
+//! **What a connection may open is its [`Grant`]**, the badge the holder of
+//! the service's acceptor minted its connector with, which the kernel stamps
+//! on every connection through it: a listing names what the grant admits and
+//! nothing else, an open of anything else is refused [`Refusal::NotGranted`],
+//! and a connection with no grant reaches nothing.
+//!
 //! **The answer comes with the server's ends of the page.** A client looks at
 //! the page the moment it hears, and one that opens the same region again
 //! sends the cursors its last server left on it. So [`Opened::over`] makes a
@@ -17,14 +23,15 @@ use toyos_transport::Word;
 use crate::layout::{self, ServerRings, RING_WORDS};
 
 /// Open the partition whose unique GUID is the payload, over the region sent
-/// with it. Handles: the region.
+/// with it, if the connection's [`Grant`] admits it. Handles: the region.
 pub const MSG_OPEN: u32 = 1;
 /// The session is open; the payload is [`Opened`].
 pub const MSG_OPENED: u32 = 2;
 /// Refused; the payload is a [`Refusal`]'s word.
 pub const MSG_REFUSED: u32 = 3;
-/// What partitions the service serves, for a client that finds its own by
-/// type: no payload, no handles; answered [`MSG_LISTED`].
+/// What partitions the service serves that the connection's [`Grant`]
+/// admits, for a client that finds its own by type or holds one partition's
+/// grant: no payload, no handles; answered [`MSG_LISTED`].
 pub const MSG_LIST: u32 = 4;
 /// The answer to [`MSG_LIST`]: one [`Listed`] after another.
 pub const MSG_LISTED: u32 = 5;
@@ -91,10 +98,10 @@ impl Opened {
 }
 
 /// One partition of the table a service drives, as [`MSG_LISTED`] carries
-/// it: its unique and type GUIDs as the table stores them. Every entry is
-/// listed, one the service will not open among them, so a client that finds
-/// its partition by type learns why from the open's refusal rather than
-/// taking the partition for missing.
+/// it: its unique and type GUIDs as the table stores them. Every entry the
+/// grant admits is listed, one the service will not open among them, so a
+/// client that finds its partition by type learns why from the open's refusal
+/// rather than taking the partition for missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listed {
     pub unique: [u8; GUID_BYTES],
@@ -124,6 +131,67 @@ impl Listed {
     }
 }
 
+/// What a connector to a block service reaches: the badge it was minted with
+/// (`SYS_PORT_MINT`), whose bytes are [`Grant::encode`]'s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    pub scope: Scope,
+    /// A session it opens takes writes; one that does not answers every
+    /// write `Invalid`, unissued.
+    pub writes: bool,
+}
+
+/// Which partitions a [`Grant`] reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The one partition whose unique GUID this is.
+    Unique([u8; GUID_BYTES]),
+    /// Every partition whose type GUID this is: a role found by type.
+    Kind([u8; GUID_BYTES]),
+}
+
+impl Grant {
+    pub const BYTES: usize = 2 + GUID_BYTES;
+
+    pub fn encode(&self) -> [u8; Self::BYTES] {
+        let (tag, guid) = match self.scope {
+            Scope::Unique(guid) => (1, guid),
+            Scope::Kind(guid) => (2, guid),
+        };
+        let mut out = [0u8; Self::BYTES];
+        out[0] = tag;
+        out[1] = u8::from(self.writes);
+        out[2..].copy_from_slice(&guid);
+        out
+    }
+
+    /// `None` for bytes no minter of this protocol stamps.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; Self::BYTES] = bytes.try_into().ok()?;
+        let guid: [u8; GUID_BYTES] = bytes[2..].try_into().ok()?;
+        let scope = match bytes[0] {
+            1 => Scope::Unique(guid),
+            2 => Scope::Kind(guid),
+            _ => return None,
+        };
+        let writes = match bytes[1] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self { scope, writes })
+    }
+
+    /// Whether it reaches the partition whose unique GUID is `unique` and
+    /// whose type GUID is `kind`.
+    pub fn admits(&self, unique: [u8; GUID_BYTES], kind: [u8; GUID_BYTES]) -> bool {
+        match self.scope {
+            Scope::Unique(guid) => guid == unique,
+            Scope::Kind(guid) => guid == kind,
+        }
+    }
+}
+
 /// Why an open was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -144,6 +212,11 @@ pub enum Refusal {
     /// service its claim: nothing on it is served, and a listing is refused
     /// the same.
     ClaimRefused,
+    /// The connection's grant does not reach that partition, whether or not
+    /// the service has it. A connection with no grant, or with bytes no
+    /// minter of this protocol stamps, reaches none, and its listing is
+    /// refused the same.
+    NotGranted,
 }
 
 impl Refusal {
@@ -155,6 +228,7 @@ impl Refusal {
             Self::Malformed => 4,
             Self::Exhausted => 5,
             Self::ClaimRefused => 6,
+            Self::NotGranted => 7,
         }
     }
 
@@ -166,6 +240,7 @@ impl Refusal {
             4 => Some(Self::Malformed),
             5 => Some(Self::Exhausted),
             6 => Some(Self::ClaimRefused),
+            7 => Some(Self::NotGranted),
             _ => None,
         }
     }
@@ -207,11 +282,41 @@ mod tests {
             Refusal::Malformed,
             Refusal::Exhausted,
             Refusal::ClaimRefused,
+            Refusal::NotGranted,
         ] {
             assert_eq!(Refusal::decode(&r.encode()), Some(r));
         }
         assert_eq!(Refusal::decode(&0u32.to_le_bytes()), None);
         assert_eq!(Refusal::decode(&[1, 0, 0]), None);
         assert_eq!(guid(&[0; 15]), None);
+    }
+
+    /// A unique grant reaches its one partition and a kind grant every
+    /// partition of its type, never one that only shares the other GUID's
+    /// bytes; and a badge decodes only as a minter of this protocol stamps it.
+    #[test]
+    fn a_grant_reaches_its_own_partitions_and_decodes_only_whole() {
+        let (own, other, data) = ([1; GUID_BYTES], [2; GUID_BYTES], [9; GUID_BYTES]);
+        let unique = Grant { scope: Scope::Unique(own), writes: false };
+        assert!(unique.admits(own, data));
+        assert!(!unique.admits(other, data));
+        assert!(!unique.admits(data, own), "a unique grant read as a type");
+        let kind = Grant { scope: Scope::Kind(data), writes: true };
+        assert!(kind.admits(own, data) && kind.admits(other, data));
+        assert!(!kind.admits(data, own), "a kind grant read as a unique GUID");
+
+        for grant in [unique, kind] {
+            assert_eq!(Grant::decode(&grant.encode()), Some(grant));
+            assert_eq!(Grant::decode(&grant.encode()[1..]), None);
+            let mut long = grant.encode().to_vec();
+            long.push(0);
+            assert_eq!(Grant::decode(&long), None);
+        }
+        let mut bad = kind.encode();
+        bad[0] = 3;
+        assert_eq!(Grant::decode(&bad), None);
+        bad = kind.encode();
+        bad[1] = 2;
+        assert_eq!(Grant::decode(&bad), None);
     }
 }

@@ -31,6 +31,9 @@ pub struct ServerSession {
     blocks: u64,
     /// The span of the device this session holds, which is its writer.
     first: u64,
+    /// Its grant lets it write; a write on a session whose grant does not is
+    /// answered `Invalid` and never reaches the device.
+    writes: bool,
     /// Each request in flight, in the order it was taken: a tag is only ever
     /// compared for equality.
     inflight: Vec<(u32, Op)>,
@@ -47,9 +50,9 @@ pub enum Taken {
 
 impl ServerSession {
     /// A session over the partition at device block `first`, `blocks` long,
-    /// which `holds` already holds for it.
-    pub fn new(first: u64, blocks: u64) -> Self {
-        Self { blocks, first, inflight: Vec::new() }
+    /// which `holds` already holds for it, taking writes if `writes`.
+    pub fn new(first: u64, blocks: u64, writes: bool) -> Self {
+        Self { blocks, first, writes, inflight: Vec::new() }
     }
 
     /// The writer this session's writes and flushes are accounted to.
@@ -74,9 +77,10 @@ impl ServerSession {
 
     /// Decide what one entry the client published is.
     ///
-    /// A malformed entry, and a tag already in flight, are answered at once
-    /// and never reach the device: the second would make one tag two
-    /// requests, and the client could not tell which answer was whose.
+    /// A malformed entry, a write its grant does not let it make, and a tag
+    /// already in flight, are answered at once and never reach the device:
+    /// the last would make one tag two requests, and the client could not
+    /// tell which answer was whose.
     pub fn take(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
@@ -84,6 +88,9 @@ impl ServerSession {
                 return Taken::Answer(Completion { tag, status: Status::Invalid })
             }
         };
+        if !self.writes && matches!(request.op, Op::Write { .. }) {
+            return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
+        }
         if self.inflight.iter().any(|&(tag, _)| tag == request.tag) {
             return Taken::Answer(Completion { tag: request.tag, status: Status::Invalid });
         }
@@ -145,7 +152,7 @@ mod tests {
     fn a_reset_answers_once_and_the_late_device_answer_is_dropped() {
         let mut holds: Holds<u8> = Holds::new();
         holds.hold(10, 20, 1).unwrap();
-        let mut session = ServerSession::new(10, 10);
+        let mut session = ServerSession::new(10, 10, true);
         assert!(matches!(session.take(write(1)), Taken::Issue(_)));
         assert_eq!(session.abort_all(), [Completion { tag: 1, status: Status::Device }]);
         assert_eq!(session.complete(1, true, &mut holds, 1), None);
@@ -155,7 +162,7 @@ mod tests {
     /// tags' values: nothing orders a tag but its arrival.
     #[test]
     fn a_reset_answers_in_the_order_taken() {
-        let mut session = ServerSession::new(0, 10);
+        let mut session = ServerSession::new(0, 10, true);
         for tag in [9, 4] {
             assert!(matches!(session.take(write(tag)), Taken::Issue(_)));
         }
@@ -165,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_tag_in_flight_twice_is_refused_unissued() {
-        let mut session = ServerSession::new(0, 10);
+        let mut session = ServerSession::new(0, 10, true);
         assert!(matches!(session.take(write(4)), Taken::Issue(_)));
         assert_eq!(session.take(write(4)), Taken::Answer(Completion { tag: 4, status: Status::Invalid }));
         assert_eq!(session.inflight().len(), 1);
@@ -177,12 +184,24 @@ mod tests {
     fn a_flush_after_a_loss_answers_lost_once() {
         let mut holds: Holds<u8> = Holds::new();
         holds.hold(0, 10, 1).unwrap();
-        let mut session = ServerSession::new(0, 10);
+        let mut session = ServerSession::new(0, 10, true);
         session.take(write(1));
         assert_eq!(session.complete(1, true, &mut holds, 0).unwrap().status, Status::Ok);
         session.take(flush(2));
         assert_eq!(session.complete(2, true, &mut holds, 1).unwrap().status, Status::Lost);
         session.take(flush(3));
         assert_eq!(session.complete(3, true, &mut holds, 1).unwrap().status, Status::Ok);
+    }
+
+    /// A session whose grant does not write answers a write `Invalid` and
+    /// holds nothing for the device, and still reads and flushes.
+    #[test]
+    fn a_read_only_session_refuses_a_write_unissued() {
+        let mut session = ServerSession::new(0, 10, false);
+        assert_eq!(session.take(write(1)), Taken::Answer(Completion { tag: 1, status: Status::Invalid }));
+        assert_eq!(session.inflight().len(), 0);
+        let read = Request { op: Op::Read { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag: 2 };
+        assert!(matches!(session.take(read.encode().map(Untrusted::new)), Taken::Issue(_)));
+        assert!(matches!(session.take(flush(3)), Taken::Issue(_)));
     }
 }
