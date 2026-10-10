@@ -665,7 +665,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            judge: |b| {
+                let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
+                smp_roster_and_tsc_trail(log.text(), cpus)?;
+                apic_mode_held(&log, cpus, "X2apic")
+            },
         },
     ),
     (
@@ -2008,19 +2013,26 @@ fn desktop_without_x2apic() -> Result<(), String> {
     }
     let said = serial::Serial::named("the boot without x2APIC", console);
     said.must_be_clean()?;
-    said.must_say("LAPIC: Xapic enabled (ID 0)")?;
-    for cpu in 0..CPUS {
-        let line = said.must_say(&format!("control_regs: cpu{cpu} apic_base="))?;
-        if !line.trim_end().ends_with(" Xapic") {
-            return Err(format!("cpu{cpu} did not declare its local APIC in xAPIC mode: {line:?}"));
-        }
-    }
-    let held = said.must_say(&format!("control_regs: {CPUS} of {CPUS} cpus hold "))?;
-    if !held.trim_end().ends_with(" apic=Xapic") {
-        return Err(format!("the machine's declaration is not xAPIC: {held:?}"));
-    }
+    apic_mode_held(&said, CPUS, "Xapic")?;
     smp_roster_and_tsc_trail(said.text(), CPUS)?;
     eprintln!("  [xapic] {CPUS} CPUs in xAPIC mode, and the compositor holds the panel");
+    Ok(())
+}
+
+/// Every one of `cpus` CPUs declared its local APIC in `mode`, as
+/// `control_regs` names it, and the machine's report says the same.
+fn apic_mode_held(log: &serial::Serial, cpus: u32, mode: &str) -> Result<(), String> {
+    for cpu in 0..cpus {
+        let line = log.must_say(&format!("control_regs: cpu{cpu} apic_base="))?;
+        if !line.trim_end().ends_with(&format!(" {mode}")) {
+            return Err(format!("cpu{cpu} did not declare its local APIC {mode}: {line:?}"));
+        }
+    }
+    let held = log.must_say(&format!("control_regs: {cpus} of {cpus} cpus hold "))?;
+    if !held.trim_end().ends_with(&format!(" apic={mode}")) {
+        return Err(format!("the machine's declaration is not {mode}: {held:?}"));
+    }
+    log.must_say(&format!("LAPIC: {mode} enabled ("))?;
     Ok(())
 }
 
