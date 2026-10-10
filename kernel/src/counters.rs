@@ -123,6 +123,17 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
             Counter::FirmwareCalls => hardware.firmware.as_ref().map(|f| f.calls),
             Counter::FirmwareNanos => hardware.firmware.as_ref().map(|f| f.nanos),
+            Counter::Switches
+            | Counter::Syscalls
+            | Counter::IdleExits
+            | Counter::IdleExitCycles
+            | Counter::IrqCycles
+            | Counter::InboxFires
+            | Counter::InboxLooks
+            | Counter::InboxRearms
+            | Counter::PipeLockSpinCycles
+            | Counter::PipeLockHoldCycles
+            | Counter::PipeCopyBytes => Some(soft::get(me, counter)),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;
@@ -209,6 +220,67 @@ fn record(cpu: usize, generation: Generation, rights: Rights) -> Record {
         hardware_id: words.map_or(0, |w| w[0] as u32),
         stale: !fresh || words.is_none(),
         values,
+    }
+}
+
+/// MEASUREMENT ONLY: the kernel's own work, counted per CPU by software.
+pub mod soft {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    use toyos_abi::counters::Counter;
+
+    use crate::arch::percpu;
+    use crate::scheduler::MAX_CPUS;
+
+    const FIRST: usize = Counter::Switches as usize;
+    const N: usize = Counter::COUNT - FIRST;
+
+    #[repr(align(64))]
+    struct Block {
+        counts: [AtomicU64; N],
+        /// The stamp the idle loop's last halt returned at, zero once spent.
+        woke: AtomicU64,
+    }
+
+    static BLOCKS: [Block; MAX_CPUS] =
+        [const { Block { counts: [const { AtomicU64::new(0) }; N], woke: AtomicU64::new(0) } }; MAX_CPUS];
+
+    fn here() -> &'static Block {
+        &BLOCKS[percpu::cpu_id() as usize]
+    }
+
+    #[inline]
+    pub fn now() -> u64 {
+        crate::arch::cpu::counter()
+    }
+
+    #[inline]
+    pub fn add(counter: Counter, n: u64) {
+        here().counts[counter as usize - FIRST].fetch_add(n, Relaxed);
+    }
+
+    /// Stamp ticks since `since`, added to `counter`.
+    #[inline]
+    pub fn since(counter: Counter, since: u64) {
+        add(counter, now().wrapping_sub(since));
+    }
+
+    pub(super) fn get(cpu: usize, counter: Counter) -> u64 {
+        BLOCKS[cpu].counts[counter as usize - FIRST].load(Relaxed)
+    }
+
+    /// The idle loop's halt returned.
+    pub fn woke() {
+        add(Counter::IdleExits, 1);
+        here().woke.store(now(), Relaxed);
+    }
+
+    /// The CPU left the idle loop's wake for a switch or another halt.
+    pub fn idle_left() {
+        let woke = here().woke.swap(0, Relaxed);
+        if woke != 0 {
+            since(Counter::IdleExitCycles, woke);
+        }
     }
 }
 

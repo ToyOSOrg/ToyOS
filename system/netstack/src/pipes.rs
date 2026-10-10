@@ -48,11 +48,14 @@ fn write_refused(why: SyscallError) -> WriteRefusal {
 
 impl ToClient for Held {
     fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
-        crate::prof::add(4, 1);
+        use crate::prof::{Slot, add, since};
+        add(Slot::PipeW, 1);
+        let t0 = crate::prof::now();
         let r = self.0.write_nonblock(bytes).map_err(write_refused);
+        since(Slot::CyPipeW, t0);
         match r {
-            Ok(n) => crate::prof::add(5, n as u64),
-            Err(_) => crate::prof::add(6, 1),
+            Ok(n) => add(Slot::PipeWBytes, n as u64),
+            Err(_) => add(Slot::PipeWRefused, 1),
         }
         r
     }
@@ -60,10 +63,14 @@ impl ToClient for Held {
 
 impl FromClient for Held {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
-        crate::prof::add(7, 1);
-        self.0.read_nonblock(out).map_err(|why| match why {
+        use crate::prof::{Slot, add, since};
+        add(Slot::PipeR, 1);
+        let t0 = crate::prof::now();
+        let r = self.0.read_nonblock(out);
+        since(Slot::CyPipeR, t0);
+        r.map_err(|why| match why {
             SyscallError::WouldBlock => {
-                crate::prof::add(8, 1);
+                add(Slot::PipeREmpty, 1);
                 ReadRefusal::Empty
             }
             _ => ReadRefusal::Broken,
