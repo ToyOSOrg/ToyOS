@@ -13,6 +13,12 @@
 //! superset of what one image links, and a crate only another platform pulls in
 //! can red here. Git and path packages are judged exactly as registry ones.
 //!
+//! **The trust roots are judged by the crate the build copies them out of**,
+//! [`crate::build::TRUST_ROOTS_CRATE`], which no shipped package reaches: by
+//! its `license` as data, the one place [`DATA_ONLY`] passes, and refused
+//! unless the licence text the image carries beside them is that crate's own
+//! `LICENSE`, byte for byte.
+//!
 //! **A committed file is judged by its [`COMMITTED_FILES`] row**,
 //! whose [`Terms`] column is its licence. A file ships when it is under a
 //! shipped asset directory or a shipped path package's directory, or when such
@@ -76,6 +82,31 @@ const ALLOWED_WITH: &[(&str, &str)] = &[("Apache-2.0", "LLVM-exception")];
 
 /// Allowed for a [`Terms::Font`] row, and nowhere else.
 const FONTS_ONLY: &[&str] = &["OFL-1.1"];
+
+/// Allowed for the data the build writes into an image out of
+/// [`crate::build::TRUST_ROOTS_CRATE`], and nowhere else: the owner allowed
+/// CDLA-Permissive-2.0 for the Mozilla roots.
+const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
+
+/// What a licence is judged as: [`FONTS_ONLY`] passes only for a font and
+/// [`DATA_ONLY`] only for the trust roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Code,
+    Font,
+    Data,
+}
+
+impl Scope {
+    fn allows(self, id: &str) -> bool {
+        ALLOWED.contains(&id)
+            || match self {
+                Scope::Code => false,
+                Scope::Font => FONTS_ONLY.contains(&id),
+                Scope::Data => DATA_ONLY.contains(&id),
+            }
+    }
+}
 
 /// Surfaced by name in every verdict, not refused.
 const NAMED: &[&str] = &["MPL-2.0"];
@@ -519,10 +550,16 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
 ];
 
 /// `NOTICE` sections that name no files, and why.
-const PROSE: &[(&str, &str)] = &[(
-    "Rust crates and the forks",
-    "every crate, fork or not, is judged by the crate half of this gate",
-)];
+const PROSE: &[(&str, &str)] = &[
+    (
+        "Rust crates and the forks",
+        "every crate, fork or not, is judged by the crate half of this gate",
+    ),
+    (
+        "licenses/CDLA-Permissive-2.0-webpki-root-certs.txt — the Mozilla roots, CDLA-Permissive-2.0",
+        "the roots the build writes out of a crate are judged, with this text beside them, by `judge_trust_roots`",
+    ),
+];
 
 // --- Expressions -------------------------------------------------------------
 
@@ -629,11 +666,10 @@ fn parse_with(tokens: &[String], at: &mut usize) -> Result<Expr, String> {
 }
 
 /// The leaves that keep `expr` from passing; empty when it passes.
-fn refused(expr: &Expr, font: bool) -> Vec<String> {
+fn refused(expr: &Expr, scope: Scope) -> Vec<String> {
     match expr {
         Expr::Id(id) => {
-            let ok = ALLOWED.contains(&id.as_str()) || (font && FONTS_ONLY.contains(&id.as_str()));
-            if ok {
+            if scope.allows(id) {
                 vec![]
             } else {
                 vec![id.clone()]
@@ -646,9 +682,9 @@ fn refused(expr: &Expr, font: bool) -> Vec<String> {
                 vec![format!("{id} WITH {exception}")]
             }
         }
-        Expr::And(parts) => parts.iter().flat_map(|p| refused(p, font)).collect(),
+        Expr::And(parts) => parts.iter().flat_map(|p| refused(p, scope)).collect(),
         Expr::Or(parts) => {
-            let each: Vec<Vec<String>> = parts.iter().map(|p| refused(p, font)).collect();
+            let each: Vec<Vec<String>> = parts.iter().map(|p| refused(p, scope)).collect();
             if each.iter().any(Vec::is_empty) {
                 vec![]
             } else {
@@ -666,17 +702,17 @@ fn names(expr: &Expr) -> bool {
         Expr::And(parts) => parts.iter().any(names),
         Expr::Or(parts) => parts
             .iter()
-            .filter(|p| refused(p, false).is_empty())
+            .filter(|p| refused(p, Scope::Code).is_empty())
             .all(names),
     }
 }
 
 /// Why `licence` does not pass, or `None` when it does.
-fn judge_licence(licence: &str, font: bool) -> Option<String> {
+fn judge_licence(licence: &str, scope: Scope) -> Option<String> {
     match parse(licence) {
         Err(why) => Some(format!("not an SPDX expression: {why}")),
         Ok(expr) => {
-            let leaves = refused(&expr, font);
+            let leaves = refused(&expr, scope);
             (!leaves.is_empty()).then(|| format!("not allowed: {}", leaves.join(", ")))
         }
     }
@@ -755,8 +791,8 @@ impl Report {
     }
 
     /// Judge `finding`'s licence, and record it as a refusal or an MPL name.
-    fn judge(&mut self, finding: Finding, font: bool) {
-        match judge_licence(&finding.licence, font) {
+    fn judge(&mut self, finding: Finding, scope: Scope) {
+        match judge_licence(&finding.licence, scope) {
             Some(why) => self.find(Finding { why, ..finding }),
             None if parse(&finding.licence).is_ok_and(|e| names(&e)) => {
                 let (subject, licence, via) = (finding.subject, finding.licence, finding.via);
@@ -938,7 +974,7 @@ fn judge_crates(metadata: &Value, roots: &[PathBuf], report: &mut Report) -> Res
             into: into[dep].clone(),
         };
         match (str_of(package, "license"), str_of(package, "license_file")) {
-            (Some(licence), _) => report.judge(finding(licence, String::new()), false),
+            (Some(licence), _) => report.judge(finding(licence, String::new()), Scope::Code),
             (None, Some(file)) => report.find(finding(
                 "",
                 format!("declares only a licence file, {file}, which no gate reads"),
@@ -947,6 +983,47 @@ fn judge_crates(metadata: &Value, roots: &[PathBuf], report: &mut Report) -> Res
         }
     }
     Ok(local)
+}
+
+// --- The trust roots ---------------------------------------------------------
+
+/// Judge the roots out of `package`, whose `LICENSE` is `text`, beside which an
+/// image ships `shipped`.
+fn judge_trust_roots(package: &Value, text: &[u8], shipped: &[u8], report: &mut Report) {
+    let name = str_of(package, "name").unwrap_or("?");
+    let version = str_of(package, "version").unwrap_or("?");
+    let finding = Finding {
+        subject: format!("crate {name} {version}, the data of {}", crate::build::TRUST_ROOTS),
+        kind: Kind::Crate,
+        key: name.to_string(),
+        licence: str_of(package, "license").unwrap_or("").to_string(),
+        why: String::new(),
+        via: vec!["build::trust_roots".to_string()],
+        into: BTreeSet::from([None]),
+    };
+    if text == shipped {
+        report.judge(finding, Scope::Data);
+    } else {
+        let why = format!("ships {} beside them, which is not its LICENSE", crate::build::TRUST_ROOTS_LICENCE.0);
+        report.find(Finding { why, ..finding });
+    }
+}
+
+/// [`judge_trust_roots`] on the build's own workspace, out of `metadata`, a
+/// document of it: the crate is a non-optional dependency of the root
+/// package, so every feature set resolves it.
+fn judge_trust_roots_of(metadata: &Value, report: &mut Report) -> Result<(), String> {
+    let name = crate::build::TRUST_ROOTS_CRATE;
+    let packages = metadata["packages"].as_array().ok_or("cargo metadata printed no packages")?;
+    let found: Vec<&Value> = packages.iter().filter(|p| str_of(p, "name") == Some(name)).collect();
+    let [package] = found[..] else {
+        return Err(format!("the build's workspace resolves {} packages named {name}, not one", found.len()));
+    };
+    let manifest = str_of(package, "manifest_path").ok_or_else(|| format!("{name} has no manifest path"))?;
+    let licence = Path::new(manifest).with_file_name("LICENSE");
+    let text = std::fs::read(&licence).map_err(|e| format!("read {}: {e}", licence.display()))?;
+    judge_trust_roots(package, &text, crate::build::TRUST_ROOTS_LICENCE.1, report);
+    Ok(())
 }
 
 // --- Committed files ---------------------------------------------------------
@@ -1004,8 +1081,11 @@ fn judge_files(ledger: &[Row], tracked: &[String], shipping: &Shipping, report: 
     }
     for (path, _, _, terms) in ledger {
         if shipping.ships(path) {
-            let font = matches!(terms, Terms::Font(_));
-            report.judge(Finding::at(Kind::File, path, terms.expr(), String::new()), font);
+            let scope = match terms {
+                Terms::Spdx(_) => Scope::Code,
+                Terms::Font(_) => Scope::Font,
+            };
+            report.judge(Finding::at(Kind::File, path, terms.expr(), String::new()), scope);
         }
     }
 }
@@ -1101,7 +1181,7 @@ fn judge_notice(
             report.notes.push(format!("NOTICE section {path} ({expr}) is not shipped"));
             continue;
         }
-        report.judge(Finding::at(Kind::Notice, path, expr, String::new()), false);
+        report.judge(Finding::at(Kind::Notice, path, expr, String::new()), Scope::Code);
     }
 }
 
@@ -1284,6 +1364,13 @@ pub fn judge(root: &Path) -> Result<String, String> {
         roots: vec![library.join("std")],
     });
 
+    let manifest = root.join("Cargo.toml");
+    let build = docs
+        .iter()
+        .find(|d| d.members.contains(&manifest))
+        .ok_or_else(|| format!("no shipped crate is in the workspace of {}", manifest.display()))?;
+    judge_trust_roots_of(&build.metadata, &mut report)?;
+
     let mut local = Local::default();
     for doc in &docs {
         let found = judge_crates(&doc.metadata, &doc.roots, &mut report)?;
@@ -1329,7 +1416,7 @@ mod tests {
     use serde_json::json;
 
     fn verdict_of(licence: &str) -> Option<String> {
-        judge_licence(licence, false)
+        judge_licence(licence, Scope::Code)
     }
 
     #[test]
@@ -1343,7 +1430,11 @@ mod tests {
             "an unrecognised licence passed"
         );
         assert!(verdict_of("OFL-1.1").is_some(), "OFL passed outside a font");
-        assert_eq!(judge_licence("OFL-1.1", true), None);
+        assert_eq!(judge_licence("OFL-1.1", Scope::Font), None);
+        assert!(judge_licence("OFL-1.1", Scope::Data).is_some(), "OFL passed as data");
+        assert!(verdict_of("CDLA-Permissive-2.0").is_some(), "CDLA passed outside data");
+        assert!(judge_licence("CDLA-Permissive-2.0", Scope::Font).is_some(), "CDLA passed for a font");
+        assert_eq!(judge_licence("CDLA-Permissive-2.0", Scope::Data), None);
         assert_eq!(verdict_of("MPL-2.0"), None);
     }
 
@@ -1692,6 +1783,23 @@ ub_checks"#;
             &[("app", "fork", None)],
         );
         assert!(crates(&d).findings.is_empty());
+    }
+
+    /// **The roots pass under their crate's licence as data, and only with
+    /// that crate's own licence text beside them.**
+    #[test]
+    fn the_trust_roots_pass_only_with_their_crates_licence_text() {
+        let judged = |licence: &str, shipped: &[u8]| {
+            let package = json!({"name": "roots", "version": "1.0.0", "license": licence});
+            let mut report = Report::default();
+            judge_trust_roots(&package, b"the text", shipped, &mut report);
+            report.findings
+        };
+        assert_eq!(judged("CDLA-Permissive-2.0", b"the text"), []);
+        let other = judged("CDLA-Permissive-2.0", b"another text");
+        assert!(other.len() == 1 && other[0].why.contains("not its LICENSE"), "{other:?}");
+        let sharing = judged("CDLA-Sharing-1.0", b"the text");
+        assert!(sharing.len() == 1 && sharing[0].why.contains("CDLA-Sharing-1.0"), "{sharing:?}");
     }
 
     #[test]

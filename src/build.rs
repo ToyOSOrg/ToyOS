@@ -337,11 +337,16 @@ struct GuestEnv {
     image_key: String,
     /// Whose floor the loader keeps (`signing::FLOOR_ENV`), which follows the key.
     floor_scope: &'static str,
+    /// `CSysroot::cc_env` for the architecture's userland: every guest crate
+    /// that compiles C compiles it with the toolchain's clang against libc's C
+    /// sysroot, never with the host's `cc`.
+    cc: Vec<(String, String)>,
 }
 
 impl GuestEnv {
-    fn new(sysroot: Sysroot) -> Self {
+    fn new(sysroot: Sysroot, arch: Arch) -> Self {
         Self {
+            cc: crate::clang::CSysroot::of(sysroot.dir(), arch).cc_env(),
             sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
@@ -371,7 +376,8 @@ fn cargo_build(
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
-        .env_remove("RUSTC");
+        .env_remove("RUSTC")
+        .envs(env.cc.iter().map(|(k, v)| (k, v)));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -710,6 +716,29 @@ fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_o
     }
 }
 
+/// Where on ROOT the certificate authorities every TLS client trusts are:
+/// `/system/etc/ssl/cert.pem`.
+pub const TRUST_ROOTS: &str = "etc/ssl/cert.pem";
+
+/// The crate [`trust_roots`] reads them out of: `licence::judge` holds them to
+/// its licence and [`TRUST_ROOTS_LICENCE`] to its licence text.
+pub const TRUST_ROOTS_CRATE: &str = "webpki-root-certs";
+
+/// Where on ROOT their licence's text is, and the text: CDLA-Permissive-2.0
+/// lets the roots be shared only with it.
+pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
+    "etc/ssl/CDLA-Permissive-2.0.txt",
+    include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
+);
+
+/// The Mozilla root program's authorities as `webpki-root-certs` publishes
+/// them, each certificate a PEM block in the published order.
+pub fn trust_roots() -> Vec<u8> {
+    let config = pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF);
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter();
+    roots.map(|cert| pem::encode_config(&pem::Pem::new("CERTIFICATE", cert.to_vec()), config)).collect::<String>().into_bytes()
+}
+
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
@@ -730,6 +759,9 @@ fn build_and_assemble(
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
     }
+
+    root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
+    root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
@@ -781,11 +813,6 @@ fn build_programs(
 
     let ws_target = root.join(format!("target/{target}/{PROFILE}"));
 
-    // Every userland crate that compiles C compiles it with the toolchain's
-    // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
-    let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
@@ -800,7 +827,7 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(root, target, &extra, env, &cc_env, quiet);
+        cargo_build(root, target, &extra, env, &[], quiet);
     }
 
     for c in &programs {
@@ -1701,7 +1728,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
     let config = parse_config(&boot.config);
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -1915,7 +1942,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -2062,7 +2089,7 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[PathBuf]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
         invalidate_stale(&mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
