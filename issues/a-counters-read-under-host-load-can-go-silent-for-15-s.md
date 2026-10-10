@@ -171,6 +171,31 @@ which tests a count where the other tests sixteen times it; a counters read
 calls neither, and no function of `counters_read`, `test-runner`,
 `supervisor`, `logkeeper`, `toybox`, `kernelprobe` or the loader differs.
 
+The fifth and sixth silent ones, two guests of one run: `virt_smp` and
+`virt_mask_windows`, in the whole suite on `wt/toyos-lastword` at
+`aa7448db0`, whose diff changes the stop's hold of the console wire and
+nothing these guests run before the stop begins.
+
+- **The lines.** `FAIL virt_smp: STALLED: waiting for the job
+  test_rs_counters_read to end — it went quiet` and `FAIL virt_mask_windows:
+  STALLED: waiting for the boot's last word — it went quiet`, three seconds
+  apart on the host's clock; 44 of 46 passed.
+- **The load.** 12 wide on the 14-core host, 1-minute load 35.09 when the
+  run began and 79.44 when it ended; liveness ceilings paid at 1.00x;
+  workers 346 s building against 752 s testing.
+- **The same profile as the second.** `virt_smp`'s last three lines are
+  `===TEST_END unmap_touch exit=0===` at 11.730, `===TEST_START
+  test_rs_counters_read===` at 11.731 and the kernel's `spawn:
+  /system/bin/test_rs_counters_read pid=13` at 11.739 on cpu4.
+  `virt_mask_windows` said nothing while its second wait ran, as the two
+  stalls without a console above did; the run kept no PL011 log of it.
+- **What is known.** The next whole suite at that commit, at load 79.44
+  rising to 78.28, passed 46 of 46.
+- **Not compared.** These two ran the kernel of `wt/toyos-lastword` at
+  `aa7448db0`, built by the compiler before the ScalarEvolution fix. The
+  comparison across the fix above was of `main`'s `tests/virtsmpcase` image;
+  theirs was not compared, so whether the fault reaches them is not known.
+
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
 in https://github.com/ToyOSOrg/ToyOS/pull/719#issuecomment-5978643928, which

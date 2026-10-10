@@ -759,6 +759,18 @@ pub fn current_is_rt() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.rt().is_rt())).unwrap_or(false)
 }
 
+/// Every thread on this CPU's run queue, in pick order, for a staging that
+/// says why a woken thread has not run. `false` means a pass owns the state.
+#[cfg(feature = "boot-actuators")]
+pub fn for_each_ready(mut f: impl FnMut(TaskId)) -> bool {
+    try_with_cpu(|cpu| {
+        for task in cpu.rq().tasks() {
+            f(task.ext().id);
+        }
+    })
+    .is_some()
+}
+
 /// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
 /// preempt-count bracket's other half is owed.
 pub extern "C" fn trampoline_entry() {
