@@ -1,26 +1,14 @@
 //! Vt-d fault interrupt handling: MSI-delivered, never polled.
 //!
 //! The handler is bounded, allocates nothing and takes no lock; unit state
-//! lives in a fixed array of atomics and function state in a slice of exactly
-//! the enumerated functions, each published once before the mask comes off. Whatever the stream, the same things happen first: Bus
-//! Master Enable cleared on the function that faulted, the first record latched
-//! whole, and a count kept per unit and per function. Clearing `BME` is also
-//! the ceiling on a storm, since a function that cannot master the bus cannot
-//! raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`).
-//!
-//! **What differs is who the fault is handed to.** A stream every driver of
-//! which is in this kernel has nobody, so the terminal action is a halt — the
-//! last thing that happens rather than the first. A stream a process drives has
-//! an owner: `pcidev` is told, that claim refuses every later call, and the
-//! machine goes on, because one process's bug taking the machine down is the
-//! thing moving a driver out of the kernel was for.
+//! lives in a fixed array of atomics, published before the mask comes off.
+//! What a record ends is `crate::iommu::fault`'s, the policy every backend
+//! applies; this reads the unit's fault recording registers into it.
 
 use crate::log;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::drivers::pci::{self, PciDevice};
+use crate::iommu::fault::{self as policy, Access, Fault, Who};
 use crate::iommu::StreamId;
 use crate::mm::{DirectMap, Mmio};
 
@@ -64,100 +52,6 @@ impl FaultUnit {
 
 static UNITS: [FaultUnit; MAX_UNITS] = [const { FaultUnit::EMPTY }; MAX_UNITS];
 
-/// A `pcidev` slot number no claim has: this function is not driven by one.
-const NO_SLOT: u32 = u32::MAX;
-
-/// One enumerated function, published before any unit is armed.
-struct Function {
-    who: u16,
-    /// Physical base of its config window, through which a fault clears `BME`.
-    config: u64,
-    domain: AtomicU32,
-    // Faults the unit has reported against it; non-zero is the per-domain flag.
-    faults: AtomicU32,
-    /// The `pcidev` slot a process drives this function on, or [`NO_SLOT`].
-    /// What decides whether a fault on it is terminal for the machine.
-    user_slot: AtomicU32,
-}
-
-/// Exactly the functions this machine enumerated, leaked once by [`describe`]:
-/// null until then, and never written again.
-static FUNCTIONS: AtomicPtr<&'static [Function]> = AtomicPtr::new(core::ptr::null_mut());
-
-fn functions() -> &'static [Function] {
-    let published = FUNCTIONS.load(Ordering::Acquire);
-    if published.is_null() {
-        return &[];
-    }
-    // SAFETY: non-null only as `describe` stored it: a leaked box, never freed
-    // or written again, published with Release once it was whole.
-    unsafe { *published }
-}
-
-/// The first fault this machine took, whole: what a later one says is decided
-/// by what the first one already broke.
-struct FirstFault {
-    who: AtomicU32,
-    address: AtomicU64,
-    reason: AtomicU32,
-    unit: AtomicU32,
-}
-
-static FIRST: FirstFault = FirstFault {
-    who: AtomicU32::new(pci::NO_FUNCTION),
-    address: AtomicU64::new(0),
-    reason: AtomicU32::new(0),
-    unit: AtomicU32::new(0),
-};
-
-/// Every function this machine enumerated, before any unit is armed: the
-/// handler reaches a faulting function's config space through this, with no lock.
-pub fn describe(devices: &[PciDevice]) {
-    let functions: Vec<Function> = devices
-        .iter()
-        .map(|device| Function {
-            who: StreamId::pci(device.bus, device.dev, device.func).requester(),
-            config: DirectMap::phys_of(device.config_window().addr() as *const u8),
-            domain: AtomicU32::new(0),
-            faults: AtomicU32::new(0),
-            user_slot: AtomicU32::new(NO_SLOT),
-        })
-        .collect();
-    let functions: &'static [Function] = Box::leak(functions.into_boxed_slice());
-    let first = FUNCTIONS.compare_exchange(
-        core::ptr::null_mut(),
-        Box::leak(Box::new(functions)),
-        Ordering::Release,
-        Ordering::Relaxed,
-    );
-    assert!(first.is_ok(), "iommu: the fault handler's functions were described twice");
-}
-
-/// Record which domain a function moved to, for the flag the handler sets.
-pub fn attached(stream: StreamId, domain: u16) {
-    if let Some(slot) = find(u32::from(stream.requester())) {
-        slot.domain.store(u32::from(domain), Ordering::Relaxed);
-    }
-}
-
-/// Record that a process drives this function on `slot`, or no longer does.
-///
-/// The handler reads it to decide what a fault on this stream is *terminal
-/// for*: a kernel-driven function has nothing to hand a fault to and the
-/// response is the halt below; one a process drives has an owner, so the record
-/// goes to that owner's claim and the machine stays up.
-pub fn user_owned(stream: StreamId, slot: Option<usize>) {
-    if let Some(function) = find(u32::from(stream.requester())) {
-        function
-            .user_slot
-            .store(slot.map_or(NO_SLOT, |slot| slot as u32), Ordering::Release);
-    }
-}
-
-fn find(requester: u32) -> Option<&'static Function> {
-    functions().iter().find(|f| u32::from(f.who) == requester)
-}
-
 /// A unit's fault-record location and count: `CAP.FRO` and `CAP.NFR`.
 #[derive(Clone, Copy)]
 pub struct Records {
@@ -198,18 +92,12 @@ pub fn arm(index: usize, regs: Mmio, found: Records, vector: u8) {
     regs.write_u32(FECTL_REG, 0);
 }
 
-const CONFIG_WINDOW: u64 = crate::mm::PAGE_SIZE;
-
 // The window an armed unit's registers live in, from the address `arm` published.
 fn window(phys: u64) -> Mmio {
-    window_of(phys, REGISTER_WINDOW)
-}
-
-fn window_of(phys: u64, size: u64) -> Mmio {
     // SAFETY: `phys` came from `DirectMap::phys_of` over a window
-    // `paging::map_mmio` produced at boot and never unmapped, `size` bytes wide;
-    // this is the same window read back.
-    unsafe { Mmio::over_phys(DirectMap::from_phys(phys), size) }
+    // `paging::map_mmio` produced at boot and never unmapped, `REGISTER_WINDOW`
+    // bytes wide; this is the same window read back.
+    unsafe { Mmio::over_phys(DirectMap::from_phys(phys), REGISTER_WINDOW) }
 }
 
 /// The unit raised its fault event.
@@ -227,26 +115,7 @@ pub fn service() {
             unit.count.load(Ordering::Relaxed),
         );
     }
-
-    if kernel_owned > 0 {
-        // capture() puts the fault on the panel before the halt takes the
-        // machine down.
-        //
-        // The refusal is the whole response and there is no recovery missing
-        // from it: a faulting device reached an address this kernel never gave
-        // it, and nothing here can know what else it already did. **So this
-        // path halts and never panics** — a report of one carries the fault
-        // record and `panic_reboot`'s arm line, and no `panicked at` line.
-        //
-        // **Only for a stream this kernel drives.** A function a process drives
-        // has an owner to refuse: its bus mastering is already gone by the time
-        // this is reached, its claim answers every later call `Io`, and the
-        // machine — whose other drivers are untouched — goes on. Halting for
-        // that would be one process's bug taking the whole machine down, which
-        // is the thing moving a driver out was for.
-        crate::drivers::panic_console::capture();
-        crate::panic::halt_all_cpus();
-    }
+    policy::conclude(kernel_owned);
     crate::arch::apic::eoi();
 }
 
@@ -275,40 +144,16 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
             (high & 0x7) as u8,
         );
         let reason = ((high >> 32) & 0xFF) as u8;
-        let address = regs.read_u64(record) & !0xFFF;
-        // First, before anything that can be slow or say no: a function that
-        // cannot master the bus raises no second fault, which is the whole of
-        // the ceiling on a storm.
-        let stopped = stop(stream);
-        let seen_here = note(stream);
-        latch(index, stream, address, reason);
-        // Before the line, so `owner=` in it is what was actually told.
-        let owner = owner_of(stream);
-        if let Some(slot) = owner {
-            crate::pcidev::note_fault(slot);
-        }
-        let count = UNITS[index].faults.fetch_add(1, Ordering::Relaxed) + 1;
-        log!(
-            // `owner=` first, because it is the only field that decides whether
-            // this machine is still running: `tests/common/serial.rs` reads
-            // `iommu: DMA FAULT owner=kernel` as a death and the other form as
-            // a record. The reason's name is the last word: every gate takes it
-            // from there.
-            "iommu: DMA FAULT owner={} unit{index} stream={stream} addr={address:#018x} \
-             access={} reason={reason:#04x} domain={} bme={} unitfaults={count} \
-             streamfaults={seen_here} first={} {}",
-            match owner {
-                Some(slot) => Owner::Process(slot),
-                None => Owner::Kernel,
-            },
-            if high & (1u64 << 62) != 0 { "read" } else { "write" },
-            blamed(stream),
-            if stopped { "cleared" } else { "unknown-function" },
-            yn(FIRST.who.load(Ordering::Relaxed) == u32::from(stream.requester())),
-            reason_name(reason),
-        );
+        let fault = Fault {
+            who: Who::Function(stream),
+            address: regs.read_u64(record) & !0xFFF,
+            access: if high & (1u64 << 62) != 0 { Access::Read } else { Access::Write },
+            reason,
+            name: reason_name(reason),
+        };
+        let unowned = policy::report(index, &UNITS[index].faults, fault);
         clear_record(regs, record);
-        if owner.is_none() {
+        if unowned {
             seen += 1;
         }
     }
@@ -318,100 +163,6 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
 
 fn clear_record(regs: Mmio, record: u64) {
     regs.write_u32(record + 12, RECORD_FAULT);
-}
-
-/// The `pcidev` slot a process drives this stream on, or `None` for a stream
-/// this kernel drives — including one it never enumerated, which nothing can be
-/// handed to either.
-fn owner_of(stream: StreamId) -> Option<usize> {
-    match find(u32::from(stream.requester()))?.user_slot.load(Ordering::Acquire) {
-        NO_SLOT => None,
-        slot => Some(slot as usize),
-    }
-}
-
-/// Who a fault was handed to, in the line. A word rather than a number, because
-/// which of the two it is decides whether this machine is still running.
-enum Owner {
-    Kernel,
-    Process(usize),
-}
-
-impl core::fmt::Display for Owner {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Kernel => write!(f, "kernel"),
-            Self::Process(slot) => write!(f, "slot{slot}"),
-        }
-    }
-}
-
-/// Clear Bus Master Enable on whoever faulted; `false` where this machine
-/// enumerated no function with that requester id, and the line says so.
-fn stop(stream: StreamId) -> bool {
-    let Some(slot) = find(u32::from(stream.requester())) else {
-        return false;
-    };
-    pci::stop_bus_mastering(window_of(slot.config, CONFIG_WINDOW));
-    true
-}
-
-fn note(stream: StreamId) -> u32 {
-    find(u32::from(stream.requester()))
-        .map_or(0, |slot| slot.faults.fetch_add(1, Ordering::Relaxed) + 1)
-}
-
-/// What the handler can say about the faulting function's address space. The
-/// middle answer is deliberately weak: a function the kernel never attached
-/// carries domain id 0 whether it sits on the identity domain or on one an
-/// actuator bound by hand, so the label claims only that nothing recorded one.
-enum Blamed {
-    Own(u32),
-    Unrecorded,
-    Unknown,
-}
-
-impl core::fmt::Display for Blamed {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Own(id) => write!(f, "{id}"),
-            Self::Unrecorded => write!(f, "unrecorded"),
-            Self::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
-fn blamed(stream: StreamId) -> Blamed {
-    match find(u32::from(stream.requester())) {
-        None => Blamed::Unknown,
-        Some(slot) => match slot.domain.load(Ordering::Relaxed) {
-            0 => Blamed::Unrecorded,
-            id => Blamed::Own(id),
-        },
-    }
-}
-
-/// Take the first fault whole, once: a second finds `who` taken and leaves it.
-fn latch(unit: usize, stream: StreamId, address: u64, reason: u8) {
-    let taken = FIRST.who.compare_exchange(
-        pci::NO_FUNCTION,
-        u32::from(stream.requester()),
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    );
-    if taken.is_ok() {
-        FIRST.address.store(address, Ordering::Relaxed);
-        FIRST.reason.store(u32::from(reason), Ordering::Relaxed);
-        FIRST.unit.store(unit as u32, Ordering::Relaxed);
-    }
-}
-
-fn yn(v: bool) -> char {
-    if v {
-        'y'
-    } else {
-        'n'
-    }
 }
 
 // Only reasons where Linux's dma_remap_fault_reasons and QEMU's VTD_FR_*

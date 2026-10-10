@@ -1,13 +1,7 @@
 //! A device's address space: one context descriptor, tagged with an ASID of
 //! its own, over stage 1 tables that map 2 MiB blocks and nothing else
-//! (`toyos_smmu::table`), and the device addresses it hands out.
-//!
-//! A domain's addresses start a quarter of the way up the 48-bit input, above
-//! all memory, so a descriptor still carrying one names nothing a domain maps
-//! by accident; they end below the first root-bridge window over that, which
-//! a bridge may route peer-to-peer before the unit sees the request. An
-//! address is handed out once: a device holding a stale one reaches whatever
-//! took its place, so nothing takes it.
+//! (`toyos_smmu::table`), and the device addresses it hands out, over the
+//! unit's 48-bit input (`crate::iommu::window`).
 //!
 //! A new leaf needs no invalidation — the unit caches no translation that
 //! faulted — and a removed one is invalidated by the domain's ASID, behind a
@@ -20,6 +14,7 @@ use toyos_smmu::table::{entry, next, plan, Access, Entry, Leaf, INPUT_BITS};
 use toyos_smmu::Asid;
 
 use super::{window, Live, UNIT};
+use crate::iommu::window::Window;
 use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
 use crate::mm::{PAGE_2M, PAGE_SIZE};
@@ -27,90 +22,12 @@ use crate::mm::{PAGE_2M, PAGE_SIZE};
 /// Domain ids start at 1: `DomainId` is never 0.
 const FIRST: u16 = 1;
 
-/// A quarter of the way up the input.
-const FLOOR: u64 = 1 << (INPUT_BITS - 2);
-
 pub(super) struct Domain {
     asid: Asid,
     root: Phys<12>,
     context: Phys<6>,
-    addresses: Addresses,
+    addresses: Window,
 }
-
-/// A domain's device addresses, from [`FLOOR`] to its ceiling.
-#[derive(Clone, Copy)]
-struct Addresses {
-    ceiling: u64,
-    /// The first not yet handed out.
-    next: u64,
-}
-
-impl Addresses {
-    /// `bytes`, rounded up to whole leaves, of addresses never handed out.
-    const fn reserve(&mut self, bytes: u64) -> Option<Iova> {
-        let Some(end) = bytes.checked_next_multiple_of(PAGE_2M) else { return None };
-        let Some(end) = self.next.checked_add(end) else { return None };
-        if end > self.ceiling {
-            return None;
-        }
-        let at = Iova::translated(self.next);
-        self.next = end;
-        Some(at)
-    }
-
-    /// Whether `bytes` at `at` is room [`Self::reserve`] handed out, starting
-    /// on a leaf it could have returned.
-    const fn handed_out(&self, at: Iova, bytes: u64) -> bool {
-        if !at.raw().is_multiple_of(PAGE_2M) || at.raw() < FLOOR {
-            return false;
-        }
-        match bytes.checked_next_multiple_of(PAGE_2M) {
-            Some(span) => match at.raw().checked_add(span) {
-                Some(end) => end <= self.next,
-                None => false,
-            },
-            None => false,
-        }
-    }
-}
-
-/// Where a domain's addresses end: under the input, and under the first of
-/// `reserved` reaching above [`FLOOR`]; at or below it where one covers it.
-const fn ceiling(reserved: &[(u64, u64)]) -> u64 {
-    let mut ceiling = 1 << INPUT_BITS;
-    let mut i = 0;
-    while i < reserved.len() {
-        let (start, end) = reserved[i];
-        if end > FLOOR && start < ceiling {
-            ceiling = start;
-        }
-        i += 1;
-    }
-    ceiling
-}
-
-/// [`Addresses`] and [`ceiling`] at their boundaries, at compile time: the
-/// binary has no test harness.
-const _: () = {
-    let mut one = Addresses { ceiling: FLOOR + 2 * PAGE_2M, next: FLOOR };
-    assert!(matches!(one.reserve(1), Some(at) if at.raw() == FLOOR));
-    assert!(one.handed_out(Iova::translated(FLOOR), PAGE_2M));
-    assert!(!one.handed_out(Iova::translated(FLOOR - PAGE_2M), PAGE_2M));
-    assert!(!one.handed_out(Iova::translated(FLOOR + PAGE_2M), PAGE_2M));
-    assert!(!one.handed_out(Iova::translated(FLOOR), PAGE_2M + 1));
-    assert!(!one.handed_out(Iova::translated(FLOOR + 1), 0));
-    assert!(!one.handed_out(Iova::translated(u64::MAX - PAGE_2M + 1), PAGE_2M));
-    // Past the ceiling, and past the end of the address space, nothing.
-    assert!(one.reserve(PAGE_2M + 1).is_none());
-    assert!(one.reserve(u64::MAX).is_none());
-    assert!(matches!(one.reserve(PAGE_2M), Some(at) if at.raw() == FLOOR + PAGE_2M));
-    assert!(one.reserve(1).is_none());
-    // `virt`'s windows, all below the floor, leave the whole input.
-    assert!(ceiling(&[(0x1000_0000, 0x3f00_0000), (0x80_0000_0000, 0x100_0000_0000)]) == 1 << INPUT_BITS);
-    // A window over the floor ends the domain where it starts; one across it leaves nothing.
-    assert!(ceiling(&[(FLOOR + 4 * PAGE_2M, FLOOR + 8 * PAGE_2M)]) == FLOOR + 4 * PAGE_2M);
-    assert!(ceiling(&[(FLOOR - PAGE_2M, FLOOR + PAGE_2M)]) < FLOOR);
-};
 
 impl Live {
     fn domain(&mut self, id: DomainId) -> &mut Domain {
@@ -171,17 +88,7 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let domains = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
     let id = u16::try_from(usize::from(FIRST) + live.domains.len()).map_err(|_| IommuError::DomainsExhausted(domains))?;
     let asid = live.unit.asid(id).ok_or(IommuError::DomainsExhausted(domains))?;
-    let top = crate::mm::pmm::top();
-    if FLOOR <= top {
-        return Err(IommuError::WindowBelowMemory { translatable: INPUT_BITS as u8, floor: FLOOR, top });
-    }
-    let ceiling = ceiling(&live.reserved);
-    let mut addresses = Addresses { ceiling, next: FLOOR };
-    // At least one leaf, whatever was asked: a domain with none is no domain.
-    let first = match addresses.reserve(room) {
-        Some(first) if ceiling >= FLOOR + PAGE_2M => first,
-        _ => return Err(IommuError::NoRoom { floor: FLOOR, ceiling, room }),
-    };
+    let (addresses, first) = Window::new(INPUT_BITS as u8, &live.reserved, room)?;
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");
     let words = Cd::new(root, asid, &live.unit).expect("SMMU: a table below the unit's output size").words();
@@ -193,10 +100,12 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     descriptor.write_u64(0, words[0]);
     let domain = Domain { asid, root, context, addresses };
     log!(
-        "iommu: domain{id} root={:#x} context={:#x} asid={} addresses from {FLOOR:#x} to {ceiling:#x}",
+        "iommu: domain{id} root={:#x} context={:#x} asid={} addresses from {:#x} to {:#x}",
         root.get(),
         context.get(),
-        asid.get()
+        asid.get(),
+        addresses.floor(),
+        addresses.ceiling()
     );
     live.domains.push(domain);
     Ok((DomainId::new(id), first))
@@ -209,7 +118,7 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
     let domain = live.domain(id);
-    let at = domain.addresses.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.addresses.ceiling))?;
+    let at = domain.addresses.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.addresses.ceiling()))?;
     let root = domain.root;
     for offset in (0..bytes).step_by(PAGE_2M as usize) {
         live.put(root, at.raw() + offset, phys + offset);
@@ -271,6 +180,6 @@ pub fn attach(function: StreamId, id: DomainId) {
     let context = live.domain(id).context;
     let ste = Ste::stage1(context, &live.unit).expect("SMMU: a descriptor below the unit's output size");
     live.write_entry(stream, ste);
-    super::fault::attached(stream, id.raw());
+    crate::iommu::fault::attached(function, id.raw());
     log!("iommu: {function} moves to domain{}", id.raw());
 }

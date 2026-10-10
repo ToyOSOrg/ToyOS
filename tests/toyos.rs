@@ -2021,13 +2021,15 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
     Ok(())
 }
 
-/// The SMMUv3 armed from the IORT, judged by what QEMU's `iommu-testdev` can
-/// and cannot write through it (`kernel/src/arch/aarch64/smmu/selftest.rs`):
-/// `GBPA` read back aborting, every stream's entry aborting, a `CMD_SYNC`
-/// consumed; the device's write refused on the entry it starts with, landing
-/// where its own domain maps it, and refused where the domain maps nothing —
-/// that one recorded, its event taken on the wired SPI and named, and the
-/// machine halted for a function no process drives.
+/// The SMMUv3 armed from the IORT, judged by what two of QEMU's
+/// `iommu-testdev` can and cannot write through it
+/// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
+/// a `CMD_SYNC` consumed; one device's write refused on the entry its stream
+/// starts with and nothing recorded, landing where its own domain maps it,
+/// and refused once the domain takes that address back; the other's, under a
+/// StreamID no function is routed from inside the stream table, refused.
+/// Those two are recorded, the unit's first and second events, taken on the
+/// wired SPI, named, and the machine halted for functions no process drives.
 fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     const FAULT: &str = "iommu: DMA FAULT owner=kernel";
     let options = BootOptions {
@@ -2043,26 +2045,46 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
         }
     }
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(FAULT));
+    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(FAULT) && l.contains(" unitfaults=2 "));
     let serial = format!("{}\n{rest}", qemu.boot_log());
     let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
     let Some(armed) = line("armed, CR0ACK") else {
         return Err(format!("the SMMUv3 was never armed\nserial:\n{serial}"));
     };
-    for want in ["every entry aborting", "a CMD_SYNC consumed", "events on SPI 106"] {
+    for want in ["every other entry invalid", "a CMD_SYNC consumed", "events on SPI 106"] {
         if !armed.contains(want) {
             return Err(format!("{want:?} not in {armed:?}"));
         }
     }
     eprintln!("  [virt] {armed}");
+    let table = armed.split_once("in a table of ").and_then(|(_, rest)| rest.split(',').next()?.parse::<u64>().ok());
+    let Some(table) = table else {
+        return Err(format!("{armed:?} names no table size"));
+    };
     // `SMMU_GBPA.ABORT`, bit 20, as the unit reads it back.
     let gbpa = line(", every transaction aborts while SMMUEN is clear")
-        .and_then(|l| l.split_once(": GBPA 0x").and_then(|(_, v)| u32::from_str_radix(v.split(',').next()?, 16).ok()));
+        .and_then(|l| l.split_once(": GBPA ").and_then(|(_, v)| hex(v.split(',').next()?)));
     match gbpa {
         Some(gbpa) if gbpa & 1 << 20 != 0 => eprintln!("  [virt] GBPA {gbpa:#x}: ABORT"),
         _ => return Err(format!("GBPA does not read back aborting: {gbpa:?}\nserial:\n{serial}")),
     }
-    for (said, verdict) in [("on the entry every stream starts with", "refused"), ("mapped to", "landed there")] {
+    let Some(unrouted) = line("is given no route") else {
+        return Err(format!("the selftest left no function unrouted\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {unrouted}");
+    let Some(stream) = unrouted.split_once(", StreamID ").and_then(|(_, rest)| hex(rest.split(',').next()?)) else {
+        return Err(format!("{unrouted:?} names no StreamID"));
+    };
+    if stream >= table {
+        return Err(format!("StreamID {stream:#x} is past a table of {table}: {unrouted:?}"));
+    }
+    for (said, verdict) in [
+        ("on the entry its stream starts with", "refused"),
+        ("mapped to", "landed there"),
+        ("which its domain no longer maps", "refused"),
+        ("under no route", "refused"),
+    ] {
         let Some(found) = line(said) else {
             return Err(format!("the selftest never said {said:?}\nserial:\n{serial}"));
         };
@@ -2071,22 +2093,31 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
             return Err(format!("{found}\nserial:\n{serial}"));
         }
     }
-    let Some(aimed) = line("which its domain does not map") else {
-        return Err(format!("the selftest never aimed a write past its domain\nserial:\n{serial}"));
+    let Some(again) = line("which its domain no longer maps") else {
+        return Err(format!("the selftest never wrote where its domain took a mapping back\nserial:\n{serial}"));
     };
-    let aimed_at = aimed.split_once("smmu-selftest: ").and_then(|(_, said)| said.split_once(" writes at 0x"));
-    let Some((function, Ok(at))) = aimed_at.map(|(function, rest)| {
-        (function, u64::from_str_radix(rest.split(',').next().unwrap_or_default(), 16))
-    }) else {
-        return Err(format!("{aimed:?} names no function and address"));
+    let aimed = again.split_once("smmu-selftest: ").and_then(|(_, said)| said.split_once("'s write at "));
+    let Some((function, Some(at))) = aimed.map(|(function, rest)| (function, rest.split(' ').next().and_then(hex)))
+    else {
+        return Err(format!("{again:?} names no function and address"));
     };
-    let Some(fault) = line(FAULT) else {
-        return Err(format!("no event reached the handler\nserial:\n{serial}"));
-    };
-    eprintln!("  [virt] {fault}");
-    let named = format!("stream={function} addr={at:#018x} access=write");
-    if !fault.contains(&named) || !fault.ends_with("F_TRANSLATION") {
-        return Err(format!("the event does not name {named:?} and F_TRANSLATION: {fault}"));
+    let faults: Vec<&str> = serial.lines().filter(|l| l.contains(FAULT)).collect();
+    for fault in &faults {
+        eprintln!("  [virt] {fault}");
+    }
+    // The unit's first and second events, so the write on the entry its
+    // stream starts with was not recorded.
+    let wants = [
+        (format!("stream={function} addr={at:#018x} access=write"), " unitfaults=1 ", "F_TRANSLATION"),
+        (format!("stream={stream:#x} "), " unitfaults=2 ", "C_BAD_STE"),
+    ];
+    if faults.len() != wants.len() {
+        return Err(format!("{} events reached the handler, not {}\nserial:\n{serial}", faults.len(), wants.len()));
+    }
+    for (fault, (named, count, name)) in faults.iter().zip(&wants) {
+        if !fault.contains(named.as_str()) || !fault.contains(count) || !fault.ends_with(name) {
+            return Err(format!("the event does not name {named:?},{count}and {name}: {fault}"));
+        }
     }
     Ok(())
 }

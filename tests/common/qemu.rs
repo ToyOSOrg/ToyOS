@@ -727,8 +727,8 @@ pub enum Profile {
     /// `HVC`, as under HVF. `virt_el1_smp`'s machine while a boot's last word
     /// can miss the console under HVF.
     VirtTcg,
-    /// [`Profile::Virt`] with its SMMUv3 and QEMU's `iommu-testdev`, a function
-    /// that writes where it is told to through the unit.
+    /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
+    /// function that writes where it is told to through the unit.
     VirtSmmu,
 }
 
@@ -870,9 +870,9 @@ struct Shape {
     rng: bool,
 }
 
-/// Whether `virt` has its SMMUv3. With it comes QEMU's `iommu-testdev`, whose
-/// writes are the only DMA a guest of this suite can aim at an address of its
-/// choosing: a unit no function writes through is a unit no test reads.
+/// Whether `virt` has its SMMUv3. With it come two of QEMU's `iommu-testdev`,
+/// whose writes are the only DMA a guest of this suite can aim at an address
+/// of its choosing: a unit no function writes through is a unit no test reads.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Smmu {
     Absent,
@@ -2212,6 +2212,9 @@ fn qemu_command(
         qemu.arg("-device").arg("virtio-rng-pci");
     }
     if shape.smmu == Smmu::WithTestdev {
+        // Two, the first enumerated below the second: the kernel's selftest
+        // routes nothing for the first, whose entry the table holds.
+        qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
     }
 

@@ -299,9 +299,9 @@ pub(super) fn timer_intid() -> u32 {
 }
 
 /// Take SPI `intid` on this CPU at [`PRIORITY`], edge-triggered, as the
-/// IOMMU's event interrupt: an SMMUv3's wired interrupts are pulses, and the
-/// IORT names no trigger. Refused with the distributor's limit where it takes
-/// no such SPI.
+/// IOMMU's event interrupt: an SMMUv3's wired interrupts are edge-triggered
+/// (IHI 0070 H.a §3.18.2, §12.4), and the IORT names no trigger. Refused
+/// with the distributor's limit where it takes no such SPI.
 pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
     let gicd = Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME);
     let limit = (32 * ((gicd.read_u32(GICD_TYPER) & 0x1F) + 1)).min(1020);

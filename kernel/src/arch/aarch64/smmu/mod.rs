@@ -4,12 +4,17 @@
 //!
 //! [`init`] arms the unit with every stream aborting and no bypass anywhere:
 //! `GBPA` aborts before anything else is written, so nothing passes while the
-//! unit is programmed; every enumerated function's stream has an entry that
-//! aborts, and the unit is enabled. A stream translates only once
+//! unit is programmed; and the unit is enabled. A stream translates only once
 //! [`domain::attach`] puts it on a domain of its own, through stage 1 alone;
-//! no domain maps memory by identity, so a function no driver attached
-//! reaches nothing. A unit this kernel cannot program is left aborting every
-//! transaction, and no domain is given.
+//! no domain maps memory by identity. An enumerated function's stream on no
+//! domain aborts and records nothing (`Ste::ABORT`): firmware may leave one
+//! mastering the bus until its driver resets it. **Every stream no
+//! enumerated function is routed from has one answer**, inside the stream
+//! table or past it: it aborts and is recorded — `C_BAD_STE` on an entry left
+//! invalid, `C_BAD_STREAMID` under `CR2.RECINVSID` — and, nobody driving it,
+//! halts the machine, as an unenumerated requester does on VT-d. A unit this
+//! kernel cannot program, and every unit of a machine whose IORT names more
+//! than one, is left aborting every transaction, and no domain is given.
 //!
 //! The unit reads what it is given coherently — `toyos_smmu::unit::probe`
 //! refuses one that does not — so a store it reads is published by the order
@@ -201,8 +206,8 @@ fn window(phys: u64, bytes: u64) -> Mmio {
     unsafe { Mmio::over_phys(DirectMap::from_phys(phys), bytes) }
 }
 
-/// The SMMUv3, armed; a refusal leaves it aborting what it is given, or says
-/// why it could not be told to.
+/// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
+/// what it is given, or says why one could not be told to.
 pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::RootBridgeWindow]) {
     let iort = match toyos_acpi::iort(direct_phys(), rsdp_addr) {
         Ok(iort) => iort,
@@ -215,37 +220,57 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::R
             return;
         }
     };
-    let mut units = iort.nodes().filter_map(|node| match node {
-        Node::Smmuv3(smmu) => Some(smmu),
-        _ => None,
-    });
-    let Some(smmu) = units.next() else {
-        log!("IOMMU: the IORT names no SMMUv3: no device is translated this boot");
-        return;
+    let named: Vec<_> = iort
+        .nodes()
+        .filter_map(|node| match node {
+            Node::Smmuv3(smmu) => Some(smmu),
+            _ => None,
+        })
+        .collect();
+    // Every unit, before any refusal: `GBPA`'s reset value is IMPLEMENTATION
+    // DEFINED, and one firmware left bypassing gives its devices all memory.
+    let mut aborting = Vec::new();
+    for smmu in &named {
+        if !smmu.base.is_multiple_of(REGISTER_PAGE) {
+            log!("IOMMU: the SMMUv3's registers at {:#x} are not on a 64 KiB page: not touched", smmu.base);
+            continue;
+        }
+        let regs = Registers(crate::mm::paging::map_mmio(smmu.base, 2 * REGISTER_PAGE, MmioPolicy::Uncacheable));
+        abort_unprogrammed(regs, smmu.base);
+        aborting.push((smmu, regs));
+    }
+    let (smmu, regs) = match (named.len(), aborting.pop()) {
+        (0, _) => {
+            log!("IOMMU: the IORT names no SMMUv3: no device is translated this boot");
+            return;
+        }
+        (1, Some(one)) => one,
+        (1, None) => return,
+        (count, _) => {
+            log!("IOMMU: the IORT names {count} SMMUv3s, and this kernel drives one: each is left aborting");
+            return;
+        }
     };
-    if units.next().is_some() {
-        log!("IOMMU: the IORT names more than one SMMUv3, and this kernel drives one: none is touched");
-        return;
-    }
-    if !smmu.base.is_multiple_of(REGISTER_PAGE) {
-        log!("IOMMU: the SMMUv3's registers at {:#x} are not on a 64 KiB page: not touched", smmu.base);
-        return;
-    }
-    let regs = Registers(crate::mm::paging::map_mmio(smmu.base, 2 * REGISTER_PAGE, MmioPolicy::Uncacheable));
-    abort_unprogrammed(regs, smmu.base);
 
+    crate::iommu::fault::describe(devices);
     let segment = u32::from(crate::pcidev::segment());
     let mut routes = Vec::new();
     for device in devices {
         let function = StreamId::pci(device.bus, device.dev, device.func);
         match iort.route(segment, function.requester()) {
+            #[cfg(feature = "boot-actuators")]
+            Ok(Route::Translated { stream, .. })
+                if crate::actuator::smmu_selftest() && selftest::stands_unrouted(device, devices) =>
+            {
+                log!("smmu-selftest: {function}, StreamID {stream:#x}, is given no route, as a function never enumerated is not");
+            }
             Ok(Route::Translated { smmu: by, stream, .. }) if by.base == smmu.base => routes.push((function, stream)),
             Ok(route) => log!("IOMMU: {function} is not routed through the SMMUv3: {route:?}"),
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
     }
     let reserved = windows.iter().map(|w| (w.base, w.end())).collect();
-    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved, devices) else {
+    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved) else {
         return;
     };
     *UNIT.lock() = Some(live);
@@ -255,8 +280,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::R
     }
 }
 
-/// `GBPA` aborting and the unit disabled: from here until `SMMUEN`, and for
-/// good if it is never set, every transaction aborts.
+/// `GBPA` aborting, the unit disabled and none of its interrupts able to
+/// write: from here until `SMMUEN`, and for good if it is never set, every
+/// transaction aborts.
 fn abort_unprogrammed(regs: Registers, base: u64) {
     let gbpa = || regs.read(reg::GBPA);
     regs.wait("GBPA free to update", || gbpa() & reg::GBPA_UPDATE == 0);
@@ -272,6 +298,15 @@ fn abort_unprogrammed(regs: Registers, base: u64) {
         log!("IOMMU: the SMMUv3 at {base:#x} was handed over with CR0 {cr0:#x}; it goes off first");
         regs.control(reg::CR0, 0, "CR0 cleared");
     }
+    // An `*_IRQ_CFG0` address that is not zero makes its interrupt a write
+    // there, which no stream table entry governs; each resets UNKNOWN and is
+    // written only with its interrupt off (§3.18.2, §6.3.21, §6.3.30, §6.3.34).
+    regs.control(reg::IRQ_CTRL, 0, "its interrupts disabled");
+    regs.write64(reg::GERROR_IRQ_CFG0, 0);
+    regs.write64(reg::EVENTQ_IRQ_CFG0, 0);
+    if regs.read(reg::IDR0) & reg::IDR0_PRI != 0 {
+        regs.write64(reg::PRIQ_IRQ_CFG0, 0);
+    }
     log!("IOMMU: SMMUv3 at {base:#x}: GBPA {:#x}, every transaction aborts while SMMUEN is clear", gbpa());
 }
 
@@ -285,7 +320,6 @@ fn program(
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32)>,
     reserved: Vec<(u64, u64)>,
-    devices: &[PciDevice],
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
     let (idr0, idr1, idr5) = (regs.read(reg::IDR0), regs.read(reg::IDR1), regs.read(reg::IDR5));
@@ -322,9 +356,11 @@ fn program(
     let mut memory = Memory::new();
     let table = memory.alloc(64 << log2);
     let streams = window(table, 64 << log2);
-    for stream in 0..1u64 << log2 {
+    // Every other entry stays zero, invalid: a stream no function is routed
+    // from is recorded, as one past the table is.
+    for (_, stream) in &routes {
         for (i, word) in Ste::ABORT.words().iter().enumerate() {
-            streams.write_u64(stream * 64 + 8 * i as u64, *word);
+            streams.write_u64(u64::from(*stream) * 64 + 8 * i as u64, *word);
         }
     }
     let (commands_log2, events_log2) =
@@ -364,14 +400,14 @@ fn program(
     regs.write64(reg::EVENTQ_BASE, events_base);
     regs.write(reg::EVENTQ_PROD, 0);
     regs.write(reg::EVENTQ_CONS, 0);
-    fault::arm(regs, window(events_at, 32 << events_log2), events, devices, &live.routes);
+    fault::arm(regs, window(events_at, 32 << events_log2), events, &live.routes);
     regs.control(reg::CR0, reg::CR0_CMDQEN | reg::CR0_EVENTQEN, "its event queue enabled");
     regs.control(reg::IRQ_CTRL, reg::IRQ_EVENTQ, "its event interrupt enabled");
     regs.control(reg::CR0, reg::CR0_CMDQEN | reg::CR0_EVENTQEN | reg::CR0_SMMUEN, "SMMUEN");
 
     log!(
-        "IOMMU: SMMUv3 at {base:#x} armed, CR0ACK {:#x}: {} functions' streams in a table of {}, every entry \
-         aborting; a CMD_SYNC consumed; events on SPI {event}",
+        "IOMMU: SMMUv3 at {base:#x} armed, CR0ACK {:#x}: {} functions' streams aborting in a table of {}, every \
+         other entry invalid; a CMD_SYNC consumed; events on SPI {event}",
         regs.read(reg::CR0ACK),
         live.routes.len(),
         1u32 << log2,

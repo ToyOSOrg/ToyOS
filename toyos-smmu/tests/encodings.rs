@@ -215,7 +215,7 @@ fn a_context_descriptors_ips_is_the_units_output_size_and_no_more_than_48_bits()
 /// (§6.3.130, §6.3.131).
 #[test]
 fn the_registers_sit_where_the_register_overview_has_them() {
-    let page0: [(usize, usize); 18] = [
+    let page0: [(usize, usize); 21] = [
         (0x0000, unit::IDR0),
         (0x0004, unit::IDR1),
         (0x0014, unit::IDR5),
@@ -228,12 +228,15 @@ fn the_registers_sit_where_the_register_overview_has_them() {
         (0x0054, unit::IRQ_CTRLACK),
         (0x0060, unit::GERROR),
         (0x0064, unit::GERRORN),
+        (0x0068, unit::GERROR_IRQ_CFG0),
         (0x0080, unit::STRTAB_BASE),
         (0x0088, unit::STRTAB_BASE_CFG),
         (0x0090, unit::CMDQ_BASE),
         (0x0098, unit::CMDQ_PROD),
         (0x009C, unit::CMDQ_CONS),
         (0x00A0, unit::EVENTQ_BASE),
+        (0x00B0, unit::EVENTQ_IRQ_CFG0),
+        (0x00D0, unit::PRIQ_IRQ_CFG0),
     ];
     for (specified, declared) in page0 {
         assert_eq!(declared, specified);
@@ -254,6 +257,7 @@ fn the_control_values_hold_each_field_where_its_register_has_it() {
     );
     // E2H clear, RECINVSID, PTM.
     assert_eq!(u64::from(unit::CR2_RECORD_PRIVATE), word(&[(0, 0, 0), (1, 1, 1), (2, 2, 1)]));
+    assert_eq!(u64::from(unit::IDR0_PRI), word(&[(16, 16, 1)]));
     assert_eq!(u64::from(unit::GBPA_ABORT | unit::GBPA_UPDATE), word(&[(20, 20, 1), (31, 31, 1)]));
     assert_eq!(u64::from(unit::IRQ_GERROR | unit::IRQ_EVENTQ), word(&[(0, 0, 1), (2, 2, 1)]));
     assert_eq!(
@@ -489,6 +493,7 @@ fn a_translation_fault_names_its_stream_its_address_and_whether_it_wrote() {
                 event(record(number, 0x0001_0008, 0xffff_8000_dead_b000, read)),
                 Event {
                     stream: 0x0001_0008,
+                    number,
                     code,
                     attempt: Some(Attempt { address: 0xffff_8000_dead_b000, write: !read })
                 }
@@ -524,7 +529,7 @@ fn every_event_number_is_its_own_code_and_only_a_fault_carries_an_attempt() {
         let decoded = event(record(number, 7, 0x1000, false));
         assert_eq!(decoded.code.name() == "unnamed", !named.iter().any(|(n, _)| *n == number), "event {number:#x}");
         let code = named.iter().find(|(n, _)| *n == number).map_or(Code::Other(number), |(_, code)| *code);
-        assert_eq!((decoded.stream, decoded.code), (7, code), "event {number:#x}");
+        assert_eq!((decoded.stream, decoded.number, decoded.code), (7, number, code), "event {number:#x}");
         assert_eq!(decoded.attempt.is_some(), (0x10..=0x13).contains(&number), "event {number:#x}");
     }
 }

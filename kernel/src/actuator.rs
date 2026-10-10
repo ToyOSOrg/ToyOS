@@ -144,9 +144,10 @@ actuators! {
     #[allow(dead_code)]
     psci_withheld = "psci-withheld";
 
-    /// Once the SMMUv3 is armed, have QEMU's `iommu-testdev` write on the
-    /// entry every stream starts with, on a domain at an address it maps, and
-    /// at one it does not. Judged by `virt_smmu`.
+    /// Give the `iommu-testdev` off bus 0 no route, and once the SMMUv3 is
+    /// armed have it and the one on bus 0 write on no domain, then the one on
+    /// bus 0 on a domain at an address it maps, and there again once it is
+    /// taken back. Judged by `virt_smmu`.
     // The SMMUv3 is AArch64's alone, so x86-64 builds an accessor it never reads.
     #[allow(dead_code)]
     smmu_selftest = "smmu-selftest";

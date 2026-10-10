@@ -237,6 +237,8 @@ pub struct Attempt {
 pub struct Event {
     /// `StreamID`, bits [63:32].
     pub stream: u32,
+    /// The event's number, bits [7:0], which `code` names.
+    pub number: u8,
     pub code: Code,
     pub attempt: Option<Attempt>,
 }
@@ -270,5 +272,5 @@ pub const fn event(record: [u64; 4]) -> Event {
         }
         _ => None,
     };
-    Event { stream: (record[0] >> 32) as u32, code, attempt }
+    Event { stream: (record[0] >> 32) as u32, number: record[0] as u8, code, attempt }
 }
