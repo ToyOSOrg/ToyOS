@@ -345,7 +345,7 @@ impl Server<'_> {
         out8(enable, in8(enable) | 1 << (n % 8));
         println!("{CONTROLLER_SERVED}{n:#x} at {:#x}/{:#x}", ec.command, ec.data);
         self.served.ec_gpe = Some(n);
-        aml.host.ec = Some(Ports { claim, command: ec.command, data: ec.data });
+        aml.host.ec = Some(Ports { claim: self.claim, command: ec.command, data: ec.data });
         self.ec = Some(ec);
         self.drain();
         self.run_queued();

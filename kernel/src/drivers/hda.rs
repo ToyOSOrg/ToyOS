@@ -344,19 +344,33 @@ pub fn init(devices: &[PciDevice]) {
         }
         1 => live.remove(0),
         n => {
-            for (pci, _, _, statests) in &live {
+            for (pci, regs, _, statests) in &live {
                 log!(
-                    "hda: {:02x}:{:02x}.{} has a live link (statests={statests:#06x})",
+                    "hda: {:02x}:{:02x}.{} {:04x}:{:04x} has a live link (statests={statests:#06x})",
                     pci.bus,
                     pci.dev,
-                    pci.func
+                    pci.func,
+                    pci.vendor_id(),
+                    pci.device_id()
                 );
+                yoga_survey(*regs, *statests);
             }
-            log!(
-                "hda: {n} controllers answer on this machine and choosing between them means \
-                 walking their codec graphs, which is the driver's — refused by name, no HDA audio"
-            );
-            return;
+            // YOGA HACK: the AMD laptop's analog codec, behind the FCH's own
+            // controller, is the one its speakers hang off; the GPU's HDMI one
+            // is left alone.
+            match live.iter().position(|(pci, ..)| (pci.vendor_id(), pci.device_id()) == (0x1022, 0x15E3)) {
+                Some(at) => {
+                    log!("hda: YOGA {n} controllers answer; taking 1022:15e3, the analog codec's");
+                    live.swap_remove(at)
+                }
+                None => {
+                    log!(
+                        "hda: {n} controllers answer on this machine and choosing between them means \
+                         walking their codec graphs, which is the driver's — refused by name, no HDA audio"
+                    );
+                    return;
+                }
+            }
         }
     };
 
@@ -532,6 +546,63 @@ fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
         return None;
     }
     Some((regs, gcap, statests))
+}
+
+/// YOGA HACK: one verb through the immediate command interface, or `None`
+/// where the controller does not answer it within a millisecond.
+fn yoga_verb(regs: Mmio, verb: u32) -> Option<u32> {
+    const ICB: u16 = 1 << 0;
+    const IRV: u16 = 1 << 1;
+    if !crate::clock::settles(1_000_000, || regs.read_u16(IMMEDIATE_STATUS) & ICB == 0) {
+        return None;
+    }
+    regs.write_u16(IMMEDIATE_STATUS, IRV);
+    regs.write_u32(IMMEDIATE_COMMAND, verb);
+    regs.write_u16(IMMEDIATE_STATUS, ICB);
+    if !crate::clock::settles(1_000_000, || regs.read_u16(IMMEDIATE_STATUS) & IRV != 0) {
+        return None;
+    }
+    let response = regs.read_u32(IMMEDIATE_RESPONSE);
+    regs.write_u16(IMMEDIATE_STATUS, IRV);
+    Some(response)
+}
+
+/// YOGA HACK: every codec on the link, its vendor/device id, and every pin
+/// widget that can drive an output: its default configuration, its pin caps
+/// and whether it carries EAPD. Reads only: GET_PARAMETER and
+/// GET_CONFIG_DEFAULT.
+fn yoga_survey(regs: Mmio, statests: u16) {
+    let param = |cad: u32, nid: u32, p: u32| yoga_verb(regs, cad << 28 | nid << 20 | 0xF00 << 8 | p);
+    for cad in (0..15u32).filter(|c| statests & (1 << c) != 0) {
+        let Some(id) = param(cad, 0, 0x00) else {
+            log!("hda: YOGA codec {cad}: no immediate response");
+            continue;
+        };
+        log!("hda: YOGA codec {cad}: {:04x}:{:04x} rev {:#010x}", id >> 16, id & 0xFFFF, param(cad, 0, 0x02).unwrap_or(0));
+        let Some(fgs) = param(cad, 0, 0x04) else { continue };
+        for fg in (fgs >> 16 & 0xFF)..(fgs >> 16 & 0xFF) + (fgs & 0xFF) {
+            let Some(widgets) = param(cad, fg, 0x04) else { continue };
+            let first = widgets >> 16 & 0xFF;
+            for nid in first..first + (widgets & 0xFF) {
+                let Some(caps) = param(cad, nid, 0x09) else { continue };
+                if caps >> 20 & 0xF != 4 {
+                    continue;
+                }
+                let pin = param(cad, nid, 0x0C).unwrap_or(0);
+                if pin & (1 << 4) == 0 {
+                    continue;
+                }
+                let config = yoga_verb(regs, cad << 28 | nid << 20 | 0xF1C << 8).unwrap_or(0);
+                log!(
+                    "hda: YOGA codec {cad} fg {fg} output pin {nid:#04x}: config {config:#010x} (device {:x}, \
+                     connectivity {:x}) pincaps {pin:#010x} eapd={}",
+                    config >> 20 & 0xF,
+                    config >> 30,
+                    pin >> 16 & 1
+                );
+            }
+        }
+    }
 }
 
 /// Put the function in D0 if firmware left it lower; D3hot reads all ones, indistinguishable from

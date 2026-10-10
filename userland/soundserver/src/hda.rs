@@ -156,6 +156,13 @@ impl Hda {
             config::WIDTH,
         );
 
+        // YOGA HACK: whether the speaker path's amplifier bit is set, said.
+        say!(
+            "soundserver: YOGA EAPD set on output pin {:#04x}: {}; on the headphone pin: {}",
+            path.output.node.0,
+            path.output.eapd,
+            path.headphone.as_ref().map_or(String::from("no headphone pin"), |hp| hp.eapd.to_string()),
+        );
         let verbs = config::verbs(&codecs, &path, format, info.stream_tag)
             .expect("the path names a codec this walk produced");
         let sent = verbs.len();
