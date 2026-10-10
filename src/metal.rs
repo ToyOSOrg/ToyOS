@@ -772,11 +772,6 @@ pub const FLASHABLE: &[&str] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     "usb-transport-break",
-    // It deafens one CPU for a window of its own clock and has the blocked-task
-    // dump kick it and probe it with an NMI. It reaches no device register and
-    // writes no firmware state; the CPU rejoins, and the boot goes on to
-    // userland and ends the way an unarmed one does.
-    "dump-deaf-cpu",
     // The kernel leaves the i8042 unprobed and a test process drives it through
     // an `isa` claim: it reads the configuration byte, has the keyboard
     // acknowledge `0xF4` and writes the byte back, each a command this kernel's

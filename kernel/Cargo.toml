@@ -68,9 +68,6 @@ shard-publish-relaxed = []
 # `device_irq` reds. They *are* the record's design, so turning them off reverts
 # the whole of what the model claims.
 device-irq-lossy = []
-# `src/sched/dump_request.rs`'s `take` and `end_report` go `Relaxed`, so the next report
-# is unordered against the last one's writes, and `dump_request` reds.
-dump-report-relaxed = []
 # The same arrangement for the sleep lock's acquire edge, and it is the first
 # *contended*-acquire model this tree has: `src/sleeplock.rs`'s two loads of
 # `now` — the ones that decide whose turn it is — go `Relaxed`, so the previous

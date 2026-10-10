@@ -92,9 +92,6 @@ actuators! {
     /// by `machine_shutdown_wire_at_the_seal`.
     wire_held_at_the_last_word = "wire-held-at-the-last-word";
 
-    /// Make one CPU ignore a kick.
-    dump_deaf_cpu = "dump-deaf-cpu";
-
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
     /// machine nothing else in this tree ends. Where CPUID states no
@@ -189,8 +186,8 @@ actuators! {
     /// so a guest reaches the reset. Judged by `screen_fatal_behind_a_painter`.
     panic_reboot_fast = "panic-reboot-fast";
 
-    /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
-    /// fatal path meeting a painter that will never let go.
+    /// Have the last boot checkpoint's painter go fatal holding the panel's
+    /// latch: a fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
 
     /// Leave the xHCI controller `xhci-leave=<vendor>:<device>` names to a
