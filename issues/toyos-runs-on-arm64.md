@@ -230,7 +230,6 @@ before any aarch64 file exists, with x86 as its only user:
 
 Each is its own issue, owned by the stage that removes it:
 
-- `issues/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 6)
 - `issues/the-crash-evidence-records-x86-fault-registers.md` (stage 5)
 - `issues/the-aarch64-kernel-builds-with-dead-code-allowed.md` (stage 7)
 
@@ -327,10 +326,9 @@ Each stage names its exit; "measured" means a number from a run.
    function is its only consumer the small-kernel track leaves, and it needs that
    stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
    track, which moves the driver out of the kernel:
-   - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
-     HDA, virtio-console and virtio-gpu drivers each refuse their function by
-     name, and a process's claim on one (netstack's, soundserver's
-     virtio-sound) is refused with them.
+   - a driver in this kernel is given no message (`irqchip::its::msi`), so
+     the kernel's xHCI (`virt`'s boot stick), HDA, virtio-console and
+     virtio-gpu drivers each refuse their function by name.
    - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
      own, which a `ramfb` scanout carved out of RAM need not be.
 
@@ -369,16 +367,24 @@ Each stage names its exit; "measured" means a number from a run.
    before its body) get a test here that reds with `put` written back as one
    `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
    test until then.
-   **The claim's handler is the first arm of `irq()`
-   (`kernel/src/arch/aarch64/trap.rs:135`) that posts a watch or lets go of a
-   `Lock`**, and either runs `preempt::enable`, whose pass at depth zero
-   (`kernel/src/preempt.rs:67`) reads nothing of `DAIF`; `do_preempt`'s
-   `assert_baseline(BASELINE_IRQ_EXIT)` (`kernel/src/scheduler.rs:358`) passes
-   at depth zero, so that pass would run inside the handler, before
-   `irqchip::end`. Owed before that arm lands: `irq()` holds the preempt count
-   across every device arm, as x86-64's `device_irq_entry` does, or
-   `preempt::enable` refuses a pass with interrupts masked, which `IrqOff`'s
-   SAFETY (`kernel/src/sched/driver.rs:49`) already assumes.
+   A claimed function's message is its claim slot's LPI through the GICv3
+   ITS (`kernel/src/arch/aarch64/irqchip/its.rs`), on QEMU's emulated GIC:
+   HVF's own refuses an ITS, so a `virt` with one is
+   `its=on,kernel-irqchip=off`. QEMU's SMMUv3 translates the message as a
+   write of the function's, so every domain maps the doorbell's page
+   (`virt_claim_lpi`, red without it on a `DMA FAULT` at `GITS_TRANSLATER`).
+   `irq()` holds the preempt count across every device arm, as x86-64's
+   `device_irq_entry` does, and `pcidev::isr` asserts it.
+   A released function's stream stays on its slot's domain, which maps
+   the doorbell; its bus mastering off and its message masked are what
+   stop its writes, and a write it makes regardless reaches the ITS, where
+   the release's `DISCARD` and `MAPD` with `V` clear leave its DeviceID
+   translating nothing. That last is read, not tested: no function QEMU
+   offers writes once mastering is off but `iommu-testdev`, which no claim
+   can tell to write. **Owed**: a `smmu-selftest` arm that puts an
+   `iommu-testdev` on a domain, maps its DeviceID to a slot and unmaps it as
+   a release does, has it write event 0 to `GITS_TRANSLATER`, and is red
+   when the slot's LPI is raised.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. Every program of `system.toml` builds

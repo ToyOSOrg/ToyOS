@@ -13,6 +13,8 @@ pub(crate) mod unclaimed;
 mod user_dev;
 mod xhci;
 
+pub(crate) use user_dev::{claim_vector, slot_interrupt};
+
 use core::arch::naked_asm;
 
 use super::cpu;
@@ -42,8 +44,28 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
 
+/// The vector a driver in this kernel arms its function's message with: one
+/// of the two below, each its own gate.
+#[derive(Clone, Copy)]
+pub struct DriverIrq(Vector);
+
+impl DriverIrq {
+    pub(crate) const fn vector(self) -> u8 {
+        self.0 as u8
+    }
+}
+
+impl core::fmt::Display for DriverIrq {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "vector {:#x}", self.vector())
+    }
+}
+
+/// The vector the xHCI controller's message-signalled interrupt carries.
+pub const XHCI_VECTOR: DriverIrq = DriverIrq(Vector::Xhci);
+
 /// The vector the HDA controller's message-signalled interrupt carries.
-pub const HDA_VECTOR: u8 = Vector::Hda as u8;
+pub const HDA_VECTOR: DriverIrq = DriverIrq(Vector::Hda);
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;

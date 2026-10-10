@@ -117,6 +117,11 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
+    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
+    // machine has.
+    "claim_lpi",
+    "claim_unrouted",
+    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
@@ -308,6 +313,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
+    ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
     ("virt_wall_clock_utc", qemu::Profile::Virt),
 ];
@@ -2285,6 +2291,140 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `tests/toyos-rust-tests`' binaries that `tests/virtclaimcase` runs as its
+/// jobs, each `test_rs_` and its name.
+const VIRT_CLAIM_LPI: &str = "claim_lpi";
+const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
+const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
+
+/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
+/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
+/// the console only if the kernel read through the BAR for a crash report.
+const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
+
+/// A claimed function's message, translated by the ITS into its claim slot's
+/// LPI, and the claims the kernel refuses beside it, on `tests/virtclaimcase`.
+/// Its first job claims QEMU's `edu` and reads every message it asks it for as
+/// one interrupt of its claim (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`),
+/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
+/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
+/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
+/// unmapped again. The second is refused the `e1000e` the IORT routes past
+/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
+/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
+/// crash report reads through it. And no access of a function's is refused
+/// at the SMMUv3.
+fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
+    const JOB: &str = "test_rs_claim_lpi";
+    const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
+    const EDU: &str = "[1234:11e8]";
+    let config = compile::repo_root().join("tests/virtclaimcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    // One CPU, so each message is taken where the job wrote the register
+    // that sends it: at EL0, which holds the preempt count at zero.
+    let options = BootOptions {
+        profile,
+        smp: 1,
+        ready_marker: "control registers: SCTLR_EL1=",
+        extra_root_files: vec![
+            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
+            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
+            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
+        ],
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
+        if !argv.iter().any(|a| a.contains(want)) {
+            return Err(format!("the machine has no {want}: {argv:?}"));
+        }
+    }
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
+    // The release's own line, its last: the DeviceID's unmapping comes before it.
+    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
+    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
+    let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
+        return Err(format!("the MADT's ITS was never armed
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {armed}");
+    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
+        return Err(format!("edu was never handed over
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {handed}");
+    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
+    let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
+        let (at, rest) = rest.split_once(' ')?;
+        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
+        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
+    });
+    let Some((at, slot, lpi)) = parsed else {
+        return Err(format!("{handed:?} names no function, slot and LPI"));
+    };
+    if lpi != 8192 + slot {
+        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
+    }
+    // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
+    // that to the ITS's DeviceID unchanged.
+    let (bus, rest) = at.split_once(':').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
+    let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
+    for want in [
+        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
+        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
+        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
+        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
+    ] {
+        let Some(found) = line(&want) else {
+            return Err(format!("the kernel never said {want:?}
+serial:
+{serial}"));
+        };
+        eprintln!("  [virt] {found}");
+    }
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_unrouted",
+        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
+    )?;
+    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
+    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
+                            DeviceID at this kernel's ITS behind the SMMUv3";
+    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
+        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {refused}");
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_bar_fault",
+        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
+    )?;
+    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
+    if faults.len() != 2 {
+        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
+    }
+    let console = serial.to_lowercase();
+    for mark in BAR_MARKS {
+        if console.contains(&format!("{mark:x}")) {
+            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
+        }
+    }
+    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
+        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
 /// Everything the PL011 has carried on `qemu`'s boot: the capture each
 /// [`judge_virt_job`] after the first goes on from, since a drain reads past
 /// the marker it waited for.
@@ -3017,6 +3157,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
+        "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a

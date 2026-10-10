@@ -194,7 +194,7 @@ pub fn route(row: usize, wire: Wire) -> Result<Line, String> {
     ioapic::route(
         wire.gsi,
         super::idt::ISA_VECTORS[row],
-        crate::drivers::pci::MSG_DEST,
+        super::apic::MSG_DEST,
         wire.trigger,
         wire.polarity,
     )

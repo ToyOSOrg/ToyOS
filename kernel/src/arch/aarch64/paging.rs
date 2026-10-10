@@ -14,7 +14,9 @@
 //! Normal write-back; a device's registers only as [`map_mmio`] maps them; and
 //! the scanout. A page is never retyped: a mapping that disagrees with the one
 //! already there is refused by name, because one page under two memory types
-//! loses coherency (D8.2.12).
+//! loses coherency (D8.2.12). So the kernel reads and writes a user page
+//! through the direct map only where it is memory: a user leaf of a device's
+//! registers answers no translation, no syscall's copy and no crash report.
 //!
 //! **A live entry is replaced break-before-make**: written invalid, its
 //! translation dropped on every CPU (`super::tlb`), and only then written
@@ -63,6 +65,14 @@ fn typed(cache: CachePolicy) -> u64 {
         CachePolicy::Uncacheable => ATTR_DEVICE << 2 | PXN | UXN,
         CachePolicy::WriteCombining => ATTR_NORMAL_NC << 2 | OUTER_SHAREABLE,
     }
+}
+
+/// Whether the frame a user leaf maps is one the kernel may reach through the
+/// direct map: not a device's registers, which the direct map holds only
+/// where [`map_mmio`] mapped them, and then as a type `memcpy`'s unaligned
+/// access faults on.
+fn through_direct_map(leaf: u64) -> bool {
+    policy_of(leaf) != CachePolicy::Uncacheable
 }
 
 /// The type a leaf this file wrote names; any other index is one it never wrote.
@@ -432,7 +442,7 @@ impl AddressSpace {
     /// `false` leaves the mapping as found and `phys` the caller's to free:
     /// the check and the write are one critical section under the caller's lock.
     pub fn map_window_if_absent(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) -> bool {
-        if self.translate(vaddr).is_some() {
+        if self.tables.leaf(vaddr.raw()).is_some() {
             return false;
         }
         self.map_window(vaddr, phys, prot);
@@ -465,7 +475,9 @@ impl AddressSpace {
         crate::sched::futex::revoke_range(phys, PAGE_2M);
     }
 
-    /// Checked here, not at the callers: only a user address names user memory.
+    /// Checked here, not at the callers: only a user address names user
+    /// memory, and a device's registers mapped there are no address the
+    /// direct map answers for.
     pub fn translate(&self, vaddr: UserAddr) -> Option<DirectMap> {
         self.walk(vaddr).map(|(at, _, _)| at)
     }
@@ -491,7 +503,7 @@ impl AddressSpace {
         if !toyos_userbound::is_user_addr(va) {
             return None;
         }
-        let (leaf, size) = self.tables.leaf(va)?;
+        let (leaf, size) = self.tables.leaf(va).filter(|&(leaf, _)| through_direct_map(leaf))?;
         let base = leaf & if size == PAGE_2M { ADDR_2M } else { ADDR };
         Some((DirectMap::from_phys(base + (va & (size - 1))), leaf, size))
     }
@@ -859,6 +871,9 @@ pub(super) fn read_user_word(addr: u64) -> Option<u64> {
             }
             (_, false) => return None,
         };
+        if !through_direct_map(entry) {
+            return None;
+        }
         let base = entry & if size == PAGE_2M { ADDR_2M } else { ADDR };
         // SAFETY: a byte of a frame a valid leaf maps, reached through the direct map.
         return Some(unsafe { core::ptr::read_volatile(DirectMap::from_phys(base + (addr & (size - 1))).as_ptr::<u64>()) });
