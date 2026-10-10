@@ -19,17 +19,8 @@ Stages, in order:
 1. **Done.** `toyos-abi`, `toyos-keymap`, `toyos-font`, `toyos` and
    `toyos-window` carry a description and a repository, and are published by
    `.github/workflows/publish.yml` through crates.io trusted publishing.
-2. **The owner's: `toyos-osrelease`'s first publish.** It is in `PUBLISHED`,
-   and the sysinfo fork names it by version, but crates.io takes a crate's
-   first version only with an API token, and trusted publishing is configured
-   per crate after it. Until then main's `publish` job is red on every landing,
-   refused at `toyos-osrelease`, which is `PUBLISHED`'s last row so that every
-   crate above it still goes up; and the sysinfo fork resolves only inside this
-   workspace, through its `[patch.crates-io]`. The owner publishes it once with
-   a token and names `publish.yml` its trusted publisher. Exit:
-   `https://index.crates.io/to/yo/toyos-osrelease` answers 200, main's next
-   `publish` is green, and the row's "last until crates.io holds it" comment
-   is deleted.
+2. **Done.** `toyos-osrelease`, which the sysinfo fork names by version, is
+   on crates.io, and names `publish.yml` its trusted publisher.
 3. **The forks.** softbuffer names
    `toyos-window` and sits on the v0.4.8 release, and raw-window-handle sits on
    v0.6.2, so nothing the window path goes through is based on a master any
