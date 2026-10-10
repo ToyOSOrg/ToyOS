@@ -1,4 +1,5 @@
-//! The key an image is signed with, and the one place a private key is held.
+//! The key an image and the package repository are signed with
+//! (`src/publish.rs`), and the one place a private key is held.
 //!
 //! **Two keys, chosen by what the image is for.** An image for a QEMU guest
 //! of `cargo run` or `cargo test`, a CI run or a metal-loop stick is signed
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use toyos_update::image::{Header, HEADER_BYTES, SIGNATURE_BYTES, SIGNED_BYTES};
+use toyos_update::repo::{base64_encode, Role};
 
 /// The variable the loader and `/system/bin/update` take the public key from
 /// at compile time: 64 lowercase hex digits.
@@ -102,6 +104,12 @@ impl Key {
         out[..HEADER_BYTES].copy_from_slice(&bytes);
         out[HEADER_BYTES..].copy_from_slice(&signature);
         out
+    }
+
+    /// The `sig` line this key vouches for a package repository document's
+    /// `body` with, as `role` (`src/publish.rs`).
+    pub fn sign_document(&self, role: Role, body: &[u8]) -> String {
+        toyos_update::repo::render::signature(&self.seed, role, body)
     }
 
     /// A key from a seed the caller chose, for a test that needs a second,
@@ -356,38 +364,10 @@ fn openssh_private(seed: &[u8; 32], public: &[u8; 32]) -> String {
     text
 }
 
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, &b)| acc | u32::from(b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
+/// An armoured body's base64, its line breaks dropped.
 fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
-    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
-    let mut out = Vec::new();
-    for chunk in digits.chunks(4) {
-        if chunk.len() == 1 {
-            return Err("base64 that ends one digit into a group".into());
-        }
-        let mut n = 0u32;
-        for (i, c) in chunk.iter().enumerate() {
-            let v = ALPHABET.iter().position(|a| a == c).ok_or_else(|| format!("{c:#x} is not base64"))?;
-            n |= (v as u32) << (18 - 6 * i);
-        }
-        out.extend_from_slice(&n.to_be_bytes()[1..chunk.len()]);
-    }
-    Ok(out)
+    let joined: String = text.split_ascii_whitespace().collect();
+    toyos_update::repo::base64_decode(&joined).ok_or_else(|| "the key is not canonical base64".into())
 }
 
 #[cfg(test)]
@@ -466,8 +446,5 @@ mod tests {
         blob[at] ^= 1;
         assert!(openssh_seed(&armour(&blob)).unwrap_err().contains("does not make the public key"));
         assert!(key.fingerprint().starts_with("SHA256:"));
-        assert_eq!(base64_decode(&base64_encode(b"any carnal pleas")).unwrap(), b"any carnal pleas");
-        assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"Ma"), "TWE=");
     }
 }
