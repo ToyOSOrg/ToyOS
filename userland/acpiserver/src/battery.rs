@@ -425,7 +425,9 @@ impl Power {
             println!("{OWN}battery {} of {present} is {}", n + 1, battery.path);
         }
         if present > 0 {
-            power.read(aml);
+            for line in power.read(aml) {
+                println!("{line}");
+            }
         }
         let found = format!(
             "{present} of {count} control-method batteries present, {} AC adapter(s), {} embedded controller device(s) told their space is there; the Global Lock taken {} times on the way",
@@ -441,8 +443,10 @@ impl Power {
         Some(power)
     }
 
-    /// Read every battery and adapter, saying a line of each that moved.
-    pub fn read<K: Kernel, C: Controller>(&mut self, aml: &mut Aml<'_, K, C>) {
+    /// Read every battery and adapter: the line of each battery whose
+    /// reading moved, for its caller to say.
+    pub fn read<K: Kernel, C: Controller>(&mut self, aml: &mut Aml<'_, K, C>) -> Vec<String> {
+        let mut lines = Vec::new();
         let mut ac = None;
         for at in 0..self.adapters.len() {
             let device = self.adapters[at].clone();
@@ -450,7 +454,7 @@ impl Power {
                 Ok(Some(Value::Integer(online))) => ac = Some(ac.unwrap_or(false) || online != 0),
                 Ok(Some(_)) => self.refused(&device, "_PSR", "no Integer"),
                 Ok(None) => self.refused(&device, "_PSR", "the adapter has no _PSR"),
-                Err(_) if self.stopping => return,
+                Err(_) if self.stopping => return lines,
                 Err(why) => self.refused(&device, "_PSR", &kind(&why)),
             }
         }
@@ -468,7 +472,7 @@ impl Power {
             let status = match self.evaluate(aml, &format!("{device}._BST"), &[]) {
                 Ok(Some(value)) => bst(&value),
                 Ok(None) => Err("the battery has no _BST".into()),
-                Err(_) if self.stopping => return,
+                Err(_) if self.stopping => return lines,
                 Err(why) => Err(kind(&why)),
             };
             let status = match status {
@@ -482,9 +486,10 @@ impl Power {
             let now = (percent(&battery.info, &status), status.state);
             if battery.said != Some(now) || ac_moved {
                 battery.said = Some(now);
-                println!("acpiserver: {}battery {} of {count}: {}; {ac}", acpiserver_api::BATTERY_READ, n + 1, said_status(&battery.info, &status));
+                lines.push(format!("acpiserver: {}battery {} of {count}: {}; {ac}", acpiserver_api::BATTERY_READ, n + 1, said_status(&battery.info, &status)));
             }
         }
+        lines
     }
 }
 
@@ -650,9 +655,9 @@ mod tests {
     }
 
     /// A line is said only where what it says moved: the percent, the state
-    /// or the adapter.
+    /// or the adapter; find said the first.
     #[test]
-    fn a_reading_is_kept_until_its_percent_its_state_or_the_adapter_moves() {
+    fn a_reading_is_said_only_where_its_percent_its_state_or_the_adapter_moves() {
         let kernel = laptop_machine(None);
         let mut aml = loaded(&kernel, Some(Emulated::new(space())));
         let mut power = Power::find(&mut aml, true).expect("a battery");
@@ -660,21 +665,26 @@ mod tests {
             let ec = aml.host.ec.as_mut().expect("a controller");
             ec.space[usize::from(at)..usize::from(at) + bytes.len()].copy_from_slice(bytes);
         };
-        power.read(&mut aml);
-        assert_eq!((power.batteries[0].said, power.ac_said), (Some((Some(87), DISCHARGING)), Some(Some(false))));
+        assert_eq!(power.read(&mut aml), Vec::<String>::new(), "nothing moved since find's reading");
         poke(&mut aml, RATE, &7000u16.to_le_bytes());
         poke(&mut aml, RATE + 2, &43600u16.to_le_bytes());
-        power.read(&mut aml);
-        assert_eq!(power.batteries[0].said, Some((Some(87), DISCHARGING)), "87% discharging at another rate is no new line");
+        assert_eq!(power.read(&mut aml), Vec::<String>::new(), "87% discharging at another rate is no new line");
         poke(&mut aml, RATE + 2, &43000u16.to_le_bytes());
-        power.read(&mut aml);
-        assert_eq!(power.batteries[0].said, Some((Some(86), DISCHARGING)));
+        assert_eq!(
+            power.read(&mut aml),
+            ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, discharging, rate 7000 mW, 12312 mV, moving 7000 mW; AC offline"]
+        );
         poke(&mut aml, AC, &[1]);
-        power.read(&mut aml);
-        assert_eq!(power.ac_said, Some(Some(true)));
+        assert_eq!(
+            power.read(&mut aml),
+            ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, discharging, rate 7000 mW, 12312 mV, moving 7000 mW; AC online"]
+        );
         poke(&mut aml, STATE, &[CHARGING as u8]);
-        power.read(&mut aml);
-        assert_eq!(power.batteries[0].said, Some((Some(86), CHARGING)));
+        assert_eq!(
+            power.read(&mut aml),
+            ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, charging, rate 7000 mW, 12312 mV, moving 7000 mW; AC online"]
+        );
+        assert_eq!(power.read(&mut aml), Vec::<String>::new());
     }
 
     /// No controller in the machine's row: `_REG` is not run, the battery

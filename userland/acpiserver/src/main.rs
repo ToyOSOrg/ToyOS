@@ -260,7 +260,9 @@ impl Server<'_> {
             if let (Some(power), Some(aml)) = (&mut self.power, &mut self.aml)
                 && Instant::now() >= next_read
             {
-                power.read(aml);
+                for line in power.read(aml) {
+                    println!("{line}");
+                }
                 next_read = Instant::now() + battery::POLL;
                 if aml.host.stopping {
                     self.power = None;
