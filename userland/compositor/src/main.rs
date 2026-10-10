@@ -41,22 +41,26 @@ pub const DRAIN_BUDGET: Duration = FRAME_INTERVAL;
 
 pub const FLAG_HARDWARE_CURSOR: u32 = 1 << 0;
 
-/// Handles the compositor watches that are not windows: keyboard, mouse,
-/// listener.
-pub const FIXED_POLL_HANDLES: u32 = 3;
+/// Handles the compositor watches that are not windows: keyboard, mouse, and
+/// the two listeners, `compositor` and `prompt`.
+pub const FIXED_POLL_HANDLES: u32 = 4;
 
-/// Hard ceiling on live windows, from the poller rather than from memory.
+/// Hard ceiling on live client windows, from the poller rather than from memory.
 ///
-/// Every window's handle is registered in the same batch as the three fixed
-/// ones
-/// and the pending connections, and [`Poller::MAX_HANDLES`] is the widest set
+/// Every window's handle is registered in the same batch as the four fixed
+/// ones, the pending connections and the prompt's two, and [`Poller::MAX_HANDLES`] is the widest set
 /// one poller can carry. Unlike the memory budget this does not move when the
 /// resolution does, which is why the poller is sized from it:
 /// `MSG_SET_RESOLUTION` can make windows cheaper mid-run, and a poller sized
 /// for the old screen would then be too small. At any resolution this machine
 /// can actually scan out, the memory budget is far below this and is what
 /// binds.
-pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS;
+pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS - PROMPT_POLL_HANDLES;
+
+/// The prompt's own: its connection waiting for its first frame, and its
+/// window, which no client's ceiling counts (`toyos_desktop::pending_admits`,
+/// `toyos_desktop::create_verdict`).
+pub const PROMPT_POLL_HANDLES: u32 = 2;
 
 /// Edge of the cursor sprites, in pixels — the size they are rasterized at and
 /// the size the software cursor damages.

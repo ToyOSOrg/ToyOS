@@ -32,16 +32,23 @@ pub mod stack;
 pub mod taskbar;
 pub mod window;
 
-pub use budget::{create_verdict, max_windows, window_bytes, Verdict};
+pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
     cursor_from_abs, cursor_style, edge_snap, fold_mouse, key_action, tab_action, CursorStyle, Grab,
-    Held, KeyAction, MouseSample, Released, TabAction, DRAG_THRESHOLD, MOUSE_EVENT_LEN,
+    Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD, MOUSE_EVENT_LEN,
 };
 pub use layout::{set_mode, Chrome, Desk};
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
 pub use stack::Stack;
 pub use taskbar::{Taskbar, MAX_STATUS_CHARS, STATUS_MARGIN};
-pub use window::{Window, WindowId, WindowMode};
+pub use window::{Level, Window, WindowId, WindowMode};
+
+/// The colour of the frame the compositor draws around a prompt and around
+/// nothing else it draws: a cue to the person at the screen, and what a
+/// screendump finds the prompt by. A client can paint it too; what an answer
+/// grants is decided by who asked, not by how it looked
+/// (`toyos_manifest::consent`).
+pub const PROMPT_FRAME: [u8; 3] = [0xf5, 0xb0, 0x2e];

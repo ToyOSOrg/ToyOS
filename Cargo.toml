@@ -90,6 +90,7 @@ members = [
     "userland/editor",
     "userland/filepicker",
     "userland/filepicker-api",
+    "userland/grants",
     "userland/files",
     "userland/fileserver",
     "userland/host",
@@ -244,6 +245,9 @@ toyos-xhci = { path = "toyos-xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
 acpiserver-api = { path = "userland/acpiserver-api" }
+# The desktop's geometry and the prompt's colour, so `consent_prompt` clicks
+# where the compositor draws and finds the prompt by what the compositor paints.
+toyos-desktop = { path = "userland/compositor/desktop" }
 # `common::https`'s server, the peer a guest's HTTPS client is judged
 # against, and the authority and certificates it presents, made per run.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

@@ -23,6 +23,9 @@ pub use toyos_keymap::{Emit, Mods, Translator};
 // Window flags
 pub const WINDOW_FLAG_TOPMOST: u8 = 1;
 
+/// The compositor's port every window but a prompt is asked for on.
+const COMPOSITOR: &str = "compositor";
+
 /// The largest payload a client sends inline; past it a region moves instead.
 ///
 /// One number both ends read: `ipc::FrameRx` discards whatever a frame
@@ -451,7 +454,7 @@ pub fn clipboard_set(text: &str) -> Result<(), CopyError> {
 
 /// [`clipboard_set`]'s exchange, for text the clipboard holds.
 fn copy(bytes: &[u8]) -> Result<(), CreateError> {
-    let conn = endow::service("compositor")?;
+    let conn = endow::service(COMPOSITOR)?;
     if bytes.len() <= MAX_INLINE_PAYLOAD {
         return Ok(conn.send_bytes(MSG_CLIPBOARD_SET, bytes)?);
     }
@@ -492,20 +495,28 @@ impl Window {
     }
 
     pub fn create_with_title(width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
-        Self::create_with_flags(width, height, title, 0)
+        Self::create_with_flags(COMPOSITOR, width, height, title, 0)
     }
 
     pub fn create_topmost(width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
-        Self::create_with_flags(width, height, title, WINDOW_FLAG_TOPMOST)
+        Self::create_with_flags(COMPOSITOR, width, height, title, WINDOW_FLAG_TOPMOST)
+    }
+
+    /// A window asked for on the compositor's port named `port` in this
+    /// program's namespace rather than on `compositor`: which port a window
+    /// came in on is what the compositor places it by.
+    pub fn create_on(port: &str, width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
+        Self::create_with_flags(port, width, height, title, 0)
     }
 
     fn create_with_flags(
+        port: &str,
         width: u32,
         height: u32,
         title: &str,
         flags: u8,
     ) -> Result<Self, CreateError> {
-        let conn = endow::service("compositor")?;
+        let conn = endow::service(port)?;
 
         let mut req = CreateWindowRequest {
             width,

@@ -708,6 +708,13 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// [`Profile::Metal`]'s machine with a USB keyboard and an absolute USB
+    /// tablet beside its i8042, on a smaller panel: the desktop driven as a
+    /// person at QEMU's window drives it, so a test injects keys and a pointer
+    /// position through the compositor's own devices and reads the panel back.
+    /// The i8042 stays; QEMU activates one input handler per device class, so
+    /// every injected keystroke and position goes to the USB device.
+    Desktop,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -750,7 +757,8 @@ impl Profile {
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
             | Self::HeadlessUsbSpare
-            | Self::Metal => Arch::X86_64,
+            | Self::Metal
+            | Self::Desktop => Arch::X86_64,
         }
     }
 
@@ -984,6 +992,11 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
                 smmu: Smmu::Absent,
                 rng: false,
+            },
+            Self::Desktop => Shape {
+                panel: Some((1280, 800)),
+                usb: &["usb-kbd,bus=xhci.0", "usb-tablet,bus=xhci.0"],
+                ..Self::Metal.shape()
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
@@ -1471,7 +1484,6 @@ impl QemuInstance {
     pub fn screendump(&mut self) -> super::screen::Ppm {
         let socket = self.sockets.qmp.clone().expect("screendump needs BootOptions { qmp: true }");
         let out = self.screendump.clone();
-        let _ = fs::remove_file(&out);
 
         // A guest that triple-faults exits QEMU (`-no-reboot`), and the
         // socket then refuses every connect. Without this the retry loop
@@ -1486,13 +1498,13 @@ impl QemuInstance {
                 panic!("[qemu] QEMU died before the screendump (status: {status})");
             }
         });
-        qmp.execute(&format!(
-            "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}",
-            out.display()
-        ));
+        dump(&mut qmp, &out)
+    }
 
-        let bytes = fs::read(&out).expect("screendump: QEMU wrote no file");
-        super::screen::Ppm::parse(&bytes)
+    /// Where [`Self::screendump`] has QEMU write the scanout, for a
+    /// [`QmpInput::screendump`] made from inside a paced step.
+    pub fn screendump_file(&self) -> PathBuf {
+        self.screendump.clone()
     }
 
     /// Screendump until the decoded screen carries `needle`, or the timeout.
@@ -2033,6 +2045,17 @@ impl QmpMonitor {
     }
 }
 
+/// The scanout, written by QEMU to `out` and read back.
+fn dump(qmp: &mut Qmp, out: &Path) -> super::screen::Ppm {
+    let _ = fs::remove_file(out);
+    qmp.execute(&format!(
+        "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}",
+        out.display()
+    ));
+    let bytes = fs::read(out).expect("screendump: QEMU wrote no file");
+    super::screen::Ppm::parse(&bytes)
+}
+
 /// An open QMP connection for injecting input.
 ///
 /// One connection rather than one per event, because QEMU delivers each
@@ -2069,7 +2092,39 @@ impl QmpInput {
             .collect();
         self.send(&body);
     }
+
+    /// The pointer to pixel `at` of a `screen`-sized panel, by an absolute
+    /// tablet position, which the compositor maps back to the pixel
+    /// (`toyos_desktop::cursor_from_abs`): the least position at or past it.
+    pub fn point(&mut self, at: (i32, i32), screen: (usize, usize)) {
+        let abs = |pixel: i32, size: usize| {
+            let size = size as i64;
+            ((i64::from(pixel) * ABS_RANGE + size - 1) / size).min(ABS_RANGE - 1)
+        };
+        let (x, y) = (abs(at.0, screen.0), abs(at.1, screen.1));
+        self.send(&[
+            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"x\",\"value\":{x}}}}}"),
+            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"y\",\"value\":{y}}}}}"),
+        ]);
+    }
+
+    /// The left button pressed at `at`, then released, each its own report.
+    pub fn click(&mut self, at: (i32, i32), screen: (usize, usize)) {
+        self.point(at, screen);
+        for down in [true, false] {
+            self.send(&[format!("{{\"type\":\"btn\",\"data\":{{\"down\":{down},\"button\":\"left\"}}}}")]);
+        }
+    }
+
+    /// [`QemuInstance::screendump`] on this connection, into `out`, for a
+    /// step that holds no instance.
+    pub fn screendump(&mut self, out: &Path) -> super::screen::Ppm {
+        dump(&mut self.0, out)
+    }
 }
+
+/// The span of QEMU's absolute axes, which the USB tablet reports unscaled.
+const ABS_RANGE: i64 = 32768;
 
 /// The argv `options` would launch QEMU with, built against placeholder
 /// paths. A profile's claim about which devices exist is a claim about this

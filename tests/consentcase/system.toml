@@ -1,0 +1,61 @@
+# The boot `consent_prompt` drives through the compositor's own keyboard and
+# tablet on `Profile::Desktop`'s machine: a package launched from the
+# launcher asks the person at the screen for a folder in the prompt layer,
+# which `filepicker` alone reaches, over a hostile fullscreen topmost window
+# the job itself opens.
+#
+# test-runner receives `compositor` so a job's own window is a client like any,
+# and lists `shell`, whose `login` row opens a login session that is not the
+# screen's: the session `grants` is answered in, and a launch that never asks.
+
+assets = ["assets"]
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "filepicker", "test-runner"]
+
+[apps]
+receives = ["compositor"]
+folder = "read-write"
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.compositor]
+service = true
+serves = ["compositor", "prompt"]
+devices = ["framebuffer", "keyboard", "mouse"]
+starts = ["/apps"]
+login = true
+
+[programs.filepicker]
+service = true
+serves = ["filepicker", "consent"]
+receives = ["compositor", "prompt"]
+
+# `dup` because test-runner hands each binary a duplicate of its capability.
+[programs.test-runner]
+syscap = ["dup"]
+receives = ["compositor"]
+starts = ["shell", "grants", "/apps"]
+
+[programs.shell]
+starts = ["grants", "/apps"]
+login = true
+
+[programs.grants]
+receives = ["grants"]
+
+# The block service and the file servers, as `tests/proctreecase` has them:
+# the package, the home and the store are DATA's.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

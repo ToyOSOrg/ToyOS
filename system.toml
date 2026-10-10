@@ -28,8 +28,14 @@ start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "
 # `devices` and `syscap` have no spelling here, so nothing installed claims
 # hardware or enters the RT band — and no directory: a package sees its own
 # `/apps/<name>` read-only and its own `/home/toy/Apps/<name>`, its `HOME`.
+#
+# `folder` is the most of a folder of the session's home a package may be
+# granted (`/system/bin/grants`), and until a signed package entry carries a
+# package's own request it is what every package asks for: read-write, since
+# gbae saves beside the ROM it plays.
 [apps]
 receives = ["compositor", "soundserver", "filepicker"]
+folder = "read-write"
 
 # `service = true` makes a row a system service: the supervisor starts it with `HOME` at
 # its own `/state/<name>` and makes that directory first. Every other row runs
@@ -62,10 +68,12 @@ receives = ["power"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
 # makes the local desktop a login session, so `swap` and `update` run from its
-# shell.
+# shell. `prompt` is the layer above every window, which `filepicker` alone
+# reaches: serving it makes the sessions its launches open the screen's, whose
+# packages may ask the person at it for a folder.
 [programs.compositor]
 service = true
-serves = ["compositor"]
+serves = ["compositor", "prompt"]
 receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
@@ -92,7 +100,7 @@ devices = ["pci:1af4:1041"]
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "grants", "/apps"]
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
@@ -107,6 +115,12 @@ receives = ["swap"]
 # `ssh <machine> update < image` runs it for a login.
 [programs.update]
 slots = true
+
+# Which folder of the session's home an installed package is granted: the one
+# row the build lets receive `grants`, which the supervisor answers from a login
+# session alone. `grants add gbae /home/toy/Games` grants one from a shell.
+[programs.grants]
+receives = ["grants"]
 
 # A name's addresses, asked of netstack's resolver: `netstack` is the whole of what it
 # holds.
@@ -131,10 +145,13 @@ syscap = ["trace"]
 # it reads the files a record names and holds nothing else.
 [programs.symbolize]
 
+# The file picker, and the consent server: `consent` is the supervisor's
+# question before a package's launch, which no row receives, and `prompt` the
+# layer it asks it in, which no other row may hold (`src/build.rs`).
 [programs.filepicker]
 service = true
-serves = ["filepicker"]
-receives = ["compositor"]
+serves = ["filepicker", "consent"]
+receives = ["compositor", "prompt"]
 
 [programs.terminal]
 provides = ["surface"]
@@ -143,7 +160,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "grants", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]

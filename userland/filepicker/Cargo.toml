@@ -1,6 +1,6 @@
 [package]
 name = "filepicker"
-description = "The file picker: a window that answers one program's open or save request with a path, served on the filepicker port."
+description = "The file picker: a window that answers one program's open or save request with a path, served on the filepicker port; and the consent server, which asks the person at the screen the supervisor's question before a package's launch, in the compositor's prompt layer."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -9,4 +9,5 @@ license = "MIT OR Apache-2.0"
 filepicker-api = { path = "../filepicker-api" }
 toyos = { path = "../../toyos" }
 toyos-font = { path = "../toyos-font" }
+toyos-manifest = { path = "../../toyos-manifest" }
 toyos-window = { path = "../toyos-window" }
