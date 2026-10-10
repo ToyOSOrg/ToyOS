@@ -10,6 +10,11 @@ const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 /// The agent that trusts the certificates of `roots`, a PEM file, and no
 /// others.
 pub fn agent(roots: &str) -> ureq::Agent {
+    config(roots).new_agent()
+}
+
+/// MEASUREMENT ONLY: [`agent`]'s configuration, for an agent of other parts.
+pub fn config(roots: &str) -> ureq::config::Config {
     let pem = std::fs::read(roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
     let certs: Vec<_> = ureq::tls::parse_pem(&pem)
         .map(|item| match item.unwrap_or_else(|e| panic!("{roots}: {e}")) {
@@ -18,7 +23,7 @@ pub fn agent(roots: &str) -> ureq::Agent {
         })
         .collect();
     let tls = TlsConfig::builder().root_certs(RootCerts::new_with_certs(&certs)).build();
-    ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).build().new_agent()
+    ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).build()
 }
 
 /// A digest as lower-case hex.
