@@ -17,7 +17,7 @@ On the console it follows `Shutting down.`, which `quiesce` calls the boot's
 last word.
 
 So on a machine with no serial port no reader keeps the line: `/log`'s writer
-was stopped with the rest of userland, `flush_final` has no wire to drain to,
+was stopped with the rest of userland, the stop's last drain has no wire to drain to,
 and the page was sealed without it. The T14 is such a machine, and one where
 the kernel writes `ACPI_ENABLE` itself and a holder can be stopped holding
 the lock.

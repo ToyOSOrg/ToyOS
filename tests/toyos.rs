@@ -267,10 +267,10 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
-    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
-    // under HVF the power-off can come before `klogd` has put it on the wire
-    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
+    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
+    // stop's whole wait for the console's wire
+    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -281,6 +281,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
+    ("virt_reboot_wire_held", qemu::Profile::VirtEl2),
+    ("virt_reboot_wire_kept", qemu::Profile::VirtEl2),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
@@ -348,6 +350,16 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // The power-off with `klogd` holding the console's wire as the stop
+    // begins, on one CPU: a staged hold of a kernel thread, read off a console
+    // QEMU keeps past the power-off, and the T14 is never asked to power off.
+    "machine_shutdown_wire_held",
+    // The same with `klogd` keeping the wire through the stop's budget.
+    "machine_shutdown_wire_kept",
+    // The same with `klogd` staged inside its hold of the wire from the boot's
+    // last word past the seal, where the stop does not hold it: the one CPU
+    // runs nothing but the stop from the seal on.
+    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -2277,8 +2289,10 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
 
 /// `tests/virtrebootcase`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
-/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`.
-fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
+/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
+/// actuators `klogd` holds the console's wire as the stop begins, judged by
+/// [`power::judge_the_held_wire`].
+fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
     let trace = common::lane::dir().join("virt_reboot.psci");
@@ -2290,6 +2304,7 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
             profile,
             qmp: true,
             psci_trace: Some(trace.clone()),
+            kernel_params: staged,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
@@ -2309,6 +2324,9 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
         .collect();
     if asked != [PSCI_SYSTEM_RESET] {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
+    }
+    if !staged.is_empty() {
+        power::judge_the_held_wire(&console, bootlog::REBOOTING, staged == power::wire_staged(true))?;
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
     Ok(())
@@ -2763,7 +2781,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile),
+        "virt_reboot" => virt_reboot(profile, &[]),
+        // The reboot with `klogd` holding the PL011's wire as the stop begins,
+        // then keeping it through the stop's budget.
+        "virt_reboot_wire_held" => virt_reboot(profile, power::wire_staged(false)),
+        "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_fatal_behind_a_painter" => {
@@ -3508,6 +3530,9 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
+        "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
+        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
