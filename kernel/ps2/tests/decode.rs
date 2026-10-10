@@ -8,7 +8,7 @@ use toyos_ps2::{KeyDecoder, KeyOutcome, MouseDecoder, MouseOutcome};
 /// Every HID keyboard usage the layouts and the compositor can name. Outside
 /// these two ranges a usage is not a keyboard usage at all.
 fn is_hid_keyboard_usage(usage: u8) -> bool {
-    (0x04..=0x65).contains(&usage) || (0xE0..=0xE7).contains(&usage)
+    (0x04..=0x65).contains(&usage) || (0x7F..=0x81).contains(&usage) || (0xE0..=0xE7).contains(&usage)
 }
 
 fn press(decoder: &mut KeyDecoder, bytes: &[u8]) -> Vec<(u8, bool)> {

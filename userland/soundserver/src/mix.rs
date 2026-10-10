@@ -19,8 +19,18 @@ use toyos_abi::RawHandle;
 use toyos_hda::stream;
 use toyos_mixer::{
     deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, wake_left_idle, Dll,
-    MixStats, Xorshift32,
+    Gain, GainRamp, MixStats, Xorshift32,
 };
+
+/// The machine's output level, applied to the whole bus after every client is mixed.
+fn apply_master(bus: &mut [f32], channels: usize, master: &mut GainRamp) {
+    for frame in bus.chunks_exact_mut(channels) {
+        let g = master.next();
+        for s in frame {
+            *s *= g;
+        }
+    }
+}
 
 use crate::backend::{Backend, Pipeline};
 use crate::client::{mix_client, ClientStream, Departure};
@@ -97,7 +107,7 @@ fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
 /// Drain the command ring the control thread fills: connects, disconnects, and
 /// volume changes. Shared by both sinks — a client's lifecycle is the same
 /// whether its audio reaches hardware or a discard.
-fn apply_commands(cmd_ring: &CommandRing, streams: &mut Vec<ClientStream>, ramp_frames: u32) {
+fn apply_commands(cmd_ring: &CommandRing, streams: &mut Vec<ClientStream>, master: &mut GainRamp, ramp_frames: u32) {
     while let Some(cmd) = cmd_ring.pop() {
         match cmd {
             MixCommand::AddClient(client) => {
@@ -113,6 +123,14 @@ fn apply_commands(cmd_ring: &CommandRing, streams: &mut Vec<ClientStream>, ramp_
             MixCommand::SetVolume { client_id, target } => {
                 if let Some(s) = streams.iter_mut().find(|s| s.client_id == client_id) {
                     s.gain.set_target(target, ramp_frames);
+                }
+            }
+            // Nothing is playing to click, so an idle bus takes the level at once.
+            MixCommand::SetMaster { target } => {
+                if streams.is_empty() {
+                    *master = GainRamp::new(target);
+                } else {
+                    master.set_target(target, ramp_frames);
                 }
             }
         }
@@ -161,6 +179,7 @@ pub(crate) fn mix_thread(
     let refill_floor_nanos = deferral_floor_nanos(num_buffers, period_nanos);
 
     let mut streams: Vec<ClientStream> = Vec::new();
+    let mut master = GainRamp::new(Gain::UNITY);
     // Boot starts SUSPENDED: every buffer free, nothing submitted, the
     // PCM stream never started. There is no unconditional silence prime — the
     // first client's ordinary refill fills the whole pipeline through the
@@ -305,7 +324,7 @@ pub(crate) fn mix_thread(
             let mut drain = [0u8; 64];
             while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
         }
-        apply_commands(cmd_ring, &mut streams, ramp_frames);
+        apply_commands(cmd_ring, &mut streams, &mut master, ramp_frames);
 
         if !was_streaming && !streams.is_empty() {
             stats = MixStats::default();
@@ -534,6 +553,7 @@ pub(crate) fn mix_thread(
             let dma_buf = unsafe {
                 core::slice::from_raw_parts_mut(backend.buffer(idx) as *mut i16, device_period_samples)
             };
+            apply_master(&mut mix_f32, device_channels as usize, &mut master);
             quantize_period(dma_buf, &mix_f32, &mut dither_rng);
 
             if !started {
@@ -653,6 +673,7 @@ pub(crate) fn null_sink_thread(
     let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
 
     let mut streams: Vec<ClientStream> = Vec::new();
+    let mut master = GainRamp::new(Gain::UNITY);
     let poller = Poller::new(64);
     let mut mix_f32 = vec![0.0f32; device_period_samples];
     // Sized for the highest client rate accepted at stream open, exactly as
@@ -703,7 +724,7 @@ pub(crate) fn null_sink_thread(
             let mut drain = [0u8; 64];
             while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
         }
-        apply_commands(cmd_ring, &mut streams, ramp_frames);
+        apply_commands(cmd_ring, &mut streams, &mut master, ramp_frames);
 
         // Start the grid when the first client of a run connects, and reset the
         // reporting window so no idle stretch dilutes it.

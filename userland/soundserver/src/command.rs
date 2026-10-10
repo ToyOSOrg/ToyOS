@@ -23,12 +23,14 @@ use crate::ring::Spsc;
 /// pushes at most one `AddClient` (there is one accept per wait) plus, per
 /// connected client, one coalesced `SetVolume` and one `RemoveClient`.
 const CMD_RING_SIZE: usize = 256;
-const _: () = assert!(CMD_RING_SIZE >= 1 + 2 * MAX_CONTROL_CLIENTS);
+const _: () = assert!(CMD_RING_SIZE >= 2 + 2 * MAX_CONTROL_CLIENTS);
 
 pub(crate) enum MixCommand {
     AddClient(Box<ClientStream>),
     RemoveClient { client_id: usize, departure: Departure },
     SetVolume { client_id: usize, target: Gain },
+    /// The machine's output level, coalesced to one per control pass.
+    SetMaster { target: Gain },
 }
 
 /// The control thread is the one producer and the mix thread the one consumer.

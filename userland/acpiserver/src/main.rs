@@ -488,6 +488,8 @@ impl Server<'_> {
                     Some((Queried::Refused(why), _)) => format!("its method did not finish: {why}"),
                 };
                 println!("acpiserver: embedded controller query {q:#04x} taken for the first time; {said}");
+            } else {
+                println!("acpiserver: embedded controller query {q:#04x} taken (#{count})");
             }
             if served.is_some_and(|(_, presses)| presses != 0) {
                 self.press();

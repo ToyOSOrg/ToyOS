@@ -37,7 +37,7 @@ pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
     cursor_from_abs, cursor_style, edge_snap, fold_mouse, key_action, tab_action, CursorStyle, Grab,
-    Held, KeyAction, MouseSample, Released, TabAction, DRAG_THRESHOLD, MOUSE_EVENT_LEN,
+    Held, KeyAction, MouseSample, Released, TabAction, VolumeKey, DRAG_THRESHOLD, MOUSE_EVENT_LEN,
 };
 pub use layout::{set_mode, Chrome, Desk};
 pub use plan::{compose, content_blit, Blit, Layer};

@@ -20,6 +20,7 @@ mod client;
 mod render;
 mod session;
 mod stats;
+mod volume;
 
 use std::time::Duration;
 
@@ -42,8 +43,8 @@ pub const DRAIN_BUDGET: Duration = FRAME_INTERVAL;
 pub const FLAG_HARDWARE_CURSOR: u32 = 1 << 0;
 
 /// Handles the compositor watches that are not windows: keyboard, mouse,
-/// listener.
-pub const FIXED_POLL_HANDLES: u32 = 3;
+/// listener, soundserver.
+pub const FIXED_POLL_HANDLES: u32 = 4;
 
 /// Hard ceiling on live windows, from the poller rather than from memory.
 ///

@@ -11,6 +11,11 @@ pub const MSG_STREAM_SET_VOLUME: u32 = 3;
 pub const MSG_STREAM_CLOSE: u32 = 4;
 /// soundserver rejected `MSG_STREAM_OPEN` (unsupported format/channels/rate).
 pub const MSG_STREAM_ERROR: u32 = 5;
+/// Change the machine's output level, on a connection that carries no stream;
+/// answered with [`MSG_MASTER_STATE`].
+pub const MSG_MASTER_ADJUST: u32 = 6;
+/// The machine's output level after a [`MSG_MASTER_ADJUST`].
+pub const MSG_MASTER_STATE: u32 = 7;
 
 /// The only sample format currently implemented end-to-end.
 pub const FORMAT_S16LE: u16 = 0;
@@ -35,6 +40,18 @@ crate::ipc_payload! {
 
     pub struct StreamSetVolume {
         pub gain: f32,
+    }
+
+    /// `step` percentage points added to the level, clamped to 0..=100;
+    /// `toggle_mute` nonzero flips mute.
+    pub struct MasterAdjust {
+        pub step: i32,
+        pub toggle_mute: u32,
+    }
+
+    pub struct MasterState {
+        pub percent: u32,
+        pub muted: u32,
     }
 }
 

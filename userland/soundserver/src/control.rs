@@ -11,7 +11,8 @@
 //! handling for every other client.
 
 use toyos::audio::{
-    StreamOpenRequest, StreamSetVolume, FORMAT_S16LE, MSG_STREAM_CLOSE, MSG_STREAM_ERROR,
+    MasterAdjust, MasterState, StreamOpenRequest, StreamSetVolume, FORMAT_S16LE, MSG_MASTER_ADJUST,
+    MSG_MASTER_STATE, MSG_STREAM_CLOSE, MSG_STREAM_ERROR,
     MSG_STREAM_OPEN, MSG_STREAM_SET_VOLUME,
 };
 use toyos::ipc::{self, RxStep};
@@ -50,7 +51,8 @@ pub(crate) const MAX_CONTROL_CLIENTS: usize = 63;
 const MAX_KEPT_PAYLOAD: usize = core::mem::size_of::<StreamOpenRequest>() + 1;
 
 const _: () = assert!(
-    core::mem::size_of::<StreamSetVolume>() < MAX_KEPT_PAYLOAD,
+    core::mem::size_of::<StreamSetVolume>() < MAX_KEPT_PAYLOAD
+        && core::mem::size_of::<MasterAdjust>() < MAX_KEPT_PAYLOAD,
     "a control payload wider than the frame buffer would be refused as malformed",
 );
 
@@ -84,6 +86,8 @@ enum Control {
     Open,
     SetVolume { idx: usize },
     Close { idx: usize },
+    /// The machine's output level, on a connection that carries no stream.
+    Master,
     /// `inspect`, on a connection that carries no stream: answered and closed.
     Inspect,
     /// An unknown message type, a payload the wrong width for its type, or a
@@ -111,9 +115,21 @@ fn classify(msg_type: u32, payload_len: usize, stream_idx: Option<usize>) -> Con
             Control::SetVolume { idx }
         }
         (MSG_STREAM_CLOSE, Some(idx)) => Control::Close { idx },
+        (MSG_MASTER_ADJUST, None) if payload_len == core::mem::size_of::<MasterAdjust>() => {
+            Control::Master
+        }
         (toyos_inspect::MSG_INSPECT, None) if payload_len == 0 => Control::Inspect,
         _ => Control::Violation,
     }
+}
+
+/// The bus gain a level means: cubic, so each step sounds about as large as the last.
+fn master_gain(percent: u32, muted: bool) -> Gain {
+    if muted {
+        return Gain::SILENT;
+    }
+    let p = percent as f32 / 100.0;
+    Gain::from_wire(p * p * p).expect("a cubed fraction is a number")
 }
 
 fn reject_open(req: &StreamOpenRequest) -> Option<&'static str> {
@@ -164,6 +180,9 @@ pub(crate) fn control_thread(
 
     let mut clients: Vec<ControlClient> = Vec::new();
     let mut next_idx: usize = 0;
+    // The machine's output level: soundserver's alone, changed only by `MSG_MASTER_ADJUST`.
+    let mut master_percent: u32 = 100;
+    let mut master_muted = false;
 
     const TOKEN_ACCEPT: u64 = u64::MAX;
 
@@ -199,6 +218,7 @@ pub(crate) fn control_thread(
         }
 
         let mut dead: Vec<usize> = Vec::new();
+        let mut master_changed = false;
         for i in 0..clients.len() {
             if !ready.contains(&(i as u64)) {
                 continue;
@@ -285,6 +305,24 @@ pub(crate) fn control_thread(
                         };
                         clients[i].pending_volume = Some(gain);
                     }
+                    Control::Master => {
+                        let req: MasterAdjust = ipc::decode_payload(&payload[..payload_len])
+                            .expect("a payload as long as the struct decodes");
+                        master_percent =
+                            (master_percent as i64 + i64::from(req.step)).clamp(0, 100) as u32;
+                        if req.toggle_mute != 0 {
+                            master_muted = !master_muted;
+                        }
+                        master_changed = true;
+                        say!("soundserver: master volume step {} mute-toggle {} -> {}%{}",
+                            req.step, req.toggle_mute != 0, master_percent,
+                            if master_muted { " muted" } else { "" });
+                        let state = MasterState { percent: master_percent, muted: u32::from(master_muted) };
+                        // One non-blocking write: a peer that will not take it misses one answer.
+                        if let Err(e) = clients[i].conn.try_send(MSG_MASTER_STATE, &state) {
+                            say!("soundserver: a master-volume answer was not taken ({e:?})");
+                        }
+                    }
                     Control::Close { idx } => {
                         remove(cmd_ring, cmd_pipe_write, idx, Departure::Closed, period_nanos);
                         dead.push(i);
@@ -325,6 +363,9 @@ pub(crate) fn control_thread(
                     submit(cmd_ring, cmd_pipe_write, MixCommand::SetVolume { client_id, target }, period_nanos);
                 }
             }
+        }
+        if master_changed {
+            submit(cmd_ring, cmd_pipe_write, MixCommand::SetMaster { target: master_gain(master_percent, master_muted) }, period_nanos);
         }
         for &i in dead.iter().rev() {
             clients.remove(i);

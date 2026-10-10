@@ -32,6 +32,7 @@ use crate::client::{
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::{FrameStats, FrameTotals};
+use crate::volume::Volume;
 use crate::{
     launcher_apps, CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
     FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, STATS_INTERVAL,
@@ -136,6 +137,7 @@ pub struct Session {
     next_stats_report: Instant,
     reported_traffic: (u64, u64),
     reported_composed: window::Traffic,
+    volume: Volume,
 }
 
 impl Session {
@@ -242,8 +244,10 @@ impl Session {
         println!("compositor: ready");
 
         let now = Instant::now();
+        let volume = Volume::new(screen.pixel_format_raw());
         Self {
             reported_traffic: screen.traffic(),
+            volume,
             reported_composed: back.surface.traffic(),
             acceptor,
             kb,
@@ -310,6 +314,9 @@ impl Session {
             }
         }
         self.tick_taskbar();
+        if let Some(r) = self.volume.damage(Instant::now()) {
+            self.damage.add(r);
+        }
         self.present();
     }
 
@@ -325,6 +332,7 @@ impl Session {
         let accept_ready = self.is_ready(self.acceptor.as_handle());
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()));
+        let sound_ready = self.volume.handle().is_some_and(|h| self.is_ready(h));
 
         // A handshake that never completes is the reason this deadline exists,
         // and the sweep has to happen on a pass that found nothing ready too —
@@ -340,7 +348,7 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready && !mouse_ready && !accept_ready && !client_ready {
+        if !kb_ready && !mouse_ready && !accept_ready && !client_ready && !sound_ready {
             return false;
         }
 
@@ -353,6 +361,9 @@ impl Session {
         }
         if accept_ready {
             self.accept();
+        }
+        if sound_ready && self.volume.drain(&self.font, self.desk.screen, self.desk.chrome.taskbar) {
+            self.watch_sound();
         }
         let frames = self.take_frames();
         self.dispatch(frames);
@@ -399,6 +410,11 @@ impl Session {
                 KeyAction::CycleFocus => {
                     if self.stack.cycle() {
                         self.damage_all();
+                    }
+                }
+                KeyAction::Volume(key) => {
+                    if self.volume.key(key) {
+                        self.watch_sound();
                     }
                 }
                 KeyAction::SpawnTerminal => {
@@ -1148,6 +1164,12 @@ impl Session {
         }
     }
 
+    fn watch_sound(&self) {
+        if let Some(h) = self.volume.handle() {
+            self.poller.watch_raw(h, READABLE, h.0 as u64);
+        }
+    }
+
     fn tick_taskbar(&mut self) {
         let now = Instant::now();
         if now.duration_since(self.last_taskbar_update) < Duration::from_secs(1) {
@@ -1189,6 +1211,7 @@ impl Session {
         // Two clock syscalls per composited frame — 120/s at the frame cap —
         // which is what any measure of a frame costs here.
         let started = Instant::now();
+        let now = started;
         let assets = Assets {
             font: &self.font,
             icons: &self.icons,
@@ -1205,6 +1228,7 @@ impl Session {
                 &self.cached_stats,
                 *region,
             );
+            self.volume.paint(&self.back.surface, *region, now);
         }
 
         // Into the back buffer, so a region containing the cursor carries it

@@ -583,6 +583,9 @@ fn service_bytes(recorded: bool) {
     }
 }
 
+/// Which `0xE0`-prefixed codes decoded to nothing and have been logged, by `code & 0x7F`.
+static UNKNOWN_E0: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 struct Drained {
     keys: usize,
     motion: usize,
@@ -642,12 +645,17 @@ fn drain() -> Drained {
                 }
             }
         } else {
+            let after_e0 = state.kbd_partial.len == 1 && state.kbd_partial.bytes[0] == 0xE0;
             match state.keys.feed(byte) {
                 KeyOutcome::Pending => {
                     state.kbd_partial.push(byte);
                     continue;
                 }
                 KeyOutcome::Key { usage, pressed } => {
+                    if matches!(usage, 0x7F..=0x81) {
+                        log!("i8042: volume key usage {:#04x} {} (scancode e0 {:#04x})",
+                            usage, if pressed { "down" } else { "up" }, byte);
+                    }
                     let queued = crate::keyboard::handle_key(usage, pressed);
                     if queued {
                         out.keys += 1;
@@ -660,7 +668,17 @@ fn drain() -> Drained {
                     lost = true;
                     true
                 }
-                KeyOutcome::None => false,
+                KeyOutcome::None => {
+                    if after_e0 {
+                        let code = byte & 0x7F;
+                        let word = &UNKNOWN_E0[usize::from(code / 64)];
+                        let bit = 1u64 << (code % 64);
+                        if word.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                            log!("i8042: unknown scancode e0 {:#04x} (first of its kind)", byte);
+                        }
+                    }
+                    false
+                }
             }
         };
         let partial = if aux { &mut state.aux_partial } else { &mut state.kbd_partial };

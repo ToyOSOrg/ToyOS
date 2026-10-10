@@ -21,6 +21,17 @@ mod usage {
     pub const LEFT: u8 = 0x50;
     pub const DOWN: u8 = 0x51;
     pub const UP: u8 = 0x52;
+    pub const MUTE: u8 = 0x7F;
+    pub const VOLUME_UP: u8 = 0x80;
+    pub const VOLUME_DOWN: u8 = 0x81;
+}
+
+/// A media key the desktop turns into a request to soundserver.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VolumeKey {
+    Mute,
+    Up,
+    Down,
 }
 
 /// What a key transition means to the desktop.
@@ -43,6 +54,7 @@ pub enum KeyAction {
     CloseFocused,
     Paste,
     SpawnTerminal,
+    Volume(VolumeKey),
 }
 
 /// What `ev` does, given the focused window's mode and whether the launcher is
@@ -56,6 +68,16 @@ pub enum KeyAction {
 /// saw the press of a key it is holding needs the release of it too, and
 /// swallowing that leaves the window believing the key is still down.
 pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: bool) -> KeyAction {
+    // The desktop's own both ways: no window ever saw the press.
+    let volume = match ev.keycode {
+        usage::MUTE => Some(VolumeKey::Mute),
+        usage::VOLUME_UP => Some(VolumeKey::Up),
+        usage::VOLUME_DOWN => Some(VolumeKey::Down),
+        _ => None,
+    };
+    if let Some(key) = volume {
+        return if ev.pressed() { KeyAction::Volume(key) } else { KeyAction::Ignore };
+    }
     if !ev.pressed() {
         return KeyAction::Forward;
     }
