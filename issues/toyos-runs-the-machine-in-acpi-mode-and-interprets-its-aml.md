@@ -258,6 +258,16 @@ otherwise pay to find again:
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:
 
+- **The controller's `_REG(3, 1)` runs on a namespace no `_INI` has run in.**
+  The battery's read (`userland/acpiserver/src/battery.rs`) tells each
+  controller device its space is there and then reads the battery, and runs
+  no `_INI`: the T14's controller `_INI` calls the firmware through
+  `SMI_CMD`, which the host does not write. The scouts' dry run read that
+  the T14's `_REG` takes another branch before its `_INI` than after it,
+  reading and writing controller offset 0x03 where after it touches the
+  controller not at all; Linux runs it after. Owner: this stage. **Exit**:
+  the slice that runs the `_STA` and `_INI` walk runs it before `_REG`.
+
 - **The server waits for no release of the Global Lock** (the orchestrator's
   ruling, not the owner's). A take that finds the firmware holding the lock
   leaves it the request, as ACPI 6.5 §5.2.10.1 has it, and is then denied by
@@ -325,8 +335,9 @@ mediated access, leaves open:
 
 What the firmware call, which the kernel makes for the server where its AML
 stores a byte to `SMI_CMD`, leaves open. The server's AML makes none yet: its
-host denies every write AML asks for and passes none to the kernel
-(`userland/acpiserver/src/host.rs`).
+host writes only the embedded controller's space, through the controller's
+own ports, and denies every other write AML asks for, passing none to the
+kernel (`userland/acpiserver/src/host.rs`).
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:

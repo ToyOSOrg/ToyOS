@@ -3,13 +3,15 @@
 //! mediated access ([`toyos_abi::acpi`]), and [`Kernel`] is that access as
 //! this server asks for it, so a host test answers in the kernel's place.
 //!
-//! **Nothing is written.** Loading a machine's tables writes nothing, and
-//! this server evaluates nothing that does yet: a write in any space is
-//! denied by name, and so is every access to the embedded controller's
-//! space, which no transaction serves for AML yet. SystemCMOS never arrives:
-//! the interpreter refuses that space itself. A read of memory, of a port or
-//! of a function's configuration space is the kernel's to make or refuse, and
-//! a refusal it names is denied under that name.
+//! **Nothing is written but the embedded controller's space.** A write to
+//! memory, a port or a function's configuration space is denied by name. The
+//! controller's space is read and written a byte at a time through its own
+//! transactions ([`crate::ec`]), on the ports this server holds
+//! ([`Controller`]), and denied by name on a machine whose row names no
+//! controller. SystemCMOS never arrives: the interpreter refuses that space
+//! itself. A read of memory, of a port or of a function's configuration space
+//! is the kernel's to make or refuse, and a refusal it names is denied under
+//! that name.
 //!
 //! **The Global Lock is the kernel's to exchange** (ACPI 6.5 §5.2.10.1). A
 //! take that finds the firmware holding it is denied by name ([`HELD`]) and
@@ -31,6 +33,7 @@ use std::time::{Duration, Instant};
 use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host};
 
+use crate::ec::Transaction;
 use crate::ledger::Ledger;
 
 /// What opens a line that carries an address, a PCI function or a name the
@@ -71,6 +74,12 @@ pub trait Kernel {
     /// once under a claim: `false` where it is wider than the register's
     /// field, and the kernel kept nothing.
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+}
+
+/// The embedded controller, as this server drives it: one transaction run to
+/// its end, or the server ended loudly where the controller stops answering.
+pub trait Controller {
+    fn transact(&mut self, tx: Transaction) -> u8;
 }
 
 /// Why a read was not made.
@@ -143,8 +152,10 @@ impl Pages {
 }
 
 /// The interpreter's host on one machine, and what it was asked.
-pub struct Firmware<'k, K> {
+pub struct Firmware<'k, K, C> {
     kernel: &'k K,
+    /// The controller the kernel's row names, if it names one.
+    pub ec: Option<C>,
     /// The zero of [`Host::timer`].
     began: Instant,
     /// Reads made, by [`Space`].
@@ -154,22 +165,28 @@ pub struct Firmware<'k, K> {
     pub takes: u64,
     pub contended: u64,
     pub notifies: u64,
+    /// Bytes of the controller's space read and written.
+    pub ec_reads: u64,
+    pub ec_writes: u64,
     pub refused: Ledger,
     notified: Ledger,
     /// The kernel answered that the machine is stopping.
     pub stopping: bool,
 }
 
-impl<'k, K: Kernel> Firmware<'k, K> {
-    pub fn new(kernel: &'k K) -> Self {
+impl<'k, K: Kernel, C: Controller> Firmware<'k, K, C> {
+    pub fn new(kernel: &'k K, ec: Option<C>) -> Self {
         Firmware {
             kernel,
+            ec,
             began: Instant::now(),
             reads: [0; 3],
             pages: Pages::default(),
             takes: 0,
             contended: 0,
             notifies: 0,
+            ec_reads: 0,
+            ec_writes: 0,
             refused: Ledger::default(),
             notified: Ledger::default(),
             stopping: false,
@@ -190,6 +207,15 @@ impl<'k, K: Kernel> Firmware<'k, K> {
         self.stopping = true;
         Denied(Refusal::Stopping.to_string())
     }
+
+    /// The machine's controller, or the denial of an access to its space
+    /// where its row names none.
+    fn controller(&mut self, what: &str, at: Address) -> Result<&mut C, Denied> {
+        if self.ec.is_none() {
+            return Err(self.deny(format!("{what} {NO_CONTROLLER}"), format_args!("{at:x?}")));
+        }
+        Ok(self.ec.as_mut().expect("just seen"))
+    }
 }
 
 fn wide(width: toyos_aml::Access) -> Width {
@@ -201,15 +227,25 @@ fn wide(width: toyos_aml::Access) -> Width {
     }
 }
 
-const NO_CONTROLLER: &str = "EmbeddedControl: this server runs no controller transaction for AML yet";
+const NO_CONTROLLER: &str = "EmbeddedControl: the machine's ACPI row names no embedded controller";
 
-impl<K: Kernel> Host for Firmware<'_, K> {
+/// The one width the interpreter reaches the controller's space at.
+fn byte(width: toyos_aml::Access) {
+    assert_eq!(width, toyos_aml::Access::Byte, "the interpreter reaches EmbeddedControl a byte at a time (Table 19.34)");
+}
+
+impl<K: Kernel, C: Controller> Host for Firmware<'_, K, C> {
     fn read(&mut self, at: Address, width: toyos_aml::Access) -> Result<u64, Denied> {
         let (space, address) = match at {
             Address::Memory(address) => (Space::SystemMemory, address),
             Address::Io(port) => (Space::SystemIo, u64::from(port)),
             Address::PciConfig { segment, bus, device, function, offset } => (Space::PciConfig, pci_address(segment, bus, device, function, offset)),
-            Address::EmbeddedControl(_) => return Err(self.deny(format!("a read of {NO_CONTROLLER}"), format_args!("{at:x?}"))),
+            Address::EmbeddedControl(address) => {
+                byte(width);
+                let read = self.controller("a read of", at)?.transact(Transaction::read_at(address));
+                self.ec_reads += 1;
+                return Ok(u64::from(read));
+            }
         };
         match read(self.kernel, space, address, wide(width)) {
             Ok((value, memory_type)) => {
@@ -226,12 +262,18 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
         let what = match at {
-            Address::Memory(_) => "a write to SystemMemory: this server writes nothing for AML yet".into(),
-            Address::Io(_) => "a write to SystemIO: this server writes nothing for AML yet".into(),
-            Address::PciConfig { .. } => "a write to PCI_Config: this server writes nothing for AML yet".into(),
-            Address::EmbeddedControl(_) => format!("a write to {NO_CONTROLLER}"),
+            Address::Memory(_) => "SystemMemory",
+            Address::Io(_) => "SystemIO",
+            Address::PciConfig { .. } => "PCI_Config",
+            Address::EmbeddedControl(address) => {
+                byte(width);
+                let value = u8::try_from(value).expect("a byte access writes a byte");
+                self.controller("a write to", at)?.transact(Transaction::write_at(address, value));
+                self.ec_writes += 1;
+                return Ok(());
+            }
         };
-        Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+        Err(self.deny(format!("a write to {what}: this server writes nothing there for AML yet"), format_args!("{width:?} {value:#x} to {at:x?}")))
     }
 
     fn sleep(&mut self, ms: u64) {
@@ -283,6 +325,7 @@ pub mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::ec::tests::Emulated;
 
     /// A kernel that answers reads from bytes at addresses, each range with a
     /// memory type, refuses `kept` ranges as the real one refuses memory of a
@@ -388,7 +431,7 @@ pub mod tests {
     #[test]
     fn a_read_is_the_kernels_in_each_space_and_counted_by_space_and_page() {
         let kernel = machine();
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         assert_eq!(host.read(Address::Memory(NVS), toyos_aml::Access::QWord), Ok(0x8877_6655_4433_2211));
         assert_eq!(host.read(Address::Memory(NVS + 2), toyos_aml::Access::Word), Ok(0x4433));
         assert_eq!(host.read(Address::Memory(NVS + 0x2000), toyos_aml::Access::Byte), Ok(0xAB));
@@ -422,7 +465,7 @@ pub mod tests {
     #[test]
     fn a_read_the_kernel_refuses_is_denied_under_the_kernels_name_and_counted() {
         let kernel = machine();
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         let ram = "a SystemMemory read the kernel refused UsableMemory, in memory of type 7";
         for _ in 0..3 {
             assert_eq!(host.read(Address::Memory(0x10_0000), toyos_aml::Access::DWord), Err(Denied(ram.into())));
@@ -439,26 +482,56 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
-    #[test]
-    fn nothing_is_written_and_the_controllers_space_is_not_reached() {
-        let kernel = machine();
-        let mut host = Firmware::new(&kernel);
-        let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
-        for (at, space) in [(Address::Memory(NVS), "SystemMemory"), (Address::Io(0xB2), "SystemIO"), (function, "PCI_Config")] {
-            let denied = host.write(at, toyos_aml::Access::Byte, 0).expect_err("a write was made");
-            assert_eq!(denied.0, format!("a write to {space}: this server writes nothing for AML yet"));
+    impl Controller for Emulated {
+        fn transact(&mut self, tx: Transaction) -> u8 {
+            Emulated::transact(self, tx)
         }
+    }
+
+    #[test]
+    fn nothing_is_written_but_the_controllers_space_and_that_only_where_the_row_names_one() {
+        let kernel = machine();
+        let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
         let controller = Address::EmbeddedControl(0x38);
-        assert_eq!(host.write(controller, toyos_aml::Access::Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
-        assert_eq!(host.read(controller, toyos_aml::Access::Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
+        for ec in [None, Some(Emulated::new([0; 256]))] {
+            let mut host = Firmware::new(&kernel, ec);
+            for (at, space) in [(Address::Memory(NVS), "SystemMemory"), (Address::Io(0xB2), "SystemIO"), (function, "PCI_Config")] {
+                let denied = host.write(at, toyos_aml::Access::Byte, 0).expect_err("a write was made");
+                assert_eq!(denied.0, format!("a write to {space}: this server writes nothing there for AML yet"));
+            }
+            if host.ec.is_none() {
+                assert_eq!(host.write(controller, toyos_aml::Access::Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
+                assert_eq!(host.read(controller, toyos_aml::Access::Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
+                assert_eq!((host.ec_reads, host.ec_writes), (0, 0));
+            }
+        }
         assert!(kernel.asked.borrow().is_empty(), "the kernel was asked for an access this server denies itself");
+    }
+
+    /// The controller's space is its own transactions', one a byte: a read is
+    /// RD_EC of its address, a write WR_EC of its address and value, and
+    /// neither reaches the kernel.
+    #[test]
+    fn the_controllers_space_is_read_and_written_through_its_transactions() {
+        let kernel = machine();
+        let mut space = [0; 256];
+        space[0xA8] = 0x5A;
+        let mut host = Firmware::new(&kernel, Some(Emulated::new(space)));
+        assert_eq!(host.read(Address::EmbeddedControl(0xA8), toyos_aml::Access::Byte), Ok(0x5A));
+        assert_eq!(host.write(Address::EmbeddedControl(0x81), toyos_aml::Access::Byte, 0x01), Ok(()));
+        assert_eq!(host.read(Address::EmbeddedControl(0x81), toyos_aml::Access::Byte), Ok(0x01));
+        let ec = host.ec.as_ref().expect("a controller");
+        assert_eq!(ec.done, [(0x80, 0xA8, 0), (0x81, 0x81, 0x01), (0x80, 0x81, 0)]);
+        assert_eq!((host.ec_reads, host.ec_writes), (2, 1));
         assert_eq!(host.reads, [0, 0, 0]);
+        assert!(host.refused.is_empty());
+        assert!(kernel.asked.borrow().is_empty(), "the controller's space reached the kernel");
     }
 
     #[test]
     fn the_lock_is_taken_and_given_back_through_the_kernel() {
         let kernel = machine();
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         assert_eq!(host.global_lock(true), Ok(()));
         assert!(kernel.held.get());
         assert_eq!(host.global_lock(false), Ok(()));
@@ -471,7 +544,7 @@ pub mod tests {
     fn a_lock_the_firmware_holds_is_denied_by_name_and_counted() {
         let kernel = machine();
         kernel.takes.borrow_mut().extend([Take::Pending, Take::Pending, Take::Taken]);
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         for _ in 0..2 {
             assert_eq!(host.global_lock(true), Err(Denied(HELD.into())));
             assert!(!kernel.held.get(), "a lock the firmware holds was reported taken");
@@ -488,7 +561,7 @@ pub mod tests {
     fn a_lock_the_kernel_cannot_take_is_denied_and_never_reported_held() {
         let kernel = machine();
         kernel.takes.borrow_mut().push_back(Take::Unusable);
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         assert_eq!(
             host.global_lock(true),
             Err(Denied("the Global Lock: the kernel exchanges no lock word in this machine's FACS".into()))
@@ -500,7 +573,7 @@ pub mod tests {
     fn a_stopping_machine_denies_everything_and_is_no_refusal_of_the_firmwares() {
         let kernel = machine();
         kernel.stops_after.set(Some(1));
-        let mut host = Firmware::new(&kernel);
+        let mut host = Firmware::new(&kernel, None::<Emulated>);
         assert_eq!(host.read(Address::Memory(NVS), toyos_aml::Access::Byte), Ok(0x11));
         assert!(!host.stopping);
         let stopping = Denied(Refusal::Stopping.to_string());

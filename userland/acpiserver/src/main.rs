@@ -29,10 +29,16 @@
 //! drain than [`QUERIES`], and [`sci::EMPTY_SCIS`] SCIs in a row that carried
 //! nothing are each a panic naming the registers.
 //!
+//! **After the load the machine's batteries and AC adapters are found** in
+//! the namespace it kept, and read every [`battery::POLL`] between SCIs
+//! ([`battery`]): the controller's space is reached only there, never inside
+//! a drain.
+//!
 //! The log carries each query number the first time it is taken and a count
 //! of every one at [`COUNTS`] intervals, never a line per event.
 
 mod aml;
+mod battery;
 mod ec;
 mod host;
 mod ledger;
@@ -51,7 +57,9 @@ use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use ec::{Do, Transaction, Wait};
-use host::{Answer, Kernel, Stopping, Take};
+use aml::Aml;
+use battery::Power;
+use host::{Answer, Controller, Kernel, Stopping, Take};
 use sci::{Event, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most a controller is waited for at one step of a transaction: one that
@@ -62,10 +70,15 @@ const QUERIES: usize = 32;
 /// How often the log is told the queries' counts, where they moved.
 const COUNTS: Duration = Duration::from_secs(30);
 
-struct Server {
-    dev: AcpiDev,
+struct Server<'a> {
+    dev: &'a AcpiDev,
     info: AcpiInfo,
     served: Served,
+    /// The controller the row names, if it names one.
+    ec: Option<Ports>,
+    /// The namespace the load kept, and the power sources found in it.
+    aml: Option<Aml<'a, Claim<'a>, Ports>>,
+    power: Option<Power>,
     /// Taken off the controller by the drain, run after it.
     queued: VecDeque<u8>,
     /// Every query number taken, and how often.
@@ -88,10 +101,14 @@ fn main() {
         power_button: info.flags & FIXED_POWER_BUTTON != 0,
         ec_gpe: info.has_ec().then_some(info.ec_gpe),
     };
+    let claim = Claim(&dev);
     let mut server = Server {
-        dev,
+        dev: &dev,
         info,
         served,
+        ec: info.has_ec().then_some(Ports { command: info.ec_command.port, data: info.ec_data.port }),
+        aml: None,
+        power: None,
         queued: VecDeque::new(),
         counts: BTreeMap::new(),
         counted: 0,
@@ -101,8 +118,58 @@ fn main() {
         power_off: false,
     };
     server.arm();
-    server.power_off = aml::load(&Claim(&server.dev), server.info.rsdp).handed;
+    let (loaded, kept) = aml::load(&claim, server.ec, server.info.rsdp);
+    server.power_off = loaded.handed;
+    server.aml = kept;
+    if let Some(aml) = &mut server.aml {
+        server.power = Power::find(aml, server.ec.is_some());
+    }
     server.serve();
+}
+
+/// The embedded controller's two ports, which this server's row holds.
+#[derive(Clone, Copy)]
+struct Ports {
+    command: u16,
+    data: u16,
+}
+
+impl Controller for Ports {
+    /// One transaction, waiting on the controller at each step for at most
+    /// [`EC_STEP`].
+    fn transact(&mut self, mut tx: Transaction) -> u8 {
+        let mut waiting: Option<(Wait, Instant)> = None;
+        loop {
+            let status = in8(self.command);
+            match tx.step(status) {
+                Do::Wait(wait) => {
+                    let since = match waiting {
+                        Some((was, since)) if was == wait => since,
+                        _ => Instant::now(),
+                    };
+                    assert!(
+                        since.elapsed() < EC_STEP,
+                        "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})"
+                    );
+                    waiting = Some((wait, since));
+                    std::thread::yield_now();
+                }
+                Do::WriteCommand(byte) => {
+                    waiting = None;
+                    out8(self.command, byte);
+                }
+                Do::WriteData(byte) => {
+                    waiting = None;
+                    out8(self.data, byte);
+                }
+                Do::ReadData => {
+                    waiting = None;
+                    tx.read(in8(self.data));
+                }
+                Do::Done(byte) => return byte,
+            }
+        }
+    }
 }
 
 /// The claim as the tables' fetch and their AML ask it for what lies outside
@@ -151,7 +218,7 @@ fn bytes(block: Block) -> impl Iterator<Item = (u16, u16)> {
     (0..block.len / 2).map(move |i| (block.port + i, block.enable() + i))
 }
 
-impl Server {
+impl Server<'_> {
     fn arm(&mut self) {
         let pm1 = self.info.pm1_event;
         out16(pm1.enable(), 0);
@@ -185,15 +252,26 @@ impl Server {
     fn serve(&mut self) -> ! {
         let poller = Poller::new(1);
         let mut next_count = Instant::now() + COUNTS;
+        let mut next_read = Instant::now() + battery::POLL;
         // A watch answers once: one still registered from a wait that timed
         // out is not registered again.
         let mut watching = false;
         loop {
+            if let (Some(power), Some(aml)) = (&mut self.power, &mut self.aml)
+                && Instant::now() >= next_read
+            {
+                power.read(aml);
+                next_read = Instant::now() + battery::POLL;
+                if aml.host.stopping {
+                    self.power = None;
+                }
+            }
             if !watching {
-                poller.watch(&self.dev, READABLE, 0);
+                poller.watch(self.dev, READABLE, 0);
                 watching = true;
             }
-            let wait = next_count.saturating_duration_since(Instant::now());
+            let until = if self.power.is_some() { next_count.min(next_read) } else { next_count };
+            let wait = until.saturating_duration_since(Instant::now());
             poller.wait(1, wait.as_nanos() as u64, |_| watching = false);
             if Instant::now() >= next_count {
                 self.log_counts();
@@ -263,9 +341,10 @@ impl Server {
 
     /// Take every query the controller has waiting off it, queued for after.
     fn drain(&mut self) {
+        let mut ec = self.ec.expect("a drain runs only where the row names a controller");
         let mut taken = 0;
-        while in8(self.info.ec_command.port) & ec::SCI_EVT != 0 {
-            let q = self.transact(Transaction::query());
+        while in8(ec.command) & ec::SCI_EVT != 0 {
+            let q = ec.transact(Transaction::query());
             if q == 0 {
                 break;
             }
@@ -273,7 +352,7 @@ impl Server {
             assert!(
                 taken <= QUERIES,
                 "acpiserver: the embedded controller had more than {QUERIES} queries waiting at once (EC_SC {:#04x})",
-                in8(self.info.ec_command.port)
+                in8(ec.command)
             );
             self.queued.push_back(q);
         }
@@ -287,39 +366,6 @@ impl Server {
             self.counted += 1;
             if *count == 1 {
                 println!("acpiserver: embedded controller query {q:#04x} taken for the first time, served by nothing: no query's method is evaluated yet");
-            }
-        }
-    }
-
-    /// One transaction, waiting on the controller at each step for at most
-    /// [`EC_STEP`].
-    fn transact(&self, mut tx: Transaction) -> u8 {
-        let (command, data) = (self.info.ec_command.port, self.info.ec_data.port);
-        let mut waiting: Option<(Wait, Instant)> = None;
-        loop {
-            let status = in8(command);
-            match tx.step(status) {
-                Do::Wait(wait) => {
-                    let since = match waiting {
-                        Some((was, since)) if was == wait => since,
-                        _ => Instant::now(),
-                    };
-                    assert!(
-                        since.elapsed() < EC_STEP,
-                        "acpiserver: the embedded controller kept {wait:?} unmet for {EC_STEP:?} (EC_SC {status:#04x})"
-                    );
-                    waiting = Some((wait, since));
-                    std::thread::yield_now();
-                }
-                Do::WriteCommand(byte) => {
-                    waiting = None;
-                    out8(command, byte);
-                }
-                Do::ReadData => {
-                    waiting = None;
-                    tx.read(in8(data));
-                }
-                Do::Done(byte) => return byte,
             }
         }
     }
