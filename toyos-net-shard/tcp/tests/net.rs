@@ -428,13 +428,15 @@ fn syn_without_timestamps(from: usize, o: &O) -> Option<Vec<u8>> {
 /// estimate of the round trip, with timestamps and without. The path's round trip quadruples once
 /// the handshake is done, so a downloader's SRTT, which only its own data samples, still says
 /// 20 ms. The reader takes a burst every millisecond twice per 20 ms: it is never offered more
-/// than twice its rate over the round trip it estimated, plus a burst and a segment, and once the
-/// window has grown it is never kept waiting.
+/// than twice its rate over an estimate at most half again the path's 80 ms, plus a burst and a
+/// segment, and once the window has grown it is never kept waiting, which an estimate under the
+/// path's would.
 #[test]
 fn the_receive_window_grows_by_what_is_read_per_round_trip() {
     const BURST: u64 = 40_000;
     const PERIOD: u64 = 20;
     const RATE: u64 = 2 * BURST / PERIOD;
+    const ESTIMATE: u64 = 120;
     for timestamps in [true, false] {
         let mut net = Net::buffered(20, BUFFER);
         net.auto_shut = false;
@@ -447,7 +449,7 @@ fn the_receive_window_grows_by_what_is_read_per_round_trip() {
         let reader = net.apps.iter().position(|a| a.node == 1).unwrap();
         let handshake = net.nodes[1].tcp.info(net.apps[reader].id).unwrap().srtt;
         assert!(handshake < Some(std::time::Duration::from_millis(30)));
-        let (mut window, mut rtt, mut last, mut settled) = (0, std::time::Duration::ZERO, None, 0);
+        let (mut window, mut settled) = (0, 0);
         for ms in 0..4_000 {
             if ms == 2_000 {
                 settled = net.apps[reader].received.1;
@@ -458,15 +460,82 @@ fn the_receive_window_grows_by_what_is_read_per_round_trip() {
             let info = net.nodes[1].tcp.info(net.apps[reader].id).unwrap();
             assert_eq!(info.ts_recent.is_some(), timestamps);
             window = window.max(u64::from(info.rcv_edge.since(info.rcv_nxt)));
-            rtt = rtt.max(info.rcv_rtt.unwrap_or_default());
-            last = info.rcv_rtt;
             assert_eq!(info.srtt, handshake, "a downloader's SRTT keeps the handshake's");
         }
-        let arm = format!("timestamps {timestamps}, window {window}, round trip {last:?}, at most {rtt:?}");
-        assert!(last.is_some_and(|r| (79_000..120_000).contains(&r.as_micros())), "{arm}");
-        let ms = rtt.as_micros().div_ceil(1000) as u64;
-        let bound = 2 * (RATE * ms + BURST) + 1448;
+        let arm = format!("timestamps {timestamps}, window {window}");
+        let bound = 2 * (RATE * ESTIMATE + BURST) + 1448;
         assert!(window <= bound, "{arm}: past {bound}");
         assert_eq!(net.apps[reader].received.1 - settled, 2_000 * RATE, "{arm}");
     }
+}
+
+/// Node 0's SYN offering an MSS of 1,392: node 1 sends 1,380-byte segments, 68 less than node 0's
+/// own send MSS of 1,448.
+fn syn_offering_1392(from: usize, o: &O) -> Option<Vec<u8>> {
+    (from == 0 && o.flags & SYN != 0).then(|| {
+        let (value, echo) = o.ts.unwrap();
+        let s = seg(o.seq).syn().wnd(o.wnd).mss(1392).sackok().ws(o.ws.unwrap()).ts(value, echo);
+        s.bytes(o.src, o.dst, 0, 0)
+    })
+}
+
+/// A download shaped like the T14's from a CDN: gigabit, a 15 ms round trip, timestamps and SACK,
+/// and a peer whose segments are shorter than the downloader's own send MSS. Full-sized is what
+/// the peer sends, so its echoes are sampled and the window grows to the whole buffer; measured
+/// against the send MSS, none ever was, and the window stayed at 65,535.
+#[test]
+fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
+    let mut net = Net::buffered(15, BUFFER);
+    net.nodes[1].credit_per_ms = Some(125_000);
+    net.rewrite = Some(Box::new(syn_offering_1392));
+    net.keep_wire = true;
+    net.connections(1, 443, [0, 32 * MIB]);
+    let peaks = watch(&mut net, 600_000);
+    assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
+    net.assert_exact();
+    let longest = net.wire.iter().filter(|(from, _)| *from == 1).map(|(_, o)| o.payload.len()).max();
+    assert_eq!((longest, peaks[0].shifts), (Some(1380), Some((7, 7))));
+    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+}
+
+/// RFC 8985 §7.3: no probe leaves unless an RTT sample came since the last. Without timestamps a
+/// retransmission voids the round's timing, so once the path's round trip passes twice the SRTT
+/// a probe every round would leave before every ACK and SRTT would never move again. Here, after
+/// a 20 ms handshake, the round trip is 100 ms, and node 0 writes ten whole segments a round,
+/// 150 ms after the last was acknowledged, by when the D-SACK of the last probe has ended its
+/// episode: the rounds without a probe take samples, SRTT climbs to the path's, and the probes
+/// stop.
+#[test]
+fn rfc_8985_7_3_no_probe_without_an_rtt_sample_since_the_last() {
+    const TAIL: usize = 10 * 1460;
+    let mut net = Net::buffered(20, BUFFER);
+    net.auto_shut = false;
+    net.rewrite = Some(Box::new(syn_without_timestamps));
+    net.connections(1, 80, [0, 0]);
+    assert!(net.run(100, |n| n.apps.len() == 2));
+    net.delay = ns(50);
+    let (sender, receiver) = (net.apps.iter().position(|a| a.node == 0).unwrap(), net.apps.iter().position(|a| a.node == 1).unwrap());
+    let mut probes = vec![0];
+    for round in 0..40u8 {
+        let (now, id) = (net.instant(0), net.apps[sender].id);
+        assert_eq!(net.nodes[0].tcp.send(now, id, &[round; TAIL]), Ok(TAIL));
+        net.apps[sender].sent.feed(&[round; TAIL]);
+        let want = net.apps[sender].sent.1;
+        for _ in 0..10_000 {
+            let info = net.nodes[0].tcp.info(id).unwrap();
+            if net.apps[receiver].received.1 == want && info.snd_una == info.snd_nxt {
+                break;
+            }
+            net.advance(1);
+        }
+        assert_eq!(net.apps[receiver].received.1, want, "round {round}");
+        net.advance(150);
+        probes.push(net.count(0, Counter::LossProbe));
+    }
+    let srtt = net.nodes[0].tcp.info(net.apps[sender].id).unwrap().srtt.unwrap();
+    let report = format!("probes after each round {probes:?}, SRTT {srtt:?}");
+    assert!((90..=110).contains(&srtt.as_millis()), "{report}");
+    assert_eq!(probes[40], probes[20], "{report}");
+    assert!(probes.windows(3).all(|w| w[2] - w[0] <= 1), "two rounds in a row probed: {report}");
+    assert_eq!((net.count(0, Counter::Rto), net.count(0, Counter::LossProbeRecovery)), (0, 0), "{report}");
 }

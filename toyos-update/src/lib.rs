@@ -1,6 +1,7 @@
 //! A signed image, the slots it is installed into, and every decision the
-//! loader and `/system/bin/update` make about one. Pure: no firmware, no
-//! device, no allocation.
+//! loader and `/system/bin/update` make about one; and the package
+//! [`repo`]sitory's signed metadata, and every decision `/system/bin/pkg` makes
+//! about it. Pure: no firmware, no device, and no allocation but [`repo`]'s.
 //!
 //! **The contract.** An [`image`] is a header naming a monotonic version and
 //! the SHA-256 of each of its sections — the kernel, its boot parameter and
@@ -22,10 +23,13 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod floor;
 pub mod image;
 pub mod policy;
 pub mod record;
+pub mod repo;
 pub mod sig;
 pub mod slots;
 

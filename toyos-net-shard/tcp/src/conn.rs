@@ -339,11 +339,12 @@ pub struct Sync {
     rto_pending: bool,
     timeout_rtx: bool,
     timing: Option<(Seq, Instant)>,
-    /// RFC 8985 §7: when the loss probe is due, whether it is, and the probe in flight: SND.NXT
-    /// once it left and whether it was a retransmission.
+    /// RFC 8985 §7: when the loss probe is due, whether it is, the probe in flight (SND.NXT once
+    /// it left and whether it was a retransmission), and whether an RTT sample came since the last.
     probe_at: Option<Instant>,
     probe_due: bool,
     probe: Option<(Seq, bool)>,
+    sampled: bool,
     persist: Option<Persist>,
     sws: Option<Instant>,
     sws_fired: bool,
@@ -390,7 +391,7 @@ impl Sync {
         let mut sync = Self {
             phase,
             tx,
-            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now, n.ts.is_some()),
+            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now, (path_mss, ts_bytes)),
             rtt,
             cc: Cc::new(smss, p.handshake_timeouts),
             peer_mss: u32::from(n.peer_mss),
@@ -412,6 +413,7 @@ impl Sync {
             probe_at: None,
             probe_due: false,
             probe: None,
+            sampled: true,
             persist: None,
             sws: None,
             sws_fired: false,
@@ -548,7 +550,7 @@ impl Sync {
             }
             if matches!(placed, Placed::InOrder | Placed::Filled) {
                 let echo = self.ts.zip(seg.options.timestamps()).map(|(ts, t)| (t.echo, ts.echo_rtt(t.echo, now)));
-                self.rx.sample_rtt(us32(text.len()), self.smss(), echo, now);
+                self.rx.sample_rtt(us32(text.len()), echo, now);
             }
             self.rx.owe_for_text(placed, now);
         }
@@ -631,19 +633,24 @@ impl Sync {
             if seg.options.sack_blocks().len() > 0 {
                 ctx.log.count(Counter::SackUnnegotiated);
             }
-            (false, false)
+            (false, None)
         };
         let flight = self.tx.flight();
         let acked = ack.since(self.tx.una);
         let window = u32::from(seg.window).checked_shl(u32::from(self.tx.shift)).unwrap_or(u32::MAX);
+        let same = acked == 0 && seg.payload.is_empty() && !seg.syn() && !seg.fin() && window == self.tx.wnd;
         // A duplicate ACK (RFC 5681 §2) or new SACK information leaves loss to recovery.
-        if newly || (acked == 0 && flight > 0 && seg.payload.is_empty() && !seg.syn() && !seg.fin() && window == self.tx.wnd) {
+        if newly || (same && flight > 0) {
             self.probe_at = None;
         }
-        // RFC 8985 §7.4: a retransmitted probe acknowledged without a D-SACK repaired a loss.
-        if let Some((_, resent)) = self.probe.filter(|&(end, _)| ack.at_or_after(end) && acked <= flight) {
-            self.probe = None;
-            if resent && !dsack {
+        // RFC 8985 §7.4.2: at or past the probe's end, a probe of new data, a D-SACK of the probe or
+        // a duplicate without SACK ends the episode with nothing lost; only an ACK past the end
+        // without either says a resent probe repaired a loss.
+        if let Some((end, resent)) = self.probe.filter(|&(end, _)| ack.at_or_after(end) && acked <= flight) {
+            if !resent || dsack == Some(end) || (same && seg.options.sack_blocks().len() == 0) {
+                self.probe = None;
+            } else if ack.after(end) {
+                self.probe = None;
                 self.cc.on_loss(flight);
                 self.cc.cwnd = self.cc.cwnd.min(self.cc.ssthresh);
                 self.cc.end_recovery();
@@ -733,15 +740,16 @@ impl Sync {
         self.schedule_probe(now);
     }
 
-    /// RFC 8985 §7.2, on new data sent and on an ACK that moves SND.UNA: with SACK, outside
-    /// recovery, with nothing SACKed and no probe in flight, a probe is due two round trips on,
-    /// plus WCDelAckT when one segment is out or the slack when more are, and never after the
-    /// RTO, which it then stands in for.
+    /// RFC 8985 §7.2, on new data sent and on an ACK that moves SND.UNA: with SACK, outside fast
+    /// and RTO recovery, with nothing SACKed, no probe in flight and an RTT sample since the last
+    /// (§7.3), a probe is due two round trips on, plus WCDelAckT when one segment is out or the
+    /// slack when more are, and never after the RTO, which it then stands in for.
     fn schedule_probe(&mut self, now: Instant) {
         self.probe_at = None;
         let Some(srtt) = self.rtt.srtt() else { return };
         let Some(rto) = self.rtx_timer else { return };
-        if !self.sack_ok || self.recovery != Recovery::None || !self.tx.sacked().is_empty() || self.probe.is_some() || self.persist.is_some() {
+        let recovering = self.recovery != Recovery::None || (self.episode && self.tx.una.at_or_before(self.recover));
+        if !self.sack_ok || recovering || !self.tx.sacked().is_empty() || self.probe.is_some() || !self.sampled || self.persist.is_some() {
             return;
         }
         let delayed = if self.tx.flight() <= self.smss() { WORST_DELAYED_ACK } else { PROBE_SLACK };
@@ -765,6 +773,7 @@ impl Sync {
                     Some(rtt) => {
                         let expected = flight.div_ceil(self.smss().saturating_mul(2).max(1)).max(1);
                         self.rtt.sample(rtt, expected);
+                        self.sampled = true;
                     }
                     None => ctx.log.count(Counter::TsEcrInvalid),
                 }
@@ -773,6 +782,7 @@ impl Sync {
                 if let Some((_, at)) = self.timing.filter(|&(end, _)| ack.at_or_after(end)) {
                     self.timing = None;
                     self.rtt.sample(now.since(at), 1);
+                    self.sampled = true;
                 }
             }
         }
@@ -804,7 +814,9 @@ impl Sync {
             }
             return;
         }
-        self.probe_at = None;
+        // RFC 8985 §7.1: fast recovery starts the loss probe's state afresh.
+        (self.probe_at, self.probe_due, self.probe) = (None, false, None);
+        self.arm(ctx.now);
         let flight = self.tx.flight();
         self.cc.on_loss(flight.saturating_sub(self.lt_bytes));
         self.recover = self.tx.nxt.sub(1);
@@ -834,8 +846,7 @@ impl Sync {
             if self.persist.is_none() {
                 let rto = self.rtt.rto();
                 self.persist = Some(Persist { at: now.after(rto), interval: rto, from: self.tx.nxt, due: false, unanswered: false });
-                self.rtx_timer = None;
-                self.probe_at = None;
+                (self.rtx_timer, self.probe_at, self.probe_due) = (None, None, false);
             }
         } else if let Some(persist) = self.persist.take() {
             if self.tx.nxt.after(persist.from) {
@@ -1370,7 +1381,7 @@ impl Sync {
         }
         let resent = start.before(self.tx.nxt);
         self.emit(ctx, exit, start, len, false, blocks)?;
-        (self.probe_at, self.probe_due, self.probe) = (None, false, Some((self.tx.nxt, resent)));
+        (self.probe_at, self.probe_due, self.probe, self.sampled) = (None, false, Some((self.tx.nxt, resent)), false);
         ctx.log.count(Counter::LossProbe);
         Ok(true)
     }
