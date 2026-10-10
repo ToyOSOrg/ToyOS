@@ -3343,6 +3343,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -4094,7 +4095,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "toyos-manifest",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -5158,6 +5159,9 @@ dependencies = [
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-pci-claim",
+ "toyos-virtio",
+ "toyos-virtio-sound",
 ]
 
 [[package]]
@@ -5682,7 +5686,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -5912,6 +5916,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
+]
+
+[[package]]
 name = "toyos-phys"
 version = "0.1.0"
 
@@ -5939,6 +5953,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-sha2-hw"
+version = "0.1.0"
+dependencies = [
+ "toyos-sha2",
+]
+
+[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -5958,7 +5979,7 @@ name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
  "toyos-manifest",
- "toyos-sha2",
+ "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -6009,6 +6030,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-wallclock",
 ]
 
@@ -6030,6 +6052,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-virtio-sound"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]
@@ -6267,7 +6297,7 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-fat32",
- "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-update",
 ]
 

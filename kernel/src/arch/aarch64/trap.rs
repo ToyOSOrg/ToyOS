@@ -498,7 +498,6 @@ pub fn install() {
 }
 
 pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
-pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

@@ -31,7 +31,6 @@ enum WriteBlock {
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
     Pipe(alloc::sync::Arc<crate::watch::Watch>, pipe::PipeId, WaitClass),
-    VirtioSound,
     Hda,
     /// A claimed keyboard, woken by its own IRQ.
     Keyboard(Deadline),
@@ -90,12 +89,11 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// Only these four device classes block; the rest answer `NotFound` on an
+/// Only these device classes block; the rest answer `NotFound` on an
 /// empty blocking read.
 fn read_block_device(claim: &crate::object::device::DeviceClaim) -> ReadBlock {
     match claim.class() {
         device::DeviceType::Keyboard => ReadBlock::Keyboard(Deadline::never()),
-        device::DeviceType::VirtioSound if claim.info_read() => ReadBlock::VirtioSound,
         device::DeviceType::HdaAudio if claim.info_read() => ReadBlock::Hda,
         _ => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
     }
@@ -162,21 +160,6 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     class,
                     Deadline::never(),
                     || pipe::has_data(id),
-                )
-                .is_err()
-                {
-                    return cancelled();
-                }
-            }
-            Err(ReadBlock::VirtioSound) => {
-                let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(
-                    &parkable,
-                    &crate::drivers::AUDIO_WATCH,
-                    0,
-                    WaitClass::Io,
-                    Deadline::never(),
-                    crate::drivers::virtio_sound::has_pending,
                 )
                 .is_err()
                 {

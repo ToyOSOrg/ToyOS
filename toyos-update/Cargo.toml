@@ -28,8 +28,10 @@ sign = []
 # which refuses the small-order and non-canonical encodings RFC 8032 §5.1.7
 # leaves to the implementation.
 ed25519-dalek = { version = "2.2", default-features = false }
-# SHA-256 over the sections and SHA-512 over the signed header, as SSHSIG
-# names it.
+# SHA-512 over the signed header, as SSHSIG names it.
 toyos-sha2 = { path = "../toyos-sha2" }
+# SHA-256 over the sections and a package archive, on the CPU's SHA
+# instructions where it has them.
+toyos-sha2-hw = { path = "../toyos-sha2-hw" }
 # The calendar a repository document's `expires` is written in, the tree's one.
 toyos-wallclock = { path = "../toyos-wallclock" }

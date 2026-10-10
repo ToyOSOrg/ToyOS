@@ -7,13 +7,8 @@
 //! against an allow-list and refused by name. Nothing here names a physical
 //! address.
 //!
-//! [`RegWidth`](crate::syscall::RegWidth) is those calls' and not this device's,
-//! since virtio-sound's stub reaches its notification registers the same way.
-//!
 //! Completions come back as [`AudioCompletionRecord`](crate::audio::AudioCompletionRecord),
-//! the same record the virtio-sound stub produces, because the mask is derived
-//! from a position read in the interrupt handler and the two backends then
-//! differ in nothing a mixer can see.
+//! whose mask is derived from a position read in the interrupt handler.
 //!
 //! [`syscall::device_reg_read`]: crate::syscall::device_reg_read
 //! [`syscall::device_reg_write`]: crate::syscall::device_reg_write

@@ -29,23 +29,32 @@ is not built.
 
 What is left of the staged work:
 
-1. **Audio and virtio-gpu, re-scoped.** `drivers/hda.rs` and
-   `drivers/virtio_sound.rs` bring their device up and gate soundd's register
-   access; `drivers/virtio_gpu.rs` is the only `Gpu` whose `SYS_GPU_*` calls do
-   anything, since GOP's are all no-ops. Each leaves when its userland holder
-   claims the function as `pci`, as netd does, retiring the `hda-audio` and
-   `virtio-sound` classes, their arms of `SYS_DEVICE_REG_READ`/`WRITE`, and
-   `SYS_GPU_*`, which is an ABI change. GOP stays: it is memory the loader
-   hands over, and the panic console paints it.
-   A virtio holder stands on `toyos-virtio`, whose first client is netstack's
-   NIC, and the second one owes that crate two things. The walk of the
-   capability list moves into it from `userland/netstack/src/virtio_net.rs`,
-   over a configuration read the caller passes in, which closes
-   `issues/the-virtio-capability-walk-reads-a-refused-configuration-read-as-zeros.md`.
-   And before a client ends its device on `UsedRefusal::Written` for a chain
+1. **HDA and virtio-gpu, re-scoped.** `drivers/hda.rs` brings its device up
+   and gates soundserver's register access; `drivers/virtio_gpu.rs` is the only
+   `Gpu` whose `SYS_GPU_*` calls do anything, since GOP's are all no-ops. Each
+   leaves when its userland holder claims the function as `pci`, as netstack
+   and soundserver's virtio-sound driver do, retiring the `hda-audio` class,
+   its arms of `SYS_DEVICE_REG_READ`/`WRITE`, and `SYS_GPU_*`, which is an ABI
+   change. GOP stays: it is memory the loader hands over, and the panic console
+   paints it. HDA leaving feeds soundserver's DLL from a claim's record on
+   every machine, so that diff lands
+   `issues/soundservers-virtio-clock-can-take-a-period-one-notification-early.md`'s
+   exit.
+   A virtio holder stands on `toyos-virtio`, which walks the capability list
+   too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as
    `len` on such a queue is measured: the NIC's transmit queue is the only
    one read so far.
+   `iommu_virtio_platform`'s decline control, `declining_is_not_free`
+   (`tests/common/iommu.rs`), declines through the kernel's
+   `virtio-no-access-platform` actuator, which reaches only a virtio function
+   the kernel drives; with the NIC and virtio-sound in processes that is the
+   virtio-gpu `Profile::HeadlessVirtioGpu` adds for it, and virtio-gpu leaving
+   leaves the control nothing to decline. Exit for the control, in the diff
+   that moves virtio-gpu out: the decline is made where the features are
+   negotiated, `toyos-virtio`'s `Offer::accept`, for a function a process
+   drives, and the control reds when that function keeps `FEATURES_OK`;
+   `Profile::HeadlessVirtioGpu` goes in the same diff.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.
