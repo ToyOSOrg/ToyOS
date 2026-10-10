@@ -45,7 +45,6 @@ pub(super) enum Intid {
     /// What `irq-storm` floods this CPU with.
     Storm,
     Hda,
-    VirtioSound,
 }
 
 pub(super) const SGI_KICK: u32 = Intid::Kick as u32;

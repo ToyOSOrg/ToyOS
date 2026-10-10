@@ -245,7 +245,7 @@ pub fn take_record(row: &Row) -> Option<DeviceIrqRecord> {
     if taken.is_some() && IRQ[row].take_unannounced() {
         log!("isa: {} took its first interrupt", function(row).expect("a claimed row was filled").name);
     }
-    taken.map(|count| DeviceIrqRecord { count })
+    taken
 }
 
 pub fn has_irq(row: &Row) -> bool {
@@ -256,7 +256,7 @@ pub fn has_irq(row: &Row) -> bool {
 /// watch. Called from the row's handler, so it takes no lock but the watch's
 /// own and the I/O APIC's masked one, and allocates nothing.
 pub fn isr(row: usize) {
-    IRQ[row].took();
+    IRQ[row].took(crate::clock::nanos_since_boot());
     for &line in lines(row) {
         if pio::level(line) {
             pio::set_masked(line, true);
