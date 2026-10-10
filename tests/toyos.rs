@@ -239,6 +239,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // `virt_random_differs` builds it for AArch64, runs it on that
     // architecture's job case, and compares two boots' draws.
     "random_draws",
+    // Its shared run asserts what holds of the clock syscalls on x86-64;
+    // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
+    // against the instant the job case stages in the RTC.
+    "wall_clock_now",
 ];
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
@@ -298,6 +302,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
+    ("virt_wall_clock_utc", qemu::Profile::Virt),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -1731,6 +1736,17 @@ fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<
 /// The same for its job `test_rs_random_draws`.
 const VIRT_RANDOM: &str = "random_draws";
 
+/// The same for its job `test_rs_wall_clock_now`.
+const VIRT_WALL_CLOCK: &str = "wall_clock_now";
+
+/// The instant `tests/virtjobcase`'s RTC starts at, and the same in Unix
+/// seconds: years from any host's own, so a reading on it came from the RTC.
+const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
+const VIRT_RTC_BASE_SECS: u64 = 1_993_799_665;
+
+/// What `wall_clock_now` says before the `SYS_CLOCK_EPOCH` its line carries.
+const WALL_CLOCK_SAID: &str = "wall-clock: epoch=";
+
 /// `tests/virtjobcase`'s jobs, in the order its job list runs them, and what
 /// each says once the kernel kept what it asks about.
 const VIRT_JOBS: &[(&str, &str)] = &[
@@ -1741,6 +1757,7 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("debug_refused", "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused"),
     ("test_rs_ring0_timer_in_syscall", "the timer interrupted the syscall's body and re-armed a quantum"),
     ("test_rs_random_draws", RANDOM_DRAWS_SAID),
+    ("test_rs_wall_clock_now", WALL_CLOCK_SAID),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -1751,8 +1768,9 @@ const RANDOM_DRAWS_SAID: &str = "random_draws: 8 threads drew 1000 times each an
 const LOADER_SEED_MIXED: &str = "random: the loader's seed is mixed into the generator's key";
 
 /// Boot `tests/virtjobcase` on one CPU, because `preempt` and `fp_isolation`
-/// see a sibling run only when it took theirs. The kernel carries `SYS_DEBUG`
-/// for `debug_refused`, and every job runs in every boot of the case.
+/// see a sibling run only when it took theirs, with its RTC at
+/// [`VIRT_RTC_BASE`]. The kernel carries `SYS_DEBUG` for `debug_refused`, and
+/// every job runs in every boot of the case.
 fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -1765,9 +1783,10 @@ fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM]
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK]
                 .map(|name| suite_bin(profile.arch(), name))
                 .to_vec(),
+            rtc_base: Some(VIRT_RTC_BASE),
             ..Default::default()
         },
     )
@@ -2032,6 +2051,40 @@ fn virt_random_differs(profile: qemu::Profile) -> Result<(), String> {
         return Err("two boots of one image printed the same 32-byte draw".to_string());
     }
     eprintln!("  [virt] two boots keyed from the loader's seed printed two draws");
+    Ok(())
+}
+
+/// The job case's `wall_clock_now`: what `SYS_CLOCK_EPOCH` and std's
+/// `SystemTime` answer is the instant staged in the RTC, which the loader read
+/// through firmware's `GetTime`. Not before the instant, and not after where
+/// the RTC, running at the host's pace, can have got to by the time the job's
+/// end was read, counted from before the boot was built: both ends are
+/// causality, and a clock with no reading, or one read elsewhere, is out by
+/// years.
+fn virt_wall_clock_utc(profile: qemu::Profile) -> Result<(), String> {
+    let launched = std::time::Instant::now();
+    let mut qemu = boot_virt_jobs(profile);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_wall_clock_now", WALL_CLOCK_SAID)?;
+    let lived = launched.elapsed().as_secs().saturating_add(1);
+    let on_the_base = VIRT_RTC_BASE_SECS..=VIRT_RTC_BASE_SECS + lived;
+    for said in [WALL_CLOCK_SAID, "wall-clock: std_epoch="] {
+        let read = serial
+            .lines()
+            .find_map(|l| l.split_once(said))
+            .and_then(|(_, rest)| rest.split_whitespace().next()?.parse::<u64>().ok());
+        match read {
+            Some(secs) if on_the_base.contains(&secs) => {
+                eprintln!("  [virt] {said}{secs}, {}s past the staged {VIRT_RTC_BASE}", secs - VIRT_RTC_BASE_SECS)
+            }
+            _ => {
+                return Err(format!(
+                    "{said} read {read:?}, outside {on_the_base:?}, {VIRT_RTC_BASE} and the {lived}s since the \
+                     launch\nserial:\n{serial}"
+                ))
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2935,6 +2988,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_ring0_timer_in_syscall" => virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}")),
         "virt_jobs_at_el2" => virt_jobs_at_el2(profile),
         "virt_random_differs" => virt_random_differs(profile),
+        "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),

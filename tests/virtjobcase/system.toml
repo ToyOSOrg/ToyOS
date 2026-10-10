@@ -14,7 +14,7 @@ syscap = ["logread"]
 receives = ["power"]
 # Four minutes from boot rather than one: a job here may run on an emulated
 # CPU, and a job past the bound reboots the guest with the job named.
-args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_ring0_timer_in_syscall", "test_rs_random_draws", "test_rs_abuse_readonly_copyout"]
+args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_ring0_timer_in_syscall", "test_rs_random_draws", "test_rs_wall_clock_now", "test_rs_abuse_readonly_copyout"]
 
 [programs.kernelprobe]
 

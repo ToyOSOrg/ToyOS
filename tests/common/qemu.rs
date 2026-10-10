@@ -1049,6 +1049,9 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
+    /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
+    /// it, and the host's own UTC with `None`.
+    pub rtc_base: Option<&'static str>,
 }
 
 impl BootOptions {
@@ -1087,6 +1090,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
+            rtc_base: None,
         }
     }
 }
@@ -2216,6 +2220,9 @@ fn qemu_command(
         (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
     }
     qemu.arg("-display").arg("none").arg("-no-reboot");
+    if let Some(base) = options.rtc_base {
+        qemu.arg("-rtc").arg(format!("base={base}"));
+    }
     if let Some((w, h)) = shape.panel {
         assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
