@@ -303,10 +303,14 @@ mediated access, leaves open:
   present PNP0C0C was found or the button's `_Qxx` is refused, a short press
   reaches nothing; in legacy mode the firmware served it, and before #845
   the kernel refused such a machine the claim and left it there. The server
-  says each of those by name. Owner: this stage. **Exit**: the owner rules
-  between that machine in ACPI mode with its press dead and the claim given
-  back so the firmware has the button again, and a host test reads the
-  server doing what he rules.
+  says each of those by name. Owner: this stage. **Exit, met**: the owner
+  ruled (2026-10-10), asked "When ToyOS switches a machine into ACPI mode but
+  its ACPI server can't load the firmware's tables (so it can't handle a
+  power button the firmware reports through ACPI code), what should
+  happen?": "Stay in ACPI mode, button dead". The host test
+  `no_namespace_leaves_the_button_and_the_controller_unserved_and_keeps_the_claim`
+  (`userland/acpiserver/src/main.rs`) reads the server serving neither the
+  button nor the controller and keeping the claim.
 
   Two more machines have no power-off, and that is the ruled state and no
   weakness with an exit. A boot whose config starts no server: "Power-off

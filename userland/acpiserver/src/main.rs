@@ -547,6 +547,26 @@ mod tests {
         }
     }
 
+    /// The owner's ruling: a machine whose power button is a control method
+    /// device and whose namespace was not kept stays in ACPI mode with the
+    /// button dead. The server serves neither the button nor the controller,
+    /// enables no GPE, asks the kernel nothing, and goes on to serve the
+    /// claim rather than end and give it back.
+    #[test]
+    fn no_namespace_leaves_the_button_and_the_controller_unserved_and_keeps_the_claim() {
+        let kernel = Scripted::default();
+        let info = AcpiInfo { rsdp: 0, pm1_event: Block::NONE, gpe0: GPE0, flags: 0, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        for (_, enable) in bytes(GPE0) {
+            server.ports.out8(enable, 0);
+        }
+        server.arm_controller();
+        assert!(!server.served.power_button, "a control-method button is served as the fixed one");
+        assert_eq!((server.ec.is_some(), server.served.ec_gpe), (false, None), "a controller is served with no namespace");
+        assert!(bytes(GPE0).all(|(_, enable)| server.ports.in8(enable) == 0), "a GPE is enabled with no namespace");
+        assert!(kernel.asked.borrow().is_empty(), "the kernel was asked for an access with no namespace");
+    }
+
     /// An AMD laptop's controller and `_Q28` under both kinds of power
     /// button: the method runs, writes the POST port and presses only where
     /// the FADT says the button is a control method device; on a machine
