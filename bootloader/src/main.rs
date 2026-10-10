@@ -473,7 +473,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // Allocated before exiting boot services, which takes the allocator away.
     let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
     // SAFETY: `pt_layout` has non-zero size.
-    let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
+    let pt_mem = unsafe { alloc::alloc::alloc(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
     // Where firmware loaded this image, which is where the x86-64 switch to
@@ -513,9 +513,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let plan = planned
         .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
 
-    // SAFETY: `pt_mem` is the zeroed allocation of `pt_layout` above, which
-    // nothing else holds; firmware's map is identity, so its address is the
-    // pool's physical one.
+    // SAFETY: `pt_mem` is the allocation of `pt_layout` above, which nothing
+    // else holds, and `write` stores every entry before it reads any;
+    // firmware's map is identity, so its address is the pool's physical one.
     let pool = unsafe { &mut *pt_mem.cast::<[Table; MAX_PAGES]>() };
     let pml4_phys = plan.write(arch::encoding::ENCODING, pool, pt_mem as u64);
     println!("Boot map: root {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
