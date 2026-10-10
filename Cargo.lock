@@ -5679,6 +5679,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
@@ -5932,6 +5933,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-bootmap",
  "toyos-phys",
+]
+
+[[package]]
+name = "toyos-ssh"
+version = "0.1.0"
+dependencies = [
+ "ring",
 ]
 
 [[package]]
