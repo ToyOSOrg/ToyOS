@@ -17,7 +17,7 @@ use etherparse::{ArpOperation, Icmpv4Type, LinkSlice, NetSlice, SlicedPacket, Tr
 use toyos_net_node::Node;
 use toyos_net_wire::Instant;
 
-use crate::common::{arp, from_server, message_of, option, sum, terms, xid, Wire, A, ACK, BROADCAST, DISCOVER, ELSEWHERE, MAC, MAC_B, MAC_R, OFFER, R};
+use crate::common::{arp, batch, from_server, message_of, option, sum, terms, xid, Wire, A, ACK, BROADCAST, DISCOVER, ELSEWHERE, MAC, MAC_B, MAC_R, OFFER, R};
 
 pub const B: Ipv4Addr = ELSEWHERE;
 pub const OFF_LINK: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
@@ -161,13 +161,13 @@ impl Lan {
                 .collect();
             for target in asked {
                 let mac = if target == R { MAC_R } else { MAC_B };
-                self.node.receive(self.now, &arp(MAC, false, mac, target, A), draw(&mut self.draws));
+                self.node.receive(self.now, batch(&[&arp(MAC, false, mac, target, A)]), draw(&mut self.draws));
             }
         }
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, frame, draw(&mut self.draws));
+        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 

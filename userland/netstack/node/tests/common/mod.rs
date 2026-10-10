@@ -291,6 +291,12 @@ pub fn echo_request(destination: Ipv4Addr, id: u16, seq: u16, data: &[u8]) -> Ve
     ipv4(MAC, MAC_R, R, destination, 1, &icmp)
 }
 
+/// `frames`, in order, as the batch [`Node::receive`] takes.
+pub fn batch<'a>(frames: &'a [&'a [u8]]) -> impl FnMut(&mut dyn FnMut(&[u8])) -> bool + 'a {
+    let mut left = frames.iter();
+    move |sink| left.next().map(|frame| sink(frame)).is_some()
+}
+
 pub struct Wire {
     pub node: Node,
     mac: [u8; 6],
@@ -341,7 +347,7 @@ impl Wire {
             }
             let asked = self.sent[from..].iter().filter(|seen| matches!(seen, Seen::Arp { request: true, sender, target, .. } if *target == R && *sender == A)).count();
             for _ in 0..asked {
-                self.node.receive(self.now, &arp(MAC, false, MAC_R, R, A), draw(&mut self.draws));
+                self.node.receive(self.now, batch(&[&arp(MAC, false, MAC_R, R, A)]), draw(&mut self.draws));
             }
         }
     }
@@ -352,7 +358,7 @@ impl Wire {
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, frame, draw(&mut self.draws));
+        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
