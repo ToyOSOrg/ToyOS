@@ -122,6 +122,10 @@ pub struct FileAttr {
     size: u64,
     file_type: FileType,
     mtime: u64,
+    /// `toyos_abi::syscall::Stat`'s identity; 0 for what the kernel numbers
+    /// not — its directories and symlinks.
+    volume: u64,
+    node: u64,
 }
 
 pub struct ReadDir {
@@ -132,7 +136,6 @@ pub struct ReadDir {
 pub struct DirEntry {
     dir_path: PathBuf,
     name: OsString,
-    size: u64,
     file_type: FileType,
 }
 
@@ -188,7 +191,36 @@ impl FileType {
 
 impl FileAttr {
     fn of(stat: toyos::fs::Stat) -> FileAttr {
-        FileAttr { size: stat.size, file_type: FileType::of_kind(stat.kind), mtime: stat.mtime }
+        FileAttr {
+            size: stat.size,
+            file_type: FileType::of_kind(stat.kind),
+            mtime: stat.mtime,
+            volume: stat.volume,
+            node: stat.node,
+        }
+    }
+
+    fn of_kernel(stat: syscall::Stat) -> FileAttr {
+        FileAttr {
+            size: stat.size,
+            file_type: opened_file_type(stat.file_type),
+            mtime: stat.mtime,
+            volume: stat.volume,
+            node: stat.node,
+        }
+    }
+
+    /// What the kernel answers of a name it opens not: its kind and size alone.
+    fn unopened(size: u64, file_type: FileType) -> FileAttr {
+        FileAttr { size, file_type, mtime: 0, volume: 0, node: 0 }
+    }
+
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+
+    pub fn node(&self) -> u64 {
+        self.node
     }
 
     pub fn size(&self) -> u64 {
@@ -246,12 +278,7 @@ impl Iterator for ReadDir {
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
         let e = self.entries.get(self.index)?;
         self.index += 1;
-        Some(Ok(DirEntry {
-            dir_path: e.dir_path.clone(),
-            name: e.name.clone(),
-            size: e.size,
-            file_type: e.file_type,
-        }))
+        Some(Ok(DirEntry { dir_path: e.dir_path.clone(), name: e.name.clone(), file_type: e.file_type }))
     }
 }
 
@@ -264,8 +291,9 @@ impl DirEntry {
         self.name.clone()
     }
 
+    /// Asked of the entry, as Unix's is: a listing carries no identity.
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        Ok(FileAttr { size: self.size, file_type: self.file_type, mtime: 0 })
+        lstat(&self.path())
     }
 
     pub fn file_type(&self) -> io::Result<FileType> {
@@ -540,14 +568,7 @@ impl File {
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         match &self.0 {
-            Inner::Kernel(h) => {
-                let stat = syscall::fstat(*h).map_err(to_io_error)?;
-                Ok(FileAttr {
-                    size: stat.size,
-                    file_type: opened_file_type(stat.file_type),
-                    mtime: stat.mtime,
-                })
-            }
+            Inner::Kernel(h) => syscall::fstat(*h).map(FileAttr::of_kernel).map_err(to_io_error),
             Inner::Served(s) => s.with(|dir, pos| dir.fstat(pos.fid, pos.generation)).map(FileAttr::of),
         }
     }
@@ -796,11 +817,10 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
                 let n = dir.read_dir(rel, &mut buf)?;
                 if n <= buf.len() {
                     let mut entries = Vec::new();
-                    toyos::fs::for_each_entry(&buf[..n], |kind, size, name| {
+                    toyos::fs::for_each_entry(&buf[..n], |kind, _, name| {
                         entries.push(DirEntry {
                             dir_path: dir_path.clone(),
                             name: OsString::from(name),
-                            size,
                             file_type: FileType::of_kind(kind),
                         })
                     })?;
@@ -822,7 +842,6 @@ fn kernel_entries(dir_path: &Path, data: &[u8]) -> Vec<DirEntry> {
         entries.push(DirEntry {
             dir_path: dir_path.to_path_buf(),
             name: OsString::from(crate::str::from_utf8(entry.name).unwrap_or("")),
-            size: entry.size,
             file_type: FileType { is_file: !entry.is_dir, is_dir: entry.is_dir, is_symlink: false },
         });
     }
@@ -933,19 +952,10 @@ fn kernel_stat(abs: &str) -> io::Result<FileAttr> {
     if let Ok(fd) = syscall::open(abs.as_bytes(), OpenFlags::READ) {
         let result = syscall::fstat(fd);
         syscall::close(fd);
-        let st = result.map_err(to_io_error)?;
-        return Ok(FileAttr {
-            size: st.size,
-            file_type: opened_file_type(st.file_type),
-            mtime: st.mtime,
-        });
+        return result.map(FileAttr::of_kernel).map_err(to_io_error);
     }
     if kernel_is_dir(abs.as_bytes()) {
-        return Ok(FileAttr {
-            size: 0,
-            file_type: FileType { is_file: false, is_dir: true, is_symlink: false },
-            mtime: 0,
-        });
+        return Ok(FileAttr::unopened(0, FileType { is_file: false, is_dir: true, is_symlink: false }));
     }
     Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
 }
@@ -960,11 +970,10 @@ pub fn lstat(path: &Path) -> io::Result<FileAttr> {
         |abs| {
             let mut link_buf = [0u8; 4096];
             if let Ok(n) = syscall::readlink(abs.as_bytes(), &mut link_buf) {
-                return Ok(FileAttr {
-                    size: n as u64,
-                    file_type: FileType { is_file: false, is_dir: false, is_symlink: true },
-                    mtime: 0,
-                });
+                return Ok(FileAttr::unopened(
+                    n as u64,
+                    FileType { is_file: false, is_dir: false, is_symlink: true },
+                ));
             }
             kernel_stat(abs)
         },

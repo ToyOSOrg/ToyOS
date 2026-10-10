@@ -672,6 +672,14 @@ pub struct Stat {
     /// undated: written on a machine whose RTC never answered, or shipped in
     /// ROOT's reproducible image.
     pub mtime: u64,
+    /// The volume the file is on; 0 for an object that is no file of any
+    /// volume. A kernel mount's is below 2^63, a file server's has bit 63 set
+    /// (`toyos::fs::SERVED_VOLUME`), so the two minters cannot collide.
+    pub volume: u64,
+    /// The file on that volume: the same through every path and handle that
+    /// reaches it, for as long as it exists and its volume stays mounted, and
+    /// no other file's while both exist. 0 exactly when `volume` is.
+    pub node: u64,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1048,7 +1056,7 @@ pub fn seek(handle: RawHandle, pos: SeekFrom) -> Result<u64, SyscallError> {
 
 /// Get file metadata for a file handle.
 pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
-    let mut stat = Stat { file_type: FileType::Unknown, size: 0, mtime: 0 };
+    let mut stat = Stat::default();
     check_unit(syscall(SYS_FSTAT, handle.0 as u64, &mut stat as *mut Stat as u64, 0, 0))?;
     Ok(stat)
 }

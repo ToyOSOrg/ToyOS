@@ -39,7 +39,7 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::cache::{Cache, Shared};
 use diskserver::disk::{Disk, DiskError, BLOCK};
-use crate::volume::{join, parent, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -68,6 +68,8 @@ pub struct DataVolume<D: Disk> {
     by_path: BTreeMap<String, Node>,
     next: Node,
     clock: fn() -> u64,
+    /// By path: the format keeps nothing that names a file across a rename.
+    ids: Identities<String>,
 }
 
 /// What a DATA partition turned out to be, as the kernel's mount decided it.
@@ -271,7 +273,25 @@ impl<D: Disk> DataVolume<D> {
             by_path: BTreeMap::new(),
             next: 1,
             clock,
+            ids: Identities::new(),
         })
+    }
+
+    /// `path` is gone, and with it every directory above it that existed only
+    /// for having something beneath.
+    fn forget(&mut self, path: &str) {
+        self.ids.forget(&path.to_string());
+        self.forget_emptied(path);
+    }
+
+    /// Every directory above `path` that existed only for having something
+    /// beneath, and has nothing now.
+    fn forget_emptied(&mut self, path: &str) {
+        let mut dir = parent(path);
+        while !dir.is_empty() && !self.is_dir(dir) {
+            self.ids.forget(&dir.to_string());
+            dir = parent(dir);
+        }
     }
 
     /// Whether anything is named beneath `dir`.
@@ -469,6 +489,13 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
     }
 
+    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+        if !self.names.contains_key(path) && !self.is_dir(path) {
+            return Err(SyscallError::NotFound);
+        }
+        Ok(self.ids.of(path.to_string()))
+    }
+
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
         let cache = Rc::clone(&self.cache);
         let open = self.entry(node)?;
@@ -632,6 +659,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             return Err(SyscallError::NotFound);
         }
         self.names.remove(path);
+        self.forget(path);
         Ok(())
     }
 
@@ -649,6 +677,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
         self.orphan(path);
         self.names.remove(path);
+        self.forget(path);
         Ok(())
     }
 
@@ -681,6 +710,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                     self.open.get_mut(&node).expect("indexed").path = to.to_string();
                     self.by_path.insert(to.to_string(), node);
                 }
+                self.ids.moved(&from.to_string(), to.to_string());
+                self.forget_emptied(from);
                 Ok(())
             }
             Kind::Dir => {
@@ -726,6 +757,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                         self.by_path.insert(moved, node);
                     }
                 }
+                self.ids.moved_tree(from, to);
+                self.forget_emptied(from);
                 Ok(())
             }
         }
@@ -882,6 +915,40 @@ mod tests {
         v.rmdir("home/d").unwrap();
         assert_eq!(v.lstat("home/d"), Err(SyscallError::NotFound));
         assert_eq!(v.rmdir("home"), Err(SyscallError::PermissionDenied), "a root stays");
+    }
+
+    /// A file's number is one across renames, its own directory's and one
+    /// over another file; every file that exists at once has its own; and a
+    /// directory that held only what was removed is gone with its number.
+    #[test]
+    fn a_file_is_one_number_across_renames_and_another_files_is_another() {
+        let mut v = vol();
+        for path in ["home/a/f", "home/a/g", "home/x/only"] {
+            let n = v.open(path, CREATE).unwrap();
+            v.close(n).unwrap();
+        }
+        v.mkdir("home/empty").unwrap();
+        let ids: Vec<u64> = ["home/a/f", "home/a/g", "home/a", "home/x", "home/x/only", "home/empty", "home", ""]
+            .iter()
+            .map(|p| v.identity(p).unwrap())
+            .collect();
+        assert!(ids.iter().all(|&n| n != 0 && ids.iter().filter(|&&m| m == n).count() == 1), "{ids:?}");
+        let (f, g, a, x) = (ids[0], ids[1], ids[2], ids[3]);
+        assert_eq!(v.identity("home/nothing"), Err(SyscallError::NotFound));
+
+        v.rename("home/a", "home/b").unwrap();
+        assert_eq!(v.identity("home/b"), Ok(a), "a directory's rename keeps its number");
+        assert_eq!(v.identity("home/b/f"), Ok(f), "and every file's beneath it");
+        v.rename("home/b/g", "home/b/f").unwrap();
+        assert_eq!(v.identity("home/b/f"), Ok(g), "a rename over a file takes its name, not its number");
+
+        v.unlink("home/x/only").unwrap();
+        assert_eq!(v.identity("home/x"), Err(SyscallError::NotFound), "a directory that held only the file went");
+        let n = v.open("home/x/only", CREATE).unwrap();
+        v.close(n).unwrap();
+        let (dir, file) = (v.identity("home/x").unwrap(), v.identity("home/x/only").unwrap());
+        assert!(!ids.contains(&dir) && !ids.contains(&file), "made again, each is a new file: {dir}, {file} of {ids:?}");
+        assert_ne!(dir, x);
     }
 
     #[test]

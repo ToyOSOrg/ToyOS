@@ -150,6 +150,8 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
             if !buf.is_null() {
                 ptr::write_bytes(buf, 0, 1);
                 let s = &mut *buf;
+                s.st_dev = st.volume;
+                s.st_ino = st.node;
                 s.st_size = st.size as i64;
                 s.st_mtim = Timespec {
                     tv_sec: (st.mtime / NANOS_PER_SEC) as i64,

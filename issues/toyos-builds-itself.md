@@ -62,7 +62,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   `mmap` and record locks
   (`issues/libc-refuses-what-toyos-cannot-yet-answer.md`); file
   identities
-  (`issues/libc-stat-answers-one-serial-number-for-every-file.md`),
+  (`issues/the-kernel-numbers-no-directory-symlink-or-listing-entry.md`),
   served like the locks by fsd; and socket descriptors that are pollable and
   can be non-blocking
   (`issues/libc-close-of-a-socket-ends-the-process.md`). Read from each
@@ -131,7 +131,7 @@ static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
 85.6 MB, 121.9 MB and 70.9 MB stripped. No guest has run either.
 - Run: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md` lists,
   `issues/libc-has-no-pread-or-pwrite.md`, and
-  `issues/libc-stat-answers-one-serial-number-for-every-file.md`.
+  `issues/the-kernel-numbers-no-directory-symlink-or-listing-entry.md`.
 
 **What M3 adds: a rustc that carries that LLVM**, after all of M2's.
 - Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`, and

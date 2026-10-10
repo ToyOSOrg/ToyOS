@@ -1,0 +1,8 @@
+two files on /tmp are two: yes
+one file through two paths is one: yes
+its open descriptor is the file: yes
+a rename keeps the file: yes
+its descriptor after the rename is the file: yes
+a link is the file it names: yes
+two files on /system are two: yes
+/system and /tmp are two volumes: yes
