@@ -96,7 +96,7 @@ fn main() {
         return run_null_sink(acceptor);
     };
     match hda::Hda::claim(dev) {
-        Ok((hda, _path, channels)) => run_hda(acceptor, hda, channels),
+        Ok((hda, _path, channels, rate)) => run_hda(acceptor, hda, channels, rate),
         Err(why) => {
             say!("soundserver: the HDA controller cannot carry audio: {why}");
             run_null_sink(acceptor)
@@ -116,7 +116,7 @@ fn run_virtio(acceptor: Acceptor, virtio: virtio::Virtio, rate: u32, channels: u
     );
 }
 
-fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
+fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8, rate: u32) {
     let info = hda.info();
     let num_buffers = info.periods as usize;
     let period_bytes = info.period_bytes as usize;
@@ -132,7 +132,7 @@ fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
         "hda",
         &mut HdaBackend { hda, buffers, period_bytes },
         num_buffers,
-        toyos_hda::config::RATE,
+        rate,
         channels as u16,
         period_bytes,
     );

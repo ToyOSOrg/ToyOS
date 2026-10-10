@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::AmpCaps;
+use crate::caps::{AmpCaps, PcmCaps};
 use crate::graph::{Codec, FunctionGroup};
 use crate::path::{OutputPath, PinSetup};
 use crate::verb::{self, Address, Node, Verb};
@@ -141,22 +141,29 @@ fn nodes(path: &OutputPath) -> Vec<Node> {
     out
 }
 
-/// The rate and width this driver asks a converter for, and whether the
-/// converter offers them.
-pub const RATE: u32 = 44_100;
+/// The width this driver asks a converter for, and the rates it will run at,
+/// best first.
+///
+/// YOGA HACK: the Yoga's converter does not offer 44.1 kHz, so the stream runs
+/// at a rate the converter offers and soundserver resamples clients to it.
 pub const WIDTH: u8 = 16;
+pub const RATES: [u32; 4] = [48_000, 44_100, 96_000, 192_000];
 
-/// `SDnFMT` and the codec's `Set Converter Format` payload for this path, or
-/// `None` where the converter does not offer [`RATE`] at [`WIDTH`].
-pub fn format(codecs: &[Codec], path: &OutputPath) -> Option<(u16, u8)> {
+/// The first of [`RATES`] `pcm` offers at [`WIDTH`].
+pub fn rate(pcm: PcmCaps) -> Option<u32> {
+    RATES.into_iter().find(|&r| pcm.supports(r, WIDTH))
+}
+
+/// `SDnFMT` and the codec's `Set Converter Format` payload for this path, its
+/// channel count and its rate, or `None` where neither the converter nor
+/// `group_pcm` (the function group's default, which a converter reporting no
+/// 16-bit rate defers to) offers one of [`RATES`] at [`WIDTH`].
+pub fn format(codecs: &[Codec], path: &OutputPath, group_pcm: Option<PcmCaps>) -> Option<(u16, u8, u32)> {
     let group = group_of(codecs, path)?;
     let converter = group.widget(path.converter)?;
-    let pcm = converter.pcm?;
-    if !pcm.supports(RATE, WIDTH) {
-        return None;
-    }
+    let rate = converter.pcm.and_then(rate).or_else(|| group_pcm.and_then(rate))?;
     let channels = converter.caps.channels.min(2);
-    Some((crate::stream::stream_format(RATE, WIDTH, channels)?, channels))
+    Some((crate::stream::stream_format(rate, WIDTH, channels)?, channels, rate))
 }
 
 fn group_of<'a>(codecs: &'a [Codec], path: &OutputPath) -> Option<&'a FunctionGroup> {
@@ -283,27 +290,29 @@ mod tests {
     }
 
     #[test]
-    fn both_machines_offer_the_one_rate_this_driver_asks_for() {
+    fn both_machines_run_at_48k_where_their_converters_offer_it() {
         let (codecs, path) = laptop();
-        assert_eq!(format(&codecs, &path), Some((0x4011, 2)));
+        assert_eq!(format(&codecs, &path, None), Some((0x0011, 2, 48_000)));
 
         let codecs = fixture::qemu();
         let path = find_output_path(&codecs).unwrap();
-        assert_eq!(format(&codecs, &path), Some((0x4011, 2)));
+        assert_eq!(format(&codecs, &path, None), Some((0x0011, 2, 48_000)));
     }
 
     #[test]
-    fn a_converter_that_does_not_offer_the_rate_is_a_refusal_and_not_a_substitution() {
+    fn a_converter_with_no_rate_here_defers_to_the_group_and_is_refused_without_one() {
         let mut codecs = fixture::laptop();
-        // 48 kHz only, at 16 bits: a converter that exists and cannot play the
-        // one rate this pipeline runs at.
+        // 8 kHz only, at 16 bits: none of RATES.
         let group = &mut codecs[0].groups[0];
         let dac = group.widgets.iter_mut().find(|w| w.node == Node(0x02)).unwrap();
         dac.pcm = Some(crate::caps::PcmCaps::decode(
-            crate::verb::Response::new(0x0002_0040).unwrap(),
+            crate::verb::Response::new(0x0002_0001).unwrap(),
         ));
         let path = find_output_path(&codecs).unwrap();
-        assert_eq!(format(&codecs, &path), None);
+        assert_eq!(format(&codecs, &path, None), None);
+        // 44.1 kHz only, at 16 bits, on the function group.
+        let group_pcm = crate::caps::PcmCaps::decode(crate::verb::Response::new(0x0002_0020).unwrap());
+        assert_eq!(format(&codecs, &path, Some(group_pcm)), Some((0x4011, 2, 44_100)));
     }
 
     #[test]

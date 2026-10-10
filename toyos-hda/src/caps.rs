@@ -329,6 +329,10 @@ impl PcmCaps {
         Self(response.raw())
     }
 
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+
     pub fn rates(self) -> impl Iterator<Item = u32> {
         let raw = self.0;
         (0..RATES.len()).filter(move |bit| raw & (1 << bit) != 0).map(|bit| RATES[bit])
