@@ -277,7 +277,8 @@ mediated access, leaves open:
   `ff_gbl_lock` counter there read 0 at 2 minutes of uptime, and a reading
   after a longer session is still owed. A Lock field and an `Acquire(\_GL,
   0xFFFF)` take with no bound. An Acquire with a TimeoutValue waits that
-  long, and the time is charged to the evaluation's 10 s. Owner: this
+  long, at most what the evaluation has left of its 10 s, and the
+  TimeoutValue is charged to it. Owner: this
   stage. **Exit**: a hold measured on the T14, either by a contended take
   in the server's own count or by `ff_gbl_lock` after a long Linux session.
   That measurement sets the bound, or replaces it with no bound if the
