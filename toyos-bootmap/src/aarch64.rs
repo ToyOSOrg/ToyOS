@@ -6,7 +6,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, DirectMapEnd, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
+use crate::{is_read_as_memory, Cache, DirectMapEnd, Encoding, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
 
 /// `MAIR_EL1` index 0: Device-nGnRE, registers.
 pub const ATTR_DEVICE: u64 = 0;
@@ -67,21 +67,8 @@ pub const fn page(phys: u64, cache: Cache) -> u64 {
     phys | PAGE | AF | attributes(cache)
 }
 
-/// The physical address width `ID_AA64MMFR0_EL1.PARange` encodes (Arm ARM
-/// K.a, D24.2.82), or `None` for an encoding it reserves.
-pub const fn physical_bits(parange: u64) -> Option<u32> {
-    match parange {
-        0b0000 => Some(32),
-        0b0001 => Some(36),
-        0b0010 => Some(40),
-        0b0011 => Some(42),
-        0b0100 => Some(44),
-        0b0101 => Some(48),
-        0b0110 => Some(52),
-        0b0111 => Some(56),
-        _ => None,
-    }
-}
+/// The three, for [`Plan::write`](crate::Plan::write).
+pub const ENCODING: Encoding = Encoding { table, block, page };
 
 /// 4 KiB pages in one 2 MiB page.
 const PAGES: u64 = PAGE_2M / PAGE_4K;

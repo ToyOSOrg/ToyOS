@@ -1,4 +1,5 @@
-//! The bootloader's transient page tables, decided rather than built.
+//! The bootloader's transient page tables, decided, and written into pages
+//! the loader gives.
 //!
 //! Between the loader's switch to these tables and the kernel's `mm::init`
 //! there is one mapping in the machine, and everything the kernel touches in
@@ -15,13 +16,12 @@
 //! A second-level table is position-independent, so one per 512 GiB the map
 //! reaches serves both views: root slot [`ROOT_IDENTITY`] + r and
 //! [`ROOT_HIGH_HALF`] + r name the same table, as both views already share
-//! every directory. The map reaches as far as the CPU's physical addresses
-//! do and the high half can hold, and refuses by name what lies past either.
+//! every directory. The map reaches as far as the high half can hold, and
+//! refuses by name what lies past it.
 //!
-//! Pure: the scanout, the loader's image, the CPU's physical address width
-//! and, where the architecture types memory by firmware's map, the write-back
-//! ranges in; a [`Plan`] out. The loader allocates the pages and writes the
-//! entries.
+//! Pure: the scanout, the loader's image and, where the architecture types
+//! memory by firmware's map, the write-back ranges in; a [`Plan`] out, which
+//! [`Plan::write`] lays into a pool of [`Table`]s the loader allocates.
 //!
 //! What the kernel takes from firmware's map when it builds its own tables is
 //! here too, because it may never map less than this map did: which types the
@@ -155,6 +155,25 @@ const FINE_TABLES: usize = 2;
 /// directory, and a table of 4 KiB leaves per split page.
 pub const MAX_PAGES: usize = 1 + MAX_REGIONS + MAX_DIRECTORIES + FINE_TABLES;
 
+/// One page of the map: 512 entries, on the page an entry names it by, since
+/// an entry's low 12 bits are flags rather than address.
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+pub struct Table(pub [u64; 512]);
+
+impl Table {
+    pub const EMPTY: Self = Self([0; 512]);
+}
+
+/// How an architecture encodes the three entries a [`Plan`] writes: one naming
+/// the table below it, a 2 MiB leaf, and a 4 KiB leaf.
+#[derive(Clone, Copy)]
+pub struct Encoding {
+    pub table: fn(u64) -> u64,
+    pub block: fn(u64, Cache) -> u64,
+    pub page: fn(u64, Cache) -> u64,
+}
+
 /// Why a machine's memory does not fit these tables.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
@@ -163,9 +182,6 @@ pub enum Refusal {
     Unaligned(u64),
     /// The range's own end does not fit an address.
     Extent { base: u64, len: u64 },
-    /// A range ending here, past the `bits` of physical address the CPU
-    /// reports: no table can name it.
-    PastWidth { end: u64, bits: u32 },
     /// More directories than [`MAX_DIRECTORIES`].
     Directories(usize),
     /// A 2 MiB page of the low map that is write-back memory in part and not
@@ -186,9 +202,6 @@ impl fmt::Display for Refusal {
             }
             Self::Extent { base, len } => {
                 write!(f, "{base:#x}+{len:#x} runs past the end of the address space")
-            }
-            Self::PastWidth { end, bits } => {
-                write!(f, "a range ends at {end:#x}, past the {bits} bits of physical address this CPU reports")
             }
             Self::Directories(needed) => {
                 write!(f, "{needed} page directories are needed and {MAX_DIRECTORIES} may be named")
@@ -305,15 +318,8 @@ impl<'a> Plan<'a> {
     /// identity or the first fetch after the switch faults. It is plain memory,
     /// so its pages are rounded out both ways and typed as the rest of memory.
     ///
-    /// `physical_bits` is the CPU's physical address width: a byte of either
-    /// at or past `1 << physical_bits` is [`Refusal::PastWidth`], and one past
-    /// [`DIRECT_MAP_WINDOW`] [`Refusal::PastWindow`].
-    pub fn new(
-        scanout: Option<(u64, u64)>,
-        loader: (u64, u64),
-        typing: Typing<'a>,
-        physical_bits: u32,
-    ) -> Result<Self, Refusal> {
+    /// A byte of either past [`DIRECT_MAP_WINDOW`] is [`Refusal::PastWindow`].
+    pub fn new(scanout: Option<(u64, u64)>, loader: (u64, u64), typing: Typing<'a>) -> Result<Self, Refusal> {
         let mut plan = Self {
             gibs: [0; MAX_DIRECTORIES],
             directories: 0,
@@ -322,10 +328,10 @@ impl<'a> Plan<'a> {
             fine: [0; FINE_TABLES],
             fines: 0,
             scanout: None,
-            loader: whole_pages(loader.0, loader.1, physical_bits)?,
+            loader: whole_pages(loader.0, loader.1)?,
             typing,
         };
-        let scanout = scanout.map(|(base, len)| plan.scanout_extent(base, len, physical_bits)).transpose()?;
+        let scanout = scanout.map(|(base, len)| plan.scanout_extent(base, len)).transpose()?;
         let spans = [
             scanout.map(|(base, end)| (base / PAGE_2M * PAGE_2M, end)),
             Some((plan.loader.0, plan.loader.0 + plan.loader.1)),
@@ -378,7 +384,7 @@ impl<'a> Plan<'a> {
 
     /// The scanout's extent as the map gives it, `(base, end)`, or why none can
     /// be given.
-    fn scanout_extent(&self, base: u64, len: u64, physical_bits: u32) -> Result<(u64, u64), Refusal> {
+    fn scanout_extent(&self, base: u64, len: u64) -> Result<(u64, u64), Refusal> {
         let granule = match self.typing {
             Typing::Firmware => PAGE_2M,
             Typing::ByMap(_) => PAGE_4K,
@@ -388,7 +394,7 @@ impl<'a> Plan<'a> {
         }
         let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
         let end = end.checked_next_multiple_of(granule).ok_or(Refusal::Extent { base, len })?;
-        reachable(end, physical_bits)?;
+        within_window(end)?;
         Ok((base, end))
     }
 
@@ -405,6 +411,38 @@ impl<'a> Plan<'a> {
             }
         }
         self.scanout = Some((base, end - base));
+    }
+
+    /// Write this map into `pool`, a zeroed pool whose first byte is at
+    /// physical address `at`, and return its root's: the root first, then
+    /// [`Plan::regions`]' tables, the directories and the split pages' tables,
+    /// each in its accessor's order.
+    pub fn write(&self, encoding: Encoding, pool: &mut [Table; MAX_PAGES], at: u64) -> u64 {
+        let first_directory = 1 + self.regions;
+        let first_fine = first_directory + self.directories;
+        let phys = |page: usize| at + page as u64 * PAGE_4K;
+        for (r, &region) in self.regions().iter().enumerate() {
+            let entry = (encoding.table)(phys(1 + r));
+            pool[0].0[ROOT_IDENTITY + region as usize] = entry;
+            pool[0].0[ROOT_HIGH_HALF + region as usize] = entry;
+        }
+        for (d, (region, index)) in self.directory_slots().enumerate() {
+            pool[1 + region].0[index] = (encoding.table)(phys(first_directory + d));
+        }
+        for (f, (directory, index)) in self.fine_slots().enumerate() {
+            pool[first_directory + directory].0[index] = (encoding.table)(phys(first_fine + f));
+        }
+        for entry in self.entries() {
+            match entry.slot {
+                Slot::Directory { directory, index } => {
+                    pool[first_directory + directory].0[index] = (encoding.block)(entry.phys, entry.cache)
+                }
+                Slot::Fine { table, index } => {
+                    pool[first_fine + table].0[index] = (encoding.page)(entry.phys, entry.cache)
+                }
+            }
+        }
+        phys(0)
     }
 
     /// The 512 GiB each second-level table covers, by number `r`, in the order
@@ -540,23 +578,19 @@ impl<'a> Plan<'a> {
 
 /// `base..base + len` as whole 2 MiB pages, rounded out both ways: `(first
 /// page, bytes covered)`. An empty range has no page to be in and is refused.
-fn whole_pages(base: u64, len: u64, physical_bits: u32) -> Result<(u64, u64), Refusal> {
+fn whole_pages(base: u64, len: u64) -> Result<(u64, u64), Refusal> {
     if len == 0 {
         return Err(Refusal::Extent { base, len });
     }
     let first = base / PAGE_2M * PAGE_2M;
     let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
     let end = end.checked_next_multiple_of(PAGE_2M).ok_or(Refusal::Extent { base, len })?;
-    reachable(end, physical_bits)?;
+    within_window(end)?;
     Ok((first, end - first))
 }
 
-/// Whether a range ending at `end` is one this CPU can address and both views
-/// can hold.
-fn reachable(end: u64, physical_bits: u32) -> Result<(), Refusal> {
-    if physical_bits < u64::BITS && end > 1 << physical_bits {
-        return Err(Refusal::PastWidth { end, bits: physical_bits });
-    }
+/// Whether a range ending at `end` is one both views can hold.
+fn within_window(end: u64) -> Result<(), Refusal> {
     if end > DIRECT_MAP_WINDOW {
         return Err(Refusal::PastWindow(end));
     }
