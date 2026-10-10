@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{arp, terms, Segment, Wire, A, MAC, MAC_B, MAC_R, R};
+use common::{arp, batch, terms, Segment, Wire, A, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 use toyos_net_shard::ConnectError;
@@ -62,6 +62,9 @@ struct Ends {
     from_dropped: bool,
     /// The ends the node let go of, in the order it did.
     let_go: Vec<PipeEnd>,
+    /// The node's calls of each end: each is a syscall in netstack.
+    writes: usize,
+    reads: usize,
 }
 
 type Client = Rc<RefCell<Ends>>;
@@ -72,6 +75,7 @@ struct ReadEnd(Client);
 impl ToClient for WriteEnd {
     fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
         let mut ends = self.0.borrow_mut();
+        ends.writes += 1;
         if ends.write_broken {
             return Err(WriteRefusal::Broken);
         }
@@ -98,6 +102,7 @@ impl Drop for WriteEnd {
 impl FromClient for ReadEnd {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
         let mut ends = self.0.borrow_mut();
+        ends.reads += 1;
         if ends.read_broken {
             return Err(ReadRefusal::Broken);
         }
@@ -417,14 +422,14 @@ impl Net {
         self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
         for frame in &frames {
             for answer in self.hears(frame) {
-                self.node.receive(self.now, &answer, draw(&mut self.draws));
+                self.node.receive(self.now, batch(&[&answer]), draw(&mut self.draws));
             }
         }
         frames.len()
     }
 
     fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, frame, draw(&mut self.draws));
+        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
@@ -633,14 +638,18 @@ fn a_connect_closed_before_its_answer_is_answered_closed() {
     assert_eq!((net.far.segments.len(), net.far.resets.len()), (sent, 0));
 }
 
-// A frame and a deadline each end in a pass of their own: an opportunity's pass is over the
-// connects only, so neither test offers one.
+// A batch of frames and a deadline each end in a pass of their own: an opportunity's pass is over
+// the connects only, so neither test offers one. The batch's pass is one, after its last frame:
+// what the batch brought is one write to the client's pipe, and its send pipe is asked once.
 #[test]
-fn a_frame_moves_an_established_stream_with_no_opportunity_after_it() {
+fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_it() {
     let (mut net, _, client) = established();
-    let frame = net.far.text(b"at once");
-    net.node.receive(net.now, &frame, draw(&mut net.draws));
-    assert_eq!(client.borrow().inbox, b"at once");
+    let frames = [net.far.text(b"all "), net.far.text(b"at "), net.far.text(b"once")];
+    let (writes, reads) = (client.borrow().writes, client.borrow().reads);
+    net.node.receive(net.now, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
+    let ends = client.borrow();
+    assert_eq!(ends.inbox, b"all at once");
+    assert_eq!((ends.writes - writes, ends.reads - reads), (1, 1), "the pipes' calls in the batch's pass");
 }
 
 #[test]
