@@ -3,8 +3,8 @@
 //! and a loader firmware put below the map's end or above it.
 
 use toyos_bootmap::{
-    aarch64, x86_64, Cache, Entry, Plan, Refusal, Slot, Typing, BOOT_MAP_BYTES, MAX_PAGES, PAGE_2M,
-    PAGE_4K,
+    aarch64, x86_64, Cache, Entry, Plan, Refusal, Slot, Typing, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, MAX_PAGES,
+    PAGE_2M, PAGE_4K, ROOT_HIGH_HALF, ROOT_IDENTITY,
 };
 
 const GIB: u64 = 1 << 30;
@@ -35,7 +35,22 @@ fn is_consistent(plan: &Plan) {
         assert!(!seen.contains(&entry.slot), "{entry:?} twice");
         seen.push(entry.slot);
     }
-    assert!(3 + plan.directories().len() + plan.fine_tables().len() <= MAX_PAGES);
+    // Every directory is named from the second-level table over its own GiB,
+    // at its own index, and no two from one place.
+    let slots: Vec<(usize, usize)> = plan.directory_slots().collect();
+    for (&gib, &(region, index)) in plan.directories().iter().zip(&slots) {
+        assert_eq!(plan.regions()[region] * 512 + index as u64, gib, "directory {gib}");
+    }
+    for (at, slot) in slots.iter().enumerate() {
+        assert!(!slots[..at].contains(slot), "{slot:?} twice");
+    }
+    // Every table is named from an identity slot below the high half and a
+    // high-half slot inside the root.
+    for &region in plan.regions() {
+        assert!(ROOT_IDENTITY + (region as usize) < ROOT_HIGH_HALF, "region {region}");
+        assert!(ROOT_HIGH_HALF + (region as usize) < 512, "region {region}");
+    }
+    assert!(1 + plan.regions().len() + plan.directories().len() + plan.fine_tables().len() <= MAX_PAGES);
 }
 
 /// A 2 MiB leaf's directory, by position.
@@ -147,7 +162,7 @@ fn a_framebuffer_that_straddles_a_gib_claims_both() {
     let loader = (12 * GIB - 0x1000, 0x3_5000);
     let full = Plan::new(Some((base, 4 * PAGE_2M)), loader, Typing::Firmware).expect("both straddling");
     assert_eq!(full.directories(), [0, 1, 2, 3, 7, 8, 11, 12]);
-    assert_eq!(3 + full.directories().len() + 2, MAX_PAGES);
+    assert_eq!(full.regions(), [0]);
     is_consistent(&full);
 }
 
@@ -169,8 +184,6 @@ fn a_base_off_the_page_is_refused_rather_than_rounded_down() {
 
 #[test]
 fn a_range_no_map_can_hold_is_refused_by_name() {
-    // Past the two PDPTs' 512 GiB.
-    assert_eq!(Plan::new(Some((512 * GIB, PANEL)), LOADER, Typing::Firmware), Err(Refusal::PastPdpt(512)));
     // Its own end does not fit an address, either as it is given...
     let base = u64::MAX - PAGE_2M + 1;
     assert_eq!(Plan::new(Some((base, u64::MAX)), LOADER, Typing::Firmware), Err(Refusal::Extent { base, len: u64::MAX }));
@@ -389,7 +402,6 @@ fn a_map_typed_loader_is_memory() {
 
 #[test]
 fn a_loader_no_map_can_hold_is_refused_by_name() {
-    assert_eq!(Plan::new(None, (512 * GIB, 0x3_4a00), Typing::Firmware), Err(Refusal::PastPdpt(512)));
     assert_eq!(
         Plan::new(None, (0x1_4000_0000, 0), Typing::Firmware),
         Err(Refusal::Extent { base: 0x1_4000_0000, len: 0 })
@@ -404,4 +416,64 @@ fn a_loader_no_map_can_hold_is_refused_by_name() {
         .expect("the loader inside the scanout's GiBs");
     assert_eq!(shared.directories(), [0, 1, 2, 3, 16, 17, 18, 19]);
     is_consistent(&shared);
+}
+
+/// A framebuffer firmware put at 1010 GiB, as an AMD laptop's does, and the
+/// panel its GOP reports there: past the low map's 512 GiB, so the map adds a
+/// second-level table for it, named from both views' second root slot.
+#[test]
+fn a_framebuffer_past_512_gib_adds_its_own_second_level_table() {
+    let base = 0xfc_9000_0000;
+    let plan = Plan::new(Some((base, 8_294_400)), LOADER, Typing::Firmware).expect("at 1010 GiB");
+    assert_eq!(base / GIB, 1010);
+    assert_eq!(plan.directories(), [0, 1, 2, 3, 1010]);
+    assert_eq!(plan.regions(), [0, 1]);
+    assert_eq!(plan.directory_slots().last(), Some((1, 1010 - 512)));
+    let mine: Vec<(u64, usize)> =
+        plan.entries().filter(|e| e.cache == Cache::Scanout).map(|e| (e.phys, directory(&e))).collect();
+    assert_eq!(mine, (0..4).map(|page| (base + page * PAGE_2M, 4)).collect::<Vec<_>>());
+    is_consistent(&plan);
+}
+
+/// A scanout across the first 512 GiB boundary is two directories under two
+/// second-level tables, and a loader in the same 512 GiB shares the second.
+#[test]
+fn a_framebuffer_across_512_gib_names_both_second_level_tables() {
+    let base = 512 * GIB - PAGE_2M;
+    let plan = Plan::new(Some((base, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), Typing::Firmware)
+        .expect("across 512 GiB");
+    assert_eq!(plan.directories(), [0, 1, 2, 3, 511, 512, 520]);
+    assert_eq!(plan.regions(), [0, 1]);
+    assert_eq!(plan.directory_slots().skip(4).collect::<Vec<_>>(), [(0, 511), (1, 0), (1, 8)]);
+    is_consistent(&plan);
+}
+
+/// The most the map can be asked for: a scanout and a loader each straddling a
+/// 512 GiB boundary, four second-level tables past the low map's, the last
+/// below the high half's last root slot.
+#[test]
+fn every_second_level_table_the_budget_has_fits_the_pool() {
+    let scanout = (1024 * GIB - PAGE_2M, 4 * PAGE_2M);
+    let loader = (DIRECT_MAP_WINDOW - 512 * GIB - 0x1000, 0x3_4a00);
+    let plan = Plan::new(Some(scanout), loader, Typing::Firmware).expect("both straddling");
+    assert_eq!(plan.regions(), [0, 1, 2, 254, 255]);
+    assert_eq!(1 + plan.regions().len() + plan.directories().len() + plan.fine_tables().len(), MAX_PAGES - 2);
+    is_consistent(&plan);
+}
+
+/// Past the high half's 128 TiB no view can hold a range: the identity view
+/// would reach into the high half's slots.
+#[test]
+fn a_range_past_the_window_is_refused_by_name() {
+    assert_eq!(
+        Plan::new(Some((DIRECT_MAP_WINDOW, PANEL)), LOADER, Typing::Firmware),
+        Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + 0x80_0000))
+    );
+    assert_eq!(
+        Plan::new(None, (DIRECT_MAP_WINDOW - 0x1000, 0x3_4a00), Typing::Firmware),
+        Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + PAGE_2M))
+    );
+    let last = Plan::new(Some((DIRECT_MAP_WINDOW - 0x80_0000, PANEL)), LOADER, Typing::Firmware).expect("the window's last GiB");
+    assert_eq!(last.regions(), [0, 255]);
+    is_consistent(&last);
 }

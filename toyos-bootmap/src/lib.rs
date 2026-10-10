@@ -1,4 +1,5 @@
-//! The bootloader's transient page tables, decided rather than built.
+//! The bootloader's transient page tables, decided, and written into pages
+//! the loader gives.
 //!
 //! Between the loader's switch to these tables and the kernel's `mm::init`
 //! there is one mapping in the machine, and everything the kernel touches in
@@ -12,9 +13,15 @@
 //! is typed ([`Typing`]) and how an entry is encoded ([`x86_64`],
 //! [`aarch64`]).
 //!
+//! A second-level table is position-independent, so one per 512 GiB the map
+//! reaches serves both views: root slot [`ROOT_IDENTITY`] + r and
+//! [`ROOT_HIGH_HALF`] + r name the same table, as both views already share
+//! every directory. The map reaches as far as the high half can hold, and
+//! refuses by name what lies past it.
+//!
 //! Pure: the scanout, the loader's image and, where the architecture types
-//! memory by firmware's map, the write-back ranges in; a [`Plan`] out. The
-//! loader allocates the pages and writes the entries.
+//! memory by firmware's map, the write-back ranges in; a [`Plan`] out, which
+//! [`Plan::write`] lays into a pool of [`Table`]s the loader allocates.
 //!
 //! What the kernel takes from firmware's map when it builds its own tables is
 //! here too, because it may never map less than this map did: which types the
@@ -39,8 +46,7 @@ pub const PAGE_2M: u64 = 2 * 1024 * 1024;
 
 const GIB: u64 = 1 << 30;
 
-/// One second-level table reaches 512 GiB, and the map has two: the identity
-/// view at root slot 0 and the high-half view at root slot 256.
+/// One second-level table reaches 512 GiB.
 const GIB_PER_PDPT: u64 = 512;
 
 /// Root slot 0: physical memory at its own address, which the switch to these
@@ -132,6 +138,10 @@ const LOADER_DIRECTORIES: usize = 2;
 /// Every page directory a [`Plan`] can name.
 pub const MAX_DIRECTORIES: usize = LOW_DIRECTORIES + SCANOUT_DIRECTORIES + LOADER_DIRECTORIES;
 
+/// Every second-level table a [`Plan`] can name: the low map's, and one per
+/// directory past it, since a directory lies in exactly one 512 GiB.
+pub const MAX_REGIONS: usize = 1 + SCANOUT_DIRECTORIES + LOADER_DIRECTORIES;
+
 /// The small page a split 2 MiB page is mapped in.
 pub const PAGE_4K: u64 = 4096;
 
@@ -141,9 +151,28 @@ const PAGES_PER_TABLE: u64 = PAGE_2M / PAGE_4K;
 /// The 2 MiB pages a scanout covers only in part: at most its first and its last.
 const FINE_TABLES: usize = 2;
 
-/// The pool a builder needs: a root, a second-level table per view, every
+/// The pool a builder needs: a root, every second-level table, every
 /// directory, and a table of 4 KiB leaves per split page.
-pub const MAX_PAGES: usize = 3 + MAX_DIRECTORIES + FINE_TABLES;
+pub const MAX_PAGES: usize = 1 + MAX_REGIONS + MAX_DIRECTORIES + FINE_TABLES;
+
+/// One page of the map: 512 entries, on the page an entry names it by, since
+/// an entry's low 12 bits are flags rather than address.
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+pub struct Table(pub [u64; 512]);
+
+impl Table {
+    pub const EMPTY: Self = Self([0; 512]);
+}
+
+/// How an architecture encodes the three entries a [`Plan`] writes: one naming
+/// the table below it, a 2 MiB leaf, and a 4 KiB leaf.
+#[derive(Clone, Copy)]
+pub struct Encoding {
+    pub table: fn(u64) -> u64,
+    pub block: fn(u64, Cache) -> u64,
+    pub page: fn(u64, Cache) -> u64,
+}
 
 /// Why a machine's memory does not fit these tables.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,14 +182,12 @@ pub enum Refusal {
     Unaligned(u64),
     /// The range's own end does not fit an address.
     Extent { base: u64, len: u64 },
-    /// Past the reach of the two second-level tables this map has.
-    PastPdpt(u64),
     /// More directories than [`MAX_DIRECTORIES`].
     Directories(usize),
     /// A 2 MiB page of the low map that is write-back memory in part and not
     /// in the rest: either type is wrong for some of it.
     Mixed(u64),
-    /// Memory that ends here, past [`DIRECT_MAP_WINDOW`].
+    /// A range that ends here, past [`DIRECT_MAP_WINDOW`].
     PastWindow(u64),
     /// A range of firmware's map that begins or ends here, off the 4 KiB page
     /// UEFI describes memory in.
@@ -176,10 +203,6 @@ impl fmt::Display for Refusal {
             Self::Extent { base, len } => {
                 write!(f, "{base:#x}+{len:#x} runs past the end of the address space")
             }
-            Self::PastPdpt(gib) => write!(
-                f,
-                "GiB {gib} is past the {GIB_PER_PDPT} this map's two second-level tables reach"
-            ),
             Self::Directories(needed) => {
                 write!(f, "{needed} page directories are needed and {MAX_DIRECTORIES} may be named")
             }
@@ -190,7 +213,7 @@ impl fmt::Display for Refusal {
             ),
             Self::PastWindow(end) => write!(
                 f,
-                "memory ends at {end:#x}, past the {DIRECT_MAP_WINDOW:#x} bytes a direct map can hold"
+                "a range ends at {end:#x}, past the {DIRECT_MAP_WINDOW:#x} bytes a direct map can hold"
             ),
             Self::OffPage(at) => write!(f, "a range of firmware's map is bounded at {at:#x}, off a {PAGE_4K:#x}-byte page"),
         }
@@ -265,6 +288,9 @@ pub struct Entry {
 pub struct Plan<'a> {
     gibs: [u64; MAX_DIRECTORIES],
     directories: usize,
+    /// The 512 GiB each second-level table covers, by number.
+    spans: [u64; MAX_REGIONS],
+    regions: usize,
     /// The 2 MiB pages split into 4 KiB leaves, by base.
     fine: [u64; FINE_TABLES],
     fines: usize,
@@ -291,10 +317,14 @@ impl<'a> Plan<'a> {
     /// x86-64 loader's switch to these tables runs from it, so it is mapped at
     /// identity or the first fetch after the switch faults. It is plain memory,
     /// so its pages are rounded out both ways and typed as the rest of memory.
+    ///
+    /// A byte of either past [`DIRECT_MAP_WINDOW`] is [`Refusal::PastWindow`].
     pub fn new(scanout: Option<(u64, u64)>, loader: (u64, u64), typing: Typing<'a>) -> Result<Self, Refusal> {
         let mut plan = Self {
             gibs: [0; MAX_DIRECTORIES],
             directories: 0,
+            spans: [0; MAX_REGIONS],
+            regions: 0,
             fine: [0; FINE_TABLES],
             fines: 0,
             scanout: None,
@@ -318,6 +348,13 @@ impl<'a> Plan<'a> {
         for (first, end) in spans.into_iter().flatten() {
             for gib in first / GIB..=(end - 1) / GIB {
                 plan.claim(gib);
+            }
+        }
+        for at in 0..plan.directories {
+            let region = plan.gibs[at] / GIB_PER_PDPT;
+            if !plan.spans[..plan.regions].contains(&region) {
+                plan.spans[plan.regions] = region;
+                plan.regions += 1;
             }
         }
         if let Some((base, end)) = scanout {
@@ -357,9 +394,7 @@ impl<'a> Plan<'a> {
         }
         let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
         let end = end.checked_next_multiple_of(granule).ok_or(Refusal::Extent { base, len })?;
-        if (end - 1) / GIB >= GIB_PER_PDPT {
-            return Err(Refusal::PastPdpt((end - 1) / GIB));
-        }
+        within_window(end)?;
         Ok((base, end))
     }
 
@@ -378,9 +413,62 @@ impl<'a> Plan<'a> {
         self.scanout = Some((base, end - base));
     }
 
+    /// Write this map over whatever `pool` holds, its first byte at physical
+    /// address `at`, and return its root's: the root first, then
+    /// [`Plan::regions`]' tables, the directories and the split pages' tables,
+    /// each in its accessor's order.
+    pub fn write(&self, encoding: Encoding, pool: &mut [Table; MAX_PAGES], at: u64) -> u64 {
+        let first_directory = 1 + self.regions;
+        let first_fine = first_directory + self.directories;
+        let phys = |page: usize| at + page as u64 * PAGE_4K;
+        pool.fill(Table::EMPTY);
+        for (r, &region) in self.regions().iter().enumerate() {
+            let entry = (encoding.table)(phys(1 + r));
+            pool[0].0[ROOT_IDENTITY + region as usize] = entry;
+            pool[0].0[ROOT_HIGH_HALF + region as usize] = entry;
+        }
+        for (d, (region, index)) in self.directory_slots().enumerate() {
+            pool[1 + region].0[index] = (encoding.table)(phys(first_directory + d));
+        }
+        for (f, (directory, index)) in self.fine_slots().enumerate() {
+            pool[first_directory + directory].0[index] = (encoding.table)(phys(first_fine + f));
+        }
+        for entry in self.entries() {
+            match entry.slot {
+                Slot::Directory { directory, index } => {
+                    pool[first_directory + directory].0[index] = (encoding.block)(entry.phys, entry.cache)
+                }
+                Slot::Fine { table, index } => {
+                    pool[first_fine + table].0[index] = (encoding.page)(entry.phys, entry.cache)
+                }
+            }
+        }
+        phys(0)
+    }
+
+    /// The 512 GiB each second-level table covers, by number `r`, in the order
+    /// a builder allocates them: each is named from root slots
+    /// [`ROOT_IDENTITY`] + `r` and [`ROOT_HIGH_HALF`] + `r`.
+    pub fn regions(&self) -> &[u64] {
+        &self.spans[..self.regions]
+    }
+
     /// The GiB each directory covers, in the order a builder allocates them.
     pub fn directories(&self) -> &[u64] {
         &self.gibs[..self.directories]
+    }
+
+    /// Where each of [`Plan::directories`] is named from: its second-level
+    /// table, by position in [`Plan::regions`], and its index there.
+    pub fn directory_slots(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.directories().iter().map(move |&gib| {
+            let region = self
+                .regions()
+                .iter()
+                .position(|r| *r == gib / GIB_PER_PDPT)
+                .expect("every directory's 512 GiB was claimed");
+            (region, (gib % GIB_PER_PDPT) as usize)
+        })
     }
 
     /// The 2 MiB pages mapped by a table of 4 KiB leaves rather than one
@@ -498,10 +586,16 @@ fn whole_pages(base: u64, len: u64) -> Result<(u64, u64), Refusal> {
     let first = base / PAGE_2M * PAGE_2M;
     let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
     let end = end.checked_next_multiple_of(PAGE_2M).ok_or(Refusal::Extent { base, len })?;
-    if (end - 1) / GIB >= GIB_PER_PDPT {
-        return Err(Refusal::PastPdpt((end - 1) / GIB));
-    }
+    within_window(end)?;
     Ok((first, end - first))
+}
+
+/// Whether a range ending at `end` is one both views can hold.
+fn within_window(end: u64) -> Result<(), Refusal> {
+    if end > DIRECT_MAP_WINDOW {
+        return Err(Refusal::PastWindow(end));
+    }
+    Ok(())
 }
 
 /// The directories past the low map's that the ranges `(first, end)` need

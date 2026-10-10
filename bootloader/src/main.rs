@@ -20,7 +20,7 @@ use uefi::{
     Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
-use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, ROOT_HIGH_HALF, ROOT_IDENTITY};
+use toyos_bootmap::{Plan, Table, BOOT_MAP_BYTES, MAX_PAGES};
 use toyos_update::policy;
 use toyos_update::record::{self, Booted, Ended, Record};
 
@@ -413,54 +413,6 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     })
 }
 
-/// Write `plan` into `pt_mem` and return its root table's physical address.
-///
-/// # Safety
-/// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
-unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
-    use arch::encoding::{block, page, table};
-    use toyos_bootmap::Slot;
-
-    let mut next_page = 0usize;
-    let mut alloc_page = || -> *mut u64 {
-        let page = pt_mem.add(next_page * 4096) as *mut u64;
-        next_page += 1;
-        page
-    };
-
-    let root = alloc_page();
-    let identity_pdpt = alloc_page();
-    let high_pdpt = alloc_page();
-    let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
-    for (slot, gib) in plan.directories().iter().enumerate() {
-        let pd = alloc_page();
-        directories[slot] = pd;
-        *identity_pdpt.add(*gib as usize) = table(pd as u64);
-        *high_pdpt.add(*gib as usize) = table(pd as u64);
-    }
-
-    let mut fine = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_PAGES];
-    for (table_at, (directory, index)) in plan.fine_slots().enumerate() {
-        let leaves = alloc_page();
-        fine[table_at] = leaves;
-        *directories[directory].add(index) = table(leaves as u64);
-    }
-
-    for entry in plan.entries() {
-        match entry.slot {
-            Slot::Directory { directory, index } => {
-                *directories[directory].add(index) = block(entry.phys, entry.cache)
-            }
-            Slot::Fine { table, index } => *fine[table].add(index) = page(entry.phys, entry.cache),
-        }
-    }
-
-    *root.add(ROOT_IDENTITY) = table(identity_pdpt as u64);
-    *root.add(ROOT_HIGH_HALF) = table(high_pdpt as u64);
-
-    root as u64
-}
-
 /// Every range firmware's map says is write-back memory, `(base, length)`:
 /// a descriptor carrying `EFI_MEMORY_WB` and not one of the two I/O types,
 /// which a firmware may give the attribute without meaning memory.
@@ -518,13 +470,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let free = gcd::free_mmio(&system_table, &mut root_bridge_windows[named..]);
     let root_bridge_window_count = (named + free) as u64;
 
-    // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
-    // it into 512-entry pages.
-    let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
-    // SAFETY: `layout` has non-zero size and its 4096 alignment is what every
-    // page-table page below needs — the low 12 bits of an entry are flags, not
-    // address bits.
-    let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
+    // Allocated before exiting boot services, which takes the allocator away.
+    let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
+    // SAFETY: `pt_layout` has non-zero size.
+    let pt_mem = unsafe { alloc::alloc::alloc(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
     // Where firmware loaded this image, which is where the x86-64 switch to
@@ -550,8 +499,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             match plan.scanout() {
                 Some((at, len)) => println!(
                     "Scanout: {at:#x}+{len:#x} mapped as the scanout in 2 MiB pages at identity and at \
-                     PHYS_OFFSET, in {} page directories",
-                    plan.directories().len()
+                     PHYS_OFFSET, in {} page directories under {} second-level tables",
+                    plan.directories().len(),
+                    plan.regions().len()
                 ),
                 None => println!("Scanout: this machine has none"),
             }
@@ -563,9 +513,11 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let plan = planned
         .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
 
-    // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and a `Plan` never names more pages than that.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
+    // SAFETY: `pt_mem` is the allocation of `pt_layout` above, which nothing
+    // else holds, and `write` stores every entry before it reads any;
+    // firmware's map is identity, so its address is the pool's physical one.
+    let pool = unsafe { &mut *pt_mem.cast::<[Table; MAX_PAGES]>() };
+    let pml4_phys = plan.write(arch::encoding::ENCODING, pool, pt_mem as u64);
     println!("Boot map: root {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
     let kernel_phys = kernel.memory.as_ptr() as u64;
