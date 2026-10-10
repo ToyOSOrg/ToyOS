@@ -47,12 +47,24 @@ const SD_CTL_DEIE: u32 = 1 << 4;
 /// audio down with a hang instead of a refusal.
 const VERB_POLLS: u32 = 4096;
 
+/// YOGA HACK: the survey's lines go to the shared ring, whose ~1900 slots hold
+/// it whole; the mix thread's 32-slot lane dropped v7's verbs and readback.
+macro_rules! yoga {
+    ($($arg:tt)*) => {
+        toyos::log::say(toyos::log::Severity::Info, format_args!($($arg)*))
+    };
+}
+
 pub struct Hda {
     dev: HdaDev,
     info: HdaInfo,
     /// Set once the engine has been told to run, so a stop and a resume are one
     /// register write each and not one per period.
     running: bool,
+    /// YOGA HACK: codec, group, converter and speaker pin, read back once on the
+    /// first start.
+    yoga_path: Option<(Address, Node, Node, Node)>,
+    yoga_started: bool,
 }
 
 /// Why this machine's HDA controller cannot carry audio. Each is a line soundserver
@@ -112,14 +124,14 @@ impl Hda {
     /// first instruction.
     pub fn claim(dev: HdaDev) -> Result<(Self, OutputPath, u8, u32), Refusal> {
         let info = dev.info().map_err(Refusal::Kernel)?;
-        let mut hda = Hda { dev, info, running: false };
+        let mut hda = Hda { dev, info, running: false, yoga_path: None, yoga_started: false };
 
         let found = probe::enumerate(&mut hda, info.statests);
         let mut codecs: Vec<Codec> = Vec::new();
         for entry in found {
             match entry {
                 Ok(codec) => {
-                    say!(
+                    yoga!(
                         "soundserver: hda codec{} vendor={:04x} device={:04x}, {} function group(s)",
                         codec.address,
                         codec.vendor,
@@ -129,7 +141,7 @@ impl Hda {
                     codecs.push(codec);
                 }
                 Err((address, fault)) => {
-                    say!("soundserver: hda codec{address} answered nothing usable ({fault:?})")
+                    yoga!("soundserver: hda codec{address} answered nothing usable ({fault:?})")
                 }
             }
         }
@@ -145,7 +157,7 @@ impl Hda {
                 let pcm = hda.get(a, group.node, verb::GET_PARAMETER, verb::PARAM_PCM);
                 let formats = hda.get(a, group.node, verb::GET_PARAMETER, verb::PARAM_STREAM_FORMATS);
                 let subsystem = hda.get(a, group.node, GET_SUBSYSTEM_ID, 0);
-                say!(
+                yoga!(
                     "soundserver: YOGA codec{a} group {:#04x} ({}): pcm {} formats {} subsystem {}",
                     group.node.0,
                     group.kind.name(),
@@ -154,13 +166,13 @@ impl Hda {
                     word(subsystem),
                 );
                 if let Some(r) = pcm {
-                    say!("soundserver: YOGA   group pcm: {}", pcm_text(PcmCaps::decode(r)));
+                    yoga!("soundserver: YOGA   group pcm: {}", pcm_text(PcmCaps::decode(r)));
                 }
                 if group.kind == FunctionKind::Audio && group_pcm.is_none() {
                     group_pcm = pcm.map(PcmCaps::decode);
                 }
                 for w in &group.widgets {
-                    say!(
+                    yoga!(
                         "soundserver: YOGA   node {:#04x} {} ch={} conns={:02x?} amp_in={:?} amp_out={:?} power={} override(fmt={} amp={}){}{}",
                         w.node.0,
                         w.caps.kind.name(),
@@ -185,7 +197,7 @@ impl Hda {
         }
 
         let path = toyos_hda::find_output_path(&codecs).map_err(Refusal::NoOutput)?;
-        say!("soundserver: YOGA chosen path {path:?}");
+        yoga!("soundserver: YOGA chosen path {path:?}");
         let group = codecs
             .iter()
             .find(|c| c.address == path.codec)
@@ -197,12 +209,12 @@ impl Hda {
             .map(|pin| (pin.node, chain(&group, pin)))
             .collect();
         for (pin, hops) in &chains {
-            say!("soundserver: YOGA chain from pin {:#04x}: {:02x?} (node, input index)", pin.0, hops);
+            yoga!("soundserver: YOGA chain from pin {:#04x}: {:02x?} (node, input index)", pin.0, hops);
         }
 
         let (format, channels, rate) =
             config::format(&codecs, &path, group_pcm).ok_or(Refusal::Rate)?;
-        say!(
+        yoga!(
             "soundserver: hda codec{} group {:#04x} converter {:#04x} -> pin {:#04x} ({}), \
              headphone {}, format {:#06x} ({} Hz {} ch {}-bit)",
             path.codec,
@@ -248,11 +260,43 @@ impl Hda {
         let at = verbs.len() - 2;
         verbs.splice(at..at, extra);
 
+        let realtek = codecs
+            .iter()
+            .find(|c| c.address == path.codec)
+            .map(|c| (c.vendor, c.device));
+        hda.survey(path.codec, path.group, "before setup");
+
+        // YOGA HACK: Linux's `alc_fill_eapd_coef` arm for 10ec:0287, the only
+        // ALC287 init it runs on a machine no quirk names (17aa:380d is in no
+        // table of v6.12's patch_realtek.c or master's realtek/alc269.c, and
+        // its `alc225_init` touches COEFs only with a headphone sensed).
+        if realtek == Some((0x10ec, 0x0287)) {
+            let a = path.codec;
+            let was10 = hda.coef_read(a, COEF_NODE, 0x10);
+            if let Some(v) = was10 {
+                hda.coef_write(a, COEF_NODE, 0x10, v & !(1 << 9));
+            }
+            let now10 = hda.coef_read(a, COEF_NODE, 0x10);
+            let was08 = hda.coef_read(a, COEF_NODE, 0x08);
+            hda.coef_write(a, COEF_NODE, 0x08, 0x4ab7);
+            let now08 = hda.coef_read(a, COEF_NODE, 0x08);
+            yoga!(
+                "soundserver: YOGA ALC287 init (Linux alc_fill_eapd_coef): coef 0x10 {} -> {} (bit 9 cleared), coef 0x08 {} -> {} (written 0x4ab7)",
+                coef_text(was10),
+                coef_text(now10),
+                coef_text(was08),
+                coef_text(now08),
+            );
+        } else {
+            yoga!("soundserver: YOGA codec is {realtek:04x?}, not 10ec:0287, so no ALC287 COEF init");
+        }
+
         let sent = verbs.len();
         for v in verbs {
             let response = hda.send(v);
-            say!("soundserver: YOGA verb {:#010x} -> {}", v.raw(), word(response));
+            yoga!("soundserver: YOGA verb {:#010x} -> {}", v.raw(), word(response));
         }
+        hda.yoga_path = Some((path.codec, path.group, path.converter, path.output.node));
 
         // YOGA HACK: what the codec says it now holds, on every node of every chain.
         for (pin, hops) in &chains {
@@ -290,9 +334,10 @@ impl Hda {
                     let stream = hda.get(a, node, verb::GET_CONVERTER_STREAM, 0);
                     line += &format!(" format {} stream {}", word(fmt), word(stream));
                 }
-                say!("{line}");
+                yoga!("{line}");
             }
         }
+        hda.survey(path.codec, path.group, "after setup");
 
         // The tag before the format, and both before the engine is ever told to
         // run: a descriptor that starts with neither plays whatever the last
@@ -300,7 +345,7 @@ impl Hda {
         hda.write(SD_CTL_TAG, RegWidth::U8, (info.stream_tag as u32) << 4)
             .map_err(Refusal::Kernel)?;
         hda.write(SD_FMT, RegWidth::U16, format as u32).map_err(Refusal::Kernel)?;
-        say!("soundserver: hda path configured in {sent} verbs, stream tag {}", info.stream_tag);
+        yoga!("soundserver: hda path configured in {sent} verbs, stream tag {}", info.stream_tag);
         Ok((hda, path, channels, rate))
     }
 
@@ -325,6 +370,88 @@ impl Hda {
             panic!("soundserver: hda could not start its stream: {e:?}");
         }
         self.running = true;
+        if !self.yoga_started {
+            self.yoga_started = true;
+            self.readback_running();
+        }
+    }
+
+    /// YOGA HACK: what the speaker path holds with the engine running, once.
+    fn readback_running(&mut self) {
+        let Some((a, group, converter, pin)) = self.yoga_path else { return };
+        let afg = self.get(a, group, verb::GET_POWER_STATE, 0);
+        let conv_power = self.get(a, converter, verb::GET_POWER_STATE, 0);
+        let fmt = self.send(Verb::long(a, converter, verb::GET_CONVERTER_FORMAT as u8, 0));
+        let stream = self.get(a, converter, verb::GET_CONVERTER_STREAM, 0);
+        let conv_amp_l = self.send(Verb::long(a, converter, GET_AMP_GAIN_MUTE, 0x8000 | 0x2000));
+        let conv_amp_r = self.send(Verb::long(a, converter, GET_AMP_GAIN_MUTE, 0x8000));
+        let pin_power = self.get(a, pin, verb::GET_POWER_STATE, 0);
+        let pinctl = self.get(a, pin, verb::GET_PIN_CONTROL, 0);
+        let eapd = self.get(a, pin, verb::GET_EAPD, 0);
+        let pin_amp_l = self.send(Verb::long(a, pin, GET_AMP_GAIN_MUTE, 0x8000 | 0x2000));
+        let pin_amp_r = self.send(Verb::long(a, pin, GET_AMP_GAIN_MUTE, 0x8000));
+        yoga!(
+            "soundserver: YOGA running: afg power {} | conv {:#04x} power {} format {} stream {} amp L {} R {} | pin {:#04x} power {} pinctl {} eapd {} amp L {} R {}",
+            word(afg),
+            converter.0,
+            word(conv_power),
+            word(fmt),
+            word(stream),
+            word(conv_amp_l),
+            word(conv_amp_r),
+            pin.0,
+            word(pin_power),
+            word(pinctl),
+            word(eapd),
+            word(pin_amp_l),
+            word(pin_amp_r),
+        );
+    }
+
+    /// YOGA HACK: the audio function group's GPIO and power, and the vendor
+    /// COEF registers Linux's Realtek driver reads and writes: processing
+    /// widget 0x20 indices 0x00..0x80, and node 0x57 index 0x04.
+    fn survey(&mut self, a: Address, group: Node, when: &str) {
+        let gpio_count = self.get(a, group, verb::GET_PARAMETER, verb::PARAM_GPIO_COUNT);
+        let data = self.get(a, group, GET_GPIO_DATA, 0);
+        let mask = self.get(a, group, GET_GPIO_MASK, 0);
+        let direction = self.get(a, group, GET_GPIO_DIRECTION, 0);
+        let power = self.get(a, group, verb::GET_POWER_STATE, 0);
+        let processing = self.get(a, COEF_NODE, verb::GET_PARAMETER, verb::PARAM_WIDGET_CAPS);
+        yoga!(
+            "soundserver: YOGA {when}: group {:#04x} gpio count {} data {} mask {} direction {} power {}; node 0x20 widget caps {}",
+            group.0,
+            word(gpio_count),
+            word(data),
+            word(mask),
+            word(direction),
+            word(power),
+            word(processing),
+        );
+        for row in (0u16..0x80).step_by(8) {
+            let values: Vec<String> =
+                (row..row + 8).map(|i| coef_text(self.coef_read(a, COEF_NODE, i))).collect();
+            yoga!("soundserver: YOGA {when}: coef[{row:#04x}..] {}", values.join(" "));
+        }
+        let ex = self.coef_read(a, Node(0x57), 0x04);
+        yoga!("soundserver: YOGA {when}: coefex node 0x57 [0x04] {}", coef_text(ex));
+    }
+
+    /// One vendor COEF register: the index, then the processing coefficient.
+    fn coef_read(&mut self, a: Address, node: Node, index: u16) -> Option<u32> {
+        self.send(Verb::long(a, node, SET_COEF_INDEX, index))?;
+        self.get(a, node, GET_PROC_COEF, 0).map(|r| r.raw())
+    }
+
+    fn coef_write(&mut self, a: Address, node: Node, index: u16, value: u32) {
+        let index_set = self.send(Verb::long(a, node, SET_COEF_INDEX, index));
+        let value_set = self.send(Verb::long(a, node, SET_PROC_COEF, value as u16));
+        yoga!(
+            "soundserver: YOGA coef write node {:#04x} [{index:#04x}] = {value:#06x}: {} {}",
+            node.0,
+            word(index_set),
+            word(value_set),
+        );
     }
 
     pub fn stop(&mut self) {
@@ -389,6 +516,19 @@ const GET_SUBSYSTEM_ID: u16 = 0xF20;
 const GET_AMP_GAIN_MUTE: u8 = 0xB;
 const AMP_OUTPUT: u16 = 1 << 15;
 const AMP_INPUT: u16 = 1 << 14;
+/// Function-group GPIO verbs and Realtek's vendor COEF access (Linux's
+/// `AC_VERB_*` values; the COEF widget is Realtek's processing node 0x20).
+const GET_GPIO_DATA: u16 = 0xF15;
+const GET_GPIO_MASK: u16 = 0xF16;
+const GET_GPIO_DIRECTION: u16 = 0xF17;
+const SET_COEF_INDEX: u8 = 0x5;
+const SET_PROC_COEF: u8 = 0x4;
+const GET_PROC_COEF: u16 = 0xC00;
+const COEF_NODE: Node = Node(0x20);
+
+fn coef_text(value: Option<u32>) -> String {
+    value.map_or(String::from("none"), |v| format!("{v:#06x}"))
+}
 
 /// Unmuted, both channels, at the amplifier's 0 dB index where it has one.
 fn amp_set(codec: Address, node: Node, which: u16, index: u8, amp: AmpCaps) -> Verb {

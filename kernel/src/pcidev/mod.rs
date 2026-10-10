@@ -1321,6 +1321,23 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
     }
 
     let who = alloc::format!("PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
+    // YOGA WIFI HACK (measurement image only, never lands): the bridge in front
+    // of the AX200 forwards only the 1 MiB firmware gave it, so a moved BAR
+    // answers ones; it is kept where firmware put it, which is span-aligned.
+    if id.vendor == 0x8086 && id.device == 0x2723 {
+        if was % span != 0 {
+            log!("pcidev: YOGA WIFI HACK: {who} BAR {index} at {was:#x} is not {span:#x}-aligned, so it is not kept");
+            return Err(Refusal::BarUnplaceable(index));
+        }
+        alone_in_its_page(pci, index, was, span);
+        cut(pci, index, was, span);
+        log!(
+            "pcidev: YOGA WIFI HACK: {who} BAR {index} ({size:#x} bytes) kept at {was:#x}, where \
+             firmware put it — inside firmware's {inside:?}; its +{reference:#x} dword answers \
+             {signature:#010x} there"
+        );
+        return Ok(was);
+    }
     let mut refused = [None; MAX_CANDIDATES];
     let mut asked = 0usize;
     while asked < MAX_CANDIDATES {
