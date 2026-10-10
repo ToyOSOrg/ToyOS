@@ -982,8 +982,14 @@ fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
     const SAID: &str = "https_download: ";
     let log = back.log();
     let said = log.text().lines().find_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim()));
-    if let Some(said) = said {
-        eprintln!("  [download] {said}");
+    // MEASUREMENT ONLY: every run's line, and what netstack said of each connection it closed.
+    for line in log.text().lines() {
+        if let Some(at) = line.find(SAID) {
+            eprintln!("  [download] {}", line[at + SAID.len()..].trim());
+        }
+        if let Some(at) = line.find("netstack: tcp closed: ") {
+            eprintln!("  [tcp] {}", &line[at + "netstack: tcp closed: ".len()..]);
+        }
     }
     back.job_passed("test_rs_https_download")?;
     let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
