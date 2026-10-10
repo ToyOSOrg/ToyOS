@@ -885,8 +885,9 @@ enum SetQuery {
     Told(u8),
     /// A non-ack byte came back; the device does not implement the exchange.
     Refused(u8),
-    /// Nothing came back, or the controller never took the write.
-    Silent,
+    /// Nothing came back, or the controller never took the write; the step
+    /// that went silent.
+    Silent(&'static str),
 }
 
 /// Ask which scancode set the keyboard is in. Read, never write: nothing
@@ -895,25 +896,25 @@ enum SetQuery {
 /// on a read that already answers.
 fn query_scancode_set(deadline: u64) -> SetQuery {
     if !write_data(0xF0, deadline) {
-        return SetQuery::Silent;
+        return SetQuery::Silent("0xF0 never left the input buffer");
     }
     match read_data(deadline) {
         Some(0xFA) => {}
         Some(other) => return SetQuery::Refused(other),
-        None => return SetQuery::Silent,
+        None => return SetQuery::Silent("no answer to 0xF0"),
     }
     if !write_data(0x00, deadline) {
-        return SetQuery::Silent;
+        return SetQuery::Silent("0x00 never left the input buffer");
     }
     // A device may ack the command byte and then refuse the argument.
     match read_data(deadline) {
         Some(0xFA) => {}
         Some(other) => return SetQuery::Refused(other),
-        None => return SetQuery::Silent,
+        None => return SetQuery::Silent("no answer to 0x00"),
     }
     match read_data(deadline) {
         Some(set) => SetQuery::Told(set),
-        None => SetQuery::Silent,
+        None => SetQuery::Silent("acked 0xF0 0x00, then no set byte"),
     }
 }
 
@@ -1114,14 +1115,32 @@ pub fn init(rsdp_addr: u64) {
             );
             return;
         }
-        SetQuery::Silent => {
-            log!("i8042: kbd DISABLED - the 0xF0 0x00 set query did not complete");
-            return;
+        // YOGA HACK (measurement image only): a silent set query keeps the
+        // keyboard, assuming set 2 under the controller's translation.
+        SetQuery::Silent(step) => {
+            let mut late = [0u8; 8];
+            let mut n = 0;
+            while n < late.len() {
+                match status() {
+                    Some(s) if s & OBF != 0 => {
+                        late[n] = inb(port(&DATA));
+                        n += 1;
+                    }
+                    _ => break,
+                }
+            }
+            log!(
+                "i8042: YOGA HACK kbd set query silent ({step}); late bytes {:02x?}; cfg {:#04x} translate {}; assuming set2+xlat and keeping the keyboard",
+                &late[..n],
+                before,
+                if before & CFG_TRANSLATE != 0 { "on" } else { "off" }
+            );
+            ("set2+xlat", "assumed, the set query was silent (YOGA HACK)")
         }
     };
-    if !device_command(&[0xF4], kbd) {
-        log!("i8042: kbd would not resume scanning — disabled");
-        return;
+    let resume = deadline(ms(KEYBOARD));
+    if !device_command(&[0xF4], resume) {
+        log!("i8042: YOGA HACK kbd would not ack 0xF4 (resume scanning); keeping the keyboard anyway");
     }
 
     // The TrackPoint. Failure here costs the pointer and nothing else, so
@@ -1199,8 +1218,11 @@ pub fn init(rsdp_addr: u64) {
     // The read-back may not be skipped: a controller that drops the write
     // still fills the output buffer and never asserts, so nothing else
     // downstream can tell.
-    let wrote = write_config(config, budget);
-    let readback = read_config(budget);
+    // YOGA HACK: the arming write gets its own deadline, so a keyboard stage
+    // that spent the probe's budget still arms the pin.
+    let arm = deadline(ms(CONTROLLER));
+    let wrote = write_config(config, arm);
+    let readback = read_config(arm);
     if !wrote || readback != Some(config) {
         crate::arch::cpu::enable_interrupts();
         // A budget spent upstream makes this write and its read-back give up

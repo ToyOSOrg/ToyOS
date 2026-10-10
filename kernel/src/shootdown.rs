@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use loom::sync::atomic::{AtomicU64, Ordering};
 
 /// Matches `sched::MAX_CPUS`.
-pub const MAX_CPUS: usize = 8;
+pub const MAX_CPUS: usize = 16;
 
 // Acquire: makes the flush that follows see the initiator's page-table write.
 #[cfg(not(feature = "shootdown-serve-relaxed"))]

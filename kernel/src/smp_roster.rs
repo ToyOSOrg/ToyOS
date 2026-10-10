@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Matches `sched::MAX_CPUS`; the roster refuses an id at or above it.
-pub const MAX_CPUS: usize = 8;
+pub const MAX_CPUS: usize = 16;
 
 const NO_HARDWARE_ID: u32 = u32::MAX;
 

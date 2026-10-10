@@ -45,7 +45,7 @@ const IDLE: Descent = Descent { shard: None, next: 0, floor: u64::MAX, cand: Non
 
 // Pinned against IST1's 16 KiB double-fault stack budget.
 const _: () = assert!(core::mem::size_of::<Descent>() == 48);
-const _: () = assert!(core::mem::size_of::<[Descent; MAX_LOG_SHARDS]>() == 384);
+const _: () = assert!(core::mem::size_of::<[Descent; MAX_LOG_SHARDS]>() == 768);
 
 impl Descent {
     /// `from` relies on `emit` stamping `at_ns` inside the same interrupt-off

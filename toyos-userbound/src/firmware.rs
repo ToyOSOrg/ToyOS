@@ -81,6 +81,8 @@ const EFI_RESERVED: u32 = 0;
 const EFI_RUNTIME_DATA: u32 = 6;
 const EFI_ACPI_RECLAIM: u32 = 9;
 const EFI_ACPI_NVS: u32 = 10;
+/// YOGA HACK: EfiMemoryMappedIO, passed to the AML in the measurement image only.
+const EFI_MMIO: u32 = 11;
 
 /// The local APIC's registers and the window every interrupt message is
 /// addressed to (Intel SDM Vol. 3A §11.4.1 and §11.11.1): the kernel's whether
@@ -237,6 +239,15 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         match ty {
             Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
             Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
+            // YOGA HACK: the firmware's MMIO, read and written, where the range registers make it uncached.
+            Some(EFI_MMIO) => {
+                if self.registers_differ {
+                    return No(Refused::RangeRegistersDiffer);
+                }
+                if !(self.uncached)(at, width.bytes()) {
+                    return No(Refused::UnlistedCached);
+                }
+            }
             None if !write => {}
             Some(_) | None => return No(Refused::MemoryType),
         }
