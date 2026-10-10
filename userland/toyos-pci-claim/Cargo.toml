@@ -12,5 +12,10 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos-device-memory = { path = "../../toyos-device-memory" }
 toyos-virtio = { path = "../../toyos-virtio" }
 
+[features]
+# `Grant::leaked`, for a driver crate's host tests: a dev-dependency's, never
+# enabled by a build that ships.
+host-grant = []
+
 [lib]
 doctest = false

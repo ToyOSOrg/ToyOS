@@ -316,8 +316,24 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         Ok(())
     }
 
+    /// The periods the device has given back that `taken` answers for, as a
+    /// mask beside it; nothing without a record.
+    ///
+    /// `taken` is the claim's interrupt record, taken before this call. The
+    /// device writes a used element before the notification that says so, and
+    /// with `avail.flags` zero and no `VIRTIO_F_EVENT_IDX` it owes one for
+    /// every element (§2.7.7), so a ring read after a record was taken holds
+    /// every period that record counts. With no record the ring is not read: a
+    /// period already in it has a notification still to land, which makes the
+    /// record readable again, and it is read then.
+    pub fn played<R>(&mut self, taken: Option<R>) -> Result<Option<(u32, R)>, Refusal> {
+        let Some(record) = taken else { return Ok(None) };
+        let mask = self.completed()?;
+        Ok((mask != 0).then_some((mask, record)))
+    }
+
     /// Every period the device has given back since the last call, as a mask.
-    pub fn completed(&mut self) -> Result<u32, Refusal> {
+    fn completed(&mut self) -> Result<u32, Refusal> {
         let mut mask = 0;
         while let Some(Used { head, written }) = used(&mut self.queues.tx)? {
             // A head `toyos-virtio` answered is one a chain was published at,

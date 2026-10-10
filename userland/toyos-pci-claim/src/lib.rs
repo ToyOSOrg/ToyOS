@@ -87,12 +87,17 @@ impl Grant {
         // and `region` goes to the caller with the grant, which keeps both for
         // as long as it keeps either.
         let window = unsafe { Window::new(region.memory.as_ptr(), bytes as usize) };
-        Ok((Self::over(window, region.device_addr), region))
+        Ok((Self { window, device_base: region.device_addr }, region))
     }
 
-    /// The grant over memory the caller already holds: a host test's plain
-    /// allocation, with the address a device would be told.
-    pub fn over(window: Window, device_base: u64) -> Self {
+    /// A grant over a leaked host allocation of `bytes`, zeroed, with the
+    /// address a device would be told: a driver crate's host test's.
+    #[cfg(feature = "host-grant")]
+    pub fn leaked(bytes: usize, device_base: u64) -> Self {
+        let backing = vec![0u64; bytes.div_ceil(8)].leak();
+        // SAFETY: `leak` gives the allocation the `'static` lifetime the window
+        // needs, and it is at least `bytes` long.
+        let window = unsafe { Window::new(backing.as_mut_ptr().cast(), bytes) };
         Self { window, device_base }
     }
 

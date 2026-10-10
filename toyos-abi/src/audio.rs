@@ -11,10 +11,6 @@ use core::sync::atomic::AtomicU32;
 /// interrupt handler — the clock source for soundserver's DLL, and the reason the
 /// mask is derived there rather than by the driver at wake time. Records are
 /// returned oldest-first.
-///
-/// soundserver's virtio-sound driver builds the same record out of its own used
-/// ring, stamped when it reads the ring rather than when the message landed: a
-/// claim's interrupt record carries a count and no time.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AudioCompletionRecord {

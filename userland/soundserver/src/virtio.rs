@@ -128,11 +128,8 @@ impl Virtio {
 
     /// The periods played since the last call, and when the device said so.
     ///
-    /// The claim's record is taken before the ring is read, so a period that
-    /// lands after the read leaves the claim readable for the next wake. The
-    /// device writes the used ring before it sends the message, so a ring read
-    /// between the two holds a period whose message has not landed: then the
-    /// read is when it lands.
+    /// The claim's record is taken before the ring is read, and the ring is
+    /// read only with one in hand ([`Sound::played`]).
     pub fn completion(&mut self) -> Option<Completion> {
         let record = match self.dev.irq() {
             Ok(record) => Some(record),
@@ -149,21 +146,11 @@ impl Virtio {
                 None => say!("virtio-sound: device event {:#x} data={}", event.code, event.data),
             })
             .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"));
-        let mask = self
+        let (mask, record) = self
             .sound
-            .completed()
-            .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"));
-        if mask == 0 {
-            return None;
-        }
-        let (first_nanos, last_nanos) = match record {
-            Some(record) => (record.first_nanos, record.last_nanos),
-            None => {
-                let now = toyos_abi::clock::nanos_since_boot();
-                (now, now)
-            }
-        };
-        Some(Completion { mask, first_nanos, last_nanos })
+            .played(record)
+            .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"))?;
+        Some(Completion { mask, first_nanos: record.first_nanos, last_nanos: record.last_nanos })
     }
 
     /// Put period `idx` on the wire: its PCM descriptor is a whole period.

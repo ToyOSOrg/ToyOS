@@ -304,7 +304,6 @@ impl TxQueue {
 /// used-ring element must satisfy is `toyos-virtio`'s, and tested there.
 #[cfg(test)]
 mod tests {
-    use toyos::volatile::Window;
     use toyos_virtio::queue::{AVAIL_ENTRY_BYTES, DESC_BYTES, RING_ENTRIES, USED_ELEM_BYTES};
 
     use super::*;
@@ -313,11 +312,7 @@ mod tests {
 
     /// A transmit queue over a plain allocation the size of the grant.
     fn queue() -> TxQueue {
-        let backing = vec![0u64; GRANT_BYTES as usize / 8].leak();
-        // SAFETY: `leak` gives the allocation the `'static` lifetime the
-        // window needs, and nothing but this queue and the test reaches it.
-        let window = unsafe { Window::new(backing.as_mut_ptr().cast(), GRANT_BYTES as usize) };
-        TxQueue::new(Grant::over(window, DEVICE_BASE))
+        TxQueue::new(Grant::leaked(GRANT_BYTES as usize, DEVICE_BASE))
     }
 
     /// The head in available-ring entry `nth` (§2.7.6).

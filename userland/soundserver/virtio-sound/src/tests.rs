@@ -567,3 +567,82 @@ fn an_event_is_handed_up_and_its_buffer_posted_again() {
     assert_eq!(sound.events(|event| said.push(event)), Err(Refusal::ShortEvent { written: 4 }));
     assert!(said.is_empty());
 }
+
+/// The claim's interrupt record, as [`Sound::played`] is handed it: when the
+/// oldest and newest notification since the last take landed.
+#[derive(Default)]
+struct Claim(Option<(u64, u64)>);
+
+impl Claim {
+    fn land(&mut self, at: u64) {
+        let first = self.0.map_or(at, |(first, _)| first);
+        self.0 = Some((first, at));
+    }
+
+    fn take(&mut self) -> Option<(u64, u64)> {
+        self.0.take()
+    }
+}
+
+/// No period is stranded: every one comes back exactly once, and none while
+/// the claim is left unreadable.
+///
+/// Two periods, each a used element and then its notification (§2.7.7),
+/// against two wakes of a driver that takes the record and then reads the
+/// ring, in every interleaving; then the driver wakes for as long as the
+/// claim reads ready, which is all a waiting soundserver does. A ring read
+/// with no record that took what it found would leave a period nobody's
+/// notification answers for, and the claim would never wake the driver for
+/// it again.
+#[test]
+fn no_period_is_stranded_between_its_used_element_and_its_notification() {
+    #[derive(Clone, Copy)]
+    enum Step {
+        Used,
+        Notified,
+        Take,
+        Read,
+    }
+    const DEVICE: [Step; 4] = [Step::Used, Step::Notified, Step::Used, Step::Notified];
+    const DRIVER: [Step; 4] = [Step::Take, Step::Read, Step::Take, Step::Read];
+
+    let mut orders = 0;
+    // Bit `n` of `pick` set: the `n`th step of the merge is the device's.
+    for pick in 0u32..1 << 8 {
+        if pick.count_ones() != 4 {
+            continue;
+        }
+        orders += 1;
+        let model = Model::new();
+        let mut sound = opened(&model);
+        sound.submit(0).expect("a period goes out");
+        sound.submit(1).expect("a period goes out");
+        let mut claim = Claim::default();
+        let (mut device, mut driver, mut landed) = (DEVICE.iter(), DRIVER.iter(), 0);
+        let mut taken = None;
+        let mut back = Vec::new();
+        for n in 0..8 {
+            let step = if pick & 1 << n != 0 { device.next() } else { driver.next() };
+            match step.copied().expect("four steps each") {
+                Step::Used => model.play(1),
+                Step::Notified => {
+                    landed += 1;
+                    claim.land(landed);
+                }
+                Step::Take => taken = claim.take(),
+                Step::Read => back.extend(sound.played(taken.take()).expect("a whole period")),
+            }
+        }
+        while let Some(record) = claim.take() {
+            back.extend(sound.played(Some(record)).expect("a whole period"));
+        }
+        let masks: Vec<u32> = back.iter().map(|(mask, _)| *mask).collect();
+        let mut seen = 0;
+        for mask in &masks {
+            assert_eq!(seen & mask, 0, "order {pick:#010b}: a period came back twice in {masks:?}");
+            seen |= mask;
+        }
+        assert_eq!(seen, 0b11, "order {pick:#010b}: the periods that came back are {masks:?}");
+    }
+    assert_eq!(orders, 70);
+}
