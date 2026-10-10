@@ -3414,9 +3414,27 @@ impl Consent {
                 };
                 let bar = desk.taskbar(1);
                 let centre = |r: toyos_desktop::Rect| (i32::midpoint(r.x0, r.x1), i32::midpoint(r.y0, r.y1));
+                // **The row is clicked once the launcher is on the panel**: the
+                // compositor folds two clicks it reads at once into one at
+                // the second's place (issues/two-clicks-the-compositor-reads-at-once-are-one-click.md).
+                let row = bar.launcher_item(0);
+                let shown = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
+                    (row.y0 as usize..row.y1 as usize)
+                        .flat_map(|y| dump.pixels[y * dump.width + row.x0 as usize..y * dump.width + row.x1 as usize].to_vec())
+                        .collect()
+                };
                 let mut input = qemu::QmpInput::open(qmp);
+                let closed = shown(&input.screendump(&self.out));
                 input.click(centre(bar.new_button()), (w, h));
-                input.click(centre(bar.launcher_item(0)), (w, h));
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while shown(&input.screendump(&self.out)) == closed {
+                    if Instant::now() >= deadline {
+                        self.red.push(format!("{name}: the launcher did not open in 20 s"));
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                input.click(centre(row), (w, h));
                 self.step = Some(ConsentStep { name, games, ..ConsentStep::default() });
             }
         }
