@@ -301,6 +301,15 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    // The IVRS QEMU 11.1.1 published to a q35 with its AMD IOMMU, read out
+    // of guest physical memory with no operating system in the guest:
+    // `toyos-acpi/tests/ivrs.rs` decodes it.
+    (
+        "toyos-acpi/fixtures/qemu-11.1.1-amdvi/ivrs.bin",
+        "c6d3f24592e7e69d5f3bcf4cad0a2cda57d93432d9fd6d2eb499fd289e6cc49d",
+        "ours: QEMU's own IVRS, captured by the commit that decodes it",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     // The tables QEMU 11.1.1 published to its `virt` machine in both of its
     // GIC modes, read out of guest physical memory over the monitor with no
     // operating system in the guest. Firmware output, as the q35 tables above:

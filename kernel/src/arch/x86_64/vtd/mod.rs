@@ -22,11 +22,11 @@ use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
 use toyos_abi::boot::RootBridgeWindow;
 use crate::iommu::{AddressWidth, StreamId};
-use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
 
+use super::iommu_unit::yn;
 use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
 use queue::Queue;
 use table::{Table, Tables};
@@ -78,11 +78,6 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     "a unit half-way through being enabled is a unit whose reach nothing can state",
 );
 
-/// x86-64's 52-bit physical-address ceiling: a register base at or above this
-/// is not an address at all, and would otherwise wrap `DirectMap::as_ptr`'s
-/// unchecked offset into the user half.
-const MAX_PHYS: u64 = 1 << 52;
-
 /// Ceiling on units inventoried; a machine past it is told, not silently truncated.
 pub(super) const MAX_UNITS: usize = 16;
 
@@ -125,23 +120,14 @@ pub(super) fn invalidate_interrupt_entries() {
 }
 
 /// `windows` and every region firmware reserved are what no domain's addresses
-/// reach.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) {
+/// reach. `false` where firmware published no DMAR.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) -> bool {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
-        // ACPI cannot distinguish "no VT-d silicon" from "VT-d disabled in
-        // firmware"; the line names both rather than guess.
-        Err(TableError::Absent) => {
-            log!(
-                "iommu: no DMAR table — this platform has no IOMMU, or VT-d is disabled in \
-                 firmware setup (look for \"VT-d\" / \"Intel Virtualization Technology for \
-                 Directed I/O\")"
-            );
-            return;
-        }
+        Err(TableError::Absent) => return false,
         Err(e) => {
             log!("iommu: DMAR unusable: {e:?} — this machine has no IOMMU the kernel can use");
-            return;
+            return true;
         }
     };
 
@@ -252,6 +238,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     for (unit, plan) in ready {
         enable(unit, plan, devices, &mut domains, remap);
     }
+    true
 }
 
 /// Whether every interrupt source may be moved to the remappable format, and
@@ -388,22 +375,9 @@ impl Unit {
     }
 }
 
-/// Firmware's register base, mapped only if 4 KiB-aligned and within the
-/// physical range — never clamped to fit, since a base in usable RAM would
-/// decode as a plausible capability register until a write lands in
-/// somebody's heap.
-fn window(base: u64) -> Option<Mmio> {
-    if base == 0 || !base.is_multiple_of(REGISTER_WINDOW) || base >= MAX_PHYS {
-        return None;
-    }
-    Some(
-        crate::mm::paging::map_mmio(base, REGISTER_WINDOW, MmioPolicy::Uncacheable),
-    )
-}
-
 fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     let base = drhd.register_base();
-    let Some(regs) = window(base) else {
+    let Some(regs) = super::iommu_unit::register_window(base, REGISTER_WINDOW) else {
         log!(
             "iommu: unit{index} register base {base:#x} is not a 4 KiB-aligned physical address \
              — not mapped"
@@ -745,15 +719,5 @@ impl Capabilities {
     /// kernel-owned devices — same protection, more page tables.
     fn passthrough(&self) -> bool {
         self.ecap & (1 << 6) != 0
-    }
-}
-
-/// One character per boolean; `n` is printed rather than omitted, since an
-/// absent field would look like a forgotten one.
-fn yn(v: bool) -> char {
-    if v {
-        'y'
-    } else {
-        'n'
     }
 }

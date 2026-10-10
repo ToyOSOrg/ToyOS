@@ -108,7 +108,6 @@ mod late_panic {
     }
 }
 
-use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
 use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, xhci};
@@ -433,14 +432,12 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     let t_periph = clock::nanos_since_boot();
 
-    let (ecam_base, pci_segment) = acpi::find_ecam_base(kernel_args.rsdp_addr)
-        .expect("ACPI: failed to find ECAM base address");
-    let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, MmioPolicy::Uncacheable);
-    let pci_devices = pci::enumerate(&ecam);
+    let ecam_windows = acpi::ecam_windows(kernel_args.rsdp_addr);
+    let pci_devices = pci::enumerate(&ecam_windows);
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, pci_segment, maps, kernel_args.root_bridge_windows());
+    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, maps, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
