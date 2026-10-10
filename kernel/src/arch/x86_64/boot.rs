@@ -110,7 +110,7 @@ pub fn clock(args: &KernelArgs) {
             None
         }
     };
-    crate::clock::init_wall(century_reg);
+    crate::clock::init_wall(super::rtc::read(century_reg).map(|civil| (civil, super::cpu::counter())));
 }
 
 /// Where the TSC counts from: `IA32_TSC_ADJUST`, where CPUID says the CPU has
