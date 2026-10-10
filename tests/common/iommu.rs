@@ -415,7 +415,7 @@ const AMDVI_SUPERSEDED: &str = "iommu: IVRS IVHD 0x10 at +48 describes 00:02.0 a
 /// The xHCI the boot stick is on, among the functions the unit serves.
 const AMDVI_SERVES_XHCI: &str = "iommu: amdvi unit0 serves 00:03.0 data=0x00";
 const AMDVI_OFF: &str = "iommu: amdvi unit0 @0xfed80000 switched off control=0x0000000000000000";
-const AMDVI_NO_ISOLATION: &str = "iommu: AMD-Vi isolates no device this boot: 1 unit(s) described";
+const AMDVI_NO_ISOLATION: &str = "iommu: AMD-Vi isolates no device this boot: 1 unit(s) described, 1 switched off";
 /// A kernel driver's domain refused for want of a unit that translates.
 const NO_DOMAIN: &str = "iommu: no domain of its own for a device: no unit on this machine translates";
 /// The USB gate: the boot stick bound through the controller behind the unit,
@@ -463,7 +463,7 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
             for field in ["CmdBufEn", "EventLogEn", "IommuEn"] {
                 log.must_say(&format!("iommu: amdvi unit0 was handed over with {field} on; it goes off"))?;
             }
-            for field in ["GALogEn", "PPRLogEn"] {
+            for field in ["EventIntEn", "GALogEn", "GAIntEn", "PPRLogEn", "PPRIntEn"] {
                 log.must_not_say(&format!("with {field} on"))?;
             }
         } else {

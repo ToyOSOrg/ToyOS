@@ -21,7 +21,7 @@ const MAX_PHYS: u64 = 1 << 52;
 
 /// The units of whichever table firmware published.
 pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) {
-    if super::vtd::init(rsdp_addr, devices, windows) || super::amdvi::init(rsdp_addr, devices) {
+    if super::vtd::init(rsdp_addr, devices, windows) || super::amdvi::init(rsdp_addr) {
         return;
     }
     // ACPI cannot tell "no IOMMU silicon" from "the IOMMU disabled in

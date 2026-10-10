@@ -11,9 +11,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::drivers::pci::PciDevice;
 use crate::iommu::StreamId;
 use crate::log;
+use crate::mm::Mmio;
 use crate::time::{Duration, Tripwire};
 
 use super::iommu_unit::{register_window, yn};
@@ -30,16 +30,19 @@ const STATUS: u64 = 0x2020;
 const IOMMU_EN: u64 = 1 << 0;
 const EVENT_LOG_EN: u64 = 1 << 2;
 const CMD_BUF_EN: u64 = 1 << 12;
-const PPR_LOG_EN: u64 = 1 << 13;
-const GA_LOG_EN: u64 = 1 << 28;
 
-/// `CONTROL` fields firmware may leave on, each with the `STATUS` bit that
-/// says it stopped: the logs before the unit, which logs nothing once off.
-const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 5] = [
+/// `CONTROL` fields firmware may leave on, in Linux's `iommu_disable` order,
+/// each with the `STATUS` bit that says it stopped, or `None` where `CONTROL`
+/// reading back is the answer: the logs and their interrupts before the unit,
+/// which logs nothing once off.
+const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 8] = [
     (CMD_BUF_EN, Some(1 << 4), "CmdBufEn"),
+    (1 << 3, None, "EventIntEn"),
     (EVENT_LOG_EN, Some(1 << 3), "EventLogEn"),
-    (GA_LOG_EN, Some(1 << 8), "GALogEn"),
-    (PPR_LOG_EN, Some(1 << 7), "PPRLogEn"),
+    (1 << 28, Some(1 << 8), "GALogEn"),
+    (1 << 29, None, "GAIntEn"),
+    (1 << 13, Some(1 << 7), "PPRLogEn"),
+    (1 << 14, None, "PPRIntEn"),
     (IOMMU_EN, None, "IommuEn"),
 ];
 
@@ -52,8 +55,7 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
 
 /// Every unit the IVRS describes, switched off; `false` where firmware
 /// published no IVRS.
-#[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
+pub fn init(rsdp_addr: u64) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
         Err(IvrsRefused::Table(TableError::Absent)) => return false,
@@ -72,7 +74,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
         info.physical_bits,
         info.virtual_bits,
     );
-    let mut units = 0usize;
+    let (mut units, mut off) = (0usize, 0usize);
     for block in ivrs.blocks() {
         match block {
             IvrsBlock::Unit(unit) => {
@@ -83,7 +85,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
                         Err(e) => log!("iommu: amdvi unit{units} device entries refused: {e:?}"),
                     }
                 }
-                switch_off(units, &unit, devices);
+                if let Some(regs) = present(units, &unit) {
+                    #[cfg(feature = "boot-actuators")]
+                    if crate::actuator::iommu_firmware_left() {
+                        leave_on(regs, &ivrs, &unit);
+                    }
+                    switch_off(units, &unit, regs);
+                    off += 1;
+                }
                 units += 1;
             }
             IvrsBlock::Superseded(unit) => log!(
@@ -115,8 +124,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
         }
     }
     log!(
-        "iommu: AMD-Vi isolates no device this boot: {units} unit(s) described, each switched off, so DMA \
-         reaches memory untranslated"
+        "iommu: AMD-Vi isolates no device this boot: {units} unit(s) described, {off} switched off, so DMA \
+         behind those reaches memory untranslated"
     );
     true
 }
@@ -180,27 +189,42 @@ fn served(ivrs: &Ivrs<impl Phys>, entry: &DeviceEntry) -> String {
     }
 }
 
-/// Every field of [`FIRMWARE_LEFT`] that is on, off, each confirmed before
-/// the next.
-#[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-fn switch_off(index: usize, unit: &Unit, devices: &[PciDevice]) {
+/// The unit's registers, or `None`, said, where its base is refused or its
+/// window does not decode.
+fn present(index: usize, unit: &Unit) -> Option<Mmio> {
     let Some(regs) = register_window(unit.base, REGISTER_WINDOW) else {
         log!(
             "iommu: amdvi unit{index} register base {:#x} is not a {REGISTER_WINDOW:#x}-aligned physical \
              address — not mapped, and whatever firmware left on stays on",
             unit.base
         );
-        return;
+        return None;
     };
     // A described unit whose window does not decode: firmware bug, or the unit is powered down.
     if regs.read_u32(STATUS) == u32::MAX {
-        log!("iommu: amdvi unit{index} @{:#x}: STATUS reads all ones, the unit is described but not present", unit.base);
-        return;
+        log!(
+            "iommu: amdvi unit{index} @{:#x}: STATUS reads all ones, the unit is described but not present, \
+             and whatever firmware left on stays on",
+            unit.base
+        );
+        return None;
     }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::iommu_firmware_left() {
-        leave_on(regs, devices);
+    Some(regs)
+}
+
+/// Spins until `done`, panicking with what `stuck` says once
+/// [`COMMAND_TIMEOUT`] has passed.
+fn spin_until(mut done: impl FnMut() -> bool, stuck: impl Fn() -> String) {
+    let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
+    while !done() {
+        assert!(crate::clock::nanos_since_boot() < deadline, "{}", stuck());
+        core::hint::spin_loop();
     }
+}
+
+/// Every field of [`FIRMWARE_LEFT`] that is on, off, each confirmed before
+/// the next.
+fn switch_off(index: usize, unit: &Unit, regs: Mmio) {
     log!(
         "iommu: amdvi unit{index} handed over control={:#018x} status={:#010x} efr={:#018x}",
         regs.read_u64(CONTROL),
@@ -217,16 +241,13 @@ fn switch_off(index: usize, unit: &Unit, devices: &[PciDevice]) {
             Some(run) => regs.read_u32(STATUS) & run == 0,
             None => regs.read_u64(CONTROL) & bit == 0,
         };
-        let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
-        while !stopped() {
-            assert!(
-                crate::clock::nanos_since_boot() < deadline,
+        spin_until(stopped, || {
+            format!(
                 "iommu: amdvi unit{index} never stopped {what}: CONTROL={:#018x} STATUS={:#010x}",
                 regs.read_u64(CONTROL),
                 regs.read_u32(STATUS)
-            );
-            core::hint::spin_loop();
-        }
+            )
+        });
     }
     log!(
         "iommu: amdvi unit{index} @{:#x} switched off control={:#018x} status={:#010x}",
@@ -240,15 +261,16 @@ fn switch_off(index: usize, unit: &Unit, devices: &[PciDevice]) {
 /// protecting memory before the operating system runs may leave it — every
 /// requester's device table entry translating through a table that maps
 /// nothing, so every DMA is blocked, with its command buffer and event log
-/// running. Each enumerated function's entry is invalidated, which is what a
-/// unit reads a changed entry on, and a completion wait says each was.
+/// running. The entry of every requester the unit's IVHD names is
+/// invalidated, which is what a unit reads a changed entry on, and a
+/// completion wait says each was.
 ///
 /// The tables are leaked, as firmware's are its own: the unit reads them
 /// until it is switched off, and freed they could read back as an entry that
 /// passes DMA untranslated.
 #[cfg(feature = "boot-actuators")]
-fn leave_on(regs: crate::mm::Mmio, devices: &[PciDevice]) {
-    use crate::mm::{pmm, DirectMap, Mmio};
+fn leave_on(regs: Mmio, ivrs: &Ivrs<impl Phys>, unit: &Unit) {
+    use crate::mm::{pmm, DirectMap};
 
     const DEVICE_TABLE: u64 = 0x0000;
     const COMMAND_BASE: u64 = 0x0008;
@@ -270,8 +292,6 @@ fn leave_on(regs: crate::mm::Mmio, devices: &[PciDevice]) {
     const COMPLETION_WAIT: u64 = (1 << 60) | 1;
     const DONE: u64 = 0x600d_f00d;
 
-    // A ring holds one entry fewer than it has, and the wait takes one.
-    assert!(devices.len() < RING - 1, "amdvi: {} functions overflow the actuator's {RING}-entry ring", devices.len());
     let window = |phys: u64, bytes: u64| {
         // SAFETY: `phys` is inside a page `pmm::alloc_page` handed out and
         // this function leaks, which the direct map covers for the machine's life.
@@ -301,23 +321,31 @@ fn leave_on(regs: crate::mm::Mmio, devices: &[PciDevice]) {
     let commands = window(commands_at, RING as u64 * 16);
     let mut tail = 0;
     let mut push = |low: u64, high: u64| {
+        // A ring holds one entry fewer than it has.
+        assert!(tail < (RING as u64 - 1) * 16, "amdvi: the unit's requesters overflow the actuator's {RING}-entry ring");
         commands.write_u64(tail, low);
         commands.write_u64(tail + 8, high);
         tail += 16;
     };
-    for device in devices {
-        push(INVALIDATE_ENTRY | u64::from(StreamId::pci(device.bus, device.dev, device.func).requester()), 0);
+    for entry in ivrs.devices(unit) {
+        let (first, last) = match entry.expect("amdvi: the actuator's unit has a device list it can walk") {
+            DeviceEntry::All { .. } => (0, u16::MAX),
+            DeviceEntry::Select { id, .. } | DeviceEntry::Extended { id, .. } | DeviceEntry::Hid { id, .. } => (id, id),
+            DeviceEntry::Range { first, last, .. } | DeviceEntry::ExtendedRange { first, last, .. } => (first, last),
+            DeviceEntry::Alias { used, .. }
+            | DeviceEntry::AliasRange { used, .. }
+            | DeviceEntry::Special { used, .. } => (used, used),
+            DeviceEntry::Other(_) => continue,
+        };
+        for id in first..=last {
+            push(INVALIDATE_ENTRY | u64::from(id), 0);
+        }
     }
     push(COMPLETION_WAIT | done_at, DONE);
     regs.write_u64(COMMAND_TAIL, tail);
     let done = window(done_at, 8);
-    let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
-    while done.read_u64(0) != DONE {
-        assert!(
-            crate::clock::nanos_since_boot() < deadline,
-            "amdvi: the actuator's completion wait never landed: STATUS={:#010x}",
-            regs.read_u32(STATUS)
-        );
-        core::hint::spin_loop();
-    }
+    spin_until(
+        || done.read_u64(0) == DONE,
+        || format!("amdvi: the actuator's completion wait never landed: STATUS={:#010x}", regs.read_u32(STATUS)),
+    );
 }
