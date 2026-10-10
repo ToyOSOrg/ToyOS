@@ -1284,11 +1284,6 @@ device_classes! {
     /// An Intel HDA controller the kernel has brought up but drives no policy
     /// on.
     HdaAudio = 5 => "hda-audio",
-    /// A virtio-sound device, on the same terms: the kernel negotiated its
-    /// features, built its virtqueues and owns their descriptors, and every
-    /// decision above that — the stream, the rate, the format, when a period is
-    /// published — belongs to whoever holds this.
-    VirtioSound = 6 => "virtio-sound",
     /// One PCI function, driven by whoever holds the claim: the kernel binds no
     /// driver to it, keeps config space, puts it in an address space of its own
     /// before it lets it master the bus, and programs its interrupt vector.

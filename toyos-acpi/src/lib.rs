@@ -44,7 +44,7 @@ pub use madt::{
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
-pub use mcfg::{ecam_allocations, Allocation, AllocationRefused, Allocations};
+pub use mcfg::{ecam_allocations, AllocationRefused, Allocations, ConfigRegister, EcamWindow, SEGMENT_GROUP};
 pub use resource::{io_ports, memory_windows, ResourceError, MAX_LIST_BYTES};
 pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};
 

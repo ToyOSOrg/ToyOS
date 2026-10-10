@@ -3344,6 +3344,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -5159,6 +5160,9 @@ dependencies = [
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-pci-claim",
+ "toyos-virtio",
+ "toyos-virtio-sound",
 ]
 
 [[package]]
@@ -5926,6 +5930,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
+]
+
+[[package]]
 name = "toyos-phys"
 version = "0.1.0"
 
@@ -6043,6 +6057,7 @@ name = "toyos-userbound"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-acpi",
  "toyos-bootmap",
 ]
 
@@ -6052,6 +6067,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-virtio-sound"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]

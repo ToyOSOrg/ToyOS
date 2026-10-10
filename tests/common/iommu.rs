@@ -12,6 +12,9 @@ use super::serial::Serial;
 /// The function `tests/netcase`'s netstack claims, as its `devices` row spells it.
 const NETSTACK_CLAIMS: &str = "1af4:1041";
 
+/// soundserver's feature line, the kernel's shape under soundserver's name.
+const SOUNDSERVER_NEGOTIATED: &str = "soundserver: VirtIO: PCI ";
+
 /// fileserver's word for DATA's directories served from memory.
 const IN_MEMORY: &str = "are in memory and will not survive a reboot";
 
@@ -70,13 +73,20 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // program's line either.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: Vec<String> = if behind_unit {
-            vec![CLAIM_BOUNDED.to_string(), NETSTACK_NEGOTIATED.to_string(), bar_moved(), msix_armed()]
+            vec![
+                NETSTACK_NEGOTIATED.to_string(),
+                SOUNDSERVER_NEGOTIATED.to_string(),
+                bar_moved(),
+                msix_armed(),
+            ]
         } else {
             vec![
                 DISKSERVER_REFUSED.to_string(),
                 FILESERVER_WITHOUT_DATA.to_string(),
                 not_handed_over(CLAIMED_AT, NOT_REMAPPED),
                 not_handed_over(NVME_AT, NOT_REMAPPED),
+                not_handed_over(SOUND_AT, NOT_REMAPPED),
+                super::audio::NULL_SINK.to_string(),
             ]
         };
         let mut text = qemu.boot_log().to_string();
@@ -100,13 +110,6 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // unit has three negotiators, one of them across the boundary, and the
         // arm without one has two and a refusal.
         let expected = if behind_unit {
-            // And the claim netstack was given is bounded to its own function's
-            // configuration space, which is what makes its capability walk —
-            // an index by numbers the *device* wrote — safe to run at all.
-            // netstack asks the kernel for a read past the end, one straddling it
-            // and one misaligned, and refuses to drive a claim that answers any
-            // of them.
-            log.must_say(CLAIM_BOUNDED)?;
             // The two things a hand-over spends, on the same function and the
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
@@ -116,7 +119,8 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
             created.len()
         } else {
             no_unit_is_no_claim(&log)?;
-            created.len() - 1
+            // The NIC's and the sound function's claims, refused.
+            created.len() - 2
         };
 
         let mut negotiated = Vec::new();
@@ -155,26 +159,29 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         }
         let sound = class_function(&log, "0401")
             .ok_or_else(|| format!("{name}: this machine enumerated no audio function"))?;
-        if !negotiated.iter().any(|(who, _)| *who == sound) {
+        if sound != SOUND_AT {
+            return Err(format!("{name}: the audio function is {sound}, where {SOUND_AT} is owed"));
+        }
+        if behind_unit != negotiated.iter().any(|(who, _)| *who == sound) {
             return Err(format!(
-                "{name}: the audio function {sound} negotiated nothing, so whether it is behind \
-                 the unit was never asked: {negotiated:?}"
+                "{name}: the audio function {sound} negotiated features = {}, where a process's \
+                 claim on it is owed = {behind_unit}: {negotiated:?}",
+                !behind_unit
             ));
         }
         eprintln!(
-            "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, the audio \
-             function {sound} among them{}",
+            "  [iommu] {name}: {} virtio function(s) negotiated, behind a unit = {behind_unit}; {}",
             negotiated.len(),
-            if behind_unit { "" } else { "; the NIC's claim refused for want of a unit" }
+            if behind_unit {
+                format!("the audio function {sound} among them")
+            } else {
+                format!("the NIC's and the audio function {sound}'s claims refused for want of a unit")
+            }
         );
     }
     declining_is_not_free(test_config)
 }
 
-/// netstack's, once its claim answers nothing outside its own function.
-const CLAIM_BOUNDED: &str =
-    "netstack: this claim answers 4096 bytes of configuration space and refuses every access \
-     outside them";
 /// netstack's feature line, the kernel's shape under netstack's name.
 const NETSTACK_NEGOTIATED: &str = "netstack: VirtIO: PCI ";
 const DISKSERVER_REFUSED: &str =
@@ -185,6 +192,10 @@ const FILESERVER_WITHOUT_DATA: &str =
 /// The slot QEMU's `-device` order puts `tests/netcase`'s NVMe controller on,
 /// the one its diskserver row claims.
 const NVME_AT: &str = "00:02.0";
+
+/// The slot QEMU's `-device` order puts the virtio-sound function on, the one
+/// `tests/netcase`'s soundserver row claims.
+const SOUND_AT: &str = "00:04.0";
 
 /// Why a machine with no unit hands no function over, in the kernel's words.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
@@ -206,10 +217,14 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// mint, and netstack exits rather than driving anything — and the machine
 /// finishes booting, which is the half a refusal that panicked would fail. The
 /// NVMe controller is refused the same, and DATA with it by name: a disk that
-/// is there and cannot be used is never answered with memory.
+/// is there and cannot be used is never answered with memory. So is the
+/// virtio-sound function, and soundserver takes its null sink.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     // netstack's own exit is the third saying, and is not read here.
-    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT])?;
+    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT, SOUND_AT])?;
+    log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
+    log.must_say("supervisor: soundserver: pci:1af4:1059 is on this machine and could not be handed over")?;
+    log.must_say(super::audio::NULL_SINK)?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
     log.must_say(DISKSERVER_REFUSED)?;
@@ -227,14 +242,16 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
 /// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
 /// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
 /// at v11.1.1), so `FEATURES_OK` never sticks. The actuator withholds the bit
-/// from every virtio device but the console, and each of them is refused for it.
+/// from every virtio device the kernel drives but the console — on this
+/// machine the virtio-gpu it adds for that, since every other function is a
+/// process's claim — and each of them is refused for it.
 fn declining_is_not_free(test_config: &Path) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
         BootOptions {
-            profile: Profile::Headless,
+            profile: Profile::HeadlessVirtioGpu,
             kernel_params: &["virtio-no-access-platform"],
             ..Default::default()
         },

@@ -60,11 +60,9 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         Ok(allocations) => allocations,
         Err(e) => return refused(format_args!("this machine's tables name no ECAM ({e:?})")),
     };
-    // Bus 0 of segment group 0 is where the chipset is, and only a window
-    // that decodes it has bus 0's address at its base.
-    let Some(ecam) = allocations.flatten().find(|window| window.segment() == 0 && window.holds(0)).map(|window| window.base())
-    else {
-        return refused(format_args!("no ECAM window of the MCFG's decodes bus 0 of segment group 0"));
+    // Bus 0 is where the chipset is.
+    let Some(ecam) = allocations.flatten().find(|window| window.holds(0)).map(|window| window.base()) else {
+        return refused(format_args!("no ECAM window of the MCFG's decodes bus 0"));
     };
     // The MCFG's word for where configuration space is, checked against
     // firmware's own map before anything dereferences it.

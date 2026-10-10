@@ -4,8 +4,11 @@
 //! Every `§` in this crate is a section of *Virtual I/O Device (VIRTIO)
 //! Version 1.2*, OASIS Committee Specification 01. [`pci`] is §4.1 with the
 //! initialisation §3.1.1 orders and the negotiation §2.2 bounds; [`queue`] is
-//! §2.7. A device type — its feature bits, its configuration fields, what its
-//! buffers carry — is its driver's and is not here.
+//! §2.7. [`pci::vendor_caps`] walks the capability list through a
+//! [`pci::ConfigSpace`] the driver's claim answers, under §6.7 of the *PCI
+//! Local Bus Specification* 3.0. A device type — its feature bits, its
+//! configuration fields, what its buffers carry — is its driver's and is not
+//! here.
 //!
 //! # The boundary
 //!
@@ -49,8 +52,6 @@
 //!   §2.7.10.1 permits whatever `used.flags` says — reading it would buy one
 //!   skipped register write for one more device-written word believed.
 //! - **No packed ring, no indirect descriptors, no legacy interface.**
-//! - **No walk of configuration space**: [`pci::Layout::of`] takes the vendor
-//!   capabilities a driver read through its claim.
 
 #![no_std]
 #![forbid(unsafe_code)]

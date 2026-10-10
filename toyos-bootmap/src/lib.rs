@@ -121,7 +121,7 @@ pub const fn is_usable_type(uefi_type: u32) -> bool {
 /// Whether the kernel reads a range of this type as memory: what the pmm hands
 /// out, and the two types ACPI's tables live in. Any other type, one this list
 /// does not know included, is not.
-const fn is_read_as_memory(uefi_type: u32) -> bool {
+pub const fn is_read_as_memory(uefi_type: u32) -> bool {
     is_usable_type(uefi_type) || matches!(uefi_type, EFI_ACPI_RECLAIM_MEMORY | EFI_ACPI_MEMORY_NVS)
 }
 

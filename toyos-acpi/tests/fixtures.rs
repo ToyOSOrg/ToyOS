@@ -88,7 +88,7 @@ fn the_mcfg_names_the_ecam_window_the_pci_walk_used() {
     assert_eq!(allocations.table_base(), 0x7fb7_6000);
     let windows: Vec<_> = allocations.collect();
     let [Ok(window)] = windows[..] else { panic!("q35 publishes one allocation, and the walk found {windows:?}") };
-    assert_eq!((window.base(), window.segment(), window.buses()), (0xb000_0000, 0, 0..=0xff));
+    assert_eq!((window.base(), window.buses()), (0xb000_0000, 0..=0xff));
     assert_eq!(window.decoded(), (0xb000_0000, 0x1000_0000));
 }
 

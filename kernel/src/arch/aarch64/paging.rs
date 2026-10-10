@@ -612,6 +612,9 @@ pub fn activate_kernel() {
     unsafe { kernel_root().activate() };
 }
 
+/// What [`map_mmio`] maps at: a 4 KiB page.
+pub const MMIO_GRAIN: u64 = PAGE_4K;
+
 /// Map a device's registers, or the scanout, into the direct map: 4 KiB pages
 /// exactly over `[phys, phys + size)`, a block where a whole 2 MiB page is
 /// asked for and free. No invalidation is owed, since only an invalid entry is

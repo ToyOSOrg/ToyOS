@@ -62,8 +62,10 @@ fn control_features() -> Vec<String> {
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
 /// justifications land. `toyos-xhci` has a shape of its own because the
 /// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
-/// kernel does. `kernel-loom` has one because `victim-retires-mid-probe`'s
-/// test arm excludes `no-preempt-guard`, which `$CONTROLS` turns on beside it.
+/// kernel does. `toyos-pci-claim` has one because `$GUESTS` excludes it and
+/// only netstack's host tests build its `host-grant`. `kernel-loom` has one
+/// because `victim-retires-mid-probe`'s test arm excludes `no-preempt-guard`,
+/// which `$CONTROLS` turns on beside it.
 /// The kernel's library is linted on the host apart from them: its tests as
 /// `--ci host` runs them, and again with `$KERNEL_CONTROLS`.
 const SHAPES: &[Shape] = &[
@@ -149,6 +151,23 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         before: &["-p", "toyos-xhci", "--all-targets"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    // `--no-deps` because its dependency `toyos` is a guest crate no shape
+    // lints. Its own target directory because `--no-deps` checks without clippy
+    // the host crates the workspace shapes lint, which `toyos-abi`'s shape
+    // below says costs every run.
+    Shape {
+        before: &[
+            "-p",
+            "toyos-pci-claim",
+            "--all-targets",
+            "--features",
+            "host-grant",
+            "--no-deps",
+            "--target-dir",
+            "target/clippy-pci-claim",
+        ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {

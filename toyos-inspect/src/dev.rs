@@ -261,7 +261,7 @@ mod tests {
             Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
             // The same claim through a second handle in the same table.
             Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
-            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder: holder(7, "soundserver") }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::HdaAudio), holder: holder(7, "soundserver") }),
             Record::Claim(Claim {
                 on: Claimed::Partition { device: 1, unique_guid: [0xcd; 16] },
                 holder: holder(12, "test-runner"),
@@ -304,7 +304,7 @@ mod tests {
             text("dev.disk.0.part1.unique").as_deref(),
             Some("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
         );
-        assert_eq!(text("dev.class.virtio-sound.holder.7").as_deref(), Some("soundserver"));
+        assert_eq!(text("dev.class.hda-audio.holder.7").as_deref(), Some("soundserver"));
     }
 
     #[test]
