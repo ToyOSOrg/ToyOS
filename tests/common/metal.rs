@@ -1050,7 +1050,7 @@ pub fn run(
         };
         readbacks.insert(label.clone(), back);
     }
-    if judge_readbacks(&root, &readbacks, &runs, shared) {
+    if judge_readbacks(&metaltimings::dir(), &readbacks, &runs, shared) {
         Verdict::Red
     } else {
         Verdict::Green
@@ -1093,8 +1093,11 @@ fn own(
 /// that judge, and with the clocks of every boot it rode agreeing
 /// ([`Readback::one_clock`]). Neither is moved by another row or a shared
 /// member riding the same boot.
+///
+/// `records` is where the machines' records are: [`metaltimings::dir`] but in
+/// a check.
 pub fn judge_readbacks(
-    root: &Path,
+    records: &Path,
     readbacks: &BTreeMap<String, Result<Readback, String>>,
     runs: &[&(&str, &'static Metal)],
     shared: &[SharedBoot],
@@ -1254,8 +1257,8 @@ pub fn judge_readbacks(
     // `toyos-metal` boots no machine without a record, so readbacks of one
     // that has none were not this tree's loop's.
     let record = machine.as_ref().map_err(Clone::clone).and_then(|machine| {
-        Record::load(root, machine)?
-            .ok_or_else(|| format!("{} is no record", root.join(machine.path()).display()))
+        Record::load(records, machine)?
+            .ok_or_else(|| format!("{} is no record", records.join(machine.file()).display()))
     });
     match (machine, record) {
         (Ok(machine), Ok(record)) => {
@@ -1285,9 +1288,9 @@ pub fn judge_readbacks(
                 measured.values().filter(|reading| !reading.passed).count()
             );
             if judged.changed {
-                match judged.record.save(root) {
+                match judged.record.save(records) {
                     Ok(at) => eprintln!(
-                        "  {} now records {} number(s) for this machine: commit it",
+                        "  {} now records {} number(s) for this machine",
                         at.display(),
                         judged.record.measured.len()
                     ),

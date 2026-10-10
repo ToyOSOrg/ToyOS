@@ -375,7 +375,7 @@ mod tests {
         assert!(refusal.contains("add --metal"), "{refusal}");
         let refusal = parsed(&["--metal", "--list", "--metal-host", "dev@box"]).unwrap_err();
         assert!(refusal.contains("--metal-host would be dropped in silence"), "{refusal}");
-        for host in ["box", "-oProxyCommand=x@box", "../t14@box"] {
+        for host in ["box", "-oProxyCommand=x@box", "dev@a b"] {
             let refusal = parsed(&["--metal", "--metal-host", host]).unwrap_err();
             assert!(refusal.starts_with("--metal-host: "), "{host}: {refusal}");
         }

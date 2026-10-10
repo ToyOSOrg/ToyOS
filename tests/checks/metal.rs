@@ -371,7 +371,7 @@ pub fn a_name_two_owners_measured_is_refused() {
 
 /// `passing`'s four rows under `bios`: its planted readings, with `complete_ms`
 /// as given.
-fn committed(bios: &str, complete_ms: u64) -> Record {
+fn kept(bios: &str, complete_ms: u64) -> Record {
     let machine = t14();
     Record {
         vendor: machine.vendor,
@@ -390,13 +390,13 @@ fn committed(bios: &str, complete_ms: u64) -> Record {
     }
 }
 
-/// `passing`'s readback judged against `record`, committed first: whether the
+/// `passing`'s readback judged against `record`, saved first: whether the
 /// run was red, and the record it left.
 fn judged_against(record: &Record) -> (bool, Record) {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
     plant(&dir, "passing", PANEL, BOOTED, None);
-    record.save(&root).expect("a committed record");
+    record.save(&root).expect("a saved record");
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     let red = metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]);
@@ -407,10 +407,10 @@ fn judged_against(record: &Record) -> (bool, Record) {
 /// green against a record it meets and red against one it is past.
 pub fn a_reading_past_its_record_fails_and_moves_nothing() {
     let bios = t14().bios;
-    let met = committed(&bios, 1165);
+    let met = kept(&bios, 1165);
     assert_eq!(judged_against(&met), (false, met));
     // 1165 ms against a ceiling of 1164.
-    let past = committed(&bios, 582);
+    let past = kept(&bios, 582);
     assert_eq!(judged_against(&past), (true, past));
 }
 
@@ -419,14 +419,14 @@ pub fn a_reading_past_its_record_fails_and_moves_nothing() {
 /// gains the row it lacks.
 pub fn a_run_under_another_bios_fails_and_records_nothing() {
     let lacking = |bios: &str| {
-        let mut record = committed(bios, 1165);
+        let mut record = kept(bios, 1165);
         record.measured.remove("span.passing.us");
         record
     };
     let older = lacking("N34ET50W (1.50 )");
     assert_eq!(judged_against(&older), (true, older));
     let bios = t14().bios;
-    assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
+    assert_eq!(judged_against(&lacking(&bios)), (false, kept(&bios, 1165)));
 }
 
 fn member(job: &str, adds_ms: u64) -> metal::Member {

@@ -26,7 +26,7 @@ use std::process::{Command, Output, Stdio};
 use crate::bootlog;
 use crate::flags::{declare_flags, Flag};
 use crate::image::LBA;
-use crate::metaltimings::{Machine, Record, Stick};
+use crate::metaltimings::{self, Machine, Record, Stick};
 
 const CONNECT_SECS: u64 = 10;
 
@@ -181,6 +181,8 @@ pub enum Refusal {
     /// The machine did not name itself: its SMBIOS answer is not
     /// [`Machine::QUERY`]'s three lines.
     Machine(String),
+    /// The account's home on the machine is no absolute path a rule can name.
+    Home(String),
     /// The machine has no record, so no stick this loop may write.
     Unrecorded { path: String },
     /// The machine's record is there and does not read.
@@ -321,6 +323,11 @@ impl fmt::Display for Refusal {
                  {said}"
             ),
             Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
+            Self::Home(got) => write!(
+                f,
+                "the account's home on the machine reads {got:?}, which is no normal absolute path \
+                 a sudoers rule can name"
+            ),
             Self::Unrecorded { path } => write!(
                 f,
                 "this machine has no record at {path}, so nothing names the stick this loop may \
@@ -445,38 +452,57 @@ impl Identity {
     }
 }
 
-/// Whether `disk` is the stick `machine`'s record under `root` names: the one
-/// disk this loop writes on that machine.
-fn recorded_stick(root: &Path, machine: &Machine, disk: &Identity) -> Result<(), Refusal> {
-    let record = Record::load(root, machine)
+/// Whether `disk` is the stick `machine`'s record in `dir` names: the one disk
+/// this loop writes on that machine.
+fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Stick, Refusal> {
+    let record = Record::load(dir, machine)
         .map_err(Refusal::Record)?
-        .ok_or_else(|| Refusal::Unrecorded { path: root.join(machine.path()).display().to_string() })?;
-    disk.check(&record.stick)
+        .ok_or_else(|| Refusal::Unrecorded { path: dir.join(machine.file()).display().to_string() })?;
+    disk.check(&record.stick)?;
+    Ok(record.stick)
+}
+
+/// What a capture left: the machine's record, the stick it names, and whether
+/// this capture wrote it.
+#[derive(Debug, PartialEq, Eq)]
+struct Captured {
+    at: PathBuf,
+    stick: Stick,
+    wrote: bool,
+}
+
+impl Captured {
+    /// The capture's account of itself: the record, and the disk every later
+    /// run on this machine wipes and writes, by its node and its identity.
+    fn said(&self, node: &Node) -> String {
+        let Stick { sectors, vendor, model } = &self.stick;
+        format!(
+            "{} {}: the stick is {}, {sectors} sectors, {vendor} {model}, removable; every run on \
+             this machine wipes and writes that disk",
+            self.at.display(),
+            if self.wrote { "records this machine now" } else { "already recorded this machine" },
+            node.whole(),
+        )
+    }
 }
 
 /// Record `machine` with `disk` as its stick where it has no record, and check
-/// `disk` against the record where it has one; answers the path it wrote, if
-/// it wrote one. **It never moves a record**: a machine is re-recorded by
-/// deleting its file.
-fn record_machine(root: &Path, machine: &Machine, disk: &Identity) -> Result<Option<PathBuf>, Refusal> {
-    let wrote = match Record::load(root, machine).map_err(Refusal::Record)? {
-        Some(_) => None,
+/// `disk` against the record where it has one. **It never moves a record**: a
+/// machine is re-recorded by deleting its file.
+fn record_machine(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Captured, Refusal> {
+    let wrote = match Record::load(dir, machine).map_err(Refusal::Record)? {
+        Some(_) => false,
         None => {
             let stick =
                 Stick { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
             // Before the write, so a fixed disk is never recorded as a stick.
             disk.check(&stick)?;
-            Some(Record::new(machine, stick).save(root).map_err(Refusal::Record)?)
+            Record::new(machine, stick).save(dir).map_err(Refusal::Record)?;
+            true
         }
     };
-    recorded_stick(root, machine, disk)?;
-    Ok(wrote)
-}
-
-/// Where the machines' records are read from and written to: the checkout
-/// this binary was built from.
-fn records_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    let stick = recorded_stick(dir, machine, disk)?;
+    Ok(Captured { at: dir.join(machine.file()), stick, wrote })
 }
 
 /// Declares every command this loop runs as root and the table the rule is
@@ -556,6 +582,38 @@ fn shell_word(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// The account's home on the machine, as its login shell answers [`Home::QUERY`]
+/// and never as a convention guesses it: the log is mounted and the rule staged
+/// under it, so no root command creates either and nothing lands in a
+/// world-writable directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Home(String);
+
+impl Home {
+    const QUERY: &str = "printf %s \"$HOME\"";
+
+    /// Normal and absolute, and one word a rule can name.
+    fn parse(text: &str) -> Result<Self, Refusal> {
+        let refused = || Refusal::Home(text.to_string());
+        Word::literal(text).map_err(|_| refused())?;
+        let rest = text.strip_prefix('/').ok_or_else(refused)?;
+        if rest.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            return Err(refused());
+        }
+        Ok(Self(text.to_string()))
+    }
+
+    /// Where the log partition is mounted.
+    fn mount(&self) -> String {
+        format!("{}/toyos-log", self.0)
+    }
+
+    /// Where the rule waits between `visudo -c` and `install`.
+    fn staged(&self) -> String {
+        format!("{}/.toyos-metal.sudoers", self.0)
+    }
+}
+
 /// Where the loop runs and what it may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Target {
@@ -586,21 +644,9 @@ impl Target {
         })
     }
 
-    /// The account's home on the machine, where the loop stages what it must
-    /// not leave in a world-writable directory.
-    fn home(&self) -> String {
-        format!("/home/{}", self.user)
-    }
-
-    /// Where the log partition is mounted on the machine; under the account's
-    /// own home, so no root command creates it.
-    fn mount(&self) -> String {
-        format!("{}/toyos-log", self.home())
-    }
-
     /// **The one place a root command line is written.** The installed rule and
     /// every argv are rendered from what this returns.
-    fn words(&self, job: Job) -> Result<Vec<Word>, Refusal> {
+    fn words(&self, job: Job, home: &Home) -> Result<Vec<Word>, Refusal> {
         let node = self.node.whole();
         let of = format!("of={node}");
         let read_log = format!("if={}", self.node.partition(self.log_part));
@@ -639,8 +685,8 @@ impl Target {
             ]),
             Job::Delete => masked(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum"]),
             Job::BootNext => masked(&[EFIBOOTMGR, "--bootnext"]),
-            Job::Mount => literal(&[MOUNT, "-o", "ro", &log, &self.mount()]),
-            Job::Umount => literal(&[UMOUNT, &self.mount()]),
+            Job::Mount => literal(&[MOUNT, "-o", "ro", &log, &home.mount()]),
+            Job::Umount => literal(&[UMOUNT, &home.mount()]),
             Job::Reboot => literal(&[REBOOT]),
             Job::Probe => literal(&[TRUE]),
         }
@@ -650,12 +696,12 @@ impl Target {
     ///
     /// **A command written with no arguments permits any arguments**
     /// (`sudoers(5)`, "Command Arguments"), so a one-word job renders `""`.
-    fn sudoers(&self) -> Result<String, Refusal> {
+    fn sudoers(&self, home: &Home) -> Result<String, Refusal> {
         let user = user_word(&self.user)?.sudoers();
         let mut out =
             String::from("# toyos-metal: the whole of what the metal loop runs as root.\n");
         for job in JOBS {
-            let rendered: Vec<String> = self.words(*job)?.iter().map(Word::sudoers).collect();
+            let rendered: Vec<String> = self.words(*job, home)?.iter().map(Word::sudoers).collect();
             let line = match rendered.len() {
                 1 => format!("{} \"\"", rendered[0]),
                 _ => rendered.join(" "),
@@ -668,8 +714,8 @@ impl Target {
     /// One job's argv, with `fill` substituted for the masked word: a job's mask
     /// count and its caller must agree, and a `fill` that is not four hex digits
     /// is a bad reading of `efibootmgr` rather than a bug here.
-    fn argv(&self, job: Job, fill: Option<&str>) -> Result<Vec<String>, Refusal> {
-        let words = self.words(job)?;
+    fn argv(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<Vec<String>, Refusal> {
+        let words = self.words(job, home)?;
         let masked = words.iter().filter(|w| **w == Word::Hex4).count();
         assert_eq!(masked, usize::from(fill.is_some()), "{job:?} takes {masked} filled word(s)");
         words
@@ -687,8 +733,8 @@ impl Target {
     }
 
     /// One job as the machine's login shell must receive it.
-    fn remote(&self, job: Job, fill: Option<&str>) -> Result<String, Refusal> {
-        let words: Vec<String> = self.argv(job, fill)?.iter().map(|w| shell_word(w)).collect();
+    fn remote(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<String, Refusal> {
+        let words: Vec<String> = self.argv(job, fill, home)?.iter().map(|w| shell_word(w)).collect();
         Ok(format!("sudo -n {}", words.join(" ")))
     }
 
@@ -1081,19 +1127,32 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
 /// The loop, over one target.
 struct Driver {
     target: Target,
+    home: Home,
     /// Print each write this run would make instead of making it; every read
     /// still happens, or the rehearsal would be of a different loop.
     dry_run: bool,
 }
 
+/// One command on `target`, as its account and never as root.
+fn ssh(target: &Target, what: &str, command: &str) -> Result<String, Refusal> {
+    let out = Command::new("ssh")
+        .args(target.ssh_argv(command))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| unstarted(what, &e))?;
+    answer(what, out).map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 impl Driver {
+    /// The loop over `target`, once the machine has said where its account's
+    /// home is.
+    fn reach(target: Target, dry_run: bool) -> Result<Self, Refusal> {
+        let home = Home::parse(&ssh(&target, "reading the account's home", Home::QUERY)?)?;
+        Ok(Self { target, home, dry_run })
+    }
+
     fn ssh(&self, what: &str, command: &str) -> Result<String, Refusal> {
-        let out = Command::new("ssh")
-            .args(self.target.ssh_argv(command))
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| unstarted(what, &e))?;
-        answer(what, out).map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        ssh(&self.target, what, command)
     }
 
     /// One root command, with `stdin` streamed into it. Announced either way,
@@ -1105,7 +1164,7 @@ impl Driver {
         fill: Option<&str>,
         stdin: Option<&Path>,
     ) -> Result<Option<Output>, Refusal> {
-        let line = self.target.remote(job, fill)?;
+        let line = self.target.remote(job, fill, &self.home)?;
         println!("  {} {line}", if self.dry_run { "would run:" } else { "run:" });
         if self.dry_run {
             return Ok(None);
@@ -1130,7 +1189,7 @@ impl Driver {
 
     /// The loop refuses to run at all until the rule is on the machine.
     fn require_sudo(&self) -> Result<(), Refusal> {
-        let probe = self.target.remote(Job::Probe, None)?;
+        let probe = self.target.remote(Job::Probe, None, &self.home)?;
         self.ssh("sudo -n", &probe).map(|_| ()).map_err(|e| Refusal::Sudo(e.to_string()))
     }
 
@@ -1278,7 +1337,7 @@ impl Driver {
     /// Two strings and not one, because only the second is the boot's log and
     /// [`bootlog::verdict`] is about that.
     fn read_log(&self) -> Result<(String, String), Refusal> {
-        self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.target.mount())))?;
+        self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.home.mount())))?;
         self.as_root("mounting the log partition", Job::Mount, None, None)?;
         let read = self.read_mounted();
         // Unconditional, because a failure in the read would otherwise leave
@@ -1298,7 +1357,7 @@ impl Driver {
     }
 
     fn read_mounted(&self) -> Result<(String, String), Refusal> {
-        let at = shell_word(&self.target.mount());
+        let at = shell_word(&self.home.mount());
         let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
         let (loader, logkeeper) = bootlog::split_listing(&listing);
         // Absence is an answer and not a failure: the boot is judged on what
@@ -1321,7 +1380,7 @@ impl Driver {
     /// filtered through a FAT driver — the same family of code that wrote the
     /// volume. This reads the sectors.
     fn raw_log(&self, sectors: u64) -> Result<Vec<u8>, Refusal> {
-        let line = self.target.remote(Job::ReadLog, None)?;
+        let line = self.target.remote(Job::ReadLog, None, &self.home)?;
         println!("  run: {line}  ({sectors} sectors)");
         let out = Command::new("ssh")
             .args(self.target.ssh_argv(&line))
@@ -1342,7 +1401,7 @@ impl Driver {
     }
 
     fn cat(&self, name: &str) -> Result<String, Refusal> {
-        let file = shell_word(&format!("{}/{name}", self.target.mount()));
+        let file = shell_word(&format!("{}/{name}", self.home.mount()));
         self.ssh("reading a log file", &format!("cat {file}"))
     }
 }
@@ -1508,15 +1567,14 @@ impl Args {
     }
 }
 
-/// `--host`'s `<user>@<machine>`, split. The user names the rule's user field
-/// and the account's home, so a `/` is refused with the rest of what either
-/// would misread; neither half may open with `-`, which `ssh` takes for a flag.
+/// `--host`'s `<user>@<machine>`, split. Neither half may open with `-`, which
+/// `ssh` takes for a flag.
 pub fn host_of(host: &str) -> Result<(&str, &str), Refusal> {
     let usage = || Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"));
     let (user, machine) = host.split_once('@').ok_or_else(usage)?;
     user_word(user)?;
     Word::literal(machine)?;
-    if user.contains('/') || [user, machine].iter().any(|half| half.starts_with('-')) {
+    if [user, machine].iter().any(|half| half.starts_with('-')) {
         return Err(usage());
     }
     Ok((user, machine))
@@ -1527,37 +1585,33 @@ pub fn host_of(host: &str) -> Result<(&str, &str), Refusal> {
 /// **The record before the rule**, so no rule is installed for a disk the
 /// record refuses. A machine with none is recorded with the disk the target
 /// names as its stick; one with a record has that disk checked against it.
+/// Either way it says which disk that is, and asks nothing: a bench holds
+/// nothing a wrong capture could lose, and the loop reaches no other machine.
 ///
 /// The rule goes on with the account's password on one command's stdin and
 /// nowhere else — never in an argument, never in output.
 fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
-    let driver = Driver { target: target.clone(), dry_run: false };
+    let driver = Driver::reach(target.clone(), false)?;
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
     let disk = Identity::parse(&driver.ssh("reading the disk", &target.identity())?)?;
-    match record_machine(records_root(), &machine, &disk)? {
-        Some(at) => println!("recorded this machine and its stick in {}", at.display()),
-        None => println!("{} is this machine's record, and the stick is its", machine.path().display()),
-    }
+    println!("{}", record_machine(&metaltimings::dir(), &machine, &disk)?.said(&target.node));
     // Staged in the account's own home rather than in a world-writable /tmp,
     // where another user could win the race between `visudo -c` and `install`.
-    let staged = format!("{}/.toyos-metal.sudoers", target.home());
+    let staged = shell_word(&driver.home.staged());
     // Cleared whichever way the install went: a refused rule left behind is a
     // file the next run would `visudo -c` instead of the one it just wrote.
-    let installed = stage_and_install(&driver, target, password, &staged);
+    let installed = stage_and_install(&driver, password, &staged);
     let cleared = driver.ssh("clearing the staged rule", &format!("rm -f {staged}"));
     installed.and(cleared)?;
     println!("installed /etc/sudoers.d/toyos-metal");
     Ok(())
 }
 
-fn stage_and_install(
-    driver: &Driver,
-    target: &Target,
-    password: &Path,
-    staged: &str,
-) -> Result<String, Refusal> {
-    let rule = target.sudoers()?;
+/// `staged` is one shell word already.
+fn stage_and_install(driver: &Driver, password: &Path, staged: &str) -> Result<String, Refusal> {
+    let target = &driver.target;
+    let rule = target.sudoers(&driver.home)?;
 
     let mut stage = Command::new("ssh")
         .args(target.ssh_argv(&format!("umask 077 && cat > {staged}")))
@@ -1614,7 +1668,6 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         install_sudoers(&args.target, password)?;
         return Ok(None);
     }
-    let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
     let began = std::time::Instant::now();
 
     let Some(asked) = &args.image else {
@@ -1654,6 +1707,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         image.path.display()
     );
 
+    let driver = Driver::reach(args.target.clone(), args.dry_run)?;
     driver.require_sudo()?;
     let policy =
         driver.ssh("reading the lid policy", "systemd-analyze cat-config systemd/logind.conf")?;
@@ -1662,14 +1716,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         .map_err(Refusal::Machine)?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
     let identity = Identity::parse(&driver.ssh("reading the disk", &args.target.identity())?)?;
-    recorded_stick(records_root(), &machine, &identity)?;
+    recorded_stick(&metaltimings::dir(), &machine, &identity)?;
     println!(
         "disk {}: {} sectors, {} {}, removable — the stick {} names",
         args.target.node.whole(),
         identity.sectors,
         identity.vendor,
         identity.model,
-        machine.path().display()
+        metaltimings::dir().join(machine.file()).display()
     );
     let preamble = began.elapsed().as_secs_f64();
 
@@ -1970,8 +2024,8 @@ const NOT_READ: &str = "-";
 /// phase of this loop's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Phases {
-    /// Admitting the image, then the rule, the lid policy, the machine and the
-    /// disk read off the machine.
+    /// Admitting the image, then the account's home, the rule, the lid policy,
+    /// the machine and the disk read off the machine.
     pub preamble: f64,
     pub wipe: f64,
     /// `dd` over `ssh`, and the table read back.
@@ -2187,6 +2241,11 @@ fn key<T: std::str::FromStr>(text: &str, name: &str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The T14's account's home, as its shell answers [`Home::QUERY`].
+    fn home() -> Home {
+        Home::parse("/home/t14").expect("a home")
+    }
 
     fn target() -> Target {
         Target {
@@ -2597,15 +2656,17 @@ mod tests {
         assert_eq!(nvme.part_sysfs(1), "/sys/class/block/nvme0n1/nvme0n1p1");
     }
 
-    /// **The stick a machine's loop writes is the one its record names**, and
-    /// the T14's committed record names the stick the loop has always written.
+    /// **The stick a machine's loop writes is the one its record names.**
     #[test]
     fn the_identity_is_the_recorded_stick_or_it_is_refused() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = toyos_tmpdir::TempDir::new("metal-record");
+        let root: &Path = &dir;
         let t14 = t14();
+        let recorded = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
+        Record::new(&t14, recorded.clone()).save(root).expect("a record");
         let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
         assert_eq!(stick.sectors, 60_062_500);
-        assert!(recorded_stick(root, &t14, &stick).is_ok());
+        assert_eq!(recorded_stick(root, &t14, &stick), Ok(recorded));
 
         let bigger = Identity::parse("500118192\nSanDisk \nUltra           \n1\n").unwrap();
         assert_eq!(
@@ -2640,7 +2701,8 @@ mod tests {
         let stick = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
 
         let refused = recorded_stick(&root, &bench, &stick);
-        let path = root.join("tests/metal/acme-bench-2.toml").display().to_string();
+        let at = root.join("acme-bench-2.toml");
+        let path = at.display().to_string();
         assert_eq!(refused, Err(Refusal::Unrecorded { path: path.clone() }));
         let said = refused.unwrap_err().to_string();
         assert!(said.contains("--install-sudoers") && said.contains(&path), "{said}");
@@ -2652,16 +2714,16 @@ mod tests {
         ));
         assert_eq!(Record::load(&root, &bench), Ok(None), "a refused capture wrote a record");
 
-        let wrote = record_machine(&root, &bench, &stick).expect("recorded");
-        assert_eq!(wrote, Some(root.join("tests/metal/acme-bench-2.toml")));
-        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(()));
-        let record = Record::load(&root, &bench).expect("a readable record").expect("a record");
+        let want = Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() };
         assert_eq!(
-            record.stick,
-            Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() }
+            record_machine(&root, &bench, &stick),
+            Ok(Captured { at: at.clone(), stick: want.clone(), wrote: true })
         );
+        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(want.clone()));
+        let record = Record::load(&root, &bench).expect("a readable record").expect("a record");
+        assert_eq!(record.stick, want);
         assert!(record.measured.is_empty());
-        assert_eq!(record_machine(&root, &bench, &stick), Ok(None));
+        assert_eq!(record_machine(&root, &bench, &stick), Ok(Captured { at, stick: want, wrote: false }));
 
         // The T14's stick is not this bench's.
         let t14_stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
@@ -2678,27 +2740,55 @@ mod tests {
         assert!(!Refusal::Unrecorded { path }.about_the_boot());
     }
 
-    /// **`--host` moves the mount with the user**: the rule, the argv and the
-    /// mount point all name the account's own home, and none the T14's.
+    /// **The capture says which disk every later run writes**: the record's
+    /// path, the node, and the identity it recorded or found recorded.
     #[test]
-    fn the_mount_is_under_the_hosts_own_account() {
+    fn a_capture_says_the_disk_it_recorded_and_every_run_will_write() {
+        let root = toyos_tmpdir::TempDir::new("metal-record");
+        let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
+        let disk = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
+        let node = Node::parse("/dev/sdb").unwrap();
+        let at = root.join("acme-bench-2.toml").display().to_string();
+        let first = record_machine(&root, &bench, &disk).expect("recorded").said(&node);
+        let again = record_machine(&root, &bench, &disk).expect("checked").said(&node);
+        for (said, how) in [(first, "records this machine now"), (again, "already recorded this machine")] {
+            assert_eq!(
+                said,
+                format!(
+                    "{at} {how}: the stick is /dev/sdb, 120176640 sectors, Kingston DataTraveler, \
+                     removable; every run on this machine wipes and writes that disk"
+                )
+            );
+        }
+    }
+
+    /// **The home is the one the machine names**: the rule, the argv, the
+    /// mount point and the staged rule all sit under it, and a home the
+    /// machine answers that is no normal absolute path is refused.
+    #[test]
+    fn the_mount_and_the_staged_rule_are_under_the_home_the_machine_named() {
         let words = ["--host", "dev@box"].map(String::from);
         let target = Args::parse(&words).unwrap().target;
-        assert_eq!(target.mount(), "/home/dev/toyos-log");
+        let home = Home::parse("/var/home/dev").expect("a home");
+        assert_eq!(home.mount(), "/var/home/dev/toyos-log");
+        assert_eq!(home.staged(), "/var/home/dev/.toyos-metal.sudoers");
         assert_eq!(
-            target.argv(Job::Mount, None).unwrap(),
-            ["/usr/bin/mount", "-o", "ro", "/dev/sda3", "/home/dev/toyos-log"]
+            target.argv(Job::Mount, None, &home).unwrap(),
+            ["/usr/bin/mount", "-o", "ro", "/dev/sda3", "/var/home/dev/toyos-log"]
         );
-        let rule = target.sudoers().unwrap();
-        assert!(rule.contains("dev ALL=(root) NOPASSWD: /usr/bin/umount /home/dev/toyos-log\n"), "{rule}");
-        assert!(!rule.contains("/home/t14"), "{rule}");
-        assert_eq!(target.home(), "/home/dev");
+        let rule = target.sudoers(&home).unwrap();
+        assert!(rule.contains("dev ALL=(root) NOPASSWD: /usr/bin/umount /var/home/dev/toyos-log\n"), "{rule}");
+        assert!(!rule.contains(" /home/"), "{rule}");
+        for answer in ["", "var/home/dev", "/", "/var/home/dev/", "/var//dev", "/var/./dev", "/var/../root", "/a b", "/a'b", "/a\n"]
+        {
+            assert_eq!(Home::parse(answer), Err(Refusal::Home(answer.to_string())), "{answer:?}");
+        }
     }
 
     #[test]
-    fn a_host_is_a_user_and_a_machine_that_ssh_reads_as_neither_flag_nor_path() {
+    fn a_host_is_a_user_and_a_machine_that_ssh_reads_as_no_flag() {
         assert_eq!(host_of("dev@box"), Ok(("dev", "box")));
-        for host in ["box", "../x@box", "a/b@box", "-oProxyCommand=x@box", "dev@-oProxyCommand=x", "dev@", "dev@a b"]
+        for host in ["box", "-oProxyCommand=x@box", "dev@-oProxyCommand=x", "dev@", "dev@a b"]
         {
             assert!(
                 matches!(host_of(host), Err(Refusal::Usage(_) | Refusal::Word(_))),
@@ -2714,7 +2804,7 @@ mod tests {
     fn the_rule_is_the_command_table_rendered() {
         let hex = "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]";
         assert_eq!(
-            target().sudoers().unwrap(),
+            target().sudoers(&home()).unwrap(),
             format!(
                 "# toyos-metal: the whole of what the metal loop runs as root.\n\
                  t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
@@ -2739,19 +2829,19 @@ mod tests {
         let mut moved = target();
         moved.node = Node::parse("/dev/sdb").unwrap();
         moved.log_part = 2;
-        let rule = moved.sudoers().unwrap();
+        let rule = moved.sudoers(&home()).unwrap();
         assert!(rule.contains("/usr/bin/mount -o ro /dev/sdb2 /home/t14/toyos-log"), "{rule}");
         assert_eq!(
-            moved.argv(Job::Mount, None).unwrap(),
+            moved.argv(Job::Mount, None, &home()).unwrap(),
             ["/usr/bin/mount", "-o", "ro", "/dev/sdb2", "/home/t14/toyos-log"]
         );
         assert!(rule.contains("/usr/sbin/wipefs --all /dev/sdb"), "{rule}");
-        assert_eq!(moved.argv(Job::Wipe, None).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
+        assert_eq!(moved.argv(Job::Wipe, None, &home()).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
         // The outside judge's read moves with the same field the mount does,
         // and it is a *partition*, spelled from the disk's own name.
         assert!(rule.contains("/usr/bin/dd if\\=/dev/sdb2 bs\\=4M"), "{rule}");
         assert_eq!(
-            moved.argv(Job::ReadLog, None).unwrap(),
+            moved.argv(Job::ReadLog, None, &home()).unwrap(),
             ["/usr/bin/dd", "if=/dev/sdb2", "bs=4M"]
         );
         assert!(!rule.contains("/dev/sda"), "{rule}");
@@ -2762,7 +2852,7 @@ mod tests {
     /// write to the disk it names.
     #[test]
     fn the_outside_judges_read_can_write_nothing() {
-        let argv = target().argv(Job::ReadLog, None).unwrap();
+        let argv = target().argv(Job::ReadLog, None, &home()).unwrap();
         assert!(argv.iter().any(|w| w.starts_with("if=")), "{argv:?}");
         assert!(!argv.iter().any(|w| w.starts_with("of=") || w.starts_with("conv=")), "{argv:?}");
         // And it names a partition rather than the whole disk, so it cannot be
@@ -2773,11 +2863,11 @@ mod tests {
     #[test]
     fn a_boot_entry_the_firmware_did_not_name_cannot_be_filled_in() {
         let t = target();
-        assert_eq!(t.argv(Job::BootNext, Some("001D")).unwrap().last().unwrap(), "001D");
-        assert_eq!(t.argv(Job::Delete, Some("ffff")).unwrap().last().unwrap(), "ffff");
+        assert_eq!(t.argv(Job::BootNext, Some("001D"), &home()).unwrap().last().unwrap(), "001D");
+        assert_eq!(t.argv(Job::Delete, Some("ffff"), &home()).unwrap().last().unwrap(), "ffff");
         for bad in ["12345", "00g1", "1", "", "0 1", "../."] {
             assert_eq!(
-                t.argv(Job::BootNext, Some(bad)),
+                t.argv(Job::BootNext, Some(bad), &home()),
                 Err(Refusal::BootEntry(bad.to_string())),
                 "{bad}"
             );
@@ -2804,7 +2894,7 @@ mod tests {
         ] {
             let mut t = target();
             t.user = user.to_string();
-            assert_eq!(t.sudoers(), Err(Refusal::Word(user.to_string())), "{user}");
+            assert_eq!(t.sudoers(&home()), Err(Refusal::Word(user.to_string())), "{user}");
             let host = ["--host".to_string(), format!("{user}@box")];
             assert!(
                 matches!(Args::parse(&host), Err(Refusal::Word(_) | Refusal::Usage(_))),
@@ -2848,11 +2938,11 @@ mod tests {
              /sys/class/block/sda/device/model /sys/class/block/sda/removable"
         );
         assert_eq!(
-            t.remote(Job::Flash, None).unwrap(),
+            t.remote(Job::Flash, None, &home()).unwrap(),
             "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync'"
         );
         assert_eq!(
-            t.remote(Job::Create, None).unwrap(),
+            t.remote(Job::Create, None, &home()).unwrap(),
             "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/sda' '--part' '1' \
              '--label' 'ToyOS' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
         );
