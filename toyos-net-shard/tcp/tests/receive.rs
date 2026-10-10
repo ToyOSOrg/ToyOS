@@ -230,10 +230,11 @@ fn s_rx_022_no_sack_unnegotiated() {
 }
 
 #[test]
-fn s_rx_023_a_reset_is_never_end_of_stream() {
+fn s_rx_023_a_reset_comes_after_the_text_before_it() {
     let mut h = fixture_e();
     h.input(1, seg(5001).ack(1001).len(100));
     h.input(2, seg(5101).rst());
+    assert_eq!(recv(&mut h, 1000), Ok(Received::Data(100)));
     assert_eq!(recv(&mut h, 1000), Err(Error::Failed(Failure::Reset)));
 }
 

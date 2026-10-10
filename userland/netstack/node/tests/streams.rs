@@ -1018,6 +1018,18 @@ fn a_reset_ends_both_pipes_and_the_stream() {
     assert!(net.events().is_empty() && net.far.resets.is_empty());
 }
 
+// Text and the reset after it in one batch: the client reads the text before the failure, as it
+// would had they come in passes of their own (Linux and the BSDs read what arrived before the
+// reset ahead of ECONNRESET).
+#[test]
+fn a_reset_in_the_batch_of_the_text_before_it_ends_the_pipes_after_the_text() {
+    let (mut net, _, client) = established();
+    let text = net.far.text(b"last");
+    let rst = net.far.rst();
+    net.node.receive(net.now, batch(&[&text, &rst]), draw(&mut net.draws));
+    assert_eq!((client.borrow().inbox.clone(), let_go(&client)), (b"last".to_vec(), vec![PipeEnd::FromClient, PipeEnd::ToClient]));
+}
+
 // ---- a client that leaves ----
 
 #[test]
