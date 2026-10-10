@@ -1,0 +1,9 @@
+# A member of the host workspace (root `Cargo.toml`): the kernel depends on it
+# by path and its tests run on the host.
+
+[package]
+name = "toyos-usbhid"
+description = "USB HID boot keyboard and pointer reports in, key transitions and pointer motion out, every malformed report refused by name; pure."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

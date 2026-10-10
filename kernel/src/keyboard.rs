@@ -94,42 +94,14 @@ pub fn release_all() -> usize {
     n
 }
 
-/// Process a HID boot protocol keyboard report (8 bytes) and return events queued; `prev` must be this device's own last report.
-pub fn handle_report(state: &mut [u8; 8], report: &[u8]) -> usize {
-    let prev = *state;
-    state.copy_from_slice(&report[..8]);
+/// Queue the transitions one USB keyboard's report made, and return how many queued.
+pub fn apply(transitions: toyos_usbhid::keyboard::Transitions) -> usize {
     let mut queued = 0;
-
-    // report[0] carries modifiers as a bitmask, not usages; synthesized here as discrete per-modifier events.
-    const MOD_BITS: [(u8, u8); 8] = [
-        (0x01, 0xE0),
-        (0x02, 0xE1),
-        (0x04, 0xE2),
-        (0x08, 0xE3),
-        (0x10, 0xE4),
-        (0x20, 0xE5),
-        (0x40, 0xE6),
-        (0x80, 0xE7),
-    ];
-    for &(bit, usage) in &MOD_BITS {
-        let now = report[0] & bit != 0;
-        if (prev[0] & bit != 0) != now && handle_key(usage, now) {
+    for key in transitions {
+        if handle_key(key.usage, key.pressed) {
             queued += 1;
         }
     }
-
-    for &usage in &prev[2..8] {
-        if usage >= 4 && !report[2..8].contains(&usage) && handle_key(usage, false) {
-            queued += 1;
-        }
-    }
-
-    for &usage in &report[2..8] {
-        if usage >= 4 && !prev[2..8].contains(&usage) && handle_key(usage, true) {
-            queued += 1;
-        }
-    }
-
     queued
 }
 

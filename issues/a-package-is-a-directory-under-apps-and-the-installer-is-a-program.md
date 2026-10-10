@@ -97,8 +97,7 @@ The storage track's users and mount-protocol stages do not block this one.
 4. The signed repository. Landed: the verifier and the publisher, on the
    host. Owed: `pkg install <name>` from a mirror list whose one kind is a
    local directory, the pinned root and its floors under `/system/etc/pkg/`,
-   the machine's under `/state/pkg`, and the commit by rename, which waits on
-   `issues/a-directory-rename-on-data-is-not-atomic.md`.
+   the machine's under `/state/pkg`, and the commit by rename.
 5. The users track's per-user `/home`
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`) decides
    where a package's own data goes. Until then it goes in its own folder of

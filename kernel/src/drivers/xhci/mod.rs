@@ -848,7 +848,7 @@ impl XhciController {
         let dev = &mut self.devices[at];
         if code == CC_SUCCESS || code == CC_SHORT_PACKET {
             dev.failures = 0;
-            dev.dispatch_report();
+            dev.dispatch_report(event.status & 0x00FF_FFFF);
             dev.requeue(&self.db_base);
             return;
         }
@@ -1188,15 +1188,14 @@ impl XhciController {
     fn teardown_port(&mut self, port_idx: u8) -> bool {
         while let Some(at) = self.devices.iter().position(|d| d.port_idx == port_idx) {
             let mut dev = self.devices.remove(at);
-            let role = dev.role;
             dev.unbind();
-            match role {
-                hid::HidRole::Keyboard => log!(
+            match &dev.role {
+                hid::HidRole::Keyboard(_) => log!(
                     "xHCI: USB keyboard on slot {} unplugged from port {}",
                     dev.slot_id, port_idx + 1
                 ),
                 // The source is logged because it is the only place the button merge is visible; a leaked entry reads the same otherwise.
-                hid::HidRole::Pointer(source) => log!(
+                hid::HidRole::Pointer(source, _) => log!(
                     "xHCI: USB pointer on slot {} unplugged from port {}, source {} released",
                     dev.slot_id, port_idx + 1, source.id()
                 ),
@@ -1663,8 +1662,8 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Usb> {
                 vendor: hid.usb.vendor,
                 product: hid.usb.product,
                 function: match hid.role {
-                    hid::HidRole::Keyboard => UsbFunction::Keyboard,
-                    hid::HidRole::Pointer(_) => UsbFunction::Pointer,
+                    hid::HidRole::Keyboard(_) => UsbFunction::Keyboard,
+                    hid::HidRole::Pointer(..) => UsbFunction::Pointer,
                 },
             });
         }
