@@ -372,8 +372,7 @@ fn main() {
     let mut accept_refused: u64 = 0;
 
     loop {
-        // First, because it is what makes the interrupt taken and what gives
-        // a driver with a per-pass receive budget that budget back.
+        // First, because it is what makes the interrupt taken.
         if let Some(link) = card.begin_pass() {
             // A change of state only: a speed change is no new network.
             if link.is_up() != link_up {
@@ -381,7 +380,7 @@ fn main() {
                 node.link(clock(), link_up, draw);
             }
         }
-        node.receive(clock(), |sink| card.rx(sink), draw);
+        let owed = node.receive(clock(), |sink| card.rx(sink), draw);
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);
@@ -418,9 +417,14 @@ fn main() {
         }
 
         // The node's next deadline: a retransmission, a lease's timer, a
-        // lookup's wait, a connect's. Zero when one is due.
+        // lookup's wait, a connect's. Zero when one is due, and when the
+        // receive stopped at its bound: the interrupts of the frames it left
+        // were taken with this pass's.
         let nanos = |left: Duration| u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
         let mut timeout = node.next_deadline().map_or(u64::MAX, |at| nanos(at.since(clock())));
+        if owed {
+            timeout = 0;
+        }
         if let Some(left) = leases.due_in() {
             timeout = timeout.min(nanos(left));
         }
