@@ -11,6 +11,8 @@ use crate::virtio_net::VirtioNet;
 pub enum Card {
     Virtio(VirtioNet),
     Intel(i219::Nic),
+    /// YOGA WIFI HACK: the AX200, which scans and carries no frame yet.
+    Wifi(crate::wifi::Wifi),
 }
 
 impl Card {
@@ -28,6 +30,13 @@ impl Card {
         }
     }
 
+    pub fn wifi(claim: toyos::PciDev) -> Self {
+        match crate::wifi::Wifi::open(claim) {
+            Ok(nic) => Self::Wifi(nic),
+            Err(why) => Self::undrivable(format!("wifi: {why}")),
+        }
+    }
+
     pub fn virtio(claim: toyos::PciDev) -> Self {
         match VirtioNet::open(claim) {
             Ok(nic) => Self::Virtio(nic),
@@ -39,6 +48,7 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.mac(),
             Self::Intel(nic) => nic.mac(),
+            Self::Wifi(nic) => nic.mac(),
         }
     }
 
@@ -47,6 +57,7 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.claim(),
             Self::Intel(nic) => nic.claim(),
+            Self::Wifi(nic) => nic.claim(),
         }
     }
 
@@ -71,6 +82,10 @@ impl Card {
         let answered = match self {
             Self::Virtio(nic) => nic.take_interrupt().map(|_| None).map_err(toyos_i219::PassRefused::Claim),
             Self::Intel(nic) => nic.begin_pass(),
+            Self::Wifi(nic) => {
+                nic.pass();
+                Ok(None)
+            }
         };
         answered.unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
     }
@@ -91,6 +106,10 @@ impl Card {
             Self::Virtio(_) => {
                 snap.put("driver", "virtio-net");
                 snap.put("link.state", "unreported");
+                return;
+            }
+            Self::Wifi(nic) => {
+                nic.inspect(snap);
                 return;
             }
             Self::Intel(nic) => nic,
@@ -145,6 +164,7 @@ impl Card {
                 take(nic.rx_frame(&frame));
                 nic.rx_done(frame);
             }
+            Self::Wifi(_) => return false,
         }
         true
     }
@@ -155,6 +175,7 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.tx_room(),
             Self::Intel(nic) => nic.tx_room(),
+            Self::Wifi(_) => 0,
         }
     }
 
@@ -168,6 +189,7 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.tx_room(),
             Self::Intel(nic) => nic.wake_on_room(),
+            Self::Wifi(_) => 0,
         }
     }
 
@@ -175,6 +197,7 @@ impl Card {
         match self {
             Self::Virtio(nic) => nic.tx(len, fill),
             Self::Intel(nic) => nic.tx(len, fill),
+            Self::Wifi(_) => panic!("wifi: the AX200 carries no frame yet, and was offered one"),
         }
     }
 
@@ -185,6 +208,7 @@ impl Card {
         match self {
             Self::Virtio(_) => None,
             Self::Intel(nic) => nic.pass_due_in(),
+            Self::Wifi(nic) => nic.due_in(),
         }
     }
 
@@ -195,6 +219,7 @@ impl Card {
         match self {
             Self::Virtio(_) => {}
             Self::Intel(nic) => nic.report(),
+            Self::Wifi(_) => {}
         }
     }
 }

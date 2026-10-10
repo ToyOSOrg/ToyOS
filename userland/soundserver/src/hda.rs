@@ -12,9 +12,10 @@
 use toyos::HdaDev;
 use toyos_abi::hda::HdaInfo;
 use toyos_abi::syscall::{RegWidth, SyscallError};
-use toyos_hda::graph::Codec;
-use toyos_hda::path::{OutputPath, PathError};
-use toyos_hda::verb::{Address, Node, Response, Verb};
+use toyos_hda::caps::{AmpCaps, PcmCaps};
+use toyos_hda::graph::{Codec, FunctionGroup, FunctionKind};
+use toyos_hda::path::{OutputPath, PathError, PinSetup};
+use toyos_hda::verb::{self as verb, Address, Node, Response, Verb};
 use toyos_hda::{config, probe};
 
 /// The controller's immediate-command registers, as byte offsets into the
@@ -65,8 +66,8 @@ pub enum Refusal {
     NoCodec,
     /// Every codec answered and none offers an output a human can hear.
     NoOutput(toyos_hda::PathError),
-    /// The converter behind the chosen pin does not offer the one rate this
-    /// pipeline runs at.
+    /// Neither the converter behind the chosen pin nor its function group
+    /// offers any rate this pipeline runs at.
     Rate,
 }
 
@@ -95,8 +96,8 @@ impl core::fmt::Display for Refusal {
             }
             Self::Rate => write!(
                 f,
-                "the converter does not offer {} Hz at {} bits",
-                config::RATE,
+                "the converter offers none of {:?} Hz at {} bits",
+                config::RATES,
                 config::WIDTH
             ),
         }
@@ -109,7 +110,7 @@ impl Hda {
     /// The claim is the argument: `/system/bin/supervisor` minted it and endowed it, so
     /// "does this machine have an HDA?" was already answered before soundserver's
     /// first instruction.
-    pub fn claim(dev: HdaDev) -> Result<(Self, OutputPath, u8), Refusal> {
+    pub fn claim(dev: HdaDev) -> Result<(Self, OutputPath, u8, u32), Refusal> {
         let info = dev.info().map_err(Refusal::Kernel)?;
         let mut hda = Hda { dev, info, running: false };
 
@@ -136,8 +137,71 @@ impl Hda {
             return Err(Refusal::NoCodec);
         }
 
+        // YOGA HACK: the whole graph, said, before anything is chosen.
+        let mut group_pcm = None;
+        for codec in &codecs {
+            for group in &codec.groups {
+                let a = codec.address;
+                let pcm = hda.get(a, group.node, verb::GET_PARAMETER, verb::PARAM_PCM);
+                let formats = hda.get(a, group.node, verb::GET_PARAMETER, verb::PARAM_STREAM_FORMATS);
+                let subsystem = hda.get(a, group.node, GET_SUBSYSTEM_ID, 0);
+                say!(
+                    "soundserver: YOGA codec{a} group {:#04x} ({}): pcm {} formats {} subsystem {}",
+                    group.node.0,
+                    group.kind.name(),
+                    word(pcm),
+                    word(formats),
+                    word(subsystem),
+                );
+                if let Some(r) = pcm {
+                    say!("soundserver: YOGA   group pcm: {}", pcm_text(PcmCaps::decode(r)));
+                }
+                if group.kind == FunctionKind::Audio && group_pcm.is_none() {
+                    group_pcm = pcm.map(PcmCaps::decode);
+                }
+                for w in &group.widgets {
+                    say!(
+                        "soundserver: YOGA   node {:#04x} {} ch={} conns={:02x?} amp_in={:?} amp_out={:?} power={} override(fmt={} amp={}){}{}",
+                        w.node.0,
+                        w.caps.kind.name(),
+                        w.caps.channels,
+                        w.connections.iter().map(|n| n.0).collect::<Vec<_>>(),
+                        w.amp_in,
+                        w.amp_out,
+                        w.caps.power_control,
+                        w.caps.format_override,
+                        w.caps.amp_override,
+                        match w.pcm {
+                            Some(pcm) => format!(" pcm {}", pcm_text(pcm)),
+                            None => String::new(),
+                        },
+                        match &w.pin {
+                            Some(pin) => format!(" pin {:?} {:?}", pin.config, pin.caps),
+                            None => String::new(),
+                        },
+                    );
+                }
+            }
+        }
+
         let path = toyos_hda::find_output_path(&codecs).map_err(Refusal::NoOutput)?;
-        let (format, channels) = config::format(&codecs, &path).ok_or(Refusal::Rate)?;
+        say!("soundserver: YOGA chosen path {path:?}");
+        let group = codecs
+            .iter()
+            .find(|c| c.address == path.codec)
+            .and_then(|c| c.groups.iter().find(|g| g.node == path.group))
+            .expect("the path names a group this walk produced")
+            .clone();
+        let chains: Vec<(Node, Vec<(Node, u8)>)> = core::iter::once(&path.output)
+            .chain(path.headphone.iter())
+            .map(|pin| (pin.node, chain(&group, pin)))
+            .collect();
+        for (pin, hops) in &chains {
+            say!("soundserver: YOGA chain from pin {:#04x}: {:02x?} (node, input index)", pin.0, hops);
+        }
+
+        let (format, channels, rate) =
+            config::format(&codecs, &path, group_pcm).ok_or(Refusal::Rate)?;
         say!(
             "soundserver: hda codec{} group {:#04x} converter {:#04x} -> pin {:#04x} ({}), \
              headphone {}, format {:#06x} ({} Hz {} ch {}-bit)",
@@ -151,23 +215,83 @@ impl Hda {
                 None => String::from("none"),
             },
             format,
-            config::RATE,
+            rate,
             channels,
             config::WIDTH,
         );
 
-        // YOGA HACK: whether the speaker path's amplifier bit is set, said.
-        say!(
-            "soundserver: YOGA EAPD set on output pin {:#04x}: {}; on the headphone pin: {}",
-            path.output.node.0,
-            path.output.eapd,
-            path.headphone.as_ref().map_or(String::from("no headphone pin"), |hp| hp.eapd.to_string()),
-        );
-        let verbs = config::verbs(&codecs, &path, format, info.stream_tag)
+        let mut verbs = config::verbs(&codecs, &path, format, info.stream_tag)
             .expect("the path names a codec this walk produced");
+        // YOGA HACK: every widget between a pin and the converter that the
+        // shared sequence does not reach — a single-connection mixer or
+        // selector — powered, and its amplifiers unmuted at 0 dB, the input
+        // one on the index the chain takes.
+        let mut extra = Vec::new();
+        for (_, hops) in &chains {
+            for &(node, index) in hops {
+                let w = group.widget(node).expect("the chain walked this widget");
+                if w.pin.is_some() || w.is_converter() {
+                    continue;
+                }
+                if w.caps.power_control {
+                    extra.push(Verb::short(path.codec, node, verb::SET_POWER_STATE, 0));
+                }
+                if let Some(amp) = w.amp_out {
+                    extra.push(amp_set(path.codec, node, AMP_OUTPUT, 0, amp));
+                }
+                if let Some(amp) = w.amp_in {
+                    extra.push(amp_set(path.codec, node, AMP_INPUT, index, amp));
+                }
+            }
+        }
+        // Before the converter's format and tag, which close the sequence.
+        let at = verbs.len() - 2;
+        verbs.splice(at..at, extra);
+
         let sent = verbs.len();
-        for verb in verbs {
-            hda.send(verb);
+        for v in verbs {
+            let response = hda.send(v);
+            say!("soundserver: YOGA verb {:#010x} -> {}", v.raw(), word(response));
+        }
+
+        // YOGA HACK: what the codec says it now holds, on every node of every chain.
+        for (pin, hops) in &chains {
+            for &(node, index) in hops {
+                let a = path.codec;
+                let w = group.widget(node).expect("the chain walked this widget");
+                let power = hda.get(a, node, verb::GET_POWER_STATE, 0);
+                let out_l = hda.send(Verb::long(a, node, GET_AMP_GAIN_MUTE, 0x8000 | 0x2000));
+                let out_r = hda.send(Verb::long(a, node, GET_AMP_GAIN_MUTE, 0x8000));
+                let in_l = hda.send(Verb::long(a, node, GET_AMP_GAIN_MUTE, 0x2000 | index as u16));
+                let in_r = hda.send(Verb::long(a, node, GET_AMP_GAIN_MUTE, index as u16));
+                let mut line = format!(
+                    "soundserver: YOGA readback pin {:#04x} node {:#04x} {}: power {} amp_out L {} R {} amp_in[{index}] L {} R {}",
+                    pin.0,
+                    node.0,
+                    w.caps.kind.name(),
+                    word(power),
+                    word(out_l),
+                    word(out_r),
+                    word(in_l),
+                    word(in_r),
+                );
+                if w.connections.len() > 1 {
+                    let select = hda.get(a, node, verb::GET_CONNECTION_SELECT, 0);
+                    line += &format!(" select {}", word(select));
+                }
+                if w.pin.is_some() {
+                    let control = hda.get(a, node, verb::GET_PIN_CONTROL, 0);
+                    let eapd = hda.get(a, node, verb::GET_EAPD, 0);
+                    let sense = hda.get(a, node, verb::GET_PIN_SENSE, 0);
+                    line += &format!(" pinctl {} eapd {} sense {}", word(control), word(eapd), word(sense));
+                }
+                if w.is_converter() {
+                    let fmt = hda.send(Verb::long(a, node, verb::GET_CONVERTER_FORMAT as u8, 0));
+                    let stream = hda.get(a, node, verb::GET_CONVERTER_STREAM, 0);
+                    line += &format!(" format {} stream {}", word(fmt), word(stream));
+                }
+                say!("{line}");
+            }
         }
 
         // The tag before the format, and both before the engine is ever told to
@@ -177,7 +301,7 @@ impl Hda {
             .map_err(Refusal::Kernel)?;
         hda.write(SD_FMT, RegWidth::U16, format as u32).map_err(Refusal::Kernel)?;
         say!("soundserver: hda path configured in {sent} verbs, stream tag {}", info.stream_tag);
-        Ok((hda, path, channels))
+        Ok((hda, path, channels, rate))
     }
 
     pub fn info(&self) -> HdaInfo {
@@ -252,6 +376,56 @@ impl Hda {
         }
         false
     }
+}
+
+impl Hda {
+    fn get(&mut self, codec: Address, node: Node, verb: u16, payload: u8) -> Option<Response> {
+        self.send(Verb::short(codec, node, verb, payload))
+    }
+}
+
+/// YOGA HACK: the verbs and payload bits only the survey above uses.
+const GET_SUBSYSTEM_ID: u16 = 0xF20;
+const GET_AMP_GAIN_MUTE: u8 = 0xB;
+const AMP_OUTPUT: u16 = 1 << 15;
+const AMP_INPUT: u16 = 1 << 14;
+
+/// Unmuted, both channels, at the amplifier's 0 dB index where it has one.
+fn amp_set(codec: Address, node: Node, which: u16, index: u8, amp: AmpCaps) -> Verb {
+    let gain = amp.gain.map_or(0, |range| range.zero_db as u16);
+    let payload = which | (1 << 13) | (1 << 12) | ((index as u16 & 0xF) << 8) | gain;
+    Verb::long(codec, node, verb::SET_AMP_GAIN_MUTE as u8, payload)
+}
+
+/// From `pin` inward to the converter: each node and the input index taken
+/// out of it, the hop's select where it has one and its only input otherwise.
+fn chain(group: &FunctionGroup, pin: &PinSetup) -> Vec<(Node, u8)> {
+    let mut out = Vec::new();
+    let mut node = pin.node;
+    for _ in 0..16 {
+        let Some(w) = group.widget(node) else { break };
+        let index = pin.route.iter().find(|h| h.node == node).map_or(0, |h| h.select);
+        out.push((node, index));
+        if w.is_converter() {
+            break;
+        }
+        let Some(&next) = w.connections.get(index as usize) else { break };
+        node = next;
+    }
+    out
+}
+
+fn word(response: Option<Response>) -> String {
+    response.map_or(String::from("none"), |r| format!("{:#010x}", r.raw()))
+}
+
+fn pcm_text(pcm: PcmCaps) -> String {
+    format!(
+        "{:#010x} rates {:?} widths {:?}",
+        pcm.raw(),
+        pcm.rates().collect::<Vec<_>>(),
+        pcm.widths().collect::<Vec<_>>()
+    )
 }
 
 impl probe::Verbs for Hda {

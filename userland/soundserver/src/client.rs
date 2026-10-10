@@ -160,8 +160,13 @@ pub(crate) fn open_stream(
     slot_count: u32,
     ramp_frames: u32,
 ) -> Option<ClientStream> {
+    // YOGA HACK: cpal's ToyOS backend asserts a 128-frame period and a 44.1 kHz
+    // device. A resampled client's slot is never smaller than a device period,
+    // which the pull loop below carries as surplus, and it is told the rate it
+    // is served at rather than the device's.
     let client_period_frames =
-        client_period_frames(device_period_frames, req.sample_rate, device_sample_rate);
+        client_period_frames(device_period_frames, req.sample_rate, device_sample_rate)
+            .max(device_period_frames);
 
     let sample_size: u32 = 2; // FORMAT_S16LE, validated before open_stream
     let client_frame_size = req.channels as u32 * sample_size;
@@ -213,7 +218,7 @@ pub(crate) fn open_stream(
     let opened = StreamOpenResponse {
         client_period_frames,
         client_period_bytes,
-        device_sample_rate,
+        device_sample_rate: req.sample_rate,
         device_channels,
         slot_count: slot_count as u16,
     };
