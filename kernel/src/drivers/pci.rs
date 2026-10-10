@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use toyos_acpi::EcamWindow;
 use toyos_pci::{bar, bridge, caps, msi, msix};
 
 use crate::mm::Mmio;
@@ -104,11 +105,12 @@ pub fn stop_bus_mastering(config: Mmio) {
 
 /// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
 ///
-/// Declared once because two readers deal in it — `PciDevice::new` carves it and
+/// Declared once because two readers deal in it — an ECAM window carves it and
 /// the reset-time xHCI stop rebuilds one from a bare address.
 pub const CONFIG_BYTES: u64 = 4096;
 
-/// PCI device identified by ECAM base + Bus/Device/Function.
+/// A PCI function, by its bus, device and function and the configuration
+/// space its ECAM window gives it.
 #[derive(Clone, Copy)]
 pub struct PciDevice {
     mmio: Mmio,
@@ -118,13 +120,6 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
-    fn new(ecam: &crate::mm::Mmio, bus: u8, dev: u8, func: u8) -> Self {
-        let offset = ((bus as u64) << 20)
-            | ((dev as u64) << 15)
-            | ((func as u64) << 12);
-        Self { mmio: ecam.subregion(offset, CONFIG_BYTES), bus, dev, func }
-    }
-
     /// A function over a caller-owned config-space window, for the cap self-test to drive the real walk over lists no hardware in reach produces.
     #[cfg(feature = "boot-actuators")]
     pub(crate) fn over_config(mmio: crate::mm::Mmio) -> Self {
@@ -533,41 +528,80 @@ impl<'a> Iterator for CapabilityIter<'a> {
     }
 }
 
-/// The window [`enumerate`] walked.
-static ECAM: crate::sync::Lock<Option<Mmio>> = crate::sync::Lock::new(None);
+/// One ECAM window, mapped over exactly the buses it decodes.
+#[derive(Clone, Copy)]
+struct Window {
+    ecam: EcamWindow,
+    mmio: Mmio,
+}
+
+impl Window {
+    /// The configuration space of a function on a bus this window decodes.
+    fn function(&self, bus: u8, dev: u8, func: u8) -> Option<Mmio> {
+        Some(self.mmio.subregion(self.ecam.offset(bus, dev, func)?, CONFIG_BYTES))
+    }
+}
+
+/// The windows [`enumerate`] walked.
+static WINDOWS: crate::sync::Lock<Vec<Window>> = crate::sync::Lock::new(Vec::new());
 
 /// The configuration space of the function at this address, whether or not
-/// one answers there: an absent function reads all ones.
+/// one answers there: an absent function reads all ones. `None` on a bus no
+/// window decodes.
 pub fn function_window(bus: u8, dev: u8, func: u8) -> Option<Mmio> {
-    (*ECAM.lock()).map(|ecam| PciDevice::new(&ecam, bus, dev, func).mmio)
+    WINDOWS.lock().iter().find_map(|window| window.function(bus, dev, func))
+}
+
+/// The ECAM windows [`enumerate`] walked, in the order it walked them.
+pub fn windows() -> Vec<EcamWindow> {
+    WINDOWS.lock().iter().map(|window| window.ecam).collect()
 }
 
 /// The most functions [`enumerate`] will hand back; the rest are logged, not enumerated.
 const MAX_DEVICES: usize = 256;
 
-/// Every PCIe function ECAM decodes, in bus/device/function order; drivers must select all matches, not the first.
-pub fn enumerate(ecam: &crate::mm::Mmio) -> Vec<PciDevice> {
+/// Every PCIe function the windows decode, window by window and in
+/// bus/device/function order within one; drivers must select all matches,
+/// not the first.
+///
+/// **Each window is mapped and read over the buses it decodes and no
+/// further**: past its end bus the addresses are other hardware's, which
+/// reads as functions that are not there.
+pub fn enumerate(ecam: &[EcamWindow]) -> Vec<PciDevice> {
     log!("PCI: Enumerating devices...");
-    *ECAM.lock() = Some(*ecam);
+    let windows: Vec<Window> = ecam
+        .iter()
+        .map(|&ecam| {
+            let (start, bytes) = ecam.decoded();
+            Window { ecam, mmio: crate::mm::paging::map_mmio(start, bytes, MmioPolicy::Uncacheable) }
+        })
+        .collect();
+    *WINDOWS.lock() = windows.clone();
 
     let mut found: Vec<PciDevice> = Vec::new();
-    'scan: for bus in 0..=255u16 {
-        for dev in 0..32u8 {
-            let root = PciDevice::new(ecam, bus as u8, dev, 0);
-            if root.vendor_id() == INVALID_VENDOR { continue; }
+    'scan: for window in &windows {
+        let function = |bus: u8, dev: u8, func: u8| {
+            let mmio = window.function(bus, dev, func).expect("the scan reads only buses its window decodes");
+            PciDevice { mmio, bus, dev, func }
+        };
+        for bus in window.ecam.buses() {
+            for dev in 0..32u8 {
+                let root = function(bus, dev, 0);
+                if root.vendor_id() == INVALID_VENDOR { continue; }
 
-            let funcs = if root.read_config_u8(HEADER_TYPE) & MULTI_FUNCTION != 0 { 8 } else { 1 };
-            for func in 0..funcs {
-                let pci = PciDevice::new(ecam, bus as u8, dev, func);
-                if pci.vendor_id() == INVALID_VENDOR { continue; }
+                let funcs = if root.read_config_u8(HEADER_TYPE) & MULTI_FUNCTION != 0 { 8 } else { 1 };
+                for func in 0..funcs {
+                    let pci = function(bus, dev, func);
+                    if pci.vendor_id() == INVALID_VENDOR { continue; }
 
-                print_device(&pci);
-                if found.len() == MAX_DEVICES {
-                    log!("PCI: more than {} functions decoded; the rest are not enumerated",
-                        MAX_DEVICES);
-                    break 'scan;
+                    print_device(&pci);
+                    if found.len() == MAX_DEVICES {
+                        log!("PCI: more than {} functions decoded; the rest are not enumerated",
+                            MAX_DEVICES);
+                        break 'scan;
+                    }
+                    found.push(pci);
                 }
-                found.push(pci);
             }
         }
     }

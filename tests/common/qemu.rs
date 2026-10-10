@@ -740,13 +740,25 @@ pub enum Profile {
     /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
     /// function that writes where it is told to through the unit.
     VirtSmmu,
+    /// [`Profile::Virt`] with its ECAM in low memory (`highmem-ecam=off`): a
+    /// 16 MiB window whose MCFG decodes buses 0 to 0x0f, with RAM right past
+    /// it. The one machine QEMU makes whose MCFG decodes fewer than 256
+    /// buses: q35's is as long as firmware programs `PCIEXBAR`, which OVMF
+    /// sets to 256 MiB and QEMU offers no option to change.
+    VirtLowEcam,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu => {
+            Self::Virt
+            | Self::VirtNoRng
+            | Self::VirtEl2
+            | Self::VirtEl2NoVhe
+            | Self::VirtTcg
+            | Self::VirtSmmu
+            | Self::VirtLowEcam => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -946,7 +958,7 @@ pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
             Self::Virt => Shape {
@@ -2149,6 +2161,7 @@ fn qemu_command(
                 Profile::VirtEl2 | Profile::VirtEl2NoVhe => {
                     format!("{},gic-version=3,virtualization=on", arch.machine())
                 }
+                Profile::VirtLowEcam => format!("{},gic-version=3,highmem-ecam=off", arch.machine()),
                 _ => format!("{},gic-version=3", arch.machine()),
             };
             match shape.smmu {

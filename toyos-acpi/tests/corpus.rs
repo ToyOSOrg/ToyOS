@@ -12,7 +12,7 @@ use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    definition_blocks, dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    definition_blocks, dsdt_address, ecam_allocations, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
     EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
@@ -33,7 +33,7 @@ fn a_length_shorter_than_the_fixed_part_is_refused_with_both_numbers() {
     let m = Machine { regions };
 
     assert_eq!(
-        ecam_base(m, RSDP_AT).err(),
+        ecam_allocations(m, RSDP_AT).err(),
         Some(TableError::Length { declared: 40, needed: 60 }),
         "the walk stops at a table of the right signature it cannot use, and says why"
     );
@@ -351,7 +351,7 @@ const FIXTURES: &[(&str, &[u8], u64)] = &[
 
 /// **No panic and no unbounded walk, over every byte of every table this crate
 /// decodes.** Each byte of each fixture takes each of its 255 other values in
-/// turn, and `ecam_base`, `hpet_base`, `rtc_century`, `iapc_boot_arch` and the
+/// turn, and the MCFG walk, `hpet_base`, `rtc_century`, `iapc_boot_arch` and the
 /// MADT walk to exhaustion all run over it. A panic anywhere — including the
 /// reader's own, which fires on a read no bound accepted — reds this.
 ///
@@ -392,7 +392,10 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                         .collect();
                     let m = Machine { regions: &regions };
 
-                    let _ = ecam_base(m, rsdp_at);
+                    if let Ok(allocations) = ecam_allocations(m, rsdp_at) {
+                        // One item per 16 bytes, and a partial one at the end.
+                        assert!(allocations.count() <= MAX_TABLE_LEN / 16 + 1, "{which}[{offset}]={value:#04x}: the MCFG walk is not ending");
+                    }
                     let _ = hpet_base(m, rsdp_at);
                     let _ = rtc_century(m, rsdp_at);
                     let _ = iapc_boot_arch(m, rsdp_at);
