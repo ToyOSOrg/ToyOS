@@ -1,0 +1,15 @@
+[package]
+name = "surveyend"
+description = "/system/bin/surveyend: ends a survey boot by powering the machine off as soon as the kernel will, so nobody reads the screen to know when to."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+# The served log, read for the record of `inspect`'s end.
+logkeeper-api = { path = "../logkeeper-api" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS itself: it asks the supervisor's `power` port to power the machine off"

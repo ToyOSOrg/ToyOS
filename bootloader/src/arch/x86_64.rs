@@ -33,6 +33,14 @@ pub fn counter_hz() -> Option<u64> {
     toyos_tsc::stated_hz((max >= 0x15).then(|| leaf(0x15)), (max >= 0x16).then(|| leaf(0x16)))
 }
 
+/// CPUID `leaf`, subleaf `sub`, as `[eax, ebx, ecx, edx]`; `None` on an
+/// architecture with no CPUID. The caller asks no leaf past the maximum its
+/// range's base leaf states.
+pub fn cpuid(leaf: u32, sub: u32) -> Option<[u32; 4]> {
+    let r = core::arch::x86_64::__cpuid_count(leaf, sub);
+    Some([r.eax, r.ebx, r.ecx, r.edx])
+}
+
 /// `CLFLUSH`'s line on every x86-64 part.
 const LINE: u64 = 64;
 
@@ -85,6 +93,16 @@ pub mod pio {
         // SAFETY: one instruction into the declared output, no memory operand.
         unsafe {
             core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+        }
+        value
+    }
+
+    /// One byte from an I/O port, safe as [`inw`] is.
+    pub fn inb(port: u16) -> u8 {
+        let value: u8;
+        // SAFETY: one instruction into the declared output, no memory operand.
+        unsafe {
+            core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
         }
         value
     }
