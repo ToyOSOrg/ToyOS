@@ -174,7 +174,6 @@ fn answer(conn: &Connection, bus: &Bus, wakes: &Wakes, wake_at: Option<u64>, now
         snap.put(&format!("{at}.id"), format!("{:04x}:{:04x}", named.device.vendor, named.device.product));
         snap.put(&format!("{at}.speed"), bus::speed_name(named.speed));
         snap.put(&format!("{at}.class"), format!("{:02x}:{:02x}:{:02x}", class.class, class.subclass, class.protocol));
-        snap.put(&format!("{at}.class_name"), class.name().unwrap_or("unnamed"));
         snap.put(&format!("{at}.slot"), u32::from(named.slot));
     }
     let counts = &bus.counts;

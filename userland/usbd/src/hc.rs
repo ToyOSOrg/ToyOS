@@ -24,6 +24,8 @@ const CAP_HCSPARAMS2: usize = 0x08;
 const CAP_HCCPARAMS1: usize = 0x10;
 const CAP_DBOFF: usize = 0x14;
 const CAP_RTSOFF: usize = 0x18;
+/// HCCPARAMS1 bit 0, 64-bit Addressing Capability (§5.3.6).
+const HCCPARAMS1_AC64: u32 = 1 << 0;
 
 const OP_USBCMD: usize = 0x00;
 const OP_USBSTS: usize = 0x04;
@@ -146,6 +148,9 @@ pub enum Refusal {
     Stuck(&'static str),
     PageSize(u32),
     Scratchpad(usize),
+    /// HCCPARAMS1.AC64 clear: the controller would truncate the device
+    /// addresses of a grant, which the kernel does not place below 4 GiB.
+    Addresses32,
 }
 
 impl std::fmt::Display for Refusal {
@@ -156,6 +161,7 @@ impl std::fmt::Display for Refusal {
             Self::Stuck(what) => write!(f, "{what} within {} ms", REGISTER_DEADLINE.as_millis()),
             Self::PageSize(p) => write!(f, "PAGESIZE={p:#x} does not include 4 KiB, where every ring is placed"),
             Self::Scratchpad(n) => write!(f, "it asks for {n} scratchpad buffers, past the {MAX_SCRATCH} one page names"),
+            Self::Addresses32 => write!(f, "it addresses only 32 bits (HCCPARAMS1.AC64 clear), and a grant is not placed below 4 GiB"),
         }
     }
 }
@@ -272,6 +278,9 @@ impl Controller {
         }
         if scratch > MAX_SCRATCH {
             return Err(Refusal::Scratchpad(scratch));
+        }
+        if hccparams1 & HCCPARAMS1_AC64 == 0 {
+            return Err(Refusal::Addresses32);
         }
 
         take_from_firmware(&regs, &read, hccparams1 >> 16);

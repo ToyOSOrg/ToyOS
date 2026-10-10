@@ -56,14 +56,8 @@ impl core::fmt::Display for Refused {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Device {
     pub class: Class,
-    /// `bMaxPacketSize0`, as the device stated it: the size at Full Speed
-    /// and below, the exponent at SuperSpeed
-    /// ([`crate::enumerate::ep0_packet_from_descriptor`]).
-    pub ep0_packet: u8,
     pub vendor: u16,
     pub product: u16,
-    /// `bcdDevice`.
-    pub release: u16,
 }
 
 /// A class triple, the device's or an interface's (USB-IF class codes).
@@ -72,39 +66,6 @@ pub struct Class {
     pub class: u8,
     pub subclass: u8,
     pub protocol: u8,
-}
-
-impl Class {
-    /// The class's name where USB-IF's table gives the device or an interface
-    /// one, and `None` for a code it does not.
-    pub fn name(self) -> Option<&'static str> {
-        Some(match self.class {
-            // Defined at the interface level: the device says nothing itself.
-            0x00 => "per-interface",
-            0x01 => "audio",
-            0x02 => "communications",
-            0x03 => "hid",
-            0x05 => "physical",
-            0x06 => "image",
-            0x07 => "printer",
-            0x08 => "mass-storage",
-            0x09 => "hub",
-            0x0a => "cdc-data",
-            0x0b => "smart-card",
-            0x0d => "content-security",
-            0x0e => "video",
-            0x0f => "personal-healthcare",
-            0x10 => "audio-video",
-            0x11 => "billboard",
-            0x12 => "type-c-bridge",
-            0xdc => "diagnostic",
-            0xe0 => "wireless",
-            0xef => "miscellaneous",
-            0xfe => "application-specific",
-            0xff => "vendor-specific",
-            _ => return None,
-        })
-    }
 }
 
 /// The descriptor's `bMaxPacketSize0`, from the first [`PREFIX_BYTES`] of it.
@@ -119,10 +80,8 @@ pub fn device(bytes: &[u8]) -> Result<Device, Refused> {
     let le16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     Ok(Device {
         class: Class { class: bytes[4], subclass: bytes[5], protocol: bytes[6] },
-        ep0_packet: bytes[7],
         vendor: le16(8),
         product: le16(10),
-        release: le16(12),
     })
 }
 
@@ -218,8 +177,8 @@ mod tests {
     #[test]
     fn a_device_descriptor_names_its_maker_its_product_and_its_class() {
         let d = device(&QEMU_STORAGE).unwrap();
-        assert_eq!((d.vendor, d.product, d.release, d.ep0_packet), (0x46f4, 0x0001, 0, 64));
-        assert_eq!(d.class.name(), Some("per-interface"));
+        assert_eq!((d.vendor, d.product), (0x46f4, 0x0001));
+        assert_eq!(d.class, Class { class: 0, subclass: 0, protocol: 0 }, "named per interface");
         assert_eq!(ep0_packet(&QEMU_STORAGE[..PREFIX_BYTES]), Ok(64));
     }
 
@@ -230,7 +189,6 @@ mod tests {
         let msc = Class { class: 8, subclass: 6, protocol: 0x50 };
         assert_eq!(named.next(), Some(msc));
         assert_eq!(named.next(), None);
-        assert_eq!(msc.name(), Some("mass-storage"));
     }
 
     #[test]

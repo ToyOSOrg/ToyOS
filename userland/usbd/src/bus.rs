@@ -21,7 +21,7 @@ use std::num::NonZeroU8;
 
 use toyos_abi::inventory::UsbSpeed;
 use toyos_xhci::descriptor::{self, Class, Interfaces};
-use toyos_xhci::enumerate::{self, Act, Command, Enumeration, Function, Learnt, Next, Request};
+use toyos_xhci::enumerate::{self, Act, Command, Enumeration, Learnt, Next, Request};
 use toyos_xhci::job::{Await, Outcome, Outstanding, Stages, CC_SUCCESS};
 use toyos_xhci::port::{self, Gone, Nanos, PortState, Reset, Step};
 
@@ -413,13 +413,14 @@ impl Bus {
         let named = Named { port: state.port, slot: state.slot, speed, device, interfaces };
         let class = named.class();
         println!(
-            "usbd: port {}: {:04x}:{:04x} at {} speed, class {:02x} ({}), on slot {}",
+            "usbd: port {}: {:04x}:{:04x} at {} speed, class {:02x}:{:02x}:{:02x}, on slot {}",
             state.port + 1,
             device.vendor,
             device.product,
             speed_name(speed),
             class.class,
-            class.name().unwrap_or("unnamed"),
+            class.subclass,
+            class.protocol,
             state.slot
         );
         self.ports[usize::from(state.port)].enumerated(NonZeroU8::new(state.slot));
@@ -471,24 +472,11 @@ fn read_back(ctrl: &Controller, state: &mut Enumerating, request: Request, outco
         Request::ConfigDescriptor => {
             let interfaces = descriptor::interfaces(&bytes).map_err(refused)?;
             state.interfaces = Some(interfaces);
-            // What the order after the configuration turns on, read as the
-            // kernel's driver reads it: a boot interface, another HID, or SCSI
-            // over Bulk-Only.
-            Ok(match interfaces.iter().find_map(function) {
-                Some(found) => Learnt::Function(found),
-                None => Learnt::Nothing,
-            })
+            // No function is learnt: which class a device's interfaces bind
+            // is the class driver's stage to decide.
+            Ok(Learnt::Nothing)
         }
         Request::SetConfiguration | Request::SetProtocol => unreachable!("never sent"),
-    }
-}
-
-fn function(class: Class) -> Option<Function> {
-    match (class.class, class.subclass, class.protocol) {
-        (0x03, 0x01, _) => Some(Function::BootHid),
-        (0x03, _, _) => Some(Function::Hid),
-        (0x08, 0x06, 0x50) => Some(Function::Msc),
-        _ => None,
     }
 }
 
