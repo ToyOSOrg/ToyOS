@@ -432,20 +432,24 @@ impl PortState {
     /// A port found connected when its controller was brought up: given the
     /// reset [`inherited_reset`] answers and awaited like any other, so the
     /// device whatever ran before left there is asked nothing until it has
-    /// been reset. Answers which reset, and the write that performs it.
+    /// been reset. Answers which reset, and the two writes that perform it,
+    /// in order.
     ///
-    /// **The write acknowledges the connect it was found by**: that edge is
+    /// **The first acknowledges the connect it was found by**: that edge is
     /// this device's arrival, and left set it reads after the enumeration as
     /// a replug of the device just enumerated. One that lands after the
-    /// write is a real replug and is seen.
+    /// write is a real replug and is seen. **Its own write**, because a
+    /// controller may act on PR and drop the write-1-to-clear bits beside
+    /// it: QEMU 11.1's `qemu-xhci` returns from a PORTSC write once it has
+    /// reset the port.
     ///
     /// For a driver that steps every port with [`Self::step`] from bring-up
     /// on: a boot scan that waits in place answers the same question through
     /// [`inherited_reset`] and keeps no machine while it does.
-    pub fn adopt(&mut self, portsc: Portsc, now: Nanos) -> (Reset, portsc::Write) {
+    pub fn adopt(&mut self, portsc: Portsc, now: Nanos) -> (Reset, [portsc::Write; 2]) {
         let kind = inherited_reset(reset_needed(self.protocol, portsc));
         self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind };
-        (kind, reset_write(kind, portsc).acknowledging_connect(portsc))
+        (kind, [portsc.neutral().acknowledging_connect(portsc), reset_write(kind, portsc)])
     }
 
     fn give_up(&mut self, why: GaveUp) -> Step<'static> {
@@ -650,7 +654,7 @@ mod tests {
         let mut port = PortState::EMPTY;
         port.speaks(Some(Protocol::Usb3));
         let trained = connected(true, 0);
-        let (kind, write) = port.adopt(trained, 0);
+        let (kind, [_, write]) = port.adopt(trained, 0);
         assert_eq!(kind, Reset::Warm);
         assert_eq!(write.raw() & (1 << 31), 1 << 31, "{:#010x} is no warm reset", write.raw());
         assert!(port.outstanding());
@@ -666,9 +670,11 @@ mod tests {
         let mut port = PortState::EMPTY;
         port.speaks(Some(Protocol::Usb2));
         let arrived = Portsc::from_raw(connected(false, 7).raw() | CSC);
-        let (kind, write) = port.adopt(arrived, 0);
+        let (kind, [ack, reset]) = port.adopt(arrived, 0);
         assert_eq!(kind, Reset::Hot);
-        assert_eq!(write.raw() & CSC, CSC, "{:#010x} leaves the arrival's edge set", write.raw());
+        assert_eq!(ack.raw() & CSC, CSC, "{:#010x} leaves the arrival's edge set", ack.raw());
+        assert_eq!(ack.raw() & ((1 << 4) | (1 << 31)), 0, "{:#010x} resets beside its acknowledge", ack.raw());
+        assert_eq!(reset.raw() & (1 << 4), 1 << 4, "{:#010x} is no hot reset", reset.raw());
         assert!(matches!(port.step(connected(false, 7), RESET_DEADLINE_NS), Step::GaveUp(GaveUp::ResetNeverFinished)));
     }
 

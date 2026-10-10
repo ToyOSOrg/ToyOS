@@ -135,9 +135,11 @@ impl Bus {
             let p = p as u8;
             let portsc = ctrl.portsc(p);
             if portsc.connected() {
-                let (kind, write) = port.adopt(portsc, now);
-                println!("usbd: port {} found connected; {kind:?} resetting it", p + 1);
-                ctrl.write_portsc(p, write);
+                let (kind, writes) = port.adopt(portsc, now);
+                println!("usbd: port {} found connected (PORTSC {:#010x}); {kind:?} resetting it", p + 1, portsc.raw());
+                for write in writes {
+                    ctrl.write_portsc(p, write);
+                }
             }
         }
         let mut outstanding = Outstanding::EMPTY;
@@ -248,7 +250,7 @@ impl Bus {
     }
 
     fn teardown(&mut self, p: u8, gone: Gone, now: Nanos) {
-        println!("usbd: port {}: its device is gone ({gone:?})", p + 1);
+        println!("usbd: port {}: its device is gone ({gone:?}, PORTSC {:#010x})", p + 1, self.ctrl.portsc(p).raw());
         self.devices.retain(|d| d.port != p);
         match self.ports[usize::from(p)].take_slot() {
             Some(slot) => self.disable(p, slot.get(), false, now),
@@ -264,6 +266,7 @@ impl Bus {
     /// A port whose reset finished: acknowledge it, and ask for a slot.
     fn begin(&mut self, p: u8, after: Option<Reset>, now: Nanos) {
         let portsc = self.ctrl.portsc(p);
+        println!("usbd: port {} enumerating after {after:?} (PORTSC {:#010x})", p + 1, portsc.raw());
         self.ctrl.write_portsc(p, port::enumeration_ack(after, portsc));
         let portsc = self.ctrl.portsc(p);
         if !portsc.enabled() {
