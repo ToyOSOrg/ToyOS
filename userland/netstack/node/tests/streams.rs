@@ -1030,6 +1030,23 @@ fn a_reset_in_the_batch_of_the_text_before_it_ends_the_pipes_after_the_text() {
     assert_eq!((client.borrow().inbox.clone(), let_go(&client)), (b"last".to_vec(), vec![PipeEnd::FromClient, PipeEnd::ToClient]));
 }
 
+// The reset's text outlives the pass that saw the reset while the client's pipe has no room for
+// it, and the failure is read after it.
+#[test]
+fn text_the_pipe_had_no_room_for_outlives_the_reset() {
+    let (mut net, _, client) = established();
+    client.borrow_mut().room = 0;
+    let text = net.far.text(b"held back");
+    let rst = net.far.rst();
+    net.node.receive(net.now, batch(&[&text, &rst]), draw(&mut net.draws));
+    assert_eq!((client.borrow().inbox.len(), let_go(&client), net.node.streams()), (0, vec![PipeEnd::FromClient], 1));
+
+    client.borrow_mut().room = 65_536;
+    net.bridge();
+    assert_eq!(client.borrow().inbox, b"held back");
+    assert_eq!((let_go(&client), net.node.streams()), (vec![PipeEnd::FromClient, PipeEnd::ToClient], 0));
+}
+
 // ---- a client that leaves ----
 
 #[test]
