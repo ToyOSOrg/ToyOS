@@ -118,6 +118,7 @@ members = [
     "userland/terminal",
     "userland/test-runner",
     "userland/toybox",
+    "userland/toyfetch",
     "userland/toyos-font",
     "userland/toyos-pci-claim",
     "userland/toyos-window",
@@ -274,6 +275,7 @@ cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
 ring = { git = "https://github.com/ToyOSOrg/ring", branch = "toyos-0.17.14" }
+sysinfo = { git = "https://github.com/ToyOSOrg/sysinfo", branch = "toyos-0.39.6" }
 
 # The one profile every guest binary is built with.
 # Optimised, because an unoptimised guest mismeasures everything under TCG;

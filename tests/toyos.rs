@@ -419,6 +419,11 @@ const MACHINE_TESTS: &[&str] = &[
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
     "usb_keyboard_rollover",
+    // What `toyfetch` reads through the `sysinfo` fork's ToyOS backend: the
+    // backend calls `SYS_SYSINFO` and reads ROOT, which no host has, and the
+    // CPU count is held to the `-smp` this boot gave QEMU, a count the
+    // kernel did not make.
+    "toyfetch_reports",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3711,6 +3716,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
+        "toyfetch_reports" => toyfetch_reports(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3765,6 +3771,68 @@ fn job_said(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
         return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     Ok(result.stdout)
+}
+
+/// `toyfetch` names the build the image's os-release does, the CPUs this boot
+/// gave QEMU, and the memory total `free` reads off the same ambient header.
+fn toyfetch_reports(test_config: &Path) -> Result<(), String> {
+    const CPUS: u32 = 3;
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions { smp: CPUS, ..Default::default() });
+    let (_, bytes) = toyos_build::image::root_file_on(qemu.boot_image(), toyos_osrelease::PATH)?;
+    let release = toyos_osrelease::parse(&bytes).map_err(|why| format!("the image's {}: {why:?}", toyos_osrelease::PATH))?;
+    // `free`'s second line is the total, used and free mebibytes.
+    let free = job_said(&mut qemu, "free")?;
+    let total: u64 = free
+        .lines()
+        .find_map(|line| line.trim().strip_suffix('M')?.split_whitespace().next()?.strip_suffix('M')?.parse().ok())
+        .ok_or_else(|| format!("`free` said no total:\n{free}"))?;
+
+    // The console carries an escape as the four characters `\x1b`.
+    let said = job_said(&mut qemu, "toyfetch")?.replace('\x1b', "\\x1b");
+    // The text a terminal shows: every SGR sequence taken out.
+    let mut shown = String::new();
+    let mut rest = said.as_str();
+    while let Some(at) = rest.find("\\x1b[") {
+        shown.push_str(&rest[..at]);
+        let end = rest[at..].find('m').ok_or_else(|| format!("an SGR sequence that never ends:\n{said}"))?;
+        rest = &rest[at + end + 1..];
+    }
+    shown.push_str(rest);
+    let field = |label: &str| -> Result<String, String> {
+        let at = format!("{label}: ");
+        let mut values = shown.lines().filter_map(|line| Some(line[line.find(&at)? + at.len()..].to_string()));
+        match (values.next(), values.next()) {
+            (Some(value), None) => Ok(value),
+            _ => Err(format!("toyfetch said no single {label} line:\n{shown}")),
+        }
+    };
+
+    let dirty = match release.tree {
+        toyos_osrelease::Tree::Clean => "",
+        toyos_osrelease::Tree::Dirty => " (dirty)",
+    };
+    let wanted = [
+        ("OS", format!("{} {}{dirty}", toyos_osrelease::NAME, release.short())),
+        ("Kernel", format!("{} {}", toyos_osrelease::NAME, release.short())),
+        ("Arch", release.arch.machine().to_string()),
+    ];
+    for (label, value) in wanted {
+        if field(label)? != value {
+            return Err(format!("toyfetch's {label} is not {value:?}:\n{shown}"));
+        }
+    }
+    // x86-64 reads its model off CPUID; QEMU names one.
+    let cpu = field("CPU")?;
+    if !cpu.ends_with(&format!(" ({CPUS})")) || cpu.starts_with("model not reported") {
+        return Err(format!("toyfetch's CPU is {cpu:?}, on a boot QEMU gave {CPUS} CPUs:\n{shown}"));
+    }
+    let memory = field("Memory")?;
+    if !memory.ends_with(&format!(" / {total} MiB")) {
+        return Err(format!("toyfetch's Memory is {memory:?}, and `free` says {total}M in all:\n{shown}"));
+    }
+    field("Uptime")?;
+    eprintln!("  [toyfetch] OS {}, CPU {cpu}, Memory {memory}", field("OS")?);
+    Ok(())
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
