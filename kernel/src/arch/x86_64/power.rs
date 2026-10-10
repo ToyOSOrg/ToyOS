@@ -18,7 +18,7 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use toyos_acpi::Reset;
+use toyos_acpi::{Facs, FacsRefused, Reset};
 use toyos_userbound::firmware::SleepType;
 use toyos_userbound::{Mediated, Ports};
 
@@ -44,7 +44,8 @@ static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 
 /// Declare the FADT's two ports a write commands, `SMI_CMD` and the reset
 /// register, and record the reset register; or say by name why this machine
-/// has either not.
+/// has either not. The FACS the FADT names is read here once, and handed to
+/// `acpi_mode::init`: `None` where the FADT is unusable.
 ///
 /// **One port may be both** (an AMD laptop's 0xb0 is): it is declared once,
 /// as `SMI_CMD`, whose kept bytes then hold the reset's value too
@@ -55,22 +56,28 @@ static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 /// still needs a hand. Walking these tables inside the panic handler instead is
 /// refused — a table walk on a machine that has already failed once is how a
 /// panic becomes a triple fault.
-pub fn init_reset(rsdp_addr: u64) {
+pub fn init_reset(rsdp_addr: u64) -> Option<Result<Facs, FacsRefused>> {
     let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE) {
         Ok(table) => table,
         Err(e) => {
             log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel, and no SMI_CMD");
-            return;
+            return None;
         }
     };
-    let reset = toyos_acpi::reset_register(&fadt);
+    let facs = toyos_acpi::facs(fadt.phys(), &fadt);
+    declare(&fadt, facs);
+    Some(facs)
+}
+
+fn declare<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>, facs: Result<Facs, FacsRefused>) {
+    let reset = toyos_acpi::reset_register(fadt);
     // Fixed hardware this kernel does not serve has no ACPI row, and so no use for `SMI_CMD`.
-    let smi_cmd = toyos_acpi::fixed_hardware(&fadt).ok().and_then(|fixed| fixed.smi_cmd);
+    let smi_cmd = toyos_acpi::fixed_hardware(fadt).ok().and_then(|fixed| fixed.smi_cmd);
     if let Some(named) = smi_cmd {
         // A FACS this kernel cannot read leaves `S4BIOS_F` unread, and the byte kept.
-        let s4bios = match toyos_acpi::facs(fadt.phys(), &fadt) {
+        let s4bios = match facs {
             Ok(facs) => facs.s4bios,
-            Err(toyos_acpi::FacsRefused::Absent) => false,
+            Err(FacsRefused::Absent) => false,
             Err(_) => true,
         };
         if let Err(why) = super::smi_cmd::declare(named.port, named.named(s4bios, reset)) {

@@ -518,7 +518,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     // First in the device phase, after storage: its lines are the diagnostic
     // boot's answer for a dead keyboard, and a panel shows the log's tail.
-    arch::boot::platform_devices(kernel_args.rsdp_addr);
+    arch::boot::platform_devices(&platform, kernel_args.rsdp_addr);
 
     #[cfg(feature = "boot-actuators")]
     arch::boot::interrupt_selftests();

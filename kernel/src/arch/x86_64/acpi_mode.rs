@@ -219,8 +219,8 @@ fn hardware() -> Option<&'static Hardware> {
 
 /// Decode the fixed hardware and fill the row; or say by name why this
 /// machine has none. After the i8042's row, whose lines the SCI may not
-/// share.
-pub fn init(rsdp_addr: u64) {
+/// share; `facs` is what `power::init_reset` read of the FACS.
+pub fn init(rsdp_addr: u64, facs: Option<Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>>) {
     let fadt = match toyos_acpi::find_table(
         crate::drivers::acpi::direct_phys(),
         rsdp_addr,
@@ -265,7 +265,8 @@ pub fn init(rsdp_addr: u64) {
         if cpu::inw(control.port(0)) & SCI_EN != 0 { "ACPI" } else { "legacy" },
     );
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
-    let (ecam, lock) = (ecam(rsdp_addr), global_lock(toyos_acpi::facs(fadt.phys(), &fadt)));
+    let facs = facs.expect("power::init_reset read the FACS of the FADT this decoded");
+    let (ecam, lock) = (ecam(rsdp_addr), global_lock(facs));
     let hardware = Hardware { fixed, control, rsdp: rsdp_addr, ecam, lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
