@@ -3022,6 +3022,7 @@ dependencies = [
  "toyos-tco",
  "toyos-tsc",
  "toyos-untrusted",
+ "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
  "toyos-xhci",
@@ -4091,8 +4092,8 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2",
  "toyos-tmpdir",
 ]
 
@@ -5669,7 +5670,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tar",
  "toml",
  "toyos-abi",
@@ -5683,6 +5683,8 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-sha2",
+ "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
  "toyos-tco",
@@ -5941,6 +5943,13 @@ name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-sha2"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -5949,11 +5958,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-ssh"
+version = "0.1.0"
+dependencies = [
+ "ring",
+]
+
+[[package]]
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2",
 ]
 
 [[package]]
@@ -6003,9 +6019,13 @@ name = "toyos-update"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
- "sha2 0.10.9",
+ "toyos-sha2",
  "toyos-wallclock",
 ]
+
+[[package]]
+name = "toyos-usbhid"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-userbound"
@@ -6263,10 +6283,10 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "update"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
  "toyos",
  "toyos-abi",
  "toyos-fat32",
+ "toyos-sha2",
  "toyos-update",
 ]
 
@@ -6296,6 +6316,16 @@ dependencies = [
  "http",
  "httparse",
  "log",
+]
+
+[[package]]
+name = "usbd"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+ "toyos-xhci",
 ]
 
 [[package]]

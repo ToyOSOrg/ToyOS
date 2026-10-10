@@ -60,6 +60,12 @@ receives = ["soundserver"]
 # `disk_backtrace` names its child's crash record with it.
 [programs.symbolize]
 
+# One xHCI controller driven from userland: `usbd_spare` claims the controller
+# the kernel was told to leave alone (`xhci-leave=`, `pci:1b36:000d` on the
+# guest and the Type-C controller on the T14), and starts and ends this itself,
+# holding the claim, its `usb` port and its process.
+[programs.usbd]
+
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
 "bin/cp" = "/system/bin/toybox"

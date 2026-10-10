@@ -152,11 +152,16 @@ pub fn ns(ms: u64) -> u64 {
 impl Net {
     /// Two nodes, a one-way delay of `rtt / 2`, clocks starting an hour in.
     pub fn new(rtt_ms: u64) -> Self {
+        Self::buffered(rtt_ms, 65_535)
+    }
+
+    /// [`Self::new`] with each node's receive and send buffers at `buffer`.
+    pub fn buffered(rtt_ms: u64, buffer: u32) -> Self {
         let node = |addr, seed: u8| Node {
             tcp: Tcp::new(toyos_net_tcp::Config {
                 mtu: 1500,
-                receive_buffer: 65_535,
-                send_buffer: 65_535,
+                receive_buffer: buffer,
+                send_buffer: buffer,
                 secrets: toyos_net_tcp::Secrets {
                     isn: key(seed),
                     timestamp: key(seed.wrapping_add(0x10)),

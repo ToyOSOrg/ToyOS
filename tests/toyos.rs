@@ -193,6 +193,10 @@ const RUST_SKIP: &[&str] = &[
     // device for, and its counts are judged beside soundserver's lines:
     // `virtio_sound_counts` runs it.
     "virtio_sound_counts",
+    // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
+    // boot's kernel does: `usbd_drives_the_spare` and the
+    // `usbd_drives_the_type_c_controller` metal row run it.
+    "usbd_spare",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -271,10 +275,10 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
-    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
-    // under HVF the power-off can come before `klogd` has put it on the wire
-    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
+    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
+    // stop's whole wait for the console's wire
+    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -285,6 +289,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
+    ("virt_reboot_wire_held", qemu::Profile::VirtEl2),
+    ("virt_reboot_wire_kept", qemu::Profile::VirtEl2),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
@@ -352,6 +358,16 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // The power-off with `klogd` holding the console's wire as the stop
+    // begins, on one CPU: a staged hold of a kernel thread, read off a console
+    // QEMU keeps past the power-off, and the T14 is never asked to power off.
+    "machine_shutdown_wire_held",
+    // The same with `klogd` keeping the wire through the stop's budget.
+    "machine_shutdown_wire_kept",
+    // The same with `klogd` staged inside its hold of the wire from the boot's
+    // last word past the seal, where the stop does not hold it: the one CPU
+    // runs nothing but the stop from the seal on.
+    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -370,6 +386,18 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // usbd on a controller the kernel leaves alone, with two devices on it,
+    // and a transfer aimed past its claim's grants: usbd is one binary that
+    // owns its controller, with no host build; `toyos-xhci`'s host tests and
+    // simulator hold every decision it takes, and none of them holds the
+    // effects — the rings, the interrupt through the claim, the unit. The
+    // T14's spare controller has no device on it and its unit is not
+    // asked to fault.
+    "usbd_drives_the_spare",
+    // A boot keyboard reporting more keys than its six slots name: the
+    // kernel's driver reading a report a device delivered over xHCI has no host
+    // build, and the T14 binds no USB keyboard.
+    "usb_keyboard_rollover",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -919,6 +947,20 @@ const METAL: &[(&str, metal::Metal)] = &[
                 &[claims::RECLAIM],
             )],
             judge: |b| claims::refused_unremapped(&b[0].kernel()),
+        },
+    ),
+    (
+        // The Type-C controller left to a claim, and usbd driving it: handed
+        // over, MSI armed through remapping, and the No-Op answered by an
+        // interrupt; usbd is killed and started again, so the release says
+        // which reset the function advertises.
+        "usbd_drives_the_type_c_controller",
+        metal::Metal {
+            arms: &[metal::once("testcases-xhci-leave", "tests/testcases", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
+            judge: |b| {
+                b[0].job_passed("test_rs_usbd_spare")?;
+                usbd_on_metal(&b[0].kernel(), &b[0].log())
+            },
         },
     ),
     // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
@@ -2281,8 +2323,10 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
 
 /// `tests/virtrebootcase`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
-/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`.
-fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
+/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
+/// actuators `klogd` holds the console's wire as the stop begins, judged by
+/// [`power::judge_the_held_wire`].
+fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
     let trace = common::lane::dir().join("virt_reboot.psci");
@@ -2294,6 +2338,7 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
             profile,
             qmp: true,
             psci_trace: Some(trace.clone()),
+            kernel_params: staged,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
@@ -2313,6 +2358,9 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
         .collect();
     if asked != [PSCI_SYSTEM_RESET] {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
+    }
+    if !staged.is_empty() {
+        power::judge_the_held_wire(&console, bootlog::REBOOTING, staged == power::wire_staged(true))?;
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
     Ok(())
@@ -2767,7 +2815,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile),
+        "virt_reboot" => virt_reboot(profile, &[]),
+        // The reboot with `klogd` holding the PL011's wire as the stop begins,
+        // then keeping it through the stop's budget.
+        "virt_reboot_wire_held" => virt_reboot(profile, power::wire_staged(false)),
+        "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_fatal_behind_a_painter" => {
@@ -3421,7 +3473,6 @@ fn libc_sockets() -> Result<(), String> {
 /// `ring` wrong at both ends.
 fn https_fetch() -> Result<(), String> {
     use common::https::{self, Authority, Seen, Server};
-    use sha2::Digest;
     const JOB: &str = "https_get";
     const KAT: &str = "ring_kat";
     /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
@@ -3432,7 +3483,8 @@ fn https_fetch() -> Result<(), String> {
     let trusted = Authority::new("ToyOS harness test authority");
     let stranger = Authority::new("ToyOS harness authority nothing trusts");
     let body = std::sync::Arc::new(https::body());
-    let want = format!("{JOB}: ok bytes={} sha256={:x}", body.len(), sha2::Sha256::digest(body.as_slice()));
+    let hex: String = toyos_sha2::Sha256::digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
+    let want = format!("{JOB}: ok bytes={} sha256={hex}", body.len());
     let fetched = Server::start(trusted.leaf(host), body.clone())?;
     let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
     let untrusted = Server::start(stranger.leaf(host), body)?;
@@ -3512,10 +3564,15 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
+        "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
+        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "virtio_sound_counts" => virtio_sound_counts(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
+        "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3635,6 +3692,178 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     };
     eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
     Ok(())
+}
+
+/// Run `command` as a job of the boot, to exit 0: everything said in its
+/// window, the kernel's records with the program lines.
+fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
+    let result = qemu.run_test(command, Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("`{command}`: {why}\nit said:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.serial));
+    }
+    Ok(result.serial)
+}
+
+/// The devices `qemu-xhci` carries on [`qemu::Profile::HeadlessUsbSpare`],
+/// as `usbd_spare` prints usbd's answer: QEMU 11.1's `usb-storage`, which
+/// trains on a USB3 port, and `usb-kbd`, each by its id, its speed and its
+/// class triple.
+const SPARE_DEVICES: [(&str, &str, &str); 2] = [
+    ("46f4:0001", "super", "08:06:50"),
+    ("0627:0001", "high", "03:01:01"),
+];
+
+/// What usbd says once the bring-up's No-Op has completed: its ring and the
+/// interrupt through the claim both work.
+const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
+
+/// The controller `xhci-leave=` names, claimed by `usbd_spare` and driven by
+/// usbd: each device named by id, speed and class on a fresh claim and again
+/// after usbd is killed and started on the next; every event announced by an
+/// interrupt; nothing waking usbd while it has nothing to do. Then the two
+/// controls: the function aimed past every grant is the kernel's `DMA FAULT`
+/// record against its slot and the claim's refusal, and on a kernel without
+/// the switch the claim is refused because the kernel drives the function.
+fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "usbd_spare";
+    const SPARE: &str = "1b36:000d";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessUsbSpare,
+        kernel_params: &["xhci-leave=1b36:000d"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin.clone())], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let left = format!(" {SPARE} to a claim (xhci-leave)");
+    let at = boot
+        .text()
+        .lines()
+        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(left.as_str()).map(str::to_string))
+        .ok_or_else(|| format!("the kernel never said it left {SPARE} alone:\n{}", boot.text()))?;
+
+    let said = job_window(&mut qemu, "test_rs_usbd_spare")?;
+    let run = serial::Serial::named("usbd_spare", said.clone());
+    run.must_be_clean()?;
+    for when in ["settled", "restarted"] {
+        let named: Vec<&str> = said.lines().filter(|l| l.contains(&format!("usbd_spare: {when}: usb.device."))).collect();
+        for (id, speed, class) in SPARE_DEVICES {
+            let port = named
+                .iter()
+                .find_map(|l| l.split_once("usb.device.")?.1.split_once(&format!(".id = {id}")).map(|(p, _)| p.to_string()))
+                .ok_or_else(|| format!("usbd named no {id} once {when}:\n{said}"))?;
+            for (field, want) in [("speed", speed), ("class", class)] {
+                run.must_say(&format!("usbd_spare: {when}: usb.device.{port}.{field} = {want}"))?;
+            }
+        }
+        run.must_say(&format!("usbd_spare: {when}: usb.devices = {}", SPARE_DEVICES.len()))?;
+    }
+    run.must_say(USBD_NOOP)?;
+    run.must_say("usbd_spare: settled: usb.events.unannounced = 0")?;
+    run.must_say("usbd_spare: 2 device(s) named, the same after a restart")?;
+    let handed = format!("pcidev: PCI {at} [{SPARE}] handed over on slot ");
+    if said.matches(&handed).count() != 2 {
+        return Err(format!("{at} was not handed over once for each usbd:\n{said}"));
+    }
+    run.must_say(&format!("PCI {at}: msi address="))?;
+
+    let faulted = job_window(&mut qemu, "test_rs_usbd_spare fault")?;
+    let fault = serial::Serial::named("usbd_spare fault", faulted.clone());
+    fault.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
+    let aimed = faulted
+        .lines()
+        .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
+        .ok_or_else(|| format!("the job never said where it aimed:\n{faulted}"))?;
+    let record = faulted
+        .lines()
+        .find(|l| l.contains("iommu: DMA FAULT owner=slot") && l.contains(&format!("stream={at} ")))
+        .ok_or_else(|| format!("no DMA FAULT record names {at}:\n{faulted}"))?;
+    let addr = record.split_once(" addr=").and_then(|(_, a)| a.split_whitespace().next()).unwrap_or_default();
+    if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
+        return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
+    }
+    eprintln!("  [usbd] {at}: two devices named twice; aimed at {aimed}: {}", record.trim());
+    drop(qemu);
+
+    // The control: the same machine and no switch, so the kernel drives it.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[(JOB.to_string(), bin)],
+        BootOptions { profile: qemu::Profile::HeadlessUsbSpare, ..Default::default() },
+    );
+    serial::Serial::boot(&qemu).must_not_say("(xhci-leave)")?;
+    let said = job_window(&mut qemu, "test_rs_usbd_spare refused")?;
+    let refused = serial::Serial::named("usbd_spare refused", said);
+    refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
+    refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    Ok(())
+}
+
+/// The T14's Type-C controller left to a claim and driven by usbd: the
+/// kernel left it, the claim was handed over with its MSI in remappable
+/// format and its remapping entry written, the message reached the slot, and
+/// the No-Op completed. What reset the function advertises is read off the
+/// release and printed, not judged.
+fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
+    const TYPE_C: &str = "8086:9a13";
+    let at = kernel
+        .text()
+        .lines()
+        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(&format!(" {TYPE_C} to a claim (xhci-leave)")).map(str::to_string))
+        .ok_or_else(|| format!("the kernel never said it left {TYPE_C} alone:\n{}", kernel.text()))?;
+    kernel.must_say(&format!("pcidev: PCI {at} [{TYPE_C}] handed over on slot "))?;
+    let message = kernel
+        .text()
+        .lines()
+        .find_map(|l| l.split_once(&format!("PCI {at}: msi address="))?.1.split_whitespace().next().map(str::to_string))
+        .ok_or_else(|| format!("{at} was not armed on MSI:\n{}", kernel.text()))?;
+    let address = u32::from_str_radix(message.trim_start_matches("0x"), 16).map_err(|e| format!("{message}: {e}"))?;
+    // Interrupt Format, bit 4 of the address: the message names a remapping
+    // entry and no vector of its own (VT-d 3.4 §5.1.5.2).
+    if address & (1 << 4) == 0 {
+        return Err(format!("{at}'s MSI address {address:#010x} is compatibility format"));
+    }
+    kernel.must_say(&format!(" source={at} p=1 "))?;
+    kernel.must_say("took its first message on vector")?;
+    log.must_say(USBD_NOOP)?;
+    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released from slot"))) {
+        eprintln!("  [usbd] {}", released.trim());
+    }
+    eprintln!("  [usbd] {at}: handed over, MSI {address:#010x} through its remapping entry, the No-Op answered");
+    Ok(())
+}
+
+/// Seven keys held on QEMU's `usb-kbd`, whose seventh report is ErrorRollOver
+/// in every slot: the driver counts it as a rollover, and as no refusal.
+fn usb_keyboard_rollover(test_config: &Path) -> Result<(), String> {
+    const BOUND: &str = "xHCI: USB keyboard ready on slot ";
+    const ROLLED_OVER: &str = " keyboard report in rollover, its modifiers believed and its other keys held, 1 since it bound";
+    const REFUSED: &str = " report refused, ";
+    let options = BootOptions { qmp: true, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|arg| arg.starts_with("usb-kbd,")) {
+        return Err("this machine was to have a usb-kbd".to_string());
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the keyboard to bind", |c| c.contains(BOUND))?;
+    const KEYS: [&str; 7] = ["q", "w", "e", "r", "t", "y", "u"];
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        input.keys(&KEYS.map(|key| (key, true)));
+        input.keys(&KEYS.map(|key| (key, false)));
+    }
+    await_guest(&mut qemu, &mut console, "the driver to read the rollover", |c| {
+        c.contains(ROLLED_OVER) || c.contains(REFUSED)
+    })?;
+    let said = serial::Serial::named("the typed-on boot", console);
+    said.must_not_say(REFUSED)?;
+    eprintln!("  [usbhid] {}", said.must_say(ROLLED_OVER)?.trim());
+    said.must_be_clean()
 }
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and

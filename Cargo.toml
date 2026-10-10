@@ -61,7 +61,9 @@ members = [
     "toyos-quiesce",
     "toyos-random",
     "toyos-rootimage",
+    "toyos-sha2",
     "toyos-smmu",
+    "toyos-ssh",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
@@ -70,6 +72,7 @@ members = [
     "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
+    "toyos-usbhid",
     "toyos-userbound",
     "toyos-virtio",
     "toyos-wallclock",
@@ -119,6 +122,7 @@ members = [
     "userland/toyos-window",
     "userland/trace",
     "userland/update",
+    "userland/usbd",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and
@@ -201,13 +205,17 @@ toyos-blackbox = { path = "toyos-blackbox" }
 toyos-update = { path = "toyos-update", features = ["sign"] }
 # A throwaway key's seed, from the operating system. Already resolved here.
 getrandom = "0.3"
+# The one `openssh-key-v1` reader and writer, shared with the SSH server's
+# host key, and the `SHA256:` fingerprint the owner's key is named by.
+toyos-ssh = { path = "toyos-ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-# The digest behind `NOTICE`'s record of every committed binary file
-# (`src/sourcegate.rs`).
-sha2 = "0.10"
+# Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
+# store key, a ROOT's name, a release asset's digest, and the harness's of a
+# body a guest fetches over TLS.
+toyos-sha2 = { path = "toyos-sha2" }
 # The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }

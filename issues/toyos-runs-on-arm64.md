@@ -294,8 +294,8 @@ Each stage names its exit; "measured" means a number from a run.
    answers from a virtio-rng (`kernel/src/random.rs`); `virt_el2_drop`,
    `virt_smp` and `virt_jobs_at_el2`, one boot of the job case with the timer
    and FP jobs in it, stay emulated at EL2, which HVF gives no guest, and
-   `virt_reboot` and three more stay emulated at EL2 until
-   `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`
+   `virt_reboot` and five more stay emulated until
+   `issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md`
    is fixed. Each judges an event, never a rate: no QEMU test measures time.
    **Accepted with the move to HVF:** `virt_user_mode`, `virt_irq_storm`,
    `virt_timer_floor`, `virt_failed_ap_leaves_no_hole` and
