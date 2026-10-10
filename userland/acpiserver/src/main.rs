@@ -48,6 +48,7 @@ mod ledger;
 mod sci;
 mod tables;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -74,7 +75,7 @@ const QUERIES: usize = 32;
 const COUNTS: Duration = Duration::from_secs(30);
 
 struct Server<'a> {
-    dev: &'a AcpiDev,
+    claim: &'a Claim<'a>,
     info: AcpiInfo,
     served: Served,
     /// The controller the row names, if it names one.
@@ -104,9 +105,9 @@ fn main() {
         power_button: info.flags & FIXED_POWER_BUTTON != 0,
         ec_gpe: info.has_ec().then_some(info.ec_gpe),
     };
-    let claim = Claim { dev: &dev, info };
+    let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false) };
     let mut server = Server {
-        dev: &dev,
+        claim: &claim,
         info,
         served,
         ec: info.has_ec().then_some(Ports { command: info.ec_command.port, data: info.ec_data.port }),
@@ -177,13 +178,27 @@ impl Controller for Ports {
 
 /// The claim as the tables' fetch and their AML ask it for what lies outside
 /// its own ports, and as the wait for the firmware's release of the Global
-/// Lock reads its event blocks and its SCI.
+/// Lock reads its event blocks and its SCI; and the one poller its SCI is
+/// waited on with, between SCIs and inside that wait.
 struct Claim<'a> {
     dev: &'a AcpiDev,
     info: AcpiInfo,
+    poller: Poller,
+    /// A watch answers once: one still registered from a wait that timed out
+    /// is not registered again.
+    watching: Cell<bool>,
 }
 
 impl Claim<'_> {
+    /// Waits until `until` for the claim's record to be readable.
+    fn readable(&self, until: Instant) {
+        if !self.watching.replace(true) {
+            self.poller.watch(self.dev, READABLE, 0);
+        }
+        let wait = until.saturating_duration_since(Instant::now());
+        self.poller.wait(1, wait.as_nanos() as u64, |_| self.watching.set(false));
+    }
+
     /// The kernel's answer; a stopping machine's is the caller's to carry,
     /// and any other refusal of a call this server formed is this server's
     /// defect.
@@ -213,7 +228,7 @@ impl Kernel for Claim<'_> {
     }
 
     fn released(&self, until: Instant) -> bool {
-        sci::await_release(&mut Waiting { claim: self, poller: Poller::new(1), watching: false }, until)
+        sci::await_release(&mut Waiting(self), until)
     }
 
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
@@ -225,33 +240,27 @@ impl Kernel for Claim<'_> {
 }
 
 /// The claim's event blocks and SCI for one wait for the firmware's release.
-struct Waiting<'c, 'a> {
-    claim: &'c Claim<'a>,
-    poller: Poller,
-    /// A watch answers once: one still registered from a wait that timed out
-    /// is not registered again.
-    watching: bool,
-}
+struct Waiting<'c, 'a>(&'c Claim<'a>);
 
 impl Fixed for Waiting<'_, '_> {
     fn pm1_status(&mut self) -> u16 {
-        in16(self.claim.info.pm1_event.port)
+        in16(self.0.info.pm1_event.port)
     }
 
     fn pm1_clear(&mut self, bits: u16) {
-        out16(self.claim.info.pm1_event.port, bits);
+        out16(self.0.info.pm1_event.port, bits);
     }
 
     fn enables(&mut self) -> Enables {
         Enables {
-            pm1: in16(self.claim.info.pm1_event.enable()),
-            gpe0: bytes(self.claim.info.gpe0).map(|(_, enable)| in8(enable)).collect(),
+            pm1: in16(self.0.info.pm1_event.enable()),
+            gpe0: bytes(self.0.info.gpe0).map(|(_, enable)| in8(enable)).collect(),
         }
     }
 
     fn enable(&mut self, enables: &Enables) {
-        out16(self.claim.info.pm1_event.enable(), enables.pm1);
-        for ((_, enable), &byte) in bytes(self.claim.info.gpe0).zip(&enables.gpe0) {
+        out16(self.0.info.pm1_event.enable(), enables.pm1);
+        for ((_, enable), &byte) in bytes(self.0.info.gpe0).zip(&enables.gpe0) {
             out8(enable, byte);
         }
     }
@@ -261,21 +270,15 @@ impl Fixed for Waiting<'_, '_> {
         if left.is_zero() {
             return false;
         }
-        if !self.watching {
-            self.poller.watch(self.claim.dev, READABLE, 0);
-            self.watching = true;
-        }
-        let mut answered = false;
-        self.poller.wait(1, left.as_nanos() as u64, |_| answered = true);
-        self.watching &= !answered;
-        match self.claim.dev.irq() {
+        self.0.readable(until);
+        match self.0.dev.irq() {
             Ok(_) | Err(SyscallError::WouldBlock) => true,
             Err(other) => panic!("acpiserver: the claim's record answered {other:?} while the Global Lock was waited for"),
         }
     }
 
     fn ack(&mut self) {
-        self.claim.dev.ack().expect("acpiserver: the claim's acknowledgement");
+        self.0.dev.ack().expect("acpiserver: the claim's acknowledgement");
     }
 }
 
@@ -304,7 +307,7 @@ impl Server<'_> {
             self.drain();
             self.run_queued();
         }
-        self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+        self.claim.dev.ack().expect("acpiserver: the claim's acknowledgement");
         println!(
             "acpiserver: armed: power button {}, embedded controller {}",
             if self.served.power_button { "served" } else { "not the fixed one, so not served" },
@@ -316,12 +319,8 @@ impl Server<'_> {
     }
 
     fn serve(&mut self) -> ! {
-        let poller = Poller::new(1);
         let mut next_count = Instant::now() + COUNTS;
         let mut next_read = Instant::now() + battery::POLL;
-        // A watch answers once: one still registered from a wait that timed
-        // out is not registered again.
-        let mut watching = false;
         loop {
             if let (Some(power), Some(aml)) = (&mut self.power, &mut self.aml)
                 && Instant::now() >= next_read
@@ -334,24 +333,18 @@ impl Server<'_> {
                     self.power = None;
                 }
             }
-            if !watching {
-                poller.watch(self.dev, READABLE, 0);
-                watching = true;
-            }
-            let until = if self.power.is_some() { next_count.min(next_read) } else { next_count };
-            let wait = until.saturating_duration_since(Instant::now());
-            poller.wait(1, wait.as_nanos() as u64, |_| watching = false);
+            self.claim.readable(if self.power.is_some() { next_count.min(next_read) } else { next_count });
             if Instant::now() >= next_count {
                 self.log_counts();
                 next_count = Instant::now() + COUNTS;
             }
-            match self.dev.irq() {
+            match self.claim.dev.irq() {
                 Ok(record) => self.scis += u64::from(record.count),
                 Err(SyscallError::WouldBlock) => continue,
                 Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
             }
             self.take();
-            self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+            self.claim.dev.ack().expect("acpiserver: the claim's acknowledgement");
         }
     }
 

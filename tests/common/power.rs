@@ -760,3 +760,141 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())
 }
+
+/// How long [`ssdt_acquiring_the_global_lock`] sleeps as it loads, in ms,
+/// before its Acquire: the window the press is sent in, wide beside a host's
+/// answer to a line.
+const PRESS_WINDOW_MS: u16 = 5000;
+
+/// The Acquire's TimeoutValue, in ms; the two together are within the
+/// 10 s one evaluation may spend asleep.
+const ACQUIRE_MS: u16 = 2000;
+
+/// What the server says of the table's Notify, which runs only where the
+/// Acquire before it timed out.
+const ACQUIRE_TIMED_OUT: &str = "Notify(\\_SB_.GLW_, 0x80) for the first time";
+
+/// What it says of the load's takes: one, and it found the firmware holding
+/// the lock.
+const ONE_TAKE_CONTENDED: &str = "; took the Global Lock 1 times, 1 of them from the firmware;";
+
+/// PM1 status and enable (ACPI 6.5 Tables 4.13, 4.14): `PWRBTN_STS` and
+/// `PWRBTN_EN`.
+const PWRBTN: u16 = 1 << 8;
+
+/// The FACS's lock word's owned bit (Table 5.11), with the pending bit a
+/// take that finds it owned sets clear.
+const OWNED: u32 = 2;
+
+/// An SSDT (ACPI 6.5 §5.2.11.2) whose definition block declares the device
+/// `\_SB.GLW` and, as it loads, sleeps `window` ms, then Acquires `\_GL`
+/// within `ms`, giving it back where that took it and Notifying `\_SB.GLW`
+/// with 0x80 where it timed out:
+///
+/// ```text
+/// Device (\_SB.GLW) {}
+/// Sleep (window)
+/// If (Acquire (\_GL, ms)) { Notify (\_SB.GLW, 0x80) } Else { Release (\_GL) }
+/// ```
+fn ssdt_acquiring_the_global_lock(window: u16, ms: u16) -> Vec<u8> {
+    const GL: &[u8] = b"\\_GL_";
+    // `\` and a DualNamePrefix (§20.2.2).
+    const GLW: &[u8] = b"\\\x2E_SB_GLW_";
+    // A PkgLength of one byte (§20.2.4): itself and what follows, under 64.
+    let package = |op: &[u8], body: &[u8]| [op, &[u8::try_from(body.len() + 1).expect("a short package")], body].concat();
+    let sleep = [&[0x5B, 0x22, 0x0B], &window.to_le_bytes()[..]].concat();
+    let acquire = [&[0x5B, 0x23], GL, &ms.to_le_bytes()].concat();
+    let notify = [&[0x86], GLW, &[0x0A, 0x80]].concat();
+    let release = [&[0x5B, 0x27], GL].concat();
+    let aml = [
+        package(&[0x5B, 0x82], GLW),
+        sleep,
+        package(&[0xA0], &[acquire, notify].concat()),
+        package(&[0xA1], &release),
+    ]
+    .concat();
+    let length = u32::try_from(36 + aml.len()).expect("a short table");
+    let mut table = [b"SSDT".as_slice(), &length.to_le_bytes(), &[2, 0], b"TOYOS ", b"GLWAIT  ", &1u32.to_le_bytes(), b"TOYS", &1u32.to_le_bytes(), &aml].concat();
+    // The byte at 9 makes the whole table sum to zero.
+    table[9] = table.iter().fold(0u8, |sum, &b| sum.wrapping_sub(b));
+    table
+}
+
+/// The number after `after` on a line, in hex.
+fn hex_after(line: &str, after: &str) -> Result<u64, String> {
+    line.split_once(after)
+        .map(|(_, rest)| rest.trim_start_matches("0x"))
+        .and_then(|rest| u64::from_str_radix(&rest[..rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len())], 16).ok())
+        .ok_or_else(|| format!("no number after {after:?} on {line:?}"))
+}
+
+/// A press latched before the server's wait for the firmware's release of
+/// the Global Lock is served once the wait ends at its Acquire's timeout: the
+/// wait clears every enable but `GBL_EN`, takes the SCI the press raised,
+/// and puts every enable back after, so the press's status raises the SCI
+/// again for `serve`. `tests/acpicase` with the test kernel's actuator for
+/// the firmware's side of the lock, which `acpi_mediated`'s `held` arm stages
+/// owned before it hands the server the claim; the table QEMU adds sleeps
+/// [`PRESS_WINDOW_MS`] as it loads, then Acquires the lock within
+/// [`ACQUIRE_MS`].
+///
+/// The press is sent once the server has armed, and QEMU's monitor reads
+/// right after it `PWRBTN_STS` latched under `PWRBTN_EN` and the lock word
+/// owned with no pending bit: the server had not yet taken, so its wait came
+/// after the press. A press inside the wait is QEMU's to drop, which sets
+/// `PWRBTN_STS` only under `PWRBTN_EN`. Then the press must power the machine
+/// off, after the Acquire said it timed out.
+pub fn acpi_press_across_a_lock_wait(probe: (String, Vec<u8>)) -> Result<(), String> {
+    let case = super::compile::repo_root().join("tests/acpicase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            // The test kernel, for the Global Lock's actuator, as `acpi_mediated_access` boots it.
+            kernel_params: &["i8042-withheld"],
+            ready_marker: "acpi: the Global Lock is the FACS's at ",
+            extra_root_files: vec![
+                probe,
+                // The arm's name is the file's: the probe asks whether it is there.
+                ("share/acpi_mediated_held".to_string(), b"held\n".to_vec()),
+            ],
+            acpi_tables: vec![ssdt_acquiring_the_global_lock(PRESS_WINDOW_MS, ACQUIRE_MS)],
+            qmp: true,
+            ..Default::default()
+        },
+    );
+    let boot = serial::Serial::named("the boot", qemu.boot_log().to_string());
+    let pm1 = hex_after(boot.must_say("acpi: the ACPI row: PM1a events ")?, "PM1a events ")?;
+    let pm1 = u16::try_from(pm1).map_err(|_| format!("a PM1a event block at {pm1:#x}"))?;
+    let lock_word = hex_after(boot.must_say("acpi: the Global Lock is the FACS's at ")?, "the FACS's at ")?;
+    // Opened before the press: QMP delivers no event emitted before its
+    // client connected.
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    let mut console = format!("{}\n", qemu.boot_log());
+    qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
+    stop.power_button();
+    // Table 4.12: PM1 enable follows PM1 status in the block.
+    let (status, enable, word) = (stop.port_word(pm1), stop.port_word(pm1 + 2), stop.memory_word(lock_word));
+    if status & enable & PWRBTN == 0 || word != OWNED {
+        return Err(format!(
+            "right after the press PM1 read status {status:#06x} under enable {enable:#06x} and the lock word {word:#x}, where a \
+             press latched before the server's take reads PWRBTN_STS under PWRBTN_EN ({PWRBTN:#06x}) and the word owned with no \
+             pending bit ({OWNED:#x})"
+        ));
+    }
+    let pressed_at = console.len();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    let after = serial::Serial::named("the press", console[pressed_at..].to_string());
+    after.must_say(ONE_TAKE_CONTENDED)?;
+    after.must_say_after(ACQUIRE_TIMED_OUT, ACPI_PRESSED)?;
+    after.must_be_clean()?;
+    let whole = serial::Serial::named("the boot and the press", console);
+    if acpi_tables_loaded(&whole, &whole, Q35_S5_SUPPLIED)? < 2 {
+        return Err(format!("the server loaded no table beside the DSDT, so not the one QEMU was handed:\n{}", whole.text()));
+    }
+    eprintln!("  [power] PM1 status {status:#06x} under enable {enable:#06x} and the lock word {word:#x} after the press");
+    eprintln!("  [power] {}", whole.must_say(ONE_TAKE_CONTENDED)?.trim());
+    eprintln!("  [power] {}", whole.must_say_after(ACQUIRE_TIMED_OUT, ACPI_PRESSED)?.trim());
+    Ok(())
+}

@@ -179,7 +179,8 @@ const RUST_SKIP: &[&str] = &[
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
     // i8042's row another claim's, which need the test kernel and its
-    // `i8042-withheld`: `acpi_mediated_access` runs it on tests/acpicase.
+    // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_across_a_lock_wait`
+    // run it on tests/acpicase.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
@@ -356,6 +357,12 @@ const MACHINE_TESTS: &[&str] = &[
     // by stopping. No host test reaches either, and the T14 is never asked to
     // power off.
     "acpi_supply_outlives_holder",
+    // A press while acpiserver waits for the firmware's release of the Global
+    // Lock: the firmware's hold is the test kernel's actuator on the FACS's
+    // word, the table that takes the lock is one QEMU adds, and the press is
+    // QEMU's on demand. The T14's firmware holds the lock when it will, and
+    // nothing presses its button but a hand.
+    "acpi_press_across_a_lock_wait",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
@@ -3702,6 +3709,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
+        "acpi_press_across_a_lock_wait" => power::acpi_press_across_a_lock_wait(suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),

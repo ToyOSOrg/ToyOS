@@ -81,7 +81,8 @@ pub const MAX_LIVE: usize = 16 << 20;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;
-/// The time one evaluation may ask to Sleep, Stall and Wait, together, in µs.
+/// The time one evaluation may ask to Sleep, Stall and Wait, and wait out
+/// in Acquires of `\_GL` that timed out, together, in µs.
 pub(crate) const MAX_WAIT_US: u64 = 10_000_000;
 /// What the Revision opcode answers (§19.6.119): this interpreter's revision.
 pub(crate) const REVISION: u64 = 1;
@@ -183,11 +184,13 @@ pub trait Host {
     /// Notify (§19.6.94) of the object at this absolute path.
     fn notify(&mut self, object: &str, value: u64);
     /// Takes the firmware's Global Lock (§5.2.10.1), for a Lock field's
-    /// access or `\_GL`'s first Acquire, waiting where the firmware holds it
-    /// for its release at most `within` milliseconds, an Acquire's
-    /// TimeoutValue below 0xFFFF (§19.6.2); `None` is no bound of the AML's,
-    /// and is never answered `Ok(false)`, a take that timed out.
-    fn global_take(&mut self, within: Option<u16>) -> Result<bool, Denied>;
+    /// access or an Acquire of `\_GL` with no TimeoutValue (0xFFFF,
+    /// §19.6.2), waiting where the firmware holds it for its release.
+    fn global_take(&mut self) -> Result<(), Denied>;
+    /// Takes the Global Lock for an Acquire of `\_GL` whose TimeoutValue is
+    /// `ms`, waiting where the firmware holds it at most that long: `false`
+    /// is the timeout, and nothing taken.
+    fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied>;
     /// Gives back the Global Lock a take took.
     fn global_release(&mut self) -> Result<(), Denied>;
 }

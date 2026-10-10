@@ -42,12 +42,18 @@
 //! [`OUTLIVED`] has a child supply this guest's own sleep type and exit, and
 //! the parent, which supplied none, ask for the power-off after the child's
 //! claim and one more have been released.
+//!
+//! **A press is served across the server's wait for the firmware's release**
+//! ([`held`]), on a boot whose ROOT carries [`HELD`] and whose firmware lists
+//! a table that takes the Global Lock at its load: the firmware's side of the
+//! lock is staged owned before `/system/bin/acpiserver` is handed the claim.
+//! The press, the wait's timeout and the power-off are the harness's to read.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::endow::{Endowments, DEV_PREFIX, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, Device};
 use toyos_abi::acpi::{pci_address, Access, AcpiInfo, Refused, Space, Width, UNLISTED};
@@ -64,6 +70,9 @@ const CLAIM_LABEL: &str = "acpi-claim";
 /// The file whose presence on ROOT makes this boot [`outlived`]'s: a job is a
 /// binary's name and takes no argument.
 const OUTLIVED: &str = "/system/share/acpi_mediated_outlived";
+
+/// The file whose presence on ROOT makes this boot [`held`]'s.
+const HELD: &str = "/system/share/acpi_mediated_held";
 
 /// `EFI_MEMORY_TYPE`s: what the kernel hands out as RAM, and ACPI's two.
 const USABLE: [u8; 5] = [1, 2, 3, 4, 7];
@@ -112,6 +121,7 @@ impl Holder {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None if std::fs::exists(OUTLIVED).expect("acpi: ask ROOT for this boot's arm") => outlived(),
+        None if std::fs::exists(HELD).expect("acpi: ask ROOT for this boot's arm") => held(),
         None => probe(),
         Some("keeper") => keeper(),
         Some("supplier") => supplier(),
@@ -628,4 +638,21 @@ fn outlived() {
     println!("{ASKED_WITH_NO_HOLDER}");
     let refused = toyos::power::stop(toyos::power::Stop::Shutdown);
     panic!("acpi: the power-off was refused: {refused:?}");
+}
+
+/// What [`held`] says once the server has the claim, with the firmware's
+/// side of the lock owned.
+const STAGED: &str = "acpi: the firmware's side of the Global Lock staged owned, and the server handed the claim";
+
+fn held() {
+    let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
+    let claim = claim(&cap);
+    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, debug_action::FIRMWARE_OWNS), 0, "acpi: the lock was not free before the server ran");
+    let mut server = Command::new("/system/bin/acpiserver")
+        .endow(&format!("{DEV_PREFIX}{}", DeviceType::Acpi.class_name()), claim.into_raw().0)
+        .spawn()
+        .expect("acpi: spawn the server");
+    println!("{STAGED}");
+    let ended = server.wait().expect("acpi: wait for the server");
+    panic!("acpi: the server ended {ended:?}, where a press powers the machine off");
 }
