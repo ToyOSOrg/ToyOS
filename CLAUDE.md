@@ -78,7 +78,7 @@ The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for 
 
 ## Working here
 
-- **Stay on the task.** What you find off it is not fixed on the way, and is filed in `issues/` only where a brief or a review asks. If something blocks, stop and report it; never work around it. Work on what ToyOS cannot do yet starts only on the owner's go.
+- **Stay on the task.** What you find off it is filed in `issues/`, one file per issue, and not fixed on the way. If something blocks, stop and report it; never work around it. What ToyOS cannot do yet is filed, and work on it starts only on the owner's go.
 - **Never degrade audible or visual quality** — even temporarily, even for a big win elsewhere — without the owner's explicit sign-off.
 - **Always be empirical.** Read actual output; run the code; investigate root causes instead of guessing. Every written number comes from a command that was run; an estimate or datasheet bound says so.
 - **Never put the owner's email or any other personal data in a network request or its headers**; any `User-Agent` is `toyos-build (https://github.com/ToyOSOrg/ToyOS)`. Nothing that identifies his machines or network goes into the tree, a commit message or anything posted on GitHub, and one that has to be referred to there is named by where it stands and its kind, with no character of it; `src/sourcegate.rs` names the shapes.
@@ -88,7 +88,7 @@ The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for 
 
 ## Prose
 
-- **Code is the product, not prose.** Prose exists only where it is load-bearing — where the code or the record needs it to be read correctly. Stale or false prose in source and docs is deleted, never corrected or rewritten; a record — a pull request's body, a prompt — is kept true of what it describes. A pull request edits no existing issue: a stale or false one is left as it is until the work that takes it up.
+- **Code is the product, not prose.** Prose exists only where it is load-bearing — where the code or the record needs it to be read correctly. Stale or false prose in source and docs is deleted, never corrected or rewritten; a record — a pull request's body, a prompt — is kept true of what it describes. A pull request edits no existing issue except the issue it takes up, or one a rule names as where it records something: any other stale or false issue is left as it is.
 - **Durable facts go in the module header at the site** — never in private agent memory, and almost never in a `CLAUDE.md`. A `CLAUDE.md` never grows: it holds pointers and caveats of the most general kind, and never cites an individual issue file. The story of a change goes in its commit message. A comment never restates a count that somebody else's landing moves.
 - **An agent edits a `CLAUDE.md` or a role prompt only when briefed to**, or to update a command, flag or step its own change removes or renames. A rule that truly has no better home and whose violation is invisible or unrecoverable is proposed as one sentence in the agent's final report.
 - **A comment is one of three kinds or it goes** — the one-clause invariant at the edit site, the boundary contract, or the refusal-reason at a surprising decision, over a module doc that is the contract and nothing else. Chronology, measurements' provenance, past implementations, investigation stories and narration of the obvious live in commit messages and the tracker, never in source — a date in a source comment is the tell, and a `CLAUDE.md` carries none either.

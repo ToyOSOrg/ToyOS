@@ -23,7 +23,7 @@ Four fields, three required, no defaults.
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
 | | `tooling` | the development machine — the harness, a gate, a price, CI, the tracker, the build system, a measurement owed |
-| | `finding` | noticed in passing — and bounded: when taken up it is promoted to a `defect` or folded into the owning module header and closed |
+| | `finding` | noticed in passing — when taken up it is promoted to a `defect` or folded into the owning module header and closed |
 | | `track` | staged work — something to build that nobody has built |
 | | `question` | blocked on the owner, and nobody else can decide it |
 | | `rejected` | considered and declined, recorded so nobody re-proposes it |
@@ -47,8 +47,7 @@ is owed — and if the body says otherwise, the *kind* is what is wrong. A rulin
 that declared a standing failure rather than removing it deferred the work; it
 did not decline it, so the entry is a `defect` and stays open.
 
-**`kind: finding` does not accumulate.** A finding
-has a bounded life: whoever takes it up either promotes it to a `defect`
+Whoever takes up a finding either promotes it to a `defect`
 (something real that someone should act on — a fix, a measurement, an
 instrument) or moves its one durable line to the module header or doc comment
 at the site that owns the subject and deletes the file by the closing
@@ -91,9 +90,9 @@ nothing at all.
 
 ## Filing one
 
-Write a new file, only where a brief or a review asks for one. A pull request
-edits no existing one: a stale or false issue is left as it is, and is updated
-only by the work that takes it up.
+Write a new file — nine agents appending to nine different files produce zero
+conflicts, and that is the whole reason this is a directory and not a document.
+Root `CLAUDE.md`'s Prose says which existing one a pull request may edit.
 
 ## Closing one
 
