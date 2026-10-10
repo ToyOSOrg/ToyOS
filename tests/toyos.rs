@@ -2,6 +2,8 @@
 extern crate toyos_build;
 
 mod common;
+#[path = "toyos-rust-tests/src/stream_ends.rs"]
+mod stream_ends;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -126,6 +128,9 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
+    // not give: the `app_view` metal row runs it on tests/proctreecase.
+    "app_view",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
@@ -134,9 +139,15 @@ const RUST_SKIP: &[&str] = &[
     // It needs a NIC in front of netstack and a host server behind it:
     // `netstack_socket_churn` runs it on `tests/netcase`.
     "netstack_socket_churn",
+    // It needs a NIC in front of netstack, a host server behind it and a host
+    // that dials its listener: `netstack_streams` runs it on `tests/netcase`.
+    "netstack_streams",
     // It needs a host that dials its listeners when it says they wait:
     // `libc_sockets` runs it on `tests/netcase`.
     "nodelay_accepted",
+    // It needs a host peer that ends each stream as the stream asks:
+    // `libc_sockets` runs it on `tests/netcase`.
+    "stream_ends_std",
     // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -282,9 +293,18 @@ const MACHINE_TESTS: &[&str] = &[
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
     "netstack_socket_churn",
+    // The stack against a TCP its writers did not write, the host kernel's
+    // behind QEMU's user network, through the kernel's own pipes and each of
+    // netstack's two drivers: netstack has no host build, the stack's host
+    // tests answer it from the tests' own script, and the T14's bench may
+    // open no peer that echoes megabytes or dials in.
+    "netstack_streams",
+    "netstack_streams_e1000e",
     // What libc's and std's socket calls ask of netstack, read back from a
-    // peer that answers: the calls are requests on netstack's port, netstack
-    // has no host build, and the T14's peer is the bench's network.
+    // peer that answers, and each way a stream ends as libc and std read it:
+    // the calls are requests on netstack's port, an end is what netstack, the
+    // kernel's pipes and the library read together, netstack has no host
+    // build, and the T14's bench has no peer that answers or resets on cue.
     "libc_sockets",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
@@ -744,6 +764,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
+    (
+        // An installed package sees its own directory read-only and its own
+        // folder as `HOME`, and nothing else of `/apps` or `/home`.
+        "app_view",
+        metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
+    ),
     // ---- one image: tests/metalcase, which runs no job ----
     //
     // The rows after the first read what any boot that hands the machine back
@@ -1002,8 +1028,9 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, and the shells `fs_share`
-/// asks DATA's server through, under its share and in a login session.
+/// rows `launch_authority` is refused and started, the shells `fs_share`
+/// asks DATA's server through, under its share and in a login session, and
+/// the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
@@ -1014,6 +1041,7 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
         "test_rs_launch_authority",
         "test_rs_port_badge",
         "test_rs_fs_share",
+        "test_rs_app_view",
     ],
 )];
 
@@ -3002,21 +3030,23 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// netstack's stream count returns once connections that ended without their
 /// client's close request are let go, a client that left a connection its
 /// peer holds is counted gone, and a connection whose receive end the kernel
-/// refuses netstack's watch of is reset. One host server here ends each
-/// connection it accepts at once and one holds each; the guest's comparisons
-/// are the verdict.
+/// refuses netstack's watch of is reset; a listener and a datagram socket
+/// whose owner left are let go, a receive that waits is answered by its
+/// datagram, and the connect past netstack's places is refused. One host
+/// server here ends each connection it accepts at once, one holds each and
+/// one answers each datagram; the guest's comparisons are the verdict.
 fn netstack_socket_churn() -> Result<(), String> {
     const JOB: &str = "netstack_socket_churn";
     let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
     let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
     // Ends with the process: a guest that never dials leaves it in `accept`.
     thread::spawn(move || server.incoming().for_each(drop));
-    let holding = holding_server()?;
+    let (holding, answering) = (holding_server()?, answering_server()?);
 
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
     let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
-    let result =
-        qemu.run_test(&format!("test_rs_netstack_socket_churn {port} {holding}"), Duration::from_secs(120));
+    let result = qemu
+        .run_test(&format!("test_rs_netstack_socket_churn {port} {holding} {answering}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -3025,6 +3055,118 @@ fn netstack_socket_churn() -> Result<(), String> {
     }
     if !result.stdout.lines().any(|l| l.trim_end().ends_with("netstack_socket_churn: ok")) {
         return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    Ok(())
+}
+
+/// What one job of netstack's said, as its verdict: it ended by itself, with
+/// 0, and with its last line.
+fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{job}: ok"))) {
+        return Err(format!("the guest never said it was done:\n{}", result.stdout));
+    }
+    Ok(())
+}
+
+/// Megabytes out to the host kernel's TCP and back unchanged, and two host
+/// peers that dial the guest's listener before it accepts either, both
+/// accepted, answered and read their stream's end: through netstack on
+/// `profile`'s card. The host server here sends back what it reads; the
+/// guest's comparisons and each peer's answer are the verdict.
+fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
+    use std::io::Read;
+    const JOB: &str = "netstack_streams";
+    /// The port the job listens on in the guest, which nothing else on its
+    /// boot binds.
+    const LISTENER: u16 = 7010;
+    const WAITS: &str = "netstack_streams: the listener waits for two peers";
+    /// A hang ceiling on a peer's answer, which the job wrote before it
+    /// ended.
+    const ANSWERED: Duration = Duration::from_secs(30);
+    let echo = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the echoing server: {e}"))?;
+    let port = echo.local_addr().map_err(|e| format!("the echoing server's port: {e}"))?.port();
+    // Ends with the process: a guest that never dials leaves it in `accept`.
+    thread::spawn(move || {
+        for stream in echo.incoming().flatten() {
+            thread::spawn(move || {
+                let mut back = stream.try_clone().expect("a second handle on an accepted stream");
+                // A guest that resets the stream ends its echo, and reads the
+                // loss itself.
+                let _ = std::io::copy(&mut &stream, &mut back);
+            });
+        }
+    });
+
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let options = BootOptions { qmp: true, profile, ..Default::default() };
+    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], options)?;
+    let [to_listener] = forwards_into(&qemu, [LISTENER])?;
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    // The connections QEMU's user network has taken off the forwarded port
+    // and is carrying to the guest's listener: every row of its table that
+    // names the guest's port, but the forward's own.
+    let mut carried = move || {
+        let table = monitor.human("info usernet");
+        table
+            .lines()
+            .map(|row| row.split_whitespace().collect::<Vec<_>>())
+            .filter(|row| row.first().is_some_and(|kind| kind.starts_with("TCP[") && *kind != "TCP[HOST_FORWARD]"))
+            .filter(|row| [3, 5].iter().any(|&at| row.get(at) == Some(&LISTENER.to_string().as_str())))
+            .count()
+    };
+    // Each peer says its own byte as soon as it has dialled, and the next
+    // dials once QEMU carries this one: its forward queues one connection,
+    // and resets a dial that arrives while one is queued.
+    let mut dial = |said: u8| -> Result<std::net::TcpStream, String> {
+        let before = carried();
+        let mut peer = std::net::TcpStream::connect(("127.0.0.1", to_listener)).map_err(|e| e.to_string())?;
+        peer.write_all(&[said]).map_err(|e| e.to_string())?;
+        peer.set_read_timeout(Some(ANSWERED)).map_err(|e| e.to_string())?;
+        let dialled = Instant::now();
+        // QEMU says nothing when it carries a connection, so its table is
+        // asked again after a wait that doubles to 64 ms.
+        let mut pause = Duration::from_millis(1);
+        while carried() == before {
+            if dialled.elapsed() > ANSWERED {
+                return Err(format!("QEMU's user network took no connection off its forward in {ANSWERED:?}"));
+            }
+            thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(64));
+        }
+        Ok(peer)
+    };
+    let mut peers = Vec::new();
+    let result =
+        qemu.run_test_paced(&format!("test_rs_{JOB} {port} {LISTENER}"), Duration::from_secs(240), |_, line| {
+            if line.trim_end().ends_with(WAITS) {
+                peers.extend(b"12".iter().map(|&said| dial(said).map(|peer| (said, peer))));
+            }
+        });
+    // A dial that failed first: it is why the job's wakes did not come.
+    let peers: Vec<_> = peers.into_iter().collect::<Result<_, _>>().map_err(|e| {
+        format!("the host could not dial the guest's listener: {e}\nthe job said:\n{}", result.stdout)
+    })?;
+    job_ok(JOB, &result)?;
+    if peers.len() != 2 {
+        return Err(format!("the job never said its listener waits:\n{}", result.stdout));
+    }
+    for (said, mut peer) in peers {
+        let mut answer = [0u8; 1];
+        peer.read_exact(&mut answer).map_err(|e| format!("the peer that said {:?} was not answered: {e}", said as char))?;
+        if answer[0] != said {
+            return Err(format!("the peer that said {:?} was answered {:?}", said as char, answer[0] as char));
+        }
+        // The guest closed the stream behind its answer.
+        match peer.read(&mut answer) {
+            Ok(0) => {}
+            ended => return Err(format!("the peer that said {:?} read {ended:?} where its stream ends", said as char)),
+        }
     }
     Ok(())
 }
@@ -3039,6 +3181,81 @@ fn holding_server() -> Result<u16, String> {
     Ok(port)
 }
 
+/// The peer `stream_ends` dials, for as long as the process lives: its port.
+/// Each connection's first byte names how it ends, and each end waits on what
+/// the client did before it.
+fn ending_server() -> Result<u16, String> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    /// A close that sends a reset (RFC 9293 §3.10.4's ABORT): a zero linger.
+    fn reset(stream: std::net::TcpStream) {
+        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+        // SAFETY: a live socket, and an option of the size its type says.
+        let set = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "a zero linger: {}", std::io::Error::last_os_error());
+    }
+    fn serve(mut stream: std::net::TcpStream) {
+        let mut what = [0u8; 1];
+        if stream.read_exact(&mut what).is_err() {
+            return;
+        }
+        match what[0] {
+            stream_ends::PEER_FIN_FIRST => {}
+            stream_ends::RESET_MID_STREAM => {
+                let ahead: Vec<u8> = (0..stream_ends::AHEAD).map(stream_ends::pattern).collect();
+                if stream.write_all(&ahead).is_ok() && stream.read_exact(&mut what).is_ok() {
+                    reset(stream);
+                }
+            }
+            stream_ends::RESET_AFTER_HALF_CLOSE => {
+                if stream.read_to_end(&mut Vec::new()).is_ok() {
+                    reset(stream);
+                }
+            }
+            stream_ends::BOTH_CLOSE => {
+                let _ = stream.write_all(b"bye");
+            }
+            stream_ends::SHUT_FIRST => {
+                let _ = stream
+                    .write_all(b".")
+                    .and_then(|()| stream.read_to_end(&mut Vec::new()))
+                    .and_then(|_| stream.write_all(b"late"));
+            }
+            _ => {}
+        }
+    }
+    let peer = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the ending peer: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the ending peer's port: {e}"))?.port();
+    thread::spawn(move || {
+        for stream in peer.incoming().flatten() {
+            thread::spawn(move || serve(stream));
+        }
+    });
+    Ok(port)
+}
+
+/// A host server that answers each datagram with itself, for as long as the
+/// process lives: its port.
+fn answering_server() -> Result<u16, String> {
+    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
+    let port = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
+    thread::spawn(move || {
+        let mut datagram = [0u8; 64];
+        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
+            echo.send_to(&datagram[..len], from).expect("answer a datagram");
+        }
+    });
+    Ok(port)
+}
+
 /// Boot `tests/netcase` with these binaries staged, to netstack's lease, since
 /// its jobs name their peer by an address, and then to the claim of its name:
 /// a responder whose probing never ends leaves the machine nameless, and
@@ -3049,7 +3266,7 @@ fn boot_netcase(
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
     const LEASED: &str = "netstack: DHCP: lease ";
-    /// `userland/netstack/src/mdns.rs`'s line for a probing no host answered.
+    /// `userland/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
@@ -3090,40 +3307,39 @@ fn forwards_into<const N: usize>(qemu: &QemuInstance, guest_ports: [u16; N]) -> 
 /// one boot of `tests/netcase`: each job dials a host server that holds what
 /// it accepts, or sends to one that answers each datagram with itself, at the
 /// address the guest's network gives the host; and each time a job says its
-/// listeners wait, the host dials them through the ports QEMU forwards. A
-/// job's own comparisons are its verdict.
+/// listeners wait, the host dials them through the ports QEMU forwards; and
+/// `stream_ends` in C and in std dial a host peer that ends each stream as
+/// its first byte names, std's report first read on this host's TCP. A job's
+/// own comparisons are its verdict.
 fn libc_sockets() -> Result<(), String> {
     const HOST: &str = "10.0.2.2";
     /// The ports `nodelay_kept` and then `nodelay_accepted` listen on in the
     /// guest, which nothing else on its boot binds.
     const LISTENERS: [u16; 4] = [7001, 7002, 7003, 7004];
-    const RUST_JOB: &str = "nodelay_accepted";
-    let holding = holding_server()?;
-    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
-    let answering = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
-    // Ends with the process, as the holding server does.
-    thread::spawn(move || {
-        let mut datagram = [0u8; 64];
-        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
-            echo.send_to(&datagram[..len], from).expect("answer a datagram");
-        }
-    });
+    const RUST_JOBS: [&str; 2] = ["nodelay_accepted", "stream_ends_std"];
+    let (holding, answering, ending) = (holding_server()?, answering_server()?, ending_server()?);
+    // The oracle: the report std's job owes is this host's TCP's.
+    let mut host = Vec::new();
+    stream_ends::run("127.0.0.1", ending, |line| host.push(line));
+    if host != stream_ends::EXPECTED {
+        return Err(format!("this host's TCP reports\n{}\nand not\n{}", host.join("\n"), stream_ends::EXPECTED.join("\n")));
+    }
 
     let case = compile::repo_root().join("tests/netcase");
-    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound"]
+    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound", "stream_ends"]
         .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
         .into();
-    let rust_bin =
-        qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), RUST_JOB);
-    let mut qemu =
-        boot_netcase(&c_bins, &[(RUST_JOB.to_string(), rust_bin)], BootOptions { qmp: true, ..Default::default() })?;
+    let rust_bins: Vec<(String, Vec<u8>)> = RUST_JOBS
+        .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), job)))
+        .into();
+    let mut qemu = boot_netcase(&c_bins, &rust_bins, BootOptions { qmp: true, ..Default::default() })?;
     let [held, clear, std_port, pipe_port] = LISTENERS;
     let [to_held, to_clear, to_std, to_pipe] = forwards_into(&qemu, LISTENERS)?;
     /// Each line a job says its listeners wait in, the constants of its
     /// source, and the forwarded ports the host dials when it does.
     type Waits<'a> = &'a [(&'a str, &'a [u16])];
     // The address first: every job names its peer by one.
-    let jobs: [(&str, String, Waits); 4] = [
+    let jobs: [(&str, String, Waits); 6] = [
         ("test_c_addr_order", holding.to_string(), &[]),
         (
             "test_c_nodelay_kept",
@@ -3142,6 +3358,8 @@ fn libc_sockets() -> Result<(), String> {
                 ("nodelay_accepted: the listener waits for a second peer", &[to_pipe]),
             ],
         ),
+        ("test_c_stream_ends", ending.to_string(), &[]),
+        ("test_rs_stream_ends_std", ending.to_string(), &[]),
     ];
     // Held to the test's end: a peer gone before a job's `accept` is a
     // connection its listener no longer holds.
@@ -3178,6 +3396,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
+        "netstack_streams" => netstack_streams(qemu::Profile::Headless),
+        "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
@@ -3552,6 +3772,28 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
         let line = refused(caller, Sessions::default().machine(), target, why);
         if !log.text().lines().any(|l| l.contains(&line)) {
             return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
+    }
+    Ok(())
+}
+
+/// `app_view` passed, every arm its package asks held, and the supervisor
+/// refused each of the two launches for its own reason: a package named after
+/// the shell's row, and one whose folder is a file. The guest sees only that
+/// each was refused.
+fn app_view(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_app_view")?;
+    let log = back.log();
+    let named = format!("supervisor: launcher: {}", toyos_manifest::row_named("shell"));
+    for said in [
+        "  every arm held",
+        "app_view: the app saw its own package read-only and its own folder as HOME, and nothing else",
+        &named,
+        "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
+         /home/toy/Apps/appview is no directory",
+    ] {
+        if !log.text().lines().any(|l| l.contains(said)) {
+            return Err(format!("the log never said `{said}`\n{}", log.text()));
         }
     }
     Ok(())

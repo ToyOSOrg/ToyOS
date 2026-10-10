@@ -1,19 +1,20 @@
-//! The signature over an image's header: Ed25519, over the message OpenSSH's
-//! SSHSIG format builds (`PROTOCOL.sshsig`), in the [`NAMESPACE`] this tree
-//! owns.
+//! The signature over anything the owner signs: Ed25519, over the message
+//! OpenSSH's SSHSIG format builds (`PROTOCOL.sshsig`), in the namespace of
+//! what is signed.
 //!
 //! ```text
-//! signed data  "SSHSIG" | string NAMESPACE | string "" | string "sha512"
-//!              | string SHA-512(header)
+//! signed data  "SSHSIG" | string namespace | string "" | string "sha512"
+//!              | string SHA-512(bytes)
 //! ```
 //!
 //! where `string` is a big-endian `u32` length and the bytes. **Why SSHSIG
-//! and not the header raw**: it is exactly what `ssh-keygen -Y sign -n
-//! toyos-image` signs, so an image signed by an implementation this tree did
-//! not write verifies here, and an owner may hold the key in any agent or
-//! token OpenSSH can sign with. The namespace is what stops a signature the
-//! owner's key made for anything else — a git commit, a file — from verifying
-//! as an image.
+//! and not the bytes raw**: it is exactly what `ssh-keygen -Y sign -n
+//! <namespace>` signs, so a signature an implementation this tree did not
+//! write made verifies here, and an owner may hold the key in any agent or
+//! token OpenSSH can sign with. **The namespace is the [`Signed`] thing's own,
+//! never an argument**: it is what stops a signature the owner's key made for
+//! anything else — a git commit, a package repository's targets, an image —
+//! from verifying as this.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use toyos_sha2::Sha512;
@@ -26,53 +27,83 @@ pub const NAMESPACE: &str = "toyos-image";
 const PREAMBLE: &[u8; 6] = b"SSHSIG";
 const HASH: &str = "sha512";
 
-/// The signed data's length: the preamble, four strings, and a SHA-512.
-pub const MESSAGE_BYTES: usize = 6 + (4 + NAMESPACE.len()) + 4 + (4 + HASH.len()) + (4 + 64);
+/// The longest namespace anything here is signed in: `toyos-timestamp`.
+const MAX_NAMESPACE: usize = 15;
 
-/// The bytes Ed25519 signs for `header`.
-pub fn message(header: &[u8; HEADER_BYTES]) -> [u8; MESSAGE_BYTES] {
-    let mut out = [0u8; MESSAGE_BYTES];
-    let mut at = 0;
+/// What a signature is over: bytes, and the namespace they are signed in.
+pub trait Signed {
+    fn namespace(&self) -> &'static str;
+    fn bytes(&self) -> &[u8];
+}
+
+/// An image's header, in [`NAMESPACE`].
+impl Signed for [u8; HEADER_BYTES] {
+    fn namespace(&self) -> &'static str {
+        NAMESPACE
+    }
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+/// The bytes Ed25519 signs for one [`Signed`]: the preamble, four strings and
+/// a SHA-512, held without allocating.
+pub struct Message {
+    bytes: [u8; 6 + (4 + MAX_NAMESPACE) + 4 + (4 + HASH.len()) + (4 + 64)],
+    len: usize,
+}
+
+impl Message {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// The bytes Ed25519 signs for `signed`.
+pub fn message<S: Signed + ?Sized>(signed: &S) -> Message {
+    let namespace = signed.namespace().as_bytes();
+    assert!(namespace.len() <= MAX_NAMESPACE, "a namespace this crate names is at most {MAX_NAMESPACE} bytes");
+    let mut out = Message { bytes: [0; 6 + (4 + MAX_NAMESPACE) + 4 + (4 + HASH.len()) + (4 + 64)], len: 0 };
     let mut put = |bytes: &[u8]| {
-        out[at..at + bytes.len()].copy_from_slice(bytes);
-        at += bytes.len();
+        out.bytes[out.len..out.len + bytes.len()].copy_from_slice(bytes);
+        out.len += bytes.len();
     };
     put(PREAMBLE);
-    for field in [NAMESPACE.as_bytes(), b"", HASH.as_bytes()] {
+    for field in [namespace, b"", HASH.as_bytes()] {
         put(&(field.len() as u32).to_be_bytes());
         put(field);
     }
     put(&64u32.to_be_bytes());
-    put(&Sha512::digest(header));
+    put(&Sha512::digest(signed.bytes()));
     out
 }
 
-/// Why a signature does not vouch for a header.
+/// Why a signature does not vouch for what it is over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// The embedded key is not a point on the curve: the binary was built wrong.
+    /// The key is not a point on the curve.
     Key,
-    /// The signature is not the key's over this header.
+    /// The signature is not the key's over these bytes in this namespace.
     Signature,
 }
 
 impl core::fmt::Display for Refused {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Key => write!(f, "the embedded image key is not an Ed25519 public key"),
-            Self::Signature => write!(f, "the signature is not this machine's key's over the header"),
+            Self::Key => write!(f, "the key is not an Ed25519 public key"),
+            Self::Signature => write!(f, "the signature is not this key's over these bytes"),
         }
     }
 }
 
-/// Whether `signature` is `key`'s over `header`.
+/// Whether `signature` is `key`'s over `signed`, in its namespace.
 ///
 /// `verify_strict`: a signature with a non-canonical `S`, or a key of small
 /// order, is refused rather than accepted by one implementation and not
 /// another.
-pub fn verify(key: &[u8; 32], header: &[u8; HEADER_BYTES], signature: &[u8; SIGNATURE_BYTES]) -> Result<(), Refused> {
+pub fn verify<S: Signed + ?Sized>(key: &[u8; 32], signed: &S, signature: &[u8; SIGNATURE_BYTES]) -> Result<(), Refused> {
     let key = VerifyingKey::from_bytes(key).map_err(|_| Refused::Key)?;
-    key.verify_strict(&message(header), &Signature::from_bytes(signature))
+    key.verify_strict(message(signed).as_bytes(), &Signature::from_bytes(signature))
         .map_err(|_| Refused::Signature)
 }
 
@@ -81,12 +112,12 @@ pub fn public_of(seed: &[u8; 32]) -> [u8; 32] {
     ed25519_dalek::SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
-/// `seed`'s signature over `header`: the host's half, and no binary on the
+/// `seed`'s signature over `signed`: the host's half, and no binary on the
 /// machine is built with it.
-#[cfg(feature = "sign")]
-pub fn sign(seed: &[u8; 32], header: &[u8; HEADER_BYTES]) -> [u8; SIGNATURE_BYTES] {
+#[cfg(any(test, feature = "sign"))]
+pub fn sign<S: Signed + ?Sized>(seed: &[u8; 32], signed: &S) -> [u8; SIGNATURE_BYTES] {
     use ed25519_dalek::Signer as _;
-    ed25519_dalek::SigningKey::from_bytes(seed).sign(&message(header)).to_bytes()
+    ed25519_dalek::SigningKey::from_bytes(seed).sign(message(signed).as_bytes()).to_bytes()
 }
 
 /// A 32-byte key from 64 hex digits, at compile time: how the loader and the
@@ -187,6 +218,8 @@ mod tests {
     fn the_message_is_sshsigs_signed_data() {
         let header = [0xA5u8; HEADER_BYTES];
         let m = message(&header);
+        let m = m.as_bytes();
+        assert_eq!(m.len(), 6 + (4 + 11) + 4 + (4 + 6) + (4 + 64));
         assert_eq!(&m[..6], b"SSHSIG");
         assert_eq!(&m[6..10], &11u32.to_be_bytes());
         assert_eq!(&m[10..21], b"toyos-image");

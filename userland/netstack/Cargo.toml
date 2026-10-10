@@ -1,6 +1,6 @@
 [package]
 name = "netstack"
-description = "The network server: one Ethernet device claimed from the kernel, smoltcp over it, DHCP, the DNS resolver and mDNS, served to programs over IPC."
+description = "The network server: one Ethernet device claimed from the kernel, ToyOS's own stack over it (toyos-net-node), its DHCP lease, resolver and mDNS name, served to programs over IPC."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -13,22 +13,14 @@ toyos-virtio = { path = "../../toyos-virtio" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }
+toyos-dhcp = { path = "../../toyos-dhcp" }
 toyos-inspect = { path = "../../toyos-inspect" }
-
-[dependencies.smoltcp]
-version = "0.12"
-default-features = false
-features = [
-    "medium-ethernet",
-    "proto-ipv4",
-    "socket-tcp",
-    "socket-udp",
-    "socket-dhcpv4",
-    # The multicast DNS group, which `mdns.rs` joins to answer for this
-    # machine's name.
-    "multicast",
-    "alloc",
-]
+toyos-net-node = { path = "node" }
+toyos-net-ip = { path = "../../toyos-net-ip" }
+toyos-net-shard = { path = "../../toyos-net-shard" }
+toyos-net-tcp = { path = "../../toyos-net-shard/tcp" }
+toyos-net-udp = { path = "../../toyos-net-udp" }
+toyos-net-wire = { path = "../../toyos-net-wire" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the NIC ToyOS claims for it"

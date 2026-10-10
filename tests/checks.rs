@@ -957,9 +957,8 @@ mod checks {
 
     /// One boot's readback, out of a `loader.log` and a `logkeeper` text.
     fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
-        let boot = "back_secs 50\nstick_secs 0\n";
-        metal::Readback::new(label, loader.into(), log.into(), boot)
-            .expect("a boot file naming both numbers")
+        metal::Readback::new(label, loader.into(), log.into(), &metal_checks::boot_file())
+            .expect("a boot file as the loop writes it")
     }
 
     /// The pass before the handoff, which every `loader.log` opens with.

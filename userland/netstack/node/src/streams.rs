@@ -429,10 +429,6 @@ impl Node {
         true
     }
 
-    pub fn nodelay(&self, id: StreamId) -> Option<bool> {
-        self.streams.live.get(&id).map(|stream| stream.options.nodelay)
-    }
-
     /// The kernel said nobody holds the other end of one of an established stream's pipes: the
     /// to-client pipe has no reader, or the from-client pipe no writer, whatever it still holds.
     pub fn pipe_gone(&mut self, now: Instant, id: StreamId, end: PipeEnd) {
