@@ -25,10 +25,6 @@ const INVALID_VENDOR: u16 = 0xFFFF;
 /// The one MSI-X table entry this kernel programs; a device's queues must point at it too.
 pub const MSIX_ENTRY: u16 = 0;
 
-// Every device interrupt in this kernel targets cpu0, named as a destination for
-// the message and for the unit to put in an entry.
-pub(crate) const MSG_DEST: u32 = 0;
-
 /// Why a walk of a function's capability list answered no capability.
 pub enum NoCapability {
     /// The walk reached the list's terminator and nothing on it carried the id.
@@ -278,20 +274,20 @@ impl PciDevice {
         self.mmio.read_u16(COMMAND);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it: a
-    /// kernel driver's arming, whose message is compatibility format on a
-    /// machine that remaps nothing. A claimed function is armed by
+    /// Point this function's [`MSIX_ENTRY`] at `irq` and enable it: a kernel
+    /// driver's arming, whose message the architecture makes
+    /// ([`crate::iommu::driver_msi`]). A claimed function is armed by
     /// [`arm_claimed_msix`] instead.
     ///
     /// Answers the entry's own window, which stays this kernel's: masking is a
     /// write to it, and a claimant that could reach it could aim the device's
     /// message at any address the LAPIC decodes.
     ///
-    /// `None` where it has no MSI-X entry this kernel can write, or the unit
-    /// refuses its message.
-    pub(in crate::drivers) fn enable_msix(&self, vector: u8) -> Option<Mmio> {
+    /// `None` where it has no MSI-X entry this kernel can write, or it is
+    /// refused a message.
+    pub(in crate::drivers) fn enable_msix(&self, irq: crate::arch::DriverIrq) -> Option<Mmio> {
         let entry = self.msix_entry().ok()?;
-        let (address, data) = self.message(vector)?;
+        let (address, data) = self.message(irq)?;
         Some(self.write_msix(entry, address, data))
     }
 
@@ -358,31 +354,21 @@ impl PciDevice {
             self.bus, self.dev, self.func);
     }
 
-    /// The address and data this function's interrupt registers take for `vector`.
+    /// The address and data this function's interrupt registers take for `irq`.
     ///
-    /// `None` refuses the device: the machine remaps interrupts and this
-    /// function has no entry, so the message it would otherwise write is one the
-    /// unit blocks.
-    fn message(&self, vector: u8) -> Option<(u32, u32)> {
-        let dest = MSG_DEST;
-        match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
-            // The same CPU the remappable one would name.
-            crate::iommu::Delivery::Direct => match crate::arch::msi_message(dest, vector) {
-                Ok(message) => Some(message),
-                Err(why) => {
-                    log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
-                    None
-                }
-            },
-            crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
-            crate::iommu::Delivery::Refused(why) => {
+    /// `None` refuses the device: the message it would otherwise write is one
+    /// nothing delivers.
+    fn message(&self, irq: crate::arch::DriverIrq) -> Option<(u32, u32)> {
+        match crate::iommu::driver_msi(self.bus, self.dev, self.func, irq) {
+            Ok(message) => Some((message.address, message.data)),
+            Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
                 None
             }
         }
     }
 
-    /// Point this function's single MSI message at `vector` and enable it: a
+    /// Point this function's single MSI message at `irq` and enable it: a
     /// kernel driver's arming, as [`Self::enable_msix`] is.
     ///
     /// **A driver in this kernel may arm this however the MSI-X walk failed**, a
@@ -390,11 +376,11 @@ impl PciDevice {
     /// holder, so an MSI-X table past that link is one nobody but this kernel
     /// could reach. A hand-over is the caller that has to tell the two apart,
     /// and `crate::pcidev`'s header says why.
-    pub(in crate::drivers) fn enable_msi(&self, vector: u8) -> bool {
+    pub(in crate::drivers) fn enable_msi(&self, irq: crate::arch::DriverIrq) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {
             return false;
         };
-        let Some((address, data)) = self.message(vector) else {
+        let Some((address, data)) = self.message(irq) else {
             return false;
         };
         self.write_msi(cap, address, data);
@@ -495,8 +481,8 @@ impl PciDevice {
     }
 }
 
-/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own remapping
-/// entry and enable it. Takes the message and nothing else: the function is
+/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own message and
+/// enable it. Takes the message and nothing else: the function is
 /// the one the entry was written for, and no other message reaches here.
 pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<Mmio, NoEntry> {
     let pci = message.function();

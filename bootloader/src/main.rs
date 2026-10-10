@@ -317,7 +317,6 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     let rules = rela::Rules {
         extent,
         window: (0, mem_size as u64),
-        fill: None,
         tls: None,
     };
     let mut reloc_count = 0u64;

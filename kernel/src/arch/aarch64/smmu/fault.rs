@@ -47,9 +47,9 @@ fn armed() -> Option<&'static Armed> {
 
 /// Everything the handler reads, before the unit's event interrupt is
 /// enabled: the registers, the queue and its indexes, and the routes.
-pub(super) fn arm(regs: Registers, queue: Mmio, events: Events, routes: &[(StreamId, u32)]) {
+pub(super) fn arm(regs: Registers, queue: Mmio, events: Events, routes: impl Iterator<Item = (StreamId, u32)>) {
     let armed =
-        Box::new(Armed { regs, queue, events, routes: routes.into(), faults: AtomicU32::new(0) });
+        Box::new(Armed { regs, queue, events, routes: routes.collect(), faults: AtomicU32::new(0) });
     let first = ARMED.compare_exchange(core::ptr::null_mut(), Box::leak(armed), Ordering::Release, Ordering::Relaxed);
     assert!(first.is_ok(), "SMMU: the event handler was armed twice");
 }

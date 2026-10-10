@@ -1,7 +1,13 @@
 //! A device's address space: one context descriptor, tagged with an ASID of
-//! its own, over stage 1 tables that map 2 MiB blocks and nothing else
+//! its own, over stage 1 tables that map 2 MiB blocks
 //! (`toyos_smmu::table`), and the device addresses it hands out, over the
 //! unit's 48-bit input (`crate::iommu::window`).
+//!
+//! **And the ITS's doorbell, the one 4 KiB page at its own address**: the unit
+//! translates a function's message as it does any write it makes, so a domain
+//! without that page is one whose function's messages it refuses. The page
+//! holds `GITS_TRANSLATER` and nothing else a device may write, and below
+//! memory it is no address a domain hands out.
 //!
 //! A new leaf needs no invalidation — the unit caches no translation that
 //! faulted — and a removed one is invalidated by the domain's ASID, behind a
@@ -19,6 +25,11 @@ use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
 use crate::mm::{PAGE_2M, PAGE_SIZE};
 
+/// One 2 MiB block of memory at `phys`, which a device reads and writes.
+fn block(phys: u64) -> Leaf {
+    Leaf::Memory(Phys::<21>::new(phys).expect("SMMU: a 2 MiB-aligned page of memory"), Access::ReadWrite)
+}
+
 /// Domain ids start at 1: `DomainId` is never 0.
 const FIRST: u16 = 1;
 
@@ -34,10 +45,9 @@ impl Live {
         &mut self.domains[usize::from(id.raw() - FIRST)]
     }
 
-    /// One 2 MiB block of `phys` at `at`, its tables grown on the way.
-    fn put(&mut self, root: Phys<12>, at: u64, phys: u64) {
-        let block = Phys::<21>::new(phys).expect("SMMU: a 2 MiB-aligned page of memory");
-        let path = plan(at, Leaf::Memory(block, Access::ReadWrite), &self.unit).expect("SMMU: a handed-out address");
+    /// `leaf` at `at`, its tables grown on the way.
+    fn put(&mut self, root: Phys<12>, at: u64, leaf: Leaf) {
+        let path = plan(at, leaf, &self.unit).expect("SMMU: a handed-out address");
         let mut table = root;
         let (leaf, walk) = path.indices().split_last().expect("a path names at least its leaf's table");
         for (level, index) in walk.iter().enumerate() {
@@ -83,6 +93,7 @@ impl Live {
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where it would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+    let doorbell = super::super::irqchip::its::doorbell_page();
     let mut held = UNIT.lock();
     let live = held.as_mut().ok_or(IommuError::NoUnit)?;
     let domains = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
@@ -98,14 +109,22 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
         descriptor.write_u64(8 * i as u64, *word);
     }
     descriptor.write_u64(0, words[0]);
+    if let Some(page) = doorbell {
+        assert!(page < addresses.floor(), "SMMU: the doorbell at {page:#x} is inside the addresses a domain hands out");
+        live.put(root, page, Leaf::Doorbell(Phys::new(page).expect("SMMU: a 4 KiB page below 2^48")));
+    }
     let domain = Domain { asid, root, context, addresses };
     log!(
-        "iommu: domain{id} root={:#x} context={:#x} asid={} addresses from {:#x} to {:#x}",
+        "iommu: domain{id} root={:#x} context={:#x} asid={} addresses from {:#x} to {:#x}, the doorbell {}",
         root.get(),
         context.get(),
         asid.get(),
         addresses.floor(),
-        addresses.ceiling()
+        addresses.ceiling(),
+        match doorbell {
+            Some(page) => alloc::format!("page at {page:#x}"),
+            None => "page nowhere: no ITS is armed".into(),
+        },
     );
     live.domains.push(domain);
     Ok((DomainId::new(id), first))
@@ -121,7 +140,7 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     let at = domain.addresses.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.addresses.ceiling()))?;
     let root = domain.root;
     for offset in (0..bytes).step_by(PAGE_2M as usize) {
-        live.put(root, at.raw() + offset, phys + offset);
+        live.put(root, at.raw() + offset, block(phys + offset));
     }
     log!("iommu: domain{} maps {phys:#x}..{:#x} at {:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M), at.raw());
     Ok(at)
@@ -148,7 +167,7 @@ pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<u16, Iommu
     assert!(domain.addresses.handed_out(at, bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
     let root = domain.root;
     for offset in (0..bytes).step_by(PAGE_2M as usize) {
-        live.put(root, at.raw() + offset, phys + offset);
+        live.put(root, at.raw() + offset, block(phys + offset));
     }
     Ok(id.raw())
 }

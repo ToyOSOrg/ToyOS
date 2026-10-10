@@ -15,7 +15,8 @@ use device::{begin, reset_done, reset_port};
 use super::super::{ErstEntry, Layout, MscBlock, PortMask, Portsc, Protocols, TrbRing};
 use super::super::{XhciController, PAGE, RING_SIZE, USB_TIMEOUT_NS};
 use super::super::{CAP_CAPLENGTH, CAP_DBOFF, CAP_HCCPARAMS1, CAP_HCSPARAMS1, CAP_HCSPARAMS2};
-use super::super::{CAP_RTSOFF, HCC_PPC, XHCI_VECTOR};
+use super::super::{CAP_RTSOFF, HCC_PPC};
+use crate::arch::trap::XHCI_VECTOR;
 use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
@@ -252,7 +253,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         );
         return None;
     };
-    log!("xHCI: {irq} enabled (vector {XHCI_VECTOR:#x})");
+    log!("xHCI: {irq} enabled ({XHCI_VECTOR})");
 
     let bar = crate::mm::paging::map_mmio(bar_addr, 0x10000, MmioPolicy::Uncacheable);
 
