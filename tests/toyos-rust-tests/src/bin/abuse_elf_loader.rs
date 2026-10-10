@@ -383,8 +383,7 @@ fn main() {
     fs::create_dir_all(DIR).expect("create /tmp/abuse_loader_exe");
     fs::create_dir_all(BIG_DIR).expect("create /tmp/abuse_loader");
 
-    // 1. A DT_* vaddr below every PT_LOAD, which `vaddr_to_file_offset` panicked
-    //    on outright when the kernel read an executable's tables.
+    // 1. A DT_* vaddr below every PT_LOAD.
     spawn_dies(
         "rela_below_image",
         &Elf::new(0x4000)
