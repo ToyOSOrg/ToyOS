@@ -29,6 +29,11 @@ inspect = { path = "../../userland/inspect" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 memmap2 = "0.9"
+# An HTTPS client as any Rust program writes one, for `https_get`, and the
+# primitives under it, for `ring_kat`'s known answers.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", default-features = false }
+ring = "0.17"
 
 # Outside the workspace, so it needs its own redirects: the forks
 # above depend on ToyOS crates by version, and only a patch maps those to the
@@ -37,6 +42,8 @@ memmap2 = "0.9"
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 memmap2 = { git = "https://github.com/ToyOSOrg/memmap2-rs", branch = "toyos-0.9.11" }
+ring = { git = "https://github.com/ToyOSOrg/ring", branch = "toyos-0.17.14" }
+getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 
 [lints.rust]
 warnings = "deny"

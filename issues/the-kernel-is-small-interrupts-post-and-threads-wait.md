@@ -134,10 +134,13 @@ times:
        has no kernel hotkey from this step, declared. **Exit**, on the T14:
        `/log` survives usbd killed mid-batch, the keyboard keeps working while
        a stick misbehaves, and Ctrl+Alt+D on the machine's own keyboard files
-       the dump with usbd killed. Where QEMU's and the T14's xHCI keep their
-       MSI-X tables is not measured: one in the BAR that holds the registers
-       refuses usbd's claim as it refuses blockd's
-       (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`).
+       the dump with usbd killed. QEMU's xHCI keeps its MSI-X table in the
+       BAR that holds the registers, which refuses usbd's claim as it refuses
+       blockd's
+       (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`),
+       and the T14's has none on its capability walk, whose end is not read
+       (`issues/every-driver-is-still-in-the-kernel.md`). Its decoders are
+       `toyos-xhci`'s Bulk-Only and SCSI modules and `toyos-usbhid`.
 5. **USB by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
