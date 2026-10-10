@@ -52,6 +52,9 @@ declare_flags!(pub CARGO_RUN = {
     pub HELP = "--help", None;
     pub CI = "--ci", Rest;
     pub CLIPPY = "--clippy", None;
+    /// Make the clang and `ld.lld` that run on ToyOS (`src/hostedclang.rs`),
+    /// and say where they are.
+    pub HOSTED_CLANG = "--hosted-clang", None;
     pub DEBUG = "--debug", None;
     pub BUILD_ONLY = "--build-only", None;
     pub DUMP_AUDIO = "--dump-audio", None;

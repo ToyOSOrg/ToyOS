@@ -458,6 +458,35 @@ pub unsafe extern "C" fn ftell(f: *mut FILE) -> i64 {
     if at < 0 { at } else { at - unsafe { (*f).unget_len } as i64 }
 }
 
+/// [`fseek`]: an `off_t` is a `long`.
+#[no_mangle]
+pub unsafe extern "C" fn fseeko(f: *mut FILE, offset: i64, whence: i32) -> i32 {
+    unsafe { fseek(f, offset, whence) }
+}
+
+/// [`ftell`]: an `off_t` is a `long`.
+#[no_mangle]
+pub unsafe extern "C" fn ftello(f: *mut FILE) -> i64 {
+    unsafe { ftell(f) }
+}
+
+/// `buf`, `BUFSIZ` bytes its caller keeps, as `f`'s buffer, fully buffered; a
+/// null `buf` leaves `f` unbuffered. What `f` held pending is written first, so
+/// the buffer it replaces is free to go.
+#[no_mangle]
+pub unsafe extern "C" fn setbuf(f: *mut FILE, buf: *mut u8) {
+    unsafe {
+        flush_buf(f);
+        if (*f).owned {
+            super::memory::free((*f).buf);
+        }
+        (*f).buf = buf;
+        (*f).owned = false;
+        (*f).cap = if buf.is_null() { 0 } else { BUFSIZ };
+        (*f).mode = if buf.is_null() { IONBF } else { IOFBF };
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rewind(f: *mut FILE) {
     if !f.is_null() {

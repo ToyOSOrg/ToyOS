@@ -1,5 +1,6 @@
-//! A double's parts: `modf`'s integral and fractional parts and `logb`'s
-//! exponent, read off its bits. It reads and sets nothing but what it is
+//! A double's parts: `modf`'s integral and fractional parts, the integer
+//! `round` and `lround` take from them, and `logb`'s exponent, read off its
+//! bits. It reads and sets nothing but what it is
 //! handed, so the host holds it to its own C library's (`toyos-libc-copies`).
 
 const MANTISSA_BITS: u32 = 52;
@@ -35,6 +36,31 @@ pub(crate) fn modf(x: f64) -> (f64, f64) {
     // Exact: both have `x`'s sign and `int` shares every bit of `x` above
     // the fraction's.
     (int, x - int)
+}
+
+/// `round`: `x` to the nearest integer, a half away from zero, keeping its
+/// sign; an integer, an infinity or a NaN is itself.
+pub(crate) fn round(x: f64) -> f64 {
+    let (int, fraction) = modf(x);
+    if fraction.abs() < 0.5 {
+        return int;
+    }
+    // Exact: below 2^52 every integer and its successor are doubles, and at or
+    // above it `modf` answers no fraction.
+    if x.is_sign_negative() { int - 1.0 } else { int + 1.0 }
+}
+
+/// `lround` of a value whose rounding is no `long`, a NaN among them: POSIX's
+/// domain error, `errno` `EDOM`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Domain;
+
+/// `lround`: [`round`] as a `long`.
+pub(crate) fn lround(x: f64) -> Result<i64, Domain> {
+    // `long`'s range as doubles, `[-2^63, 2^63)`; a NaN is in neither half.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    let rounded = round(x);
+    if (-LIMIT..LIMIT).contains(&rounded) { Ok(rounded as i64) } else { Err(Domain) }
 }
 
 /// `logb` at a zero: POSIX's pole error, `-inf` with `errno` `ERANGE`.

@@ -17,6 +17,7 @@ pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;
 pub mod gptwrite;
+pub mod hostedclang;
 pub mod flags;
 pub mod hostws;
 pub mod icons;
