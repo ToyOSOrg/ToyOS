@@ -74,6 +74,11 @@ const OVERFLOW: u32 = 1 << 31;
 pub struct Events(pub(crate) Indexes);
 
 impl Events {
+    /// The records a full queue holds.
+    pub const fn entries(self) -> u32 {
+        1 << self.0.log2size
+    }
+
     /// The entry the next record is read from.
     pub const fn slot(self, cons: u32) -> usize {
         self.0.slot(cons)
@@ -194,6 +199,34 @@ pub enum Code {
     Other(u8),
 }
 
+impl Code {
+    /// The event's mnemonic, as §7.3's headings name it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::UnsupportedTransaction => "F_UUT",
+            Self::BadStream => "C_BAD_STREAMID",
+            Self::EntryFetch => "F_STE_FETCH",
+            Self::BadEntry => "C_BAD_STE",
+            Self::AtsRequest => "F_BAD_ATS_TREQ",
+            Self::StreamDisabled => "F_STREAM_DISABLED",
+            Self::TranslatedForbidden => "F_TRANSL_FORBIDDEN",
+            Self::BadSubstream => "C_BAD_SUBSTREAMID",
+            Self::ContextFetch => "F_CD_FETCH",
+            Self::BadContext => "C_BAD_CD",
+            Self::WalkAbort => "F_WALK_EABT",
+            Self::Translation => "F_TRANSLATION",
+            Self::AddressSize => "F_ADDR_SIZE",
+            Self::AccessFlag => "F_ACCESS",
+            Self::Permission => "F_PERMISSION",
+            Self::TlbConflict => "F_TLB_CONFLICT",
+            Self::ConfigurationConflict => "F_CFG_CONFLICT",
+            Self::PageRequest => "E_PAGE_REQUEST",
+            Self::VmsFetch => "F_VMS_FETCH",
+            Self::Other(_) => "unnamed",
+        }
+    }
+}
+
 /// What a device tried, where the record says: the four translation-related
 /// faults carry it (§7.3.13 to §7.3.16).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -209,6 +242,8 @@ pub struct Attempt {
 pub struct Event {
     /// `StreamID`, bits [63:32].
     pub stream: u32,
+    /// The event's number, bits [7:0], which `code` names.
+    pub number: u8,
     pub code: Code,
     pub attempt: Option<Attempt>,
 }
@@ -242,5 +277,5 @@ pub const fn event(record: [u64; 4]) -> Event {
         }
         _ => None,
     };
-    Event { stream: (record[0] >> 32) as u32, code, attempt }
+    Event { stream: (record[0] >> 32) as u32, number: record[0] as u8, code, attempt }
 }
