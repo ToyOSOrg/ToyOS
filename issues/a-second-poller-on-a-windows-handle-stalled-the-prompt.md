@@ -27,7 +27,8 @@ poller ended the stall. Related, and not shown to be the cause:
 
 ## Owner
 
-`toyos/src/poller.rs` and the kernel's watch it rides, which nobody holds.
+`toyos-window`'s `Window::poll_event` and the windows that drain through it,
+in the desktop track `issues/toyos-has-a-desktop.md`.
 
 ## Exit condition
 
