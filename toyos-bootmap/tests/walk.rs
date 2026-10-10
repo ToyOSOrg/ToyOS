@@ -87,10 +87,11 @@ fn pat(entry: u64, pat_bit: u64) -> u64 {
     pat_bit << 2 | u64::from(entry & PCD != 0) << 1 | u64::from(entry & PWT != 0)
 }
 
-/// `plan` written into a fresh pool at [`AT`], and its root.
+/// `plan` written at [`AT`] into a pool whose every entry is a stale present
+/// one naming memory outside it, and its root.
 fn written(plan: &Plan) -> (Box<[Table; MAX_PAGES]>, u64) {
     let mut pool: Box<[Table; MAX_PAGES]> =
-        vec![Table::EMPTY; MAX_PAGES].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!());
+        vec![Table([u64::MAX; 512]); MAX_PAGES].into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!());
     let root = plan.write(x86_64::ENCODING, &mut pool, AT);
     (pool, root)
 }

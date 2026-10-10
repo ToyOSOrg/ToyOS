@@ -413,14 +413,15 @@ impl<'a> Plan<'a> {
         self.scanout = Some((base, end - base));
     }
 
-    /// Write this map into `pool`, a zeroed pool whose first byte is at
-    /// physical address `at`, and return its root's: the root first, then
+    /// Write this map over whatever `pool` holds, its first byte at physical
+    /// address `at`, and return its root's: the root first, then
     /// [`Plan::regions`]' tables, the directories and the split pages' tables,
     /// each in its accessor's order.
     pub fn write(&self, encoding: Encoding, pool: &mut [Table; MAX_PAGES], at: u64) -> u64 {
         let first_directory = 1 + self.regions;
         let first_fine = first_directory + self.directories;
         let phys = |page: usize| at + page as u64 * PAGE_4K;
+        pool.fill(Table::EMPTY);
         for (r, &region) in self.regions().iter().enumerate() {
             let entry = (encoding.table)(phys(1 + r));
             pool[0].0[ROOT_IDENTITY + region as usize] = entry;
