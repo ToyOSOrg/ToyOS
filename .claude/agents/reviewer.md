@@ -122,7 +122,11 @@ if it meets the bar above; otherwise it is a NOTE.
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
   comparison against Ubuntu — is not a test: it is posted on the pull request as evidence and
-  never becomes a suite row. A test or row the diff adds or changes that breaks this is a BLOCKER.
+  never becomes a suite row. A recording from another OS or a reference implementation is an
+  oracle only when it is committed with its provenance and read hermetically, and a timing held to
+  Linux's only when Linux's was read on the same machine. A policy another OS chose, or its copy
+  of a fact a primary source states, is never an oracle. A test or row the diff adds or changes
+  that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
