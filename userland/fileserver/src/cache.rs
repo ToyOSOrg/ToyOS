@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::disk::{Disk, DiskError, BLOCK};
+use diskserver::disk::{Disk, DiskError, BLOCK};
 
 /// Clean blocks kept: 64 MiB.
 pub const CLEAN_LIMIT: usize = 16 * 1024;
@@ -232,11 +232,11 @@ impl<D> Clone for Shared<D> {
 
 impl<D: Disk> bcachefs::BlockIO for Shared<D> {
     fn read_block(&self, block: bcachefs::BlockNum, buf: &mut bcachefs::BlockBuf) -> Result<(), bcachefs::DeviceError> {
-        self.0.read(block.raw(), buf.as_bytes_mut()).map_err(|e| bcachefs::DeviceError::classify(&e))
+        self.0.read(block.raw(), buf.as_bytes_mut()).map_err(|_| bcachefs::DeviceError::classify(&Attempted))
     }
 
     fn write_block(&self, block: bcachefs::BlockNum, buf: &bcachefs::BlockBuf) -> Result<(), bcachefs::DeviceError> {
-        self.0.write(block.raw(), buf.as_bytes()).map_err(|e| bcachefs::DeviceError::classify(&e))
+        self.0.write(block.raw(), buf.as_bytes()).map_err(|_| bcachefs::DeviceError::classify(&Attempted))
     }
 
     fn block_count(&self) -> u64 {
@@ -244,12 +244,15 @@ impl<D: Disk> bcachefs::BlockIO for Shared<D> {
     }
 
     fn sync(&self) -> Result<(), bcachefs::DeviceError> {
-        self.0.flush().map_err(|e| bcachefs::DeviceError::classify(&e))
+        self.0.flush().map_err(|_| bcachefs::DeviceError::classify(&Attempted))
     }
 }
 
-/// Every refusal here was attempted: nothing in this server refuses on a clock.
-impl bcachefs::TransferError for DiskError {
+/// What every [`DiskError`] is to bcachefs: attempted, since nothing in this
+/// server refuses on a clock.
+struct Attempted;
+
+impl bcachefs::TransferError for Attempted {
     fn refused_before_attempt(&self) -> bool {
         false
     }
@@ -258,7 +261,7 @@ impl bcachefs::TransferError for DiskError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disk::Ram;
+    use crate::ram::Ram;
 
     /// A disk that counts what reaches it.
     struct Counting {

@@ -176,7 +176,7 @@ struct ProgramConfig {
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
-    /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
+    /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
@@ -629,6 +629,11 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
+        }
+        // The supervisor grants the idle slot to a launch alone, so a row it
+        // starts at boot, or again, would run holding nothing.
+        if program.slots && config.boot.start.contains(name) {
+            return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
     }
     for (port, holder) in HELD_ALONE {
@@ -2960,6 +2965,7 @@ mod tests {
         "diag/system.toml",
         "console/system.toml",
         "tests/acpicase/system.toml",
+        "tests/blockgrantcase/system.toml",
         "tests/consentcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
@@ -2969,6 +2975,7 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/panelcase/system.toml",
         "tests/proctreecase/system.toml",
+        "tests/slotscase/system.toml",
         "tests/testcases/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
@@ -3033,6 +3040,9 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+        let booted: SystemConfig =
+            toml::from_str("[boot]\nstart = [\"update\"]\n[programs.update]\nslots = true\n").unwrap();
+        assert!(held_by_their_holders_alone(&booted).is_err());
         let grants: SystemConfig = toml::from_str("[programs.grants]\nreceives = [\"grants\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&grants).is_ok());
         let shell: SystemConfig = toml::from_str("[programs.shell]\nreceives = [\"grants\"]\n").unwrap();

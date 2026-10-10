@@ -60,6 +60,8 @@ pub enum Outcome {
     Durable,
     /// The server refused it as malformed.
     Invalid,
+    /// A write the session's grant does not make, refused unissued.
+    ReadOnly,
     /// The device did not do it. A write answered this may or may not have
     /// reached the medium; a flush answered this left writes the device would
     /// not keep.
@@ -224,12 +226,18 @@ impl<const D: usize> Client<D> {
                 let outcome = match status {
                     Status::Invalid => Outcome::Invalid,
                     Status::Device => Outcome::Device,
-                    // A read or a write answered `Lost` is a server that does
-                    // not know which op it was.
-                    Status::Lost | Status::Ok => return Err(Violation::Entry),
+                    Status::ReadOnly if matches!(q.op, Op::Write { .. }) => Outcome::ReadOnly,
+                    // A read or a write answered `Lost`, or a read answered
+                    // `ReadOnly`, is a server that does not know which op it
+                    // was.
+                    Status::ReadOnly | Status::Lost | Status::Ok => return Err(Violation::Entry),
                 };
                 self.answers.push_back((ticket, outcome));
             }
+            // A write the session took once, refused by the same grant on its
+            // way again, or a flush refused as a write: a server that does
+            // not know what it granted.
+            (Kind::Reissue(_) | Kind::Flush(_), Status::ReadOnly) => return Err(Violation::Entry),
             (Kind::Reissue(mut acked), Status::Ok) => {
                 acked.seq = self.bump();
                 // A loss since it went out: an earlier write it overlaps may
@@ -519,6 +527,25 @@ mod tests {
         let f = client.next_request().unwrap();
         answer(&mut client, f, Status::Ok);
         assert_eq!(client.take_answers().collect::<Vec<_>>(), [(3, Outcome::Device)]);
+    }
+
+    /// A write refused by its grant is the caller's `ReadOnly` and gives its
+    /// arena blocks back; the word on a read or a flush is a server that does
+    /// not know which op it answered.
+    #[test]
+    fn read_only_answers_a_write_alone() {
+        let mut client: Client = Client::new();
+        client.session_started();
+        client.submit(1, Op::Write { run: run(0, 1), lba: 0 });
+        let w = client.next_request().unwrap();
+        answer(&mut client, w, Status::ReadOnly);
+        assert_eq!(client.take_answers().collect::<Vec<_>>(), [(1, Outcome::ReadOnly)]);
+        assert_eq!(client.take_released().collect::<Vec<_>>(), [run(0, 1)]);
+        for op in [Op::Read { run: run(1, 1), lba: 0 }, Op::Flush] {
+            client.submit(2, op);
+            let r = client.next_request().unwrap();
+            assert_eq!(client.complete(Completion { tag: r.tag, status: Status::ReadOnly }), Err(Violation::Entry));
+        }
     }
 
     #[test]

@@ -19,6 +19,11 @@ toyos-logstream = { path = "../../toyos-logstream" }
 logkeeper-api = { path = "../../userland/logkeeper-api" }
 # The ACPI server's count line, for `acpi_hold`'s wait on it.
 acpiserver-api = { path = "../../userland/acpiserver-api" }
+# A block service's session, its grants and the partition types, for
+# `partition_grant` and `update_idle_slot`.
+diskserver = { path = "../../userland/diskserver" }
+toyos-blockring = { path = "../../toyos-blockring" }
+toyos-gpt = { path = "../../toyos-gpt" }
 # The diary's decoder, for `trace_read` and `trace_flood`.
 toyos-trace = { path = "../../toyos-trace" }
 # The reader's asker, for `hda_client_stall`.
