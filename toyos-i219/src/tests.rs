@@ -122,11 +122,11 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     assert_eq!(nic.peek(regs::TDLEN) as usize, TX_RING * tx_desc::BYTES);
     assert_eq!(nic.peek(regs::TDT), 0);
 
-    // Both timers off: an interrupt this driver waits on may not be held back
-    // by one nothing else expires.
+    // Both timers off and the throttle on: the first frame after a quiet
+    // spell is not held back, and a stream's are taken a batch a wake.
     assert_eq!(nic.peek(regs::RDTR), 0);
     assert_eq!(nic.peek(regs::RADV), 0);
-    assert_eq!(nic.peek(regs::ITR), 0);
+    assert_eq!(u64::from(nic.peek(regs::ITR)) * 256, 128_000, "§10.2.4.2 counts in 256 ns");
 
     assert_eq!(driver.mac(), NVM_MAC);
 }

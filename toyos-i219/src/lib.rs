@@ -156,6 +156,12 @@ pub const RX_RING: usize = 256;
 /// so what this bounds is how many may be in flight at once: one fewer than
 /// this, [`I219::tx_room`]'s most.
 pub const TX_RING: usize = 16;
+/// `ITR` (§10.2.4.2): the least interval between two of the function's
+/// interrupts, in 256 ns units — 128 µs. It runs from the last interrupt, so a
+/// frame after a quiet spell that long interrupts at once, and a gigabit
+/// stream's full-sized frames, one each 12.3 µs, wake their reader about ten at
+/// a time.
+const THROTTLE: u32 = 500;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
 /// Bytes per transmit buffer, and therefore the longest frame [`I219::tx_reserve`]
@@ -933,10 +939,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
         nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
 
-        // No moderation on either side: §10.2.4.2's throttle and the two
-        // receive timers all hold an interrupt back, and what this driver
-        // waits on is the frame that has already arrived.
-        nic.regs.write32(regs::ITR, 0);
+        // The throttle alone: the two receive timers hold back every frame's
+        // interrupt, the first after a quiet spell too, and the throttle none
+        // of those.
+        nic.regs.write32(regs::ITR, THROTTLE);
         nic.regs.write32(regs::RDTR, 0);
         nic.regs.write32(regs::RADV, 0);
         nic.regs.write32(regs::TIDV, 0);
