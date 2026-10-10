@@ -37,9 +37,9 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
   minutes of silence kills you, and ending a turn to announce a wait strands the work.
 - Nothing a pull request's evidence rests on, mutation patches and run logs included, lives only in
   a temporary directory: `/tmp` is wiped when the CLI restarts. Post mutation patches to the pull
-  request as a comment. Evidence lives only on the pull request, never in a gist or on any other
-  host; a log too long for a comment is posted as its command, head, exit and summary lines, and the
-  whole file stays in the run's log directory.
+  request as a comment. Evidence lives only on the pull request, never in a gist or on another
+  host: a log is posted whole, across as many comments as it takes, and an excerpt only points into
+  it.
 - A mutation — yours, or one a review names, guest ones included — is applied as a checked patch,
   shown to build, run, reported red or green with its exit code, and restored in the same script,
   leaving the tree clean. One that stays green is a test to add.
