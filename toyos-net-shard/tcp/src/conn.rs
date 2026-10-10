@@ -646,6 +646,7 @@ impl Sync {
         // RFC 8985 §7.4.2: at or past the probe's end, a probe of new data, a D-SACK of the probe or
         // a duplicate without SACK ends the episode with nothing lost; only an ACK past the end
         // without either says a resent probe repaired a loss.
+        let mut cut = false;
         if let Some((end, resent)) = self.probe.filter(|&(end, _)| ack.at_or_after(end) && acked <= flight) {
             if !resent || dsack == Some(end) || (same && seg.options.sack_blocks().len() == 0) {
                 self.probe = None;
@@ -655,19 +656,20 @@ impl Sync {
                 self.cc.cwnd = self.cc.cwnd.min(self.cc.ssthresh);
                 self.cc.end_recovery();
                 ctx.log.count(Counter::LossProbeRecovery);
+                cut = true;
             }
         }
         if acked > 0 && acked <= flight {
             self.new_ack(seg, ack, acked, flight, ctx);
             if newly {
-                self.duplicate(ack, ctx);
+                self.duplicate(ack, cut, ctx);
             }
         } else if self.sack_ok {
             if newly {
-                self.duplicate(ack, ctx);
+                self.duplicate(ack, cut, ctx);
             }
         } else if flight > 0 && seg.payload.is_empty() && !seg.syn() && !seg.fin() && ack == self.tx.una && window == self.tx.wnd {
-            self.duplicate(ack, ctx);
+            self.duplicate(ack, cut, ctx);
         }
         if ack.at_or_after(self.tx.una) && (self.tx.wl1.before(seg.seq) || (self.tx.wl1 == seg.seq && self.tx.wl2.at_or_before(ack))) {
             self.tx.wnd = window;
@@ -788,8 +790,9 @@ impl Sync {
         }
     }
 
-    /// A duplicate acknowledgment: RFC 5681 §2's without SACK, RFC 6675 §2's with it.
-    fn duplicate(&mut self, ack: Seq, ctx: &mut Ctx<'_>) {
+    /// A duplicate acknowledgment: RFC 5681 §2's without SACK, RFC 6675 §2's with it. `cut` says
+    /// this ACK already reduced cwnd for the loss a resent probe repaired.
+    fn duplicate(&mut self, ack: Seq, cut: bool, ctx: &mut Ctx<'_>) {
         let smss = self.smss();
         match &mut self.recovery {
             Recovery::Fast { inflations } => {
@@ -818,7 +821,10 @@ impl Sync {
         (self.probe_at, self.probe_due, self.probe) = (None, false, None);
         self.arm(ctx.now);
         let flight = self.tx.flight();
-        self.cc.on_loss(flight.saturating_sub(self.lt_bytes));
+        // One ACK is one congestion event, cut once, as Linux's `tcp_enter_recovery` in CWR.
+        if !cut {
+            self.cc.on_loss(flight.saturating_sub(self.lt_bytes));
+        }
         self.recover = self.tx.nxt.sub(1);
         self.episode = true;
         self.urgent = Some(self.tx.una);

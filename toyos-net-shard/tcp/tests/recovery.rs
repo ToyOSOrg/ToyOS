@@ -1,4 +1,4 @@
-//! L    expect(&h.send(32, 1448), &["SEQ=15481 LEN=1448"]);ss recovery: NewReno on E, RFC 6675 on EF. LR-15's 64-range bound lives
+//! Loss recovery: NewReno on E, RFC 6675 on EF. LR-15's 64-range bound lives
 //! beside the scoreboard in `src/tx.rs`.
 
 mod common;
@@ -477,6 +477,24 @@ fn rfc_8985_7_4_a_dsack_of_another_segment_still_infers_the_loss() {
     expect(&h.input_full(30, seg(5001).ack(15_481)), &["SEQ=15481 LEN=1448"]);
     h.input_full(40, seg(5001).ack(16_929).sack(&[(1001, 2449)]));
     assert_eq!((h.count(Counter::DsackRcvd), h.count(Counter::LossProbeRecovery), h.info().ssthresh), (1, 1, 2896));
+}
+
+/// RFC 8985 §7.4.2 and §7.1 on one ACK: it passes the resent probe's end and SACKs three
+/// segments above a hole, so it both infers the probe's loss and enters SACK recovery. That is one
+/// congestion event and cwnd is cut once, from the flight before the ACK, as Linux's
+/// `tcp_enter_recovery` takes no second reduction in CWR.
+#[test]
+fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_once() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.send(25, 5 * 1448));
+    assert_eq!(h.input_full(30, seg(5001).ack(15_481)).len(), 5);
+    h.input_full(40, seg(5001).ack(16_929).sack(&[(18_377, 22_721)]));
+    let info = h.info();
+    assert!(info.in_recovery);
+    assert_eq!((h.count(Counter::LossProbeRecovery), h.count(Counter::SackRecovery)), (1, 1));
+    assert_eq!((info.ssthresh, info.cwnd), (7240 * 7 / 10, 7240 * 7 / 10));
 }
 
 /// RFC 8985 §7.4.2, Case 2: after the ACK at the resent probe's end, a duplicate ACK without SACK
