@@ -77,6 +77,19 @@ fn a_mouse_with_absolute_motion_is_refused() {
     assert_eq!(report::mouse(&d), Err(Refused::Absolute));
 }
 
+/// Two's complement only where the Logical Minimum is below zero (HID 1.11
+/// §6.2.2.7): X and Y with a minimum of 0 read 0xFF as 255.
+#[test]
+fn a_field_whose_minimum_is_zero_is_unsigned() {
+    let mut d = APPENDIX_E10.to_vec();
+    // X and Y's Logical Minimum -127 becomes 0.
+    assert_eq!(&d[38..40], &[0x15, 0x81]);
+    d[39] = 0x00;
+    let m = report::mouse(&d).unwrap();
+    assert_eq!(m.x, Field { bit: 8, size: 8, signed: false });
+    assert_eq!(m.read(&[0, 0xFF, 0x80]), Ok(Motion { buttons: 0, dx: 255, dy: 128, wheel: 0 }));
+}
+
 #[test]
 fn a_descriptor_with_no_mouse_is_refused() {
     assert_eq!(report::mouse(&TOUCHPAD[..47]), Err(Refused::NoMouse));
