@@ -23,7 +23,7 @@ Four fields, three required, no defaults.
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
 | | `tooling` | the development machine — the harness, a gate, a price, CI, the tracker, the build system, a measurement owed |
-| | `finding` | noticed in passing — and bounded: at its next review it is promoted to a `defect` or folded into the owning module header and closed |
+| | `finding` | noticed in passing — and bounded: when taken up it is promoted to a `defect` or folded into the owning module header and closed |
 | | `track` | staged work — something to build that nobody has built |
 | | `question` | blocked on the owner, and nobody else can decide it |
 | | `rejected` | considered and declined, recorded so nobody re-proposes it |
@@ -48,7 +48,7 @@ that declared a standing failure rather than removing it deferred the work; it
 did not decline it, so the entry is a `defect` and stays open.
 
 **`kind: finding` does not accumulate.** A finding
-has a bounded life: whoever next reviews it either promotes it to a `defect`
+has a bounded life: whoever takes it up either promotes it to a `defect`
 (something real that someone should act on — a fix, a measurement, an
 instrument) or moves its one durable line to the module header or doc comment
 at the site that owns the subject and deletes the file by the closing
@@ -76,7 +76,7 @@ The tracker is one directory with no subdirectories: what an issue is, is its
 `kind`, and what it is about, its slug and its body. The **slug** is its
 identity — unique across the tracker — so `rg <slug>` finds every pointer at
 it. A slug is a claim like any sentence here: one the tree has refuted is
-renamed in the commit that corrects the body, with every citation moved.
+renamed by the work that takes it up, with every citation moved.
 
 ## Pointing at one
 
@@ -91,9 +91,9 @@ nothing at all.
 
 ## Filing one
 
-Write a new file. Do not touch an existing one you do not own — nine agents
-appending to nine different files produce zero conflicts, and that is the whole
-reason this is a directory and not a document.
+Write a new file, only where a brief or a review asks for one. A pull request
+edits no existing one: a stale or false issue is left as it is, and is updated
+only by the work that takes it up.
 
 ## Closing one
 
@@ -109,8 +109,8 @@ that goes to the module header or the doc comment at the site that owns the
 subject, stated as what is true there and citing nothing. The story does not go
 with it.
 
-**Every citation goes in the same merge, so search before you delete — for the
-slug as well as the path.** The slug is the identity, and a pointer written as a
+**Every citation outside `issues/` goes in the same merge, so search before you
+delete — for the slug as well as the path.** The slug is the identity, and a pointer written as a
 bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One in a comment

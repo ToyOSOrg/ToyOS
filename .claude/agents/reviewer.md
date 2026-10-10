@@ -84,8 +84,8 @@ if it meets the bar above; otherwise it is a NOTE.
 - **What no gate reads.** A BLOCKER each: a workspace member's `Cargo.toml` declaring `[profile]`
   or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
   saying what it is; a new cargo feature or `cfg` arm of one, or an arm a changed `src/clippy.rs`
-  shape stops building, that no shape in `src/clippy.rs` lints; an `issues/` file added, changed
-  or deleted against `issues/README.md`.
+  shape stops building, that no shape in `src/clippy.rs` lints; an `issues/` file added or
+  deleted against `issues/README.md`.
 - **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. No workflow uses the
   combined `actions/cache`, which saves too. The host cache has one writer, nightly's `host`,
   and one reader, ci.yml's `host`, on the same `runs-on`, both caching `src/cicache.rs`'s
@@ -125,9 +125,8 @@ if it meets the bar above; otherwise it is a NOTE.
   guest test, or one whose behaviour changes, whose pull request body does not say why a type, a
   host test and a metal row cannot reach its behaviour is a BLOCKER, and so is one whose reason a
   cheaper tier answers. A guest test is cut only where a cheaper tier already holds its behaviour,
-  named in the pull request body; where a stage of a track names it, in the same diff, with the
-  behaviour it guarded and an exit a build or test can fail; or as root `CLAUDE.md` deletes a red
-  or flaky test. Any other cut is a BLOCKER.
+  named in the pull request body, or as root `CLAUDE.md` deletes a red or flaky test. Any other
+  cut is a BLOCKER.
 - **Waits.** A flat wait, or defensive code that hides a failure instead of failing fast (root
   `CLAUDE.md`, "Fail fast"), is a BLOCKER, in code and in tests.
 - **Actuators.** A kernel static of any kind, atomic or `Lock`-wrapped, that an `actuator::` guard's
@@ -147,9 +146,10 @@ whether the evidence the change needs exists — never on how either is describe
 measurements — command, exit code, log, head — and the reasons **Guest tests** and **Fit** ask of
 it are evidence, judged under those rules: a claimed measurement that is absent, from another head
 or contradicted by its own log is the **Evidence** BLOCKER. This section covers only how things
-are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. Prose in a
-record — a pull request's body, an issue — that is false of the tree or of the record is one line
-under NOTE, and the orchestrator corrects a pull request's body himself. A source comment's
+are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. A pull
+request's body that is false of the tree or of the record is one line under NOTE, and the
+orchestrator corrects it himself. An issue file's staleness is never raised, and no branch is asked
+to edit one; an edit to one by a branch that does not take up its work is a NOTE. A source comment's
 wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
 formatting, a comment that could be shorter — are not raised.
 
