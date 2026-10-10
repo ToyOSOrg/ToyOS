@@ -33,8 +33,6 @@
 
 #![forbid(unsafe_code)]
 
-use toyos_sha2::Sha256;
-
 /// The name the supervisor serves swap requests on — a `supervisor-serve`
 /// record — which the manifest names because its holder starts only in a login
 /// session.
@@ -89,7 +87,7 @@ pub type Digest = [u8; 32];
 
 /// The digest of `bytes`.
 pub fn digest(bytes: &[u8]) -> Digest {
-    Sha256::digest(bytes)
+    toyos_sha2_hw::sha256_digest(bytes)
 }
 
 pub fn hex(digest: &Digest) -> String {

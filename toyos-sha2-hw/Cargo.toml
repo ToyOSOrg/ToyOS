@@ -1,0 +1,12 @@
+[package]
+name = "toyos-sha2-hw"
+description = "SHA-256 on the CPU's SHA instructions where CPUID offers them, toyos-sha2's scalar compression where it does not: what every SHA-256 the tree takes hashes with."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# The buffering, the padding and the round constants, and the compression
+# where the CPU has no instructions for it.
+toyos-sha2 = { path = "../toyos-sha2" }
