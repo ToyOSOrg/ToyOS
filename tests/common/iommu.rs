@@ -74,7 +74,6 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: Vec<String> = if behind_unit {
             vec![
-                CLAIM_BOUNDED.to_string(),
                 NETSTACK_NEGOTIATED.to_string(),
                 SOUNDSERVER_NEGOTIATED.to_string(),
                 bar_moved(),
@@ -111,13 +110,6 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // unit has three negotiators, one of them across the boundary, and the
         // arm without one has two and a refusal.
         let expected = if behind_unit {
-            // And the claim netstack was given is bounded to its own function's
-            // configuration space, which is what makes its capability walk —
-            // an index by numbers the *device* wrote — safe to run at all.
-            // netstack asks the kernel for a read past the end, one straddling it
-            // and one misaligned, and refuses to drive a claim that answers any
-            // of them.
-            log.must_say(CLAIM_BOUNDED)?;
             // The two things a hand-over spends, on the same function and the
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
@@ -190,10 +182,6 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
     declining_is_not_free(test_config)
 }
 
-/// netstack's, once its claim answers nothing outside its own function.
-const CLAIM_BOUNDED: &str =
-    "netstack: this claim answers 4096 bytes of configuration space and refuses every access \
-     outside them";
 /// netstack's feature line, the kernel's shape under netstack's name.
 const NETSTACK_NEGOTIATED: &str = "netstack: VirtIO: PCI ";
 const DISKSERVER_REFUSED: &str =

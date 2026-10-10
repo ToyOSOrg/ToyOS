@@ -5,7 +5,9 @@
 //! soundserver suspends only once every period it submitted has come back from
 //! the device, so a stream that ends with soundserver suspended is one whose
 //! every submitted period completed; and the periods it submitted cover at
-//! least the periods this client filled.
+//! least the periods this client filled. With no client its wait has no
+//! timeout, so the suspend is reached only through the claim's interrupts: a
+//! transmit queue with no vector leaves it `running`.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};

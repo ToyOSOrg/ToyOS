@@ -3370,6 +3370,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -5272,10 +5273,10 @@ dependencies = [
  "rubato",
  "toyos",
  "toyos-abi",
- "toyos-device-memory",
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-pci-claim",
  "toyos-virtio",
  "toyos-virtio-sound",
 ]
@@ -5992,6 +5993,16 @@ name = "toyos-pci"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+]
+
+[[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]

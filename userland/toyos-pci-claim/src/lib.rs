@@ -1,32 +1,41 @@
-//! What both NIC drivers need from the substrate: `toyos-device-memory`'s
-//! boundary over the SDK's `toyos::volatile::Window`, the claim's
-//! configuration space as `toyos-virtio` walks it, the kernel's word for a
-//! call a bring-up cannot go on without, and the latch a diagnostic is printed
-//! on.
+//! A PCI claim, as a userland driver reaches the function behind it.
 //!
-//! **[`Bar`] and [`Grant`] are the one implementation of the boundary both
-//! driver crates are written against**, an instruction deep: every offset
-//! that reaches them a driver crate has bounded, and the two barriers are here
-//! and nowhere else in this program. Neither owns its mapping: a driver's
-//! holder keeps the `SharedMemory` and the `DmaRegion` for as long as it keeps
-//! the driver.
+//! What the kernel keeps is the claim: config space, the vector it programmed
+//! into the function's MSI-X table, and the address space the function
+//! translates through. **This crate is the one implementation of
+//! `toyos-device-memory`'s boundary over the SDK's [`Window`]** — [`Bar`] and
+//! [`Grant`], an instruction deep, every offset that reaches them bounded by
+//! the driver crate above — and, for a virtio function, the bring-up every
+//! virtio driver makes before its device type begins ([`virtio`]).
+//!
+//! Neither [`Bar`] nor [`Grant`] owns its mapping: whoever holds the driver
+//! keeps the `SharedMemory` and the `DmaRegion` for as long as it keeps the
+//! driver, and the constructors here hand both back together.
 
-use std::cell::Cell;
 use std::sync::atomic::{fence, Ordering};
 
+use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
-use toyos::PciDev;
-use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos::{DmaRegion, PciDev};
+use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::{DmaBuffers, Registers};
-use toyos_virtio::pci::ConfigSpace;
+
+pub mod virtio;
 
 /// A mapped BAR, as a driver reaches its device's registers.
 #[derive(Clone, Copy)]
 pub struct Bar(Window);
 
 impl Bar {
-    pub fn over(window: Window) -> Self {
-        Self(window)
+    /// BAR `index` of the claim, `bytes` long, and the mapping the window
+    /// points into.
+    pub fn map(dev: &PciDev, index: u32, bytes: u64) -> Result<(Self, SharedMemory), KernelRefused> {
+        let mapped = dev.map_bar(index, bytes).map_err(KernelRefused::on("the register window"))?;
+        // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and
+        // `mapped` goes to the caller with the window, which keeps both for as
+        // long as it keeps either.
+        let window = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
+        Ok((Self(window), mapped))
     }
 }
 
@@ -70,12 +79,25 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// A fresh grant of at least `bytes` for the claim's function, and the
+    /// region the window points into.
+    pub fn alloc(dev: &PciDev, bytes: u64) -> Result<(Self, DmaRegion), KernelRefused> {
+        let region = dev.dma_alloc(bytes).map_err(KernelRefused::on("a DMA grant"))?;
+        // SAFETY: the kernel rounds the request up to whole pages, never down,
+        // and `region` goes to the caller with the grant, which keeps both for
+        // as long as it keeps either.
+        let window = unsafe { Window::new(region.memory.as_ptr(), bytes as usize) };
+        Ok((Self::over(window, region.device_addr), region))
+    }
+
+    /// The grant over memory the caller already holds: a host test's plain
+    /// allocation, with the address a device would be told.
     pub fn over(window: Window, device_base: u64) -> Self {
         Self { window, device_base }
     }
 
-    /// The same bytes, for the holder's own view of them: the frames, which no
-    /// driver crate reaches.
+    /// The same bytes, for the holder's own view of them: what no driver crate
+    /// reaches — frames, PCM.
     pub fn window(&self) -> Window {
         self.window
     }
@@ -123,23 +145,6 @@ impl DmaBuffers for Grant {
     }
 }
 
-/// A claim's configuration space, as `toyos-virtio`'s capability walk reads
-/// it: each read one `config_read` of its width, and its refusal the kernel's
-/// word.
-pub struct ClaimConfig<'a>(pub &'a PciDev);
-
-impl ConfigSpace for ClaimConfig<'_> {
-    type Refused = SyscallError;
-
-    fn read8(&self, at: u16) -> Result<u8, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8)
-    }
-
-    fn read32(&self, at: u16) -> Result<u32, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U32)
-    }
-}
-
 /// The kernel refused a call a bring-up cannot go on without, and the word is
 /// the kernel's own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -157,27 +162,5 @@ impl KernelRefused {
 impl std::fmt::Display for KernelRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the kernel refused {}: {:?}", self.call, self.why)
-    }
-}
-
-/// What a diagnostic last said, so it says it again only on a change.
-///
-/// **On change, not per element**: a device flooding a ring with descriptors a
-/// driver will not act on costs one line, not one per descriptor, which is the
-/// difference between a diagnostic and a way to drown the console from the
-/// other side of the boundary.
-pub struct Latch<T: Copy + PartialEq>(Cell<T>);
-
-impl<T: Copy + PartialEq + Default> Default for Latch<T> {
-    fn default() -> Self {
-        Self(Cell::new(T::default()))
-    }
-}
-
-impl<T: Copy + PartialEq> Latch<T> {
-    /// The previous value if `now` is not it, and `None` if nothing has moved.
-    pub fn moved(&self, now: T) -> Option<T> {
-        let was = self.0.replace(now);
-        (was != now).then_some(was)
     }
 }

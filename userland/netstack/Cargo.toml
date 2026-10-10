@@ -10,6 +10,7 @@ toyos = { path = "../../toyos" }
 toyos-device-memory = { path = "../../toyos-device-memory" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-virtio = { path = "../../toyos-virtio" }
+toyos-pci-claim = { path = "../toyos-pci-claim" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }

@@ -9,7 +9,7 @@
 //!
 //! **The transport and the rings are `toyos-virtio`'s**, where every word the
 //! device writes is bounded and every refusal is host-tested, over
-//! `device.rs`'s register window and grant. What is this file's is the
+//! `toyos-pci-claim`'s register window and grant. What is this file's is the
 //! network device (§5.1): which buffer goes with which head, the header in
 //! front of every frame, and what becomes of a refusal.
 //!
@@ -24,20 +24,16 @@
 use std::cell::RefCell;
 
 use toyos::shm::SharedMemory;
-use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
-use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::DmaBuffers;
-use toyos_virtio::pci::{vendor_caps, Layout, Live, Offer, WalkRefusal};
+use toyos_pci_claim::virtio::{negotiate, Negotiated, Refusal};
+use toyos_pci_claim::{Bar, Grant};
+use toyos_virtio::pci::Live;
 use toyos_virtio::queue::{avail_bytes, desc_bytes, Buffer, Parts, Published, Used, Virtqueue};
-
-use crate::device::{Bar, ClaimConfig, Grant, KernelRefused};
 
 /// §5.1.3: the device has a MAC address of its own to read.
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
-/// §6, for the feature line: the bit `toyos-virtio` accepts wherever it is
-/// offered, and a gate reads back.
-const VIRTIO_F_ACCESS_PLATFORM: u64 = toyos_virtio::pci::VIRTIO_F_ACCESS_PLATFORM;
 
 /// The one MSI-X table entry the kernel programs.
 const MSIX_ENTRY: u16 = 0;
@@ -81,41 +77,6 @@ const _: () = {
     assert!(NET_HDR_SIZE < RX_BUF_SIZE && NET_HDR_SIZE < TX_BUF_SIZE);
 };
 
-/// Why the device was not brought up. Each keeps its own word: a machine with
-/// no such device and one that refused a feature set ask different things of a
-/// caller.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Refusal {
-    /// What the device published or answered, as the transport refused it.
-    Device(toyos_virtio::pci::Refusal),
-    Kernel(KernelRefused),
-    /// The capability list, as the walk refused it.
-    Walk(WalkRefusal<SyscallError>),
-    /// The claim answered a configuration read it had to refuse.
-    Unbounded(&'static str, u32),
-}
-
-impl From<toyos_virtio::pci::Refusal> for Refusal {
-    fn from(why: toyos_virtio::pci::Refusal) -> Self {
-        Self::Device(why)
-    }
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Device(why) => write!(f, "{why}"),
-            Self::Kernel(why) => write!(f, "{why}"),
-            Self::Walk(why) => write!(f, "{why}"),
-            Self::Unbounded(what, at) => write!(
-                f,
-                "the claim answered a {what} at {at:#x}, so it is not a claim on one \
-                 function's own configuration space"
-            ),
-        }
-    }
-}
-
 /// The next chain the device has finished with on `rings`, or `None`.
 ///
 /// **Every way the used ring is not believed ends the device's use**: a head
@@ -126,37 +87,6 @@ fn finished(rings: &mut Virtqueue<Grant>) -> Option<Used> {
     rings
         .poll_used()
         .unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
-}
-
-/// The bound the capability walk rests on, asked once before the walk.
-///
-/// **`toyos_virtio::pci::vendor_caps` indexes configuration space by numbers
-/// the *device* wrote**
-/// — the capability pointer and every `next` link in the chain — and it is safe
-/// only because a claim answers its own function's 4 KiB and nothing else. That
-/// is the kernel's contract, so this is where the driver that depends on it
-/// checks it: a read past the end and one not aligned for its own width are
-/// both refused, and the first byte is not. An aligned read that straddles the
-/// end cannot be written — 4096 is a multiple of every width — and one whose
-/// offset wraps cannot be expressed, `PciDev::config_read` taking a `u32`; both
-/// are answered where the arithmetic lives, in `toyos-dma`'s host tests.
-fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
-    const CONFIG_BYTES: u32 = 4096;
-    for (what, at, width) in [
-        ("read past its configuration space", CONFIG_BYTES, RegWidth::U8),
-        ("misaligned read", 1, RegWidth::U16),
-    ] {
-        if dev.config_read(at, width).is_ok() {
-            return Err(Refusal::Unbounded(what, at));
-        }
-    }
-    // And the bound is a bound rather than a wall: the vendor id is still there.
-    dev.config_read(0, RegWidth::U16).map_err(KernelRefused::on("its vendor id")).map_err(Refusal::Kernel)?;
-    crate::say!(
-        "netstack: this claim answers {CONFIG_BYTES} bytes of configuration space and refuses \
-         every access outside them"
-    );
-    Ok(())
 }
 
 /// The virtio-net function, brought up and driving.
@@ -178,52 +108,11 @@ impl VirtioNet {
     /// feature negotiation, both queues and their vectors in the order
     /// `toyos-virtio`'s types fix, which is virtio 1.2 §3.1.1's.
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
-        let info = dev.describe().map_err(KernelRefused::on("the claim's description")).map_err(Refusal::Kernel)?;
+        let Negotiated { setup, mapping, features } = negotiate(&dev, VIRTIO_NET_F_MAC)?;
+        crate::say!("netstack: {features}");
 
-        config_space_is_bounded(&dev)?;
-        let layout = Layout::of(&vendor_caps(&ClaimConfig(&dev)).map_err(Refusal::Walk)?)?;
-        // The kernel hands out a BAR at a time, and reports 0 bytes for one it
-        // keeps back.
-        let bar = layout.bar();
-        let bar_bytes = *info
-            .bar_bytes
-            .get(bar as usize)
-            .filter(|bytes| **bytes > 0)
-            .ok_or(toyos_virtio::pci::Refusal::MissingCap("a BAR this claim may map"))?;
-        let mapped = dev
-            .map_bar(bar as u32, bar_bytes)
-            .map_err(KernelRefused::on("the register window"))
-            .map_err(Refusal::Kernel)?;
-        // SAFETY: the mapping is `bar_bytes` long and lives as long as
-        // `mapped`, which this struct holds for its own life.
-        let window = unsafe { Window::new(mapped.as_ptr(), bar_bytes as usize) };
-
-        let offer = Offer::acknowledge(Bar::over(window), &layout)?;
-        let offered = offer.features();
-        let setup = offer.accept(VIRTIO_NET_F_MAC)?;
-        let features = setup.features();
-        // The line the kernel's virtio drivers print, in the same shape:
-        // `iommu_virtio_platform` reads it back for every virtio function the
-        // machine creates.
-        crate::say!(
-            "netstack: VirtIO: PCI {:02x}:{:02x}.{} features device={offered:#x} \
-             negotiated={features:#x} access_platform={}",
-            info.bus,
-            info.dev,
-            info.func,
-            if features & VIRTIO_F_ACCESS_PLATFORM != 0 { 'y' } else { 'n' },
-        );
-
-        let region = dev
-            .dma_alloc(GRANT_BYTES)
-            .map_err(KernelRefused::on("a DMA grant"))
-            .map_err(Refusal::Kernel)?;
-        // SAFETY: the grant covers at least `GRANT_BYTES` — the kernel rounds
-        // the request up to whole pages, never down — and lives as long as
-        // `region`, which this struct holds.
-        let window = unsafe { Window::new(region.memory.as_ptr(), GRANT_BYTES as usize) };
-        window.zero();
-        let grant = Grant::over(window, region.device_addr);
+        let (grant, region) = Grant::alloc(&dev, GRANT_BYTES)?;
+        grant.window().zero();
 
         let rx = Virtqueue::new(grant, RX_QUEUE, RX_QUEUE_SIZE, RX_PARTS);
         let tx = TxQueue::new(grant);
@@ -242,7 +131,7 @@ impl VirtioNet {
         let nic = Self {
             dev,
             device: setup.driver_ok(),
-            _bar: mapped,
+            _bar: mapping,
             _region: region,
             grant,
             rx: RefCell::new(rx),
@@ -415,6 +304,7 @@ impl TxQueue {
 /// used-ring element must satisfy is `toyos-virtio`'s, and tested there.
 #[cfg(test)]
 mod tests {
+    use toyos::volatile::Window;
     use toyos_virtio::queue::{AVAIL_ENTRY_BYTES, DESC_BYTES, RING_ENTRIES, USED_ELEM_BYTES};
 
     use super::*;

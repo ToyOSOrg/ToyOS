@@ -42,6 +42,16 @@ What is left of the staged work:
    the device only reads, whose bound is 0, what QEMU's device reports as
    `len` on such a queue is measured: the NIC's transmit queue is the only
    one read so far.
+   `iommu_virtio_platform`'s decline control, `declining_is_not_free`
+   (`tests/common/iommu.rs`), declines through the kernel's
+   `virtio-no-access-platform` actuator, which reaches only a virtio function
+   the kernel drives; with the NIC and virtio-sound in processes that is the
+   virtio-gpu `Profile::HeadlessVirtioGpu` adds for it, and virtio-gpu leaving
+   leaves the control nothing to decline. Exit for the control, in the diff
+   that moves virtio-gpu out: the decline is made where the features are
+   negotiated, `toyos-virtio`'s `Offer::accept`, for a function a process
+   drives, and the control reds when that function keeps `FEATURES_OK`;
+   `Profile::HeadlessVirtioGpu` goes in the same diff.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.

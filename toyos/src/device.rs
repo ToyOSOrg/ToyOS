@@ -178,9 +178,9 @@ impl PciDev {
 
 /// A claim's interrupts since its last read, or `Err(WouldBlock)` for none.
 fn irq_record(dev: &Device) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
-    let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0 };
+    let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0, _pad: 0, first_nanos: 0, last_nanos: 0 };
     // SAFETY: the slice covers exactly the record being filled, and every
-    // bit pattern of its one integer field is a valid one.
+    // bit pattern of each of its integer fields is a valid one.
     let buf = unsafe {
         core::slice::from_raw_parts_mut(&mut record as *mut _ as *mut u8, toyos_abi::pci::DeviceIrqRecord::SIZE)
     };

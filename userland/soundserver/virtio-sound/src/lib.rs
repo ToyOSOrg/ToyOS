@@ -297,8 +297,6 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         let xfer = TX_XFER + idx * wire::XFER_BYTES as usize;
         let status = TX_STATUS + idx * wire::STATUS_BYTES as usize;
         self.mem.write32(xfer, STREAM_ID);
-        // What a status the device does not write leaves behind is no `S_OK`.
-        self.mem.write32(status, 0);
         let chain = [
             Buffer::readable(self.mem.device_addr(xfer), wire::XFER_BYTES),
             Buffer::readable(self.mem.device_addr(pcm), PERIOD_BYTES as u32),

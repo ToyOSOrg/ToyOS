@@ -115,6 +115,7 @@ members = [
     "userland/test-runner",
     "userland/toybox",
     "userland/toyos-font",
+    "userland/toyos-pci-claim",
     "userland/toyos-window",
     "userland/trace",
     "userland/update",

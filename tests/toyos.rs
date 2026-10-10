@@ -3597,8 +3597,7 @@ fn virtio_sound_counts(test_config: &Path) -> Result<(), String> {
         QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
     let mut console = qemu.boot_log().to_string();
     await_guest(&mut qemu, &mut console, "soundserver's bring-up", |c| BROUGHT_UP.iter().all(|l| c.contains(l)))
-        .map_err(|e| format!("{e}
-{console}"))?;
+        .map_err(|e| format!("{e}\n{console}"))?;
     let boot = serial::Serial::named("the boot", console);
     boot.must_be_clean()?;
     boot.must_say("soundserver: VirtIO: PCI ")?;
@@ -3607,33 +3606,26 @@ fn virtio_sound_counts(test_config: &Path) -> Result<(), String> {
 
     let result = qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(120));
     if let Some(why) = &result.error {
-        return Err(format!("{why}
-the job said:
-{}", result.stdout));
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
     if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:
-{}", result.exit_code, result.stdout));
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     let said = &result.stdout;
     let Some(counted) = said.lines().find(|l| l.contains("virtio_sound_counts: ")) else {
-        return Err(format!("the job never said what it counted:
-{said}"));
+        return Err(format!("the job never said what it counted:\n{said}"));
     };
     if said.contains("cannot be driven on") {
-        return Err(format!("soundserver refused its device mid-stream:
-{said}"));
+        return Err(format!("soundserver refused its device mid-stream:\n{said}"));
     }
     let mut from = 0;
     for line in IN_ORDER {
         let times = said.matches(line).count();
         let Some(at) = said[from..].find(line) else {
-            return Err(format!("`{line}` is not after the line before it in the window:
-{said}"));
+            return Err(format!("`{line}` is not after the line before it in the window:\n{said}"));
         };
         if times != 1 {
-            return Err(format!("`{line}` said {times} times in one stream's window:
-{said}"));
+            return Err(format!("`{line}` said {times} times in one stream's window:\n{said}"));
         }
         from += at + line.len();
     }
