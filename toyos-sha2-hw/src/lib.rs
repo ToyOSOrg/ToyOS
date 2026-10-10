@@ -3,9 +3,8 @@
 //! blocks are `toyos-sha2`'s scalar compression. Both compute FIPS 180-4
 //! §6.2.2, so which one ran decides how fast a digest came, never what it is.
 //!
-//! **AArch64 is scalar.** Its SHA2 instructions are announced only in
-//! `ID_AA64ISAR0_EL1`, which ToyOS's EL0 cannot read and its kernel does not
-//! report, so a userland caller there has nothing to choose by.
+//! **AArch64 is scalar.** ToyOS has no AArch64 metal, so no gain from its SHA2
+//! instructions could be measured.
 
 #![cfg_attr(not(test), no_std)]
 
