@@ -101,7 +101,7 @@ pub const fn narrow_destination(apic_id: u32) -> Result<u8, &'static str> {
 /// for a message and for a remapping entry, with or without `EIME`.
 pub(crate) const MSG_DEST: u32 = 0;
 /// [`MSG_DEST`] in eight bits, so no message or entry naming it is refused.
-const MSG_DEST_NARROW: u8 = match narrow_destination(MSG_DEST) {
+pub(crate) const MSG_DEST_NARROW: u8 = match narrow_destination(MSG_DEST) {
     Ok(dest) => dest,
     Err(_) => panic!("MSG_DEST does not fit an 8-bit destination"),
 };
