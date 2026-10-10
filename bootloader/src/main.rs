@@ -46,6 +46,7 @@ mod rootimage;
 mod seed;
 mod slot;
 mod stamp;
+mod wallclock;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -497,7 +498,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -631,8 +632,16 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         // Read into this struct below, and nowhere else: the kernel zeroes it here.
         loader_seed: [0; toyos_abi::boot::SEED_LEN],
         loader_seed_len: 0,
+        wall_clock_secs: 0,
+        wall_clock_counter: 0,
+        wall_clock_known: 0,
     };
     kernel_args.loader_seed_len = seed::read(&system_table, &mut kernel_args.loader_seed);
+    if let Some((civil, counter)) = wall_clock {
+        kernel_args.wall_clock_secs = civil.to_unix_secs();
+        kernel_args.wall_clock_counter = counter;
+        kernel_args.wall_clock_known = 1;
+    }
     report_reach(
         "Kernel arguments",
         &kernel_args as *const KernelArgs as u64,
@@ -703,25 +712,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // range, and `image` is that image, relocated, with its entry at
     // `entry_offset`.
     unsafe { arch::enter_kernel(image, kernel.entry_offset as u64, &kernel_args) }
-}
-
-/// When this pass armed the page, in Unix seconds, or 0 where firmware would
-/// not say.
-///
-/// The zone is not applied and does not need to be: what a reader of the stick
-/// asks of this number is whether the record beside it is *this* boot's
-/// predecessor's or one left over, and an hour either way answers that.
-fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
-    let Ok(t) = system_table.runtime_services().get_time() else { return 0 };
-    toyos_wallclock::Civil {
-        year: u64::from(t.year()),
-        month: u64::from(t.month()),
-        day: u64::from(t.day()),
-        hour: u64::from(t.hour()),
-        min: u64::from(t.minute()),
-        sec: u64::from(t.second()),
-    }
-    .to_unix_secs()
 }
 
 /// End a pass that read the black box and boots no kernel, by resetting the
@@ -959,9 +949,22 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
+    // Read once, outside the watchdog's bound: the page is stamped with it, and
+    // the kernel carries it forward to its boot on the counter read beside it.
+    let wall_clock = match wallclock::now(&system_table) {
+        Ok((civil, counter)) => {
+            println!("Wall clock: firmware's GetTime reads {civil} UTC at counter {counter}");
+            Some((civil, counter))
+        }
+        Err(why) => {
+            println!("Wall clock: {why}, so the kernel is handed none");
+            None
+        }
+    };
+
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
-    blackbox::arm(page, armed_at(&system_table), log_guid);
+    blackbox::arm(page, wall_clock.map_or(0, |(civil, _)| civil.to_unix_secs()), log_guid);
     bootnext::point_at_us(handle, &system_table);
 
     // The last act before the jump, so the smallest possible span of this loader
@@ -970,5 +973,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, wall_clock, system_table);
 }
