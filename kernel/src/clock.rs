@@ -13,6 +13,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Rel
 use crate::arch::cpu;
 use crate::log::LogStamp;
 use crate::time::Instant;
+use kernel::clock::{anchor, ticks_to_nanos};
 use toyos_wallclock::Civil;
 
 static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
@@ -43,10 +44,6 @@ pub fn set_counter(boot: u64, period_fs: u64) {
     TSC_BOOT.store(boot, Relaxed);
     TSC_PERIOD_FS.store(period_fs, Relaxed);
     publish_page(boot, period_fs, at_boot);
-}
-
-fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
-    ((ticks as u128 * period_fs as u128) / 1_000_000) as u64
 }
 
 /// Now as a log line's time: nanoseconds since the counter's zero — power-on,
@@ -190,14 +187,7 @@ pub fn init_wall(reading: Result<(Civil, u64), impl core::fmt::Display>) {
         }
     };
 
-    let (boot, period_fs) = (TSC_BOOT.load(Relaxed), TSC_PERIOD_FS.load(Relaxed));
-    let secs = civil.to_unix_secs();
-    let boot_secs = if at >= boot {
-        secs.saturating_sub(ticks_to_nanos(at - boot, period_fs) / NANOS_PER_SEC)
-    } else {
-        secs.saturating_add(ticks_to_nanos(boot - at, period_fs) / NANOS_PER_SEC)
-    };
-    BOOT_SECS.store(boot_secs, Relaxed);
+    BOOT_SECS.store(anchor(civil.to_unix_secs(), at, TSC_BOOT.load(Relaxed), TSC_PERIOD_FS.load(Relaxed)), Relaxed);
     WALL_KNOWN.store(true, Release);
     log!("clock: the RTC reads {civil} UTC");
 }

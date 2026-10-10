@@ -13,7 +13,8 @@ its wall clock on that (`kernel/src/arch/aarch64/rtc.rs`); x86-64 ignores it
 and reads the CMOS itself (`kernel/src/arch/x86_64/rtc.rs`), with the FADT's
 century register (`kernel/src/drivers/acpi.rs`), so the two architectures keep
 two readers of one clock, and on x86-64 the field is written and never read.
-On a PC firmware's `GetTime` reads the same CMOS.
+Whether the T14's firmware answers `GetTime` from the same CMOS is not
+measured.
 
 Exit condition: x86-64 anchors on the loader's reading, and
 `arch/x86_64/rtc.rs`, `acpi::rtc_century_register` and their callers are
