@@ -268,8 +268,8 @@ pub fn spawn<H>(
 
     let exe_tls_template = match layout.tls().and_then(TlsSegment::occupied) {
         Some(tls) => {
-            let Some(tls_file_off) = layout.file_offset_of(tls.template().start()) else {
-                log!("spawn: {}: PT_TLS is in or near no PT_LOAD segment", path);
+            let Some(tls_file_off) = layout.file_offset_of(tls.template()) else {
+                log!("spawn: {}: PT_TLS's template is in no PT_LOAD's file bytes", path);
                 return Err(SyscallError::InvalidArgument.into());
             };
             // Read directly into the `memsz`-sized buffer: `OwnedAlloc` zeroes
