@@ -15,7 +15,6 @@ use std::path::Path;
 
 use flate2::read::GzDecoder;
 use pkg::{archive, sums};
-use toyos_sha2::Sha256;
 use toyos_manifest::package::{self, Package};
 
 /// Answers the consent prompt in advance, for a caller with no terminal.
@@ -66,7 +65,7 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
     let want = sums::digest_for(&sums_text, &name)?;
 
     let bytes = fs::read(file).map_err(|e| format!("pkg: cannot read {}: {e}", file.display()))?;
-    let got = sums::hex(&Sha256::digest(&bytes));
+    let got = sums::hex(&toyos_sha2_hw::sha256_digest(&bytes));
     if got != want {
         return Err(format!("pkg: {name} hashes to {got} and {SUMS} says {want}"));
     }

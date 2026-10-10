@@ -16,7 +16,7 @@ user memory through an `unsafe` `from_raw_parts` of the kernel's own whose
 |---|---|---|
 | `DmaGrant` | `grant_bytes`, `kernel/src/syscall/device.rs` | `size_of == 4 + 4 + 8 + 8`, a sum written by hand |
 | `DmaMapping` | inline in `sys_device_dma_map`, the same file | `size_of == 8 + 8`, a sum written by hand |
-| `DeviceIrqRecord` | `record_bytes`, `kernel/src/object/ops.rs` | `SIZE == 4`, a total written by hand; the struct is one `u32` |
+| `DeviceIrqRecord` | `record_bytes`, `kernel/src/object/ops.rs` | `SIZE == 4 + 4 + 8 + 8`, a sum written by hand |
 
 Read, nothing run: none of the three has padding today. Each assertion
 compares the struct's size with a number a person wrote, and nothing ties

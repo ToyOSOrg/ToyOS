@@ -1,10 +1,13 @@
 ---
-status: open
+status: assigned
 kind: track
 opened: 2026-10-10
 ---
 
 # An AMD-Vi machine isolates no device
+
+Held by the orchestrator's AMD laptop track: its stage 5, amdvi-translate, builds
+translation, and its stage 6, amdvi-intremap, interrupt remapping.
 
 On a machine whose IVRS describes AMD-Vi units, `kernel/src/arch/x86_64/amdvi/`
 switches every unit off, so every device's DMA reaches all of memory and every

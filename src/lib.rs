@@ -121,6 +121,11 @@ pub fn ensure_submodules(repo_dir: &Path) {
 /// the toolchain from them need. Refused in a linked worktree, whose `rust/` is
 /// `sysroot::fork_checkout`'s to make: `git submodule` there rewrites the
 /// `core.worktree` of the primary's fork.
+///
+/// One commit deep, where the primary's moves take the depth `.gitmodules`
+/// declares, which for `rust` is its whole history: a linked worktree's fork
+/// checkout shares the primary's objects and is told ahead of its pin from
+/// behind it by ancestry, and a runner has no linked worktree.
 pub fn ensure_shallow_fork(root: &Path) -> Result<(), String> {
     if root.join("rust/x.py").exists() {
         return Ok(());
@@ -131,12 +136,8 @@ pub fn ensure_shallow_fork(root: &Path) -> Result<(), String> {
             root.join("rust").display()
         ));
     }
-    let status = Command::new("git")
-        .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-        .current_dir(root)
-        .status()
-        .map_err(|e| format!("git submodule update --init --depth 1 rust: {e}"))?;
-    status.success().then_some(()).ok_or_else(|| format!("git submodule update --init --depth 1 rust exited {status}"))
+    sysroot::submodule_update(root, "rust", true);
+    Ok(())
 }
 
 /// Ensure a single git submodule is checked out.

@@ -7,11 +7,12 @@ opened: 2026-09-27
 # A package cannot ship its own libraries
 
 A program on a file server is spawned from a memory image its parent read
-(`SpawnArgs::image`), and `kernel/src/loader/mod.rs`'s `load_needed_libs` then
-finds its `DT_NEEDED` libraries in `/system/lib` alone: the kernel opens no path
-a file server holds. A package under `/apps/<name>/` whose binary needs a
-library it carries beside it fails to spawn, where before the file servers
-moved out of the kernel the executable's own directory was searched first.
+(`SpawnArgs::image`), and nothing loads a `DT_NEEDED` library for it: the
+kernel loads none at spawn, and an executable that names one is refused at its
+own start (`toyos::relocate`) until the userland loader of
+`issues/the-kernel-still-parses-what-userland-writes.md` loads them. A package
+under `/apps/<name>/` whose binary needs a library it carries beside it fails
+to start.
 
 ## Exit condition
 

@@ -170,7 +170,7 @@ const STREAM_BLOCKS: usize = 32;
 /// ROOT onto the idle ROOT partition as it arrives, [`STREAM_BLOCKS`] at a
 /// time, and held to `sha256` once whole.
 fn stream_root(input: &mut impl Read, root: &mut dyn Disk, len: u64, sha256: toyos_update::Digest) -> Result<(), String> {
-    let mut hasher = toyos_sha2::Sha256::new();
+    let mut hasher = toyos_sha2_hw::sha256();
     let mut run = vec![0u8; STREAM_BLOCKS * BLOCK];
     let blocks = len / BLOCK as u64;
     let mut at = 0u64;

@@ -153,7 +153,7 @@ fn record(claim: &Device) -> Option<u32> {
     match syscall::read_nonblock(claim.as_handle(), &mut record) {
         Ok(n) => {
             assert_eq!(n, DeviceIrqRecord::SIZE, "isa: a record of {n} bytes");
-            Some(u32::from_ne_bytes(record))
+            Some(u32::from_ne_bytes([record[0], record[1], record[2], record[3]]))
         }
         Err(SyscallError::WouldBlock) => None,
         Err(other) => panic!("isa: a bound claim's read answered {other:?}"),

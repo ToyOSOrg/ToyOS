@@ -27,6 +27,7 @@ pub mod log;
 pub mod net;
 pub mod port;
 pub mod process;
+pub mod relocate;
 pub mod surface;
 pub mod shm;
 pub mod syscap;
@@ -35,7 +36,7 @@ pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{
-    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev, VirtioSoundDev,
+    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev,
 };
 
 pub use toyos_abi::RawHandle;
