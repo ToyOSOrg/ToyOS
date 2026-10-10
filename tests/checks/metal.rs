@@ -4,8 +4,8 @@
 use super::*;
 use metal::{Metal, Readback};
 use toyos_build::metal::{
-    verdict_file, Refusal, BACK_SECS, BIOS_KEY, PRODUCT_KEY, READBACK_BOOT, READBACK_KERNEL,
-    READBACK_LOADER, READBACK_VERDICT, STICK_SECS_KEY, VENDOR_KEY,
+    verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
+    READBACK_VERDICT,
 };
 use toyos_build::metaltimings::{Machine, Record};
 
@@ -53,6 +53,21 @@ fn expired_at(reached: i64) -> String {
 const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
                        [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper\n";
 
+/// A T14 boot's `boot.txt` as the loop writes it.
+pub(super) fn boot_file() -> String {
+    let phases = Phases {
+        preamble: 3.1,
+        wipe: 0.4,
+        flash: 121.5,
+        dd_secs: 117.2,
+        entry: 2.3,
+        down: 8.0,
+        read_log: 1.4,
+        raw_log: Some(9.9),
+    };
+    BootFile { back: 40, stick: 0, machine: t14(), phases }.text()
+}
+
 /// One boot's readback as the loop writes it.
 pub(super) fn plant(
     dir: &Path,
@@ -63,14 +78,10 @@ pub(super) fn plant(
 ) {
     let home = metal::at(dir, label);
     fs::create_dir_all(&home).expect("a readback directory");
-    let boot = format!(
-        "{BACK_SECS} 40\n{STICK_SECS_KEY} 0\n{VENDOR_KEY} LENOVO\n{PRODUCT_KEY} 20W0003AMZ\n\
-         {BIOS_KEY} N34ET71W (1.71 )\n"
-    );
     for (name, text) in [
         (READBACK_LOADER, loader(page)),
         (READBACK_KERNEL, format!("{STARTED}{kernel}")),
-        (READBACK_BOOT, boot),
+        (READBACK_BOOT, boot_file()),
         (READBACK_VERDICT, verdict_file(verdict)),
     ] {
         fs::write(home.join(name), text).expect("a planted file");

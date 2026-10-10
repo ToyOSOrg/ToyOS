@@ -24,10 +24,8 @@ loopback delivers in. A red there prints the host's name and both answers.
 The pipe ABI carries both halves (`toyos/src/net.rs`): a bind's request
 carries its listener's options and `MsgType::TcpListenerSetOption` sets one
 afterwards, and an accept's answer says what its connection holds
-(`TcpOptions`). netstack answers the rule for both
-(`userland/netstack/src/listen.rs`), but for the connection after a reset
-handshake
-(`issues/a-handshake-reset-before-it-ends-hands-its-option-to-the-next-connection.md`),
+(`TcpOptions`). netstack answers the rule for both by the node's calls
+(`userland/netstack/src/serve.rs`, `userland/netstack/node/src/listeners.rs`),
 and the `libc_sockets` guest test reads it: `nodelay_accepted` by `toyos::net`, for a connection that
 waited when the option was set, its wake read first, and for the next one
 dialled; `tests/netcase/nodelay_kept.c` by libc's `setsockopt` and

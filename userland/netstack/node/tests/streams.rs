@@ -538,7 +538,7 @@ fn a_connect_is_a_handshake_and_its_answer_names_the_port() {
     let [syn, ack] = &net.far.segments[..] else { panic!("a SYN and an ACK, not {:?}", net.far.segments) };
     assert!(syn.syn && syn.ack.is_none() && syn.text.is_empty() && !syn.fin && !syn.rst, "{syn:?}");
     assert_eq!((ack.syn, ack.seq, ack.ack, ack.text.len()), (false, syn.seq.wrapping_add(1), Some(ISS + 1), 0));
-    assert_eq!((net.node.streams(), net.watch(id), net.node.nodelay(id)), (1, Some(IDLE), Some(false)));
+    assert_eq!((net.node.streams(), net.watch(id)), (1, Some(IDLE)));
     assert_eq!(dropped(&client), (false, false));
 }
 
@@ -980,7 +980,7 @@ fn a_close_sends_what_the_pipe_held_and_then_the_fin() {
     assert!(net.far.resets.is_empty());
     // The id names nothing.
     net.node.close(net.now, id);
-    assert_eq!((net.node.nodelay(id), net.node.set_nodelay(net.now, id, true), net.node.shutdown_write(net.now, id)), (None, false, false));
+    assert_eq!((net.node.set_nodelay(net.now, id, true), net.node.shutdown_write(net.now, id)), (false, false));
 }
 
 // RFC 9293 §3.6.1 (SHLD-3): a close with text unread is a reset, which shows the peer it was
@@ -1301,7 +1301,7 @@ fn nodelay_reaches_the_stack() {
     assert_eq!(net.far.texts(), [100], "the second write waits for the first's acknowledgment");
     assert!(net.node.set_nodelay(net.now, id, true));
     net.pump();
-    assert_eq!((net.far.texts(), net.node.nodelay(id)), (vec![100, 50], Some(true)));
+    assert_eq!(net.far.texts(), [100, 50]);
 }
 
 // ---- the wire is not trusted ----

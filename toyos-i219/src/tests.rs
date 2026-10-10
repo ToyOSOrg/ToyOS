@@ -315,7 +315,7 @@ mod refusals {
     const DONE: u8 = rx_desc::status::DD | rx_desc::status::EOP;
 
     /// The one that matters most: this number becomes the length of a slice
-    /// handed to smoltcp, so a device claiming more than the buffer holds
+    /// handed to the stack, so a device claiming more than the buffer holds
     /// would be a read past it.
     #[test]
     fn more_bytes_than_the_buffer_holds_is_refused() {

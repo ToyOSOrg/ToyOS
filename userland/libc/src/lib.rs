@@ -28,6 +28,7 @@ mod sigmask;
 mod socket;
 mod sockopt;
 mod stdio;
+mod streamend;
 mod string;
 mod strtonum;
 mod text;
