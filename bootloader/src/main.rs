@@ -9,15 +9,9 @@ use alloc::vec;
 use alloc::alloc::Layout;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
-use uefi::{
-    prelude::*,
-    CStr16,
-    proto::console::gop::{GraphicsOutput, PixelFormat},
-    proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
-    proto::loaded_image::LoadedImage,
-    proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryAttribute, MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
-    Event,
+use efi::{
+    cstr16, CStr16, DevicePath, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, ROOT_HIGH_HALF, ROOT_IDENTITY};
@@ -37,7 +31,7 @@ mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
-mod protocol;
+mod efi;
 mod floor;
 mod gcd;
 mod loaderlog;
@@ -82,32 +76,26 @@ struct LoadedKernel {
     pub stack_size: usize,
 }
 
-fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr16) -> vec::Vec<u8> {
-    let mut fs = system_table
-        .boot_services()
-        .get_image_file_system(handle)
-        .expect("Failed to get file system");
+/// `path` on the volume firmware loaded this image from: `LoadedImage`'s
+/// `DeviceHandle` is that volume's (UEFI 2.10 §9.1.1).
+fn load_file_bytes(handle: Handle, system_table: &SystemTable, path: &CStr16) -> vec::Vec<u8> {
+    let bs = system_table.boot_services();
+    let device = bs
+        .exclusive::<LoadedImage>(handle)
+        .expect("Failed to open LoadedImage")
+        .device()
+        .expect("Firmware names no device this image was loaded from");
+    let mut fs = bs.exclusive::<SimpleFileSystem>(device).expect("Failed to get file system");
 
     let mut file = fs
         .open_volume()
         .expect("Failed to open volume")
-        .open(path, FileMode::Read, FileAttribute::default())
+        .open(path, Mode::Read)
         .expect("Failed to open file")
         .into_regular_file()
         .expect("Failed to convert to regular file");
 
-    let file_info_len = file
-        .get_info::<FileInfo>(&mut [])
-        .expect_err("Failed to get file info len")
-        .data()
-        .expect("File info len was None");
-
-    let mut buffer = vec![0; file_info_len];
-    let file_info = file
-        .get_info::<FileInfo>(&mut buffer)
-        .expect("Failed to get file info");
-
-    let declared = file_info.file_size();
+    let declared = file.info().expect("Failed to get file info").file_size;
     assert!(
         declared <= MAX_ESP_FILE,
         "the ESP reports a {declared}-byte file, past the {MAX_ESP_FILE}-byte bound"
@@ -129,8 +117,8 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
 /// Do not simplify to `vec![0; size]`: that memsets the whole file
 /// immediately before `File::read` overwrites every byte. The chain is not
 /// visible at the call site — `vec![0u8; n]` takes `SpecFromElem`'s zero branch
-/// to `RawVec::with_capacity_zeroed_in` and so to `alloc_zeroed`, and uefi
-/// 0.26's allocator implements only `alloc`/`dealloc`, so it falls through to
+/// to `RawVec::with_capacity_zeroed_in` and so to `alloc_zeroed`, and `efi`'s
+/// allocator implements only `alloc`/`dealloc`, so it falls through to
 /// `GlobalAlloc`'s default of `alloc` plus `write_bytes(ptr, 0, size)`.
 fn alloc_uninit(size: usize) -> vec::Vec<u8> {
     // `\toyos\cmdline` is legitimately empty on a machine with no boot
@@ -171,38 +159,35 @@ struct BootPartition {
 /// signature type firmware chose not to fill in all land here, and the kernel
 /// is expected to boot on all of them knowing it has no partition of its own.
 /// Every early-return below is one of those, so none of them panics.
-fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<BootPartition> {
+fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPartition> {
     let bs = system_table.boot_services();
-    let image = protocol::exclusive::<LoadedImage>(bs, handle).ok()?;
+    let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = protocol::exclusive::<DevicePath>(bs, device).ok()?;
+    let path = bs.exclusive::<DevicePath>(device).ok()?;
 
-    let is_hard_drive = |node: &&DevicePathNode| {
-        node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE)
-    };
     // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
     // a partition inside a partition, and picking either is guessing which of
     // the two the kernel's block device will be looking at.
-    let mut nodes = path.node_iter().filter(is_hard_drive);
+    let mut nodes = path.nodes().filter(|node| (node[0], node[1]) == HardDrive::TYPE);
     let node = nodes.next()?;
     if nodes.next().is_some() {
         println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
-    let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
-    if hd.partition_format() != PartitionFormat::GPT {
+    let hd = HardDrive::parse(node)?;
+    if hd.format != HardDrive::GPT {
         println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
     }
-    let PartitionSignature::Guid(guid) = hd.partition_signature() else {
+    if hd.signature_type != HardDrive::GUID_SIGNATURE {
         println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
         return None;
-    };
+    }
     Some(BootPartition {
-        guid: guid.to_bytes(),
-        start_lba: hd.partition_start(),
-        blocks: hd.partition_size(),
+        guid: hd.signature,
+        start_lba: hd.start,
+        blocks: hd.size,
     })
 }
 
@@ -219,7 +204,7 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
 /// was assembled by something that is not this project — and booting it anyway
 /// would mean a kernel that quietly has nowhere to write its log, on the
 /// machine that has no other channel.
-fn log_partition_guid(handle: Handle, system_table: &SystemTable<Boot>) -> [u8; 16] {
+fn log_partition_guid(handle: Handle, system_table: &SystemTable) -> [u8; 16] {
     let bytes = load_file_bytes(handle, system_table, cstr16!("\\toyos\\log.guid"));
     <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or_else(|_| {
         panic!("\\toyos\\log.guid holds {} bytes, wanted 16", bytes.len())
@@ -242,9 +227,10 @@ const HUNG_WITHOUT_A_RECORD: &str =
     "Boot attempts: the previous boot of this image never reported; the machine is handed back";
 
 /// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
-/// for firmware's own use and this is the first one an application may take;
-/// `uefi`'s `set_watchdog_timer` refuses a reserved one outright.
+/// for firmware's own use (UEFI 2.10 §7.5.1) and this is the first one an
+/// application may take.
 const WATCHDOG_CODE: u64 = 0x0001_0000;
+const _: () = assert!(WATCHDOG_CODE > 0xffff);
 
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
@@ -372,20 +358,20 @@ struct GopInfo {
 /// The mode is the firmware's: `Mode->Info` is the mode it already set for the
 /// panel (UEFI 2.11 §12.9.2, "Current Mode of the graphics device"), and
 /// §12.9.2.2's `SetMode` is never called.
-fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
+fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
     let bs = system_table.boot_services();
-    let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    let mut gop = protocol::get::<GraphicsOutput>(bs, gop_handle).ok()?;
+    let gop_handle = bs.handle_for::<Gop>().ok()?;
+    let gop = bs.get::<Gop>(gop_handle).ok()?;
 
     let mode = gop.current_mode_info();
-    let (width, height) = mode.resolution();
-    let stride = mode.stride();
-    let pixel_format = match mode.pixel_format() {
-        PixelFormat::Rgb => 0,
-        PixelFormat::Bgr => 1,
+    let (width, height) = (mode.horizontal_resolution, mode.vertical_resolution);
+    let stride = mode.pixels_per_scan_line;
+    let pixel_format = match mode.pixel_format {
+        PixelFormat::RGB => 0,
+        PixelFormat::BGR => 1,
         // UEFI 2.11 §12.9.2: `PixelBltOnly` "does not support a physical frame
         // buffer", so this display has no scanout for the kernel to inherit.
-        PixelFormat::BltOnly => {
+        PixelFormat::BLT_ONLY => {
             println!("GOP: {}x{} is Blt-only, so this display publishes no framebuffer", width, height);
             return None;
         }
@@ -396,9 +382,7 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
         ),
     };
 
-    let mut fb = gop.frame_buffer();
-    let framebuffer = fb.as_mut_ptr() as u64;
-    let framebuffer_size = fb.size() as u64;
+    let (framebuffer, framebuffer_size) = gop.frame_buffer();
 
     println!("{} {}x{} stride={} format={} fb={:#x} size={}",
         loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
@@ -406,9 +390,9 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     Some(GopInfo {
         framebuffer,
         framebuffer_size,
-        width: width as u32,
-        height: height as u32,
-        stride: stride as u32,
+        width,
+        height,
+        stride,
         pixel_format,
     })
 }
@@ -464,15 +448,15 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
 /// Every range firmware's map says is write-back memory, `(base, length)`:
 /// a descriptor carrying `EFI_MEMORY_WB` and not one of the two I/O types,
 /// which a firmware may give the attribute without meaning memory.
-fn write_back_memory(system_table: &SystemTable<Boot>) -> vec::Vec<(u64, u64)> {
+fn write_back_memory(system_table: &SystemTable) -> vec::Vec<(u64, u64)> {
     let boot_services = system_table.boot_services();
-    let sizes = boot_services.memory_map_size();
+    let (map_size, entry_size) = boot_services.memory_map_size();
     // Room for the descriptors allocating this buffer itself may add.
-    let mut buffer = vec![0u8; sizes.map_size + 8 * sizes.entry_size];
+    let mut buffer = vec![0u64; (map_size + 8 * entry_size).div_ceil(8)];
     let map = boot_services.memory_map(&mut buffer).expect("the memory map, before the exit");
     map.entries()
-        .filter(|d| d.att.contains(MemoryAttribute::WRITE_BACK))
-        .filter(|d| d.ty != MemoryType::MMIO && d.ty != MemoryType::MMIO_PORT_SPACE)
+        .filter(|d| d.att & MemoryDescriptor::WRITE_BACK != 0)
+        .filter(|d| d.ty != MemoryDescriptor::MMIO && d.ty != MemoryDescriptor::MMIO_PORT_SPACE)
         .map(|d| (d.phys_start, d.page_count * PAGE_SIZE as u64))
         .collect()
 }
@@ -483,7 +467,7 @@ fn write_back_memory(system_table: &SystemTable<Boot>) -> vec::Vec<(u64, u64)> {
 ///
 /// Before `ExitBootServices` only — past it neither the print nor the panic
 /// survives — and said before it is asserted, because `assert!` panics through
-/// uefi-services, whose handler reaches the console and not `loader.log`.
+/// `efi`'s handler, which reaches the console and not `loader.log`.
 fn report_reach(what: &str, at: u64, len: u64) {
     let inside = at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES);
     println!(
@@ -497,7 +481,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -531,7 +515,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // the boot map runs from: the map holds it wherever that is.
     let loader = {
         let bs = system_table.boot_services();
-        let image = protocol::exclusive::<LoadedImage>(bs, bs.image_handle())
+        let image = bs.exclusive::<LoadedImage>(bs.image_handle())
             .expect("firmware answers LoadedImage for the image it started");
         let (base, size) = image.info();
         (base as u64, size)
@@ -648,19 +632,18 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
-    let mms = system_table.boot_services().memory_map_size();
-    let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
+    let (map_size, entry_size) = system_table.boot_services().memory_map_size();
+    let memory_map_entry_count = map_size / entry_size + MAP_MARGIN;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
 
-    let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
+    let uefi_memory_map = system_table.exit_boot_services();
 
     // **Nothing below this line may allocate or panic.** Boot services are gone,
-    // so the allocator answers null and `println!` dereferences a system table
-    // uefi-services has already nulled; either one ends in a panic inside a
-    // panic, and a fault with no IDT of our own vectors into firmware's, which
-    // dead-loops. The machine then holds the loader's last line on the panel
-    // forever and says nothing — which is the failure this loop is written to
-    // be incapable of, not merely unlikely to reach.
+    // so the allocator answers null and `println!` finds no console; either one
+    // ends in a panic whose handler can neither say it nor power the machine
+    // off, and spins. The machine then holds the loader's last line on the
+    // panel forever and says nothing — which is the failure this loop is
+    // written to be incapable of, not merely unlikely to reach.
     uefi_memory_map.entries().for_each(|entry| {
         if memory_map.len() == memory_map.capacity() {
             // A `push` here would grow the vector, and growing it is the death
@@ -671,7 +654,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             return;
         }
         memory_map.push(MemoryMapEntry {
-            uefi_type: entry.ty.0,
+            uefi_type: entry.ty,
             // Saturating: `overflow-checks` is on in this profile, so a
             // descriptor whose extent does not fit an address would panic here
             // rather than in a caller that could report it.
@@ -711,57 +694,44 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 /// The zone is not applied and does not need to be: what a reader of the stick
 /// asks of this number is whether the record beside it is *this* boot's
 /// predecessor's or one left over, and an hour either way answers that.
-fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
+fn armed_at(system_table: &SystemTable) -> u64 {
     let Ok(t) = system_table.runtime_services().get_time() else { return 0 };
     toyos_wallclock::Civil {
-        year: u64::from(t.year()),
-        month: u64::from(t.month()),
-        day: u64::from(t.day()),
-        hour: u64::from(t.hour()),
-        min: u64::from(t.minute()),
-        sec: u64::from(t.second()),
+        year: u64::from(t.year),
+        month: u64::from(t.month),
+        day: u64::from(t.day),
+        hour: u64::from(t.hour),
+        min: u64::from(t.minute),
+        sec: u64::from(t.second),
     }
     .to_unix_secs()
 }
 
 /// End a pass that read the black box and boots no kernel, by resetting the
 /// machine rather than returning to the boot manager.
-///
-/// **A UEFI application that returns leaves whatever it registered behind, and
-/// the boot manager then unloads its image.** `uefi_services::init` registers a
-/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
-/// system signals that group from inside its own `ExitBootServices`, and
-/// firmware calls into memory that is no longer ours.
-fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
+fn end_this_pass(system_table: &SystemTable) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
-    if let Some(event) = exit_event {
-        // After the last line is written: closing it is what stops `println!`
-        // being disabled by a callback, not what enables it, but the ordering
-        // is the one a reader should not have to check.
-        let _ = system_table.boot_services().close_event(event);
-    }
-    system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
+    system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS)
 }
 
-#[entry]
-fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+/// The loader, entered from `efi`'s `efi_main` with this image's handle.
+fn main(handle: Handle, system_table: SystemTable) -> Status {
     // First, so this reading is firmware's time and none of the loader's.
     let entry_counter = arch::counter();
     let counter_hz = stamp::start();
-    let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
     // the image neither exits boot services nor disables it, and a minute is
     // this project's bound for every watchdog. Reported after the log is open,
     // so the answer is on the stick and not only on the screen.
     let firmware_watchdog =
-        system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE, None);
+        system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE);
     // Before the first line, so the screen holds this loader's lines and none
     // of the firmware's: its logo and its boot manager's text. ClearScreen
     // (UEFI 2.11 §12.4.8) is the console's own clear, which also homes the
     // cursor; said once the log is open.
-    let cleared = system_table.stdout().clear();
+    let cleared = system_table.clear_screen();
     // The same sixteen bytes the kernel is handed below, read once, and read
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
@@ -868,7 +838,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         // owner is already in, so this pass boots none: `BootNext` is left alone
         // and the firmware's own boot order takes the machine.
         println!("{HUNG_WITHOUT_A_RECORD}");
-        end_this_pass(&system_table, exit_event);
+        end_this_pass(&system_table);
     }
     if let Some(finding) = finding {
         for line in &finding.lines {
@@ -882,7 +852,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         }
         if finding.ends_the_chain {
             // The last boot is accounted for, so this pass boots no kernel.
-            end_this_pass(&system_table, exit_event);
+            end_this_pass(&system_table);
         }
     }
     match firmware_watchdog {
