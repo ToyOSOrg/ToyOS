@@ -451,10 +451,10 @@ tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 
 The response files NIST's Cryptographic Algorithm Validation Program publishes
 for the SHA Validation System: messages and the digests FIPS 180-4 gives them,
-the external oracle `toyos-sha2`'s tests hold it to. A work of the United States
-government, not under copyright in the United States (17 U.S.C. §105). Test
-input only: nothing built from this repository carries them, and no shipped
-package's directory holds them.
+the external oracle `toyos-sha2`'s and `toyos-sha2-hw`'s tests hold them to. A
+work of the United States government, not under copyright in the United States
+(17 U.S.C. §105). Test input only: nothing built from this repository carries
+them, and no shipped package's directory holds them.
 
 Of the archive, only SHA-256's and SHA-512's files, the two hashes the crate
 has.

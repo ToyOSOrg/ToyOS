@@ -18,7 +18,7 @@ syscap = ["logread"]
 [programs.soundserver]
 service = true
 serves = ["soundserver"]
-devices = ["hda-audio", "virtio-sound"]
+devices = ["hda-audio", "pci:1af4:1059"]
 syscap = ["rt"]
 
 [programs.test-runner]

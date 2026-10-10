@@ -26,7 +26,8 @@ mod efer {
     pub const MSR: u32 = 0xC000_0080;
     pub const SCE: u64 = 1 << 0;
     pub const LME: u64 = 1 << 8;
-    /// CPU-set on entering long mode; read-only, so excluded from this value.
+    /// CPU-set on entering long mode and 1 while this kernel runs, so declared:
+    /// Intel ignores a write that clears it, an AMD Zen 2 CPU faults on one.
     pub const LMA: u64 = 1 << 10;
     pub const NXE: u64 = 1 << 11;
 }
@@ -107,9 +108,9 @@ const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
 const _: () = assert!(CR4_REQUIRED & CR4_FORBIDDEN == 0);
 const _: () = assert!(CR4_OPTIONAL & CR4_FORBIDDEN == 0);
 
-/// `IA32_EFER` on every CPU: `SCE`, `LME`, `NXE`. `SCE` is declared only
+/// `IA32_EFER` on every CPU: `SCE`, `LME`, `LMA`, `NXE`. `SCE` is declared only
 /// here, never by `arch::syscall::init`, so one register keeps one owner.
-pub const EFER: u64 = efer::SCE | efer::LME | efer::NXE;
+pub const EFER: u64 = efer::SCE | efer::LME | efer::LMA | efer::NXE;
 
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
@@ -189,7 +190,8 @@ pub fn init(cpu_id: u32) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
         // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
-        // bits `declaration` has just confirmed this CPU defines.
+        // bits `declaration` has just confirmed this CPU defines and whose `LMA`
+        // is the one this CPU, in long mode, already holds.
         unsafe {
             cpu::write_cr4(declared);
             cpu::wrmsr(efer::MSR, EFER);
@@ -376,11 +378,9 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
         "control_regs: cpu{cpu_id} holds cr4={live_cr4:#010x}, the declaration is \
          {declared_cr4:#010x}",
     );
-    // `LMA` is excluded: clearing it means the CPU itself left long mode.
     assert!(
-        live_efer & !efer::LMA == EFER && live_efer & efer::LMA != 0,
-        "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is \
-         {EFER:#06x} plus the CPU's own LMA",
+        live_efer == EFER,
+        "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is {EFER:#06x}",
     );
     CHECKED.fetch_add(1, Ordering::Relaxed);
 }

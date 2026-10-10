@@ -38,10 +38,12 @@ explained either way: it is a userland fault the kernel handled correctly.
 
 **What to read if it happens again.** `err=0x4` is a user-mode read of a
 not-present page, so it is `/system/bin/echo`'s own dereference of 1 and not the
-loader's. Two candidates and one run cannot separate them: a `Command::output()`
-path whose child inherits something the fault arms disturbed, and demand paging
-handing the binary a page it had not finished relocating (`relocs=2600` is on the
-trace). Capture the guest with QMP rather than letting the harness kill it —
+loader's. One run named two candidates: a `Command::output()` path whose child
+inherits something the fault arms disturbed, and demand paging handing the binary
+a page it had not finished relocating (`relocs=2600` is on the trace). The second
+is gone from the tree: an executable applies every relocation in its own `_start`
+before it reads a word (`toyos::relocate`), the fault path relocates nothing, and
+the trace carries no `relocs=`. Capture the guest with QMP rather than letting the harness kill it —
 `BootOptions { qmp: true }` leaves the socket, and `info registers -a` says
 whether any other CPU is still running.
 

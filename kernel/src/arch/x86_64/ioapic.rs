@@ -21,7 +21,6 @@ pub use toyos_acpi::{Polarity, Trigger};
 
 use crate::arch::IrqGuard;
 use crate::drivers::acpi::MadtInfo;
-use crate::iommu::Delivery;
 use crate::log;
 use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
@@ -245,7 +244,7 @@ fn locate(gsi: Gsi) -> Result<(&'static Unit, u32), RouteError> {
 ///
 /// Under remapping the entry names a table slot and the destination lives in
 /// that slot — but the id must still fit whatever names it, so `DestTooWide`
-/// moves rather than disappearing and arrives as [`Delivery::Refused`].
+/// moves rather than disappearing and arrives as [`RouteError::NotRemappable`].
 pub fn route(
     gsi: Gsi,
     vector: u8,
@@ -255,17 +254,20 @@ pub fn route(
 ) -> Result<(), RouteError> {
     let (unit, n) = locate(gsi)?;
     let level = trigger == Trigger::Level;
-    let (index, high) =
-        match crate::iommu::remap_pin(unit.id, vector, dest_apic_id, level) {
-            Delivery::Direct => {
-                if dest_apic_id >= 0xFF {
-                    return Err(RouteError::DestTooWide(dest_apic_id));
-                }
-                (0, dest_apic_id << 24)
-            }
-            Delivery::Remapped(pin) => (pin.low, pin.high),
-            Delivery::Refused(why) => return Err(RouteError::NotRemappable(gsi, why)),
-        };
+    // Under no unit that remaps, the entry names its CPU itself; under one, a
+    // pin with no entry of its own is refused rather than written in a form
+    // the unit blocks.
+    let (index, high) = if !super::vtd::interrupt::is_armed() {
+        if dest_apic_id >= 0xFF {
+            return Err(RouteError::DestTooWide(dest_apic_id));
+        }
+        (0, dest_apic_id << 24)
+    } else {
+        match super::vtd::interrupt::pin(unit.id, vector, dest_apic_id, level) {
+            Ok(pin) => (pin.low, pin.high),
+            Err(why) => return Err(RouteError::NotRemappable(gsi, why)),
+        }
+    };
     let low = vector as u32
         | index
         | if polarity == Polarity::Low { RTE_POLARITY_LOW } else { 0 }

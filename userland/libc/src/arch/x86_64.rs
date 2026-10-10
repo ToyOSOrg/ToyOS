@@ -3,15 +3,19 @@
 /// Entry point for C programs. Stack layout at entry (set up by kernel):
 ///   [RSP]   = argc
 ///   [RSP+8] = argv[0], argv[1], ..., NULL
+/// The image relocates itself first, from its own header's address.
 #[cfg(not(feature = "std-runtime"))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "lea rdi, [rip + __ehdr_start]",
+        "call {relocate}",
         "mov rdi, [rsp]",      // argc
         "lea rsi, [rsp + 8]",  // argv
         "call {start_c}",
         "ud2",
+        relocate = sym toyos::relocate::relocate_self,
         start_c = sym crate::runtime::start_c,
     );
 }

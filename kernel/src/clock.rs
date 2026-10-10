@@ -1,8 +1,9 @@
 //! The machine's clocks: monotonic since boot, read off the CPU's free-running
 //! counter at the period the architecture's boot gives [`set_counter`] (on
-//! x86-64, measured against the HPET); wall-clock, read from the
-//! architecture's RTC exactly once — a CMOS read can block for up to a
-//! second — in [`init_wall`], and answered after as that reading plus
+//! x86-64, measured against the HPET); wall-clock, the architecture's one
+//! reading of the RTC — on x86-64 a CMOS read, which can block for up to a
+//! second, and on AArch64 firmware's, which the loader hands over — anchored
+//! in [`init_wall`] and answered after as that reading plus
 //! [`nanos_since_boot`]; and the log's stamp ([`stamp`]), the same clock
 //! counted from the counter's zero, which is where every line of the log —
 //! the loader's, the kernel's and every program's — counts from.
@@ -12,6 +13,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Rel
 use crate::arch::cpu;
 use crate::log::LogStamp;
 use crate::time::Instant;
+use kernel::clock::{anchor, ticks_to_nanos};
+use toyos_wallclock::Civil;
 
 static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
 static TSC_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
@@ -41,10 +44,6 @@ pub fn set_counter(boot: u64, period_fs: u64) {
     TSC_BOOT.store(boot, Relaxed);
     TSC_PERIOD_FS.store(period_fs, Relaxed);
     publish_page(boot, period_fs, at_boot);
-}
-
-fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
-    ((ticks as u128 * period_fs as u128) / 1_000_000) as u64
 }
 
 /// Now as a log line's time: nanoseconds since the counter's zero — power-on,
@@ -176,18 +175,19 @@ static BOOT_SECS: AtomicU64 = AtomicU64::new(0);
 /// Whether the above means anything; zero is a valid instant, not a sentinel.
 static WALL_KNOWN: AtomicBool = AtomicBool::new(false);
 
-/// Reads the RTC, which keeps UTC, once, after [`init`], and anchors the wall
-/// clock to it.
-pub fn init_wall(century_reg: Option<u8>) {
-    let civil = match crate::arch::rtc::read(century_reg) {
-        Ok(civil) => civil,
+/// Anchors the wall clock, once, after [`set_counter`], to the architecture's
+/// reading of the RTC, which keeps UTC: the instant, and the counter when it
+/// was true, which on a machine whose loader read it is before boot.
+pub fn init_wall(reading: Result<(Civil, u64), impl core::fmt::Display>) {
+    let (civil, at) = match reading {
+        Ok(reading) => reading,
         Err(fault) => {
             log!("clock: this machine will not say what time it is — {fault}");
             return;
         }
     };
 
-    BOOT_SECS.store(civil.to_unix_secs().saturating_sub(nanos_since_boot() / NANOS_PER_SEC), Relaxed);
+    BOOT_SECS.store(anchor(civil.to_unix_secs(), at, TSC_BOOT.load(Relaxed), TSC_PERIOD_FS.load(Relaxed)), Relaxed);
     WALL_KNOWN.store(true, Release);
     log!("clock: the RTC reads {civil} UTC");
 }

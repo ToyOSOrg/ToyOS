@@ -6,7 +6,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, DirectMapEnd, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
+use crate::{is_read_as_memory, Cache, DirectMapEnd, Encoding, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
 
 /// `MAIR_EL1` index 0: Device-nGnRE, registers.
 pub const ATTR_DEVICE: u64 = 0;
@@ -66,6 +66,9 @@ const fn attributes(cache: Cache) -> u64 {
 pub const fn page(phys: u64, cache: Cache) -> u64 {
     phys | PAGE | AF | attributes(cache)
 }
+
+/// The three, for [`Plan::write`](crate::Plan::write).
+pub const ENCODING: Encoding = Encoding { table, block, page };
 
 /// 4 KiB pages in one 2 MiB page.
 const PAGES: u64 = PAGE_2M / PAGE_4K;
