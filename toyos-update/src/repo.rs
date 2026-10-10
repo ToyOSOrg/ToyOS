@@ -654,7 +654,7 @@ pub struct Archive {
 
 impl Archive {
     pub fn of(item: &Item) -> Self {
-        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: Sha256::new() }
+        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: toyos_sha2_hw::sha256() }
     }
 
     /// The next bytes, refused where they run past the signed length.
