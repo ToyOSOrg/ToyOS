@@ -44,8 +44,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
-
 const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
 
@@ -308,7 +306,7 @@ fn sources(root: &Path) -> Result<Sources, String> {
             continue;
         }
         let bytes = fs::read(&file).map_err(|e| format!("read {path}: {e}"))?;
-        sources.insert(path, format!("{:x}", Sha256::digest(bytes)));
+        sources.insert(path, crate::release::sha256_hex(&bytes));
     }
     Ok(sources)
 }

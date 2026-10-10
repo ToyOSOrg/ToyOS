@@ -14,14 +14,14 @@ mod access;
 mod latch;
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 use crate::log;
 use crate::log::LogStamp;
 use crate::panic_reboot::Bound;
-use crate::time::{Budget, Cadence, Duration};
+use crate::time::{Budget, Duration};
 use crate::mm::policy::MmioPolicy;
 use crate::mm::{self, DirectMap};
 
@@ -42,18 +42,6 @@ const _: () = assert!(SNAPSHOT_CAP >= MAX_ROWS * MAX_COLS);
 
 /// One two-bit [`Mark`] per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
 const MARK_BYTES: usize = SNAPSHOT_CAP.div_ceil(4);
-
-/// How long Ctrl+Alt+D's report keeps the panel.
-const REPORT_HOLD: Budget = Budget::of(
-    Duration::from_secs(15),
-    "the report stops being put back and the desktop keeps its screen",
-);
-
-/// How often the panel is checked for an overwrite while the report holds it.
-const REPORT_CHECK: Cadence = Cadence::every(
-    Duration::from_millis(20),
-    "PROBES uncached reads per check, on the CPU that took an interrupt anyway",
-);
 
 #[derive(Clone, Copy)]
 struct Fb {
@@ -299,15 +287,6 @@ const EARLY_CAPTOR: u32 = 1;
 /// Scratch for readers of the live shards (a boot checkpoint, or a fatal
 /// path with no panic handler run) — separate from `SNAPSHOT` so a checkpoint cannot erase a captured, unpainted report.
 static LIVE: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
-
-/// Ctrl+Alt+D's report, rendered once and held for [`REPORT_HOLD`] by [`hold_report`].
-/// A separate buffer, not a live re-read, because it must survive a repaint after the ring has moved on.
-static REPORT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
-
-/// When the report gives the panel back. 0 means it does not hold it.
-static HOLD_UNTIL: AtomicU64 = AtomicU64::new(0);
-/// Next `nanos_since_boot` a CPU may check the panel; a CAS picks one CPU of the eight.
-static HOLD_CHECK_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Set once a process claims `DeviceType::Framebuffer`; a fatal panic ignores this and takes the screen back unconditionally.
 static SCREEN_OWNED_BY_USERLAND: AtomicBool = AtomicBool::new(false);
@@ -679,7 +658,7 @@ pub fn render() -> bool {
     // Before the paint, from the same view the panel gets: a fault inside the
     // painter then costs the screen and not the copy the next boot reads.
     crate::blackbox::record_panic(text.text);
-    paint(Fill::Fatal, text, Watch::No, || false);
+    paint(Fill::Fatal, text, || false);
     true
 }
 
@@ -722,7 +701,7 @@ pub fn boot_checkpoint() {
     repaint();
 }
 
-/// The `panel-painter-stalls` actuator: Ctrl+Alt+D's report painter, holding
+/// The `panel-painter-stalls` actuator: a boot checkpoint's painter, holding
 /// the latch, goes fatal before it paints, so `screen_fatal_behind_a_painter`
 /// has a fatal path land on a latch whose holder is beneath it and will never
 /// give it back — the case of a painter halted by the halt IPI mid-paint.
@@ -731,12 +710,10 @@ pub mod stall {
     /// What the painter says as it goes fatal; the test reads it off the panel.
     pub const HELD: &str = "panel: a painter holding the panel went fatal";
 
-    pub(super) fn inside_the_latch() {
-        if !crate::actuator::panel_painter_stalls() {
-            return;
-        }
+    pub fn inside_the_latch() -> ! {
+        assert!(super::take_for_boot(), "panel-painter-stalls: the panel's latch was not free to take");
         crate::log!("{HELD}");
-        crate::panic::halt_all_cpus();
+        crate::panic::halt_all_cpus()
     }
 }
 
@@ -751,80 +728,8 @@ fn repaint() {
     if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) || !take_for_boot() {
         return;
     }
-    paint(Fill::Boot, live_tail(), Watch::No, fatal_claimed);
+    paint(Fill::Boot, live_tail(), fatal_claimed);
     PAINTING.store(false, Ordering::SeqCst);
-}
-
-/// Put the log between two marks on the panel, and keep it there: a
-/// bracket, not a tail, so the answer cannot land on the wrong page.
-/// `from`/`to` are timestamps, not byte positions — a byte range has no
-/// meaning across shards and could be widened by a concurrent writer.
-///
-/// [`boot_checkpoint`] without the userland check — the keystroke is the
-/// consent. A single paint is not a report, so this arms a hold that [`hold_report`] answers.
-pub fn paint_report(from: LogStamp, to: LogStamp) {
-    // SAFETY: sound as `capture`'s `SNAPSHOT` write — `REPORT` is reached
-    // only from here and `report_text`; the dump reschedules every CPU, so only one is in flight.
-    let into = unsafe { &mut *REPORT.0.get() };
-    into.render(from, to);
-    HOLD_UNTIL.store(
-        crate::clock::nanos_since_boot().saturating_add(REPORT_HOLD.nanos()),
-        Ordering::Relaxed,
-    );
-    paint_held_report();
-}
-
-/// The report as it was when the dump finished, held for [`REPORT_HOLD`]; empty until one has been asked for.
-fn report_text() -> View<'static> {
-    // SAFETY: sound as `paint_report`'s write — both callers run after it returns, and `paint_held_report` holds `PAINTING`.
-    unsafe { &*REPORT.0.get() }.view()
-}
-
-fn paint_held_report() {
-    if !take_for_boot() {
-        return;
-    }
-    #[cfg(feature = "boot-actuators")]
-    stall::inside_the_latch();
-    forget_the_glass();
-    paint(Fill::Boot, report_text(), Watch::Yes, fatal_claimed);
-    PAINTING.store(false, Ordering::SeqCst);
-}
-
-/// Put the report back if the panel has stopped carrying it. Called from
-/// `drain_irqs` on every CPU, every pass. Repaints on evidence, not a
-/// timer: a genuinely stopped machine costs [`PROBES`] reads per
-/// [`REPORT_CHECK`] and never a paint — a timer would blank and redraw every
-/// tick, risking a black frame if a camera catches the gap.
-pub fn hold_report() {
-    let until = HOLD_UNTIL.load(Ordering::Relaxed);
-    if until == 0 {
-        return;
-    }
-    let now = crate::clock::nanos_since_boot();
-    if now >= until {
-        HOLD_UNTIL.store(0, Ordering::Relaxed);
-        return;
-    }
-    let due = HOLD_CHECK_AT.load(Ordering::Relaxed);
-    if now < due
-        || HOLD_CHECK_AT
-            .compare_exchange(
-                due,
-                now.saturating_add(REPORT_CHECK.nanos()),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_err()
-    {
-        return;
-    }
-    let Some(fb) = snapshot() else { return };
-    if !mapped(&fb) || panel_carries_report(&fb) {
-        return;
-    }
-    log!("panic console: the panel was drawn over, putting the report back");
-    paint_held_report();
 }
 
 /// Carries "halted" vs "still booting" at zero cost, and proves the console ran this boot.
@@ -911,31 +816,6 @@ fn row_offsets(text: &[u8], cols: usize, first: usize, out: &mut [Row]) {
         }
     }
 }
-
-/// Whether a later pass must tell this paint apart from the panel being
-/// drawn over. Only the report does — a checkpoint's screen is superseded, a fatal one's by nothing.
-#[derive(Clone, Copy, PartialEq)]
-enum Watch {
-    No,
-    Yes,
-}
-
-/// Pixels of the watched paint remembered, so a later pass can tell "still up" from "drawn over" without a copy of the panel.
-const PROBES: usize = 128;
-
-/// How many of `PROBES` are a grid over the panel rather than ink of the text, catching a repaint with no glyphs over it.
-/// Neither replaces the other: a grid probe on the report's own black background can't catch a same-colour overwrite the way an ink probe can.
-const GRID_PROBES: usize = 32;
-const GRID_COLS: usize = 8;
-const GRID_ROWS: usize = GRID_PROBES / GRID_COLS;
-const _: () = assert!(GRID_COLS > 1 && GRID_ROWS > 1);
-
-/// One ink probe every this many inked glyphs, so probes span the page rather than clustering on its first line.
-const PROBE_STRIDE: usize = 29;
-
-static PROBE_AT: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
-static PROBE_PX: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
-static PROBE_N: AtomicUsize = AtomicUsize::new(0);
 
 /// One grid position as the panel left it: the character drawn there and its
 /// [`Ink`].
@@ -1101,7 +981,7 @@ fn spent(began: u64, pixels: u64) {
 
 /// `stop` is asked before every row and every scanline of a fill: a paint it
 /// answers yes to leaves at once, and the grid is forgotten, not believed.
-fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
+fn paint(fill: Fill, view: View, stop: impl Fn() -> bool) {
     let Some(fb) = snapshot() else { return };
     if !mapped(&fb) {
         return;
@@ -1144,8 +1024,6 @@ fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
     row_offsets(text, cols, first, &mut row_start[..draw]);
     let mut want_row = [Cell::GROUND; MAX_COLS];
 
-    let mut inked = 0usize;
-    let mut probes = 0usize;
     for r in 0..grid_rows {
         if stop() {
             forget_the_glass();
@@ -1179,54 +1057,11 @@ fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
                 pixels += draw_cell(&fb, c, r, cell, ground, palette.pixel(cell.ink()));
                 *was = cell;
             }
-            if watch == Watch::Yes && text_row.is_some() {
-                if let Some((bx, by)) = cell.character().and_then(glyph_ink) {
-                    if inked.is_multiple_of(PROBE_STRIDE) && probes < PROBES - GRID_PROBES {
-                        let (x, y) = (c * GLYPH_W + bx, r * GLYPH_H + by);
-                        PROBE_AT[probes].store(((y as u32) << 16) | x as u32, Ordering::Relaxed);
-                        probes += 1;
-                    }
-                    inked += 1;
-                }
-            }
         }
     }
 
     flush_stores();
-    if watch == Watch::Yes {
-        sample_probes(&fb, probes);
-    }
     spent(began, pixels);
-}
-
-/// Read back what this paint left at each probe (not assumed), after the
-/// grid is added to the draw loop's ink — a probe outside the published byte count was never written.
-fn sample_probes(fb: &Fb, ink: usize) {
-    let mut n = ink.min(PROBES - GRID_PROBES);
-    let w = (fb.width as usize).saturating_sub(1);
-    let h = (fb.height as usize).saturating_sub(1);
-    for i in 0..GRID_PROBES {
-        // Corners included, where a taskbar or the strip below the last row sits, and where `Ppm::fill` reads.
-        let (x, y) = (w * (i % GRID_COLS) / (GRID_COLS - 1), h * (i / GRID_COLS) / (GRID_ROWS - 1));
-        PROBE_AT[n].store(((y as u32) << 16) | x as u32, Ordering::Relaxed);
-        n += 1;
-    }
-    for i in 0..n {
-        let at = PROBE_AT[i].load(Ordering::Relaxed);
-        let px = get_pixel(fb, (at & 0xFFFF) as usize, (at >> 16) as usize);
-        PROBE_PX[i].store(px, Ordering::Relaxed);
-    }
-    PROBE_N.store(n, Ordering::Relaxed);
-}
-
-/// Whether every probe still holds what the last paint left there; no probes means nothing painted, so this answers yes.
-fn panel_carries_report(fb: &Fb) -> bool {
-    let n = PROBE_N.load(Ordering::Relaxed).min(PROBES);
-    (0..n).all(|i| {
-        let at = PROBE_AT[i].load(Ordering::Relaxed);
-        get_pixel(fb, (at & 0xFFFF) as usize, (at >> 16) as usize)
-            == PROBE_PX[i].load(Ordering::Relaxed)
-    })
 }
 
 /// Put every store this module has made on the bus.
@@ -1294,19 +1129,6 @@ fn rgb(fb: &Fb, r: u32, g: u32, b: u32) -> u32 {
     }
 }
 
-/// What is on the glass at one pixel, or 0 where nothing may be read — the
-/// same clamp [`row_base`] applies, so a probe on a position that could not be written is never a false alarm.
-fn get_pixel(fb: &Fb, x: usize, y: usize) -> u32 {
-    let Some(row) = (y as u64).checked_mul(fb.stride_px as u64) else { return 0 };
-    let Some(idx) = row.checked_add(x as u64).and_then(|v| v.checked_mul(4)) else { return 0 };
-    if idx.saturating_add(4) > fb.bytes {
-        return 0;
-    }
-    // SAFETY: a volatile read of the scanout has no safe spelling; bounded
-    // by `idx + 4 <= fb.bytes` above, and `validate` refusing a null/out-of-map base.
-    unsafe { core::ptr::read_volatile(fb.ptr.add(idx as usize) as *const u32) }
-}
-
 /// Base pointer for a row, given `len` pixels will be written from it.
 /// `None` means the row does not fit, and so does no later row.
 fn row_base(fb: &Fb, y: usize, len: usize) -> Option<*mut u32> {
@@ -1356,24 +1178,10 @@ fn glyph_char(byte: u8) -> u8 {
 /// font would draw, which [`glyph_char`] does not produce.
 static NO_INK: [u8; GLYPH_H] = [0; GLYPH_H];
 
-/// The 16 rows the font draws [`glyph_char`]'s answer with; one mapping, so
-/// [`glyph_ink`] cannot disagree with the draw.
+/// The 16 rows the font draws [`glyph_char`]'s answer with.
 fn glyph(ch: u8) -> &'static [u8] {
     let base = ch.saturating_sub(0x20) as usize * GLYPH_H;
     FONT.get(base..base + GLYPH_H).unwrap_or(&NO_INK)
-}
-
-/// A pixel of this character's glyph, in its cell. `None` for a glyph with no
-/// ink — the only kind a probe must refuse, since a blank cell looks the same whether the report is still there or not.
-fn glyph_ink(ch: u8) -> Option<(usize, usize)> {
-    for (row, &bits) in glyph(ch).iter().enumerate() {
-        for bit in 0..GLYPH_W {
-            if bits & (0x80 >> bit) != 0 {
-                return Some((bit, row));
-            }
-        }
-    }
-    None
 }
 
 /// One cell's whole 8x16 block, ink and ground together, so a repaint clears

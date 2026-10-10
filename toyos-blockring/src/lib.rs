@@ -50,6 +50,6 @@ pub use entry::{Completion, Op, Request, Status};
 pub use toyos_transport::Run;
 pub use layout::{BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
 
-/// The name a block service is served under. A holder of its connector may
-/// open any partition the service has.
+/// The name a block service is served under. A connection opens only what its
+/// connector's badge grants ([`wire::Grant`]).
 pub const PORT: &str = "block";

@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Its product is how long a spawn of `toybox` takes to its exit, which a
+    // guest's host sets: the `spawn_cost` metal row runs it.
+    "spawn_cost",
     // Its verdict is a duration: whether a shootdown waits for every other CPU
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
@@ -114,6 +117,11 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
+    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
+    // machine has.
+    "claim_lpi",
+    "claim_unrouted",
+    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
@@ -154,9 +162,6 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host peer that ends each stream as the stream asks:
     // `libc_sockets` runs it on `tests/netcase`.
     "stream_ends_std",
-    // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open for
-    // twenty seconds. On a shared boot it would be twenty seconds of nothing.
-    "lan_hold",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -189,6 +194,18 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It claims the NVMe controller a boot off that disk starts no server
+    // for, and reads the inventory: `block_grants_reach_their_partitions`
+    // runs it on tests/blockgrantcase.
+    "partition_grant",
+    // It installs the image its machine test staged into a second slot on
+    // the disk diskserver drives: `update_writes_the_idle_slot_through_the_block_service`
+    // runs it on tests/slotscase.
+    "update_idle_slot",
+    // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
+    // boot's kernel does: `usbd_drives_the_spare` and the
+    // `usbd_drives_the_type_c_controller` metal row run it.
+    "usbd_spare",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -230,6 +247,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // `virt_random_differs` builds it for AArch64, runs it on that
     // architecture's job case, and compares two boots' draws.
     "random_draws",
+    // Its shared run asserts what holds of the clock syscalls on x86-64;
+    // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
+    // against the instant the job case stages in the RTC.
+    "wall_clock_now",
 ];
 
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
@@ -243,7 +264,7 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 // the only one that architecture has.
 const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_panic_muted", qemu::Profile::Metal),
-    // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
+    // The same fatal path from inside a boot checkpoint's painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound. The profile
     // whose 16550 is the console, where the fatal path writes its last line raw.
@@ -267,10 +288,10 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_debug_refused", qemu::Profile::Virt),
     ("virt_readonly_copyout", qemu::Profile::Virt),
     ("virt_ring0_timer_in_syscall", qemu::Profile::Virt),
-    // Emulated, with `virt_el1_smp` and `virt_off_names_the_cpus_left_on`: each
-    // waits for the boot's last word behind `unmap_touch`'s fault reports, and
-    // under HVF the power-off can come before `klogd` has put it on the wire
-    // (issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md).
+    // Emulated, with `virt_el1_smp`, `virt_off_names_the_cpus_left_on` and the
+    // reboots: under HVF a `klogd` the stop wakes can go undispatched past the
+    // stop's whole wait for the console's wire
+    // (issues/a-woken-klogd-can-wait-seconds-on-an-idle-cpu-under-hvf.md).
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -281,11 +302,17 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_reboot", qemu::Profile::VirtEl2),
     ("virt_off_names_the_cpus_left_on", qemu::Profile::VirtEl2),
     ("virt_reboot_refused_without_psci", qemu::Profile::Virt),
+    ("virt_reboot_wire_held", qemu::Profile::VirtEl2),
+    ("virt_reboot_wire_kept", qemu::Profile::VirtEl2),
     // The job case entered at EL2, once: the entry's EL2 writes for the timer
     // and FP, which no boot under HVF runs.
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
+    ("virt_smmu", qemu::Profile::VirtSmmu),
+    ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
+    ("virt_wall_clock_utc", qemu::Profile::Virt),
+    ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -295,6 +322,11 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // An AMD-Vi unit left blocking every device, switched off before the boot
+    // stick is driven behind it: the T14 is an Intel machine, no AMD one is
+    // in reach, and the register sequence and the DMA it frees are no host
+    // test's.
+    "amdvi_firmware_left",
     // netstack's own state behind a real stack and a peer that ends its
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
@@ -348,6 +380,16 @@ const MACHINE_TESTS: &[&str] = &[
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
     "machine_shutdown_short_stop",
+    // The power-off with `klogd` holding the console's wire as the stop
+    // begins, on one CPU: a staged hold of a kernel thread, read off a console
+    // QEMU keeps past the power-off, and the T14 is never asked to power off.
+    "machine_shutdown_wire_held",
+    // The same with `klogd` keeping the wire through the stop's budget.
+    "machine_shutdown_wire_kept",
+    // The same with `klogd` staged inside its hold of the wire from the boot's
+    // last word past the seal, where the stop does not hold it: the one CPU
+    // runs nothing but the stop from the seal on.
+    "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
     // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
@@ -362,10 +404,38 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // A badge the kernel stamps on a connection to diskserver, judged by
+    // diskserver on the disk it drives: the grant's decisions are host-tested
+    // in diskserver and toyos-blockring, but whether the badge diskserver
+    // reads is the one a connector was minted with, and whether a refused
+    // open stays refused against a partition nothing else holds, is the
+    // kernel's port and a claimed controller, which have no host build; and
+    // the T14 boots from a stick, so no disk diskserver drives holds a
+    // partition the loader named.
+    "block_grants_reach_their_partitions",
+    // The supervisor reading the slot table through a block session and
+    // minting `update` the idle slot's partitions, which `update` writes and
+    // marks through diskserver: the supervisor, the launcher and diskserver
+    // have no host build, and the T14's slots are on its stick, which only
+    // the kernel drives until usbd.
+    "update_writes_the_idle_slot_through_the_block_service",
+    // usbd on a controller the kernel leaves alone, with two devices on it,
+    // and a transfer aimed past its claim's grants: usbd is one binary that
+    // owns its controller, with no host build; `toyos-xhci`'s host tests and
+    // simulator hold every decision it takes, and none of them holds the
+    // effects — the rings, the interrupt through the claim, the unit. The
+    // T14's spare controller has no device on it and its unit is not
+    // asked to fault.
+    "usbd_drives_the_spare",
     // A boot keyboard reporting more keys than its six slots name: the
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
     "usb_keyboard_rollover",
+    // What `toyfetch` reads through the `sysinfo` fork's ToyOS backend: the
+    // backend calls `SYS_SYSINFO` and reads ROOT, which no host has, and the
+    // CPU count is held to the `-smp` this boot gave QEMU, a count the
+    // kernel did not make.
+    "toyfetch_reports",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -565,6 +635,20 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // How long a spawn of `toybox` takes to its exit, printed by the job and
+        // read off the stick for an A/B against another build: that it ran, and
+        // what it said, are the verdict.
+        "spawn_cost",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_spawn_cost")?;
+                b[0].log().must_say("spawn_cost: /system/bin/toybox min ")?;
+                Ok(())
+            },
+        },
+    ),
+    (
         // `SYS_DEBUG` holds each other CPU's shootdown acknowledgement back,
         // so the kernel that carries it; the verdict is the guest's own exit,
         // and every wait it asserts is a floor, which no load shortens.
@@ -593,22 +677,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 eprintln!("  [trace] {}", log.must_say("trace_flood: ")?);
                 Ok(())
             },
-        },
-    ),
-    (
-        // One CPU deafened by the actuator, named by the blocked-task dump and
-        // found by its NMI where it spins.
-        "dump_nmi_probe",
-        metal::Metal {
-            // Held open by a job, because an empty list ends the boot before the
-            // actuator arms.
-            arms: &[metal::once(
-                "testcases-deaf",
-                "tests/testcases",
-                &["dump-deaf-cpu"],
-                &["test_rs_lan_hold"],
-            )],
-            judge: |b| faults::dump_nmi_probe_on_metal(&b[0].kernel()),
         },
     ),
     (
@@ -917,6 +985,20 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| claims::refused_unremapped(&b[0].kernel()),
         },
     ),
+    (
+        // The Type-C controller left to a claim, and usbd driving it: handed
+        // over, MSI armed through remapping, and the No-Op answered by an
+        // interrupt; usbd is killed and started again, so the release says
+        // which reset the function advertises.
+        "usbd_drives_the_type_c_controller",
+        metal::Metal {
+            arms: &[metal::once("testcases-xhci-leave", "tests/testcases", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
+            judge: |b| {
+                b[0].job_passed("test_rs_usbd_spare")?;
+                usbd_on_metal(&b[0].kernel(), &b[0].log())
+            },
+        },
+    ),
     // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
@@ -977,6 +1059,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
+        "test_rs_spawn_cost",
         "test_rs_null_sink_client_exits",
         claims::RECLAIM,
     ],
@@ -1688,6 +1771,17 @@ fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<
 /// The same for its job `test_rs_random_draws`.
 const VIRT_RANDOM: &str = "random_draws";
 
+/// The same for its job `test_rs_wall_clock_now`.
+const VIRT_WALL_CLOCK: &str = "wall_clock_now";
+
+/// The instant `tests/virtjobcase`'s RTC starts at, and the same in Unix
+/// seconds: years from any host's own, so a reading on it came from the RTC.
+const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
+const VIRT_RTC_BASE_SECS: u64 = 1_993_799_665;
+
+/// What `wall_clock_now` says before the `SYS_CLOCK_EPOCH` its line carries.
+const WALL_CLOCK_SAID: &str = "wall-clock: epoch=";
+
 /// `tests/virtjobcase`'s jobs, in the order its job list runs them, and what
 /// each says once the kernel kept what it asks about.
 const VIRT_JOBS: &[(&str, &str)] = &[
@@ -1698,6 +1792,7 @@ const VIRT_JOBS: &[(&str, &str)] = &[
     ("debug_refused", "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused"),
     ("test_rs_ring0_timer_in_syscall", "the timer interrupted the syscall's body and re-armed a quantum"),
     ("test_rs_random_draws", RANDOM_DRAWS_SAID),
+    ("test_rs_wall_clock_now", WALL_CLOCK_SAID),
     ("test_rs_abuse_readonly_copyout", "a syscall writes only where its caller could store"),
 ];
 
@@ -1708,8 +1803,9 @@ const RANDOM_DRAWS_SAID: &str = "random_draws: 8 threads drew 1000 times each an
 const LOADER_SEED_MIXED: &str = "random: the loader's seed is mixed into the generator's key";
 
 /// Boot `tests/virtjobcase` on one CPU, because `preempt` and `fp_isolation`
-/// see a sibling run only when it took theirs. The kernel carries `SYS_DEBUG`
-/// for `debug_refused`, and every job runs in every boot of the case.
+/// see a sibling run only when it took theirs, with its RTC at
+/// [`VIRT_RTC_BASE`]. The kernel carries `SYS_DEBUG` for `debug_refused`, and
+/// every job runs in every boot of the case.
 fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -1722,9 +1818,10 @@ fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM]
+            extra_root_files: [VIRT_COPYOUT, VIRT_RING0_TIMER, VIRT_RANDOM, VIRT_WALL_CLOCK]
                 .map(|name| suite_bin(profile.arch(), name))
                 .to_vec(),
+            rtc_base: Some(VIRT_RTC_BASE),
             ..Default::default()
         },
     )
@@ -1992,6 +2089,40 @@ fn virt_random_differs(profile: qemu::Profile) -> Result<(), String> {
     Ok(())
 }
 
+/// The job case's `wall_clock_now`: what `SYS_CLOCK_EPOCH` and std's
+/// `SystemTime` answer is the instant staged in the RTC, which the loader read
+/// through firmware's `GetTime`. Not before the instant, and not after where
+/// the RTC, running at the host's pace, can have got to by the time the job's
+/// end was read, counted from before the boot was built: both ends are
+/// causality, and a clock with no reading, or one read elsewhere, is out by
+/// years.
+fn virt_wall_clock_utc(profile: qemu::Profile) -> Result<(), String> {
+    let launched = std::time::Instant::now();
+    let mut qemu = boot_virt_jobs(profile);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_wall_clock_now", WALL_CLOCK_SAID)?;
+    let lived = launched.elapsed().as_secs().saturating_add(1);
+    let on_the_base = VIRT_RTC_BASE_SECS..=VIRT_RTC_BASE_SECS + lived;
+    for said in [WALL_CLOCK_SAID, "wall-clock: std_epoch="] {
+        let read = serial
+            .lines()
+            .find_map(|l| l.split_once(said))
+            .and_then(|(_, rest)| rest.split_whitespace().next()?.parse::<u64>().ok());
+        match read {
+            Some(secs) if on_the_base.contains(&secs) => {
+                eprintln!("  [virt] {said}{secs}, {}s past the staged {VIRT_RTC_BASE}", secs - VIRT_RTC_BASE_SECS)
+            }
+            _ => {
+                return Err(format!(
+                    "{said} read {read:?}, outside {on_the_base:?}, {VIRT_RTC_BASE} and the {lived}s since the \
+                     launch\nserial:\n{serial}"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A machine with no source at all: no virtio-rng, so firmware has no
 /// `EFI_RNG_PROTOCOL` and the loader hands no seed, and a CPU with no RNDR.
 /// The kernel says each and refuses by name before its first hash container.
@@ -2020,6 +2151,320 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
         if serial.contains(never) {
             return Err(format!("{never:?} on the PL011 of a machine with no source\nserial:\n{serial}"));
         }
+    }
+    Ok(())
+}
+
+/// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
+/// maps those sixteen buses' megabytes and no more, and enumerates the
+/// functions QEMU put there and nothing else, and the boot goes on.
+fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    const WINDOW: &str = "ACPI: ECAM window: segment 0 buses 0x00..=0x0f, bus 0 at 0x3f000000";
+    const MAPPED: &str = "mmio: 0x3f000000+0x1000000 ";
+    const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
+    /// What QEMU puts on bus 0 of this profile: the host bridge, the xHCI and
+    /// the virtio-rng, as `vendor=… device=…`.
+    const FUNCTIONS: &[&str] = &[
+        "00:00.0 [0600] vendor=1b36 device=0008",
+        "00:01.0 [0c03] vendor=1033 device=0194",
+        "00:02.0 [00ff] vendor=1af4 device=1005",
+    ];
+    let options = BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
+    let argv = qemu::profile_argv(&options);
+    if !argv.iter().any(|a| a.contains("highmem-ecam=off")) {
+        return Err(format!("the machine keeps its ECAM high: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    // What was read and what was mapped before what was said about it.
+    pci_inventory(&serial).map_err(|why| format!("{why}\nserial:\n{serial}"))?;
+    let rows: Vec<&str> = serial.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
+    let found: Vec<&str> = rows.iter().map(|row| row.split(" prog_if=").next().unwrap_or(row)).collect();
+    if found != FUNCTIONS {
+        return Err(format!("the kernel enumerated {found:#?}, and QEMU put {FUNCTIONS:#?} on the window's buses"));
+    }
+    if let Some(wider) = serial.lines().find(|l| l.contains("mmio: 0x3f000000+") && !l.contains(MAPPED)) {
+        return Err(format!("the window was mapped wider than its buses: {wider:?}\nserial:\n{serial}"));
+    }
+    for want in [MAPPED, WINDOW, SPAWNED] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    eprintln!("  [virt] {WINDOW}; {} functions: {found:?}", found.len());
+    Ok(())
+}
+
+/// The SMMUv3 armed from the IORT, judged by what two of QEMU's
+/// `iommu-testdev` can and cannot write through it
+/// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
+/// a `CMD_SYNC` consumed; one device's write refused on the entry its stream
+/// starts with and nothing recorded, and landing where its own domain maps
+/// it; the other's three, under a StreamID no function is routed from inside
+/// the stream table, refused, the first two recorded as no function's and the
+/// third counted and not written, and the machine going on; and the first's again once its domain takes that address back,
+/// refused, recorded as the kernel's, and the machine halted on it. Each
+/// record taken on the wired SPI and named. Read to the halt path's own line
+/// past the stop, so nothing the guest could still say is missed.
+fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    const FAULT: &str = "iommu: DMA FAULT owner=";
+    const WENT_ON: &str = "smmu-selftest: the unrouted function's three events were read, and the machine goes on";
+    // `panic_reboot::arm`'s line, which `halt_all_cpus` writes once every
+    // other CPU is stopped: one of its two heads.
+    let halted = |l: &str| l.contains("panic: rebooting") || l.contains("panic: holding this panel");
+    let options = BootOptions {
+        profile,
+        kernel_params: &["smmu-selftest"],
+        ready_marker: "control registers: SCTLR_EL1=",
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    for want in ["iommu=smmuv3", "iommu-testdev"] {
+        if !argv.iter().any(|a| a.contains(want)) {
+            return Err(format!("the machine has no {want}: {argv:?}"));
+        }
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(Duration::from_secs(30), halted);
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let lines: Vec<&str> = serial.lines().collect();
+    let at = |want: &str| lines.iter().position(|l| l.contains(want));
+    let line = |want: &str| at(want).map(|i| lines[i].to_string());
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    if let Some(failed) = line("smmu-selftest: FAIL") {
+        return Err(format!("{failed}\nserial:\n{serial}"));
+    }
+    let Some(stop) = lines.iter().position(|l| halted(l)) else {
+        return Err(format!("the machine never reached the halt path's line past the stop\nserial:\n{serial}"));
+    };
+    let Some(armed) = line("armed, CR0ACK") else {
+        return Err(format!("the SMMUv3 was never armed\nserial:\n{serial}"));
+    };
+    for want in ["every other entry invalid", "a CMD_SYNC consumed", "events on SPI 106"] {
+        if !armed.contains(want) {
+            return Err(format!("{want:?} not in {armed:?}"));
+        }
+    }
+    eprintln!("  [virt] {armed}");
+    let table = armed.split_once("in a table of ").and_then(|(_, rest)| rest.split(',').next()?.parse::<u64>().ok());
+    let Some(table) = table else {
+        return Err(format!("{armed:?} names no table size"));
+    };
+    // `SMMU_GBPA.ABORT`, bit 20, as the unit reads it back.
+    let gbpa = line(", every transaction aborts while SMMUEN is clear")
+        .and_then(|l| l.split_once(": GBPA ").and_then(|(_, v)| hex(v.split(',').next()?)));
+    match gbpa {
+        Some(gbpa) if gbpa & 1 << 20 != 0 => eprintln!("  [virt] GBPA {gbpa:#x}: ABORT"),
+        _ => return Err(format!("GBPA does not read back aborting: {gbpa:?}\nserial:\n{serial}")),
+    }
+    let Some(unrouted) = line("is given no route") else {
+        return Err(format!("the selftest left no function unrouted\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {unrouted}");
+    let Some(stream) = unrouted.split_once(", StreamID ").and_then(|(_, rest)| hex(rest.split(',').next()?)) else {
+        return Err(format!("{unrouted:?} names no StreamID"));
+    };
+    if stream >= table {
+        return Err(format!("StreamID {stream:#x} is past a table of {table}: {unrouted:?}"));
+    }
+    for (said, verdict) in [
+        ("on the entry its stream starts with", "refused"),
+        ("mapped to", "landed there"),
+        ("'s write 1 at ", "refused"),
+        ("'s write 2 at ", "refused"),
+        ("'s write 3 at ", "refused"),
+        ("which its domain no longer maps", "refused"),
+    ] {
+        let Some(found) = line(said) else {
+            return Err(format!("the selftest never said {said:?}\nserial:\n{serial}"));
+        };
+        eprintln!("  [virt] {found}");
+        if !found.ends_with(verdict) {
+            return Err(format!("{found}\nserial:\n{serial}"));
+        }
+    }
+    let Some(again) = line("which its domain no longer maps") else {
+        return Err(format!("the selftest never wrote where its domain took a mapping back\nserial:\n{serial}"));
+    };
+    let aimed = again.split_once("smmu-selftest: ").and_then(|(_, said)| said.split_once("'s write at "));
+    let Some((function, Some(address))) =
+        aimed.map(|(function, rest)| (function, rest.split(' ').next().and_then(hex)))
+    else {
+        return Err(format!("{again:?} names no function and address"));
+    };
+    let faults: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(FAULT)).collect();
+    for &fault in &faults {
+        eprintln!("  [virt] {}", lines[fault]);
+    }
+    // The unit's first four events, so the write on the entry its stream
+    // starts with was not recorded; the stray's third is counted and, not
+    // being a power of two, not written.
+    let wants = [
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=1 streamfaults=1 ", "C_BAD_STE"),
+        (format!("owner=none unit0 stream={stream:#x} "), " unitfaults=2 streamfaults=2 ", "C_BAD_STE"),
+        (
+            format!("owner=kernel unit0 stream={function} addr={address:#018x} access=write"),
+            " unitfaults=4 ",
+            "F_TRANSLATION",
+        ),
+    ];
+    if faults.len() != wants.len() {
+        return Err(format!("{} events reached the handler, not {}\nserial:\n{serial}", faults.len(), wants.len()));
+    }
+    for (&fault, (named, count, name)) in faults.iter().zip(&wants) {
+        let fault = lines[fault];
+        if !fault.contains(named.as_str()) || !fault.contains(count) || !fault.ends_with(name) {
+            return Err(format!("the event does not name {named:?},{count}and {name}: {fault}"));
+        }
+    }
+    // The machine went on past the unrouted records and stopped at the
+    // kernel's: the selftest's line between them, and the stop after the last.
+    let went_on = at(WENT_ON).ok_or_else(|| format!("the selftest never said {WENT_ON:?}\nserial:\n{serial}"))?;
+    if !(faults[1] < went_on && went_on < faults[2] && faults[2] < stop) {
+        return Err(format!(
+            "the unrouted records, the selftest going on, the kernel's record and the stop are out of order: \
+             lines {}, {went_on}, {} and {stop}\nserial:\n{serial}",
+            faults[1], faults[2]
+        ));
+    }
+    // A halt, which writes the record and the stop's line and no panic.
+    if let Some(death) = lines.iter().find(|l| serial::died(l).is_some() && !l.contains("owner=kernel")) {
+        return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
+/// `tests/toyos-rust-tests`' binaries that `tests/virtclaimcase` runs as its
+/// jobs, each `test_rs_` and its name.
+const VIRT_CLAIM_LPI: &str = "claim_lpi";
+const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
+const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
+
+/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
+/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
+/// the console only if the kernel read through the BAR for a crash report.
+const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
+
+/// A claimed function's message, translated by the ITS into its claim slot's
+/// LPI, and the claims the kernel refuses beside it, on `tests/virtclaimcase`.
+/// Its first job claims QEMU's `edu` and reads every message it asks it for as
+/// one interrupt of its claim (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`),
+/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
+/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
+/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
+/// unmapped again. The second is refused the `e1000e` the IORT routes past
+/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
+/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
+/// crash report reads through it. And no access of a function's is refused
+/// at the SMMUv3.
+fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
+    const JOB: &str = "test_rs_claim_lpi";
+    const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
+    const EDU: &str = "[1234:11e8]";
+    let config = compile::repo_root().join("tests/virtclaimcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    // One CPU, so each message is taken where the job wrote the register
+    // that sends it: at EL0, which holds the preempt count at zero.
+    let options = BootOptions {
+        profile,
+        smp: 1,
+        ready_marker: "control registers: SCTLR_EL1=",
+        extra_root_files: vec![
+            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
+            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
+            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
+        ],
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
+        if !argv.iter().any(|a| a.contains(want)) {
+            return Err(format!("the machine has no {want}: {argv:?}"));
+        }
+    }
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
+    // The release's own line, its last: the DeviceID's unmapping comes before it.
+    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
+    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
+    let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
+        return Err(format!("the MADT's ITS was never armed
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {armed}");
+    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
+        return Err(format!("edu was never handed over
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {handed}");
+    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
+    let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
+        let (at, rest) = rest.split_once(' ')?;
+        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
+        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
+    });
+    let Some((at, slot, lpi)) = parsed else {
+        return Err(format!("{handed:?} names no function, slot and LPI"));
+    };
+    if lpi != 8192 + slot {
+        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
+    }
+    // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
+    // that to the ITS's DeviceID unchanged.
+    let (bus, rest) = at.split_once(':').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
+    let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
+    for want in [
+        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
+        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
+        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
+        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
+    ] {
+        let Some(found) = line(&want) else {
+            return Err(format!("the kernel never said {want:?}
+serial:
+{serial}"));
+        };
+        eprintln!("  [virt] {found}");
+    }
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_unrouted",
+        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
+    )?;
+    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
+    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
+                            DeviceID at this kernel's ITS behind the SMMUv3";
+    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
+        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {refused}");
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_bar_fault",
+        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
+    )?;
+    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
+    if faults.len() != 2 {
+        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
+    }
+    let console = serial.to_lowercase();
+    for mark in BAR_MARKS {
+        if console.contains(&format!("{mark:x}")) {
+            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
+        }
+    }
+    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
+        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
     }
     Ok(())
 }
@@ -2277,8 +2722,10 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
 
 /// `tests/virtrebootcase`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
-/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`.
-fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
+/// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
+/// actuators `klogd` holds the console's wire as the stop begins, judged by
+/// [`power::judge_the_held_wire`].
+fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
     let trace = common::lane::dir().join("virt_reboot.psci");
@@ -2290,6 +2737,7 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
             profile,
             qmp: true,
             psci_trace: Some(trace.clone()),
+            kernel_params: staged,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
         },
@@ -2309,6 +2757,9 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
         .collect();
     if asked != [PSCI_SYSTEM_RESET] {
         return Err(format!("QEMU traced {asked:x?} of CPU_OFF, SYSTEM_OFF and SYSTEM_RESET, not one SYSTEM_RESET"));
+    }
+    if !staged.is_empty() {
+        power::judge_the_held_wire(&console, bootlog::REBOOTING, staged == power::wire_staged(true))?;
     }
     eprintln!("  [virt] Rebooting., then one SYSTEM_RESET, and QEMU stopped for guest-reset");
     Ok(())
@@ -2747,7 +3198,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_ring0_timer_in_syscall" => virt_job(profile, &format!("test_rs_{VIRT_RING0_TIMER}")),
         "virt_jobs_at_el2" => virt_jobs_at_el2(profile),
         "virt_random_differs" => virt_random_differs(profile),
+        "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
+        "virt_smmu" => virt_smmu(profile, test_config),
+        "virt_claim_lpi" => virt_claim_lpi(profile),
+        "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
@@ -2763,14 +3218,18 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el1_smp" => virt_smp(profile, "HVC", 1),
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
-        "virt_reboot" => virt_reboot(profile),
+        "virt_reboot" => virt_reboot(profile, &[]),
+        // The reboot with `klogd` holding the PL011's wire as the stop begins,
+        // then keeping it through the stop's budget.
+        "virt_reboot_wire_held" => virt_reboot(profile, power::wire_staged(false)),
+        "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
         "screen_fatal_behind_a_painter" => {
             // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
-            // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
-            // go fatal once it holds the latch, so the fatal path meets a
+            // IPI lands mid-paint. The actuator has the last boot checkpoint's
+            // painter go fatal once it holds the latch, so the fatal path meets a
             // holder beneath itself; the report must take the screen
             // regardless, and its CPU must go on to watch the reset bound,
             // which is what the reset proves.
@@ -2786,20 +3245,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     profile,
                     qmp: true,
                     kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
+                    // The fatal path is the boot's own end: it never reaches userland.
+                    ready_marker: HELD,
                     ..Default::default()
                 },
             );
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.keys(&[
-                    ("ctrl", true),
-                    ("alt", true),
-                    ("d", true),
-                    ("d", false),
-                    ("alt", false),
-                    ("ctrl", false),
-                ]);
-            }
             let dump = qemu.screendump_until(HELD, Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -2919,7 +3369,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             // The death's own census, which the seal writes as lines of its
             // own. Anchored at the line's start: the ring's tail under it can
-            // carry a blocked-task dump's `irq: cpu0`, behind a record's stamp.
+            // carry an `irq: cpu0` record, behind its stamp.
             for owed in ["irq: cpu0 ", "tlb: shootdowns="] {
                 if !sealed.lines().any(|line| line.starts_with(owed)) {
                     return Err(format!(
@@ -3417,7 +3867,6 @@ fn libc_sockets() -> Result<(), String> {
 /// `ring` wrong at both ends.
 fn https_fetch() -> Result<(), String> {
     use common::https::{self, Authority, Seen, Server};
-    use sha2::Digest;
     const JOB: &str = "https_get";
     const KAT: &str = "ring_kat";
     /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
@@ -3428,7 +3877,8 @@ fn https_fetch() -> Result<(), String> {
     let trusted = Authority::new("ToyOS harness test authority");
     let stranger = Authority::new("ToyOS harness authority nothing trusts");
     let body = std::sync::Arc::new(https::body());
-    let want = format!("{JOB}: ok bytes={} sha256={:x}", body.len(), sha2::Sha256::digest(body.as_slice()));
+    let hex: String = toyos_sha2_hw::sha256_digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
+    let want = format!("{JOB}: ok bytes={} sha256={hex}", body.len());
     let fetched = Server::start(trusted.leaf(host), body.clone())?;
     let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
     let untrusted = Server::start(stranger.leaf(host), body)?;
@@ -3496,6 +3946,7 @@ fn https_fetch() -> Result<(), String> {
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
@@ -3508,10 +3959,17 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
+        "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
+        "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
+        "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
+        "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
+        "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
+        "toyfetch_reports" => toyfetch_reports(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3548,6 +4006,11 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
             "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
         ));
     }
+    // The boot volume's grant does not write, and only that one.
+    let read_only = said.text().lines().filter(|line| line.contains("diskserver: session ") && line.contains(", read-only)")).count();
+    if read_only != 1 {
+        return Err(format!("diskserver opened {read_only} read-only sessions, and only the slot's volume is granted one\n{console}"));
+    }
     Ok(())
 }
 
@@ -3561,6 +4024,64 @@ fn job_said(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
         return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     Ok(result.stdout)
+}
+
+/// `toyfetch` names the build the image's os-release does, the CPUs this boot
+/// gave QEMU, and the memory total `free` reads off the same ambient header.
+fn toyfetch_reports(test_config: &Path) -> Result<(), String> {
+    const CPUS: u32 = 3;
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions { smp: CPUS, ..Default::default() });
+    let (_, bytes) = toyos_build::image::root_file_on(qemu.boot_image(), toyos_osrelease::PATH)?;
+    let release = toyos_osrelease::parse(&bytes).map_err(|why| format!("the image's {}: {why:?}", toyos_osrelease::PATH))?;
+    // `free`'s second line is the total, used and free mebibytes.
+    let free = job_said(&mut qemu, "free")?;
+    let total: u64 = free
+        .lines()
+        .find_map(|line| line.trim().strip_suffix('M')?.split_whitespace().next()?.strip_suffix('M')?.parse().ok())
+        .ok_or_else(|| format!("`free` said no total:\n{free}"))?;
+
+    // The console carries an escape as the four characters `\x1b`.
+    let said = job_said(&mut qemu, "toyfetch")?.replace('\x1b', "\\x1b");
+    // The text a terminal shows: every SGR sequence taken out.
+    let mut shown = String::new();
+    let mut rest = said.as_str();
+    while let Some(at) = rest.find("\\x1b[") {
+        shown.push_str(&rest[..at]);
+        let end = rest[at..].find('m').ok_or_else(|| format!("an SGR sequence that never ends:\n{said}"))?;
+        rest = &rest[at + end + 1..];
+    }
+    shown.push_str(rest);
+    let field = |label: &str| -> Result<String, String> {
+        let at = format!("{label}: ");
+        let mut values = shown.lines().filter_map(|line| Some(line[line.find(&at)? + at.len()..].to_string()));
+        match (values.next(), values.next()) {
+            (Some(value), None) => Ok(value),
+            _ => Err(format!("toyfetch said no single {label} line:\n{shown}")),
+        }
+    };
+
+    let wanted = [
+        ("OS", release.pretty_name().to_string()),
+        ("Kernel", format!("{} {}", toyos_osrelease::NAME, release.uname_release())),
+        ("Arch", release.arch.machine().to_string()),
+    ];
+    for (label, value) in wanted {
+        if field(label)? != value {
+            return Err(format!("toyfetch's {label} is not {value:?}:\n{shown}"));
+        }
+    }
+    // x86-64 reads its model off CPUID; QEMU names one.
+    let cpu = field("CPU")?;
+    if !cpu.ends_with(&format!(" ({CPUS})")) || cpu.starts_with("model not reported") {
+        return Err(format!("toyfetch's CPU is {cpu:?}, on a boot QEMU gave {CPUS} CPUs:\n{shown}"));
+    }
+    let memory = field("Memory")?;
+    if !memory.ends_with(&format!(" / {total} MiB")) {
+        return Err(format!("toyfetch's Memory is {memory:?}, and `free` says {total}M in all:\n{shown}"));
+    }
+    field("Uptime")?;
+    eprintln!("  [toyfetch] OS {}, CPU {cpu}, Memory {memory}", field("OS")?);
+    Ok(())
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
@@ -3630,6 +4151,292 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
         return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
     };
     eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
+    Ok(())
+}
+
+/// What `partition_grant` says, a line per grant it was refused through.
+const GRANTS_SAID: [&str; 5] = [
+    "partition_grant: the log's grant opened the log and was refused the boot volume NotGranted",
+    "partition_grant: DATA's grant opened DATA and was refused the log NotGranted",
+    "partition_grant: the boot volume's read-only grant read it and was refused a write ReadOnly",
+    "partition_grant: the port's own connector was refused a listing and an open NotGranted",
+    "partition_grant: the running ROOT was refused Held to the grant naming it",
+];
+
+/// A connection to diskserver opens only what the badge on its connector
+/// grants, on the NVMe disk the machine booted from: `partition_grant` starts
+/// diskserver itself and mints each grant, and diskserver names each refusal.
+fn block_grants_reach_their_partitions() -> Result<(), String> {
+    const JOB: &str = "partition_grant";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/blockgrantcase");
+    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
+    let result = qemu.run_test("test_rs_partition_grant", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let said = serial::Serial::named("the job", result.stdout);
+    for line in GRANTS_SAID {
+        eprintln!("  [grant] {}", said.must_say(line)?.trim());
+    }
+    // diskserver's own word for each refusal, beside the job's.
+    for refused in ["refused: NotGranted", "refused: Held"] {
+        if !said.text().lines().any(|l| l.contains("diskserver: an open of ") && l.trim_end().ends_with(refused)) {
+            return Err(format!("diskserver never said an open was {refused}:\n{}", said.text()));
+        }
+    }
+    Ok(())
+}
+
+/// The update image `update_writes_the_idle_slot_through_the_block_service`
+/// stages: a ROOT of one file, signed with this run's key at a version past
+/// any a build signs; the ROOT's length, which the second slot is made to
+/// hold exactly, so the host mounts the partition whole; its file; and the
+/// three files the slot's FAT volume is to carry, each with its bytes.
+struct StagedUpdate {
+    image: Vec<u8>,
+    version: u64,
+    root_bytes: u64,
+    marker: Vec<u8>,
+    volume: [(&'static str, Vec<u8>); 3],
+}
+
+/// Where the staged ROOT's one file is, and the path the guest reads the
+/// update image at.
+const UPDATE_MARKER: &str = "etc/update-test";
+const UPDATE_IMAGE: &str = "share/update-test.img";
+
+fn staged_update() -> StagedUpdate {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("this host's clock is past 1970");
+    let marker = format!("update {} {}\n", std::process::id(), since.as_nanos()).into_bytes();
+    let root = toyos_build::image::create_root_image(&[(UPDATE_MARKER.to_string(), marker.clone())], &[], true);
+    // Past every version a build signs, which is its Unix time.
+    let version = u64::from(u32::MAX) << 8;
+    let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version };
+    let kernel = b"update test kernel";
+    let image = toyos_build::image::update_image(kernel, &root, "", signing);
+    // The image is the signed header, the kernel, the boot parameter and
+    // ROOT, end to end (`toyos_update::image`).
+    let signed = toyos_update::image::SIGNED_BYTES;
+    let volume = [
+        (toyos_update::slots::SIGNED_FILE, image[..signed].to_vec()),
+        (toyos_update::slots::KERNEL_FILE, kernel.to_vec()),
+        (toyos_update::slots::CMDLINE_FILE, image[signed + kernel.len()..image.len() - root.len()].to_vec()),
+    ];
+    StagedUpdate { image, version, root_bytes: root.len() as u64, marker, volume }
+}
+
+/// `update` on a machine booted off its NVMe disk: the supervisor reads the
+/// slot table through a session on diskserver and grants `update` the idle
+/// slot's partitions as connectors minted for each, and `update` writes the
+/// signed image there and marks it — read back off the disk by the host, and
+/// its FAT volume judged by toyos-fat32-check, which shares no code with it.
+fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String> {
+    const JOB: &str = "update_idle_slot";
+    let staged = staged_update();
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let case = compile::repo_root().join("tests/slotscase");
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessNoUsb,
+        extra_root_files: vec![(UPDATE_IMAGE.to_string(), staged.image.clone())],
+        second_slot: Some(staged.root_bytes),
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
+    let result = qemu.run_test("test_rs_update_idle_slot", Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let said = serial::Serial::named("the job", result.stdout);
+    eprintln!(
+        "  [update] {}",
+        said.must_say("supervisor: the idle slot is B, granted with the slot table read through the block service")?.trim()
+    );
+    eprintln!("  [update] {}", said.must_say(&format!("update: installed version {} in slot B", staged.version))?.trim());
+
+    let mut disk = fs::File::open(qemu.boot_image()).map_err(|e| format!("{}: {e}", qemu.boot_image().display()))?;
+    let table = toyos_build::image::slot_table_of(&mut disk)?;
+    let marked = table.slot(table.marked).ok_or("the slot table marks a slot it does not carry")?;
+    if table.marked.letter() != 'B' || marked.version != staged.version {
+        return Err(format!("after the update the slot table marks {} at version {}, not B at {}", table.marked.letter(), marked.version, staged.version));
+    }
+    let (_, read_back) = toyos_build::image::root_file_on(qemu.boot_image(), UPDATE_MARKER)?;
+    if read_back != staged.marker {
+        return Err(format!("slot B's ROOT carries {:?} at {UPDATE_MARKER}, and the update carried {:?}", String::from_utf8_lossy(&read_back), String::from_utf8_lossy(&staged.marker)));
+    }
+    eprintln!("  [update] the disk's slot table marks B at version {}, and B's ROOT mounts carrying the update's {UPDATE_MARKER}", staged.version);
+
+    use std::io::{Read as _, Seek as _};
+    // B's FAT volume: judged whole by the checker that is no part of the
+    // driver `update` wrote it with, then each file read back byte for byte.
+    let (at, len) = toyos_build::image::partition_extent(&mut disk, marked.boot)?;
+    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
+    disk.seek(std::io::SeekFrom::Start(at))
+        .and_then(|_| disk.read_exact(&mut volume))
+        .map_err(|e| format!("slot B's volume at byte {at}: {e}"))?;
+    let complaints = toyos_fat32_check::check(&volume);
+    if !complaints.is_empty() {
+        return Err(format!("toyos-fat32-check refuses slot B's volume:\n{}", toyos_fat32_check::describe(&complaints)));
+    }
+    for (name, staged) in &staged.volume {
+        let read = toyos_build::image::read_file_on(&mut disk, marked.boot, name)
+            .map_err(|why| format!("slot B's volume: {why}"))?;
+        if read != *staged {
+            return Err(format!("slot B's {name} is {} bytes that are not the {} the update carried", read.len(), staged.len()));
+        }
+    }
+    eprintln!("  [update] slot B's volume checks out, carrying the update's {} byte for byte", staged.volume.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
+    Ok(())
+}
+
+/// Run `command` as a job of the boot, to exit 0: everything said in its
+/// window, the kernel's records with the program lines.
+fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
+    let result = qemu.run_test(command, Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("`{command}`: {why}\nit said:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.serial));
+    }
+    Ok(result.serial)
+}
+
+/// The devices `qemu-xhci` carries on [`qemu::Profile::HeadlessUsbSpare`],
+/// as `usbd_spare` prints usbd's answer: QEMU 11.1's `usb-storage`, which
+/// trains on a USB3 port, and `usb-kbd`, each by its id, its speed and its
+/// class triple.
+const SPARE_DEVICES: [(&str, &str, &str); 2] = [
+    ("46f4:0001", "super", "08:06:50"),
+    ("0627:0001", "high", "03:01:01"),
+];
+
+/// What usbd says once the bring-up's No-Op has completed: its ring and the
+/// interrupt through the claim both work.
+const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
+
+/// The controller `xhci-leave=` names, claimed by `usbd_spare` and driven by
+/// usbd: each device named by id, speed and class on a fresh claim and again
+/// after usbd is killed and started on the next; every event announced by an
+/// interrupt; nothing waking usbd while it has nothing to do. Then the two
+/// controls: the function aimed past every grant is the kernel's `DMA FAULT`
+/// record against its slot and the claim's refusal, and on a kernel without
+/// the switch the claim is refused because the kernel drives the function.
+fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "usbd_spare";
+    const SPARE: &str = "1b36:000d";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessUsbSpare,
+        kernel_params: &["xhci-leave=1b36:000d"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin.clone())], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let left = format!(" {SPARE} to a claim (xhci-leave)");
+    let at = boot
+        .text()
+        .lines()
+        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(left.as_str()).map(str::to_string))
+        .ok_or_else(|| format!("the kernel never said it left {SPARE} alone:\n{}", boot.text()))?;
+
+    let said = job_window(&mut qemu, "test_rs_usbd_spare")?;
+    let run = serial::Serial::named("usbd_spare", said.clone());
+    run.must_be_clean()?;
+    for when in ["settled", "restarted"] {
+        let named: Vec<&str> = said.lines().filter(|l| l.contains(&format!("usbd_spare: {when}: usb.device."))).collect();
+        for (id, speed, class) in SPARE_DEVICES {
+            let port = named
+                .iter()
+                .find_map(|l| l.split_once("usb.device.")?.1.split_once(&format!(".id = {id}")).map(|(p, _)| p.to_string()))
+                .ok_or_else(|| format!("usbd named no {id} once {when}:\n{said}"))?;
+            for (field, want) in [("speed", speed), ("class", class)] {
+                run.must_say(&format!("usbd_spare: {when}: usb.device.{port}.{field} = {want}"))?;
+            }
+        }
+        run.must_say(&format!("usbd_spare: {when}: usb.devices = {}", SPARE_DEVICES.len()))?;
+    }
+    run.must_say(USBD_NOOP)?;
+    run.must_say("usbd_spare: settled: usb.events.unannounced = 0")?;
+    run.must_say("usbd_spare: 2 device(s) named, the same after a restart")?;
+    let handed = format!("pcidev: PCI {at} [{SPARE}] handed over on slot ");
+    if said.matches(&handed).count() != 2 {
+        return Err(format!("{at} was not handed over once for each usbd:\n{said}"));
+    }
+    run.must_say(&format!("PCI {at}: msi address="))?;
+
+    let faulted = job_window(&mut qemu, "test_rs_usbd_spare fault")?;
+    let fault = serial::Serial::named("usbd_spare fault", faulted.clone());
+    fault.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
+    let aimed = faulted
+        .lines()
+        .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
+        .ok_or_else(|| format!("the job never said where it aimed:\n{faulted}"))?;
+    let record = faulted
+        .lines()
+        .find(|l| l.contains("iommu: DMA FAULT owner=slot") && l.contains(&format!("stream={at} ")))
+        .ok_or_else(|| format!("no DMA FAULT record names {at}:\n{faulted}"))?;
+    let addr = record.split_once(" addr=").and_then(|(_, a)| a.split_whitespace().next()).unwrap_or_default();
+    if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
+        return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
+    }
+    eprintln!("  [usbd] {at}: two devices named twice; aimed at {aimed}: {}", record.trim());
+    drop(qemu);
+
+    // The control: the same machine and no switch, so the kernel drives it.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[(JOB.to_string(), bin)],
+        BootOptions { profile: qemu::Profile::HeadlessUsbSpare, ..Default::default() },
+    );
+    serial::Serial::boot(&qemu).must_not_say("(xhci-leave)")?;
+    let said = job_window(&mut qemu, "test_rs_usbd_spare refused")?;
+    let refused = serial::Serial::named("usbd_spare refused", said);
+    refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
+    refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    Ok(())
+}
+
+/// The T14's Type-C controller left to a claim and driven by usbd: the
+/// kernel left it, the claim was handed over with its MSI in remappable
+/// format and its remapping entry written, the message reached the slot, and
+/// the No-Op completed. What reset the function advertises is read off the
+/// release and printed, not judged.
+fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
+    const TYPE_C: &str = "8086:9a13";
+    let at = kernel
+        .text()
+        .lines()
+        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(&format!(" {TYPE_C} to a claim (xhci-leave)")).map(str::to_string))
+        .ok_or_else(|| format!("the kernel never said it left {TYPE_C} alone:\n{}", kernel.text()))?;
+    kernel.must_say(&format!("pcidev: PCI {at} [{TYPE_C}] handed over on slot "))?;
+    let message = kernel
+        .text()
+        .lines()
+        .find_map(|l| l.split_once(&format!("PCI {at}: msi address="))?.1.split_whitespace().next().map(str::to_string))
+        .ok_or_else(|| format!("{at} was not armed on MSI:\n{}", kernel.text()))?;
+    let address = u32::from_str_radix(message.trim_start_matches("0x"), 16).map_err(|e| format!("{message}: {e}"))?;
+    // Interrupt Format, bit 4 of the address: the message names a remapping
+    // entry and no vector of its own (VT-d 3.4 §5.1.5.2).
+    if address & (1 << 4) == 0 {
+        return Err(format!("{at}'s MSI address {address:#010x} is compatibility format"));
+    }
+    kernel.must_say(&format!(" source={at} p=1 "))?;
+    kernel.must_say("took its first message on vector")?;
+    log.must_say(USBD_NOOP)?;
+    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released from slot"))) {
+        eprintln!("  [usbd] {}", released.trim());
+    }
+    eprintln!("  [usbd] {at}: handed over, MSI {address:#010x} through its remapping entry, the No-Op answered");
     Ok(())
 }
 
@@ -4982,7 +5789,7 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
         ("APIC", "ACPI: MADT cpus="),
         ("FACP", "ACPI: reset register "),
         ("HPET", "clock: HPET at "),
-        ("MCFG", "ACPI: ECAM base address: "),
+        ("MCFG", "ACPI: ECAM window: "),
     ];
     for (signature, decoded) in NEEDED {
         if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))

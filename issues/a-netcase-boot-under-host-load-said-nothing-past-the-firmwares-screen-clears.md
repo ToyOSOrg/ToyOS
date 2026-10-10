@@ -26,6 +26,13 @@ other worktrees' work, went red the same way after 64 s, its 16550 file the
 same 58 bytes. Load averages 89.36, 87.83 and 82.56 as it began and 98.94,
 91.36 and 84.48 as it ended.
 
+A third, at `f44d4c6c1` on `wt/toyos-usbd`: a whole `cargo test` went red
+on `netstack_streams` alone, its boot timing out after 64 s with nothing at
+all on its console, beside 45 green, `netstack_streams_e1000e` on the same
+netcase image among them. Load averages 69.67, 65.99 and 62.40 as the suite
+began and 44.91, 57.07 and 59.57 as it ended, with other worktrees' work
+beside it; the 16550 file was not kept.
+
 Not reduced: whether the firmware is stuck or starved, which a QMP read of a
 silent guest's registers would say (`tests/CLAUDE.md`'s method for a death
 during boot), and at what rate.

@@ -89,6 +89,16 @@ pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the dis
 /// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
+/// What the [`LOCKED_UP`] record says before the stuck CPU's `pc`, the `rip`
+/// of the NMI frame that sampled it, in `kernel/src/hardlockup/mod.rs`.
+pub const LOCKUP_PC: &str = "  pc=";
+
+/// The function the hard-lockup control's CPU spins in, as that `pc` line
+/// names it: `sync::Lock::lock`, whichever `Lock<T>` the linker folded it
+/// under. A line naming anything else is an NMI entry that handed the sample
+/// the wrong word of its frame.
+pub const LOCK_SPIN: [&str; 2] = ["<kernel::sync::Lock<", ">>::lock+"];
+
 /// What the kernel seals under its own `DONE` record, in
 /// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
 /// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
@@ -708,6 +718,8 @@ mod tests {
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
+            ("kernel/src/hardlockup/mod.rs", format!("\"{LOCKUP_PC}{{}}\", At(pc)")),
+            ("kernel/src/sync.rs", "pub fn lock(&self) -> LockGuard<'_, T>".to_string()),
             (
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),

@@ -513,9 +513,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
         Fails("every_message_is_counted_once"),
     ]),
-    red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
-        Fails("a_request_filed_during_a_report_is_reported"),
-    ]),
     Control {
         krate: KERNEL_LOOM,
         feature: "no-preempt-guard",

@@ -38,7 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use sha2::Digest as _;
+use toyos_sha2::Sha256;
 
 use crate::sig;
 use crate::{sha256, Digest};
@@ -649,12 +649,12 @@ pub struct Archive {
     length: u64,
     sha256: Digest,
     seen: u64,
-    hash: sha2::Sha256,
+    hash: Sha256,
 }
 
 impl Archive {
     pub fn of(item: &Item) -> Self {
-        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: sha2::Sha256::new() }
+        Archive { length: item.length, sha256: item.sha256, seen: 0, hash: toyos_sha2_hw::sha256() }
     }
 
     /// The next bytes, refused where they run past the signed length.
@@ -673,7 +673,7 @@ impl Archive {
         if self.seen < self.length {
             return Err(Refused::ArchiveShort { length: self.length, got: self.seen });
         }
-        if Digest::from(self.hash.finalize()) != self.sha256 {
+        if self.hash.finalize() != self.sha256 {
             return Err(Refused::ArchiveDigest);
         }
         Ok(())

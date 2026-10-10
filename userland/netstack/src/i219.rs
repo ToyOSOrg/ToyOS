@@ -1,6 +1,6 @@
 //! The I219, as netstack drives it: the clock and the claim the driver's logic
-//! is written against beside `device.rs`'s register window and grant, and
-//! nothing else.
+//! is written against beside `toyos-pci-claim`'s register window and grant,
+//! and nothing else.
 //!
 //! What the kernel keeps is the *claim*: config space, the interrupt vector it
 //! programmed into this function, and the address space the function
@@ -15,7 +15,7 @@
 //! descriptor, which is what lets the driver's logic live in a crate that
 //! forbids `unsafe` at all.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use toyos::shm::SharedMemory;
@@ -24,8 +24,7 @@ use toyos::{DmaRegion, PciDev};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::Registers;
 use toyos_i219::{Clock, Interrupts};
-
-use crate::device::{Bar, Grant, KernelRefused, Latch};
+use toyos_pci_claim::{Bar, Grant, KernelRefused};
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
 /// anchor plus the timestamp counter — and the thread's own sleep, which is how
@@ -113,21 +112,14 @@ fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
         .find(|(_, bytes)| **bytes >= toyos_i219::regs::REGISTER_BYTES as u64)
         .map(|(index, bytes)| (index as u32, *bytes))
         .ok_or(Opening::NoWindow)?;
-    let mapped = dev
-        .map_bar(bar, bytes)
-        .map_err(KernelRefused::on("the BAR"))
-        .map_err(Opening::Kernel)?;
+    let (window, mapped) = Bar::map(dev, bar, bytes).map_err(Opening::Kernel)?;
     crate::say!(
         "netstack: I219: PCI {:02x}:{:02x}.{} registers in BAR {bar} ({bytes:#x} bytes)",
         info.bus,
         info.dev,
         info.func,
     );
-    // SAFETY: `map_bar` answered `bytes` bytes of live mapping, and `mapped`
-    // goes to the caller with the window, which keeps both for as long as it
-    // keeps either.
-    let window = unsafe { Window::new(mapped.as_ptr(), bytes as usize) };
-    Ok((Bar::over(window), mapped))
+    Ok((window, mapped))
 }
 
 /// Everything the claim is asked for before the part is reached, in the order
@@ -145,17 +137,8 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
         bar.read32(toyos_i219::regs::TCTL)
     );
     toyos_i219::quiesce(&bar);
-    let region = dev
-        .dma_alloc(toyos_i219::GRANT_BYTES)
-        .map_err(KernelRefused::on("a DMA grant"))
-        .map_err(Opening::Kernel)?;
-    let device_base = region.device_addr;
-    // SAFETY: `dma_alloc` answered `GRANT_BYTES` bytes of live mapping, and
-    // `region` goes to the caller with the grant, which keeps both for as
-    // long as it keeps either.
-    let window =
-        unsafe { Window::new(region.memory.as_ptr(), toyos_i219::GRANT_BYTES as usize) };
-    Ok((bar, Grant::over(window, device_base), mapped, region))
+    let (grant, region) = Grant::alloc(dev, toyos_i219::GRANT_BYTES).map_err(Opening::Kernel)?;
+    Ok((bar, grant, mapped, region))
 }
 
 /// What a bring-up says about itself: a sentence each for what it asked the
@@ -354,5 +337,27 @@ impl Nic {
                 counters.spurious,
             );
         }
+    }
+}
+
+/// What a diagnostic last said, so it says it again only on a change.
+///
+/// **On change, not per element**: a device flooding a ring with descriptors a
+/// driver will not act on costs one line, not one per descriptor, which is the
+/// difference between a diagnostic and a way to drown the console from the
+/// other side of the boundary.
+struct Latch<T: Copy + PartialEq>(Cell<T>);
+
+impl<T: Copy + PartialEq + Default> Default for Latch<T> {
+    fn default() -> Self {
+        Self(Cell::new(T::default()))
+    }
+}
+
+impl<T: Copy + PartialEq> Latch<T> {
+    /// The previous value if `now` is not it, and `None` if nothing has moved.
+    fn moved(&self, now: T) -> Option<T> {
+        let was = self.0.replace(now);
+        (was != now).then_some(was)
     }
 }

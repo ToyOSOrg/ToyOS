@@ -61,6 +61,10 @@ pub mod status {
     pub const FAILED: u8 = 128;
 }
 
+/// §4.1.5.1.2: the vector field value that maps a source to no MSI-X entry,
+/// so it raises no interrupt at all.
+pub const NO_VECTOR: u16 = 0xFFFF;
+
 /// §6: "This indicates compliance with this specification".
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 /// §6: the device reaches memory through addresses the platform translates,
@@ -79,6 +83,96 @@ pub struct VendorCap {
     /// `cfg_type` is the notification structure's (§4.1.4.4) and nothing
     /// anywhere else.
     pub notify_off_multiplier: u32,
+}
+
+/// A function's configuration space, as a driver reads it through its claim.
+///
+/// Each read is one access of the width its name says, at an offset the walk
+/// has already aligned for it, and answers the claim's refusal unchanged.
+pub trait ConfigSpace {
+    type Refused: Copy + core::fmt::Debug + PartialEq + Eq;
+    fn read8(&self, at: u16) -> Result<u8, Self::Refused>;
+    fn read32(&self, at: u16) -> Result<u32, Self::Refused>;
+}
+
+/// *PCI Local Bus Specification* 3.0 §6.2.3: `Status`, whose bit 4 says the
+/// capabilities pointer is valid; §6.7: the pointer, the vendor-specific
+/// capability's id, and the first offset past the predefined header, below
+/// which no capability is.
+const STATUS: u16 = 0x06;
+const STATUS_CAPABILITIES: u8 = 1 << 4;
+const CAPABILITIES_PTR: u16 = 0x34;
+const CAP_ID_VENDOR: u8 = 0x09;
+const FIRST_CAP: u8 = 0x40;
+/// Every dword-aligned place a capability can be in the 256-byte header: a
+/// walk that has taken more links than this has come back round.
+const CAP_PLACES: usize = (0x100 - FIRST_CAP as usize) / 4;
+
+/// Why a capability list was not walked to its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalkRefusal<E> {
+    /// The claim refused a read the walk had to make, in its own word.
+    Read { at: u16, why: E },
+    /// A link points into the predefined header (§6.7).
+    IntoHeader { at: u8 },
+    /// The list came back round on itself.
+    Looped,
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for WalkRefusal<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Read { at, why } => {
+                write!(f, "its configuration space refused a read at {at:#x}: {why:?}")
+            }
+            Self::IntoHeader { at } => {
+                write!(f, "its capability list links to {at:#x}, inside the PCI header")
+            }
+            Self::Looped => write!(f, "its capability list never ends"),
+        }
+    }
+}
+
+/// The vendor-specific capabilities a function publishes (§4.1.4), in its
+/// list's order: what [`Layout::of`] chooses among.
+///
+/// Every link is the device's: each is masked of the two bits §6.7 reserves
+/// before it is an offset, a link into the header is refused, and so is a
+/// list longer than the header has places for. A read the claim refuses ends
+/// the walk under that refusal's own word.
+pub fn vendor_caps<C: ConfigSpace>(config: &C) -> Result<Vec<VendorCap>, WalkRefusal<C::Refused>> {
+    let read8 = |at: u16| config.read8(at).map_err(|why| WalkRefusal::Read { at, why });
+    let read32 = |at: u16| config.read32(at).map_err(|why| WalkRefusal::Read { at, why });
+    let mut found = Vec::new();
+    if read8(STATUS)? & STATUS_CAPABILITIES == 0 {
+        return Ok(found);
+    }
+    let mut next = read8(CAPABILITIES_PTR)? & !3;
+    let mut taken = 0;
+    while next != 0 {
+        if next < FIRST_CAP {
+            return Err(WalkRefusal::IntoHeader { at: next });
+        }
+        if taken == CAP_PLACES {
+            return Err(WalkRefusal::Looped);
+        }
+        taken += 1;
+        let at = next as u16;
+        if read8(at)? == CAP_ID_VENDOR {
+            let cfg_type = read8(at + 3)?;
+            found.push(VendorCap {
+                cfg_type,
+                bar: read8(at + 4)?,
+                offset: read32(at + 8)?,
+                length: read32(at + 12)?,
+                // §4.1.4.4: present after the notification structure's
+                // capability and no other's.
+                notify_off_multiplier: if cfg_type == CFG_NOTIFY { read32(at + 16)? } else { 0 },
+            });
+        }
+        next = read8(at + 1)? & !3;
+    }
+    Ok(found)
 }
 
 /// Which of a device's interrupt sources.
@@ -278,10 +372,10 @@ impl<R: Registers> Offer<R> {
     /// and nothing more is written to it.
     pub fn acknowledge(regs: R, layout: &Layout) -> Result<Self, Refusal> {
         let window = regs.bytes();
-        // §4.1.4.3.1 and §4.1.4.4.1: the alignment of each offset.
+        // §4.1.4.3.1, §4.1.4.4.1 and §4.1.4.6.1: the alignment of each offset.
         let common = Region::of(&layout.common, "COMMON_CFG", window, common::BYTES, 4)?;
         let notify = Region::of(&layout.notify, "NOTIFY_CFG", window, 0, 2)?;
-        let device = Region::of(&layout.device, "DEVICE_CFG", window, 0, 1)?;
+        let device = Region::of(&layout.device, "DEVICE_CFG", window, 0, 4)?;
         let mut wires = Wires {
             regs,
             common: common.at,
@@ -423,6 +517,17 @@ impl<R: Registers> Setup<R> {
         }
         let byte = self.wires.regs.read8(base + at);
         Ok((self, byte))
+    }
+
+    /// The 32-bit field `at` bytes into the device-specific structure, read
+    /// 32 bits wide as §4.1.3.1 has a 32-bit field read.
+    pub fn device_read32(mut self, at: usize) -> Result<(Self, u32), Refusal> {
+        let Region { at: base, bytes } = self.wires.device;
+        if at.checked_add(4).is_none_or(|end| end > bytes) || !at.is_multiple_of(4) {
+            return Err(self.wires.refuse(Refusal::PastDeviceConfig { at, bytes }));
+        }
+        let word = self.wires.regs.read32(base + at);
+        Ok((self, word))
     }
 
     /// §3.1.1 step 8: the device is live.

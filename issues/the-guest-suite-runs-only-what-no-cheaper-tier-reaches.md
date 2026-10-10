@@ -71,7 +71,6 @@ console's renderer. Exit: as stage A.
   refused while the first holds it.
 - host `screen_early_panel`: the panel repaints after each committed record.
 - host `screen_log_absent`: a `/log` that did not mount is said on the panel.
-- host `screen_blocked_dump`: Ctrl+Alt+D's summary tells the three states apart.
 - host `screen_late_panic`: the fatal report is painted from the snapshot `capture()` froze, so a
   record committed after the capture is absent from the panel; and a frame wider than the panel
   wraps, its tail on the grid before the next frame (`check_wrap`). `screen_panic_muted` holds

@@ -56,8 +56,7 @@ their clocks, and no `METAL` row judges them.
   (`log_stream_stalled_reader`). logd writes `/log` promptly while the machine
   runs (`kernel_log_file`, and `tests/common/usb.rs`'s stick with no write
   cache).
-- **Panel and storage.** A dump survives the compositor's next repaint
-  (`screen_blocked_dump`). A same-length overwrite of a pinned `/home` file
+- **Storage.** A same-length overwrite of a pinned `/home` file
   reads back whole through its displaced file's teardown: one read is taken
   now, and it may come before the teardown (`home_overwrite_reads_back`).
 

@@ -4,15 +4,13 @@ use core::sync::atomic::AtomicU32;
 
 /// One batch of DMA buffer completions, recorded at interrupt time.
 ///
-/// Reads on a sound device's handle (after the initial info read) return an
+/// Reads on the HDA claim's handle (after the initial info read) return an
 /// array of these: the kernel writes as many pending records as fit in the caller's
 /// buffer and returns the byte count. `mask` bit N set means period N finished
 /// playing, and `timestamp_nanos` is `nanos_since_boot` captured in the
 /// interrupt handler — the clock source for soundserver's DLL, and the reason the
 /// mask is derived there rather than by the driver at wake time. Records are
 /// returned oldest-first.
-///
-/// Both stubs produce it, so the two backends differ in nothing a mixer sees.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AudioCompletionRecord {

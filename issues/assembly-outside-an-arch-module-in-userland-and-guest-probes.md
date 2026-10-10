@@ -23,6 +23,10 @@ the loader now hold none outside those; what is left:
   interface: on AArch64 a `fence` is `dmb ish`, which orders nothing a device
   outside the inner-shareable domain observes (the kernel's `arch::barrier`
   says why, and `Mmio` carries `writel`/`readl` ordering there).
+- `usbd` (`hc.rs`'s `Ring` and doorbell, `bus.rs`'s EP0 transfers) has the
+  same gap twice over: a TRB's body is ordered before its control word with
+  `fence`, and nothing orders the control word before the doorbell's MMIO
+  store.
 
 **Exit condition**: the SDK gains a per-architecture module (as `toyos-abi`'s
 syscall entry and libc's `arch/` are) holding DMA barriers; the guest probes

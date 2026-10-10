@@ -14,8 +14,8 @@
 //! rounded, ends at the thread pointer, `tls_start + total_memsz`. Variant I:
 //! the linker computes `TPOFF = align_up(16, p_align) + sym_offset` from the
 //! executable's own `PT_TLS`, so the executable's block is the first one,
-//! `gap` above the thread pointer. Either way `tls_start` carries the largest
-//! alignment any module asked for. Every input is a sum of numbers a file
+//! `gap` above the thread pointer. Either way `tls_start` carries the
+//! executable's alignment. Every input is a sum of numbers a file
 //! declared, which is why every step here is checked and the whole thing is a
 //! pure function: `dtv_bytes <= tls_start` is the property, and it used to be
 //! an assertion in the kernel reached from a crafted `PT_TLS`.
@@ -43,19 +43,17 @@ impl Variant {
     }
 }
 
-/// A thread's static TLS, as much of it as its layout depends on. Its
-/// alignments are powers of two, or it does not exist ([`Static::new`]).
+/// A thread's static TLS, the executable's module alone, as much of it as its
+/// layout depends on. Its alignment is a power of two, or it does not exist
+/// ([`Static::new`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Static {
     variant: Variant,
-    /// Every static module's bytes, placed by [`place_module`].
+    /// The module's bytes: in variant II its [`exe_extent`].
     total_memsz: usize,
-    /// The largest `p_align` any static module declared, "no constraint" as 8.
-    max_align: usize,
-    /// The `p_align` of the module at offset 0, "no constraint" as 8: variant
-    /// I's executable, whose linker fixed its distance from the thread pointer
-    /// from it.
-    first_align: usize,
+    /// Its `p_align`, "no constraint" as 8: variant I's linker fixed the
+    /// executable's distance from the thread pointer from it.
+    align: usize,
 }
 
 /// A planned TLS allocation, in offsets from the base of one block.
@@ -73,21 +71,21 @@ pub struct TlsBlock {
 impl Static {
     /// `None` for an alignment that is not a power of two: a mask that is not
     /// a mask can place the data anywhere. Zero and one mean "no constraint".
-    pub fn new(variant: Variant, total_memsz: usize, max_align: usize, first_align: usize) -> Option<Static> {
-        Some(Static { variant, total_memsz, max_align: effective(max_align)?, first_align: effective(first_align)? })
+    pub fn new(variant: Variant, total_memsz: usize, align: usize) -> Option<Static> {
+        Some(Static { variant, total_memsz, align: effective(align)? })
     }
 
     pub fn total_memsz(self) -> usize {
         self.total_memsz
     }
 
-    pub fn max_align(self) -> usize {
-        self.max_align
+    pub fn align(self) -> usize {
+        self.align
     }
 
     /// No module at all: what a thread of a program without TLS is given.
     pub const fn empty(variant: Variant) -> Static {
-        Static { variant, total_memsz: 0, max_align: 8, first_align: 8 }
+        Static { variant, total_memsz: 0, align: 8 }
     }
 
     /// Lay out one thread's TLS block, or `None` for a layout no allocation
@@ -99,7 +97,7 @@ impl Static {
     /// All three are kernel constants; everything else came out of a file.
     pub fn plan(self, tcb_size: usize, dtv_bytes: usize, granule: usize) -> Option<TlsBlock> {
         debug_assert!(granule.is_power_of_two());
-        let align = self.max_align;
+        let align = self.align;
         match self.variant {
             Variant::II => {
                 let block_size = self.total_memsz.checked_add(tcb_size)?;
@@ -141,10 +139,10 @@ impl Static {
         }
     }
 
-    /// Variant I's distance from the thread pointer to the first module's
-    /// data: `align_up(16, p_align)` of that module, the linker's own.
+    /// Variant I's distance from the thread pointer to the module's data:
+    /// `align_up(16, p_align)`, the linker's own.
     fn gap(self) -> usize {
-        self.first_align.max(16)
+        self.align.max(16)
     }
 }
 
@@ -167,17 +165,6 @@ impl TlsOffset {
     pub const fn get(self) -> u64 {
         self.0
     }
-}
-
-/// One module's placement in a combined block: `cursor` rounded up to the
-/// module's own `p_align` (psABI, not a shared constant), floored at the 16
-/// `cmpxchg16b` needs. `align` is a power of two ≤ [`crate::MAX_TLS_ALIGN`]
-/// by [`crate::Layout::parse`]; `tls_start` carries the max, so a base on the
-/// module's own align lands the module on it.
-pub fn place_module(cursor: usize, memsz: usize, align: usize) -> Option<(usize, usize)> {
-    let align = align.max(16);
-    let base = if cursor > 0 { align_up(cursor, align)? } else { 0 };
-    Some((base, base.checked_add(memsz)?))
 }
 
 /// The bytes variant II's executable module takes below the thread pointer: its

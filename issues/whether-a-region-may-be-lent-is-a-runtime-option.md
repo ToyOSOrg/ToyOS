@@ -11,10 +11,14 @@ may be lent a region by reading `Region::pages` — `Some` for pages the kernel
 allocated for the region, `None` for an aperture, firmware's framebuffer, or a
 pool a kernel driver owns — together with its cache policy. A new region kind
 that fills the field the wrong way is lendable, or refused, with no compile
-error; the only check is `blockd_lends_within_its_bound`'s refusal of
-virtio-sound's pool. And the field's name says nothing about lending: the
-virtio-gpu scanout and cursor carry `Some` and are lendable today, which is the
-same authority their holder already has but was decided by nobody.
+error. The one test written for it, `blockd_lends_within_its_bound`, refused
+virtio-sound's pool, which left the kernel with its driver; the test is out of
+the guest suite and staged as a T14 row in
+`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`'s stage J,
+where the kernel driver's pool it can refuse is HDA's. And the field's name
+says nothing about lending: the virtio-gpu scanout and cursor carry `Some` and
+are lendable today, which is the same authority their holder already has but
+was decided by nobody.
 
 **Exit condition.** A region's kind is a type — owned pages, a kernel driver's
 pool, an aperture — and `dma_map` takes only the owned-pages kind, so a region

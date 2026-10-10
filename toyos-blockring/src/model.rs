@@ -273,7 +273,7 @@ fn start(failures: Failures) -> World {
 fn connect(world: &mut World) {
     let mut holds = Holds::new();
     holds.hold(0, BLOCKS as u64, 1).expect("a fresh server holds nothing");
-    world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64), holds });
+    world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64, true), holds });
     world.alive = true;
     world.losses = 0;
     world.client.session_started();

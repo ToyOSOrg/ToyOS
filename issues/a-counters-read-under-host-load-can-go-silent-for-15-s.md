@@ -136,6 +136,30 @@ the step each stopped in is not read from it:
   77 (38 s, with ceilings paid at 8.00x and 31 s between its image and its
   first guest line) and 75 to 67 (7 s).
 
+Three in one run, `wt/toyos-nohotkey` at `22b7bb464`, the whole suite, 41 of
+44: `virt_smp` (`waiting for the job test_rs_counters_read to end`),
+`virt_mask_windows` and `virt_off_names_the_cpus_left_on` (each `waiting for
+the boot's last word`), all three verdicts within 4 s of the host's clock.
+Load 54.08 60.22 55.97 when the suite began and 71.66 62.30 57.69 when it
+ended, 14 cores; fastest boot 716 ms against the reference 1424 ms, ceilings
+at 1.00x; workers 1309 s building against 1181 s testing. `virt_smp`'s last
+three lines are this file's profile: `===TEST_END unmap_touch exit=0===` and
+`===TEST_START test_rs_counters_read===` at 11.606 and 11.607, the spawn of
+`pid=13` at 11.616 on cpu4. The other two said nothing while they were waited
+on, so the step each stopped in is not read; `virt_off_names_the_cpus_left_on`
+is also one of `issues/the-boots-last-word-can-miss-the-console-when-klogd-holds-the-wire.md`'s
+waits. The branch removes the blocked-task dump from `drain_irqs`, which every
+pass runs. The three alone at that commit passed (load 56.98 to 54.99). Not
+known: whether the guests ran; no register capture was taken. Against that
+removal as the cause: at `2375834a6`, which already carries it and whose
+guest kernel differs from `22b7bb464`'s only by three `pub` methods with no
+caller, the whole suite passed 43 of 43, the same three among them, at load
+28.66 rising to 61.52; what it took out of a pass is three unarmed checks
+that each load an atomic and return; and the read is answered from the kick
+vector (`counters::serve_here`), not from a pass. The three images were
+built within 2 s of each other, after a 23 s wait on the artifact lock, and
+the three guests failed together.
+
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
 `src/miscompile.rs` now refuses a sysroot for) is not their cause.
 `tests/virtsmpcase`'s image was built and `virt_el1_smp` run by the compiler
@@ -146,6 +170,31 @@ a loop peeled or not, and in the sysroot's std in `fs::DirBuilder::_create`,
 which tests a count where the other tests sixteen times it; a counters read
 calls neither, and no function of `counters_read`, `test-runner`,
 `supervisor`, `logkeeper`, `toybox`, `kernelprobe` or the loader differs.
+
+The fifth and sixth silent ones, two guests of one run: `virt_smp` and
+`virt_mask_windows`, in the whole suite on `wt/toyos-lastword` at
+`aa7448db0`, whose diff changes the stop's hold of the console wire and
+nothing these guests run before the stop begins.
+
+- **The lines.** `FAIL virt_smp: STALLED: waiting for the job
+  test_rs_counters_read to end — it went quiet` and `FAIL virt_mask_windows:
+  STALLED: waiting for the boot's last word — it went quiet`, three seconds
+  apart on the host's clock; 44 of 46 passed.
+- **The load.** 12 wide on the 14-core host, 1-minute load 35.09 when the
+  run began and 79.44 when it ended; liveness ceilings paid at 1.00x;
+  workers 346 s building against 752 s testing.
+- **The same profile as the second.** `virt_smp`'s last three lines are
+  `===TEST_END unmap_touch exit=0===` at 11.730, `===TEST_START
+  test_rs_counters_read===` at 11.731 and the kernel's `spawn:
+  /system/bin/test_rs_counters_read pid=13` at 11.739 on cpu4.
+  `virt_mask_windows` said nothing while its second wait ran, as the two
+  stalls without a console above did; the run kept no PL011 log of it.
+- **What is known.** The next whole suite at that commit, at load 79.44
+  rising to 78.28, passed 46 of 46.
+- **Not compared.** These two ran the kernel of `wt/toyos-lastword` at
+  `aa7448db0`, built by the compiler before the ScalarEvolution fix. The
+  comparison across the fix above was of `main`'s `tests/virtsmpcase` image;
+  theirs was not compared, so whether the fault reaches them is not known.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
 QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`

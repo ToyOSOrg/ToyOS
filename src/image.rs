@@ -6,7 +6,6 @@ use std::path::Path;
 use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBlockIO};
 
 use crate::arch::Arch;
-use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
@@ -135,7 +134,7 @@ fn format_root(
 /// the bytes, so no two entries can run together into an input a different
 /// split would also produce.
 fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> FsUuid {
-    let mut hasher = Sha256::new();
+    let mut hasher = toyos_sha2_hw::sha256();
     let mut field = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
@@ -1412,8 +1411,8 @@ mod tests {
         for (name, data) in &files {
             let read = fs.read_file(name).unwrap_or_else(|e| panic!("read {name}: {e:?}"));
             assert_eq!(
-                Sha256::digest(&read),
-                Sha256::digest(data),
+                toyos_sha2_hw::sha256_digest(&read),
+                toyos_sha2_hw::sha256_digest(data),
                 "{name} reads back as {} bytes that are not the {} it was given",
                 read.len(),
                 data.len()

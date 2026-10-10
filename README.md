@@ -146,7 +146,7 @@ itself on its own hardware and reproduces, byte for byte, what the host built.
 | ✅ | The whole OS booted across many machine shapes, in parallel, as an ordinary `cargo test` |
 | ✅ | An audio gate that compares captured device output against a recorded baseline, statistically |
 | ✅ | Kernel decisions in plain crates, tested on the host in milliseconds |
-| ✅ | Reading a machine with no serial port — panics, logs and a blocked-task dump painted on its own panel |
+| ✅ | Reading a machine with no serial port — panics and logs painted on its own panel |
 | ✅ | LLDB against a running kernel |
 | ⬜ | A Windows host |
 

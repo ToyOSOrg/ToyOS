@@ -88,7 +88,7 @@ impl<T> SleepLock<T> {
         assert!(
             me.is_none() || self.holder() != me,
             "sleeplock: {} already holds this lock",
-            OwnerName(word_of(me)),
+            Holder(word_of(me)),
         );
         let owner = word_of(me);
         if let Some(guard) = self.take(owner) {
@@ -135,15 +135,22 @@ impl<T> SleepLock<T> {
             word => Some(TaskId::unpack(word)),
         }
     }
+
+    /// Who holds the lock as of this read, for a message and never a
+    /// decision: it may have moved by the time it is said.
+    pub fn holder_name(&self) -> Holder {
+        Holder(self.holder.load(Ordering::Relaxed))
+    }
 }
 
-/// Prints as a task where it names one, or "a context with no task" rather than the raw packed word.
-struct OwnerName(u64);
+/// A lock's holder by name: a task, a context with no task, or nobody.
+pub struct Holder(u64);
 
-impl core::fmt::Display for OwnerName {
+impl core::fmt::Display for Holder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.0 {
-            FREE | NOT_A_TASK => write!(f, "a context with no task"),
+            FREE => write!(f, "nobody"),
+            NOT_A_TASK => write!(f, "a context with no task"),
             word => write!(f, "{}", TaskId::unpack(word)),
         }
     }

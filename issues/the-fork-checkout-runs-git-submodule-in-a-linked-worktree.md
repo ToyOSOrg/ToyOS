@@ -15,7 +15,18 @@ worktree writes `core.worktree` into shared config and breaks git in the
 primary checkout's `rust/`. The orchestrator measured that for
 `git submodule update rust` in a linked worktree of the monorepo, which set the
 primary's `.git/modules/rust/config` `core.worktree` to a path that does not
-exist; this arm is the same command one level down and is unmeasured.
+exist. One level down, under git 2.54.0, the same command has two outcomes,
+measured on `sysroot`'s `two_pins` fixture shape (pull request #831). Run where
+this arm runs it, in a fork checkout fresh from `git worktree add` whose
+`library/backtrace` is an empty directory, it clones a git directory of the
+checkout's own, under the primary's `.git/modules/rust/worktrees/<name>/modules/`,
+leaves the primary's nested configuration unchanged, and `git status` in the
+primary's `rust/` exits 0. Run where that `library/backtrace` is already a
+`git worktree add` of the primary's nested repository, as `fork_checkout`
+otherwise makes it, it rewrites the primary's nested `core.worktree` to the
+linked path, and `git status` in the primary's `rust/` exits 128. Nothing
+keeps the command from the second state: what it is safe in is a property of
+the directory git happens to find, and the rule stands on the command.
 
 `ensure_submodule` (`src/lib.rs`) runs `git submodule update --init
 library/backtrace` in the same fork checkout, from `sysroot::build_std` and

@@ -7,6 +7,7 @@
 
 use alloc::vec::Vec;
 
+use crate::iommu::window::{self, Window};
 use crate::iommu::{AddressWidth, IommuError, Iova, StreamId};
 use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
@@ -218,37 +219,13 @@ pub fn identity_domain(tables: &mut Tables, width: AddressWidth, top: u64) -> (T
     (root, frames)
 }
 
-/// One domain's second-level tables, its id, and how far up its addresses have been handed out.
+/// One domain's second-level tables, its id, and its addresses.
 #[derive(Clone, Copy)]
 pub struct Domain {
     root: Table,
     id: u16,
     width: AddressWidth,
-    /// Where its addresses start: [`Domain::first_address`] of what its unit
-    /// translates, which is not [`AddressWidth::bits`] — see
-    /// [`Domain::translatable_bits`].
-    floor: u64,
-    /// Where they end: [`ceiling`].
-    ceiling: u64,
-    next: u64,
-}
-
-/// Where a domain's addresses end: under what its unit translates, and under
-/// the first of `reserved` that reaches above `floor` — a root bridge's window,
-/// which a bridge may route peer-to-peer before the unit sees the request
-/// (PCIe Base §2.4), or a region firmware reserved (VT-d §3.16). At or below
-/// `floor` where one of them covers it.
-const fn ceiling(translatable: u8, floor: u64, reserved: &[(u64, u64)]) -> u64 {
-    let mut ceiling = 1u64 << translatable;
-    let mut i = 0;
-    while i < reserved.len() {
-        let (start, end) = reserved[i];
-        if end > floor && start < ceiling {
-            ceiling = start;
-        }
-        i += 1;
-    }
-    ceiling
+    window: Window,
 }
 
 impl Domain {
@@ -266,13 +243,8 @@ impl Domain {
         if mgaw < width.bits() { mgaw } else { width.bits() }
     }
 
-    /// A quarter of the way up what this domain can translate.
-    const fn first_address(translatable: u8) -> u64 {
-        1 << (translatable - 2)
-    }
-
-    /// A domain with `room` bytes of addresses between its floor and its
-    /// [`ceiling`], or the reason it has not.
+    /// A domain with `room` bytes of its [`Window`] handed out at the address
+    /// answered, or the reason it has not.
     pub fn new(
         tables: &mut Tables,
         id: u16,
@@ -280,21 +252,9 @@ impl Domain {
         mgaw: u8,
         reserved: &[(u64, u64)],
         room: u64,
-    ) -> Result<Self, IommuError> {
-        let translatable = Self::translatable_bits(width, mgaw);
-        let floor = Self::first_address(translatable);
-        // Above memory, so a descriptor still carrying one of these names
-        // nothing this domain maps and faults rather than landing on a page.
-        let top = crate::mm::pmm::top();
-        if floor <= top {
-            return Err(IommuError::WindowBelowMemory { translatable, floor, top });
-        }
-        let ceiling = ceiling(translatable, floor, reserved);
-        // At least one leaf, whatever was asked: a domain with none is no domain.
-        if ceiling.saturating_sub(floor) < room.next_multiple_of(PAGE_2M).max(PAGE_2M) {
-            return Err(IommuError::NoRoom { floor, ceiling, room });
-        }
-        Ok(Self { root: tables.alloc(), id, width, floor, ceiling, next: floor })
+    ) -> Result<(Self, Iova), IommuError> {
+        let (window, first) = Window::new(Self::translatable_bits(width, mgaw), reserved, room)?;
+        Ok((Self { root: tables.alloc(), id, width, window }, first))
     }
 
     pub fn root(&self) -> Table {
@@ -305,101 +265,32 @@ impl Domain {
         self.id
     }
 
-    pub const fn floor(&self) -> u64 {
-        self.floor
+    pub const fn window(&self) -> &Window {
+        &self.window
     }
 
-    pub const fn ceiling(&self) -> u64 {
-        self.ceiling
-    }
-
-    /// Reserve room for `bytes`, rounded up to whole leaves. An address is
-    /// never handed out twice, unmapped or not: a device holding a stale one
-    /// would reach whatever took its place.
-    pub fn reserve(&mut self, bytes: u64) -> Option<Iova> {
-        let span = bytes.next_multiple_of(PAGE_2M);
-        let end = self.next.checked_add(span)?;
-        if end > self.ceiling() {
-            return None;
-        }
-        let at = Iova::translated(self.next);
-        self.next = end;
-        Some(at)
-    }
-
-    /// Whether `bytes` at `at` is room [`Self::reserve`] already handed out:
-    /// the only room a mapping may be placed in by address.
-    ///
-    /// `at` must itself be a leaf `reserve` could have returned, not merely
-    /// inside a handed-out span: [`map_2m`]'s index floors to the enclosing
-    /// leaf, so an unaligned `at` this let through would silently place a
-    /// mapping short of, or overlapping, where the caller named.
-    pub const fn handed_out(&self, at: Iova, bytes: u64) -> bool {
-        if !at.raw().is_multiple_of(PAGE_2M) {
-            return false;
-        }
-        let span = bytes.next_multiple_of(PAGE_2M);
-        if at.raw() < self.floor() {
-            return false;
-        }
-        match at.raw().checked_add(span) {
-            Some(end) => end <= self.next,
-            None => false,
-        }
+    pub fn window_mut(&mut self) -> &mut Window {
+        &mut self.window
     }
 }
 
-/// [`Domain::handed_out`] is a pure predicate on a `Copy` struct: checked here
-/// at compile time rather than under a test harness this no-`std` binary has
-/// none of.
+/// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
+/// smaller of the two.
+///
+/// Asserted here rather than in a guest because no guest holds the shape: QEMU's
+/// `intel-iommu` derives both fields from one `aw-bits` property, so its model
+/// cannot report a `SAGAW` wider than its `MGAW` at all.
 const _: () = {
-    const ROOT: Table = Table { phys: 0 };
-    // `translatable = 48` puts `floor()` (a quarter of `1 << 48`) at `1 << 46`,
-    // itself far past `PAGE_2M`-aligned.
-    const FLOOR: u64 = Domain::first_address(48);
-    const ONE_LEAF: Domain = Domain {
-        root: ROOT,
-        id: KERNEL_DOMAIN + 1,
-        width: AddressWidth::Bits48,
-        floor: FLOOR,
-        ceiling: 1 << 48,
-        next: FLOOR + PAGE_2M,
-    };
-    const TWO_LEAVES: Domain = Domain { next: FLOOR + 2 * PAGE_2M, ..ONE_LEAF };
-
-    // Exactly what one `reserve(PAGE_2M)` handed out.
-    assert!(ONE_LEAF.handed_out(Iova::translated(FLOOR), PAGE_2M));
-    // Short of the floor: nothing this domain has ever reserved.
-    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR - PAGE_2M), PAGE_2M));
-    // Past what has been reserved so far.
-    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR + PAGE_2M), PAGE_2M));
-    // A byte count is rounded up to the leaf it needs, not truncated to fit.
-    assert!(!ONE_LEAF.handed_out(Iova::translated(FLOOR), PAGE_2M + 1));
-    // Two leaves handed out; the second is room in its own right.
-    assert!(TWO_LEAVES.handed_out(Iova::translated(FLOOR + PAGE_2M), PAGE_2M));
-    // Mid-span but off a leaf boundary: inside the handed-out range without
-    // being an address `reserve` ever returned.
-    assert!(!TWO_LEAVES.handed_out(Iova::translated(FLOOR + 1), PAGE_2M));
-};
-
-/// [`ceiling`] over the windows the T14's firmware declares, unsorted as it
-/// declares them: a 39-bit unit's domain ends where the first window above its
-/// floor begins, and a window reaching over the floor leaves it nothing.
-const _: () = {
-    const FLOOR: u64 = Domain::first_address(39);
-    const T14: [(u64, u64); 7] = [
-        (0xA200_0000, 0xBD00_0000),
-        (0x40_0000_0000, 0x60_3DC0_0000),
-        (0xA080_0000, 0xA200_0000),
-        (0xBD00_0000, 0xC000_0000),
-        (0xFF00_0000, 0xFFB8_0000),
-        (0xFFD3_A070, 0x1_0000_0000),
-        (0x60_3DC0_0000, 0x80_0000_0000),
-    ];
-    assert!(FLOOR == 0x20_0000_0000);
-    assert!(ceiling(39, FLOOR, &T14) == 0x40_0000_0000);
-    assert!(ceiling(39, FLOOR, &[]) == 1 << 39);
-    assert!(ceiling(39, FLOOR, &[(0x10_0000_0000, FLOOR + 1)]) < FLOOR);
+    assert!(Domain::translatable_bits(AddressWidth::Bits48, 39) == 39);
+    assert!(window::first_address(39) < 1 << 39);
+    // What a window placed by the table depth alone would be, against the
+    // ceiling such a unit reports.
+    assert!(window::first_address(48) >= 1 << 39);
+    // A unit whose two limits agree is unchanged by any of this.
+    assert!(Domain::translatable_bits(AddressWidth::Bits48, 48) == 48);
+    assert!(Domain::translatable_bits(AddressWidth::Bits39, 39) == 39);
+    // And tables shallower than `MGAW` bind it the other way round.
+    assert!(Domain::translatable_bits(AddressWidth::Bits39, 48) == 39);
 };
 
 pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {
@@ -508,10 +399,11 @@ impl Displaced {
     }
 }
 
-/// The entry that moves `requester`'s present entry `old` onto `domain`, and
-/// what that leaves the unit holding: the id `old` named, never `domain`'s.
-const fn rebind(old: (u64, u64), requester: u16, domain: &Domain) -> ((u64, u64), Displaced) {
-    let new = context_entry(domain.root, domain.id, domain.width);
+/// The entry that moves `requester`'s present entry `old` onto domain `id`
+/// at `root`, and what that leaves the unit holding: the id `old` named, never
+/// `id`.
+const fn rebind(old: (u64, u64), requester: u16, root: Table, id: u16, width: AddressWidth) -> ((u64, u64), Displaced) {
+    let new = context_entry(root, id, width);
     (new, Displaced { requester, domain: (old.1 >> 8) as u16 })
 }
 
@@ -549,7 +441,7 @@ pub fn bind(root: Table, stream: StreamId, domain: &Domain) -> Displaced {
         "iommu: {stream} has no context entry to move — it was not enumerated when its unit \
          was programmed"
     );
-    let (new, displaced) = rebind(old, stream.requester(), domain);
+    let (new, displaced) = rebind(old, stream.requester(), domain.root, domain.id, domain.width);
     context.replace_pair(index, old, new);
     displaced
 }
@@ -558,35 +450,8 @@ pub fn bind(root: Table, stream: StreamId, domain: &Domain) -> Displaced {
 /// domain's id, the only one its cached entry can match (§6.5.2.1), and its new
 /// entry names the domain it moved to.
 const _: () = {
-    const OWN: Domain = Domain {
-        root: Table { phys: 0x5000 },
-        id: u16::MAX,
-        width: AddressWidth::Bits39,
-        floor: 0,
-        ceiling: 0,
-        next: 0,
-    };
     let identity = context_entry(Table { phys: 0x3000 }, KERNEL_DOMAIN, AddressWidth::Bits48);
-    let (new, displaced) = rebind(identity, 0x00F8, &OWN);
+    let (new, displaced) = rebind(identity, 0x00F8, Table { phys: 0x5000 }, u16::MAX, AddressWidth::Bits39);
     assert!(displaced.domain == KERNEL_DOMAIN && displaced.requester == 0x00F8);
     assert!(new.0 == 0x5000 | PRESENT && new.1 == (u16::MAX as u64) << 8 | 1);
-};
-
-/// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
-/// smaller of the two.
-///
-/// Asserted here rather than in a guest because no guest holds the shape: QEMU's
-/// `intel-iommu` derives both fields from one `aw-bits` property, so its model
-/// cannot report a `SAGAW` wider than its `MGAW` at all.
-const _: () = {
-    assert!(Domain::translatable_bits(AddressWidth::Bits48, 39) == 39);
-    assert!(Domain::first_address(39) < 1 << 39);
-    // What a window placed by the table depth alone would be, against the
-    // ceiling such a unit reports.
-    assert!(Domain::first_address(48) >= 1 << 39);
-    // A unit whose two limits agree is unchanged by any of this.
-    assert!(Domain::translatable_bits(AddressWidth::Bits48, 48) == 48);
-    assert!(Domain::translatable_bits(AddressWidth::Bits39, 39) == 39);
-    // And tables shallower than `MGAW` bind it the other way round.
-    assert!(Domain::translatable_bits(AddressWidth::Bits39, 48) == 39);
 };

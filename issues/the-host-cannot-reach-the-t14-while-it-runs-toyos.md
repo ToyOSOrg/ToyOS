@@ -59,9 +59,8 @@ text: `lan_talk` and `lan_dhcp_lease`, which read what the host heard, and
 
 `lan_message_delivery` could not move to a boot that does not talk without a
 new job: the card's first message arrived 8.499 s into the last boot read,
-with its link, so the boot has to be held open until then, and the one hold
-the tree has is the flat sleep
-`issues/lan-hold-holds-a-boot-open-for-a-flat-twenty-seconds.md` records.
+with its link, so the boot has to be held open until then, and no job in the
+tree holds a boot open on that event.
 
 ## What stands in the meantime
 

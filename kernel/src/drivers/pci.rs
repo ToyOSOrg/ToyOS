@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use toyos_acpi::EcamWindow;
 use toyos_pci::{bar, bridge, caps, msi, msix};
 
 use crate::mm::Mmio;
@@ -24,13 +25,6 @@ const INVALID_VENDOR: u16 = 0xFFFF;
 
 /// The one MSI-X table entry this kernel programs; a device's queues must point at it too.
 pub const MSIX_ENTRY: u16 = 0;
-
-// Every device interrupt in this kernel targets cpu0, named as a destination for
-// the message and for the unit to put in an entry.
-pub(crate) const MSG_DEST: u32 = 0;
-
-/// No requester id: a bus/device/function is sixteen bits, so this is none of them.
-pub(crate) const NO_FUNCTION: u32 = u32::MAX;
 
 /// Why a walk of a function's capability list answered no capability.
 pub enum NoCapability {
@@ -107,11 +101,12 @@ pub fn stop_bus_mastering(config: Mmio) {
 
 /// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
 ///
-/// Declared once because two readers deal in it — `PciDevice::new` carves it and
+/// Declared once because two readers deal in it — an ECAM window carves it and
 /// the reset-time xHCI stop rebuilds one from a bare address.
 pub const CONFIG_BYTES: u64 = 4096;
 
-/// PCI device identified by ECAM base + Bus/Device/Function.
+/// A PCI function, by its bus, device and function and the configuration
+/// space its ECAM window gives it.
 #[derive(Clone, Copy)]
 pub struct PciDevice {
     mmio: Mmio,
@@ -121,13 +116,6 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
-    fn new(ecam: &crate::mm::Mmio, bus: u8, dev: u8, func: u8) -> Self {
-        let offset = ((bus as u64) << 20)
-            | ((dev as u64) << 15)
-            | ((func as u64) << 12);
-        Self { mmio: ecam.subregion(offset, CONFIG_BYTES), bus, dev, func }
-    }
-
     /// A function over a caller-owned config-space window, for the cap self-test to drive the real walk over lists no hardware in reach produces.
     #[cfg(feature = "boot-actuators")]
     pub(crate) fn over_config(mmio: crate::mm::Mmio) -> Self {
@@ -281,20 +269,20 @@ impl PciDevice {
         self.mmio.read_u16(COMMAND);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it: a
-    /// kernel driver's arming, whose message is compatibility format on a
-    /// machine that remaps nothing. A claimed function is armed by
+    /// Point this function's [`MSIX_ENTRY`] at `irq` and enable it: a kernel
+    /// driver's arming, whose message the architecture makes
+    /// ([`crate::iommu::driver_msi`]). A claimed function is armed by
     /// [`arm_claimed_msix`] instead.
     ///
     /// Answers the entry's own window, which stays this kernel's: masking is a
     /// write to it, and a claimant that could reach it could aim the device's
     /// message at any address the LAPIC decodes.
     ///
-    /// `None` where it has no MSI-X entry this kernel can write, or the unit
-    /// refuses its message.
-    pub(in crate::drivers) fn enable_msix(&self, vector: u8) -> Option<Mmio> {
+    /// `None` where it has no MSI-X entry this kernel can write, or it is
+    /// refused a message.
+    pub(in crate::drivers) fn enable_msix(&self, irq: crate::arch::DriverIrq) -> Option<Mmio> {
         let entry = self.msix_entry().ok()?;
-        let (address, data) = self.message(vector)?;
+        let (address, data) = self.message(irq)?;
         Some(self.write_msix(entry, address, data))
     }
 
@@ -361,31 +349,21 @@ impl PciDevice {
             self.bus, self.dev, self.func);
     }
 
-    /// The address and data this function's interrupt registers take for `vector`.
+    /// The address and data this function's interrupt registers take for `irq`.
     ///
-    /// `None` refuses the device: the machine remaps interrupts and this
-    /// function has no entry, so the message it would otherwise write is one the
-    /// unit blocks.
-    fn message(&self, vector: u8) -> Option<(u32, u32)> {
-        let dest = MSG_DEST;
-        match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
-            // The same CPU the remappable one would name.
-            crate::iommu::Delivery::Direct => match crate::arch::msi_message(dest, vector) {
-                Ok(message) => Some(message),
-                Err(why) => {
-                    log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
-                    None
-                }
-            },
-            crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
-            crate::iommu::Delivery::Refused(why) => {
+    /// `None` refuses the device: the message it would otherwise write is one
+    /// nothing delivers.
+    fn message(&self, irq: crate::arch::DriverIrq) -> Option<(u32, u32)> {
+        match crate::iommu::driver_msi(self.bus, self.dev, self.func, irq) {
+            Ok(message) => Some((message.address, message.data)),
+            Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
                 None
             }
         }
     }
 
-    /// Point this function's single MSI message at `vector` and enable it: a
+    /// Point this function's single MSI message at `irq` and enable it: a
     /// kernel driver's arming, as [`Self::enable_msix`] is.
     ///
     /// **A driver in this kernel may arm this however the MSI-X walk failed**, a
@@ -393,11 +371,11 @@ impl PciDevice {
     /// holder, so an MSI-X table past that link is one nobody but this kernel
     /// could reach. A hand-over is the caller that has to tell the two apart,
     /// and `crate::pcidev`'s header says why.
-    pub(in crate::drivers) fn enable_msi(&self, vector: u8) -> bool {
+    pub(in crate::drivers) fn enable_msi(&self, irq: crate::arch::DriverIrq) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {
             return false;
         };
-        let Some((address, data)) = self.message(vector) else {
+        let Some((address, data)) = self.message(irq) else {
             return false;
         };
         self.write_msi(cap, address, data);
@@ -498,8 +476,8 @@ impl PciDevice {
     }
 }
 
-/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own remapping
-/// entry and enable it. Takes the message and nothing else: the function is
+/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own message and
+/// enable it. Takes the message and nothing else: the function is
 /// the one the entry was written for, and no other message reaches here.
 pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<Mmio, NoEntry> {
     let pci = message.function();
@@ -536,41 +514,80 @@ impl<'a> Iterator for CapabilityIter<'a> {
     }
 }
 
-/// The window [`enumerate`] walked.
-static ECAM: crate::sync::Lock<Option<Mmio>> = crate::sync::Lock::new(None);
+/// One ECAM window, mapped over exactly the buses it decodes.
+#[derive(Clone, Copy)]
+struct Window {
+    ecam: EcamWindow,
+    mmio: Mmio,
+}
+
+impl Window {
+    /// The configuration space of a function on a bus this window decodes.
+    fn function(&self, bus: u8, dev: u8, func: u8) -> Option<Mmio> {
+        Some(self.mmio.subregion(self.ecam.offset(bus, dev, func)?, CONFIG_BYTES))
+    }
+}
+
+/// The windows [`enumerate`] walked.
+static WINDOWS: crate::sync::Lock<Vec<Window>> = crate::sync::Lock::new(Vec::new());
 
 /// The configuration space of the function at this address, whether or not
-/// one answers there: an absent function reads all ones.
+/// one answers there: an absent function reads all ones. `None` on a bus no
+/// window decodes.
 pub fn function_window(bus: u8, dev: u8, func: u8) -> Option<Mmio> {
-    (*ECAM.lock()).map(|ecam| PciDevice::new(&ecam, bus, dev, func).mmio)
+    WINDOWS.lock().iter().find_map(|window| window.function(bus, dev, func))
+}
+
+/// The ECAM windows [`enumerate`] walked, in the order it walked them.
+pub fn windows() -> Vec<EcamWindow> {
+    WINDOWS.lock().iter().map(|window| window.ecam).collect()
 }
 
 /// The most functions [`enumerate`] will hand back; the rest are logged, not enumerated.
 const MAX_DEVICES: usize = 256;
 
-/// Every PCIe function ECAM decodes, in bus/device/function order; drivers must select all matches, not the first.
-pub fn enumerate(ecam: &crate::mm::Mmio) -> Vec<PciDevice> {
+/// Every PCIe function the windows decode, window by window and in
+/// bus/device/function order within one; drivers must select all matches,
+/// not the first.
+///
+/// **Each window is mapped and read over the buses it decodes and no
+/// further**: past its end bus the addresses are other hardware's, which
+/// reads as functions that are not there.
+pub fn enumerate(ecam: &[EcamWindow]) -> Vec<PciDevice> {
     log!("PCI: Enumerating devices...");
-    *ECAM.lock() = Some(*ecam);
+    let windows: Vec<Window> = ecam
+        .iter()
+        .map(|&ecam| {
+            let (start, bytes) = ecam.decoded();
+            Window { ecam, mmio: crate::mm::paging::map_mmio(start, bytes, MmioPolicy::Uncacheable) }
+        })
+        .collect();
+    *WINDOWS.lock() = windows.clone();
 
     let mut found: Vec<PciDevice> = Vec::new();
-    'scan: for bus in 0..=255u16 {
-        for dev in 0..32u8 {
-            let root = PciDevice::new(ecam, bus as u8, dev, 0);
-            if root.vendor_id() == INVALID_VENDOR { continue; }
+    'scan: for window in &windows {
+        let function = |bus: u8, dev: u8, func: u8| {
+            let mmio = window.function(bus, dev, func).expect("the scan reads only buses its window decodes");
+            PciDevice { mmio, bus, dev, func }
+        };
+        for bus in window.ecam.buses() {
+            for dev in 0..32u8 {
+                let root = function(bus, dev, 0);
+                if root.vendor_id() == INVALID_VENDOR { continue; }
 
-            let funcs = if root.read_config_u8(HEADER_TYPE) & MULTI_FUNCTION != 0 { 8 } else { 1 };
-            for func in 0..funcs {
-                let pci = PciDevice::new(ecam, bus as u8, dev, func);
-                if pci.vendor_id() == INVALID_VENDOR { continue; }
+                let funcs = if root.read_config_u8(HEADER_TYPE) & MULTI_FUNCTION != 0 { 8 } else { 1 };
+                for func in 0..funcs {
+                    let pci = function(bus, dev, func);
+                    if pci.vendor_id() == INVALID_VENDOR { continue; }
 
-                print_device(&pci);
-                if found.len() == MAX_DEVICES {
-                    log!("PCI: more than {} functions decoded; the rest are not enumerated",
-                        MAX_DEVICES);
-                    break 'scan;
+                    print_device(&pci);
+                    if found.len() == MAX_DEVICES {
+                        log!("PCI: more than {} functions decoded; the rest are not enumerated",
+                            MAX_DEVICES);
+                        break 'scan;
+                    }
+                    found.push(pci);
                 }
-                found.push(pci);
             }
         }
     }

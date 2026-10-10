@@ -1,5 +1,6 @@
 # The one boot that runs netstack with a virtio NIC in front of it, with diskserver's
-# NVMe controller beside it: `iommu_virtio_platform`'s machine.
+# NVMe controller and soundserver's virtio-sound beside it: `iommu_virtio_platform`'s
+# machine, where every virtio function is a process's claim or a kernel driver's.
 #
 # netstack's `main` opens the NIC before anything else and returns on `NotFound`,
 # so a config with no NIC never reaches a line of the daemon proper.
@@ -8,7 +9,7 @@
 # announce itself.
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -25,6 +26,12 @@ syscap = ["logread"]
 service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041", "pci:8086:10d3"]
+
+[programs.soundserver]
+service = true
+serves = ["soundserver"]
+devices = ["pci:1af4:1059"]
+syscap = ["rt"]
 
 # `netstack` because `netstack_socket_churn` connects through it and reads its
 # counts.

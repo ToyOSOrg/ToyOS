@@ -15,7 +15,8 @@ use device::{begin, reset_done, reset_port};
 use super::super::{ErstEntry, Layout, MscBlock, PortMask, Portsc, Protocols, TrbRing};
 use super::super::{XhciController, PAGE, RING_SIZE, USB_TIMEOUT_NS};
 use super::super::{CAP_CAPLENGTH, CAP_DBOFF, CAP_HCCPARAMS1, CAP_HCSPARAMS1, CAP_HCSPARAMS2};
-use super::super::{CAP_RTSOFF, HCC_PPC, XHCI_VECTOR};
+use super::super::{CAP_RTSOFF, HCC_PPC};
+use crate::arch::trap::XHCI_VECTOR;
 use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
@@ -114,6 +115,13 @@ pub fn init(devices: &[PciDevice]) {
     let mut controllers = Vec::new();
     let mut present = 0;
     for pci_dev in devices.iter().filter(|d| d.matches_class(0x0C, 0x03, Some(0x30))) {
+        // Before anything that touches the function, `enable_bus_master`'s
+        // record of it as this kernel's above all: that is what refuses a claim.
+        if crate::actuator::xhci_left().is_some_and(|id| pci_dev.is_id(id.vendor, id.device)) {
+            log!("xHCI: leaving PCI {:02x}:{:02x}.{} {:04x}:{:04x} to a claim (xhci-leave)",
+                pci_dev.bus, pci_dev.dev, pci_dev.func, pci_dev.vendor_id(), pci_dev.device_id());
+            continue;
+        }
         present += 1;
         if let Some(ctrl) = init_one(pci_dev) {
             controllers.push(ctrl);
@@ -245,7 +253,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         );
         return None;
     };
-    log!("xHCI: {irq} enabled (vector {XHCI_VECTOR:#x})");
+    log!("xHCI: {irq} enabled ({XHCI_VECTOR})");
 
     let bar = crate::mm::paging::map_mmio(bar_addr, 0x10000, MmioPolicy::Uncacheable);
 

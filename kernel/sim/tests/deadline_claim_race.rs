@@ -9,10 +9,7 @@
 //! executed in between, which is the only way to say it.
 //!
 //! What it asserts is invariant T across that window: a CPU that
-//! holds a parked task with a pending deadline has its timer armed for it. The
-//! state it constructs is the one `kernel/src/sched/dump.rs` cannot describe —
-//! a machine halted with a parked thread and a stopped timer reports
-//! `1 pending, 0 OVERDUE`, which is what health looks like.
+//! holds a parked task with a pending deadline has its timer armed for it.
 //!
 //! It fails by aborting, like `scenarios::old_preemptible_window`: a task is a
 //! linear value with a drop bomb, so unwinding out of

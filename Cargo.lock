@@ -3013,11 +3013,14 @@ dependencies = [
  "toyos-gicv3",
  "toyos-gpt",
  "toyos-hda",
+ "toyos-its",
  "toyos-pci",
+ "toyos-phys",
  "toyos-ps2",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
+ "toyos-smmu",
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
@@ -3341,6 +3344,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -3372,6 +3376,15 @@ name = "nonempty"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
+
+[[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -3690,6 +3703,16 @@ dependencies = [
  "block2 0.6.2",
  "libc",
  "objc2 0.6.4",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
  "objc2-core-foundation",
 ]
 
@@ -4091,8 +4114,8 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -5156,6 +5179,9 @@ dependencies = [
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-pci-claim",
+ "toyos-virtio",
+ "toyos-virtio-sound",
 ]
 
 [[package]]
@@ -5251,6 +5277,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "supervisor"
 version = "0.1.0"
 dependencies = [
+ "diskserver",
  "toyos",
  "toyos-abi",
  "toyos-blockring",
@@ -5331,6 +5358,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "git+https://github.com/ToyOSOrg/sysinfo?branch=toyos-0.39.6#bcb2381592d4e8a9a40f11f41ccc3c915ca6a876"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "toyos",
+ "toyos-abi",
+ "toyos-osrelease",
+ "windows",
 ]
 
 [[package]]
@@ -5594,6 +5637,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyfetch"
+version = "0.1.0"
+dependencies = [
+ "sysinfo",
+]
+
+[[package]]
 name = "toyos"
 version = "0.18.0"
 dependencies = [
@@ -5666,7 +5716,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tar",
  "toml",
  "toyos-abi",
@@ -5680,6 +5729,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-sha2-hw",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -5909,6 +5959,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
+]
+
+[[package]]
 name = "toyos-phys"
 version = "0.1.0"
 
@@ -5929,6 +5989,20 @@ name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-sha2"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "toyos-sha2-hw"
+version = "0.1.0"
+dependencies = [
+ "toyos-sha2",
+]
+
+[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -5947,8 +6021,8 @@ dependencies = [
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -5998,7 +6072,8 @@ name = "toyos-update"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
- "sha2 0.10.9",
+ "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-wallclock",
 ]
 
@@ -6011,6 +6086,7 @@ name = "toyos-userbound"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-acpi",
  "toyos-bootmap",
 ]
 
@@ -6020,6 +6096,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-virtio-sound"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]
@@ -6254,10 +6338,10 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "update"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
+ "diskserver",
  "toyos",
- "toyos-abi",
  "toyos-fat32",
+ "toyos-sha2-hw",
  "toyos-update",
 ]
 
@@ -6287,6 +6371,16 @@ dependencies = [
  "http",
  "httparse",
  "log",
+]
+
+[[package]]
+name = "usbd"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+ "toyos-xhci",
 ]
 
 [[package]]
@@ -6615,6 +6709,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6622,6 +6732,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"

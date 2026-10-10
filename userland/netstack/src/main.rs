@@ -44,7 +44,6 @@ use toyos_net_wire::Instant;
 
 mod card;
 mod client;
-mod device;
 mod i219;
 mod pipes;
 mod serve;

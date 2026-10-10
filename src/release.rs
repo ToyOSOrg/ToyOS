@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use toyos_tmpdir::TempDir;
 
 use crate::buildlock::Keyed;
@@ -83,7 +82,7 @@ pub(crate) fn named_key(text: &str) -> Option<Key> {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn on_runner() -> bool {

@@ -364,9 +364,13 @@ impl State {
             let value = write.expect("stub: a read of the notification structure");
             self.notify(at - NOTIFY_AT as usize, bytes, value);
         } else if device.contains(&at) {
-            assert!(write.is_none() && bytes == 1, "stub: the device structure is bytes, read");
-            self.trace.push(Event::DeviceConfig { at: at - DEVICE_AT as usize });
-            return self.device_config[at - DEVICE_AT as usize] as u32;
+            assert!(write.is_none(), "stub: the device structure is read and never written");
+            let at = at - DEVICE_AT as usize;
+            assert!(at + bytes <= self.device_config.len(), "stub: a read past the device structure");
+            self.trace.push(Event::DeviceConfig { at });
+            let mut word = [0u8; 4];
+            word[..bytes].copy_from_slice(&self.device_config[at..at + bytes]);
+            return u32::from_le_bytes(word);
         } else {
             panic!("stub: an access at {at:#x}, which is in none of the device's structures");
         }

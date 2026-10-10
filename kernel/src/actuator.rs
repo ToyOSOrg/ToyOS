@@ -79,8 +79,18 @@ actuators! {
     /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
     stop_budget_spent = "stop-budget-spent";
 
-    /// Make one CPU ignore a kick.
-    dump_deaf_cpu = "dump-deaf-cpu";
+    /// Have `klogd` take the console's wire as the stop begins and keep it
+    /// until the stop asks for it. Judged by `machine_shutdown_wire_held`.
+    wire_held_across_the_stop = "wire-held-across-the-stop";
+
+    /// The same, with `klogd` keeping the wire through the stop's whole
+    /// `LET_GO`. Judged by `machine_shutdown_wire_kept`.
+    wire_kept_through_the_stop = "wire-kept-through-the-stop";
+
+    /// Have `klogd` hold the console's wire from the boot's last word until the
+    /// stop has taken the seal, where the stop does not hold it itself. Judged
+    /// by `machine_shutdown_wire_at_the_seal`.
+    wire_held_at_the_last_word = "wire-held-at-the-last-word";
 
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
@@ -116,9 +126,11 @@ actuators! {
     /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
     virtio_no_access_platform = "virtio-no-access-platform";
 
-    /// Leave every IOMMU unit queueing, translating and remapping through
-    /// tables of its own, as firmware may hand one over, just before this
-    /// kernel programs it. Judged by `iommu_firmware_left`.
+    /// Leave every IOMMU unit as firmware may hand one over, just before this
+    /// kernel takes it: a VT-d unit queueing, translating and remapping
+    /// through tables of its own, an AMD-Vi unit blocking every device's DMA
+    /// with its command buffer and event log running. Judged by
+    /// `iommu_firmware_left` and `amdvi_firmware_left`.
     iommu_firmware_left = "iommu-firmware-left";
 
     /// Read the DMAR's flags with `INTR_REMAP` clear, as on a platform whose
@@ -143,6 +155,14 @@ actuators! {
     // PSCI is AArch64's alone, so x86-64 builds an accessor it never reads.
     #[allow(dead_code)]
     psci_withheld = "psci-withheld";
+
+    /// Give the `iommu-testdev` off bus 0 no route, and once the SMMUv3 is
+    /// armed have it and the one on bus 0 write on no domain, then the one on
+    /// bus 0 on a domain at an address it maps, and there again once it is
+    /// taken back. Judged by `virt_smmu`.
+    // The SMMUv3 is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    smmu_selftest = "smmu-selftest";
 
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
     control_regs_bench = "control-regs-bench";
@@ -176,9 +196,14 @@ actuators! {
     /// so a guest reaches the reset. Judged by `screen_fatal_behind_a_painter`.
     panic_reboot_fast = "panic-reboot-fast";
 
-    /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
-    /// fatal path meeting a painter that will never let go.
+    /// Have the last boot checkpoint's painter go fatal holding the panel's
+    /// latch: a fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
+
+    /// Leave the xHCI controller `xhci-leave=<vendor>:<device>` names to a
+    /// claim: `drivers::xhci` never touches it. Read through [`xhci_left`];
+    /// judged by `usbd_drives_the_spare`.
+    xhci_leave = "xhci-leave=";
 }
 
 #[cfg(feature = "boot-actuators")]
@@ -189,6 +214,7 @@ const IMPLIES: &[(&str, &[&str])] = &[
     // so the control that ends a machine no other bound ends is staged over the
     // one that stops this machine ending itself.
     ("hard-lockup-probe", &["wedge-before-reset"]),
+    ("wire-kept-through-the-stop", &["wire-held-across-the-stop"]),
 ];
 
 #[cfg(feature = "boot-actuators")]
@@ -202,7 +228,16 @@ static ARMED: [AtomicU64; ARM_WORDS] = [const { AtomicU64::new(0) }; ARM_WORDS];
 pub fn init(cmdline: &str) {
     let mut armed = [0u64; ARM_WORDS];
     for token in toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t)) {
-        arm(&mut armed, token);
+        // A name that ends in `=` carries the rest of its token as a value.
+        let name = match token.split_once('=') {
+            Some((name, value)) => {
+                let name = &token[..=name.len()];
+                take_value(name, value);
+                name
+            }
+            None => token,
+        };
+        arm(&mut armed, name);
     }
     for (name, implied) in IMPLIES {
         if is_armed(&armed, name) {
@@ -218,6 +253,39 @@ pub fn init(cmdline: &str) {
     if armed.iter().any(|&word| word != 0) {
         log!("actuators: {cmdline}");
     }
+}
+
+/// The value a valued actuator carries, kept where its reader finds it.
+#[cfg(feature = "boot-actuators")]
+fn take_value(name: &str, value: &str) {
+    match name {
+        "xhci-leave=" => {
+            let id = toyos_abi::syscall::PciId::parse(value).unwrap_or_else(|| {
+                panic!("boot parameter {name}{value}: not <vendor>:<device> in hex")
+            });
+            XHCI_LEFT.store(id.wire(), Ordering::Relaxed);
+        }
+        _ => panic!("boot parameter {name}{value}: this kernel declares no such valued actuator"),
+    }
+}
+
+/// [`PciId::wire`](toyos_abi::syscall::PciId::wire) of the controller
+/// `xhci-leave=` names, read only once that actuator is armed.
+#[cfg(feature = "boot-actuators")]
+static XHCI_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// The xHCI controller `xhci-leave=` leaves to a claim, if it is armed.
+#[cfg(feature = "boot-actuators")]
+pub fn xhci_left() -> Option<toyos_abi::syscall::PciId> {
+    xhci_leave().then(|| {
+        toyos_abi::syscall::PciId::from_wire(XHCI_LEFT.load(Ordering::Relaxed))
+            .expect("stored from an id's own word")
+    })
+}
+
+#[cfg(not(feature = "boot-actuators"))]
+pub const fn xhci_left() -> Option<toyos_abi::syscall::PciId> {
+    None
 }
 
 #[cfg(feature = "boot-actuators")]

@@ -52,7 +52,6 @@ pub fn modifiers() -> u8 {
 
 /// Queue one key transition; a transition to an already-held state queues nothing.
 pub fn handle_key(usage: u8, pressed: bool) -> bool {
-    // Sole path into KEY_BUF; splitting per driver would miss a Ctrl+Alt+D pressed across two devices.
     if usage == 0 {
         return false;
     }
@@ -66,12 +65,6 @@ pub fn handle_key(usage: u8, pressed: bool) -> bool {
         if pressed { *word |= bit } else { *word &= !bit }
         modifiers_of(&held)
     };
-
-    // Ctrl+Alt+D: keyed by HID usage so it is the same three keys under every layout; recorded, not run, since the caller holds its driver's guard.
-    if pressed && modifiers & MOD_CTRL != 0 && modifiers & MOD_ALT != 0 && usage == 0x07 {
-        crate::sched::dump::file_request();
-        return false;
-    }
 
     let mut buf = KEY_BUF.lock();
     if buf.len() >= MAX_QUEUED_EVENTS {
