@@ -46,7 +46,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use toyos_sha2::Sha256;
 
 use crate::arch::Arch;
 use crate::buildlock::{self, Guard, Held, Keyed};
