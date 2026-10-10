@@ -757,8 +757,6 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     let whole = serial::Serial::named("the boot and the press", console);
     acpi_tables_loaded(&whole, &whole, Q35_S5_SUPPLIED)?;
     whole.must_say_after(ACPI_S5_HANDED, ACPI_PRESSED)?;
-    // QEMU's DSDT names no embedded controller, which the server finds there.
-    whole.must_say_after(&format!("{}no PNP0C09 device is present", acpiserver_api::CONTROLLER_NONE), ACPI_PRESSED)?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())
 }

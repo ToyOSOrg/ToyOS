@@ -3,14 +3,19 @@
 //! mediated access ([`toyos_abi::acpi`]), and [`Kernel`] is that access as
 //! this server asks for it, so a host test answers in the kernel's place.
 //!
-//! **A port is the only thing written.** A read of memory, of a port or of a
-//! function's configuration space, and a write to a port, is the kernel's to
-//! make or refuse, and a refusal it names is denied under that name: the
-//! kernel keeps every port it drives, and makes a byte for `SMI_CMD` a call
-//! into the firmware or refuses it. A write to memory or to configuration
-//! space is denied by name, and so is every access to the embedded
-//! controller's space, which no transaction serves for AML yet. SystemCMOS
-//! never arrives: the interpreter refuses that space itself.
+//! **A read of memory, of a port or of a function's configuration space is
+//! the kernel's to make or refuse**, and a refusal it names is denied under
+//! that name.
+//!
+//! **Only the port writes in [`FORWARDED`] are asked of the kernel**, each
+//! said the first time it is asked: a write to a register that changes
+//! nothing but an index or a POST code. Every other port write is denied by
+//! name and never reaches the kernel: a reset-capable port, `SMI_CMD`, a data
+//! register. The reset register is the kernel's to keep wherever it is. A
+//! write to memory or to configuration space is denied by name, and so is
+//! every access to the embedded controller's space, which no transaction
+//! serves for AML yet. SystemCMOS never arrives: the interpreter refuses that
+//! space itself.
 //!
 //! **The Global Lock is the kernel's to exchange** (ACPI 6.5 §5.2.10.1). A
 //! take that finds the firmware holding it is denied by name ([`HELD`]) and
@@ -45,6 +50,17 @@ pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
 
 /// The denial of a take that found the firmware holding the Global Lock.
 pub const HELD: &str = "the Global Lock: the firmware holds it, and this server waits for no release yet";
+
+/// The port writes asked of the kernel, by port and width: the index
+/// registers of the CMOS's upper bank and of the AMD FCH's power-management
+/// block, a byte each, and the POST port's word. No other: a port write this
+/// server has no account of can be a reset (0x92, 0xCF9), a call into the
+/// firmware (`SMI_CMD`) or a data register's.
+pub const FORWARDED: [(u16, toyos_aml::Access); 3] =
+    [(0x72, toyos_aml::Access::Byte), (0x80, toyos_aml::Access::Word), (0xCD6, toyos_aml::Access::Byte)];
+
+/// The denial of a port write not in [`FORWARDED`].
+pub const UNFORWARDED: &str = "a SystemIO write of a port and width this server asks of the kernel for no AML";
 
 /// The kernel does nothing more for this claim: the machine is stopping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,6 +178,8 @@ pub struct Firmware<'k, K> {
     pub notifies: u64,
     pub refused: Ledger,
     notified: Ledger,
+    /// The [`FORWARDED`] writes asked of the kernel, by port and width.
+    written: Ledger,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
     /// Presses of one of them notified and not yet served.
@@ -182,6 +200,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             notifies: 0,
             refused: Ledger::default(),
             notified: Ledger::default(),
+            written: Ledger::default(),
             buttons: Vec::new(),
             presses: 0,
             stopping: false,
@@ -238,7 +257,11 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
         let what = match at {
+            Address::Io(port) if !FORWARDED.contains(&(port, width)) => UNFORWARDED.into(),
             Address::Io(port) => {
+                if self.written.see(&format!("{port:#x} {width:?}")) {
+                    println!("acpiserver: a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
+                }
                 return match self.kernel.access(Access::write(Space::SystemIo, u64::from(port), wide(width), value)) {
                     Err(Stopping) => Err(self.stopped()),
                     Ok(Answer { made: Ok(_), .. }) => Ok(()),
@@ -466,36 +489,49 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
-    /// A port is written as the kernel answers, its refusal under its name;
-    /// memory and configuration space are never written, and the
-    /// controller's space is not reached, none of them asked of the kernel.
+    /// A port write in [`FORWARDED`] is asked of the kernel, and made or
+    /// refused as it answers; every other port and width, memory and
+    /// configuration space are denied by name, and the controller's space is
+    /// not reached, none of them asked of the kernel.
     #[test]
-    fn only_a_port_is_written_and_the_controllers_space_is_not_reached() {
-        let kernel = machine();
+    fn only_a_forwarded_port_write_is_asked_of_the_kernel() {
+        use toyos_aml::Access::{Byte, DWord, Word};
+        let mut kernel = machine();
+        kernel.ports = vec![(0x72, 0), (0x80, 0)];
         let mut host = Firmware::new(&kernel);
-        // An AMD laptop's `_Q28` writes its query's number to the POST port as a word.
-        assert_eq!(host.write(Address::Io(0xB2), toyos_aml::Access::Word, 0x28), Ok(()));
-        let refused = host.write(Address::Io(0x70), toyos_aml::Access::Byte, 1);
+        assert_eq!(host.write(Address::Io(0x80), Word, 0x28), Ok(()));
+        assert_eq!(host.write(Address::Io(0x72), Byte, 0x08), Ok(()));
+        let refused = host.write(Address::Io(0xCD6), Byte, 0x60);
         assert_eq!(refused, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
         assert_eq!(
             *kernel.asked.borrow(),
             [
-                Access::write(Space::SystemIo, 0xB2, Width::Word, 0x28),
-                Access::write(Space::SystemIo, 0x70, Width::Byte, 1),
+                Access::write(Space::SystemIo, 0x80, Width::Word, 0x28),
+                Access::write(Space::SystemIo, 0x72, Width::Byte, 0x08),
+                Access::write(Space::SystemIo, 0xCD6, Width::Byte, 0x60),
             ]
         );
+        // Reset-capable ports with the values that reset a machine, the
+        // reset register an AMD laptop shares with `SMI_CMD`, a data
+        // register, and a forwarded port at a width it is not forwarded at.
+        for (port, width, value) in
+            [(0xCF9, Byte, 0x06), (0xCF9, Byte, 0x0E), (0x92, Byte, 0x01), (0xB0, Byte, 0xFB), (0xB2, Byte, 0xA0), (0x73, Byte, 0), (0xCD7, Byte, 0), (0x72, Word, 0), (0x80, Byte, 0), (0x80, DWord, 0)]
+        {
+            assert_eq!(host.write(Address::Io(port), width, value), Err(Denied(UNFORWARDED.into())), "{port:#x} {width:?}");
+        }
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
         for (at, denied) in [
             (Address::Memory(NVS), "a write to SystemMemory: this server writes no memory for AML"),
             (function, "a write to PCI_Config: this server writes no configuration space for AML"),
         ] {
-            assert_eq!(host.write(at, toyos_aml::Access::Byte, 0), Err(Denied(denied.into())));
+            assert_eq!(host.write(at, Byte, 0), Err(Denied(denied.into())));
         }
         let controller = Address::EmbeddedControl(0x38);
-        assert_eq!(host.write(controller, toyos_aml::Access::Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
-        assert_eq!(host.read(controller, toyos_aml::Access::Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert_eq!(kernel.asked.borrow().len(), 2, "the kernel was asked for an access this server denies itself");
+        assert_eq!(host.write(controller, Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
+        assert_eq!(host.read(controller, Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
+        assert_eq!(kernel.asked.borrow().len(), 3, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
+        assert_eq!(host.written.counts(), "0x72 Byte x1; 0x80 Word x1; 0xcd6 Byte x1");
     }
 
     /// A Notify of 0x80 to a button the server serves is a press, and to

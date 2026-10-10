@@ -273,11 +273,18 @@ pub mod tests {
 
     /// What every guest boot does, against the kernel's stand-in: QEMU's
     /// DSDT is fetched, loads asking the machine for nothing, and its `\_S5`
-    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of.
+    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of;
+    /// its namespace names no embedded controller, and no control-method
+    /// button where one is looked for.
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
         let kernel = machine(QEMU);
-        assert_eq!(load_only(&kernel, RSDP), Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let (loaded, kept) = load(&kernel, RSDP);
+        assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let Aml { mut interpreter, mut host } = kept.expect("QEMU's DSDT loads");
+        for control_method in [false, true] {
+            assert_eq!(crate::devices::find(&mut interpreter, &mut host, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());
+        }
         assert!(kernel.asked.borrow().iter().all(|access| access.write == 0 && access.space == 0));
         assert!(!kernel.held.get());
         assert_eq!(kernel.handed.get(), Some(0));
