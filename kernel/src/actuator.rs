@@ -126,9 +126,11 @@ actuators! {
     /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
     virtio_no_access_platform = "virtio-no-access-platform";
 
-    /// Leave every IOMMU unit queueing, translating and remapping through
-    /// tables of its own, as firmware may hand one over, just before this
-    /// kernel programs it. Judged by `iommu_firmware_left`.
+    /// Leave every IOMMU unit as firmware may hand one over, just before this
+    /// kernel takes it: a VT-d unit queueing, translating and remapping
+    /// through tables of its own, an AMD-Vi unit blocking every device's DMA
+    /// with its command buffer and event log running. Judged by
+    /// `iommu_firmware_left` and `amdvi_firmware_left`.
     iommu_firmware_left = "iommu-firmware-left";
 
     /// Read the DMAR's flags with `INTR_REMAP` clear, as on a platform whose

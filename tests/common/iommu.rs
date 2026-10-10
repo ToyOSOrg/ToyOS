@@ -1,6 +1,7 @@
 //! `iommu_virtio_platform`: whether each virtio function QEMU creates behind
 //! its emulated VT-d unit, and none created without one, negotiated
-//! `VIRTIO_F_ACCESS_PLATFORM`.
+//! `VIRTIO_F_ACCESS_PLATFORM`. `amdvi_firmware_left`: whether an AMD-Vi unit
+//! firmware left blocking is switched off before the boot stick is driven.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -405,4 +406,70 @@ fn class_function(log: &Serial, class: &str) -> Option<String> {
         }
     }
     found
+}
+
+/// What the kernel says of the one unit QEMU's IVRS describes, as an 11h over
+/// a superseded 10h (`toyos-acpi/tests/ivrs.rs` decodes the same table).
+const AMDVI_UNIT: &str = "iommu: amdvi unit0 @0xfed80000 seg=0 dev=00:02.0 ivhd=0x11";
+const AMDVI_SUPERSEDED: &str = "iommu: IVRS IVHD 0x10 at +48 describes 00:02.0 again";
+/// The xHCI the boot stick is on, among the functions the unit serves.
+const AMDVI_SERVES_XHCI: &str = "iommu: amdvi unit0 serves 00:03.0 data=0x00";
+const AMDVI_OFF: &str = "iommu: amdvi unit0 @0xfed80000 switched off control=0x0000000000000000";
+const AMDVI_NO_ISOLATION: &str = "iommu: AMD-Vi isolates no device this boot: 1 unit(s) described";
+/// A kernel driver's domain refused for want of a unit that translates.
+const NO_DOMAIN: &str = "iommu: no domain of its own for a device: no unit on this machine translates";
+/// The USB gate: the boot stick bound through the controller behind the unit,
+/// which only DMA the unit lets through can do.
+const STICK_BOUND: &str = "usb-storage: 1 device(s)";
+
+/// **A unit an AMD machine's firmware left on is switched off, and the boot
+/// stick's DMA reaches memory.** QEMU's `amd-iommu` is the only AMD-Vi unit
+/// in reach: the T14 is an Intel machine, and the hand-over's register
+/// sequence and the DMA it frees are neither of them a host test's. Two
+/// boots: the shipped kernel finds a unit nothing left on and switches
+/// nothing; the test kernel's `iommu-firmware-left` leaves the unit blocking
+/// every device's DMA with its command buffer and event log running, and
+/// each goes off by its own write before the stick is driven. With the
+/// switch-off reverted that boot's stick never binds.
+pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
+    let profile = Profile::MetalAmdVi;
+    let argv = qemu::profile_argv(&BootOptions { profile, ..Default::default() });
+    let devices: Vec<&str> = argv.windows(2).filter(|w| w[0] == "-device").map(|w| w[1].as_str()).collect();
+    if devices.first() != Some(&"amd-iommu,intremap=off,dma-remap=on") {
+        return Err(format!(
+            "the AMD unit is not the first -device of {devices:?}, so a function ahead of it bypasses it"
+        ));
+    }
+    for (kernel_params, left) in [(&[][..], false), (&["iommu-firmware-left"][..], true)] {
+        let qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions { profile, kernel_params, ..Default::default() });
+        let log = Serial::boot(&qemu);
+        log.must_be_clean()?;
+        log.must_say("Boot: complete")?;
+        log.must_say(STICK_BOUND)?;
+        log.must_say("iommu: IVRS rev=1 ivinfo=0x00002801 efr_images=y preboot_dma_protection=n pa=40 va=0")?;
+        log.must_say(AMDVI_UNIT)?;
+        log.must_say(AMDVI_SUPERSEDED)?;
+        log.must_say(AMDVI_SERVES_XHCI)?;
+        log.must_say(AMDVI_OFF)?;
+        log.must_say(AMDVI_NO_ISOLATION)?;
+        log.must_say(NO_DOMAIN)?;
+        log.must_not_say("no DMAR or IVRS table")?;
+        let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
+        if left {
+            // `CmdBufEn`, `EventLogEn` and `IommuEn`, as the actuator wrote them.
+            if !handed.contains("control=0x0000000000001005") {
+                return Err(format!("the actuator's unit was handed over as {handed:?}"));
+            }
+            for field in ["CmdBufEn", "EventLogEn", "IommuEn"] {
+                log.must_say(&format!("iommu: amdvi unit0 was handed over with {field} on; it goes off"))?;
+            }
+            for field in ["GALogEn", "PPRLogEn"] {
+                log.must_not_say(&format!("with {field} on"))?;
+            }
+        } else {
+            log.must_not_say("was handed over with")?;
+        }
+        eprintln!("  [amdvi] left on = {left}: {handed}; the stick bound behind the unit");
+    }
+    Ok(())
 }

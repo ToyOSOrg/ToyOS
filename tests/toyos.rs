@@ -299,6 +299,11 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // An AMD-Vi unit left blocking every device, switched off before the boot
+    // stick is driven behind it: the T14 is an Intel machine, no AMD one is
+    // in reach, and the register sequence and the DMA it frees are no host
+    // test's.
+    "amdvi_firmware_left",
     // netstack's own state behind a real stack and a peer that ends its
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
@@ -3657,6 +3662,7 @@ fn https_fetch() -> Result<(), String> {
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
