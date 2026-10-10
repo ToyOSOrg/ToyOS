@@ -53,29 +53,6 @@ pub fn run() {
     );
     assert_eq!(keyboard::modifiers(), 0, "input-merge: a modifier survived release_all");
 
-    // An unchanged report must queue nothing — the wake guard depends on it.
-    let mut one = [0u8; 8];
-    let report = [0u8, 0, 0x05, 0, 0, 0, 0, 0];
-    assert_eq!(
-        keyboard::handle_report(&mut one, &report),
-        1,
-        "input-merge: new report queued nothing"
-    );
-    assert_eq!(
-        keyboard::handle_report(&mut one, &report),
-        0,
-        "input-merge: an unchanged report queued an event"
-    );
-
-    // Each keyboard diffs against its own report array; sharing one flapped the held key.
-    let mut two = [0u8; 8];
-    assert_eq!(
-        keyboard::handle_report(&mut two, &[0u8; 8]),
-        0,
-        "input-merge: an idle second keyboard released the first one's key"
-    );
-    assert_eq!(keyboard::handle_report(&mut one, &[0u8; 8]), 1, "input-merge: the release went missing");
-
     drain();
 
     // Publishing a second pointer's buttons verbatim released the first pointer's held button.

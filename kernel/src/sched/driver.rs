@@ -798,6 +798,18 @@ pub fn for_each_dying(mut f: impl FnMut(TaskId)) -> bool {
     .is_some()
 }
 
+/// Every thread on this CPU's run queue, in pick order, for a staging that
+/// says why a woken thread has not run. `false` means a pass owns the state.
+#[cfg(feature = "boot-actuators")]
+pub fn for_each_ready(mut f: impl FnMut(TaskId)) -> bool {
+    try_with_cpu(|cpu| {
+        for task in cpu.rq().tasks() {
+            f(task.ext().id);
+        }
+    })
+    .is_some()
+}
+
 /// The thread this CPU has loaded, if any.
 pub fn running_id() -> Option<TaskId> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().id)).flatten()

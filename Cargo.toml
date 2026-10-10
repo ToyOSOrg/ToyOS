@@ -62,6 +62,7 @@ members = [
     "toyos-random",
     "toyos-rootimage",
     "toyos-smmu",
+    "toyos-ssh",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
@@ -70,6 +71,7 @@ members = [
     "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
+    "toyos-usbhid",
     "toyos-userbound",
     "toyos-virtio",
     "toyos-wallclock",
@@ -200,6 +202,9 @@ getrandom = "0.3"
 # The wallpaper's `powf` and `expf`, in Rust and the same on every host, where
 # `f32`'s own call the host's C library and ROOT's UUID is derived from its bytes.
 libm = "0.2.16"
+# The one `openssh-key-v1` reader and writer, shared with the SSH server's
+# host key, and the `SHA256:` fingerprint the owner's key is named by.
+toyos-ssh = { path = "toyos-ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }

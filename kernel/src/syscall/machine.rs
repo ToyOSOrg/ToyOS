@@ -7,6 +7,7 @@
 
 use alloc::vec::Vec;
 
+use crate::log::console::StopWire;
 use crate::power;
 use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
@@ -66,7 +67,7 @@ fn read_on_cursor<C: toyos_abi::UserSafe>(
     }
 }
 
-fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
+fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallError> {
     // Refused by name, and first: nothing below runs twice.
     if !crate::quiesce::claim_the_shutdown() {
         log!("power: this machine is already stopping, so this caller stops with the rest");
@@ -86,15 +87,24 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     if crate::actuator::usb_reset_under_load() {
         crate::usb_gate::sweep_under_load();
     }
+    let parkable = crate::scheduler::Parkable::at_entry();
+    // The console's writer holding the wire as the stop begins, which a
+    // shipping `klogd` does at any moment.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_across_the_stop() {
+        crate::log::console::hold_across_the_stop(&parkable);
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
     // Every userland thread stops here, the log's writer with the rest:
     // `/system/bin/supervisor` had it flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
-    crate::log::console::drain_for_the_stop();
     // From here on nothing carries a record to a file: the seal below takes
     // every one stamped after this one, the newest the stop found.
     let stop_began = crate::log::read::newest_committed();
+    // Held to the machine's end: every record below reaches the wire before a
+    // CPU is taken down, whoever was writing it when the stop began.
+    let mut wire = crate::log::console::take_for_the_stop(&parkable);
     // The machine's census, which no process's start or end takes.
     crate::census::log();
     #[cfg(feature = "mask-windows")]
@@ -110,10 +120,16 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.
     crate::drivers::xhci::flush_disks();
+    // `klogd` inside its hold of the wire as the last word is logged, which a
+    // stop that did not hold the wire would leave it in at the seal below.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_at_the_last_word() {
+        crate::log::console::hold_at_the_last_word(&parkable);
+    }
     log!("{last}");
     // Order is load-bearing: the console drain, the seal, then the caller's
     // non-returning call.
-    crate::log::console::drain_inline();
+    wire.drain();
     // The next boot's loader reads this page to learn how the last one ended,
     // and a machine that was asked to stop is the one answer that is not a
     // death. Without it the loader would find the loader's own `ARMED` and
@@ -134,7 +150,11 @@ fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // `power::reboot`/`power::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.
     crate::drivers::xhci::seal_shut();
-    Ok(stopping)
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wire_held_at_the_last_word() {
+        crate::log::console::sealed();
+    }
+    Ok((stopping, wire))
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
@@ -148,7 +168,7 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
         return SyscallError::NotSupported.to_u64();
     }
     match quiesce("Shutting down.") {
-        Ok(stopping) => power::shutdown(stopping),
+        Ok((stopping, wire)) => power::shutdown(stopping, wire),
         Err(e) => e.to_u64(),
     }
 }
@@ -163,10 +183,10 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
         log!("reboot: this machine has no reset this kernel performs — refused");
         return SyscallError::NotSupported.to_u64();
     }
-    if let Err(e) = quiesce("Rebooting.") {
-        return e.to_u64();
+    match quiesce("Rebooting.") {
+        Ok((_, wire)) => power::reboot(wire),
+        Err(e) => e.to_u64(),
     }
-    power::reboot();
 }
 
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.
