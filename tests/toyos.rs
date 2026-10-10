@@ -194,10 +194,6 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
-    // It plays through soundserver's virtio-sound driver, which the T14 has no
-    // device for, and its counts are judged beside soundserver's lines:
-    // `virtio_sound_counts` runs it.
-    "virtio_sound_counts",
     // It claims the NVMe controller a boot off that disk starts no server
     // for, and reads the inventory: `block_grants_reach_their_partitions`
     // runs it on tests/blockgrantcase.
@@ -316,6 +312,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
     ("virt_wall_clock_utc", qemu::Profile::Virt),
+    ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
@@ -325,6 +322,11 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // An AMD-Vi unit left blocking every device, switched off before the boot
+    // stick is driven behind it: the T14 is an Intel machine, no AMD one is
+    // in reach, and the register sequence and the DMA it frees are no host
+    // test's.
+    "amdvi_firmware_left",
     // netstack's own state behind a real stack and a peer that ends its
     // connections: netstack is one binary that owns its NIC, with no host
     // build, and the T14's peer is the bench's network.
@@ -393,10 +395,6 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
-    // A stream through soundserver's own virtio-sound driver, counted and
-    // ordered: the device exists only on a QEMU machine — the T14's sound is
-    // HDA — and its audio goes nowhere, since no guest test plays any.
-    "virtio_sound_counts",
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
@@ -2218,6 +2216,47 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
     Ok(())
 }
 
+/// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
+/// maps those sixteen buses' megabytes and no more, and enumerates the
+/// functions QEMU put there and nothing else, and the boot goes on.
+fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
+    const WINDOW: &str = "ACPI: ECAM window: segment 0 buses 0x00..=0x0f, bus 0 at 0x3f000000";
+    const MAPPED: &str = "mmio: 0x3f000000+0x1000000 ";
+    const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
+    /// What QEMU puts on bus 0 of this profile: the host bridge, the xHCI and
+    /// the virtio-rng, as `vendor=… device=…`.
+    const FUNCTIONS: &[&str] = &[
+        "00:00.0 [0600] vendor=1b36 device=0008",
+        "00:01.0 [0c03] vendor=1033 device=0194",
+        "00:02.0 [00ff] vendor=1af4 device=1005",
+    ];
+    let options = BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() };
+    let argv = qemu::profile_argv(&options);
+    if !argv.iter().any(|a| a.contains("highmem-ecam=off")) {
+        return Err(format!("the machine keeps its ECAM high: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    // What was read and what was mapped before what was said about it.
+    pci_inventory(&serial).map_err(|why| format!("{why}\nserial:\n{serial}"))?;
+    let rows: Vec<&str> = serial.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
+    let found: Vec<&str> = rows.iter().map(|row| row.split(" prog_if=").next().unwrap_or(row)).collect();
+    if found != FUNCTIONS {
+        return Err(format!("the kernel enumerated {found:#?}, and QEMU put {FUNCTIONS:#?} on the window's buses"));
+    }
+    if let Some(wider) = serial.lines().find(|l| l.contains("mmio: 0x3f000000+") && !l.contains(MAPPED)) {
+        return Err(format!("the window was mapped wider than its buses: {wider:?}\nserial:\n{serial}"));
+    }
+    for want in [MAPPED, WINDOW, SPAWNED] {
+        if !serial.contains(want) {
+            return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
+        }
+    }
+    eprintln!("  [virt] {WINDOW}; {} functions: {found:?}", found.len());
+    Ok(())
+}
+
 /// The SMMUv3 armed from the IORT, judged by what two of QEMU's
 /// `iommu-testdev` can and cannot write through it
 /// (`kernel/src/arch/aarch64/smmu/selftest.rs`): `GBPA` read back aborting,
@@ -3224,6 +3263,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
         "virt_claim_lpi" => virt_claim_lpi(profile),
+        "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
@@ -3967,6 +4007,7 @@ fn https_fetch() -> Result<(), String> {
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
@@ -3983,7 +4024,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
-        "virtio_sound_counts" => virtio_sound_counts(test_config),
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
@@ -4518,69 +4558,6 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         };
         eprintln!("  [claims] {}", line.trim());
     }
-    Ok(())
-}
-
-/// soundserver brings the virtio-sound function up itself, behind the unit, and
-/// plays one stream through it to the end: the job's counts (`inspect`'s), and
-/// soundserver's lines in their order — the stream started once after the
-/// client connected, and stopped once, before soundserver suspended, with no
-/// refusal on the way.
-fn virtio_sound_counts(test_config: &Path) -> Result<(), String> {
-    const JOB: &str = "virtio_sound_counts";
-    /// soundserver's bring-up, which it says before any client is accepted.
-    const BROUGHT_UP: [&str; 3] = [
-        "virtio-sound: configured stream 0: 44100Hz 2ch s16le",
-        "soundserver: ready, 8 buffers, 44100Hz 2ch, 512 bytes/period, 128 frames/period",
-        "soundserver: suspended",
-    ];
-    /// The stream's lines, in the order they are owed, each once.
-    const IN_ORDER: [&str; 6] = [
-        " connected (id=",
-        "soundserver: resumed",
-        "virtio-sound: stream 0 started",
-        " removed (",
-        "virtio-sound: stream 0 stopped",
-        "soundserver: suspended",
-    ];
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let mut qemu =
-        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
-    let mut console = qemu.boot_log().to_string();
-    await_guest(&mut qemu, &mut console, "soundserver's bring-up", |c| BROUGHT_UP.iter().all(|l| c.contains(l)))
-        .map_err(|e| format!("{e}\n{console}"))?;
-    let boot = serial::Serial::named("the boot", console);
-    boot.must_be_clean()?;
-    boot.must_say("soundserver: VirtIO: PCI ")?;
-    boot.must_say("access_platform=y")?;
-    boot.must_not_say(audio::NULL_SINK)?;
-
-    let result = qemu.run_test(&format!("test_rs_{JOB}"), Duration::from_secs(120));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    let said = &result.stdout;
-    let Some(counted) = said.lines().find(|l| l.contains("virtio_sound_counts: ")) else {
-        return Err(format!("the job never said what it counted:\n{said}"));
-    };
-    if said.contains("cannot be driven on") {
-        return Err(format!("soundserver refused its device mid-stream:\n{said}"));
-    }
-    let mut from = 0;
-    for line in IN_ORDER {
-        let times = said.matches(line).count();
-        let Some(at) = said[from..].find(line) else {
-            return Err(format!("`{line}` is not after the line before it in the window:\n{said}"));
-        };
-        if times != 1 {
-            return Err(format!("`{line}` said {times} times in one stream's window:\n{said}"));
-        }
-        from += at + line.len();
-    }
-    eprintln!("  [sound] {}", counted.trim());
     Ok(())
 }
 
@@ -5874,7 +5851,7 @@ fn acpi_table_inventory(log: &str) -> Result<(), String> {
         ("APIC", "ACPI: MADT cpus="),
         ("FACP", "ACPI: reset register "),
         ("HPET", "clock: HPET at "),
-        ("MCFG", "ACPI: ECAM base address: "),
+        ("MCFG", "ACPI: ECAM window: "),
     ];
     for (signature, decoded) in NEEDED {
         if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))

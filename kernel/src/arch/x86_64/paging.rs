@@ -876,6 +876,10 @@ pub fn with_driven_windows<T>(f: impl FnOnce(&[(u64, u64)]) -> T) -> T {
     f(&DRIVEN.lock())
 }
 
+/// What [`map_mmio`] maps at: whole 2 MiB pages, so a window off this grain
+/// takes its neighbours' bytes with it.
+pub const MMIO_GRAIN: u64 = PAGE_2M;
+
 /// Free function (not a method): the lock and the shootdown are separate
 /// statements. Not optional — `map_2m` may change memory type under a
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.

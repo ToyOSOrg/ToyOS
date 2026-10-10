@@ -5,7 +5,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, DirectMapEnd, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
+use crate::{is_read_as_memory, Cache, DirectMapEnd, Encoding, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
 
 /// One past the kernel direct map's last byte: [`BOOT_MAP_BYTES`], or the end
 /// of the highest range the kernel reads as memory in whole [`PAGE_2M`] pages,
@@ -56,3 +56,6 @@ pub const fn block(phys: u64, cache: Cache) -> u64 {
 pub const fn page(phys: u64, cache: Cache) -> u64 {
     block(phys, cache) & !PAGE_SIZE
 }
+
+/// The three, for [`Plan::write`](crate::Plan::write).
+pub const ENCODING: Encoding = Encoding { table, block, page };

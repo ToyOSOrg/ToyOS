@@ -716,6 +716,10 @@ pub enum Profile {
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
     MetalNoX2apic,
+    /// [`Profile::Metal`] with QEMU's AMD unit in place of VT-d: the boot
+    /// stick's controller behind an AMD-Vi unit, which the kernel finds by the
+    /// IVRS and switches off.
+    MetalAmdVi,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -744,6 +748,12 @@ pub enum Profile {
     /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
     /// function that writes where it is told to through the unit.
     VirtSmmu,
+    /// [`Profile::Virt`] with its ECAM in low memory (`highmem-ecam=off`): a
+    /// 16 MiB window whose MCFG decodes buses 0 to 0x0f, with RAM right past
+    /// it. The one machine QEMU makes whose MCFG decodes fewer than 256
+    /// buses: q35's is as long as firmware programs `PCIEXBAR`, which OVMF
+    /// sets to 256 MiB and QEMU offers no option to change.
+    VirtLowEcam,
     /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
     /// QEMU's `edu`, a function that sends an MSI when told to, and an
     /// `e1000e` the IORT routes past the SMMUv3.
@@ -754,7 +764,14 @@ impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu | Self::VirtIts => {
+            Self::Virt
+            | Self::VirtNoRng
+            | Self::VirtEl2
+            | Self::VirtEl2NoVhe
+            | Self::VirtTcg
+            | Self::VirtSmmu
+            | Self::VirtLowEcam
+            | Self::VirtIts => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -764,7 +781,8 @@ impl Profile {
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::Metal
-            | Self::MetalNoX2apic => Arch::X86_64,
+            | Self::MetalNoX2apic
+            | Self::MetalAmdVi => Arch::X86_64,
         }
     }
 
@@ -820,6 +838,18 @@ pub struct Iommu {
 /// What every profile but the four that vary it declares: the widest address
 /// width QEMU offers and interrupt remapping on.
 pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true, eim: false };
+
+/// Which vendor's unit a machine has.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Unit {
+    /// `intel-iommu`, with the capabilities it is staged with.
+    Vtd(Iommu),
+    /// `amd-iommu`, interrupt remapping off, which needs no split irqchip,
+    /// and `dma-remap` on: without it QEMU 11.1.1 passes every function's DMA
+    /// untranslated whatever the unit is told (`hw/i386/amd_iommu.c:1165`
+    /// and `:1310` at v11.1.1), and a unit left blocking would block nothing.
+    AmdVi,
+}
 
 /// The controller every profile but [`Profile::MetalUsb`] gets. `nec-usb-xhci`
 /// registers `MAX(p2, p3)` attachable USB ports over `p2 + p3` port registers —
@@ -898,7 +928,7 @@ struct Shape {
     /// The unit that decodes this machine's DMA, or its absence. Stated per
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
-    iommu: Option<Iommu>,
+    iommu: Option<Unit>,
     /// `virt`'s SMMUv3, which is a machine property rather than a device.
     smmu: Smmu,
     /// A virtio-rng, which is firmware's alone: edk2's driver puts
@@ -968,7 +998,7 @@ pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
             Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
@@ -995,7 +1025,7 @@ impl Profile {
                 usb: &["usb-kbd,bus=xhci.0"],
                 blockdevs: &[],
                 storage: Storage::Disk { data_bytes: NVME_SMALL },
-                iommu: Some(IOMMU_DEFAULT),
+                iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
                 smmu: Smmu::Absent,
                 rng: false,
                 virtio_gpu: false,
@@ -1013,12 +1043,13 @@ impl Profile {
                 usb: &[],
                 blockdevs: &[],
                 storage: Storage::Stick { nvme_bytes: NVME_SMALL },
-                iommu: Some(IOMMU_DEFAULT),
+                iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
                 smmu: Smmu::Absent,
                 rng: false,
                 virtio_gpu: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
+            Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi), ..Self::Metal.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
@@ -1037,7 +1068,7 @@ impl Profile {
     }
 
     /// The unit this profile puts on the machine, or `None`.
-    pub fn iommu(self) -> Option<Iommu> {
+    pub fn iommu(self) -> Option<Unit> {
         self.shape().iommu
     }
 }
@@ -2162,21 +2193,23 @@ fn qemu_command(
     // is the option that does it, and it leaves i8042/ps2-kbd/ps2-mouse alone.
     qemu.arg("-nodefaults");
 
-    // `kernel-irqchip=split` only when there is a unit: interrupt remapping
-    // needs the userspace half of the irqchip, and a machine with no unit has
-    // no reason to be built differently from the one it has always been.
+    // `kernel-irqchip=split` only for VT-d: its interrupt remapping needs the
+    // userspace half of the irqchip, AMD-Vi is staged with none, and a machine
+    // with no unit has no reason to be built differently from the one it has
+    // always been.
     let mut machine = match arch {
         Arch::X86_64 => {
             assert!(shape.smmu == Smmu::Absent, "a q35 has no SMMUv3");
             arch.machine().to_string()
         }
         Arch::Aarch64 => {
-            // The unit a profile declares is VT-d, which `virt` has none of.
-            assert!(shape.iommu.is_none(), "`virt` has no VT-d");
+            // A unit a profile declares is VT-d or AMD-Vi, which `virt` has none of.
+            assert!(shape.iommu.is_none(), "`virt` has no VT-d or AMD-Vi");
             let machine = match options.profile {
                 Profile::VirtEl2 | Profile::VirtEl2NoVhe => {
                     format!("{},gic-version=3,virtualization=on", arch.machine())
                 }
+                Profile::VirtLowEcam => format!("{},gic-version=3,highmem-ecam=off", arch.machine()),
                 _ => format!("{},gic-version=3", arch.machine()),
             };
             match shape.smmu {
@@ -2186,7 +2219,7 @@ fn qemu_command(
             }
         }
     };
-    if shape.iommu.is_some() {
+    if let Some(Unit::Vtd(_)) = shape.iommu {
         machine.push_str(",kernel-irqchip=split");
     }
 
@@ -2221,13 +2254,19 @@ fn qemu_command(
     // address space unless the unit exists when the function is created, so a
     // unit emitted after the devices it is meant to decode is a unit that
     // decodes nothing — the vacuity trap, in its harness-side form.
-    if let Some(unit) = shape.iommu {
-        qemu.arg("-device").arg(format!(
-            "intel-iommu,intremap={},caching-mode=on,aw-bits={},eim={}",
-            if unit.intremap { "on" } else { "off" },
-            unit.aw_bits,
-            if unit.eim { "on" } else { "off" }
-        ));
+    match shape.iommu {
+        Some(Unit::Vtd(unit)) => {
+            qemu.arg("-device").arg(format!(
+                "intel-iommu,intremap={},caching-mode=on,aw-bits={},eim={}",
+                if unit.intremap { "on" } else { "off" },
+                unit.aw_bits,
+                if unit.eim { "on" } else { "off" }
+            ));
+        }
+        Some(Unit::AmdVi) => {
+            qemu.arg("-device").arg("amd-iommu,intremap=off,dma-remap=on");
+        }
+        None => {}
     }
     // A virtio function reaches memory through `vdev->dma_as`, the machine's own
     // address space with the unit bypassed, unless it is created with this — the
