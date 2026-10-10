@@ -3,8 +3,6 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod driver;
-pub mod dump;
-pub mod dump_request;
 pub mod kthread;
 pub mod payload;
 pub mod reap_gate;

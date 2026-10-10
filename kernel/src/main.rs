@@ -563,6 +563,11 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     report_power_on(kernel_args, complete);
 
     #[cfg(feature = "boot-actuators")]
+    if actuator::panel_painter_stalls() {
+        drivers::panic_console::stall::inside_the_latch();
+    }
+
+    #[cfg(feature = "boot-actuators")]
     if actuator::test_late_panic() {
         late_panic::Nest::<late_panic::Nest<late_panic::Nest<late_panic::Nest<
             late_panic::Nest<late_panic::Nest<late_panic::Nest<late_panic::Nest<

@@ -23,7 +23,6 @@ pub mod entropy;
 pub mod entry;
 pub mod fpu;
 pub mod hw;
-pub mod iommu_unit;
 pub mod irqchip;
 pub mod keyboard_controller;
 pub mod paging;
@@ -33,11 +32,14 @@ pub mod pmu;
 pub mod power;
 pub mod psci;
 pub mod rtc;
+pub mod smmu;
 pub mod smp;
 pub mod switch;
 pub mod tlb;
 pub mod trap;
 pub mod watchdog;
+
+pub use smmu as iommu_unit;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;

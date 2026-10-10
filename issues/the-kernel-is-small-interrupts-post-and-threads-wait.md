@@ -72,9 +72,10 @@ times:
    invisible restart can come later. The kernel keeps ROOT's in-memory read
    path and exec from it. USB storage stays in the kernel until stage 5 moves
    the whole xHCI out, because its one IOMMU domain is shared with the
-   keyboard, and the panic console and the kernel's hotkeys never depend on a
-   userland USB program. No swap, declared. `SYS_DEVICE_DMA_MAP` for zero-copy
-   block I/O. FAT32 on `/log` in the installed product is deferred.
+   keyboard, and the panic console never depends on a userland USB program.
+   Ctrl+Alt+D is removed (owner, 2026-10-10: "i dont want it. i want it
+   removed."). No swap, declared.
+   `SYS_DEVICE_DMA_MAP` for zero-copy block I/O. FAT32 on `/log` in the installed product is deferred.
 
    Stages 3 and 4 are built as these steps, one pull request each:
    1. **`toyos-blockring`**, the protocol, pure. **Exit**: an interleaving
@@ -125,16 +126,10 @@ times:
       interrupts-off and preemption-off windows are measured.
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
        keyboard claim and mass storage over `toyos-blockring`, and the kernel
-       USB bridge is deleted. **What must work with no userland stays off
-       USB**: the kernel's one
-       hotkey, Ctrl+Alt+D (`kernel/src/keyboard.rs`, the blocked-task dump),
-       is recognised on the i8042's transitions and no longer on a USB
-       keyboard's, which from here reach the kernel only as usbd's keyboard
-       claim and are never read for it. A machine whose only keyboard is USB
-       has no kernel hotkey from this step, declared. **Exit**, on the T14:
-       `/log` survives usbd killed mid-batch, the keyboard keeps working while
-       a stick misbehaves, and Ctrl+Alt+D on the machine's own keyboard files
-       the dump with usbd killed. QEMU's xHCI keeps its MSI-X table in the
+       USB bridge is deleted. A USB keyboard's transitions reach the kernel
+       only as usbd's keyboard claim. **Exit**, on the T14: `/log` survives
+       usbd killed mid-batch, and the keyboard keeps working while a stick
+       misbehaves. QEMU's xHCI keeps its MSI-X table in the
        BAR that holds the registers, which refuses usbd's claim as it refuses
        blockd's
        (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`),
@@ -226,11 +221,9 @@ times:
    4. **xHCI's thread is usbd's** (step 10 above): `Xhci`, `poll_if_pending`
       and `port_work_pending` go with the kernel's driver, and `irq_ring` and
       `sync::OwedLock`, whose one user is `XHCI`, with them. **Exit**: step 10's.
-   5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
-      dump and the heartbeat become `pass`'s own, and the TCO feed stays,
-      since what it proves is that passes run. The dump keeps painting its
-      report on the panel and holding it there, a device the pass reaches
-      (owner, 2026-09-30). **Exit**: `drain_irqs` and the
+   5. **The pass is the scheduler's.** `drain_irqs` goes: the heartbeat
+      becomes `pass`'s own, and the TCO feed stays, since what it proves is
+      that passes run. **Exit**: `drain_irqs` and the
       idle loop's device checks are gone, both windows are measured against
       step 2's readings by its rule, and the exits of
       `issues/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
@@ -243,8 +236,8 @@ times:
       exact ports through the TSS I/O permission bitmap and its ISA lines as
       records** (`kernel/src/isa.rs`). **Done** (#592).
    2. **ps2server**, the server over that claim, feeding the kernel's keyboard
-      and mouse streams so Ctrl+Alt+D and the merge with USB HID stay where
-      they are; the kernel's driver, its vector, its actuators and the
+      and mouse streams so the merge with USB HID stays where it is; the
+      kernel's driver, its vector, its actuators and the
       `keyboard_controller` seam deleted. A keyboard claim is refused while no
       source exists, which init's order of endowment then decides. **Exit**:
       no i8042 code in the kernel, and typing resumes after ps2server is killed

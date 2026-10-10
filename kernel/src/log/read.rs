@@ -155,10 +155,6 @@ impl Published {
         self.lost.store(cursor.lost, Ordering::Relaxed);
     }
 
-    pub fn lost(&self) -> u64 {
-        self.lost.load(core::sync::atomic::Ordering::Relaxed)
-    }
-
     /// Resets the position to the oldest record every shard still holds.
     pub fn rewind(&self) {
         use core::sync::atomic::Ordering;

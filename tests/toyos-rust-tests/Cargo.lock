@@ -145,6 +145,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "diskserver"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -815,8 +826,24 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-blockhold"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blockring"
+version = "0.1.0"
+dependencies = [
+ "toyos-blockhold",
+ "toyos-transport",
+]
+
+[[package]]
 name = "toyos-font"
 version = "0.2.0"
+
+[[package]]
+name = "toyos-gpt"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-inspect"
@@ -842,6 +869,7 @@ version = "0.1.0"
 dependencies = [
  "acpiserver-api",
  "cpal",
+ "diskserver",
  "inspect",
  "libloading",
  "logkeeper-api",
@@ -850,6 +878,8 @@ dependencies = [
  "rustls",
  "toyos",
  "toyos-abi",
+ "toyos-blockring",
+ "toyos-gpt",
  "toyos-inspect",
  "toyos-logstream",
  "toyos-tco",
@@ -868,6 +898,17 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
+
+[[package]]
+name = "toyos-transport"
+version = "0.1.0"
+dependencies = [
+ "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-untrusted"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-window"
