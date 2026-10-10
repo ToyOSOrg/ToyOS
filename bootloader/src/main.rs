@@ -16,13 +16,11 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryAttribute, MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
-    Event,
+    table::{boot::{MemoryAttribute, MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, ROOT_HIGH_HALF, ROOT_IDENTITY};
-use toyos_update::policy;
-use toyos_update::record::{self, Booted, Ended, Record};
+use toyos_update::record::Record;
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one, under one [`stamp`]. The arguments
@@ -34,11 +32,8 @@ macro_rules! println {
 }
 
 mod arch;
-mod attempt;
 mod blackbox;
-mod bootnext;
 mod protocol;
-mod floor;
 mod gcd;
 mod loaderlog;
 mod rootbridge;
@@ -46,6 +41,7 @@ mod rootimage;
 mod seed;
 mod slot;
 mod stamp;
+mod survey;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -228,18 +224,6 @@ fn log_partition_guid(handle: Handle, system_table: &SystemTable<Boot>) -> [u8; 
 
 /// [`toyos_tco::FIRMWARE_BOUND_MS`] in the seconds `set_watchdog_timer` takes.
 const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as usize;
-
-/// The head of every line about the attempt count this image has on its stick.
-const ATTEMPTS: &str = "Boot attempts:";
-
-/// **What a boot that never reported looks like from the next one**, and the
-/// line the T14 driver reads as its own verdict.
-///
-/// Written where this pass refuses to boot a kernel because the last one was
-/// handed the machine and said nothing back. Held to the host's spelling by
-/// `toyos_build::bootlog`'s own gate.
-const HUNG_WITHOUT_A_RECORD: &str =
-    "Boot attempts: the previous boot of this image never reported; the machine is handed back";
 
 /// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
 /// for firmware's own use and this is the first one an application may take;
@@ -724,32 +708,14 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
     .to_unix_secs()
 }
 
-/// End a pass that read the black box and boots no kernel, by resetting the
-/// machine rather than returning to the boot manager.
-///
-/// **A UEFI application that returns leaves whatever it registered behind, and
-/// the boot manager then unloads its image.** `uefi_services::init` registers a
-/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
-/// system signals that group from inside its own `ExitBootServices`, and
-/// firmware calls into memory that is no longer ours.
-fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
-    println!("{}", loaderlog::ENDS_AT_CHAIN);
-    loaderlog::close_without_a_kernel();
-    if let Some(event) = exit_event {
-        // After the last line is written: closing it is what stops `println!`
-        // being disabled by a callback, not what enables it, but the ordering
-        // is the one a reader should not have to check.
-        let _ = system_table.boot_services().close_event(event);
-    }
-    system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
-}
-
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First, so this reading is firmware's time and none of the loader's.
     let entry_counter = arch::counter();
     let counter_hz = stamp::start();
-    let exit_event = uefi_services::init(&mut system_table).unwrap();
+    // The exit-boot-services callback it registers stays this image's: every
+    // pass of this loader hands the machine to a kernel.
+    let _exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
     // the image neither exits boot services nor disables it, and a minute is
@@ -766,56 +732,18 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
     // Before the log is opened, and before this loader's own allocations can
-    // land on the page: whether this pass replaces the last boot's file or
-    // appends a report under it is what the page decides, and the boot being
-    // reported on has to stay readable.
+    // land on the page, so the boot being reported on stays readable.
     let (page, claim_refused) = blackbox::claim(&system_table);
     // The log partition's signature is what a record belongs to: `src/image.rs`
     // mints one per image, so a record another image left in this memory is one
     // this pass clears rather than reports.
     let (finding, stale) = blackbox::harvest(page, log_guid);
-    // **The bound on a hang, and it is read before anything is opened**: the
-    // count lives on the same volume `loader.log` is about to take exclusively,
-    // so this is the one window there is to read and write it.
-    let previous = attempt::read(&system_table, &log_guid);
-    let retry = match &previous {
-        Ok(previous) => attempt::is_the_retry(page.is_some(), finding.is_some(), previous.count),
-        Err(_) => false,
-    };
-    // **How the last boot ended is a fact about the image it ran**: a hang the
-    // count caught and every death the page recorded mark that image dead in
-    // its slot, and a handover on purpose proves it.
-    let ended = match (&finding, retry) {
-        (Some(finding), _) => finding.ended,
-        (None, true) => Ended::Hung,
-        (None, false) => Ended::Unknown,
-    };
-    // Read here and not where it is used: a hang is a death only for an image
-    // above it, and this is the pass that has to know which. A floor refused
-    // boots nothing, and is said on the stick before it is said anywhere else.
-    let (mut image_floor, floor_notes) = match floor::read(&system_table, &log_guid) {
-        Ok(read) => read,
-        Err(why) => {
-            loaderlog::open(&system_table, &log_guid, false);
-            println!("{}", loaderlog::BEGINS_AT);
-            println!("{why}");
-            panic!("{why}");
-        }
-    };
-    let accounted = record::account(previous.clone().unwrap_or_default(), ended, image_floor.value);
-    // Cleared where the last boot is accounted for, and where this pass is
-    // about to hand the machine back: both leave the next boot of this image a
-    // first attempt, which is what one hand per hang means.
-    let next = if finding.is_some() || retry {
-        0
-    } else {
-        attempt::next(previous.as_ref().map_or(0, |previous| previous.count))
-    };
-    // Names no booted image: the slot this pass boots is written down once it
-    // is chosen, and only then.
-    let mut record = Record { count: next, ..accounted.record };
-    let wrote = attempt::write(&system_table, &log_guid, &record);
-    loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
+    // **Every pass appends, and every pass boots.** A survey stick keeps each
+    // boot's lines, and a record harvested from the last boot is filed and
+    // the machine surveyed again: no attempt count, no slot's death and no
+    // floor is kept, so nothing here decides not to boot.
+    let separator = if finding.is_some() { loaderlog::SEPARATOR } else { loaderlog::NEXT_BOOT };
+    loaderlog::open(&system_table, &log_guid, separator);
     println!("{}", loaderlog::BEGINS_AT);
     match counter_hz {
         Some(hz) => println!("Loader clock: each line opens with the seconds since the counter's zero, at the counter's stated {hz} Hz"),
@@ -830,46 +758,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     if let Some(line) = stale {
         println!("{line}");
     }
-    // Said either way, because the bound is only as good as what a reader can
-    // see of it: a stick this could not count on is a machine with no bound.
-    match (&previous, &wrote) {
-        (Err(why), _) | (_, Err(why)) => println!("{ATTEMPTS} {why}, so this boot is not counted and a hang here needs a hand"),
-        (Ok(previous), Ok(())) => println!("{ATTEMPTS} this image has had the machine {} time(s) without reporting; now {next}", previous.count),
-    }
-    if let (Some(died), Some(booted)) = (accounted.died, previous.as_ref().ok().and_then(|p| p.booted)) {
-        let mut hex = [0u8; 64];
-        println!(
-            "Slot {}: its image {} died on its last boot, so no pass boots it again until an update replaces it",
-            died.letter(),
-            toyos_update::hex(&booted.digest, &mut hex)
-        );
-    }
-    for note in floor_notes {
-        println!("{note}");
-    }
-    // Raised before either end of the chain below: the pass that reads a
-    // handover on purpose is the one pass that knows the image proved itself —
-    // and raised to the version its slot's signed header carries, verified
-    // here, never to the one the record on the disk names.
-    if let Some(booted) = accounted.proven {
-        match slot::proven(handle, &system_table, &booted) {
-            Ok(version) => {
-                let to = policy::raised(image_floor.value, version);
-                floor::raise(&system_table, &mut image_floor, to);
-            }
-            Err(why) => println!("Anti-rollback floor: not raised, because the proven image is not verified: {why}"),
-        }
-    }
-    if retry {
-        // **The hang, and the only bound there is on one.** The last boot of
-        // this image was handed the machine and never reported — no panic, no
-        // fault, no deliberate handover — and the black box is empty, which is
-        // what a power cut leaves. Booting the same kernel again is the loop the
-        // owner is already in, so this pass boots none: `BootNext` is left alone
-        // and the firmware's own boot order takes the machine.
-        println!("{HUNG_WITHOUT_A_RECORD}");
-        end_this_pass(&system_table, exit_event);
-    }
     if let Some(finding) = finding {
         for line in &finding.lines {
             println!("{line}");
@@ -879,10 +767,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         // lines reads them off the stick.
         for line in &finding.filed {
             loaderlog::line(format_args!("{}{line}", stamp::now()));
-        }
-        if finding.ends_the_chain {
-            // The last boot is accounted for, so this pass boots no kernel.
-            end_this_pass(&system_table, exit_event);
         }
     }
     match firmware_watchdog {
@@ -904,6 +788,8 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         .expect("ACPI 2.0 RSDP not found in UEFI config table");
     println!("RSDP address: {:#x}", rsdp_addr);
 
+    survey::run(&system_table, rsdp_addr, entry_counter);
+
     let boot_part = boot_partition(handle, &system_table);
     match &boot_part {
         Some(p) => println!(
@@ -919,16 +805,10 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
-    let chosen = slot::choose(handle, &system_table, image_floor.value, &record)
+    // Floor zero and no record: the floor is a firmware variable, which this
+    // loader neither reads nor writes on a machine that is not ours.
+    let chosen = slot::choose(handle, &system_table, 0, &Record::default())
         .unwrap_or_else(|why| panic!("Slots: {why}"));
-    record.booted = Some(Booted { slot: chosen.which, version: chosen.version, digest: chosen.digest });
-    match attempt::write_chosen(&log_guid, &record) {
-        Ok(()) => println!("{ATTEMPTS} slot {}'s image is written down as the one this pass boots", chosen.which.letter()),
-        Err(why) => println!(
-            "{ATTEMPTS} {why}, so a death of slot {}'s image is not seen by the next pass",
-            chosen.which.letter()
-        ),
-    }
     let kernel_bytes = chosen.kernel;
     println!("Kernel: {} bytes", kernel_bytes.len());
 
@@ -959,10 +839,10 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
-    // The page says a kernel is running, and `BootNext` says this loader gets the
-    // machine again however that kernel ends.
+    // The page says a kernel is running. No `BootNext` is written: the boot
+    // after a reset is the firmware's own, and picking this stick again from
+    // its boot menu is what reads the page.
     blackbox::arm(page, armed_at(&system_table), log_guid);
-    bootnext::point_at_us(handle, &system_table);
 
     // The last act before the jump, so the smallest possible span of this loader
     // is inside the bound: everything above it can still be reported, and a hang

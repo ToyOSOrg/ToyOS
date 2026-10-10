@@ -25,7 +25,7 @@ const HEAD: &str = "Root bridge:";
 /// UEFI 2.10 §14.2.2, in the spec's own field order.
 #[repr(C)]
 #[unsafe_protocol("2f707ebb-4a1a-11d4-9a38-0090273fc14d")]
-struct PciRootBridgeIo {
+pub(crate) struct PciRootBridgeIo {
     parent_handle: *mut c_void,
     poll_mem: *mut c_void,
     poll_io: *mut c_void,
@@ -33,7 +33,13 @@ struct PciRootBridgeIo {
     mem_write: *mut c_void,
     io_read: *mut c_void,
     io_write: *mut c_void,
-    pci_read: *mut c_void,
+    pci_read: unsafe extern "efiapi" fn(
+        this: *const PciRootBridgeIo,
+        width: u32,
+        address: u64,
+        count: usize,
+        buffer: *mut c_void,
+    ) -> Status,
     pci_write: *mut c_void,
     copy_mem: *mut c_void,
     map: *mut c_void,
@@ -46,7 +52,28 @@ struct PciRootBridgeIo {
     configuration:
         unsafe extern "efiapi" fn(this: *const PciRootBridgeIo, resources: *mut *const c_void)
             -> Status,
-    segment_number: u32,
+    pub(crate) segment_number: u32,
+}
+
+/// `EfiPciWidthUint32` (UEFI 2.10 §14.2.2).
+const WIDTH_U32: u32 = 2;
+
+impl PciRootBridgeIo {
+    /// One configuration dword of `bus:device.function` at `offset`, read by
+    /// the bridge's own `Pci.Read`: firmware's access, through no mapping of
+    /// this loader's. `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_PCI_ADDRESS` carries an
+    /// offset past the first 256 bytes in `ExtendedRegister`, with `Register`
+    /// zero.
+    pub(crate) fn config_u32(&self, bus: u8, device: u8, function: u8, offset: u16) -> Result<u32, Status> {
+        let place = (u64::from(bus) << 24) | (u64::from(device & 0x1f) << 16) | (u64::from(function & 7) << 8);
+        let offset = u64::from(offset & 0xffc);
+        let address = if offset < 0x100 { place | offset } else { place | (offset << 32) };
+        let mut value = 0u32;
+        // SAFETY: `self` is the protocol firmware installed, the call is the
+        // spec's, and the buffer is one `u32` for a count of one at that width.
+        let status = unsafe { (self.pci_read)(self, WIDTH_U32, address, 1, (&mut value as *mut u32).cast()) };
+        if status.is_success() { Ok(value) } else { Err(status) }
+    }
 }
 
 /// A field added or dropped above moves `configuration`, and the symptom is

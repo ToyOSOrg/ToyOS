@@ -112,6 +112,7 @@ members = [
     "userland/sshserver",
     "userland/supervisor",
     "userland/swap",
+    "userland/surveyend",
     "userland/symbolize",
     "userland/terminal",
     "userland/test-runner",

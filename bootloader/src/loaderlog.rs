@@ -4,7 +4,7 @@
 //! here too, written and flushed before the loader goes on.
 //!
 //! The file is `loader.log` at the root of the partition
-//! `KernelArgs::log_partition_guid` names, truncated at each boot. One file
+//! `KernelArgs::log_partition_guid` names, appended to by every boot. One file
 //! under a fixed name and never one of `logkeeper`'s timestamped ones, so a reader
 //! looking for the kernel's log on this volume never picks this up.
 //!
@@ -30,19 +30,6 @@ pub const GOP_AT: &str = "GOP: mode";
 /// The file's last line: [`close`] runs before the memory map is sized, and a
 /// write after that could grow the map the kernel is about to be handed.
 const ENDS_AT: &str = "Loader log: the kernel handoff begins, so this file ends here";
-
-/// The last line of a pass that reads the black box and boots no kernel.
-pub const ENDS_AT_CHAIN: &str =
-    "Loader log: the last boot is accounted for, so this pass resets the machine";
-
-/// Close the file on a pass that boots no kernel. Separate from [`close`]
-/// because that one's last line is about a handoff this pass does not make.
-pub fn close_without_a_kernel() {
-    // SAFETY: [`Sink`]'s contract. Dropping the handle closes it.
-    unsafe { *SINK.0.get() = None };
-    // SAFETY: [`Volume`]'s contract.
-    unsafe { *VOLUME.0.get() = None };
-}
 
 const NAME: &CStr16 = cstr16!("loader.log");
 
@@ -71,6 +58,9 @@ static VOLUME: Volume = Volume(UnsafeCell::new(None));
 /// What a pass that appends writes before its own first line, so the boot being
 /// reported on and the pass reporting on it are never read as one.
 pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
+
+/// What a pass that harvested nothing writes before its own first line.
+pub const NEXT_BOOT: &str = "--- another boot of this stick begins here";
 
 /// The handle of the filesystem on the partition `guid` names, or why this
 /// machine has none.
@@ -101,24 +91,6 @@ pub fn volume_handle(
     }
 }
 
-/// Open the log partition's root, hand it to `visit`, and **release the
-/// protocol when it returns** — which is what makes this usable before [`open`]
-/// takes the same handle exclusively and keeps it for the rest of the pass.
-pub fn with_volume<T>(
-    system_table: &SystemTable<Boot>,
-    guid: &[u8; 16],
-    visit: impl FnOnce(&mut uefi::proto::media::file::Directory) -> T,
-) -> Result<T, alloc::string::String> {
-    let bs = system_table.boot_services();
-    let handle = volume_handle(bs, guid)?;
-    let mut fs = crate::protocol::exclusive::<SimpleFileSystem>(bs, handle)
-        .map_err(|e| alloc::format!("the log partition would not open ({e})"))?;
-    let mut root = fs
-        .open_volume()
-        .map_err(|e| alloc::format!("the log partition has no volume ({e})"))?;
-    Ok(visit(&mut root))
-}
-
 /// Hand the log partition's root to `visit`, once [`open`] holds the volume;
 /// `Err` where it does not, which is a pass whose log never opened.
 pub fn with_open_volume<T>(visit: impl FnOnce(&mut Directory) -> T) -> Result<T, alloc::string::String> {
@@ -131,7 +103,7 @@ pub fn with_open_volume<T>(visit: impl FnOnce(&mut Directory) -> T) -> Result<T,
     }
 }
 
-pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
+pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], separator: &str) {
     let bs = system_table.boot_services();
     let handle = match volume_handle(bs, guid) {
         Ok(handle) => handle,
@@ -145,44 +117,25 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
         Ok(root) => root,
         Err(e) => return refused(format_args!("the log partition has no volume ({e})")),
     };
-    // Deleted and not rewound: `CreateReadWrite` opens what is already there at
-    // offset zero without truncating it, so a shorter boot than the last would
-    // end in the last one's tail.
-    if truncate {
-        match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
-            Ok(stale) => {
-                if let Err(e) = stale.delete() {
-                    return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
-                }
-            }
-            Err(e) if e.status() == Status::NOT_FOUND => {}
-            Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
-        }
-    }
     let file = match root.open(NAME, FileMode::CreateReadWrite, FileAttribute::empty()) {
         Ok(file) => file,
         Err(e) => return refused(format_args!("{NAME} would not open ({e})")),
     };
-    let Some(file) = file.into_regular_file() else {
+    let Some(mut file) = file.into_regular_file() else {
         return refused(format_args!("{NAME} on the log partition is a directory"));
     };
     #[expect(clippy::disallowed_methods, reason = "the exclusive open outlives this function, until `close`")]
     core::mem::forget(fs);
-    let mut file = file;
-    if !truncate {
-        // `EFI_FILE_POSITION_END_OF_FILE` (UEFI 2.10 §13.5.13): the one seek
-        // that does not need the length read first.
-        if let Err(e) = file.set_position(u64::MAX) {
-            return refused(format_args!("{NAME} would not seek to its end ({e})"));
-        }
+    // `EFI_FILE_POSITION_END_OF_FILE` (UEFI 2.10 §13.5.13): the one seek
+    // that does not need the length read first.
+    if let Err(e) = file.set_position(u64::MAX) {
+        return refused(format_args!("{NAME} would not seek to its end ({e})"));
     }
     // SAFETY: [`Sink`]'s contract.
     unsafe { *SINK.0.get() = Some(file) };
     // SAFETY: [`Volume`]'s contract.
     unsafe { *VOLUME.0.get() = Some(root) };
-    if !truncate {
-        println!("{SEPARATOR}");
-    }
+    println!("{separator}");
 }
 
 pub fn line(args: fmt::Arguments) {

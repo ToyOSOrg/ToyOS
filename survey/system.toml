@@ -1,0 +1,44 @@
+# The survey: one boot of a machine that is not ours, which learns what it can
+# and changes nothing.
+#
+# **No program here can write a disk but the stick's log partition.** No
+# `diskserver` row, so nothing claims an NVMe controller; `fileserver` serves
+# the `log` role alone, which is the partition the loader's `log.guid` names on
+# the stick; no `update`, `swap` or `pkg` row, and nothing here starts a program.
+#
+# The boot ends itself: `surveyend` powers the machine off once `inspect` has
+# ended and `acpiserver` has handed the kernel `\_S5`, the supervisor having
+# had the log made whole first; the kernel's boot deadline resets a boot that
+# gets no further.
+# Nothing claims the framebuffer.
+[boot]
+start = ["logkeeper", "fileserver", "acpiserver", "soundserver", "inspect", "surveyend"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+[programs.fileserver]
+restart = true
+roles = ["log"]
+
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+[programs.soundserver]
+service = true
+serves = ["soundserver"]
+devices = ["hda-audio"]
+syscap = ["rt"]
+
+# Once, at the start: what the kernel's inventory and counters, the sound
+# server and the log say of themselves, into the log.
+[programs.inspect]
+receives = ["soundserver", "log"]
+syscap = ["inventory", "counters"]
+
+[programs.surveyend]
+receives = ["power", "log"]
