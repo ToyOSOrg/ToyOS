@@ -346,9 +346,9 @@ kernel a write to a port and to nothing else
 (`userland/acpiserver/src/host.rs`), and the AML that writes after the load
 is a controller query's method, run only on a machine whose power button is
 a control method device; the T14's button is the fixed one. On an AMD
-laptop's tables, outside the tree, every query method the controller
-defines wrote port 0x80 and no other port, with each controller byte read
-as 0 and again as 0xFF: no call.
+laptop's tables, outside the tree, no query method the controller defines
+wrote a port but 0x80, with each controller byte read as 0 and again as
+0xFF: no call.
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:
