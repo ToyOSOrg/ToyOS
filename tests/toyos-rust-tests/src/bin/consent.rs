@@ -84,6 +84,10 @@ fn job() {
     let mut red = Vec::new();
     prepared(&mut red);
     not_a_folder(&mut red);
+    // Every step below asks of an empty store, and waits on the host.
+    if !red.is_empty() {
+        panic!("consent: {red:#?}");
+    }
     let mut hostile = Command::new(SELF)
         .arg("hostile")
         .stdout(Stdio::piped())
