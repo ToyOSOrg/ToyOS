@@ -23,11 +23,23 @@ to 12 at a time, at loads up to 130, beside
 a guest suite and `--ci host`, under memory pressure and under sustained disk
 writes. None stalled, so what stopped the firmware is not known.
 
-Owner: the harness's boot wait, `wait_for_ready` in `tests/common/qemu.rs`.
-Today a boot that times out is killed with nothing read but its console.
+`b65ba04fe` deleted `virt_claim_lpi` for it, with everything only it
+reached: `Profile::VirtIts`, `tests/virtclaimcase` and the `claim_lpi`,
+`claim_unrouted` and `claim_bar_fault` suite binaries. The test is restored
+as it stands at `ec8a746b1`, the commit that also fixed its other red, the
+kernel's lines of a job judged before they reached the PL011: `git revert
+b65ba04fe`. Until then nothing reaches the ITS path the arm64 track's stage 6
+names (`issues/toyos-runs-on-arm64.md`).
+
+Owner: the arm64 track's stage 6, whose ITS path has no test until this
+closes.
 
 ## Exit condition
 
-A stalled boot is reproduced, or caught where it happens, with the guest's
-registers read over QMP before QEMU is killed. The cause is named from them
-and fixed where it lives.
+The stall is reproduced by a deliberate harness, not by the suite: parallel
+boots of the restored `Profile::VirtIts` machine, each waited on
+`SCTLR_EL1=` and run with `-action reboot=shutdown -action shutdown=pause`,
+the registers of one that stalls read over QMP before QEMU is killed
+(`tests/CLAUDE.md`, a death during boot is reproduced by boots). The cause is
+named from them and fixed where it lives, and `virt_claim_lpi` is restored by
+reverting `b65ba04fe` in the same change.
