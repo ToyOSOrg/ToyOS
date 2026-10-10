@@ -1,7 +1,7 @@
 //! What `CR0`, `CR4`, `IA32_EFER`, `IA32_APIC_BASE` and the performance
 //! request hold on every CPU in this machine. One declaration, applied by the
 //! BSP and every AP and checked on each; nothing else may write any of them.
-//! Each register is written whole: `CR0` and `EFER` are constants, `CR4` is
+//! Each register is written whole: `CR0` and `EFER` ([`kernel::efer`]) are constants, `CR4` is
 //! required bits plus whatever optional bits this CPU offers, and
 //! `IA32_APIC_BASE` is the local APIC at its architectural address in the one
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
@@ -21,18 +21,10 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use toyos_cpuvuln::HwpFacts;
 
+use kernel::efer::{self, DECLARED as EFER};
+
 use super::cpu;
 use crate::log;
-
-/// `IA32_EFER`, SDM Vol. 3A §2.2.1. Address from Vol. 4 Table 2-2.
-mod efer {
-    pub const MSR: u32 = 0xC000_0080;
-    pub const SCE: u64 = 1 << 0;
-    pub const LME: u64 = 1 << 8;
-    /// CPU-set on entering long mode; read-only, so excluded from this value.
-    pub const LMA: u64 = 1 << 10;
-    pub const NXE: u64 = 1 << 11;
-}
 
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
@@ -142,10 +134,6 @@ const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
 const _: () = assert!(CR4_REQUIRED & CR4_FORBIDDEN == 0);
 const _: () = assert!(CR4_OPTIONAL & CR4_FORBIDDEN == 0);
 
-/// `IA32_EFER` on every CPU: `SCE`, `LME`, `NXE`. `SCE` is declared only
-/// here, never by `arch::syscall::init`, so one register keeps one owner.
-pub const EFER: u64 = efer::SCE | efer::LME | efer::NXE;
-
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
 
@@ -229,7 +217,8 @@ pub fn init(cpu_id: u32) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
         // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
-        // bits `declaration` has just confirmed this CPU defines.
+        // bits `declaration` has just confirmed this CPU defines and whose `LMA`
+        // is the one this CPU, in long mode, already holds.
         unsafe { cpu::write_cr4(declared) };
         trail_value("control_regs::init: wrmsr efer", EFER, cpu_id);
         // SAFETY: as above.
@@ -499,11 +488,9 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
         "control_regs: cpu{cpu_id} holds cr4={live_cr4:#010x}, the declaration is \
          {declared_cr4:#010x}",
     );
-    // `LMA` is excluded: clearing it means the CPU itself left long mode.
     assert!(
-        live_efer & !efer::LMA == EFER && live_efer & efer::LMA != 0,
-        "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is \
-         {EFER:#06x} plus the CPU's own LMA",
+        live_efer == EFER,
+        "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is {EFER:#06x}",
     );
     CHECKED.fetch_add(1, Ordering::Relaxed);
 }
