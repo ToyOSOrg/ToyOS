@@ -244,6 +244,20 @@ rust-lang/llvm-project, Apache-2.0 WITH LLVM-exception like upstream's; the
 toolchain release carries the clang, `lld` and LLVM tools built from it.
 
 
+licenses/CDLA-Permissive-2.0-webpki-root-certs.txt — the Mozilla roots, CDLA-Permissive-2.0
+-------------------------------------------------------------------------------------------
+
+Every image carries the authorities of Mozilla's root program as the
+`webpki-root-certs` crate publishes them, a derived work of the CCADB's data,
+written by `src/build.rs`'s `trust_roots`. That crate is under
+CDLA-Permissive-2.0, which the owner allowed for these roots: it asks that the
+agreement's text travel with the data, and the image carries it beside them as
+/system/etc/ssl/CDLA-Permissive-2.0.txt.
+
+    Licence text: licenses/CDLA-Permissive-2.0-webpki-root-certs.txt (the
+    crate's `LICENSE`, sha256
+    e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8)
+
 bcachefs/tests/fixtures/ — volumes upstream's tools wrote
 ---------------------------------------------------------
 

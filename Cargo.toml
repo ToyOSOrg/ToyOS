@@ -62,6 +62,7 @@ members = [
     "toyos-random",
     "toyos-rootimage",
     "toyos-smmu",
+    "toyos-ssh",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
@@ -70,6 +71,7 @@ members = [
     "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
+    "toyos-usbhid",
     "toyos-userbound",
     "toyos-virtio",
     "toyos-wallclock",
@@ -200,6 +202,9 @@ toyos-blackbox = { path = "toyos-blackbox" }
 toyos-update = { path = "toyos-update", features = ["sign"] }
 # A throwaway key's seed, from the operating system. Already resolved here.
 getrandom = "0.3"
+# The one `openssh-key-v1` reader and writer, shared with the SSH server's
+# host key, and the `SHA256:` fingerprint the owner's key is named by.
+toyos-ssh = { path = "toyos-ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
@@ -219,6 +224,10 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The commit an image is built from, its time and whether the tree is that
 # commit's, where `git` is a host's C tool (`src/build.rs`'s `release`).
 gix = { version = "0.88", default-features = false, features = ["status", "sha1"] }
+# The authorities `build::trust_roots` writes to ROOT, as the rustls project
+# publishes the Mozilla root program, and the PEM it writes them in.
+webpki-root-certs = "1"
+pem = "4"
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
@@ -233,6 +242,10 @@ toyos-xhci = { path = "toyos-xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
 acpiserver-api = { path = "userland/acpiserver-api" }
+# `common::https`'s server, the peer a guest's HTTPS client is judged
+# against, and the authority and certificates it presents, made per run.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.14"
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
@@ -255,6 +268,7 @@ raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", bra
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 softbuffer = { git = "https://github.com/ToyOSOrg/softbuffer", branch = "toyos-0.4.8" }
 winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
+ring = { git = "https://github.com/ToyOSOrg/ring", branch = "toyos-0.17.14" }
 
 # The one profile every guest binary is built with.
 # Optimised, because an unoptimised guest mismeasures everything under TCG;
