@@ -93,8 +93,7 @@ to a failure arm reaches it: boot it with `BootOptions { qmp: true, .. }` so the
 guest survives the verdict, and ask `human-monitor-command` for
 `info registers -a` over the lane's socket to see what the *other* CPU was
 doing. Take that capture before injecting anything — a keystroke revives a
-halted CPU, so Ctrl+Alt+D both confirms the diagnosis and destroys the evidence
-for it.
+halted CPU, so input over the same socket destroys the evidence for it.
 
 ## What the surviving line establishes about the machine
 

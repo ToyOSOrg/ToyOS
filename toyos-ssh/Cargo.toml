@@ -1,0 +1,18 @@
+# A member of the host workspace (root `Cargo.toml`): its tests run on the
+# host. Nothing built for a guest depends on it yet, so `ring` is built for the
+# host alone until ring links for ToyOS.
+
+[package]
+name = "toyos-ssh"
+description = "An SSH server, sans-IO: the trust boundary of every network login — version exchange, packets, key exchange, publickey authentication and session channels — with no socket, thread or clock of its own."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Every primitive the one algorithm set needs, from one audited crate already
+# resolved in the root lockfile for the build's TLS: X25519, Ed25519 sign and
+# verify, `chacha20_poly1305_openssh` (made for exactly this packet layout),
+# SHA-256 and the system's randomness.
+ring = "0.17"

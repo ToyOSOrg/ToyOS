@@ -8,6 +8,8 @@ pub mod compile;
 pub mod devices;
 pub mod faults;
 pub mod hostedclang;
+/// The HTTPS server a guest's client fetches from.
+pub mod https;
 pub mod iommu;
 pub mod irqcensus;
 /// The `isa` claim's rows on the T14.

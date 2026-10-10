@@ -65,6 +65,8 @@ toyos_net_wire::counters! {
     SackRecovery = "tcp.sack-recovery";
     LimitedTransmit = "tcp.limited-transmit";
     PersistProbe = "tcp.persist-probe";
+    LossProbe = "tcp.loss-probe";
+    LossProbeRecovery = "tcp.loss-probe-recovery";
     KeepaliveProbe = "tcp.keepalive-probe";
     EventOverflow = "tcp.event-overflow";
 }

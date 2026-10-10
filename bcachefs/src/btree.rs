@@ -365,15 +365,24 @@ fn write_entry(b: &mut [u8; BLOCK_SIZE], offset: usize, key: &Key, value: &[u8])
 /// child's subtree, so the answer is the last child whose key is `<= key`,
 /// defaulting to the first — which covers everything below the second key.
 fn find_child(children: &[Child], key: &Key) -> Option<BlockNum> {
-    let mut chosen = children.first()?.block;
-    for child in children {
-        if child.key <= *key {
-            chosen = child.block;
-        } else {
-            break;
-        }
+    children.get(child_index(children, key)).map(|c| c.block)
+}
+
+/// [`find_child`]'s answer as an index into `children`.
+fn child_index(children: &[Child], key: &Key) -> usize {
+    children.iter().take_while(|c| c.key <= *key).count().saturating_sub(1)
+}
+
+/// The block a node the operation in progress changed is written to: its
+/// own where [`BitmapAllocator::in_place`] allows, and otherwise a new one,
+/// the old given up.
+fn own(io: &dyn BlockIO, alloc: &mut BitmapAllocator, block: BlockNum) -> Result<BlockNum, FsError> {
+    if alloc.in_place(block) {
+        return Ok(block);
     }
-    Some(chosen)
+    let moved = alloc.alloc_block(io)?;
+    alloc.free_range(io, block, 1)?;
+    Ok(moved)
 }
 
 /// Search the B+ tree for an exact key match. Returns the leaf entry's value.
@@ -434,27 +443,48 @@ pub fn search_by_hash(
     }
 }
 
-/// Delete an exact key from the B+ tree. Returns the old value if found.
+/// Delete an exact key from the B+ tree: the root after it and the old value,
+/// or `None` with nothing written when no entry has the key.
 /// Does not merge underflowing nodes — just removes the entry from the leaf.
-pub fn delete(io: &dyn BlockIO, root: BlockNum, key: &Key) -> Result<Option<Vec<u8>>, FsError> {
-    let mut block = root;
-    let mut depth = Depth::ROOT;
+pub fn delete(
+    io: &dyn BlockIO,
+    alloc: &mut BitmapAllocator,
+    root: BlockNum,
+    key: &Key,
+) -> Result<Option<(BlockNum, Vec<u8>)>, FsError> {
+    delete_recursive(io, alloc, root, Depth::ROOT, key)
+}
 
-    loop {
-        match Node::read(io, block)? {
-            Node::Leaf(mut entries) => {
-                let Some(pos) = entries.iter().position(|e| e.key == *key) else {
-                    return Ok(None);
-                };
-                let old = entries.remove(pos);
-                Node::Leaf(entries).write(io, block)?;
-                return Ok(Some(old.value));
+fn delete_recursive(
+    io: &dyn BlockIO,
+    alloc: &mut BitmapAllocator,
+    block: BlockNum,
+    depth: Depth,
+    key: &Key,
+) -> Result<Option<(BlockNum, Vec<u8>)>, FsError> {
+    match Node::read(io, block)? {
+        Node::Leaf(mut entries) => {
+            let Some(pos) = entries.iter().position(|e| e.key == *key) else {
+                return Ok(None);
+            };
+            let old = entries.remove(pos);
+            let at = own(io, alloc, block)?;
+            Node::Leaf(entries).write(io, at)?;
+            Ok(Some((at, old.value)))
+        }
+        Node::Interior { level, mut children } => {
+            let idx = child_index(&children, key);
+            let child = children.get(idx).ok_or(FsError::CorruptedNode(block))?.block;
+            let Some((moved, old)) = delete_recursive(io, alloc, child, depth.descend(block)?, key)? else {
+                return Ok(None);
+            };
+            if moved == child {
+                return Ok(Some((block, old)));
             }
-            Node::Interior { children, .. } => {
-                let next = find_child(&children, key).ok_or(FsError::CorruptedNode(block))?;
-                depth = depth.descend(block)?;
-                block = next;
-            }
+            children[idx].block = moved;
+            let at = own(io, alloc, block)?;
+            Node::Interior { level, children }.write(io, at)?;
+            Ok(Some((at, old)))
         }
     }
 }
@@ -499,7 +529,8 @@ fn walk_recursive(
 
 /// Insert a key-value pair into the B+ tree.
 ///
-/// Returns the root block, which changes when the old root was split.
+/// Returns the root block, which changes when the old root was split or
+/// written somewhere new.
 pub fn insert(
     io: &dyn BlockIO,
     alloc: &mut BitmapAllocator,
@@ -508,29 +539,29 @@ pub fn insert(
 ) -> Result<BlockNum, FsError> {
     check_entry_fits(&entry)?;
 
-    match insert_recursive(io, alloc, root, Depth::ROOT, entry)? {
-        InsertResult::Done => Ok(root),
-        InsertResult::Split(siblings) => {
-            let level = Node::read(io, root)?
-                .level()
-                .checked_add(1)
-                .ok_or(FsError::CorruptedNode(root))?;
-            let old_min_key = min_key(io, root, Depth::ROOT)?;
-            let new_root_block = alloc.alloc_block(io)?;
-
-            let mut children = alloc::vec![Child { key: old_min_key, block: root }];
-            children.extend(siblings);
-            Node::Interior { level, children }.write(io, new_root_block)?;
-
-            Ok(new_root_block)
-        }
+    let Placed { at, split } = insert_recursive(io, alloc, root, Depth::ROOT, entry)?;
+    if split.is_empty() {
+        return Ok(at);
     }
+    let level = Node::read(io, at)?
+        .level()
+        .checked_add(1)
+        .ok_or(FsError::CorruptedNode(at))?;
+    let old_min_key = min_key(io, at, Depth::ROOT)?;
+    let new_root_block = alloc.alloc_block(io)?;
+
+    let mut children = alloc::vec![Child { key: old_min_key, block: at }];
+    children.extend(split);
+    Node::Interior { level, children }.write(io, new_root_block)?;
+
+    Ok(new_root_block)
 }
 
-enum InsertResult {
-    Done,
-    /// The node split: these follow it, in key order.
-    Split(Vec<Child>),
+/// Where an insert left a node: its block, and the siblings it split off, in
+/// key order.
+struct Placed {
+    at: BlockNum,
+    split: Vec<Child>,
 }
 
 fn insert_recursive(
@@ -539,7 +570,7 @@ fn insert_recursive(
     block: BlockNum,
     depth: Depth,
     entry: Entry,
-) -> Result<InsertResult, FsError> {
+) -> Result<Placed, FsError> {
     match Node::read(io, block)? {
         Node::Leaf(mut entries) => {
             match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
@@ -548,32 +579,24 @@ fn insert_recursive(
             }
             write_or_split(io, alloc, block, Node::Leaf(entries))
         }
-        Node::Interior { level, children } => {
-            let mut idx = 0;
-            for (i, child) in children.iter().enumerate() {
-                if child.key <= entry.key {
-                    idx = i;
-                } else {
-                    break;
-                }
-            }
+        Node::Interior { level, mut children } => {
+            let idx = child_index(&children, &entry.key);
             let child_block = children.get(idx).ok_or(FsError::CorruptedNode(block))?.block;
             let deeper = depth.descend(block)?;
 
-            match insert_recursive(io, alloc, child_block, deeper, entry)? {
-                InsertResult::Done => Ok(InsertResult::Done),
-                InsertResult::Split(siblings) => {
-                    let mut children = children;
-                    for sibling in siblings {
-                        let pos = match children.binary_search_by(|c| c.key.cmp(&sibling.key)) {
-                            Ok(i) => i + 1,
-                            Err(i) => i,
-                        };
-                        children.insert(pos, sibling);
-                    }
-                    write_or_split(io, alloc, block, Node::Interior { level, children })
-                }
+            let Placed { at, split } = insert_recursive(io, alloc, child_block, deeper, entry)?;
+            if at == child_block && split.is_empty() {
+                return Ok(Placed { at: block, split });
             }
+            children[idx].block = at;
+            for sibling in split {
+                let pos = match children.binary_search_by(|c| c.key.cmp(&sibling.key)) {
+                    Ok(i) => i + 1,
+                    Err(i) => i,
+                };
+                children.insert(pos, sibling);
+            }
+            write_or_split(io, alloc, block, Node::Interior { level, children })
         }
     }
 }
@@ -583,20 +606,23 @@ fn write_or_split(
     alloc: &mut BitmapAllocator,
     block: BlockNum,
     node: Node,
-) -> Result<InsertResult, FsError> {
+) -> Result<Placed, FsError> {
+    let at = own(io, alloc, block)?;
     if NODE_HEADER_SIZE + node.payload_size() <= BLOCK_SIZE {
-        node.write(io, block)?;
-        return Ok(InsertResult::Done);
+        node.write(io, at)?;
+        return Ok(Placed { at, split: Vec::new() });
     }
-    split_node(io, alloc, block, node)
+    Ok(Placed { at, split: split_node(io, alloc, at, node)? })
 }
 
+/// Split `node` across `block` and new siblings, answering the siblings. The
+/// blocks it took are the operation's, which gives them back if it fails.
 fn split_node(
     io: &dyn BlockIO,
     alloc: &mut BitmapAllocator,
     block: BlockNum,
     node: Node,
-) -> Result<InsertResult, FsError> {
+) -> Result<Vec<Child>, FsError> {
     match node {
         Node::Leaf(entries) => {
             // One entry is not a split problem. Halving by *count* used to
@@ -610,28 +636,15 @@ fn split_node(
 
             let mut nodes = pack(entries);
             let first = nodes.remove(0);
-            let mut blocks = Vec::with_capacity(nodes.len());
-            for _ in &nodes {
-                match alloc.alloc_block(io) {
-                    Ok(sibling) => blocks.push(sibling),
-                    Err(e) => {
-                        for taken in blocks {
-                            alloc.free_range(io, taken, 1)?;
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-            // The siblings first: a failure before `block` is replaced leaves
-            // the tree as it was and blocks nothing names.
             let mut children = Vec::with_capacity(nodes.len());
-            for (node, sibling) in nodes.into_iter().zip(blocks) {
+            for node in nodes {
+                let sibling = alloc.alloc_block(io)?;
                 children.push(Child { key: node[0].key, block: sibling });
                 Node::Leaf(node).write(io, sibling)?;
             }
             Node::Leaf(first).write(io, block)?;
 
-            Ok(InsertResult::Split(children))
+            Ok(children)
         }
         Node::Interior { level, mut children } => {
             if children.len() < 2 {
@@ -649,7 +662,7 @@ fn split_node(
             Node::Interior { level, children }.write(io, block)?;
             Node::Interior { level, children: right }.write(io, right_block)?;
 
-            Ok(InsertResult::Split(alloc::vec![Child { key: split_key, block: right_block }]))
+            Ok(alloc::vec![Child { key: split_key, block: right_block }])
         }
     }
 }
@@ -806,9 +819,8 @@ mod tests {
         );
     }
 
-    /// A split that finds no block for a later sibling gives back the ones it
-    /// took for the earlier: nothing names them yet, so nothing else frees
-    /// them.
+    /// A split that finds no block for a later sibling fails its operation,
+    /// which gives back the block it took for the earlier: nothing names it.
     #[test]
     fn a_split_short_of_a_sibling_gives_back_the_ones_it_took() {
         let io = crate::block_io::VecBlockIO::new(16);
@@ -821,10 +833,13 @@ mod tests {
         let mut middle: Vec<Entry> = (0..40).map(|_| entry(72)).collect();
         middle.insert(20, entry(MAX_ENTRY_SIZE - KEY_HEADER_SIZE));
         assert_eq!(pack(middle.clone()).len(), 3, "two siblings, and a block for one");
+        alloc.begin(crate::alloc_bitmap::Reserve::Keep);
         assert!(matches!(
             split_node(&io, &mut alloc, leaf, Node::Leaf(middle)),
             Err(FsError::NoSpace { .. }),
         ));
+        assert_eq!(alloc.free_blocks, 0, "the first sibling took the last block");
+        alloc.fail(&io);
         assert_eq!(alloc.free_blocks, 1, "the first sibling's block went back");
     }
 

@@ -3,8 +3,10 @@
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
 //! supervisor under `serve:fs:<role>`; for its volume, a claim on each partition
-//! of its role a disk the kernel drives carries, and diskserver's `block`
-//! connector in its namespace; and nothing else of the machine. DATA is one
+//! of its role a disk the kernel drives carries, and `block` in its namespace,
+//! a connector to diskserver minted for its role's partition alone — every
+//! DATA partition, or the one the loader named, read-only for the boot
+//! volume; and nothing else of the machine. DATA is one
 //! partition counted over both, and two are refused by name, never guessed
 //! between (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
 //! unique GUID of the partition the loader named for it when no claim on it
@@ -42,7 +44,8 @@ use std::time::{Duration, Instant};
 
 use fileserver::absent::Absent;
 use fileserver::data::{DataVolume, Located, Probed};
-use fileserver::disk::{Claimed, Disk, Ram, Served};
+use diskserver::disk::{Claimed, Disk, Served};
+use fileserver::ram::Ram;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
 use fileserver::rights;

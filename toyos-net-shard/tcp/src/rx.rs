@@ -4,6 +4,23 @@
 //! `unread + (edge − next) ≤ capacity` always holds, so every byte the peer may send has room. The
 //! edge never retreats (RFC 7323 §2.4), bytes already stored are never overwritten, and bytes once
 //! reported in a SACK block are kept until delivered: this receiver never reneges.
+//!
+//! **The capacity grows only by what the user reads.** It starts at
+//! [`limits::RECEIVE_BUFFER_INITIAL`](crate::limits::RECEIVE_BUFFER_INITIAL) and, once a round
+//! trip has passed, rises to twice what the user read per round trip, up to the configured
+//! buffer: enough that a reader keeping up never waits on the window while the sender's rate
+//! doubles. Text nobody reads grows nothing, so a peer alone cannot make a connection hold more
+//! than the initial capacity, and a connection whose round trip is unknown keeps it.
+//!
+//! **The round trip is the receiver's own** (Linux's `tcp_rcv_rtt_measure_ts` and
+//! `tcp_rcv_rtt_measure`): a downloader sends no data, so the sender's SRTT keeps the handshake's
+//! sample while queueing lengthens the path. With timestamps, a full-sized segment carrying a
+//! TSecr not yet seen samples the age of that echo, at least one tick and at most twice the
+//! estimate, averaged with gain 1/8: an echo aged by the peer's own silence moves the estimate
+//! by an eighth at most. Full-sized is the largest segment the peer sends, learned from what
+//! arrives (Linux's `tcp_measure_rcv_mss`), never this end's send MSS: a peer whose segments are
+//! shorter would never be sampled. Without timestamps, the time the peer took to fill the window
+//! offered is at least one round trip, and the least such time is kept.
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -16,6 +33,8 @@ use crate::Instant;
 
 pub const OOO_RANGES: usize = 32;
 pub const DELAYED_ACK: Duration = Duration::from_millis(40);
+/// One TSval tick (RFC 7323 §5.4): an echo's age is never less.
+const TICK: Duration = Duration::from_millis(1);
 /// Distinct duplicate ACKs held for a starved transmit: enough for the peer's fast retransmit.
 pub const DUP_ACKS_OWED: u8 = 3;
 
@@ -65,16 +84,43 @@ pub struct Rx {
     /// The window, in bytes, the last segment sent offered.
     pub last_window: u32,
     pub last_ack_sent: Seq,
+    /// The most the capacity grows to.
+    max: usize,
+    /// When the current measurement began, and what the user has read since.
+    round: (Instant, usize),
+    /// The receiver's round-trip estimate.
+    rtt: Option<Duration>,
+    /// The last TSecr sampled, or without timestamps the edge whose filling is timed, and since when.
+    sampler: Sampler,
+    /// The largest segment the peer sends, the length of the last shorter one, and the bounds
+    /// of both: what our SYN offered less the timestamp option, and the floor MSS less it.
+    rcv_mss: u32,
+    short: u32,
+    mss_bounds: (u32, u32),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Sampler {
+    Echo(Option<u32>),
+    Fill(Option<(Seq, Instant)>),
 }
 
 impl Rx {
-    /// `next` is IRS + 1; the SYN or SYN-ACK offered `window`, unscaled.
-    pub fn new(next: Seq, capacity: usize, shift: u8, window: u32) -> Self {
+    /// `next` is IRS + 1; the SYN or SYN-ACK offered `window`, unscaled; the capacity grows to
+    /// `max`, or to the most a window field at `shift` offers if that is less: an edge past it
+    /// would be one the peer was never told of. `(mss, options)`: the MSS our SYN offered and the
+    /// timestamp option's length on every segment, 0 without timestamps, which picks how the
+    /// round trip is sampled.
+    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, (mss, options): (u32, u32)) -> Self {
+        let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
+        let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
+        let max = max.min(offerable);
+        let floor = u32::from(crate::limits::MSS_FLOOR).saturating_sub(options);
         Self {
             next,
             edge: next.add(window),
             shift,
-            buf: Ring::new(capacity),
+            buf: Ring::new(max.min(initial)),
             ranges: Vec::new(),
             stamp: 0,
             fin: None,
@@ -88,6 +134,59 @@ impl Rx {
             trigger: None,
             last_window: window,
             last_ack_sent: next,
+            max,
+            round: (now, 0),
+            rtt: None,
+            sampler: if options > 0 { Sampler::Echo(None) } else { Sampler::Fill(None) },
+            rcv_mss: floor,
+            short: 0,
+            mss_bounds: (floor, mss.saturating_sub(options)),
+        }
+    }
+
+    /// The most the peer may have unread and in flight to us: the receive buffer's present size.
+    #[cfg(test)]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
+    /// After in-order text of `len` bytes arrived at `now`, with its TSecr and that echo's age
+    /// where it is one this end sent.
+    pub fn sample_rtt(&mut self, len: u32, echo: Option<(u32, Option<Duration>)>, now: Instant) {
+        self.measure_mss(len);
+        match &mut self.sampler {
+            Sampler::Echo(last) => {
+                let Some((echo, age)) = echo.filter(|&(echo, _)| *last != Some(echo)) else { return };
+                *last = Some(echo);
+                let Some(age) = age.filter(|_| len >= self.rcv_mss) else { return };
+                let age = age.max(TICK);
+                self.rtt = Some(self.rtt.map_or(age, |rtt| rtt.saturating_mul(7).saturating_add(age.min(rtt.saturating_mul(2))).checked_div(8).unwrap_or(rtt)));
+            }
+            Sampler::Fill(mark) => {
+                if let Some((edge, since)) = *mark {
+                    if self.next.before(edge) {
+                        return;
+                    }
+                    let took = now.since(since).max(Duration::from_micros(1));
+                    self.rtt = Some(self.rtt.map_or(took, |rtt| rtt.min(took)));
+                }
+                *mark = Some((self.edge, now));
+            }
+        }
+    }
+
+    /// Linux's `tcp_measure_rcv_mss`: a segment as long as the largest so far raises it, up to what
+    /// our SYN offered; two in a row of one shorter length, not under the floor, lower it to that.
+    fn measure_mss(&mut self, len: u32) {
+        let (floor, offered) = self.mss_bounds;
+        let short = core::mem::replace(&mut self.short, 0);
+        if len >= self.rcv_mss {
+            self.rcv_mss = len.min(offered);
+        } else if len >= floor {
+            self.short = len;
+            if len == short {
+                self.rcv_mss = len;
+            }
         }
     }
 
@@ -252,6 +351,11 @@ impl Rx {
     /// The right edge and window field a segment built now carries; [`Self::advertise`] commits them.
     pub fn offer(&self, mss: u32) -> (Seq, u16) {
         let edge = self.candidate(mss).unwrap_or(self.edge);
+        // A window the shift would round to zero is offered as one unit where the buffer has the
+        // room, as Linux does: else a sender owing the text of a hole waits on a window not shut.
+        let unit = 1u32.checked_shl(u32::from(self.shift)).unwrap_or(u32::MAX);
+        let window = edge.since(self.next);
+        let edge = if window > 0 && window < unit && unit <= self.free() { self.next.add(unit) } else { edge };
         let field = (edge.since(self.next) >> self.shift).min(u32::from(u16::MAX));
         (edge, u16::try_from(field).unwrap_or(u16::MAX))
     }
@@ -266,11 +370,15 @@ impl Rx {
         if !self.ranges.is_empty() {
             return None;
         }
-        let free = u32::try_from(self.buf.capacity().saturating_sub(self.buf.len())).unwrap_or(u32::MAX);
         let mask = u32::MAX.checked_shl(u32::from(self.shift)).unwrap_or(0);
-        let candidate = self.next.add(free & mask);
+        let candidate = self.next.add(self.free() & mask);
         let threshold = self.threshold(mss);
         (candidate.after(self.edge) && candidate.since(self.edge) >= threshold).then_some(candidate)
+    }
+
+    /// Room for text the user has not read.
+    fn free(&self) -> u32 {
+        u32::try_from(self.buf.capacity().saturating_sub(self.buf.len())).unwrap_or(u32::MAX)
     }
 
     fn threshold(&self, mss: u32) -> u32 {
@@ -354,11 +462,90 @@ impl Rx {
         self.buf.consume(n);
     }
 
-    /// After the user read: a window update is owed when the window offered was below the
-    /// threshold and the edge would now move by at least it (RFC 9293 §3.8.6.2.2).
-    pub fn after_read(&mut self, mss: u32) {
-        if self.candidate(mss).is_some() && self.last_window < self.threshold(mss) {
-            self.ack_now = true;
+    /// After the user read `n` bytes: the capacity grows by the module's rule, and a window update
+    /// is owed when the window offered was below the threshold and the edge would now move by at
+    /// least it (RFC 9293 §3.8.6.2.2).
+    pub fn after_read(&mut self, n: usize, now: Instant, mss: u32) {
+        let (began, read) = self.round;
+        let read = read.saturating_add(n);
+        self.round = (began, read);
+        if let Some(rtt) = self.rtt.filter(|&rtt| now.since(began) >= rtt) {
+            let read = u128::try_from(read).unwrap_or(u128::MAX);
+            let per_rtt = read.saturating_mul(rtt.as_nanos()).checked_div(now.since(began).as_nanos()).unwrap_or(0);
+            let want = usize::try_from(per_rtt.saturating_mul(2)).unwrap_or(usize::MAX);
+            self.buf.grow(want.min(self.max));
+            self.round = (now, 0);
         }
+        if let Some(candidate) = self.candidate(mss) {
+            if self.last_window < self.threshold(mss) || candidate.since(self.next) >= self.window().saturating_mul(2) {
+                self.ack_now = true;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// A timestamped connection's receive side at t = 0: our SYN offered an MSS of 1,460.
+    fn stamped() -> Rx {
+        Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12))
+    }
+
+    fn echo(rx: &mut Rx, len: u32, tsecr: u32, age: Duration) {
+        rx.sample_rtt(len, Some((tsecr, Some(age))), Instant::from_nanos(u64::from(tsecr) * 1_000_000));
+    }
+
+    /// Full-sized is the peer's largest segment: 1,380-byte segments are sampled though our own
+    /// send MSS is larger. After a 1,448-byte one, a single 1,380-byte segment is not; the second
+    /// in a row lowers full-sized to 1,380 and is.
+    #[test]
+    fn full_sized_is_learned_from_what_arrives() {
+        let mut rx = stamped();
+        echo(&mut rx, 1380, 1, ms(15));
+        assert_eq!(rx.rtt, Some(ms(15)));
+        echo(&mut rx, 1448, 2, ms(15));
+        echo(&mut rx, 1380, 3, ms(23));
+        assert_eq!(rx.rtt, Some(ms(15)));
+        echo(&mut rx, 1380, 4, ms(23));
+        assert_eq!(rx.rtt, Some(ms(16)));
+    }
+
+    /// The echo of the last ACK before the peer fell silent for 10 s ages by the silence: it moves
+    /// the estimate by an eighth, no more. An echo of this tick's TSval ages one tick.
+    #[test]
+    fn an_echo_aged_by_the_peers_silence_moves_the_estimate_an_eighth() {
+        let mut rx = stamped();
+        for tsecr in 1..40 {
+            echo(&mut rx, 1448, tsecr, ms(16));
+        }
+        echo(&mut rx, 1448, 10_040, ms(10_016));
+        assert_eq!(rx.rtt, Some(ms(18)));
+        echo(&mut rx, 1448, 10_041, Duration::ZERO);
+        assert_eq!(rx.rtt, Some(Duration::from_micros(15_875)));
+    }
+
+    /// Without timestamps the time to fill a window offered is at least a round trip, so the
+    /// least is kept: the window offered at 0 ms fills at 80 ms, the next at 200 ms.
+    #[test]
+    fn without_timestamps_the_least_fill_time_is_kept() {
+        let mut rx = Rx::new(Seq::new(1), 65_535, 0, 65_535, Instant::from_nanos(0), (1460, 0));
+        let arrive = |rx: &mut Rx, len: usize, at_ms: u64| {
+            let next = rx.next;
+            assert_eq!(rx.place(next, &vec![0; len]), Placed::InOrder);
+            rx.sample_rtt(u32::try_from(len).unwrap(), None, Instant::from_nanos(at_ms * 1_000_000));
+            rx.read(&mut vec![0; len]);
+            rx.advertise(1460);
+        };
+        arrive(&mut rx, 1460, 0);
+        arrive(&mut rx, 64_075, 80);
+        assert_eq!(rx.rtt, Some(ms(80)));
+        arrive(&mut rx, 65_535, 200);
+        assert_eq!(rx.rtt, Some(ms(80)));
     }
 }

@@ -28,14 +28,20 @@ the two registers' offsets are `kernel/src/arch/aarch64/irqchip.rs`'s: one
 register's fields have two crates. `toyos_its::TRANSLATION_FRAME` and
 `toyos_gicv3::FRAME` are both the GIC's 64 KiB frame.
 
-**Owner.** `issues/toyos-runs-on-arm64.md`'s stage 6: the SMMUv3 unit, which
-writes these tables from `kernel/src/arch/aarch64/` beside `paging.rs`, owns
-the descriptor; the ITS, which edits `irqchip.rs` and reads `GICR_TYPER` for
-every CPU, owns the redistributor.
+**The distributor.** `toyos-its/src/lpi.rs`'s `Layout::new` decodes
+`GICD_TYPER`'s `LPIS`, `IDbits` and `num_LPIs`, and
+`kernel/src/arch/aarch64/irqchip.rs`'s `route_iommu_events` decodes its
+`ITLinesNumber`: one register's fields have two homes.
+
+**Owner.** `issues/toyos-runs-on-arm64.md`. The descriptor is stage 4's, its
+owed break-before-make ordering of a live entry's replacement, which rewrites
+how `kernel/src/arch/aarch64/paging.rs` writes an entry. The redistributor and
+the distributor are stage 6's ITS work, which edits `irqchip.rs` and reads
+`GICR_TYPER` for every CPU and `GICD_TYPER` for its LPIs.
 
 **Exit.** Each bit and the level index has one declaration that the kernel's
 tables, the loader's and the unit's are all written from, and each
-redistributor register's fields have one crate:
+redistributor or distributor register's fields have one home:
 
 ```
 rg -n 'const (VALID|TABLE|TABLE_OR_PAGE|AP_\w+|NOT_GLOBAL|INNER_SHAREABLE|OUTER_SHAREABLE|AF|PXN|UXN): u64' \
@@ -43,5 +49,6 @@ rg -n 'const (VALID|TABLE|TABLE_OR_PAGE|AP_\w+|NOT_GLOBAL|INNER_SHAREABLE|OUTER_
 rg -n 'fn index' kernel/src/arch/aarch64/paging.rs toyos-smmu/src/table.rs
 ```
 
-print nothing, and `rg -l 'GICR_TYPER' toyos-its kernel/gicv3` names one
-directory.
+print nothing, `rg -l 'GICR_TYPER' toyos-its kernel/gicv3` names one
+directory, and `rg -l 'ITLinesNumber|IDbits|num_LPIs' toyos-its/src kernel/src
+kernel/gicv3/src` names files of one crate.

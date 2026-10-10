@@ -104,7 +104,9 @@ pub struct Secrets {
 pub struct Config {
     /// The outgoing interface's IP MTU.
     pub mtu: u16,
+    /// The most a connection's receive buffer grows to; it sets the window scale offered.
     pub receive_buffer: u32,
+    /// The most a connection's send buffer holds; storage is taken as it fills.
     pub send_buffer: u32,
     pub secrets: Secrets,
 }
@@ -150,6 +152,9 @@ pub mod limits {
     pub const EVENTS: usize = 1_024;
     /// The largest window scaling can offer (RFC 7323 §2.3): no receive buffer is larger.
     pub const RECEIVE_BUFFER_MAX: u32 = 65_535 << 14;
+    /// A connection's receive capacity until its reader grows it (`rx`'s module): the most a
+    /// SYN's unscaled window offers, and the most a connection nobody reads ever holds.
+    pub const RECEIVE_BUFFER_INITIAL: u32 = 65_535;
 }
 
 /// A [`Config`] that [`Tcp::new`] refuses.

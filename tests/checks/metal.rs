@@ -391,7 +391,7 @@ fn member(job: &str, adds_ms: u64) -> metal::Member {
 pub fn a_failing_shared_member_fails_itself_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
-    let jobs = ["test_rs_std_tls", "test_rs_fs_large_file"];
+    let jobs = ["test_rs_std_tls_multi_crate", "test_rs_fs_large_file"];
     let exits = |code: i32| {
         format!(
             "{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: {} pid=12 code=0 cpu=4ms\n\

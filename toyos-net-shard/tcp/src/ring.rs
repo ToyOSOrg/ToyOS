@@ -1,5 +1,6 @@
-//! A byte ring of fixed capacity whose storage is taken at the first write, so a connection that
-//! carries no data holds no buffer. Offsets count from the oldest byte held.
+//! A byte ring whose storage grows, by doubling, with the furthest offset written and never past
+//! the capacity, so a connection holds memory for what it holds and not for what it may. The
+//! capacity only rises. Offsets count from the oldest byte held.
 
 use alloc::vec::Vec;
 
@@ -37,18 +38,35 @@ impl Ring {
         self.capacity.saturating_sub(self.len)
     }
 
-    /// The physical index of `offset`, which is below the capacity.
+    /// Raises the capacity to `capacity`; a lower one is no change.
+    pub fn grow(&mut self, capacity: usize) {
+        self.capacity = self.capacity.max(capacity);
+    }
+
+    /// The physical index of `offset`, which is below the storage's length.
     fn at(&self, offset: usize) -> usize {
         let index = self.head.saturating_add(offset);
-        index.checked_sub(self.capacity).unwrap_or(index)
+        index.checked_sub(self.bytes.len()).unwrap_or(index)
+    }
+
+    /// Storage for every offset below `end`, at most the capacity: each byte stored keeps its
+    /// offset, laid out again from the head.
+    fn reserve(&mut self, end: usize) {
+        if end > self.bytes.len() {
+            self.bytes.rotate_left(self.head);
+            self.head = 0;
+            let len = end.max(self.bytes.len().saturating_mul(2)).min(self.capacity);
+            self.bytes.resize(len, 0);
+        }
     }
 
     /// Stores `data` at `offset` without counting it held; what lies past the capacity is not stored.
     pub fn write_at(&mut self, offset: usize, data: &[u8]) -> usize {
-        if self.bytes.is_empty() {
-            self.bytes.resize(self.capacity, 0);
-        }
         let fits = self.capacity.saturating_sub(offset).min(data.len());
+        if fits == 0 {
+            return 0;
+        }
+        self.reserve(offset.saturating_add(fits));
         let start = self.at(offset);
         let (data, _) = data.split_at(fits);
         let first = self.bytes.get_mut(start..).map_or(0, |to| copy(to, data));
@@ -81,7 +99,7 @@ impl Ring {
         let offset = offset.min(self.len);
         let len = len.min(self.len.saturating_sub(offset));
         let start = self.at(offset);
-        let first_len = len.min(self.capacity.saturating_sub(start));
+        let first_len = len.min(self.bytes.len().saturating_sub(start));
         let first = self.bytes.get(start..start.saturating_add(first_len)).unwrap_or_default();
         let second = self.bytes.get(..len.saturating_sub(first_len)).unwrap_or_default();
         (first, second)

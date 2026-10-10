@@ -1,0 +1,20 @@
+# A block service's grants, judged by `block_grants_reach_their_partitions`:
+# diskserver is built into the image and started by nothing but the one job,
+# `partition_grant`, which holds the claim it hands it and the acceptor every
+# grant is minted on. No file server runs, so no partition of the disk the
+# machine booted from is held but the one the job opens.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# `device` because the job mints the controller's claim it hands diskserver,
+# `dup` because test-runner hands a job its capability as a duplicate and
+# hands none without it, and `inventory` because the job reads which
+# partitions the loader named.
+[programs.test-runner]
+syscap = ["device", "dup", "inventory"]
+
+[programs.diskserver]

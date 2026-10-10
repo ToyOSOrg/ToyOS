@@ -100,6 +100,8 @@ pub enum Status {
     Ok,
     /// Refused unread: the request was malformed ([`Refused`]).
     Invalid,
+    /// Refused unissued: a write on a session whose grant does not write.
+    ReadOnly,
     /// The device did not do it, or was reset under it. A write answered this
     /// may or may not have reached the medium.
     Device,
@@ -110,12 +112,15 @@ pub enum Status {
 }
 
 impl Status {
+    const ALL: [Self; 5] = [Self::Ok, Self::Invalid, Self::Device, Self::Lost, Self::ReadOnly];
+
     const fn word(self) -> u32 {
         match self {
             Self::Ok => 0,
             Self::Invalid => 1,
             Self::Device => 2,
             Self::Lost => 3,
+            Self::ReadOnly => 4,
         }
     }
 }
@@ -139,8 +144,7 @@ impl Completion {
         if !reserved.iter().all(|word| word.is(0)) {
             return None;
         }
-        let status =
-            [Status::Ok, Status::Invalid, Status::Device, Status::Lost].into_iter().find(|s| status.is(s.word()))?;
+        let status = Status::ALL.into_iter().find(|s| status.is(s.word()))?;
         Some(Self { tag: opaque(tag), status })
     }
 }
@@ -207,11 +211,11 @@ mod tests {
 
     #[test]
     fn a_completion_survives_its_words_and_refuses_what_it_does_not_define() {
-        for status in [Status::Ok, Status::Invalid, Status::Device, Status::Lost] {
+        for status in Status::ALL {
             let c = Completion { tag: 9, status };
             assert_eq!(Completion::decode(peer(c.encode())), Some(c));
         }
-        assert_eq!(Completion::decode(peer([1, 4, 0, 0])), None);
+        assert_eq!(Completion::decode(peer([1, 5, 0, 0])), None);
         assert_eq!(Completion::decode(peer([1, 0, 1, 0])), None);
     }
 }

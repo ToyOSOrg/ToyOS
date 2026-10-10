@@ -21,8 +21,8 @@ request is an allocation request, and every one of them needs an owner who can
 say no.* Three instances were filed under it — the compositor's windows, netd's
 piped connections, and `SYS_CONNECT` pinning 4 MiB into an unbounded pending
 queue — and all three now have a bound *and* a caller that hears the refusal,
-which is the pair the class asks for: `toyos_desktop::max_windows` and netd's
-`max_piped_connections` each divide an eighth of physical memory by what one unit
+which is the pair the class asks for: `toyos_desktop::max_windows` and netstack's
+`places_for` each divide an eighth of physical memory by what one unit
 costs and refuse past it, and a pipe allocates its ring page on first use rather
 than at `create`. **What a bound alone still does not answer is whose window to
 refuse.** The memory is charged to nobody, so a cap is the only thing between one

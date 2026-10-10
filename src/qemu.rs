@@ -33,8 +33,7 @@
 //! halted-awaiting-interrupt machine from a wedged one.
 //!
 //! **Take that capture before injecting anything.** A keystroke revives a
-//! halted CPU, so Ctrl+Alt+D over the same socket both confirms the diagnosis
-//! and destroys the evidence for it.
+//! halted CPU, so input over the same socket destroys the evidence.
 //!
 //! # Audio
 //!

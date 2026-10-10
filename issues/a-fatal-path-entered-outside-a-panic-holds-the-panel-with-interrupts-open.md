@@ -9,8 +9,8 @@ opened: 2026-10-03
 `panic::halt_all_cpus` says the machine holds its report "with interrupts
 masked" and masks nothing itself: the panic handler and the exception entries
 mask before they reach it. Two callers do not, both in the test kernel alone:
-the `panel-painter-stalls` actuator, from a scheduler pass
-(`kernel/src/drivers/panic_console/mod.rs`'s `stall`), and `SYS_DEBUG`'s
+the `panel-painter-stalls` actuator, from the boot thread after the last boot
+phase (`kernel/src/drivers/panic_console/mod.rs`'s `stall`), and `SYS_DEBUG`'s
 `FATAL_HALT` (`kernel/src/syscall/dispatch.rs`). The CPU that then holds the
 panel spins on the reset bound with `IF` set, and every device handler pinned
 to it still runs on a kernel that has declared itself dead.
@@ -22,7 +22,9 @@ and the halted one's has it clear. With `hold_the_panel` patched to poll port
 0x60 and a key pressed inside the bound, six boots: the patched poll read the
 key in four, each with the panel's CPU cpu1, and never saw it in two. The one
 of those two whose console was kept had the panel on cpu0, where the i8042's
-handler is pinned.
+handler is pinned. Those boots staged the actuator from the Ctrl+Alt+D
+report's painter, in a scheduler pass; that hotkey is removed, and the reading
+has not been taken since the actuator moved to the boot thread.
 
 So that test stages a fatal path no shipping kernel takes. Not measured: that
 the handler read the byte in the two boots the poll missed it; the open `IF`

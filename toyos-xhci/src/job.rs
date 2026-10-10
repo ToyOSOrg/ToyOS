@@ -119,6 +119,14 @@ impl Outcome {
     }
 }
 
+/// Bytes a transfer of `asked` bytes moved, from its event's residue — the
+/// bytes it did not move (xHCI 1.2 §6.4.2.1, TRB Transfer Length). A residue
+/// past `asked` is the controller contradicting itself, and believing it
+/// would name bytes past the buffer: it reads as nothing moved.
+pub const fn moved(asked: u32, residue: u32) -> u32 {
+    asked.saturating_sub(residue)
+}
+
 struct Job<W> {
     what: W,
     /// What the **next** completion this operation owes must name. A two-stage
@@ -451,5 +459,16 @@ mod tests {
         let mut o = two_stage();
         assert!(o.answered(EP0_DATA, CC_SUCCESS, 0));
         assert_eq!(o.finished(100), Some(("descriptor", Outcome::Silent)));
+    }
+
+    /// A short packet moved what it did not leave; a whole transfer left
+    /// nothing; a residue past the request names no byte past the buffer.
+    #[test]
+    fn a_transfer_moved_what_its_residue_did_not_leave() {
+        assert_eq!(moved(8, 5), 3, "a short packet");
+        assert_eq!(moved(8, 0), 8, "a whole transfer");
+        assert_eq!(moved(8, 8), 0, "nothing moved");
+        assert_eq!(moved(8, 9), 0, "a residue past the request");
+        assert_eq!(moved(18, 0x00FF_FFFF), 0, "the field's largest residue");
     }
 }

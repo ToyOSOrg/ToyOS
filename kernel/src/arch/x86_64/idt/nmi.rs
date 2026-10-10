@@ -1,17 +1,13 @@
-//! Vector 2: probes a CPU that isn't answering an IPI kick by writing its
-//! `rip` into a lock-free per-CPU slot for `sched::dump` to read from
-//! ordinary context. Never logs, since the interrupted context may hold the
-//! log ring's lock, and never reschedules, so no preempt-count or
-//! exit-to-user check either.
-//! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
-//! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
-//! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.
-//!
-//! It is also where `crate::hardlockup` samples the CPU it landed on, which is
+//! Vector 2: where `crate::hardlockup` samples the CPU it landed on, which is
 //! the one bound a CPU with `IF` clear is under: the frame's `rip`, `rsp` and
 //! `rflags` are what a machine whose every CPU stopped taking interrupts has
 //! left to say. That path may seal a record and reset from here and never
-//! return.
+//! return. Never logs, since the interrupted context may hold the log ring's
+//! lock, and never reschedules, so no preempt-count or exit-to-user check
+//! either.
+//! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
+//! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
+//! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.
 
 use core::arch::naked_asm;
 
@@ -87,11 +83,8 @@ pub(super) extern "sysv64" fn nmi_entry() {
 
 extern "sysv64" fn note(rip: u64, rsp: u64, rflags: u64) {
     crate::arch::percpu::irq_took!(Nmi);
-    crate::sched::dump::note_nmi(rip);
-    // After the probe's store and before the nested-NMI staging: a hard lockup
-    // ends the machine from here, so the sibling asking where this CPU is still
-    // gets its answer, and nothing stages a second NMI onto a frame that is
-    // sealing a record.
+    // Before the nested-NMI staging: a hard lockup ends the machine from here,
+    // and nothing stages a second NMI onto a frame that is sealing a record.
     crate::hardlockup::sample(rip, rsp, rflags);
     #[cfg(feature = "boot-actuators")]
     stage_nested_if_armed();

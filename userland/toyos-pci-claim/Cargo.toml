@@ -1,0 +1,21 @@
+[package]
+name = "toyos-pci-claim"
+description = "A PCI claim as a userland driver reaches its function: toyos-device-memory's register window and DMA grant over the SDK's Window, and a virtio function's capability walk, mapping and feature negotiation through toyos-virtio."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-device-memory = { path = "../../toyos-device-memory" }
+toyos-virtio = { path = "../../toyos-virtio" }
+
+[features]
+# `Grant::leaked`, for a driver crate's host tests: a dev-dependency's, never
+# enabled by a build that ships.
+host-grant = []
+
+[lib]
+doctest = false

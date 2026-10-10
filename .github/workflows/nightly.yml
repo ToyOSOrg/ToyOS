@@ -87,7 +87,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     container:
-      image: debian:sid
+      image: public.ecr.aws/docker/library/debian:sid
     steps:
       - name: deps
         run: |

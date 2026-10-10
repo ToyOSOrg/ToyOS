@@ -181,31 +181,6 @@ pub fn unbind(source: PointerSource) -> bool {
     published
 }
 
-/// Process a HID report: 6 bytes `[buttons, x_lo, x_hi, y_lo, y_hi, scroll]` for a tablet, 3/4 bytes `[buttons, dx, dy, scroll?]` for a boot mouse. Returns the number of events queued.
-pub fn handle_report(source: PointerSource, report: &[u8]) -> usize {
-    let queued = if report.len() >= 6 {
-        handle_motion(
-            source,
-            report[0],
-            Motion::Absolute {
-                x: u16::from_le_bytes([report[1], report[2]]),
-                y: u16::from_le_bytes([report[3], report[4]]),
-            },
-            report[5] as i8,
-        )
-    } else if report.len() >= 3 {
-        handle_motion(
-            source,
-            report[0],
-            Motion::Relative { dx: report[1] as i8 as i32, dy: report[2] as i8 as i32 },
-            if report.len() > 3 { report[3] as i8 } else { 0 },
-        )
-    } else {
-        false
-    };
-    queued as usize
-}
-
 pub fn has_data() -> bool {
     !MOUSE_BUF.lock().is_empty()
 }

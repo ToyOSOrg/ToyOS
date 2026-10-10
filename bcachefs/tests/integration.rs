@@ -707,7 +707,7 @@ fn a_rename_carries_the_file_to_the_new_name() {
 fn a_renamed_file_keeps_every_extent_it_had() {
     // A file in one run survives a rename that reallocates as readily as one
     // that carries the extents. Discontiguous runs do not.
-    let (mut fs, _) = one_block_holes(64);
+    let (mut fs, _) = one_block_holes(128);
     let data: Vec<u8> = (0..4 * 4096 + 11).map(|i| (i % 251) as u8).collect();
     fs.create("frag.bin", &data, 3).expect("create a fragmented file");
     let (before, _) = fs.file_extents("frag.bin").expect("file_extents").expect("extents");
@@ -837,40 +837,39 @@ fn entries_of_mixed_size_survive_node_splits() {
 
 // --- A short allocation is not the allocation that was asked for ---
 
+/// The blocks every change but a shrink leaves free: the crate's `NODE_RESERVE`.
+const NODE_RESERVE: u32 = 16;
+
 /// A volume whose free space is nothing but one-block holes, so the allocator
-/// can only ever report a run shorter than a multi-block request.
+/// can only ever report a run shorter than a multi-block request: every block
+/// a file's data may take, taken in one run, every other one given back, and
+/// the run the reserve kept taken after.
 ///
-/// Returns the surviving files' single data blocks alongside it: a block the
-/// allocator did *not* hand out is the ground truth for "this write landed on
-/// somebody else's file".
-fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<(String, u64)>) {
+/// Returns the blocks still taken alongside it: a block the allocator did
+/// *not* hand out is the ground truth for "this write landed on somebody
+/// else's file".
+fn one_block_holes(blocks: u64) -> (Mounted<VecBlockIO, ReadWrite>, Vec<u64>) {
     let mut fs = Formatted::format(VecBlockIO::new(blocks)).expect("format").mount();
-    let mut made = Vec::new();
-    for i in 0..blocks {
-        let name = format!("f{i:03}");
-        if fs.create(&name, &vec![0xAAu8; 4096], 0).is_err() {
-            break;
-        }
-        made.push(name);
+    let mut run = Vec::new();
+    let mut page = 0;
+    while fs.resolve_or_alloc_block(&mut run, page).is_ok() {
+        page += 1;
     }
-    assert!(made.len() > 8, "volume too small to fragment: {} files", made.len());
-    for (i, name) in made.iter().enumerate() {
-        if i % 2 == 0 {
-            assert!(fs.delete(name).expect("delete"), "delete {name}");
-        }
-    }
-    let survivors = made
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| i % 2 == 1)
-        .map(|(_, n)| {
-            let (extents, _) = fs.file_extents(n).expect("file_extents").expect("a survivor kept its extents");
-            assert_eq!(extents.len(), 1);
-            assert_eq!(extents[0].block_count, 1);
-            (n.clone(), extents[0].start_block)
-        })
-        .collect();
-    (fs, survivors)
+    let taken: Vec<u64> = run.iter().flat_map(|e| e.start_block..e.start_block + e.block_count as u64).collect();
+    assert!(taken.len() > 8, "volume too small to fragment: {} blocks", taken.len());
+    let holes: Vec<Extent> =
+        taken.iter().step_by(2).map(|&b| Extent { start_block: b, block_count: 1, _reserved: 0 }).collect();
+    fs.free_extents(&holes).expect("give every other block back");
+    let mut tail = vec![Extent { start_block: *taken.last().unwrap(), block_count: 1, _reserved: 0 }];
+    fs.resolve_or_alloc_block(&mut tail, NODE_RESERVE).expect("the run left for nodes");
+
+    let sb = bcachefs::Superblock::read(fs.io()).expect("the superblock");
+    let mut bitmap = bcachefs::BlockBuf::zeroed();
+    bcachefs::BlockIO::read_block(fs.io(), sb.bitmap_start, &mut bitmap).expect("the bitmap");
+    let free = |b: u64| bitmap.0[b as usize / 8] & (1 << (b % 8)) == 0;
+    let run = (0..blocks - 1).find(|&b| free(b) && free(b + 1));
+    assert_eq!(run, None, "a free run longer than one block: this proves nothing");
+    (fs, taken.into_iter().skip(1).step_by(2).collect())
 }
 
 #[test]
@@ -891,11 +890,7 @@ fn a_sparse_write_resolves_inside_the_blocks_it_reserved() {
         reserved.contains(&block),
         "page 3 resolved to block {block}, outside the extents it recorded: {extents:?}",
     );
-    assert!(
-        !survivors.iter().any(|(_, b)| *b == block),
-        "page 3 resolved to block {block}, which belongs to {:?}",
-        survivors.iter().find(|(_, b)| *b == block).map(|(n, _)| n),
-    );
+    assert!(!survivors.contains(&block), "page 3 resolved to block {block}, which was already taken");
 }
 
 #[test]
@@ -923,9 +918,11 @@ fn every_page_of_a_fragmented_file_owns_a_distinct_block() {
 // --- Write-path ordering: an operation that fails must not have destroyed
 //     what it was asked to replace, nor kept what it took. ---
 
-/// Blocks a 64-block volume has to give: everything but the superblock, the
-/// bitmap, the root node and the backup superblock.
-const FREE_BLOCKS_64: usize = 60;
+/// One-block files a fresh 64-block volume takes: its 60 free blocks, less
+/// the 16 a create leaves free, less the formatted root, which the first
+/// change copies and frees only at a commit, less the leaf's copy the last
+/// create holds beside the one it replaces.
+const ONE_BLOCK_FILES_64: usize = 60 - NODE_RESERVE as usize - 2;
 
 fn small_volume() -> Mounted<VecBlockIO, ReadWrite> {
     Formatted::format(VecBlockIO::new(64)).expect("format").mount()
@@ -934,7 +931,7 @@ fn small_volume() -> Mounted<VecBlockIO, ReadWrite> {
 /// How many one-block files this volume still has room for.
 fn one_block_files_that_fit(fs: &mut Mounted<VecBlockIO, ReadWrite>) -> usize {
     let mut fitted = 0;
-    for i in 0..FREE_BLOCKS_64 * 2 {
+    for i in 0..ONE_BLOCK_FILES_64 * 2 {
         let name = format!("p{:03}", i);
         if fs.create(&name, b"x", 0).is_err() {
             break;
@@ -971,7 +968,7 @@ fn a_write_that_runs_out_of_space_gives_back_what_it_took() {
     let mut fresh = small_volume();
     let untouched = one_block_files_that_fit(&mut fresh);
     assert_eq!(
-        untouched, FREE_BLOCKS_64,
+        untouched, ONE_BLOCK_FILES_64,
         "the baseline is wrong, so the comparison below proves nothing",
     );
 
@@ -989,11 +986,15 @@ fn a_write_that_runs_out_of_space_gives_back_what_it_took() {
 #[test]
 fn a_metadata_update_that_cannot_be_reinserted_leaves_the_entry_alone() {
     let mut fs = small_volume();
-    // Every free block spent, and the root leaf filled to within one entry's
-    // growth of a split — so the reinsert has to split and the split has no
-    // block to split into.
-    for i in 0..FREE_BLOCKS_64 {
+    // Every block a file's data may take spent, then the rest on the nodes
+    // of names with no data, until one more needs a block the volume does
+    // not have — so the reinsert has no block to write to.
+    for i in 0..ONE_BLOCK_FILES_64 {
         fs.create(&format!("f{:02}", i), b"x", 100 + i as u64).expect("fill");
+    }
+    let mut names = 0;
+    while fs.create(&format!("empty{names}"), b"", 0).is_ok() {
+        names += 1;
     }
 
     let (extents, _) = fs.file_extents("f00").expect("file_extents").expect("f00 is on the volume");
@@ -1012,6 +1013,103 @@ fn a_metadata_update_that_cannot_be_reinserted_leaves_the_entry_alone() {
         b"x",
     );
     assert_eq!(fs.file_mtime("f00").expect("mtime").unwrap_or(0), 100, "the failed update left its mtime behind");
+}
+
+/// Fill `fs` with names enough to span leaves, then with one-block files,
+/// then with names with none until a create right after a commit is refused:
+/// how many files it took.
+fn filled_to_the_last_name(fs: &mut Mounted<VecBlockIO, ReadWrite>) -> usize {
+    for i in 0..150 {
+        fs.create(&format!("spread{i:03}"), b"", 0).expect("a name with no data");
+        if i % 50 == 49 {
+            fs.sync().expect("a commit");
+        }
+    }
+    let mut files = 0;
+    while fs.create(&format!("f{files:02}"), b"x", 0).is_ok() {
+        files += 1;
+    }
+    let mut names = 0;
+    loop {
+        fs.sync().expect("a commit");
+        let before = names;
+        while fs.create(&format!("empty{names}"), b"", 0).is_ok() {
+            names += 1;
+        }
+        if names == before {
+            break;
+        }
+    }
+    assert!(files > 4 && names > 0, "{files} files and {names} empty names filled the volume");
+    assert!(fs.create("after", b"x", 0).is_err(), "the volume is full");
+    files
+}
+
+/// Shrink every one of `files` to nothing, then delete each, on a volume
+/// filled to its last name; then, after a commit, take a file again.
+fn shrinks_and_deletes_and_takes_again(fs: &mut Mounted<VecBlockIO, ReadWrite>, files: usize) {
+    for i in 0..files {
+        let name = format!("f{i:02}");
+        let (extents, _) = fs.file_extents(&name).expect("file_extents").expect("the file is on the volume");
+        fs.update_metadata(&name, &[], 0, 1).expect("a shrink of a full volume's file");
+        fs.free_extents(&extents).expect("the shrink's free");
+    }
+    for i in 0..files {
+        assert!(matches!(fs.delete(&format!("f{i:02}")), Ok(true)), "the delete of f{i:02}");
+    }
+    fs.sync().expect("a commit");
+    fs.create("after", b"x", 0).expect("a file in what the deletes gave back");
+}
+
+/// A volume filled to its last name still shrinks and deletes every file, and
+/// after the next commit takes a file again.
+#[test]
+fn a_volume_full_of_empty_names_still_deletes_and_frees() {
+    let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
+    let files = filled_to_the_last_name(&mut fs);
+    shrinks_and_deletes_and_takes_again(&mut fs, files);
+}
+
+/// Data grown outside any operation takes no block of the reserve, even
+/// where every free block lies in one run after the file's end, so the entry
+/// that records the run does not grow and draws on the reserve itself.
+#[test]
+fn a_file_grown_past_what_the_volume_spares_leaves_the_reserve() {
+    let mut mkfs = Formatted::format(VecBlockIO::new(128)).expect("format");
+    mkfs.create("f00", b"x", 0).expect("a one-block file");
+    let mut fs = mkfs.mount();
+    let (mut extents, _) = fs.file_extents("f00").expect("file_extents").expect("f00 is on the volume");
+
+    let grown = fs.resolve_or_alloc_block(&mut extents, 128);
+    assert!(matches!(grown, Err(FsError::NoSpace { .. })), "a page past every block of the volume: {grown:?}");
+    assert_eq!(extents.len(), 1, "the run is not contiguous with the file, so this proves nothing: {extents:?}");
+    let blocks = extents[0].block_count as u64;
+    fs.update_metadata("f00", &extents, blocks * 4096, 1).expect("the run recorded");
+    fs.sync().expect("a commit");
+
+    let free = bcachefs::Superblock::read(fs.io()).expect("the superblock").free_blocks;
+    assert!(free >= NODE_RESERVE as u64, "the commit holds {free} blocks free, fewer than the reserve");
+    shrinks_and_deletes_and_takes_again(&mut fs, 1);
+}
+
+/// A volume stopped between two commits holds more blocks used than its
+/// superblock counts free; a read-write mount counts its bitmap, so what the
+/// stop leaked is no block a shrink or a delete is promised.
+#[test]
+fn a_mount_after_a_stop_counts_the_blocks_its_bitmap_holds() {
+    let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
+    fs.sync().expect("a commit");
+    fs.create("lost", &[1; 20 * 4096], 0).expect("taken and never committed");
+    let image = (0..128).flat_map(|b| {
+        let mut buf = bcachefs::BlockBuf::zeroed();
+        bcachefs::BlockIO::read_block(fs.io(), BlockNum::new(b), &mut buf).expect("read");
+        buf.as_bytes().to_vec()
+    });
+    let mut fs = Mounted::<_, ReadWrite>::open(VecBlockIO::from_vec(image.collect())).expect("the stopped volume mounts");
+    assert!(matches!(fs.read_file("lost"), Err(FsError::NotFound)), "the stop came before the commit");
+
+    let files = filled_to_the_last_name(&mut fs);
+    shrinks_and_deletes_and_takes_again(&mut fs, files);
 }
 
 // --- The device error channel: a block the device would not give back is not

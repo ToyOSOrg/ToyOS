@@ -1,5 +1,3 @@
-# Host-tested; nothing ships it until the stack replaces smoltcp (issues/toyos-has-its-own-network-stack.md).
-
 [package]
 name = "toyos-net-tcp"
 version = "0.1.0"

@@ -134,11 +134,10 @@ machine that is still running passes somewhere. Judge the next occurrence by the
 signature exactly as before; a green run of this test proves what it always
 proved, which is nothing.
 
-The one instrument that could name what a stopped CPU is doing has still never
-been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
-clear from one halted with its kick undelivered from one wedged below the
-interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
-which destroys what it reports on.
+What a stopped CPU is doing has still never been read off one: in a guest,
+`info registers -a` over QMP (`src/qemu.rs`) gives every vCPU's `RIP`, `RFL`
+and `HLT`, and is taken before injecting anything, since a keystroke revives a
+halted CPU.
 
 ## The reproduction was unreachable from 2026-08-27 to 2026-09-03, and is not any more
 
@@ -167,11 +166,19 @@ calls "#156 did not fire this run, which proves nothing". What changed is that a
 red now means the desktop stopped answering, which is what the declaration was
 written about.
 
-**Exit condition and owner.** Restored when #156 is fixed and a `sched::dump`
-NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
-passes during the freeze — nothing short of that instrument distinguishes this
-signature from a green run, which this entry has already shown proves nothing
-either way. Owner: `kernel::sched`, the placement track that closed the
+**Exit condition and owner.** Restored when #156 is fixed and a reproduction
+confirms no CPU stopped taking scheduler passes during the freeze — nothing
+short of that distinguishes this signature from a green run, which this entry
+has already shown proves nothing either way. The instrument this exit named,
+the blocked-task dump's NMI probe, is removed with its hotkey. What can read it
+now is the kernel's trace diary (`kernel/src/trace.rs`), which every CPU writes
+from its timer and its scheduler, printed by `/system/bin/trace`: a CPU whose
+newest record stands behind the others' at the read stopped passing then, and
+an `IdleEnter` as that record says it went to halt. Its rings hold 8192
+records a CPU, so a CPU that kept passing has overwritten what it said before
+the freeze, and the read has to be taken by a program spawned after it, which
+a reproduction whose desktop stopped answering may not allow. It has never
+been taken on one. Owner: `kernel::sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
 `kernel/pure/sched/cpu.rs`) and is nearest the remaining half; held by the
 orchestrator.

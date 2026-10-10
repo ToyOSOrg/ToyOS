@@ -33,9 +33,12 @@ typed can be ended by whoever sent it.** The sender needs nothing but
 - A window client receives its buffer the same way (`userland/toyos-window/src/lib.rs`).
 - blockd maps the region a client sends with its open (`Region::adopt` in
   `userland/blockd/src/region.rs`), so a *client* holding its connector ends it.
-- netd adopts as pipes the two handles a client sends with a piped socket
-  (`DataPipes::take`) and the one with a piped bind (`handle_tcp_bind_piped`),
-  both in `userland/netd/src/main.rs`: a *client* ends it the same way.
+- netstack adopts as pipes the two handles a client sends with a piped socket
+  (`data_pipes`) and the one with a piped bind (`Sockets::listen`), both in
+  `userland/netstack/src/serve.rs`: a handle that is no pipe end answers a
+  refusal the node ends that client's stream or listener for
+  (`userland/netstack/src/pipes.rs`), and a datagram socket's are netstack's
+  own to read and write.
 
 Nothing in the tree is hostile today, so nothing fails. The property the
 architecture claims — that a process cannot be harmed by what it was not given —

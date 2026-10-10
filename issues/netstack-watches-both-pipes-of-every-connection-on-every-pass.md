@@ -7,8 +7,8 @@ opened: 2026-10-08
 # netstack watches both pipes of every connection on every pass
 
 Every pass of netstack's loop submits a watch for each pipe of each live piped
-connection, ready or not, changed or not (`userland/netstack/src/main.rs`, the
-loop in `main`): an idle connection submits two. A watch replaces its handle's
+connection, ready or not, changed or not (`userland/netstack/src/serve.rs`,
+`Sockets::watch`, called by the loop in `main`): an idle connection submits two. A watch replaces its handle's
 earlier one, so each is a poll allocated and registered again, with the takes
 of the global pipe lock that `arm` makes to read the pipe and find its watches
 (`kernel/src/inbox/mod.rs`).

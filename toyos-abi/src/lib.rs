@@ -32,7 +32,6 @@ pub mod ring;
 pub mod syscall;
 pub mod trace;
 pub mod usersafe;
-pub mod virtio_sound;
 
 pub use handle::{RawHandle, Rights, HANDLE_INVALID};
 pub use usersafe::UserSafe;

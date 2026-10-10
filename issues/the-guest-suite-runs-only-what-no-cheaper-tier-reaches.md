@@ -71,7 +71,6 @@ console's renderer. Exit: as stage A.
   refused while the first holds it.
 - host `screen_early_panel`: the panel repaints after each committed record.
 - host `screen_log_absent`: a `/log` that did not mount is said on the panel.
-- host `screen_blocked_dump`: Ctrl+Alt+D's summary tells the three states apart.
 - host `screen_late_panic`: the fatal report is painted from the snapshot `capture()` froze, so a
   record committed after the capture is absent from the panel; and a frame wider than the panel
   wraps, its tail on the grid before the next frame (`check_wrap`). `screen_panic_muted` holds
@@ -226,9 +225,8 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 - host `sshd_key_auth`: sshd refuses a key not authorized.
 - host `lan_lease_report`: a link that goes down and comes back after a lease neither gives the
   lease up nor starts the client over. The T14 cannot flap its cable, and no T14 row reads a lease
-  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Exit: netd's link-up decision (its main loop and
-  `dhcp::restart`) lifted into a function a netd `#[test]` drives with a lease held, red when the
-  `!dhcp.leased()` guard goes.
+  (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Held on a host by the node's `a_link_that_returns_keeps_a_held_lease_and_announces_it` and
+  `a_link_that_returns_with_no_lease_starts_discovery_over_at_once` (`userland/netstack/node/tests/lease.rs`).
 - metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
   exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
   are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:

@@ -53,7 +53,7 @@ impl Card {
     /// **The record has to be taken, not merely noticed.** A claim reads ready
     /// while it holds an undrained interrupt, so a pass that saw the token and
     /// left it would find the same one on the next `wait` and every one after
-    /// it. What the message meant is in the rings, which `iface.poll` reads.
+    /// it.
     /// This is also where a driver with a per-pass budget gets it back.
     ///
     /// A claim that refuses the read for anything but `WouldBlock` is the
@@ -129,6 +129,24 @@ impl Card {
         snap.put("wire.seen", wire.seen);
         snap.put("errors.missed", wire.missed);
         snap.put("errors.crc", wire.crc_errors);
+    }
+
+    /// Hands the next received frame to `take` and gives its buffer back to
+    /// the card once `take` returns; `false` when none waits.
+    pub fn rx(&self, take: impl FnOnce(&[u8])) -> bool {
+        match self {
+            Self::Virtio(nic) => {
+                let Some((index, len)) = nic.poll_rx() else { return false };
+                take(nic.rx_frame(index, len));
+                nic.rx_done(index);
+            }
+            Self::Intel(nic) => {
+                let Some(frame) = nic.poll_rx() else { return false };
+                take(nic.rx_frame(&frame));
+                nic.rx_done(frame);
+            }
+        }
+        true
     }
 
     /// How many frames the card takes now. [`Self::tx`] is for a caller this

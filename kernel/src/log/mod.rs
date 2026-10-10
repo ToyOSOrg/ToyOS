@@ -6,6 +6,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
+mod handoff;
 pub mod read;
 pub mod recovery;
 pub mod registry;

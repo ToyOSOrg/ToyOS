@@ -1,4 +1,5 @@
-//! The key an image is signed with, and the one place a private key is held.
+//! The key an image and the package repository are signed with
+//! (`src/publish.rs`), and the one place a private key is held.
 //!
 //! **Two keys, chosen by what the image is for.** An image for a QEMU guest
 //! of `cargo run` or `cargo test`, a CI run or a metal-loop stick is signed
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use toyos_update::image::{Header, HEADER_BYTES, SIGNATURE_BYTES, SIGNED_BYTES};
+use toyos_update::repo::Role;
 
 /// The variable the loader and `/system/bin/update` take the public key from
 /// at compile time: 64 lowercase hex digits.
@@ -89,8 +91,7 @@ impl Key {
     /// `SHA256:<base64>` of the OpenSSH public key blob, as `ssh-keygen -l`
     /// prints it: the one name for this key a line may carry.
     pub fn fingerprint(&self) -> String {
-        let digest = toyos_update::sha256(&public_blob(&self.public));
-        format!("SHA256:{}", base64_encode(&digest).trim_end_matches('='))
+        toyos_ssh::hostkey::fingerprint(&self.public)
     }
 
     /// The header naming these sections, and its signature: a slot's signed
@@ -102,6 +103,12 @@ impl Key {
         out[..HEADER_BYTES].copy_from_slice(&bytes);
         out[HEADER_BYTES..].copy_from_slice(&signature);
         out
+    }
+
+    /// The `sig` line this key vouches for a package repository document's
+    /// `body` with, as `role` (`src/publish.rs`).
+    pub fn sign_document(&self, role: Role, body: &[u8]) -> String {
+        toyos_update::repo::render::signature(&self.seed, role, body)
     }
 
     /// A key from a seed the caller chose, for a test that needs a second,
@@ -223,7 +230,7 @@ fn read_owner_key(path: &Path) -> Result<Key, String> {
             path.display()
         )
     })?;
-    let seed = openssh_seed(&text).map_err(|why| format!("{}: {why}", path.display()))?;
+    let seed = toyos_ssh::hostkey::openssh_seed(&text).map_err(|why| format!("{}: {why}", path.display()))?;
     Ok(Key::from_seed(seed, Whose::Owner(path.to_path_buf())))
 }
 
@@ -237,7 +244,7 @@ pub fn mint_owner_key() -> Result<(PathBuf, String), String> {
     let key = Key::mint();
     let dir = path.parent().ok_or_else(|| format!("{} has no directory", path.display()))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let text = openssh_private(&key.seed, &key.public);
+    let text = openssh_text(&key.seed);
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -251,143 +258,11 @@ pub fn mint_owner_key() -> Result<(PathBuf, String), String> {
     Ok((path, key.fingerprint()))
 }
 
-/// `string ssh-ed25519 | string key`, the OpenSSH public key blob.
-fn public_blob(public: &[u8; 32]) -> Vec<u8> {
-    let mut out = Vec::new();
-    put_string(&mut out, b"ssh-ed25519");
-    put_string(&mut out, public);
-    out
-}
-
-fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-fn take_string<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], String> {
-    let len = bytes.get(..4).ok_or("the key ends inside a length")?;
-    let len = u32::from_be_bytes(len.try_into().expect("four bytes")) as usize;
-    let s = bytes.get(4..4 + len).ok_or("the key ends inside a field")?;
-    *bytes = &bytes[4 + len..];
-    Ok(s)
-}
-
-const BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
-const END: &str = "-----END OPENSSH PRIVATE KEY-----";
-const MAGIC: &[u8] = b"openssh-key-v1\0";
-
-/// The Ed25519 seed an unencrypted `openssh-key-v1` file holds
-/// (OpenSSH's `PROTOCOL.key`).
-fn openssh_seed(text: &str) -> Result<[u8; 32], String> {
-    let body = text
-        .trim()
-        .strip_prefix(BEGIN)
-        .and_then(|t| t.strip_suffix(END))
-        .ok_or("not an OpenSSH private key")?;
-    let blob = base64_decode(body)?;
-    let mut rest = blob.strip_prefix(MAGIC).ok_or("not an openssh-key-v1 key")?;
-    if take_string(&mut rest)? != b"none" || take_string(&mut rest)? != b"none" {
-        return Err("the key is encrypted, and a build cannot ask for its passphrase".into());
-    }
-    take_string(&mut rest)?;
-    let count = rest.get(..4).ok_or("no key count")?;
-    if u32::from_be_bytes(count.try_into().expect("four bytes")) != 1 {
-        return Err("the file holds more than one key".into());
-    }
-    rest = &rest[4..];
-    let mut public = take_string(&mut rest)?;
-    let mut private = take_string(&mut rest)?;
-    if take_string(&mut public)? != b"ssh-ed25519" {
-        return Err("the key is not Ed25519".into());
-    }
-    let public: [u8; 32] = take_string(&mut public)?.try_into().map_err(|_| "a public key that is not 32 bytes")?;
-    let checks = private.get(..8).ok_or("no check words")?;
-    if checks[..4] != checks[4..] {
-        return Err("the check words disagree, which is a key that was not decrypted".into());
-    }
-    private = &private[8..];
-    if take_string(&mut private)? != b"ssh-ed25519" {
-        return Err("the private half is not Ed25519".into());
-    }
-    if take_string(&mut private)? != public {
-        return Err("the private half names another public key".into());
-    }
-    let pair = take_string(&mut private)?;
-    let seed: [u8; 32] = pair.get(..32).and_then(|s| s.try_into().ok()).ok_or("a private key that is not 64 bytes")?;
-    if toyos_update::sig::public_of(&seed) != public {
-        return Err("the seed does not make the public key the file names".into());
-    }
-    Ok(seed)
-}
-
 /// An unencrypted `openssh-key-v1` file for `seed`, which OpenSSH reads.
-fn openssh_private(seed: &[u8; 32], public: &[u8; 32]) -> String {
-    let mut blob = MAGIC.to_vec();
-    put_string(&mut blob, b"none");
-    put_string(&mut blob, b"none");
-    put_string(&mut blob, b"");
-    blob.extend_from_slice(&1u32.to_be_bytes());
-    put_string(&mut blob, &public_blob(public));
-    let mut private = Vec::new();
+fn openssh_text(seed: &[u8; 32]) -> String {
     let mut check = [0u8; 4];
     getrandom::fill(&mut check).expect("the operating system's randomness");
-    private.extend_from_slice(&check);
-    private.extend_from_slice(&check);
-    put_string(&mut private, b"ssh-ed25519");
-    put_string(&mut private, public);
-    let mut pair = seed.to_vec();
-    pair.extend_from_slice(public);
-    put_string(&mut private, &pair);
-    put_string(&mut private, b"toyos-image");
-    let mut pad = 1u8;
-    while !private.len().is_multiple_of(8) {
-        private.push(pad);
-        pad += 1;
-    }
-    put_string(&mut blob, &private);
-    let encoded = base64_encode(&blob);
-    let mut text = format!("{BEGIN}\n");
-    for line in encoded.as_bytes().chunks(70) {
-        text.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-        text.push('\n');
-    }
-    text.push_str(END);
-    text.push('\n');
-    text
-}
-
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, &b)| acc | u32::from(b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
-fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
-    let digits: Vec<u8> = text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
-    let mut out = Vec::new();
-    for chunk in digits.chunks(4) {
-        if chunk.len() == 1 {
-            return Err("base64 that ends one digit into a group".into());
-        }
-        let mut n = 0u32;
-        for (i, c) in chunk.iter().enumerate() {
-            let v = ALPHABET.iter().position(|a| a == c).ok_or_else(|| format!("{c:#x} is not base64"))?;
-            n |= (v as u32) << (18 - 6 * i);
-        }
-        out.extend_from_slice(&n.to_be_bytes()[1..chunk.len()]);
-    }
-    Ok(out)
+    toyos_ssh::hostkey::openssh_private(seed, check, "toyos-image")
 }
 
 #[cfg(test)]
@@ -399,8 +274,8 @@ mod tests {
     #[test]
     fn an_owner_key_reads_back_and_signs_what_the_loader_verifies() {
         let key = Key::mint();
-        let text = openssh_private(&key.seed, &key.public);
-        assert_eq!(openssh_seed(&text), Ok(key.seed));
+        let text = openssh_text(&key.seed);
+        assert_eq!(toyos_ssh::hostkey::openssh_seed(&text), Ok(key.seed));
         let header = Header::of(3, b"k", b"c", &[0; 4096]);
         let signed = key.sign(&header);
         let sig: [u8; 64] = signed[HEADER_BYTES..].try_into().unwrap();
@@ -434,7 +309,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("owner-key-mode");
         let path = dir.path().join("key");
         let key = Key::mint();
-        std::fs::write(&path, openssh_private(&key.seed, &key.public)).unwrap();
+        std::fs::write(&path, openssh_text(&key.seed)).unwrap();
         for mode in [0o644, 0o640, 0o604] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             let refusal = read_owner_key(&path).err().expect("a key others may read");
@@ -443,31 +318,5 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let owner = read_owner_key(&path).expect("a 0600 key reads");
         assert_eq!((owner.public, owner.floor_scope()), (key.public, toyos_update::floor::Scope::Machine));
-    }
-
-    /// Everything that is not an unencrypted Ed25519 `openssh-key-v1` key is
-    /// refused, each by the word for it; the fingerprint is the form
-    /// `ssh-keygen -l` prints.
-    #[test]
-    fn a_key_that_is_not_one_is_refused_by_name() {
-        let key = Key::throwaway_from([7; 32]);
-        assert!(openssh_seed("not a key").unwrap_err().contains("not an OpenSSH private key"));
-        let armour = |blob: &[u8]| format!("{BEGIN}\n{}\n{END}\n", base64_encode(blob));
-        let mut encrypted = MAGIC.to_vec();
-        put_string(&mut encrypted, b"aes256-ctr");
-        put_string(&mut encrypted, b"bcrypt");
-        assert!(openssh_seed(&armour(&encrypted)).unwrap_err().contains("encrypted"));
-        let text = openssh_private(&key.seed, &key.public);
-        let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
-        let mut blob = base64_decode(&body).unwrap();
-        // The seed's last byte, inside the private half: a seed that does not
-        // make the public key the file names.
-        let at = blob.windows(32).position(|w| w == key.seed).expect("the seed is in the file") + 31;
-        blob[at] ^= 1;
-        assert!(openssh_seed(&armour(&blob)).unwrap_err().contains("does not make the public key"));
-        assert!(key.fingerprint().starts_with("SHA256:"));
-        assert_eq!(base64_decode(&base64_encode(b"any carnal pleas")).unwrap(), b"any carnal pleas");
-        assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"Ma"), "TWE=");
     }
 }

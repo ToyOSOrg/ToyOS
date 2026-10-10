@@ -157,7 +157,7 @@ struct ProgramConfig {
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
-    /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
+    /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
@@ -337,11 +337,16 @@ struct GuestEnv {
     image_key: String,
     /// Whose floor the loader keeps (`signing::FLOOR_ENV`), which follows the key.
     floor_scope: &'static str,
+    /// `CSysroot::cc_env` for the architecture's userland: every guest crate
+    /// that compiles C compiles it with the toolchain's clang against libc's C
+    /// sysroot, never with the host's `cc`.
+    cc: Vec<(String, String)>,
 }
 
 impl GuestEnv {
-    fn new(sysroot: Sysroot) -> Self {
+    fn new(sysroot: Sysroot, arch: Arch) -> Self {
         Self {
+            cc: crate::clang::CSysroot::of(sysroot.dir(), arch).cc_env(),
             sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
@@ -371,7 +376,8 @@ fn cargo_build(
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
-        .env_remove("RUSTC");
+        .env_remove("RUSTC")
+        .envs(env.cc.iter().map(|(k, v)| (k, v)));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -587,6 +593,11 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
         }
+        // The supervisor grants the idle slot to a launch alone, so a row it
+        // starts at boot, or again, would run holding nothing.
+        if program.slots && config.boot.start.contains(name) {
+            return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
+        }
     }
     if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
         return Err(format!("`[apps] receives` names `{}`, which only `{}` may hold", toyos_swap::PORT, toyos_swap::HOLDER));
@@ -710,6 +721,29 @@ fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_o
     }
 }
 
+/// Where on ROOT the certificate authorities every TLS client trusts are:
+/// `/system/etc/ssl/cert.pem`.
+pub const TRUST_ROOTS: &str = "etc/ssl/cert.pem";
+
+/// The crate [`trust_roots`] reads them out of: `licence::judge` holds them to
+/// its licence and [`TRUST_ROOTS_LICENCE`] to its licence text.
+pub const TRUST_ROOTS_CRATE: &str = "webpki-root-certs";
+
+/// Where on ROOT their licence's text is, and the text: CDLA-Permissive-2.0
+/// lets the roots be shared only with it.
+pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
+    "etc/ssl/CDLA-Permissive-2.0.txt",
+    include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
+);
+
+/// The Mozilla root program's authorities as `webpki-root-certs` publishes
+/// them, each certificate a PEM block in the published order.
+pub fn trust_roots() -> Vec<u8> {
+    let config = pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF);
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter();
+    roots.map(|cert| pem::encode_config(&pem::Pem::new("CERTIFICATE", cert.to_vec()), config)).collect::<String>().into_bytes()
+}
+
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
@@ -730,6 +764,9 @@ fn build_and_assemble(
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
     }
+
+    root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
+    root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
@@ -781,11 +818,6 @@ fn build_programs(
 
     let ws_target = root.join(format!("target/{target}/{PROFILE}"));
 
-    // Every userland crate that compiles C compiles it with the toolchain's
-    // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
-    let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
     // the same reason: a program's path is keyed on (crate, target, profile)
     // alone, so every config in this run writes and reads the same
@@ -800,7 +832,7 @@ fn build_programs(
             extra.push("-p");
             extra.push(pkg);
         }
-        cargo_build(root, target, &extra, env, &cc_env, quiet);
+        cargo_build(root, target, &extra, env, &[], quiet);
     }
 
     for c in &programs {
@@ -1159,7 +1191,7 @@ fn check_params(root: &Path, params: &[String]) {
     let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name) || own.contains(name) || is_valued_param(name),
+            declared.iter().any(|a| arms(a, name)) || own.contains(name) || is_valued_param(name),
             "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
              Actuators it declares: {}.\n\
              Boot parameters it declares: {}.\n\
@@ -1332,6 +1364,12 @@ pub fn manifest_and_symlinks(config: &Path) -> (Vec<u8>, Vec<(String, String)>) 
     let config = parse_config(config);
     let symlinks = config.symlinks.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     (render_manifest(&config), symlinks)
+}
+
+/// Whether the boot parameter `param` arms `actuator`: by its whole name, or,
+/// for a name that ends in `=`, with the value it carries after it.
+pub fn arms(actuator: &str, param: &str) -> bool {
+    param == actuator || (actuator.ends_with('=') && param.starts_with(actuator))
 }
 
 /// Every actuator `kernel/src/actuator.rs` declares, read out of the file that
@@ -1701,7 +1739,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
     let config = parse_config(&boot.config);
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -1915,7 +1953,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
 
@@ -2062,7 +2100,7 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[PathBuf]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
         invalidate_stale(&mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
@@ -2420,8 +2458,11 @@ mod tests {
         let both: Vec<&String> = actuators.iter().filter(|a| features.contains(a)).collect();
         assert!(both.is_empty(), "declared as both an actuator and a kernel feature: {both:?}");
         assert!(
-            actuators.iter().all(|a| a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')),
-            "an actuator name is ASCII `[a-z0-9-]`, and these are not: {actuators:?}"
+            actuators.iter().all(|a| {
+                a.strip_suffix('=').unwrap_or(a).bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
+            "an actuator name is ASCII `[a-z0-9-]`, `=` after it where it carries a value, and \
+             these are not: {actuators:?}"
         );
     }
 
@@ -2880,6 +2921,7 @@ mod tests {
         "diag/system.toml",
         "console/system.toml",
         "tests/acpicase/system.toml",
+        "tests/blockgrantcase/system.toml",
         "tests/hostedclangcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
@@ -2889,7 +2931,9 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/panelcase/system.toml",
         "tests/proctreecase/system.toml",
+        "tests/slotscase/system.toml",
         "tests/testcases/system.toml",
+        "tests/virtclaimcase/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
         "tests/virtrebootcase/system.toml",
@@ -2953,6 +2997,9 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+        let booted: SystemConfig =
+            toml::from_str("[boot]\nstart = [\"update\"]\n[programs.update]\nslots = true\n").unwrap();
+        assert!(held_by_their_holders_alone(&booted).is_err());
     }
 
     /// Every committed config passes, and each refusal has a config that

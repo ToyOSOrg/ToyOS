@@ -32,6 +32,14 @@
 //! starter names it (`--running <guid>`, the ROOT the loader read), because a
 //! writer there changes the image under the kernel that booted from it.
 //!
+//! **A connection reaches what its grant says** ([`wire::Grant`]): the badge
+//! the supervisor minted its connector with on this service's port, which the
+//! kernel stamps on it and answers this acceptor alone. A listing names the
+//! partitions the grant admits, an open of any other is refused `NotGranted`
+//! whether or not the table carries it, a connection with no grant reaches
+//! nothing, and a session whose grant does not write answers every write
+//! `ReadOnly` before the device sees it.
+//!
 //! **A client may ask what is served** ([`wire::MSG_LIST`]) before it opens
 //! anything, which is how a file server finds its role's partition by type.
 //!
@@ -52,12 +60,12 @@ use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::AsHandle;
 use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
-use toyos_abi::syscall::{DEV_PREFIX, SyscallError};
+use toyos_abi::syscall::{DEV_PREFIX, MAX_BADGE, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
 use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
-use toyos_blockring::wire::{self, Opened, Refusal};
+use toyos_blockring::wire::{self, Grant, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
 
 /// How long a command may go unanswered before the controller is reset to
@@ -172,6 +180,47 @@ fn read_table(ctrl: &mut Controller) -> Vec<Part> {
     parts
 }
 
+/// The partitions a listing through `grant` names: every one it admits, of
+/// `parts`, the table of a drive or why it has none. **The grant is asked
+/// first**, so a connection with none learns nothing of the drive.
+fn listed(parts: Result<&[Part], Refusal>, grant: Option<Grant>) -> Result<Vec<u8>, Refusal> {
+    let grant = grant.ok_or(Refusal::NotGranted)?;
+    Ok(parts?
+        .iter()
+        .filter(|p| grant.admits(p.unique, p.kind))
+        .flat_map(|p| wire::Listed { unique: p.unique, kind: p.kind }.encode())
+        .collect())
+}
+
+/// Where an open of `guid` through `grant` is served, before anything is
+/// held for it; or its refusal. **The grant is asked first**, so a
+/// connection learns nothing of a partition it does not reach, not even
+/// whether the table carries it; then the drive, then the table, then the
+/// partition the machine runs from.
+fn admitted(
+    parts: Result<&[Part], Refusal>,
+    running: Option<[u8; 16]>,
+    guid: [u8; 16],
+    grant: Option<Grant>,
+) -> Result<(u64, u64), Refusal> {
+    let grant = grant.ok_or(Refusal::NotGranted)?;
+    let part = parts?.iter().find(|p| p.unique == guid && guid != [0; 16]);
+    // A partition the table does not carry has no type: only a unique grant
+    // naming it reaches it, to be told `NotFound`.
+    if !grant.admits(guid, part.map_or([0; 16], |p| p.kind)) {
+        return Err(Refusal::NotGranted);
+    }
+    let span = match part.map(|p| &p.span) {
+        None => return Err(Refusal::NotFound),
+        Some(Err(_)) => return Err(Refusal::Unusable),
+        Some(Ok(span)) => *span,
+    };
+    if running == Some(guid) {
+        return Err(Refusal::Held);
+    }
+    Ok(span)
+}
+
 /// A connection that has not opened a session yet.
 struct Pending {
     conn: Connection,
@@ -223,6 +272,18 @@ impl Drive {
         }
     }
 
+    /// The table a listing and an open are judged against: none on a drive
+    /// that is absent, and a drive this service cannot use, or was refused,
+    /// refused by that word.
+    fn parts(&self) -> Result<&[Part], Refusal> {
+        match self {
+            Drive::Up(_, parts) => Ok(parts),
+            Drive::Absent => Ok(&[]),
+            Drive::Unusable => Err(Refusal::Unusable),
+            Drive::ClaimRefused => Err(Refusal::ClaimRefused),
+        }
+    }
+
     fn oldest(&self) -> Option<Instant> {
         match self {
             Drive::Up(ctrl, _) => ctrl.oldest(),
@@ -251,6 +312,7 @@ struct Opening {
     opened: Opened,
     device_addr: u64,
     first: u64,
+    writes: bool,
 }
 
 impl Service {
@@ -258,35 +320,27 @@ impl Service {
         Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running }
     }
 
-    /// What a listing answers: every partition the table names.
-    fn listing(&self) -> Result<Vec<u8>, Refusal> {
-        match &self.ctrl {
-            Drive::Up(_, parts) => {
-                Ok(parts.iter().flat_map(|p| wire::Listed { unique: p.unique, kind: p.kind }.encode()).collect())
-            }
-            Drive::Absent => Ok(Vec::new()),
-            Drive::Unusable => Err(Refusal::Unusable),
-            Drive::ClaimRefused => Err(Refusal::ClaimRefused),
-        }
+    /// What a listing through `grant` answers: every partition of the table
+    /// it admits.
+    fn listing(&self, grant: Option<Grant>) -> Result<Vec<u8>, Refusal> {
+        listed(self.ctrl.parts(), grant)
     }
 
-    /// The span an open of `guid` is served on, held for it; or its refusal.
-    fn place(&mut self, guid: [u8; 16]) -> Result<(u64, u64), Refusal> {
-        let parts = match &self.ctrl {
-            Drive::Up(_, parts) => parts,
-            Drive::Absent => return Err(Refusal::NotFound),
-            Drive::Unusable => return Err(Refusal::Unusable),
-            Drive::ClaimRefused => return Err(Refusal::ClaimRefused),
-        };
-        let part = parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
-        let (first, blocks) = match part.map(|p| &p.span) {
-            None => return Err(Refusal::NotFound),
-            Some(Err(_)) => return Err(Refusal::Unusable),
-            Some(Ok(span)) => *span,
-        };
-        if self.running == Some(guid) {
-            return Err(Refusal::Held);
+    /// The span an open of `guid` through `grant` is served on, held for it;
+    /// or its refusal.
+    ///
+    /// **A client that hung up holds nothing**: every session's end its client
+    /// has already made is read before the open is judged, so an open made
+    /// after another holder closed its connection is never refused `Held` for
+    /// a holder that is gone — only for one whose commands are still on the
+    /// device.
+    fn place(&mut self, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
+        let (first, blocks) = admitted(self.ctrl.parts(), self.running, guid, grant)?;
+        let ids: Vec<u64> = self.sessions.keys().copied().collect();
+        for id in ids {
+            self.hear(id);
         }
+        self.retire();
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(Refusal::Exhausted);
         }
@@ -298,13 +352,14 @@ impl Service {
 
     /// What an open answers: a session to admit, or its refusal. `region` is
     /// the client's and is consumed either way.
-    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle) -> Result<Opening, Refusal> {
+    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle, grant: Option<Grant>) -> Result<Opening, Refusal> {
         let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
-        let (first, blocks) = self.place(guid)?;
+        let (first, blocks) = self.place(guid, grant)?;
+        let writes = grant.expect("placed through a grant").writes;
         match self.ctrl.up().claim().dma_map(region.handle()) {
             Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
                 let (rings, opened) = Opened::over(region.words(), blocks, guid);
-                Ok(Opening { region, rings, opened, device_addr: mapping.device_addr, first })
+                Ok(Opening { region, rings, opened, device_addr: mapping.device_addr, first, writes })
             }
             // A region longer than a session would spend the claim's bound on
             // the kernel's side for every other client: refused whole.
@@ -336,7 +391,7 @@ impl Service {
                 region: opening.region,
                 device_addr: opening.device_addr,
                 rings: opening.rings,
-                state: ServerSession::new(opening.first, opening.opened.blocks()),
+                state: ServerSession::new(opening.first, opening.opened.blocks(), opening.writes),
                 unique: opening.opened.unique(),
                 closing: false,
                 requests: 0,
@@ -450,6 +505,21 @@ impl Service {
                     Ok(_) | Err(SyscallError::WouldBlock) => {}
                     Err(_) => s.closing = true,
                 }
+            }
+        }
+    }
+
+    /// Consume session `id`'s doorbell bytes; once its client has hung up,
+    /// the session is closing.
+    fn hear(&mut self, id: u64) {
+        let s = self.sessions.get_mut(&id).expect("a session");
+        let mut sink = [0u8; 64];
+        while !s.closing {
+            match s.conn.read_nonblock(&mut sink) {
+                Ok(0) => s.closing = true,
+                Ok(_) => {}
+                Err(SyscallError::WouldBlock) => return,
+                Err(_) => s.closing = true,
             }
         }
     }
@@ -648,7 +718,7 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
                 }
                 RxStep::Frame { msg_type, payload_len } => {
                     let p = pending.remove(i);
-                    handshake(service, p, msg_type, payload_len);
+                    handshake(service, acceptor, p, msg_type, payload_len);
                 }
             }
         }
@@ -656,10 +726,7 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
         let ids: Vec<u64> = service.sessions.keys().copied().collect();
         for id in ids {
             if ready.contains(&(TOKEN_SESSION + id)) {
-                let s = service.sessions.get_mut(&id).expect("listed");
-                if !doorbells(&s.conn) {
-                    s.closing = true;
-                }
+                service.hear(id);
             }
             service.pull(id);
         }
@@ -668,26 +735,25 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
     }
 }
 
-/// Consume a session's doorbell bytes; `false` once its client has hung up.
-fn doorbells(conn: &Connection) -> bool {
-    let mut sink = [0u8; 64];
-    loop {
-        match conn.read_nonblock(&mut sink) {
-            Ok(0) => return false,
-            Ok(_) => continue,
-            Err(SyscallError::WouldBlock) => return true,
-            Err(_) => return false,
-        }
+/// The grant `conn`, accepted from `acceptor`, was minted with; `None` for a
+/// connection through an unbadged connector or with bytes no minter stamps.
+fn grant(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Grant> {
+    let mut badge = [0u8; MAX_BADGE];
+    match acceptor.badge(conn, &mut badge) {
+        Ok(bytes) => Grant::decode(bytes),
+        Err(SyscallError::NotFound) => None,
+        Err(why) => panic!("diskserver: its own acceptor would not say a connection's badge: {why:?}"),
     }
 }
 
 /// Answer one connection's first frame: a listing, or an open.
-fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usize) {
+fn handshake(service: &mut Service, acceptor: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize) {
     let refuse = |conn: &Connection, why: Refusal| {
         let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
     };
+    let grant = grant(acceptor, &p.conn);
     if msg_type == wire::MSG_LIST && payload_len == 0 {
-        match service.listing() {
+        match service.listing(grant) {
             Err(why) => refuse(&p.conn, why),
             // One frame, and the connection is done with: a table larger than
             // a frame is one this service lists no part of rather than half of.
@@ -708,19 +774,20 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
         refuse(&p.conn, Refusal::Malformed);
         return;
     };
-    match service.open(guid, region) {
+    match service.open(guid, region, grant) {
         Err(why) => {
             println!("diskserver: an open of {} refused: {why:?}", guid_text(guid));
             refuse(&p.conn, why);
         }
         Ok(opening) => {
-            let opened = opening.opened;
+            let (opened, writes) = (opening.opened, opening.writes);
             if p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
                 service.abandon(opening);
                 return;
             }
             let id = service.admit(opening, p.conn);
-            println!("diskserver: session {id} opened {} ({} blocks)", guid_text(guid), opened.blocks());
+            let access = if writes { "" } else { ", read-only" };
+            println!("diskserver: session {id} opened {} ({} blocks{access})", guid_text(guid), opened.blocks());
         }
     }
 }
@@ -728,6 +795,7 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_blockring::wire::Scope;
 
     /// A controller this service cannot use, or one whose claim was refused,
     /// is a disk there and never a machine without one: its listing and its
@@ -736,14 +804,77 @@ mod tests {
     #[test]
     fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
         let guid = [7; 16];
+        let grant = Some(Grant { scope: Scope::Unique(guid), writes: true });
         let mut unusable = Service::new(Drive::Unusable, None);
-        assert_eq!(unusable.listing(), Err(Refusal::Unusable));
-        assert_eq!(unusable.place(guid), Err(Refusal::Unusable));
+        assert_eq!(unusable.listing(grant), Err(Refusal::Unusable));
+        assert_eq!(unusable.place(guid, grant), Err(Refusal::Unusable));
         let mut unclaimed = Service::new(Drive::ClaimRefused, None);
-        assert_eq!(unclaimed.listing(), Err(Refusal::ClaimRefused));
-        assert_eq!(unclaimed.place(guid), Err(Refusal::ClaimRefused));
+        assert_eq!(unclaimed.listing(grant), Err(Refusal::ClaimRefused));
+        assert_eq!(unclaimed.place(guid, grant), Err(Refusal::ClaimRefused));
         let mut absent = Service::new(Drive::Absent, None);
-        assert_eq!(absent.listing(), Ok(Vec::new()));
-        assert_eq!(absent.place(guid), Err(Refusal::NotFound));
+        assert_eq!(absent.listing(grant), Ok(Vec::new()));
+        assert_eq!(absent.place(guid, grant), Err(Refusal::NotFound));
+        for mut service in [unusable, unclaimed, absent] {
+            assert_eq!(service.listing(None), Err(Refusal::NotGranted));
+            assert_eq!(service.place(guid, None), Err(Refusal::NotGranted));
+        }
+    }
+
+    const LOG: [u8; 16] = [1; 16];
+    const BOOT: [u8; 16] = [2; 16];
+    const DATA: [u8; 16] = [3; 16];
+    const ROOT: [u8; 16] = [4; 16];
+    const LOG_KIND: [u8; 16] = [0x10; 16];
+    const BOOT_KIND: [u8; 16] = [0x20; 16];
+    const DATA_KIND: [u8; 16] = [0x30; 16];
+    const ROOT_KIND: [u8; 16] = [0x40; 16];
+
+    fn table() -> Vec<Part> {
+        [(LOG, LOG_KIND), (BOOT, BOOT_KIND), (DATA, DATA_KIND), (ROOT, ROOT_KIND)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (unique, kind))| Part { unique, kind, span: Ok((i as u64 * 100, 100)) })
+            .collect()
+    }
+
+    fn unique(guid: [u8; 16]) -> Option<Grant> {
+        Some(Grant { scope: Scope::Unique(guid), writes: true })
+    }
+
+    /// A unique grant opens its one partition and is refused every other of
+    /// the same table by name, as is a connection with no grant; a kind grant
+    /// opens every partition of its type and no other; and the partition the
+    /// machine runs from is held whatever reaches it.
+    #[test]
+    fn an_open_reaches_only_what_its_grant_admits() {
+        let parts = table();
+        assert_eq!(admitted(Ok(&parts), None, LOG, unique(LOG)), Ok((0, 100)));
+        for other in [BOOT, DATA, ROOT] {
+            assert_eq!(admitted(Ok(&parts), None, other, unique(LOG)), Err(Refusal::NotGranted));
+            assert_eq!(admitted(Ok(&parts), None, other, None), Err(Refusal::NotGranted));
+        }
+        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
+        assert_eq!(admitted(Ok(&parts), None, DATA, data), Ok((200, 100)));
+        assert_eq!(admitted(Ok(&parts), None, LOG, data), Err(Refusal::NotGranted));
+        // Nothing of a GUID the table does not carry, but to the grant that names it.
+        assert_eq!(admitted(Ok(&parts), None, [9; 16], data), Err(Refusal::NotGranted));
+        assert_eq!(admitted(Ok(&parts), None, [9; 16], unique([9; 16])), Err(Refusal::NotFound));
+        assert_eq!(admitted(Ok(&parts), Some(ROOT), ROOT, unique(ROOT)), Err(Refusal::Held));
+        assert_eq!(admitted(Ok(&parts), Some(ROOT), ROOT, unique(LOG)), Err(Refusal::NotGranted));
+    }
+
+    /// A listing names exactly what its grant admits, and nothing to a
+    /// connection with none.
+    #[test]
+    fn a_listing_names_only_what_its_grant_admits() {
+        let parts = table();
+        let decoded = |bytes: Vec<u8>| -> Vec<[u8; 16]> {
+            wire::Listed::decode_all(&bytes).expect("whole entries").map(|l| l.unique).collect()
+        };
+        assert_eq!(listed(Ok(&parts), unique(BOOT)).map(decoded), Ok(vec![BOOT]));
+        let roots = Some(Grant { scope: Scope::Kind(ROOT_KIND), writes: false });
+        assert_eq!(listed(Ok(&parts), roots).map(decoded), Ok(vec![ROOT]));
+        assert_eq!(listed(Ok(&parts), unique([9; 16])).map(decoded), Ok(vec![]));
+        assert_eq!(listed(Ok(&parts), None), Err(Refusal::NotGranted));
     }
 }

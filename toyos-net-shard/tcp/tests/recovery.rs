@@ -268,12 +268,21 @@ fn s_lr_017_a_second_timeout() {
     assert_eq!((info.ssthresh, info.cwnd, info.rto), (10_220, 1460, ms(800)));
 }
 
+/// EF's ten segments meet silence: two round trips and the slack on, a loss probe sends the last
+/// one again (RFC 8985 §7.3), and the RTO runs from it.
+fn probed_then_expired(h: &mut H) {
+    ten_out(h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    assert_eq!(h.count(Counter::LossProbe), 1);
+    nothing(&h.at(221));
+    expect(&h.at(222), &["SEQ=1001"]);
+}
+
 #[test]
 fn s_lr_018_no_sack_recovery_before_the_timeout_point() {
     let mut h = fixture_ef();
-    ten_out(&mut h);
-    h.at(200);
-    for (t, end) in [(210, 3897), (211, 5345), (212, 6793)] {
+    probed_then_expired(&mut h);
+    for (t, end) in [(232, 3897), (233, 5345), (234, 6793)] {
         sack_dup(&mut h, t, &[(2449, end)]);
     }
     assert!(!h.info().in_recovery);
@@ -283,9 +292,8 @@ fn s_lr_018_no_sack_recovery_before_the_timeout_point() {
 #[test]
 fn s_lr_019_sacks_after_a_timeout_skip_held_ranges() {
     let mut h = fixture_ef();
-    ten_out(&mut h);
-    expect(&h.at(200), &["SEQ=1001"]);
-    let outs = h.input_full(210, seg(5001).ack(2449).sack(&[(1001, 2449), (3897, 15_481)]));
+    probed_then_expired(&mut h);
+    let outs = h.input_full(232, seg(5001).ack(2449).sack(&[(1001, 2449), (3897, 15_481)]));
     expect(&outs, &["SEQ=2449 LEN=1448"]);
     assert_eq!(h.info().cwnd, 2896);
     assert_eq!(h.count(Counter::DsackRcvd), 1);
@@ -330,4 +338,177 @@ fn s_lr_023_a_lost_fast_retransmission() {
     let info = h.info();
     assert_eq!(info.ssthresh, flight * 7 / 10);
     assert_eq!(info.cwnd, 1460);
+}
+
+/// RFC 8985 §7.3: with data queued past cwnd and the peer's window open, the probe is a segment
+/// of new data, outside cwnd; its ACK infers no loss.
+#[test]
+fn rfc_8985_7_3_the_probe_is_new_data_where_the_window_takes_a_segment() {
+    let mut h = fixture_ef();
+    assert_eq!(h.send(0, 30_000).len(), 10);
+    nothing(&h.at(21));
+    expect(&h.at(22), &["SEQ=15481 LEN=1448"]);
+    let cwnd = h.info().cwnd;
+    h.input_full(30, seg(5001).ack(16_929));
+    assert_eq!((h.count(Counter::LossProbe), h.count(Counter::LossProbeRecovery), h.count(Counter::RetransmitBytes)), (1, 0, 0));
+    assert!(h.info().cwnd >= cwnd);
+}
+
+/// RFC 8985 §7.4.2: the probe sent the last segment again. The ACK that reaches its end without
+/// a D-SACK leaves the episode open, since the original's ACK reads the same; the ACK past the
+/// end with none says one copy was lost: cwnd is reduced as for a loss, once.
+#[test]
+fn rfc_8985_7_4_a_resent_probe_acknowledged_past_its_end_without_a_dsack_repaired_a_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.send(25, 1448));
+    expect(&h.input_full(30, seg(5001).ack(15_481)), &["SEQ=15481 LEN=1448"]);
+    assert_eq!(h.count(Counter::LossProbeRecovery), 0);
+    h.input_full(40, seg(5001).ack(16_929));
+    let info = h.info();
+    assert_eq!((info.ssthresh, info.cwnd, info.in_recovery), (2896, 2896, false));
+    assert_eq!(h.count(Counter::LossProbeRecovery), 1);
+}
+
+/// RFC 8985 §7.4.2: the ACK that reaches the resent probe's end carries no D-SACK, and the next
+/// reports the probe as a duplicate: both copies arrived, nothing was lost, and cwnd stands through
+/// the ACK of what is sent next.
+#[test]
+fn rfc_8985_7_4_a_dsack_after_the_ack_at_the_probes_end_infers_no_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    h.input_full(30, seg(5001).ack(15_481));
+    let cwnd = h.info().cwnd;
+    h.input_full(31, seg(5001).ack(15_481).sack(&[(14_033, 15_481)]));
+    nothing(&h.send(32, 1448).into_iter().filter(|o| o.payload.is_empty()).collect::<Vec<_>>());
+    h.input_full(40, seg(5001).ack(16_929));
+    assert_eq!((h.info().cwnd >= cwnd, h.count(Counter::LossProbeRecovery), h.count(Counter::DsackRcvd)), (true, 0, 1));
+}
+
+/// RFC 8985 §7.4: the same, but the ACK reports the probe's segment as a duplicate: nothing was
+/// lost, and cwnd stands.
+#[test]
+fn rfc_8985_7_4_a_resent_probe_reported_as_a_duplicate_infers_no_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    let cwnd = h.info().cwnd;
+    h.input_full(30, seg(5001).ack(15_481).sack(&[(14_033, 15_481)]));
+    assert_eq!((h.info().cwnd >= cwnd, h.count(Counter::LossProbeRecovery), h.count(Counter::DsackRcvd)), (true, 0, 1));
+}
+
+/// RFC 8985 §7.2: with one segment out, the probe waits WCDelAckT past two round trips, which is
+/// past the RTO here, so it goes at the RTO's time in the RTO's place, and the RTO runs from it.
+#[test]
+fn rfc_8985_7_2_with_one_segment_out_the_probe_stands_in_for_the_first_rto() {
+    let mut h = fixture_ef();
+    h.send(0, 1448);
+    let rto = h.info().rto.as_millis() as i64;
+    nothing(&h.at(rto - 1));
+    expect(&h.at(rto), &["SEQ=1001 LEN=1448"]);
+    assert_eq!((h.count(Counter::LossProbe), h.count(Counter::Rto)), (1, 0));
+    nothing(&h.at(2 * rto - 1));
+    expect(&h.at(2 * rto), &["SEQ=1001 LEN=1448"]);
+    assert_eq!(h.count(Counter::Rto), 1);
+}
+
+/// RFC 8985 §7.2: no probe is scheduled in RTO recovery. After the probe at 22 ms and the RTO at
+/// 222 ms, a cumulative ACK without SACK moves SND.UNA while go-back-N has the rest still to send:
+/// no second probe follows it, however long the next ACK takes.
+#[test]
+fn rfc_8985_7_2_no_probe_in_rto_recovery() {
+    let mut h = fixture_ef();
+    probed_then_expired(&mut h);
+    h.input_full(232, seg(5001).ack(2449));
+    let pto = 2 * h.info().srtt.unwrap().as_millis() as i64 + 2;
+    let rto = h.info().rto.as_millis() as i64;
+    h.at(232 + pto + 1);
+    h.at(232 + rto - 1);
+    assert_eq!((h.count(Counter::LossProbe), h.count(Counter::Rto)), (1, 1));
+}
+
+/// RFC 8985 §7.1: entering fast recovery ends the probe's episode. The resent probe is still
+/// outstanding when SACK recovery begins, and that recovery's own reduction is the only one: the
+/// ACK at the probe's end and the one past it reduce nothing more.
+#[test]
+fn rfc_8985_7_1_fast_recovery_ends_the_probes_episode() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&sack_dup(&mut h, 30, &[(2449, 3897)]));
+    nothing(&sack_dup(&mut h, 31, &[(2449, 5345)]));
+    expect(&sack_dup(&mut h, 32, &[(2449, 6793)]), &["SEQ=1001 LEN=1448"]);
+    let ssthresh = h.info().ssthresh;
+    h.input_full(40, seg(5001).ack(15_481));
+    assert!(!h.info().in_recovery);
+    expect(&h.send(41, 1448), &["SEQ=15481 LEN=1448"]);
+    h.input_full(50, seg(5001).ack(16_929));
+    assert_eq!((h.info().ssthresh, h.count(Counter::SackRecovery), h.count(Counter::LossProbeRecovery)), (ssthresh, 1, 0));
+}
+
+/// A probe that came due while the next hop was not ready has not left when an ACK shuts the
+/// window: persist takes over, and the last segment is not sent again into the shut window.
+#[test]
+fn a_probe_due_when_the_window_shuts_gives_way_to_persist() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    h.hop = Box::new(|t, _| if t < 100 { toyos_net_tcp::Hop::Pending } else { toyos_net_tcp::Hop::Ready(()) });
+    nothing(&h.at(22));
+    let latest = h.log.iter().rev().find_map(|o| o.ts.map(|(v, _)| v)).unwrap();
+    nothing(&h.at(30));
+    h.deliver(seg(5001).ack(1001).wnd(0).ts(50_030, latest));
+    assert_eq!(h.info().snd_wnd, 0);
+    h.tcp.wake(B);
+    nothing(&h.at(100));
+    assert_eq!(h.count(Counter::LossProbe), 0);
+}
+
+/// RFC 8985 §7.4.2: only a D-SACK matching the probe's end says the probe was a duplicate. The ACK
+/// past the end reports an older segment as a duplicate, not the probe: one copy of the probe's
+/// segment was still lost, and cwnd is reduced.
+#[test]
+fn rfc_8985_7_4_a_dsack_of_another_segment_still_infers_the_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.send(25, 1448));
+    expect(&h.input_full(30, seg(5001).ack(15_481)), &["SEQ=15481 LEN=1448"]);
+    h.input_full(40, seg(5001).ack(16_929).sack(&[(1001, 2449)]));
+    assert_eq!((h.count(Counter::DsackRcvd), h.count(Counter::LossProbeRecovery), h.info().ssthresh), (1, 1, 2896));
+}
+
+/// RFC 8985 §7.4.2 and §7.1 on one ACK: it passes the resent probe's end and SACKs three
+/// segments above a hole, so it both infers the probe's loss and enters SACK recovery, and cwnd is
+/// cut twice: the probe's cut, then recovery's from the flight after the ACK. Linux v6.12 does the
+/// same: `tcp_process_tlp_ack` reduces and leaves CWR through `tcp_try_keep_open`, so
+/// `tcp_enter_recovery` finds no reduction in progress and reduces again.
+#[test]
+fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_twice() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.send(25, 5 * 1448));
+    assert_eq!(h.input_full(30, seg(5001).ack(15_481)).len(), 5);
+    h.input_full(40, seg(5001).ack(16_929).sack(&[(18_377, 22_721)]));
+    let info = h.info();
+    assert!(info.in_recovery);
+    assert_eq!((h.count(Counter::LossProbeRecovery), h.count(Counter::SackRecovery)), (1, 1));
+    assert_eq!((info.ssthresh, info.cwnd), (4 * 1448 * 7 / 10, 4 * 1448 * 7 / 10));
+}
+
+/// RFC 8985 §7.4.2, Case 2: after the ACK at the resent probe's end, a duplicate ACK without SACK
+/// says both copies arrived; the ACK past the end that follows infers nothing.
+#[test]
+fn rfc_8985_7_4_a_duplicate_without_sack_at_the_probes_end_infers_no_loss() {
+    let mut h = fixture_ef();
+    ten_out(&mut h);
+    expect(&h.at(22), &["SEQ=14033 LEN=1448"]);
+    nothing(&h.send(25, 1448));
+    expect(&h.input_full(30, seg(5001).ack(15_481)), &["SEQ=15481 LEN=1448"]);
+    let cwnd = h.info().cwnd;
+    nothing(&h.input_full(31, seg(5001).ack(15_481)));
+    h.input_full(40, seg(5001).ack(16_929));
+    assert_eq!((h.info().cwnd >= cwnd, h.count(Counter::LossProbeRecovery)), (true, 0));
 }

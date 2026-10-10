@@ -2,15 +2,13 @@
 //!
 //! The kernel programs one MSI-X vector per claimed function and accumulates
 //! what arrives into a record its holder reads through a syscall. So there are
-//! two parties on two CPUs and one word between them: an ISR that bumps a
-//! count, and a reader that takes it.
+//! two parties on two CPUs: an ISR that counts a message and stamps when it
+//! landed, and a reader that takes the count and its times.
 //!
-//! **The invariant is that every message is counted exactly once.** Nothing
-//! here orders anything else — the word is the whole of what it says, so the
-//! orderings are `Relaxed` and the property is an interleaving. What makes it
-//! hold is that the taking side is a read-modify-write: a reader that loaded a
+//! **The invariant is that every message is counted exactly once, and a
+//! read's times are its own messages'.** What makes the first hold is that
+//! both sides change the count by a read-modify-write: a reader that loaded a
 //! count and then cleared it drops every message the ISR recorded in between.
-//!
 //! That is the record's whole design, so the negative control is it turned off
 //! — a cargo feature rather than a comment:
 //!
@@ -19,8 +17,8 @@
 //!   --test device_irq
 //! ```
 //!
-//! makes the `swap` a load and a store and the ISR's `fetch_add` a load, an
-//! add and a store, and [`every_message_is_counted_once`] must red.
+//! makes every compare-exchange a load and a store, and
+//! [`every_message_is_counted_once`] must red.
 
 use kernel_loom::device_irq::Interrupt;
 use loom::sync::Arc;
@@ -29,8 +27,8 @@ use loom::sync::Arc;
 ///
 /// Two messages against one reader that may run at any point between them: what
 /// the reader took plus what is left is exactly what arrived. A `store` where
-/// the count has a `fetch_add` fails this, and so does a reader that loads and
-/// then clears instead of swapping.
+/// the count has a compare-exchange fails this, and so does a reader that
+/// loads and then clears instead of exchanging.
 #[test]
 fn every_message_is_counted_once() {
     loom::model(|| {
@@ -39,14 +37,14 @@ fn every_message_is_counted_once() {
         let isr = {
             let irq = irq.clone();
             loom::thread::spawn(move || {
-                irq.took();
-                irq.took();
+                irq.took(1);
+                irq.took(2);
             })
         };
 
-        let taken = irq.take().unwrap_or(0);
+        let taken = irq.take().map_or(0, |record| record.count);
         isr.join().unwrap();
-        let left = irq.take().unwrap_or(0);
+        let left = irq.take().map_or(0, |record| record.count);
 
         assert_eq!(
             taken + left,
@@ -54,6 +52,58 @@ fn every_message_is_counted_once() {
             "two interrupts arrived, the reader took {taken} and {left} were left: a driver \
              that misses one waits for a device that has already spoken",
         );
+    });
+}
+
+/// A read's first time is the landing of the first message it counts, and its
+/// newest time no older than the newest it counts.
+///
+/// Three messages, landing at 1, 2 and 3, against a reader that takes once at
+/// any point among them and then takes what is left: whatever the split, each
+/// read's `first_nanos` is its own first message's, and a message that lands
+/// while the reader is between its exchange and its loads stamps the next
+/// read and never this one. A single slot for both reads' first times fails
+/// this, and so does a stamp made after the exchange that counts it.
+#[test]
+fn a_reads_times_are_its_own_messages() {
+    loom::model(|| {
+        let irq = Arc::new(Interrupt::new());
+
+        let isr = {
+            let irq = irq.clone();
+            loom::thread::spawn(move || {
+                for at in 1..=3 {
+                    irq.took(at);
+                }
+            })
+        };
+
+        let taken = irq.take();
+        isr.join().unwrap();
+        let left = irq.take();
+
+        let counted = taken.map_or(0, |record| record.count);
+        if let Some(record) = taken {
+            assert_eq!(record.first_nanos, 1, "the first read counted from message 1 and was told {}", record.first_nanos);
+            assert!(
+                record.last_nanos >= u64::from(counted),
+                "a read that counted {counted} message(s) was told the newest landed at {}",
+                record.last_nanos
+            );
+        }
+        match left {
+            None => assert_eq!(counted, 3, "the first read counted {counted} and nothing was left"),
+            Some(left) => {
+                assert_eq!(
+                    left.first_nanos,
+                    u64::from(counted) + 1,
+                    "the second read counted from message {} and was told {}",
+                    counted + 1,
+                    left.first_nanos
+                );
+                assert_eq!(left.last_nanos, 3, "the newest message landed at 3 and the last read was told {}", left.last_nanos);
+            }
+        }
     });
 }
 
@@ -68,9 +118,10 @@ fn an_idle_record_answers_nothing() {
         let irq = Interrupt::new();
         assert!(irq.take().is_none(), "an untouched record answered a reader");
         assert!(!irq.armed(), "an untouched record read ready");
-        irq.took();
+        irq.took(7);
         assert!(irq.armed(), "a record with a message in it read empty");
-        assert_eq!(irq.take(), Some(1));
+        let record = irq.take().expect("a record with a message in it answered nothing");
+        assert_eq!((record.count, record.first_nanos, record.last_nanos), (1, 7, 7));
         assert!(irq.take().is_none(), "the same message was answered twice");
         assert!(!irq.armed(), "a drained record still reads ready");
     });

@@ -37,9 +37,9 @@
 //! may take is bounded nowhere. A client that still holds its reading end, or may still write,
 //! is never timed here: what it cannot send is [tcp]'s to give up on.
 //!
-//! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here. A
-//! transmit opportunity can only fail a connect, whose next hop it found to answer nobody, and
-//! ends in a pass over the connects.
+//! Every call that can move a stream ends in a pass: a batch of frames, a deadline, and each call
+//! here. A transmit opportunity can only fail a connect, whose next hop it found to answer
+//! nobody, and ends in a pass over the connects.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -427,10 +427,6 @@ impl Node {
         stream.options.nodelay = nodelay;
         self.stack.tcp_set_options(now, stream.conn, stream.options);
         true
-    }
-
-    pub fn nodelay(&self, id: StreamId) -> Option<bool> {
-        self.streams.live.get(&id).map(|stream| stream.options.nodelay)
     }
 
     /// The kernel said nobody holds the other end of one of an established stream's pipes: the

@@ -1,5 +1,9 @@
 
-use crate::{keyboard, mouse};
+use toyos_usbhid::keyboard::{Keyboard, Read};
+use toyos_usbhid::pointer::{Motion, Pointer};
+use toyos_xhci::job;
+
+use crate::{keyboard, log, mouse};
 use super::{Mmio, Trb, TrbRing, TRB_NORMAL};
 
 /// What a configuration descriptor's HID interface said it was, differing only in report size and SET_PROTOCOL; parse-time only.
@@ -10,11 +14,10 @@ pub enum HidType {
     Tablet,
 }
 
-/// What a *bound* device is; pointer and tablet dispatch identically, so the source is carried rather than derived from the (per-controller) slot id.
-#[derive(Clone, Copy)]
+/// What a *bound* device is, with what its reports are read against: a keyboard's own last report, since diffing against another device's would synthesize releases for keys still down; and a pointer's source, carried rather than derived from the (per-controller) slot id.
 pub enum HidRole {
-    Keyboard,
-    Pointer(mouse::PointerSource),
+    Keyboard(Keyboard),
+    Pointer(mouse::PointerSource, Pointer),
 }
 
 pub struct HidDevice {
@@ -39,8 +42,10 @@ pub struct HidDevice {
     pub report: crate::mm::Dma<'static>,
     pub report_size: u32,
     pub role: HidRole,
-    /// Per device: diffing against another device's report would synthesize releases for keys still down.
-    pub prev_report: [u8; 8],
+    /// Reports refused since bind, none of them believed; logged as [`tally`] says.
+    pub refused: u32,
+    /// Keyboard reports in rollover since bind, each believed for its modifiers alone; logged as [`tally`] says.
+    pub rolled_over: u32,
     /// The completion code this endpoint broke with; read and cleared by [`super::XhciController::recover_endpoints`], never by the code that sets it.
     pub broke_with: Option<u32>,
     /// Consecutive failures; a delivered report clears it — see [`super::MAX_HID_FAILURES`].
@@ -51,33 +56,61 @@ impl HidDevice {
     /// What this device is called in every line about it: two names, not three — mouse and tablet dispatch identically, distinguished only by report length.
     pub fn kind(&self) -> &'static str {
         match self.role {
-            HidRole::Keyboard => "keyboard",
-            HidRole::Pointer(_) => "pointer",
+            HidRole::Keyboard(_) => "keyboard",
+            HidRole::Pointer(..) => "pointer",
         }
     }
 
-    pub fn dispatch_report(&mut self) {
+    /// Reads the report a transfer delivered; `residue` is what of `report_size` the device did not send, whose bytes are still the last report's.
+    pub fn dispatch_report(&mut self, residue: u32) {
         let mut buf = [0u8; 8];
-        let size = self.report_size as usize;
-        // `report_size` is 4, 6 or 8, so `copy_to` never sees `size > 8`; not yet requeued, so this copy has the buffer to itself.
-        self.report.copy_to(0, &mut buf[..size]);
+        // `report_size` is 4, 6 or 8, so `copy_to` never sees more than 8; not yet requeued, so this copy has the buffer to itself.
+        let delivered = &mut buf[..job::moved(self.report_size, residue) as usize];
+        self.report.copy_to(0, delivered);
         // Waking on an unchanged report would make readiness disagree with `has_data()`.
-        let queued = match self.role {
-            HidRole::Keyboard => keyboard::handle_report(&mut self.prev_report, &buf[..size]) != 0,
-            HidRole::Pointer(source) => mouse::handle_report(source, &buf[..size]) != 0,
+        let queued = match &mut self.role {
+            HidRole::Keyboard(keys) => match keys.report(delivered) {
+                Ok(Read::Keys(transitions)) => keyboard::apply(transitions) != 0,
+                Ok(Read::RollOver(transitions)) => {
+                    let queued = keyboard::apply(transitions) != 0;
+                    self.roll_over();
+                    queued
+                }
+                Err(why) => return self.refuse(format_args!("{why:?}")),
+            },
+            HidRole::Pointer(source, pointer) => match pointer.decode(delivered) {
+                Ok(read) => mouse::handle_motion(*source, read.buttons, motion(read.motion), read.wheel),
+                Err(why) => return self.refuse(format_args!("{why:?}")),
+            },
         };
         if queued {
             self.wake();
         }
     }
 
+    #[cold]
+    fn refuse(&mut self, why: core::fmt::Arguments<'_>) {
+        if tally(&mut self.refused) {
+            log!("xHCI: slot {} {} report refused, {} since it bound: {why}",
+                self.slot_id, self.kind(), self.refused);
+        }
+    }
+
+    #[cold]
+    fn roll_over(&mut self) {
+        if tally(&mut self.rolled_over) {
+            log!("xHCI: slot {} keyboard report in rollover, its modifiers believed and its other keys held, \
+                {} since it bound", self.slot_id, self.rolled_over);
+        }
+    }
+
     /// Releases everything this device was holding, on its way off the bus.
-    /// A zero report, not `keyboard::release_all`: only `prev_report` records which held keys are this device's.
+    /// Its own keys, not `keyboard::release_all`: only its `Keyboard` records which held keys are this device's.
     pub fn unbind(&mut self) {
-        let queued = match self.role {
-            HidRole::Keyboard => keyboard::handle_report(&mut self.prev_report, &[0u8; 8]) != 0,
+        let queued = match &mut self.role {
+            HidRole::Keyboard(keys) => keyboard::apply(keys.release()) != 0,
             // Also frees this device's button-table entry, so replugging costs the machine nothing.
-            HidRole::Pointer(source) => mouse::unbind(source),
+            HidRole::Pointer(source, _) => mouse::unbind(*source),
         };
         if queued {
             self.wake();
@@ -87,8 +120,8 @@ impl HidDevice {
     // The role's one watch, which carries the blocked `sys_read` and the polls alike.
     fn wake(&self) {
         match self.role {
-            HidRole::Keyboard => crate::keyboard::WATCH.post(),
-            HidRole::Pointer(_) => crate::mouse::WATCH.post(),
+            HidRole::Keyboard(_) => crate::keyboard::WATCH.post(),
+            HidRole::Pointer(..) => crate::mouse::WATCH.post(),
         }
     }
 
@@ -100,5 +133,18 @@ impl HidDevice {
         self.int_ring.enqueue(trb);
         // An `Mmio` write: ordered after the TRB it announces.
         db_base.write_u32(self.slot_id as u64 * 4, self.int_ep_dci as u32);
+    }
+}
+
+/// Counts one more; true for the first and each power of two after it, so a device cannot flood the log.
+fn tally(count: &mut u32) -> bool {
+    *count = count.saturating_add(1);
+    count.is_power_of_two()
+}
+
+fn motion(motion: Motion) -> mouse::Motion {
+    match motion {
+        Motion::Relative { dx, dy } => mouse::Motion::Relative { dx: dx.into(), dy: dy.into() },
+        Motion::Absolute { x, y } => mouse::Motion::Absolute { x, y },
     }
 }

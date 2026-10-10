@@ -140,7 +140,6 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
-    ("kernel/src/drivers/virtio_sound.rs", 2),
     ("kernel/src/arch/x86_64/hw.rs", 1),
     ("kernel/src/mm/mmio.rs", 2),
     ("kernel/src/mm/region.rs", 2),
@@ -277,8 +276,7 @@ fn host_files() -> Vec<PathBuf> {
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
 #[cfg(test)]
 fn digest(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The shapes of a value that identifies a machine or the network it is on,
@@ -466,8 +464,7 @@ mod tests {
     /// The first: the NMI handler must not log. It would reenter its own CPU's
     /// log shard — the reservation is sound only because the CPU that owns the
     /// shard has `IF` and `TF` masked through publication, and an NMI is the one
-    /// interrupt that ignores `IF`. `dump_nmi_probe` is what makes the handler
-    /// *useful*; this is what keeps it silent.
+    /// interrupt that ignores `IF`. This is what keeps it silent.
     ///
     /// The second: no log producer in `kernel/` carries `!!!` in its format
     /// string. `panic_console::has_alert` used to scan every display row for

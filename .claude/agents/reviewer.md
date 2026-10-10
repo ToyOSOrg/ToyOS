@@ -27,9 +27,9 @@ fixed before landing.
 
 A change that touches no source, test or manifest is held to every rule this file names, and past
 them is judged only on what is false of the tree or of the record it describes; a citation that
-points at nothing, and a deleted document still cited; a ruling of the owner's stated more broadly
-or more narrowly than he gave it, or a design presented as his; an issue or stage without an owner
-that exists, or without an exit something can read; and a close whose exit is not met.
+points at nothing, and a deleted document still cited outside `issues/`; a ruling of the owner's
+stated more broadly or more narrowly than he gave it, or a design presented as his; an issue or
+stage the branch writes without an owner that exists, or without an exit something can read; and a close whose exit is not met.
 
 Name a mutation only where a defect would otherwise land unseen, never one a type refuses or one a
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
@@ -147,9 +147,11 @@ whether the evidence the change needs exists — never on how either is describe
 measurements — command, exit code, log, head — and the reasons **Guest tests** and **Fit** ask of
 it are evidence, judged under those rules: a claimed measurement that is absent, from another head
 or contradicted by its own log is the **Evidence** BLOCKER. This section covers only how things
-are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. Prose in a
-record — a pull request's body, an issue — that is false of the tree or of the record is one line
-under NOTE, and the orchestrator corrects a pull request's body himself. A source comment's
+are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. A pull
+request's body that is false of the tree or of the record is one line under NOTE, and the
+orchestrator corrects it himself. An issue file's staleness is never raised, and no branch is asked
+to edit one; an edit to an existing one other than the issue the branch takes up, or one a rule names as where
+it records something, is a NOTE. A source comment's
 wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
 formatting, a comment that could be shorter — are not raised.
 

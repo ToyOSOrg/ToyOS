@@ -14,7 +14,6 @@
 use toyos::endow::Endowments;
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
-use toyos_abi::audio::AudioCompletionRecord;
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_hda::stream;
@@ -238,7 +237,6 @@ pub(crate) fn mix_thread(
     let mut convert_buf = vec![0.0f32; max_client_frames * 2];
     let mut dither_rng = Xorshift32::new(toyos_abi::clock::nanos_since_boot() as u32);
     let mut dll = Dll::new(period_nanos as f64);
-    let mut records = [AudioCompletionRecord { mask: 0, _pad: 0, timestamp_nanos: 0 }; 16];
 
     const TOKEN_AUDIO: u64 = u64::MAX - 1;
     const TOKEN_CMD: u64 = u64::MAX - 2;
@@ -315,54 +313,50 @@ pub(crate) fn mix_thread(
             idle_wakes = 0;
         }
 
-        let n_records = backend.completions(&mut records);
-        if n_records > 0 {
-            // Read before the record loop, because it is what a *pickup* is
-            // measured to: the instant soundserver first held the record, not the
-            // instant it finished acting on a batch of them.
+        let completed = backend.completion();
+        if let Some(rec) = completed {
+            // Read before the record is acted on, because it is what a
+            // *pickup* is measured to: the instant soundserver first held the
+            // record, not the instant it finished acting on it.
             let seen_at = toyos_abi::clock::nanos_since_boot();
-            let mut wake_completions = 0u32;
-            for rec in &records[..n_records] {
-                let n = rec.mask.count_ones();
-                assert!(n > 0, "soundserver: completion record with empty mask");
-                assert_eq!(free_mask & rec.mask, 0, "soundserver: repeated completion for free buffer");
-                // Where the engine is, taken from what it reported rather than
-                // predicted: a mask a driver reads late is the OR of every
-                // `completed` since it last looked, so it can name a whole lap
-                // — which places the engine nowhere — and a cursor soundserver
-                // stepped itself would have to be right about how many laps
-                // that was. Re-deriving it per record cannot drift.
-                if pipeline == Pipeline::Ring {
-                    match stream::decode(rec.mask, num_buffers) {
-                        Some(stream::Completed::Run { first, count }) => {
-                            ring_cursor = (first + count) % num_buffers;
-                        }
-                        // Every period played and the mask says no more than
-                        // that. The cursor stays where it was: the fill order
-                        // from here is a guess either way, and a lap of silence
-                        // has already gone out — it counts as the drain it
-                        // is, and the next record re-anchors.
-                        Some(stream::Completed::Lapped) => {}
-                        None => panic!(
-                            "soundserver: the engine completed {:#x}, which is no walk of a \
-                             {num_buffers}-period ring",
-                            rec.mask
-                        ),
+            let n = rec.mask.count_ones();
+            assert!(n > 0, "soundserver: completion record with empty mask");
+            assert_eq!(free_mask & rec.mask, 0, "soundserver: repeated completion for free buffer");
+            // Where the engine is, taken from what it reported rather than
+            // predicted: a mask a driver reads late is the OR of every
+            // `completed` since it last looked, so it can name a whole lap
+            // — which places the engine nowhere — and a cursor soundserver
+            // stepped itself would have to be right about how many laps
+            // that was. Re-deriving it per record cannot drift.
+            if pipeline == Pipeline::Ring {
+                match stream::decode(rec.mask, num_buffers) {
+                    Some(stream::Completed::Run { first, count }) => {
+                        ring_cursor = (first + count) % num_buffers;
                     }
+                    // Every period played and the mask says no more than
+                    // that. The cursor stays where it was: the fill order
+                    // from here is a guess either way, and a lap of silence
+                    // has already gone out — it counts as the drain it
+                    // is, and the next record re-anchors.
+                    Some(stream::Completed::Lapped) => {}
+                    None => panic!(
+                        "soundserver: the engine completed {:#x}, which is no walk of a \
+                         {num_buffers}-period ring",
+                        rec.mask
+                    ),
                 }
-                unplayed = unplayed.saturating_sub(n as usize);
-                free_mask |= rec.mask;
-                // Zero-on-complete, before anything can decide to leave
-                // this buffer unfilled: the engine returns to it in
-                // `num_buffers` periods whatever soundserver does.
-                for idx in 0..num_buffers {
-                    if rec.mask & (1 << idx) != 0 {
-                        backend.released(idx);
-                    }
-                }
-                wake_completions += n;
-                dll.update(rec.timestamp_nanos as f64, n);
             }
+            unplayed = unplayed.saturating_sub(n as usize);
+            free_mask |= rec.mask;
+            // Zero-on-complete, before anything can decide to leave
+            // this buffer unfilled: the engine returns to it in
+            // `num_buffers` periods whatever soundserver does.
+            for idx in 0..num_buffers {
+                if rec.mask & (1 << idx) != 0 {
+                    backend.released(idx);
+                }
+            }
+            dll.update(rec.last_nanos as f64, n);
             // Measured against the prediction this wait was *armed* on, not
             // against whatever the DLL holds when the wait returns. They differ
             // on a window's first wake, armed while soundserver was still idle and
@@ -371,9 +365,10 @@ pub(crate) fn mix_thread(
             // whenever soundserver armed a timer the distance from that prediction
             // is the sample, however large.
             //
-            // **And it is recorded in two halves**, split at the oldest
-            // record's ISR timestamp: everything before it is the device
-            // failing to complete when it was due, everything after it is
+            // **And it is recorded in two halves**, split at when the
+            // device's first message about these periods landed: everything
+            // before it is the device failing to complete when it was due,
+            // everything after it is
             // soundserver failing to run once it had. `WorstWake` is where that
             // distinction is argued; here it costs one subtraction, because
             // both instants were already in hand.
@@ -384,18 +379,18 @@ pub(crate) fn mix_thread(
                 // landed *before* it was due was not late by any amount, and a
                 // soundserver that is nonetheless late here slept through it, so all
                 // of the overshoot is the pickup.
-                let irq_at = records[0].timestamp_nanos.max(t_est);
+                let irq_at = rec.first_nanos.max(t_est);
                 stats.wake(
                     seen_at.saturating_sub(t_est),
                     irq_at.saturating_sub(t_est),
                     seen_at.saturating_sub(irq_at),
-                    wake_completions,
+                    n,
                     period_nanos,
                 );
             }
             if !streams.is_empty() {
-                stats.completions += wake_completions;
-                stats.max_batch = stats.max_batch.max(wake_completions);
+                stats.completions += n;
+                stats.max_batch = stats.max_batch.max(n);
             }
         } else if armed_on.is_some() {
             // Armed on a grid point, woken, and the device had produced
@@ -601,6 +596,7 @@ pub(crate) fn mix_thread(
         }
 
         if wake_left_idle(was_streaming, started_at_wake, !streams.is_empty(), cmd_ready) {
+            let n_records = usize::from(completed.is_some());
             idle_wakes = idle_wakes.saturating_add(1);
             if idle_wakes < IDLE_WAKES_SAID {
                 say!("soundserver: idle wake {idle_wakes} ({n_records} records)");

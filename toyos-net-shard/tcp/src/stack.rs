@@ -100,7 +100,8 @@ enum User {
 
 struct Ended {
     failure: Option<Failure>,
-    /// After both FINs: what the user has still to read.
+    /// After both FINs or the peer's reset: what the user has still to read, ahead of the failure
+    /// (Linux and the BSDs, not RFC 9293 §3.10.7.4's SHOULD-flush).
     rx: Option<Box<Rx>>,
 }
 
@@ -414,7 +415,7 @@ impl Tcp {
         Local {
             mss: mtu.saturating_sub(40),
             shift: self.shift,
-            window: u16::try_from(self.config.receive_buffer.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
+            window: u16::try_from(self.config.receive_buffer.min(limits::RECEIVE_BUFFER_INITIAL)).unwrap_or(u16::MAX),
             receive_buffer: usize::try_from(self.config.receive_buffer).unwrap_or(0),
             send_buffer: usize::try_from(self.config.send_buffer).unwrap_or(0),
             mtu,
@@ -474,7 +475,7 @@ impl Tcp {
     }
 
     /// A connection's end: the user who holds it keeps the socket to learn why (and to read what
-    /// both FINs left); anyone else's is freed.
+    /// both FINs or a reset left); anyone else's is freed.
     fn end(&mut self, index: u32, failure: Option<Failure>, rx: Option<Box<Rx>>) {
         let Some(conn) = value(&mut self.conns, index) else { return };
         match conn.user {
@@ -887,7 +888,7 @@ impl Tcp {
                 self.settle(index, now);
             }
             Verdict::Closed => self.end(index, None, Some(Box::new(sync.rx))),
-            Verdict::Reset => self.end(index, Some(Failure::Reset), None),
+            Verdict::Reset => self.end(index, Some(Failure::Reset), Some(Box::new(sync.rx))),
             Verdict::TimeWait => {
                 let tw = TimeWait::from_sync(&sync, now);
                 let owed = sync.rx.ack_now || sync.rx.dup_owed > 0 || sync.rx.delayed.is_some();
@@ -1009,11 +1010,10 @@ impl Tcp {
         let conn = self.conn(id)?;
         let result = match &mut conn.state {
             Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
-            Tcb::Sync(sync) => sync.recv(out),
-            Tcb::Ended(Ended { failure: Some(failure), .. }) => Err(Error::Failed(*failure)),
-            Tcb::Ended(Ended { failure: None, rx }) => match rx.as_mut().map(|rx| rx.read(out)) {
+            Tcb::Sync(sync) => sync.recv(out, now),
+            Tcb::Ended(Ended { failure, rx }) => match rx.as_mut().map(|rx| rx.read(out)) {
                 Some(n) if n > 0 => Ok(Received::Data(n)),
-                _ => Ok(Received::End),
+                _ => failure.map_or(Ok(Received::End), |f| Err(Error::Failed(f))),
             },
         };
         self.settle(id.index, now);
@@ -1028,11 +1028,10 @@ impl Tcp {
         let conn = self.conn(id)?;
         let result = match &mut conn.state {
             Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
-            Tcb::Sync(sync) => sync.recv_with(take),
-            Tcb::Ended(Ended { failure: Some(failure), .. }) => Err(Error::Failed(*failure)),
-            Tcb::Ended(Ended { failure: None, rx }) => match rx.as_mut() {
+            Tcb::Sync(sync) => sync.recv_with(take, now),
+            Tcb::Ended(Ended { failure, rx }) => match rx.as_mut() {
                 Some(rx) if rx.unread() > 0 => Ok(Received::Data(rx.read_with(take))),
-                _ => Ok(Received::End),
+                _ => failure.map_or(Ok(Received::End), |f| Err(Error::Failed(f))),
             },
         };
         self.settle(id.index, now);
