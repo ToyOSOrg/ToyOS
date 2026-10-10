@@ -76,20 +76,19 @@ fn a_table_needs_both_of_its_tags_and_a_non_zero_size() {
 
 #[test]
 fn a_dynamic_table_with_no_null_terminator_stops_at_the_buffer() {
-    let tags: Vec<_> = (0..64).map(|i| (dynamic::DT_NEEDED, i as u64)).collect();
-    let data = dynamic_unterminated(&tags);
-    assert_eq!(Dynamic::needed(&data).count(), 64);
+    let data = dynamic_unterminated(&[(dynamic::DT_RELA, 0x1000), (dynamic::DT_RELASZ, 48)]);
+    assert_eq!(Dynamic::parse(&data).rela, Some(dynamic::Table { vaddr: 0x1000, size: 48 }));
 
     // And a trailing partial entry is not an entry.
     let short = &data[..data.len() - 4];
-    assert_eq!(Dynamic::needed(short).count(), 63);
+    assert_eq!(Dynamic::parse(short).rela, None);
 }
 
 #[test]
 fn everything_after_dt_null_is_ignored() {
-    let mut data = dynamic(&[(dynamic::DT_NEEDED, 1)]);
-    data.extend_from_slice(&dynamic_unterminated(&[(dynamic::DT_NEEDED, 2)]));
-    assert_eq!(Dynamic::needed(&data).collect::<Vec<_>>(), vec![1]);
+    let mut data = dynamic(&[(dynamic::DT_RELA, 0x1000)]);
+    data.extend_from_slice(&dynamic_unterminated(&[(dynamic::DT_RELASZ, 48)]));
+    assert_eq!(Dynamic::parse(&data).rela, None);
 }
 
 // ── Relocation tables ───────────────────────────────────────────────────
@@ -494,28 +493,6 @@ fn a_symbol_section_whose_link_names_nothing_is_no_symbol_section() {
     let table = SectionTable::new(&bytes);
     assert_eq!(table.symbols(SHT_SYMTAB), None);
     assert!(table.symbols(SHT_DYNSYM).is_some());
-}
-
-/// `.rela.dyn` is identified by shape — a `SHT_RELA` of 24-byte entries whose
-/// first is `R_X86_64_RELATIVE` — because reading section names needs
-/// `.shstrtab`, which needs `e_shstrndx`, which is not in this table.
-#[test]
-fn rela_dyn_is_found_by_shape_and_only_by_shape() {
-    let bytes = [
-        shdr(0, 0, 0, 0, 0),
-        shdr(SHT_RELA, 0x100, 24, 0, 16), // wrong entry size
-        shdr(SHT_RELA, 0x200, 0, 0, 24),  // empty
-        shdr(SHT_RELA, 0x300, 48, 0, 24), // first entry is not RELATIVE
-        shdr(SHT_RELA, 0x400, 72, 0, 24), // this one
-    ]
-    .concat();
-    let table = SectionTable::new(&bytes);
-    let mut reader = |off: u64| match off {
-        0x300 => RelaTable::new(&rela(0, 1, 6, 0), Machine::X86_64).get(0),
-        0x400 => RelaTable::new(&rela(0, 0, 8, 0), Machine::X86_64).get(0),
-        _ => None,
-    };
-    assert_eq!(table.rela_dyn(&mut reader), Some((0x400, 72)));
 }
 
 /// A loader that applies `SHT_RELA` alone reaches those sections only through

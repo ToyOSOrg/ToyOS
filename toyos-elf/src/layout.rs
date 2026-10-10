@@ -570,23 +570,6 @@ impl Layout {
         self.vaddr_to_file_offset(self.extent.min.checked_add(at.get())?)
     }
 
-    /// How many bytes of file back `vaddr` before the segment holding it runs
-    /// out.
-    ///
-    /// `.gnu.hash` declares no length anywhere — its extent is the section it
-    /// lives in and no `DT_*` tag names one — so the honest bound is the
-    /// containing segment's own file image. `None` when no segment's file
-    /// image covers `vaddr`.
-    pub fn file_bytes_from(&self, vaddr: u64) -> Option<u64> {
-        for seg in self.segments() {
-            let Some(within) = vaddr.checked_sub(self.seg_vaddr(seg)) else { continue };
-            if within < seg.filesz {
-                return seg.filesz.checked_sub(within);
-            }
-        }
-        None
-    }
-
     /// A segment's `p_vaddr`, back out of its image offset: inside the extent,
     /// so the sum cannot overflow.
     fn seg_vaddr(&self, seg: &Segment) -> u64 {

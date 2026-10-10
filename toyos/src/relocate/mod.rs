@@ -36,7 +36,7 @@ use toyos_abi::RawHandle;
 
 /// Why a program's relocations are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refusal {
+enum Refusal {
     /// The header is no little-endian ELF64 of a machine this knows, or its
     /// program headers are not 56 bytes each.
     Header,
@@ -73,7 +73,7 @@ pub enum Refusal {
 const REFUSED_LINE: &[u8] = b"this program's relocations are refused: it cannot start\n";
 
 /// The status a program whose relocations are refused exits with.
-pub const REFUSED_STATUS: i32 = 127;
+const REFUSED_STATUS: i32 = 127;
 
 /// Apply the running image's own relocations, or end the process with
 /// [`REFUSED_STATUS`].

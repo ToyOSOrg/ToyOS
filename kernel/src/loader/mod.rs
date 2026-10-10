@@ -1,9 +1,9 @@
 //! Building a process out of an ELF file.
 //!
-//! The kernel reads an executable's program headers and its `PT_TLS`
-//! template, demand-pages its `PT_LOAD`s and jumps to its entry; it reads no
-//! dynamic section, applies no relocation and loads no library at spawn. The
-//! program relocates itself (`toyos::relocate`).
+//! The kernel reads an executable's program headers, its `PT_TLS` template
+//! and its build-id note, demand-pages its `PT_LOAD`s and jumps to its entry;
+//! it reads no dynamic section, applies no relocation and loads no library at
+//! spawn. The program relocates itself (`toyos::relocate`).
 //!
 //! Every number the file names is untrusted: a refusal is
 //! `SyscallError::{InvalidArgument, ResourceExhausted}`, never a panic.

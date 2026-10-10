@@ -21,7 +21,6 @@ pub struct Table {
 }
 
 pub const DT_NULL: i64 = 0;
-pub const DT_NEEDED: i64 = 1;
 pub const DT_PLTRELSZ: i64 = 2;
 pub const DT_STRTAB: i64 = 5;
 pub const DT_SYMTAB: i64 = 6;
@@ -81,11 +80,6 @@ impl Dynamic {
         out
     }
 
-    /// The `DT_STRTAB`/`DT_STRSZ` pair, when the file names both.
-    pub fn strtab_table(&self) -> Option<Table> {
-        Table::from_tags(self.strtab, self.strsz)
-    }
-
     /// `.dynsym`'s entry count where no section header says it: what the
     /// `.gnu.hash` table describes, `gnu_hash` being its bytes from
     /// `DT_GNU_HASH` on, or else the gap from `DT_SYMTAB` to `DT_STRTAB`,
@@ -100,15 +94,6 @@ impl Dynamic {
             None => Ok(gap),
             Some(table) => GnuHash::parse(table).and_then(|h| h.sym_count()).ok_or(gap),
         }
-    }
-
-    /// `DT_NEEDED` offsets into the string table, in the order they appear.
-    ///
-    /// An iterator rather than a collection: the count is one per entry of a
-    /// table whose length the file chose, so anything that materialises it is
-    /// an allocation sized by untrusted input.
-    pub fn needed(data: &[u8]) -> impl Iterator<Item = u64> + '_ {
-        Entries::new(data).filter_map(|(tag, val)| (tag == DT_NEEDED).then_some(val))
     }
 }
 

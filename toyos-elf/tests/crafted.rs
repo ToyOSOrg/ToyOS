@@ -330,23 +330,6 @@ fn an_extrapolated_file_offset_that_overflows_has_no_answer() {
     assert_eq!(layout.vaddr_to_file_offset(0x2000), None);
 }
 
-/// `.gnu.hash` declares its length nowhere, so its bound is the file image of
-/// the segment holding it.
-#[test]
-fn the_file_bytes_behind_a_vaddr_are_the_containing_segments() {
-    let layout = accepted(
-        Elf::new(0x4000)
-            .ph(Phdr::load(0, 0, 0x1000, 0x2000, PF_R | PF_X))
-            .ph(Phdr::load(0x2000, 0x2000, 0x800, 0x2000, PF_R | PF_W))
-            .build(),
-    );
-    assert_eq!(layout.file_bytes_from(0), Some(0x1000));
-    assert_eq!(layout.file_bytes_from(0xF00), Some(0x100));
-    // Inside the segment's memory image but past its file image: no bytes.
-    assert_eq!(layout.file_bytes_from(0x1800), None);
-    assert_eq!(layout.file_bytes_from(0x2400), Some(0x400));
-}
-
 /// `(image offset, bytes, count)` of the table a layout places, for comparing.
 fn table_of(layout: &Layout) -> Option<(u64, u64, u16)> {
     layout.program_headers().map(|t| (t.image().start().get(), t.image().len(), t.count()))
