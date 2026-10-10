@@ -1,4 +1,4 @@
-//! Vector 0xFF, the spurious vector `apic::enable_x2apic` writes into the SVR
+//! Vector 0xFF, the spurious vector `apic::enable` writes into the SVR
 //! on every CPU.
 //!
 //! The EOI is conditional: sent only when the ISR bit is set (SDM Vol. 3A
@@ -10,7 +10,7 @@ use core::arch::naked_asm;
 
 use crate::arch::apic;
 
-/// The vector `apic::enable_x2apic` writes into the SVR; pub because the IDT
+/// The vector `apic::enable` writes into the SVR; pub because the IDT
 /// gate row hardcodes `0xFF` on its own and must be kept in sync by hand.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 

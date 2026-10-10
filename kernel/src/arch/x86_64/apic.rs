@@ -1,136 +1,216 @@
+//! The local APIC, in the mode `control_regs` declared for every CPU: x2APIC
+//! through MSRs where CPUID offers it, xAPIC through its MMIO page where it
+//! does not. Every register is reached through [`Reg`], which is the only
+//! place the two modes differ but for the ICR's destination.
+//!
+//! Sections cited here are the Intel SDM's, Vol. 3A order 325384-093US,
+//! chapter 13, and the AMD APM's, Vol. 2 publication 24593 rev. 3.45,
+//! chapter 16.
+
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use super::control_regs::{self, ApicMode};
 use super::{cpu, percpu};
 use crate::hw::MIN_ONE_SHOT;
 use crate::log;
+use crate::mm::policy::MmioPolicy;
+use crate::mm::{DirectMap, Mmio};
 use crate::time::{Delay, Duration};
 
-/// The local APIC registers and MSRs this file may name.
-// Every variant is an architectural local-APIC register touching no memory or control transfer, so none can make `Reg::write`'s unsafe wrmsr unsound.
-// Addresses are x2APIC's: 0x800 plus the xAPIC MMIO offset shifted right four; ApicBase is the one exception, the MSR that turns x2APIC on.
+/// A local APIC register by its xAPIC MMIO offset (SDM Table 13-1, APM Table
+/// 16-2); its x2APIC MSR is `0x800 + offset / 16` (SDM §13.12.1.2, APM
+/// §16.11.1). Only the constants below exist, so every register named is an
+/// architectural one touching no memory or control transfer.
 #[derive(Clone, Copy)]
-#[repr(u32)]
-enum Reg {
-    ApicBase = 0x1B,
-    Id = 0x802,
-    Eoi = 0x80B,
-    Svr = 0x80F,
-    /// First of the eight in-service words (0x810..=0x817); see `in_service`.
-    Isr0 = 0x810,
-    Icr = 0x830,
-    LvtTimer = 0x832,
-    /// The performance-monitoring counters' LVT entry, xAPIC offset 0x340.
-    LvtPmc = 0x834,
-    TimerInit = 0x838,
-    TimerCurrent = 0x839,
-    TimerDivide = 0x83E,
-}
+struct Reg(u32);
 
 impl Reg {
-    #[inline]
-    fn read(self) -> u64 {
-        cpu::rdmsr(self as u32)
+    const ID: Reg = Reg(0x20);
+    const EOI: Reg = Reg(0xB0);
+    const SVR: Reg = Reg(0xF0);
+    /// The ICR's command half; in x2APIC the whole 64-bit ICR (SDM §13.6.1,
+    /// §13.12.9; APM §16.5, §16.13).
+    const ICR: Reg = Reg(0x300);
+    /// The ICR's destination half, xAPIC only: x2APIC has no MSR 831H.
+    const ICR_HIGH: Reg = Reg(0x310);
+    const LVT_TIMER: Reg = Reg(0x320);
+    /// The performance-monitoring counters' LVT entry.
+    const LVT_PMC: Reg = Reg(0x340);
+    const TIMER_INIT: Reg = Reg(0x380);
+    const TIMER_CURRENT: Reg = Reg(0x390);
+    const TIMER_DIVIDE: Reg = Reg(0x3E0);
+
+    /// The in-service word holding `vector`'s bit, one of eight at 100H–170H
+    /// (SDM §13.8.4 Figure 13-20, APM Table 16-2).
+    fn isr(vector: u8) -> Reg {
+        Reg(0x100 + 0x10 * (u32::from(vector) >> 5))
     }
 
     #[inline]
-    fn write(self, value: u64) {
-        // SAFETY: every value written here is a local-APIC word built in this module from architectural field encodings, so no reserved-bit #GP is possible.
-        unsafe { cpu::wrmsr(self as u32, value) };
+    fn read(self) -> u32 {
+        match control_regs::apic_mode() {
+            ApicMode::X2apic => cpu::rdmsr(self.msr()) as u32,
+            ApicMode::Xapic => window().read_u32(u64::from(self.0)),
+        }
     }
+
+    #[inline]
+    fn write(self, value: u32) {
+        match control_regs::apic_mode() {
+            // SAFETY: an architectural local-APIC register (the constants
+            // above), written a word this module built from its field
+            // encodings, so no reserved-bit `#GP` is possible.
+            ApicMode::X2apic => unsafe { cpu::wrmsr(self.msr(), u64::from(value)) },
+            ApicMode::Xapic => window().write_u32(u64::from(self.0), value),
+        }
+    }
+
+    fn msr(self) -> u32 {
+        0x800 + (self.0 >> 4)
+    }
+}
+
+/// The xAPIC register page, a whole 4 KiB (SDM §13.4.1, APM §16.3.2), which
+/// [`init`] maps uncacheable before anything reaches it: every access to it
+/// is then serializing (SDM §13.12.3's note), so none owes a fence.
+fn window() -> Mmio {
+    Mmio::new(DirectMap::from_phys(control_regs::APIC_REGISTERS), 0x1000)
 }
 
 pub const TIMER_VECTOR: u8 = 0x20;
 
 /// Where a device writes a message-signalled interrupt: the local APIC's
-/// message window (SDM Vol. 3A §11.11.1). The one spelling of it — the
+/// message window (SDM §13.11.1). The one spelling of it — the
 /// compatibility format below, VT-d's remappable format and VT-d's own fault
 /// event all start here.
 pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
 
+/// `apic_id` as the eight bits an xAPIC ICR, a compatibility-format MSI and
+/// an I/O APIC entry carry it in (SDM §13.6.1, §13.11.1), or the refusal:
+/// `0xFF` there is the broadcast, not a CPU.
+pub fn narrow_destination(apic_id: u32) -> Result<u8, &'static str> {
+    u8::try_from(apic_id)
+        .ok()
+        .filter(|id| *id != 0xFF)
+        .ok_or("the APIC id does not fit an 8-bit destination, where 0xFF is broadcast")
+}
+
 /// The compatibility-format message that raises `vector` on the CPU whose APIC
 /// ID is `dest`: the destination in address bits 19:12, the vector in the data.
 pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
-    Ok((MSI_DOORBELL | (dest << 12), vector as u32))
+    Ok((MSI_DOORBELL | u32::from(narrow_destination(dest)?) << 12, vector as u32))
 }
 
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs),
 /// which is one quantum: what the Ring 0 timer branch re-arms with.
-pub(crate) static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
+static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
 const _: () = assert!(kernel::sched::fair::QUANTUM_NS == 10_000_000);
 
-/// The spurious-interrupt vector register, whole (SDM Vol. 3A §11.9): the APIC
-/// enabled, the vector `arch::idt::spurious` gates, and every other bit
+/// The spurious-interrupt vector register, whole (SDM §13.9, APM §16.4.7): the
+/// APIC enabled, the vector `arch::idt::spurious` gates, and every other bit
 /// clear — EOI-broadcast suppression among them, so an EOI for a level line
 /// reaches the I/O APIC and clears its Remote IRR.
-const SVR: u64 = 1 << 8 | super::idt::spurious::SPURIOUS_VECTOR as u64;
+const SVR: u32 = 1 << 8 | super::idt::spurious::SPURIOUS_VECTOR as u32;
 
-/// Guards IPI sends before the APIC is enabled.
-static X2APIC_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Guards IPI sends before the BSP's APIC is enabled.
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
-fn enable_x2apic() {
-    let mut base = Reg::ApicBase.read();
-    base |= (1 << 11) | (1 << 10);
-    Reg::ApicBase.write(base);
-
-    Reg::Svr.write(SVR);
-    let held = Reg::Svr.read();
+/// This CPU's `IA32_APIC_BASE` as declared, then its SVR, read back.
+fn enable(cpu_id: u32) -> ApicMode {
+    let mode = control_regs::init_apic(cpu_id);
+    // The BSP's alone: every AP reaches the same page through the kernel's tables.
+    if cpu_id == 0 && mode == ApicMode::Xapic {
+        crate::mm::paging::map_mmio(control_regs::APIC_REGISTERS, 0x1000, MmioPolicy::Uncacheable);
+    }
+    Reg::SVR.write(SVR);
+    let held = Reg::SVR.read();
     assert!(held == SVR, "LAPIC: SVR reads {held:#x} after {SVR:#x} was written");
+    mode
 }
 
-/// Initialize the BSP's Local APIC in x2APIC mode.
+/// Enable the BSP's local APIC.
 pub fn init() {
-    enable_x2apic();
-    X2APIC_ENABLED.store(true, Ordering::Release);
-    log!("LAPIC: x2APIC enabled (ID {})", id());
+    let mode = enable(0);
+    ENABLED.store(true, Ordering::Release);
+    log!("LAPIC: {mode:?} enabled (ID {})", id());
 }
 
-/// Enable the AP's local APIC in x2APIC mode.
+/// Enable this AP's local APIC, in the mode the BSP's took.
 pub fn init_ap() {
-    enable_x2apic();
+    enable(percpu::cpu_id());
 }
 
+/// This CPU's APIC id: all 32 bits in x2APIC, bits 31:24 in xAPIC (SDM
+/// §13.4.6 Figure 13-6, APM §16.3.3, §16.12).
 pub fn id() -> u32 {
-    Reg::Id.read() as u32
+    match control_regs::apic_mode() {
+        ApicMode::X2apic => Reg::ID.read(),
+        ApicMode::Xapic => Reg::ID.read() >> 24,
+    }
 }
 
-/// Raise an interrupt `icr` names whole, after every store before it. An
-/// x2APIC ICR write is not serializing (SDM Vol. 3A, "MSR Access in x2APIC
-/// Mode"), so without the fence a target could take the interrupt before the
-/// store it announces.
-fn send(icr: u64) {
-    cpu::wrmsr_fence();
-    Reg::Icr.write(icr);
+/// Raise the interrupt `command` names — the ICR's low half — at the CPU
+/// whose APIC id is `apic_id`, or at the destination its shorthand names
+/// when `None`, after every store before it.
+///
+/// x2APIC: one write, behind a fence, since that write is not serializing
+/// (SDM §13.12.3, APM §16.11.2) and a target could otherwise take the
+/// interrupt before the store it announces. xAPIC: the destination half and
+/// then the command half, whose write sends (SDM §13.6.1, APM §16.5), with
+/// interrupts closed between them so a handler's own send cannot retarget
+/// this one — an NMI handler's targeted send could, and the only one is the
+/// boot actuators' nested-NMI staging. Delivery Status is not polled: APM
+/// §16.5 lets the ICR be written again without it, and SDM §13.6.1 asks no
+/// wait.
+fn send(apic_id: Option<u32>, command: u32) {
+    match control_regs::apic_mode() {
+        ApicMode::X2apic => {
+            let icr = u64::from(apic_id.unwrap_or(0)) << 32 | u64::from(command);
+            cpu::wrmsr_fence();
+            // SAFETY: the ICR, written a command this module encodes and a
+            // 32-bit destination, which every x2APIC accepts.
+            unsafe { cpu::wrmsr(Reg::ICR.msr(), icr) };
+        }
+        ApicMode::Xapic => {
+            let _closed = super::IrqGuard::close();
+            if let Some(apic_id) = apic_id {
+                let dest = narrow_destination(apic_id)
+                    .unwrap_or_else(|why| panic!("LAPIC: no IPI can reach APIC id {apic_id:#x}: {why}"));
+                Reg::ICR_HIGH.write(u32::from(dest) << 24);
+            }
+            Reg::ICR.write(command);
+        }
+    }
 }
 
 /// Send INIT IPI to the specified APIC ID.
 pub fn send_init(apic_id: u32) {
-    // ICR write: destination in the high 32 bits, 0x4500 = delivery INIT, level assert.
-    send(((apic_id as u64) << 32) | 0x4500);
+    // 0x4500 = delivery INIT, level assert.
+    send(Some(apic_id), 0x4500);
 }
 
 /// Send Startup IPI (SIPI) with the given vector (trampoline page number).
 pub fn send_sipi(apic_id: u32, vector: u8) {
-    send(((apic_id as u64) << 32) | 0x4600 | vector as u64);
+    send(Some(apic_id), 0x4600 | u32::from(vector));
 }
 
 /// Send EOI.
 #[inline]
 pub fn eoi() {
-    Reg::Eoi.write(0);
+    Reg::EOI.write(0);
 }
 
 /// Whether `vector` is in service on this CPU.
 pub fn in_service(vector: u8) -> bool {
-    // ISR is eight 32-bit words (SDM Vol. 3A §12.8.4): word = vector >> 5, bit = vector & 31.
-    let word = cpu::rdmsr(Reg::Isr0 as u32 + (vector as u32 >> 5));
+    let word = Reg::isr(vector).read();
     (word >> (vector & 31)) & 1 != 0
 }
 
 /// The highest vector in service — the one being handled, since the LAPIC only
-/// delivers above the ISR top (SDM Vol. 3A §12.8.4). `None` outside a handler.
+/// delivers above the ISR top (SDM §13.8.4). `None` outside a handler.
 pub fn in_service_highest() -> Option<u8> {
     for word_index in (0..8u32).rev() {
-        let word = cpu::rdmsr(Reg::Isr0 as u32 + word_index) as u32;
+        let word = Reg::isr((word_index * 32) as u8).read();
         if word != 0 {
             return Some((word_index * 32 + (31 - word.leading_zeros())) as u8);
         }
@@ -141,21 +221,21 @@ pub fn in_service_highest() -> Option<u8> {
 /// Send an IPI to this CPU (self shorthand).
 #[cfg(feature = "boot-actuators")]
 pub fn send_self(vector: u8) {
-    if !X2APIC_ENABLED.load(Ordering::Relaxed) {
+    if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
     // Destination shorthand = self (0b01 << 18), fixed delivery, level assert.
-    send(0x0004_4000 | vector as u64);
+    send(None, 0x0004_4000 | u32::from(vector));
 }
 
 fn ipi_all_excluding_self(vector: u8) {
     // destination shorthand = all-excluding-self (0b11 << 18), fixed delivery
-    send(0x000C_0000 | vector as u64);
+    send(None, 0x000C_0000 | u32::from(vector));
 }
 
 /// Ask every other CPU to flush its TLB.
 pub(super) fn tlb_ipi() {
-    if X2APIC_ENABLED.load(Ordering::Relaxed) {
+    if ENABLED.load(Ordering::Relaxed) {
         ipi_all_excluding_self(0xFE);
     }
 }
@@ -163,9 +243,9 @@ pub(super) fn tlb_ipi() {
 /// Send the kick IPI to one CPU, waking it if halted.
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {
-    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    if !ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);
-    send(((apic_id as u64) << 32) | 0x4000 | u64::from(super::idt::KICK_VECTOR));
+    send(Some(apic_id), 0x4000 | u32::from(super::idt::KICK_VECTOR));
 }
 
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
@@ -182,44 +262,44 @@ pub fn kick_all_but_self() {
 // Test kernels only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
 #[cfg(feature = "boot-actuators")]
 pub fn send_nmi(cpu_id: u32) {
-    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    if !ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);
-    send(((apic_id as u64) << 32) | 0x4400);
+    send(Some(apic_id), 0x4400);
 }
 
 /// Point this CPU's performance-counter LVT entry at NMI delivery, unmasked —
 /// the one interrupt a CPU that has cleared `IF` still takes, and so the only
 /// way `crate::hardlockup` can sample one.
 ///
-/// **Written again after every delivery, not once at arm.** SDM Vol. 3A §12.5.1:
-/// the local APIC sets this entry's mask flag when it handles a
+/// **Written again after every delivery, not once at arm.** SDM §13.5.1, APM
+/// §16.4.3: the local APIC sets this entry's mask flag when it handles a
 /// performance-monitoring interrupt, and only software clears it, so a handler
 /// that does not write this gets exactly one NMI for the machine's life.
 ///
 /// Declared whole: delivery mode 100b (NMI) in bits 10:8, mask clear, and a
 /// vector field the CPU ignores under that delivery mode.
 pub fn arm_perf_nmi() {
-    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
-    Reg::LvtPmc.write(0b100 << 8);
+    if !ENABLED.load(Ordering::Relaxed) { return; }
+    Reg::LVT_PMC.write(0b100 << 8);
 }
 
 /// Send every other CPU the halt IPI, where the machine has released any: before
 /// that no sibling has been sent its `SIPI`, so there are only CPUs still waiting
 /// for one rather than CPUs that need halting.
 pub fn stop_other_cpus() {
-    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::smp::is_ready() {
-        send(0x000C_0000 | 0xFD);
+    if ENABLED.load(Ordering::Relaxed) && crate::smp::is_ready() {
+        send(None, 0x000C_0000 | 0xFD);
     }
 }
 
 /// Calibrate the LAPIC timer on the BSP (requires HPET); does not start it.
 pub fn init_timer() {
     // Divide by 1 for maximum resolution.
-    Reg::TimerDivide.write(0b1011);
+    Reg::TIMER_DIVIDE.write(0b1011);
 
     // Masked one-shot mode for calibration.
-    Reg::LvtTimer.write(1 << 16);
-    Reg::TimerInit.write(0xFFFF_FFFF);
+    Reg::LVT_TIMER.write(1 << 16);
+    Reg::TIMER_INIT.write(0xFFFF_FFFF);
 
     const CALIBRATION: Delay = Delay::to_measure(
         Duration::from_millis(10),
@@ -229,11 +309,11 @@ pub fn init_timer() {
     while crate::clock::nanos_since_boot() - start < CALIBRATION.nanos() {}
     let elapsed = crate::clock::nanos_since_boot() - start;
 
-    let remaining = Reg::TimerCurrent.read() as u32;
+    let remaining = Reg::TIMER_CURRENT.read();
     let ticks_elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
     let ticks_10ms = (ticks_elapsed as u64 * 10_000_000 / elapsed) as u32;
 
-    Reg::TimerInit.write(0);
+    Reg::TIMER_INIT.write(0);
     TIMER_TICKS.store(ticks_10ms, Ordering::Release);
     // Fallback for any Ring 0 fire before the scheduler arms its first quantum.
     percpu::set_last_armed_ticks(OneShot::ticks(ticks_10ms as u64).0);
@@ -245,7 +325,7 @@ pub fn init_timer() {
     log!("LAPIC timer: {} ticks/10ms, so {}Hz", ticks_10ms, ticks_10ms as u64 * 100);
 }
 
-// The only path to Reg::TimerInit / last_armed_ticks — the floor is enforced once here, not at each of the three call sites.
+// The floor is enforced once here, not at each of the three call sites.
 struct OneShot(u32);
 
 impl OneShot {
@@ -262,11 +342,11 @@ impl OneShot {
     }
 
     fn arm(self) {
-        Reg::TimerDivide.write(0b1011);
+        Reg::TIMER_DIVIDE.write(0b1011);
         // LVT resets masked; an AP may reach here before this register was ever written.
-        Reg::LvtTimer.write(TIMER_VECTOR as u64);
+        Reg::LVT_TIMER.write(u32::from(TIMER_VECTOR));
         percpu::set_last_armed_ticks(self.0);
-        Reg::TimerInit.write(self.0 as u64);
+        Reg::TIMER_INIT.write(self.0);
     }
 }
 
@@ -281,7 +361,7 @@ pub fn arm_one_shot(nanos: u64) {
 pub fn arm_within(nanos: u64) {
     let want = OneShot::after(nanos);
     // Zero here means stop_timer, not an imminent expiry — a running count never reaches zero on its own.
-    let remaining = Reg::TimerCurrent.read() as u32;
+    let remaining = Reg::TIMER_CURRENT.read();
     let ticks = if remaining == 0 { want.0 } else { want.0.min(remaining) };
     OneShot::ticks(ticks as u64).arm();
 }
@@ -289,18 +369,32 @@ pub fn arm_within(nanos: u64) {
 /// What the timer was last armed with: `TIMER_INIT`, a count of ticks.
 #[cfg(feature = "test-actuators")]
 pub fn comparator() -> u64 {
-    Reg::TimerInit.read()
+    u64::from(Reg::TIMER_INIT.read())
 }
 
 /// Whether a Ring 0 fire since [`comparator`] read `_armed` re-armed one quantum.
 #[cfg(feature = "test-actuators")]
 pub fn rearmed_a_quantum(_armed: u64) -> bool {
-    Reg::TimerInit.read() == u64::from(TIMER_TICKS.load(Ordering::Relaxed))
+    Reg::TIMER_INIT.read() == TIMER_TICKS.load(Ordering::Relaxed)
+}
+
+/// The Ring 3 fire's re-arm, before its Rust half runs: what this CPU last
+/// armed, again, so the timer survives a handler that panics first.
+pub(crate) extern "sysv64" fn rearm_last() {
+    Reg::TIMER_INIT.write(percpu::last_armed_ticks());
+}
+
+/// The Ring 0 fire's local-APIC work, called from its stub with interrupts
+/// closed: the EOI, then one quantum on, or a stopped timer left stopped.
+pub(crate) extern "sysv64" fn ring0_fire() {
+    eoi();
+    let stopped = percpu::last_armed_ticks() == 0;
+    Reg::TIMER_INIT.write(if stopped { 0 } else { TIMER_TICKS.load(Ordering::Relaxed) });
 }
 
 /// Stop the timer. No more interrupts until re-armed.
 pub fn stop_timer() {
     percpu::set_last_armed_ticks(0);
-    Reg::TimerInit.write(0);
+    Reg::TIMER_INIT.write(0);
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);
 }

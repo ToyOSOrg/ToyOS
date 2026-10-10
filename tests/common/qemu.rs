@@ -708,6 +708,10 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
+    /// whatever the host, so its local APICs run in xAPIC mode: the machine
+    /// an AMD laptop without x2APIC is.
+    MetalNoX2apic,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -750,24 +754,32 @@ impl Profile {
             | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
             | Self::HeadlessUsbSpare
-            | Self::Metal => Arch::X86_64,
+            | Self::Metal
+            | Self::MetalNoX2apic => Arch::X86_64,
         }
     }
 
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::MetalNoX2apic => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
 
     /// The CPU this machine has.
-    fn cpu(self) -> &'static str {
+    fn cpu(self) -> String {
         match self {
-            Self::VirtEl2NoVhe => "cortex-a72",
-            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72",
-            _ => self.arch().cpu(self.accel()),
+            Self::VirtEl2NoVhe => "cortex-a72".to_string(),
+            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72".to_string(),
+            // The one declaration's CPU with its x2APIC taken away, refused by
+            // name the day that declaration stops offering one.
+            Self::MetalNoX2apic => {
+                let offered = self.arch().cpu(self.accel());
+                assert!(offered.contains(",+x2apic"), "{offered:?} offers no x2APIC to take away");
+                offered.replace(",+x2apic", ",-x2apic")
+            }
+            _ => self.arch().cpu(self.accel()).to_string(),
         }
     }
 }
@@ -985,6 +997,7 @@ impl Profile {
                 smmu: Smmu::Absent,
                 rng: false,
             },
+            Self::MetalNoX2apic => Self::Metal.shape(),
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
