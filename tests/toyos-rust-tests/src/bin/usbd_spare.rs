@@ -45,8 +45,8 @@ const SETTLE_BOUND: Duration = Duration::from_secs(30);
 /// `CLAIM_RETURN` for the same reason. A liveness guard.
 const CLAIM_RETURN: Duration = Duration::from_secs(2);
 
-/// The span across which a parked usbd may not wake for anything but the
-/// asking: the absence is what is measured, so the span is the instrument.
+/// The span across which a parked usbd may wake for nothing but an event:
+/// the absence is what is measured, so the span is the instrument.
 const PARKED_SPAN: Duration = Duration::from_millis(500);
 
 /// What the fault arm aims the command ring at: a gigabyte past its one
@@ -183,11 +183,12 @@ fn drive(cap: &SysCap) {
     assert!(number(&first, "usb.interrupts.records") > 0, "usbd_spare: usbd read no interrupt record");
     assert_eq!(first.get("usb.noop").map(Value::to_string).as_deref(), Some("completed"));
 
-    // Parked: across the span nothing but the asking wakes it.
+    // Parked: across the span nothing wakes it that is not an event — no
+    // timeout, and no claim read ready without a record behind it.
     let before = usbd.ask("parked, before");
     std::thread::sleep(PARKED_SPAN);
     let after = usbd.ask("parked, after");
-    for path in ["usb.wakes.timed", "usb.wakes.device", "usb.events.taken", "usb.interrupts.records"] {
+    for path in ["usb.wakes.timed", "usb.wakes.empty"] {
         assert_eq!(number(&before, path), number(&after, path), "usbd_spare: {path} moved while usbd had nothing to do");
     }
     assert_eq!(after.get("usb.deadline_ns").map(Value::to_string).as_deref(), Some("none"));

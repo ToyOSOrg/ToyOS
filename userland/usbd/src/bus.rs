@@ -67,6 +67,8 @@ pub struct Counts {
     pub interrupts: u64,
     /// Events taken off the ring, each after a record.
     pub events: u64,
+    /// Of them, events of a type nothing this driver does raises.
+    pub other: u64,
     /// Answers found on the ring by an operation's deadline: an event no
     /// interrupt announced.
     pub unannounced: u64,
@@ -165,7 +167,7 @@ impl Bus {
                 }
                 // The register says what a port is; the event is a reason to look.
                 Event::Port => self.ports_dirty = true,
-                Event::Other(kind) => println!("usbd: an event of type {kind} this driver asked for nothing that raises"),
+                Event::Other => self.counts.other += 1,
             }
         }
         self.ctrl.consumed();

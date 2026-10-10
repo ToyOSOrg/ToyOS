@@ -131,8 +131,8 @@ pub enum Event {
     Transfer { trb: u64, slot: u8, dci: u8, code: u32, residue: u32 },
     /// A Port Status Change: a reason to read the ports, nothing more.
     Port,
-    /// Anything else the controller may put on the ring, by its type.
-    Other(u32),
+    /// Anything else the controller may put on the ring.
+    Other,
 }
 
 /// Why the controller was not brought up.
@@ -407,7 +407,7 @@ impl Controller {
                 residue: status & 0x00ff_ffff,
             },
             EVENT_PORT_STATUS_CHANGE => Event::Port,
-            other => Event::Other(other),
+            _ => Event::Other,
         })
     }
 

@@ -187,6 +187,7 @@ fn answer(conn: &Connection, bus: &Bus, wakes: &Wakes, wake_at: Option<u64>, now
     snap.put("interrupts.counted", counts.interrupts);
     snap.put("events.taken", counts.events);
     snap.put("events.unannounced", counts.unannounced);
+    snap.put("events.other", counts.other);
     snap.put("operations.silent", counts.silent);
     snap.put("wakes.timed", wakes.timed);
     snap.put("wakes.device", wakes.device);
