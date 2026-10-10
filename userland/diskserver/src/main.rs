@@ -336,10 +336,9 @@ impl Service {
     /// device.
     fn place(&mut self, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
         let (first, blocks) = admitted(self.ctrl.parts(), self.running, guid, grant)?;
-        for s in self.sessions.values_mut() {
-            if !s.closing && !doorbells(&s.conn) {
-                s.closing = true;
-            }
+        let ids: Vec<u64> = self.sessions.keys().copied().collect();
+        for id in ids {
+            self.hear(id);
         }
         self.retire();
         if self.sessions.len() >= MAX_SESSIONS {
@@ -506,6 +505,21 @@ impl Service {
                     Ok(_) | Err(SyscallError::WouldBlock) => {}
                     Err(_) => s.closing = true,
                 }
+            }
+        }
+    }
+
+    /// Consume session `id`'s doorbell bytes; once its client has hung up,
+    /// the session is closing.
+    fn hear(&mut self, id: u64) {
+        let s = self.sessions.get_mut(&id).expect("a session");
+        let mut sink = [0u8; 64];
+        while !s.closing {
+            match s.conn.read_nonblock(&mut sink) {
+                Ok(0) => s.closing = true,
+                Ok(_) => {}
+                Err(SyscallError::WouldBlock) => return,
+                Err(_) => s.closing = true,
             }
         }
     }
@@ -712,28 +726,12 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
         let ids: Vec<u64> = service.sessions.keys().copied().collect();
         for id in ids {
             if ready.contains(&(TOKEN_SESSION + id)) {
-                let s = service.sessions.get_mut(&id).expect("listed");
-                if !doorbells(&s.conn) {
-                    s.closing = true;
-                }
+                service.hear(id);
             }
             service.pull(id);
         }
         service.publish();
         service.retire();
-    }
-}
-
-/// Consume a session's doorbell bytes; `false` once its client has hung up.
-fn doorbells(conn: &Connection) -> bool {
-    let mut sink = [0u8; 64];
-    loop {
-        match conn.read_nonblock(&mut sink) {
-            Ok(0) => return false,
-            Ok(_) => continue,
-            Err(SyscallError::WouldBlock) => return true,
-            Err(_) => return false,
-        }
     }
 }
 

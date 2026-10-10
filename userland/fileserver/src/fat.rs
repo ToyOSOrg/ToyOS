@@ -37,6 +37,11 @@ pub struct Bytes<D> {
     len: u64,
 }
 
+// The disk's `ReadOnly` is `Device` here because it never arrives: the one
+// read-only grant is the BOOT server's, whose volume is mounted unwritable,
+// whose clients are refused every changing operation before it, and whose
+// close and sync write nothing. `toyos-fat32` has the one device word since it
+// reads every refused write as of unknown outcome.
 impl<D: Disk> BlockAccess for Bytes<D> {
     fn capacity(&self) -> u64 {
         self.len
@@ -578,6 +583,47 @@ mod tests {
 
         assert_eq!(v.lstat("a.txt"), Err(SyscallError::Io));
         assert_eq!(v.node_meta(a), Err(SyscallError::Io));
+    }
+
+    /// A disk whose grant does not write: every write and flush is refused.
+    struct Granted(Ram);
+
+    impl Disk for Granted {
+        fn blocks(&self) -> u64 {
+            self.0.blocks()
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            self.0.read(first, out)
+        }
+        fn write(&mut self, _: u64, _: &[u8]) -> Result<(), DiskError> {
+            panic!("a read-only volume wrote to its disk")
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            panic!("a read-only volume flushed its disk")
+        }
+    }
+
+    /// A volume mounted unwritable never asks its disk to write or flush, so
+    /// the read-only grant's refusal never reaches [`Bytes`].
+    #[test]
+    fn a_read_only_volume_never_writes_its_disk() {
+        const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+        let spec = spec_volume::fixture();
+        let blocks = spec.bytes.len().div_ceil(BLOCK);
+        let mut ram = Ram::new(blocks as u64);
+        let mut image = spec.bytes.clone();
+        image.resize(blocks * BLOCK, 0);
+        ram.write(0, &image).unwrap();
+        let mut v = FatVolume::mount(Granted(ram), false, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
+
+        assert_eq!(v.lstat("short.txt").unwrap().size, 100);
+        v.list("sub").unwrap();
+        let n = v.open("short.txt", OPEN).unwrap();
+        let mut out = vec![0u8; 100];
+        assert_eq!(v.read(n, 0, &mut crate::volume::Buf(&mut out)), Ok(100));
+        assert!(out == spec.bytes[spec_volume::cluster_offset(spec.at("short.txt").first)..][..100], "the file reads as the fixture wrote it");
+        v.close(n).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which
