@@ -1,6 +1,7 @@
 [package]
 name = "toyos-osrelease"
-description = "The one definition of /system/etc/os-release: which build an image is, written by the build and read by the supervisor and libc's uname (no_std, no alloc)."
-version = "0.1.0"
+description = "The one definition of /system/etc/os-release: which build an image is, written by the build and read by the supervisor, libc's uname and the sysinfo fork (no_std, no alloc)."
+version = "0.1.0" # never bumped; crates.io's is assigned on publish (src/sdkversion.rs)
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ToyOSOrg/ToyOS"

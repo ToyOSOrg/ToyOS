@@ -116,6 +116,17 @@ pub struct KernelArgs {
     /// once it has read them, and neither side prints a byte of them.
     pub loader_seed: [u8; SEED_LEN],
     pub loader_seed_len: u64,
+    /// What firmware's `GetTime` (UEFI 2.11 §8.3.1) said the time was, in
+    /// Unix seconds, and [`Self::loader_entry_counter`]'s counter as it
+    /// answered: the instant and when it was true, so the kernel carries it on
+    /// to its own boot exactly. UTC, because the hardware clock keeps UTC and
+    /// `EFI_TIME::TimeZone` is not read.
+    pub wall_clock_secs: u64,
+    pub wall_clock_counter: u64,
+    /// 1 where firmware answered a date that exists, and 0 where `GetTime`
+    /// failed or answered one that does not, which is a machine and not an
+    /// error: the loader's line says which, and the kernel has no wall clock.
+    pub wall_clock_known: u64,
 }
 
 /// The bytes of [`KernelArgs::loader_seed`].
@@ -238,7 +249,10 @@ const _: () = {
     assert!(offset_of!(KernelArgs, root_read_ticks) == 1264);
     assert!(offset_of!(KernelArgs, loader_seed) == 1272);
     assert!(offset_of!(KernelArgs, loader_seed_len) == 1304);
-    assert!(size_of::<KernelArgs>() == 1312);
+    assert!(offset_of!(KernelArgs, wall_clock_secs) == 1312);
+    assert!(offset_of!(KernelArgs, wall_clock_counter) == 1320);
+    assert!(offset_of!(KernelArgs, wall_clock_known) == 1328);
+    assert!(size_of::<KernelArgs>() == 1336);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -335,6 +349,9 @@ mod tests {
         root_read_ticks: 0,
         loader_seed: [0; SEED_LEN],
         loader_seed_len: 0,
+        wall_clock_secs: 0,
+        wall_clock_counter: 0,
+        wall_clock_known: 0,
     };
 
     #[test]

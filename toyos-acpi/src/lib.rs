@@ -7,8 +7,8 @@
 //!
 //! Multi-byte fields are composed from bytes, little-endian, so no firmware
 //! byte is transmuted into a type. Field offsets cite ACPI 6.5, except MCFG's
-//! (PCI Firmware Specification), HPET's (IA-PC HPET Specification), SPCR's (Microsoft's SPCR specification)
-//! and the IORT's (Arm DEN 0049).
+//! (PCI Firmware Specification), HPET's (IA-PC HPET Specification), SPCR's (Microsoft's SPCR specification),
+//! the IORT's (Arm DEN 0049) and the IVRS's (AMD 48882).
 //!
 //! `no_std`, no allocation, no `unsafe`.
 
@@ -20,7 +20,9 @@ mod facs;
 mod fadt;
 mod gtdt;
 mod iort;
+mod ivrs;
 mod madt;
+mod mcfg;
 mod resource;
 mod spcr;
 
@@ -36,11 +38,15 @@ pub use fadt::{
 };
 use fadt::FADT_DSDT;
 pub use iort::{iort, Iort, IortRefused, ItsDevice, Node, Route, Smmuv3};
+pub use ivrs::{
+    ivrs, DeviceEntries, DeviceEntry, Features, IvInfo, Ivmd, Ivrs, IvrsBlock, IvrsRefused, Requesters, Uid, Unit,
+};
 pub use madt::{
     isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
+pub use mcfg::{ecam_allocations, AllocationRefused, Allocations, ConfigRegister, EcamWindow, SEGMENT_GROUP};
 pub use resource::{memory_windows, ResourceError, MAX_LIST_BYTES};
 pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};
 
@@ -362,22 +368,6 @@ impl<P: Phys> Iterator for DefinitionBlocks<P> {
         }
         None
     }
-}
-
-/// PCI Firmware Specification 3.3, Table 4-3: the first allocation structure
-/// sits one 8-byte reserved field past the header, and its base address is the
-/// ECAM window's.
-pub const MCFG_FIRST_ENTRY: usize = SDT_HEADER_LEN + 8;
-const MCFG_ENTRY_LEN: usize = 16;
-
-/// The ECAM base address the MCFG's first allocation structure names.
-pub fn ecam_base<P: Phys>(phys: P, rsdp_addr: u64) -> Result<(Table<P>, u64), TableError> {
-    let needed = MCFG_FIRST_ENTRY + MCFG_ENTRY_LEN;
-    let mcfg = find_table(phys, rsdp_addr, b"MCFG", needed)?;
-    let base = mcfg
-        .u64_at(MCFG_FIRST_ENTRY)
-        .ok_or(TableError::Length { declared: mcfg.len as u32, needed })?;
-    Ok((mcfg, base))
 }
 
 /// IA-PC HPET Specification 1.0a, Table 3: the event timer block's Generic

@@ -125,9 +125,12 @@ impl Space {
     }
 }
 
+/// `GICR_PENDBASER.PTZ` [62]: the pending table is all zeroes, so the
+/// redistributor need not read it. Write-only: it reads as zero (§12.11.32).
+pub const PENDBASER_PTZ: u64 = 1 << 62;
+
 /// `GICR_PENDBASER` (§12.11.32) for the pending table at `table`, which is
-/// all zeroes: `Physical_Address` [51:16], and `PTZ` [62], which says so and
-/// lets the redistributor not read it.
+/// all zeroes: `Physical_Address` [51:16], and [`PENDBASER_PTZ`].
 pub const fn pendbaser(table: Phys<16>) -> u64 {
-    1 << 62 | CACHED | table.get()
+    PENDBASER_PTZ | CACHED | table.get()
 }

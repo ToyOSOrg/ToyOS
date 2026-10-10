@@ -535,62 +535,14 @@ impl Layout {
         None
     }
 
-    /// The file offset a virtual address maps to.
-    ///
-    /// Falls back to extrapolating from the nearest segment at or below
-    /// `vaddr`, which is what `.rela.dyn` and friends need when the linker
-    /// places them past a segment's file-backed extent.
-    ///
-    /// `None` when there is no segment at or below `vaddr` to extrapolate
-    /// from, or when the extrapolation overflows. Every `vaddr` asked here is a
-    /// `DT_*` tag, so the answer to "this address is in no segment" is that the
-    /// binary is malformed, not that the kernel dies.
-    pub fn vaddr_to_file_offset(&self, vaddr: u64) -> Option<u64> {
-        let into = |seg: &Segment| vaddr.checked_sub(self.seg_vaddr(seg));
-        for seg in self.segments() {
-            if let Some(within) = into(seg).filter(|&w| w < seg.filesz) {
-                return seg.file_offset.checked_add(within);
-            }
-        }
-        let mut best: Option<(&Segment, u64)> = None;
-        for seg in self.segments() {
-            if let Some(within) = into(seg) {
-                if best.is_none_or(|(_, w)| within < w) {
-                    best = Some((seg, within));
-                }
-            }
-        }
-        let (seg, within) = best?;
-        seg.file_offset.checked_add(within)
-    }
-
-    /// The file offset of an image offset this layout handed out, as
-    /// [`vaddr_to_file_offset`](Self::vaddr_to_file_offset) maps it.
-    pub fn file_offset_of(&self, at: ImageOffset) -> Option<u64> {
-        self.vaddr_to_file_offset(self.extent.min.checked_add(at.get())?)
-    }
-
-    /// How many bytes of file back `vaddr` before the segment holding it runs
-    /// out.
-    ///
-    /// `.gnu.hash` declares no length anywhere — its extent is the section it
-    /// lives in and no `DT_*` tag names one — so the honest bound is the
-    /// containing segment's own file image. `None` when no segment's file
-    /// image covers `vaddr`.
-    pub fn file_bytes_from(&self, vaddr: u64) -> Option<u64> {
-        for seg in self.segments() {
-            let Some(within) = vaddr.checked_sub(self.seg_vaddr(seg)) else { continue };
-            if within < seg.filesz {
-                return seg.filesz.checked_sub(within);
-            }
-        }
-        None
-    }
-
-    /// A segment's `p_vaddr`, back out of its image offset: inside the extent,
-    /// so the sum cannot overflow.
-    fn seg_vaddr(&self, seg: &Segment) -> u64 {
-        self.extent.min.wrapping_add(seg.image.start)
+    /// Where the file holds `range`, or `None` when no one segment's file
+    /// bytes hold all of it: past `p_filesz` a segment is zeroes, not the file.
+    pub fn file_offset_of(&self, range: ImageRange) -> Option<u64> {
+        let seg = self.segments().iter().find(|seg| {
+            seg.image.start <= range.start && range.end().get() <= seg.image.start.wrapping_add(seg.filesz)
+        })?;
+        // `p_offset + p_filesz` fits a `u64`, and `range` lies inside both.
+        Some(seg.file_offset.wrapping_add(range.start.wrapping_sub(seg.image.start)))
     }
 }
 

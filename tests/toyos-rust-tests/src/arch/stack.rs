@@ -20,3 +20,25 @@ mod x86_64 {
         }
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::*;
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64 {
+    /// An undefined instruction with `sp` and the frame pointer `x29` set
+    /// first, so the fault's report meets both.
+    pub fn undefined_with_stack_at(sp: u64, fp: u64) -> ! {
+        // SAFETY: none — the fault is the point, and it ends this process.
+        unsafe {
+            core::arch::asm!(
+                "mov sp, {s}",
+                "mov x29, {f}",
+                "udf #0",
+                s = in(reg) sp,
+                f = in(reg) fp,
+                options(noreturn),
+            );
+        }
+    }
+}

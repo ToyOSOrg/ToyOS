@@ -67,8 +67,6 @@ const IR0_ERSTSZ: u64 = 0x28;
 const IR0_ERSTBA: u64 = 0x30; // 64-bit
 const IR0_ERDP:   u64 = 0x38; // 64-bit
 
-const XHCI_VECTOR: u8 = 0x21;
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Trb {
