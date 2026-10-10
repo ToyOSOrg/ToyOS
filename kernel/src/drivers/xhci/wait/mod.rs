@@ -21,7 +21,7 @@ use crate::log;
 use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRing};
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
 use toyos_xhci::call::NotTaken;
-use toyos_xhci::job::{Await, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
+use toyos_xhci::job::{self, Await, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 use toyos_xhci::scan;
 
@@ -419,9 +419,8 @@ impl XhciController {
         if let Some(data) = trbs.data {
             match self.wait_transfer(slot, 1, data) {
                 Ok((CC_SUCCESS | CC_SHORT_PACKET, residue)) => {
-                    // Residue is clamped: past the requested length it would
-                    // report more bytes delivered than the buffer holds.
-                    delivered = data_len.saturating_sub(residue.min(u16::MAX as u32) as u16);
+                    // No more than `data_len`, so it is a `u16`.
+                    delivered = job::moved(data_len.into(), residue) as u16;
                 }
                 // An errored data stage halts EP0, so the status stage's TRB
                 // never runs; it is not waited for.

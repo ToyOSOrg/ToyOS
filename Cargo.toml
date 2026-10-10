@@ -62,6 +62,7 @@ members = [
     "toyos-random",
     "toyos-rootimage",
     "toyos-smmu",
+    "toyos-ssh",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
@@ -70,6 +71,7 @@ members = [
     "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
+    "toyos-usbhid",
     "toyos-userbound",
     "toyos-virtio",
     "toyos-wallclock",
@@ -199,6 +201,9 @@ toyos-blackbox = { path = "toyos-blackbox" }
 toyos-update = { path = "toyos-update", features = ["sign"] }
 # A throwaway key's seed, from the operating system. Already resolved here.
 getrandom = "0.3"
+# The one `openssh-key-v1` reader and writer, shared with the SSH server's
+# host key, and the `SHA256:` fingerprint the owner's key is named by.
+toyos-ssh = { path = "toyos-ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
