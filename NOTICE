@@ -185,7 +185,8 @@ would have arrived unremarked. `assets/` is walked whole for that reason.
 MIT requires the notice to be included in copies. Before this file the only
 copy of it in reach was a `phosphor-icons/` directory on one developer's disk,
 which `.gitignore` line 7 keeps out of the repository. They ship as
-`share/icons/*.svg` on every ROOT that carries `assets/`.
+`share/icons/*.alpha`, drawn from them at build time by `src/icons.rs`, on
+every ROOT that carries `assets/`.
 
 
 assets/fonts/OpenSans-*.ttf — Open Sans, SIL Open Font License 1.1

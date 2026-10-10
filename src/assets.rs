@@ -320,6 +320,12 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                     add_dir(&path, &format!("{prefix}{subdir}/"), ships, files);
                 } else if !system_font && path.extension().is_some_and(|e| e == "ttf") {
                     continue;
+                } else if path.extension().is_some_and(|e| e == "svg") {
+                    if ships(&path) {
+                        let stem = path.file_stem().unwrap().to_str().unwrap();
+                        let svg = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+                        files.push((format!("{prefix}{stem}.alpha"), crate::icons::rasterize(stem, &svg)));
+                    }
                 } else if ships(&path) {
                     let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
                     let data = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
@@ -377,7 +383,10 @@ mod tests {
         fs::create_dir_all(dir.join("target")).expect("make a stray target/");
 
         fs::write(dir.join("kept.wad"), b"tracked").expect("write kept.wad");
-        fs::write(dir.join("icons/kept.svg"), b"tracked").expect("write icons/kept.svg");
+        // An icon ships drawn, and only when tracked: both are committed icons.
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fs::copy(root.join("assets/icons/x-bold.svg"), dir.join("icons/x-bold.svg")).expect("copy x-bold.svg");
+        fs::copy(root.join("assets/icons/minus-bold.svg"), dir.join("icons/minus-bold.svg")).expect("copy minus-bold.svg");
         fs::write(dir.join("music.sf2"), b"tracked").expect("write music.sf2");
         fs::write(dir.join(".DS_Store"), b"finder").expect("write .DS_Store");
         fs::write(dir.join("target/.deps-stamp"), b"cargo").expect("write target/.deps-stamp");
@@ -391,7 +400,7 @@ mod tests {
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         };
         git(&["init", "-q"]);
-        git(&["add", "kept.wad", "icons/kept.svg", "music.sf2"]);
+        git(&["add", "kept.wad", "icons/x-bold.svg", "music.sf2"]);
 
         let shipped: BTreeSet<String> = collect(&[dir.display().to_string()], &BTreeSet::new())
             .into_iter()
@@ -402,7 +411,7 @@ mod tests {
             shipped,
             BTreeSet::from([
                 "share/kept.wad".to_string(),
-                "share/icons/kept.svg".to_string(),
+                "share/icons/x-bold.alpha".to_string(),
                 "share/music.sf2".to_string(),
             ]),
             "ROOT's asset list is not what the repository says it is"
@@ -423,7 +432,7 @@ mod tests {
             without,
             BTreeSet::from([
                 "share/kept.wad".to_string(),
-                "share/icons/kept.svg".to_string(),
+                "share/icons/x-bold.alpha".to_string(),
             ]),
             "a committed asset that is not there took something else with it"
         );

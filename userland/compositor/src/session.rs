@@ -10,6 +10,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use sprite::Sprite;
 use toyos::endow;
 use toyos::ipc::RxStep;
 use toyos::poller::{Poller, READABLE};
@@ -33,7 +34,7 @@ use crate::client::{
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::{FrameStats, FrameTotals};
 use crate::{
-    launcher_apps, CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
+    launcher_apps, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
     FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, STATS_INTERVAL,
 };
 
@@ -43,18 +44,26 @@ const _: () = assert!(
 );
 
 struct Cursors {
-    default: sprite::Sprite,
-    crosshair: sprite::Sprite,
-    resize: sprite::Sprite,
+    default: Sprite,
+    crosshair: Sprite,
+    resize: Sprite,
 }
 
 impl Cursors {
-    fn get(&self, style: CursorStyle) -> &sprite::Sprite {
+    fn get(&self, style: CursorStyle) -> &Sprite {
         match style {
             CursorStyle::Crosshair => &self.crosshair,
             CursorStyle::Resize => &self.resize,
             CursorStyle::Default => &self.default,
         }
+    }
+
+    /// What the software cursor damages, whichever cursor it moves from and to.
+    fn extent(&self) -> (i32, i32) {
+        let all = [&self.default, &self.crosshair, &self.resize];
+        let w = all.iter().map(|s| s.width()).max().unwrap();
+        let h = all.iter().map(|s| s.height()).max().unwrap();
+        (w as i32, h as i32)
     }
 }
 
@@ -174,13 +183,9 @@ impl Session {
         let mut cursor_shm = SharedMemory::adopt(fb_info.cursor, 64 * 64 * 4)
             .expect("the cursor buffer the framebuffer claim just handed over");
         let cursors = Cursors {
-            default: read_sprite("/system/share/icons/cursor-bold.svg", CURSOR_PX, [255, 255, 255]),
-            resize: read_sprite(
-                "/system/share/icons/arrow-down-right-bold.svg",
-                CURSOR_PX,
-                [255, 255, 255],
-            ),
-            crosshair: read_sprite("/system/share/icons/crosshair-simple-bold.svg", CURSOR_PX, [0, 0, 0]),
+            default: Sprite::icon("cursor-bold", [255, 255, 255]),
+            resize: Sprite::icon("arrow-down-right-bold", [255, 255, 255]),
+            crosshair: Sprite::icon("crosshair-simple-bold", [0, 0, 0]),
         };
         render::upload_cursor(&fb_dev, cursor_shm.as_mut_slice(), &cursors.default, hw_cursor);
 
@@ -205,9 +210,9 @@ impl Session {
         wallpaper.rescale(&screen);
 
         let icons = TitleBarIcons {
-            minimize: read_sprite("/system/share/icons/minus-bold.svg", 14, [255, 255, 255]),
-            maximize: read_sprite("/system/share/icons/square-bold.svg", 14, [255, 255, 255]),
-            close: read_sprite("/system/share/icons/x-bold.svg", 14, [255, 255, 255]),
+            minimize: Sprite::icon("minus-bold", [255, 255, 255]),
+            maximize: Sprite::icon("square-bold", [255, 255, 255]),
+            close: Sprite::icon("x-bold", [255, 255, 255]),
         };
 
         let apps = launcher_apps();
@@ -450,9 +455,9 @@ impl Session {
             self.fb_dev.move_cursor(self.cursor.x as u32, self.cursor.y as u32)
                 .expect("compositor holds the framebuffer claim");
         } else {
-            let px = CURSOR_PX as i32;
-            self.damage.add(Rect::new(was.x, was.y, px, px));
-            self.damage.add(Rect::new(self.cursor.x, self.cursor.y, px, px));
+            let (w, h) = self.cursors.extent();
+            self.damage.add(Rect::new(was.x, was.y, w, h));
+            self.damage.add(Rect::new(self.cursor.x, self.cursor.y, w, h));
         }
         let delta = Point { x: self.cursor.x - was.x, y: self.cursor.y - was.y };
 
@@ -1386,11 +1391,6 @@ fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {
         font_w: font.width() as i32,
         apps,
     }
-}
-
-fn read_sprite(path: &str, size: u32, color: [u8; 3]) -> sprite::Sprite {
-    let svg = std::fs::read(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-    sprite::Sprite::from_svg_colored(&svg, size, color)
 }
 
 /// Total physical memory, as the kernel reports it.

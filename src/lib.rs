@@ -19,6 +19,7 @@ pub mod gitfixture;
 pub mod gptwrite;
 pub mod flags;
 pub mod hostws;
+pub mod icons;
 pub mod identity;
 pub mod image;
 pub mod kernelconsole;
