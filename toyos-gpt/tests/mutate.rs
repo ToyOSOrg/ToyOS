@@ -29,6 +29,7 @@ struct Seen {
     first: u64,
     last: u64,
     count: u64,
+    name: Vec<u16>,
 }
 
 /// An entry the parser handed back as no partition.
@@ -59,6 +60,7 @@ fn observe(img: &mut Image, targets: &[Guid]) -> (Result<Listed, GptError>, Answ
         first: p.first_lba(),
         last: p.last_lba(),
         count: p.lba_count().get(),
+        name: p.name().to_vec(),
     };
     let mut out = [None; 64];
     let listed = toyos_gpt::list(img, &mut out).map(|scan| Listed {
@@ -78,7 +80,8 @@ fn observe(img: &mut Image, targets: &[Guid]) -> (Result<Listed, GptError>, Answ
 }
 
 fn is(e: &RawEntry, s: &Seen) -> bool {
-    (e.index, e.type_guid, e.unique, e.first, e.last) == (s.index, s.type_guid, s.unique, s.first, s.last)
+    let name: Vec<u16> = e.name.iter().copied().take_while(|unit| *unit != 0).collect();
+    (e.index, e.type_guid, e.unique, e.first, e.last, &name) == (s.index, s.type_guid, s.unique, s.first, s.last, &s.name)
 }
 
 /// A partition's own invariant, against the copy it came from and the device.

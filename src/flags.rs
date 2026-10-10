@@ -66,7 +66,6 @@ declare_flags!(pub CARGO_RUN = {
     pub BOOT_CONFIG = "--boot-config", Next;
     pub ARCH = "--arch", Next;
     pub REGEN_FONT = "--regen-font", None;
-    pub REGEN_WALLPAPER = "--regen-wallpaper", None;
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
     /// Mint the owner's image-signing key where `signing::owner_key_path`
     /// says, refusing to replace one.
