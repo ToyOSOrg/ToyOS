@@ -489,6 +489,7 @@ toyos-elf = { path = "../toyos-elf" }
 toyos-gicv3 = { path = "gicv3" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
+toyos-its = { path = "../toyos-its" }
 toyos-pci = { path = "pci" }
 toyos-phys = { path = "../toyos-phys" }
 toyos-smmu = { path = "../toyos-smmu" }

@@ -3,9 +3,9 @@
 //! The line through the device is **who can name an address**. This module
 //! keeps config space — there is no write path to it from userland — puts the
 //! function in an address space of its own at the unit *before* it enables bus
-//! mastering, programs the interrupt vector into whichever of the function's two
-//! message mechanisms it has, through its slot's own remapping entry and no
-//! other message, and hands out every device address a descriptor
+//! mastering, programs its slot's own message into whichever of the function's
+//! two message mechanisms it has, translated for that function alone and no
+//! other, and hands out every device address a descriptor
 //! may carry. Nothing the holder writes into a descriptor can make the device
 //! touch memory the kernel did not grant it: the domain maps the grants — the
 //! claim's own, and the regions of ordinary memory its holder lends it
@@ -101,8 +101,8 @@
 //! by the time it was used. The binding is lent by the claim under the lock
 //! its release takes it with (`object::Held`): a call runs wholly before the
 //! release or finds no binding. Outside a claim's own mint and release, only
-//! the two handlers name a slot, by the vector and the requester the hardware
-//! gave them.
+//! the two handlers name a slot, by the interrupt and the requester the
+//! hardware gave them.
 //!
 //! **A poll is on a slot's watch only while its claim holds the slot.** It is
 //! registered with the binding ([`add_poll`]), so before the release, whose
@@ -131,7 +131,7 @@ use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{IommuError, OwnSpace, Remapped};
+use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
 use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
@@ -141,14 +141,9 @@ use crate::watch::IrqWatch;
 
 /// How many functions this machine can hand out at once.
 ///
-/// A small fixed number because each one costs an interrupt vector, and a
-/// vector in `arch::idt` is declared rather than allocated.
+/// A small fixed number because each one costs an interrupt of its own, which
+/// the architecture declares per slot rather than allocates.
 pub const MAX_FUNCTIONS: usize = 4;
-
-/// The vectors those functions' messages carry, one per slot. Declared here and
-/// in `arch::idt`'s table; `VECTORS.len() == MAX_FUNCTIONS` is what keeps the
-/// two from disagreeing.
-pub const VECTORS: [u8; MAX_FUNCTIONS] = [0x28, 0x29, 0x2A, 0x2B];
 
 /// The most one grant may be. A driver's rings and buffers are kilobytes to a
 /// megabyte; this is room for a queue depth nothing in reach uses, and a bound
@@ -234,9 +229,9 @@ struct Aimed {
 static RESIDUE: [Lock<Vec<Aimed>>; MAX_FUNCTIONS] =
     [const { Lock::new(Vec::new()) }; MAX_FUNCTIONS];
 
-/// How a claimed function was made to speak, and the slot's remapping entry it
-/// speaks through. Both deliver [`VECTORS`]`[slot]` into the same
-/// [`Interrupt`] and the claim answers the same handle either way.
+/// How a claimed function was made to speak, and the slot's message it speaks
+/// with. Both deliver the slot's own interrupt into the same [`Interrupt`] and
+/// the claim answers the same handle either way.
 enum Armed {
     /// This function's one MSI-X table entry, mapped for the kernel alone.
     Msix(Mmio, Remapped),
@@ -599,9 +594,11 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 /// Why a function could not be handed over. Carried rather than collapsed: one
 /// message for all of them sends whoever reads the log looking in the wrong
 /// place.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 enum Refusal {
     NotRemapped,
+    /// The machine translates messages, and none could be made for this function.
+    NoMessage(Refused),
     NoInterrupt,
     MsixUnusable,
     CapsTruncated,
@@ -639,6 +636,7 @@ impl core::fmt::Display for Refusal {
                 "its interrupts would not be remapped on this machine, and a message that is not \
                  remapped can raise any vector on any CPU"
             ),
+            Self::NoMessage(why) => write!(f, "no message of its own could be made for it — {why}"),
             Self::NoInterrupt => write!(
                 f,
                 "neither its MSI-X nor its MSI could be armed, and a claim with no interrupt \
@@ -769,14 +767,13 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
             IRQ[slot].clear();
             crate::iommu::note_user_owned(pci.bus, pci.dev, pci.func, Some(slot));
             log!(
-                "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, \
-                 vector {:#x}",
+                "pcidev: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] handed over on slot {slot}, {}",
                 pci.bus,
                 pci.dev,
                 pci.func,
                 id.vendor,
                 id.device,
-                VECTORS[slot],
+                crate::arch::slot_interrupt(slot),
             );
             Ok((info, Claim::pci(binding)))
         }
@@ -826,7 +823,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // mechanism can be armed on is one no holder could ever be told anything
     // about. Every refusal from here drops `message`, which puts the slot's
     // entry back to not present.
-    let message = crate::iommu::claim_msi(remapping, slot, &pci, VECTORS[slot]);
+    let message = crate::iommu::claim_msi(remapping, slot, &pci).map_err(Refusal::NoMessage)?;
     let armed = match arm_claimed_msix(&message) {
         Ok(entry) => Armed::Msix(entry, message),
         Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
@@ -1737,7 +1734,7 @@ pub fn take_record(binding: &Binding) -> Result<Option<DeviceIrqRecord>, Syscall
     }
     let taken = IRQ[slot].take();
     if taken.is_some() && IRQ[slot].take_unannounced() {
-        log!("pcidev: slot {slot} took its first message on vector {:#x}", VECTORS[slot]);
+        log!("pcidev: slot {slot} took its first message on {}", crate::arch::slot_interrupt(slot));
     }
     Ok(taken.map(|count| DeviceIrqRecord { count }))
 }
@@ -1748,10 +1745,15 @@ pub fn has_irq(binding: &Binding) -> bool {
     IRQ[binding.slot].armed() || IRQ[binding.slot].faulted()
 }
 
-/// Records one message and posts the claim's watch. Called from the vector's
-/// handler, so it allocates nothing; `record.rs` owns the counting, and
-/// `kernel-loom` models it against a concurrent reader.
+/// Records one message and posts the claim's watch. Called from the
+/// interrupt's handler, so it allocates nothing; `record.rs` owns the
+/// counting, and `kernel-loom` models it against a concurrent reader.
+///
+/// **The handler holds the preempt count raised across it**: the post lets go
+/// of a count of its own, and at depth zero that would run a scheduler pass
+/// inside the handler, before its end of interrupt.
 pub fn isr(slot: usize) {
+    assert!(crate::preempt::count() > 0, "pcidev: slot {slot}'s interrupt arrived with the preempt count at zero");
     IRQ[slot].took();
     WATCHES[slot].post_in_place();
 }

@@ -39,20 +39,13 @@ pub mod tlb;
 pub mod trap;
 pub mod watchdog;
 
+pub use irqchip::its as message_unit;
+pub(crate) use irqchip::its::slot_interrupt;
 pub use smmu as iommu_unit;
+pub use trap::DriverIrq;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;
-
-/// A message-signalled interrupt's address and data for `vector` on CPU
-/// `dest`, which this machine does not give: the doorbell is an ITS's
-/// `GITS_TRANSLATER` and the data an event the ITS maps, and nothing here
-/// drives an ITS. Every function that would take one is a driver the
-/// small-kernel track moves out of the kernel, or a claimed function the
-/// SMMUv3 of the port's stage 6 must translate first; each is refused by name.
-pub fn msi_message(_dest: u32, _vector: u8) -> Result<(u32, u32), &'static str> {
-    Err("AArch64 delivers no message-signalled interrupt to this kernel: the GICv3 ITS is unported")
-}
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
 /// back as they were — restored, not enabled — so a guard nests inside a region

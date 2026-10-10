@@ -47,10 +47,14 @@ pub const TIMER_VECTOR: u8 = 0x20;
 /// event all start here.
 pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
 
-/// The compatibility-format message that raises `vector` on the CPU whose APIC
-/// ID is `dest`: the destination in address bits 19:12, the vector in the data.
-pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
-    Ok((MSI_DOORBELL | (dest << 12), vector as u32))
+/// Every device interrupt in this kernel targets cpu0, named as a destination
+/// for a message and for a remapping entry.
+pub(crate) const MSG_DEST: u32 = 0;
+
+/// The compatibility-format message that raises `vector` on [`MSG_DEST`]: the
+/// destination in address bits 19:12, the vector in the data.
+pub(super) fn msi_message(vector: u8) -> (u32, u32) {
+    (MSI_DOORBELL | (MSG_DEST << 12), vector as u32)
 }
 
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs),

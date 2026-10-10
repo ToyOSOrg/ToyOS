@@ -449,6 +449,6 @@ fn arm_interrupt(pci: &PciDevice, device: &VirtioDevice) -> bool {
         );
         return false;
     }
-    log!("virtio-sound: MSI-X vector {vector:#x} on table entry {MSIX_ENTRY}");
+    log!("virtio-sound: MSI-X {vector} on table entry {MSIX_ENTRY}");
     true
 }

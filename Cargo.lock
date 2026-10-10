@@ -3013,6 +3013,7 @@ dependencies = [
  "toyos-gicv3",
  "toyos-gpt",
  "toyos-hda",
+ "toyos-its",
  "toyos-pci",
  "toyos-phys",
  "toyos-ps2",

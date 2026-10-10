@@ -414,39 +414,3 @@ fn program(
     );
     Some(live)
 }
-
-pub mod interrupt {
-    use crate::iommu::{Refused, StreamId};
-
-    pub struct Msi {
-        pub address: u32,
-        pub data: u32,
-    }
-
-    pub struct Pin {
-        pub low: u32,
-        pub high: u32,
-    }
-
-    /// The SMMUv3 remaps no interrupt: a message is an ITS's to translate,
-    /// and nothing here drives one.
-    pub fn is_armed() -> bool {
-        false
-    }
-
-    pub fn msi(_source: StreamId, _vector: u8, _dest: u32) -> Result<Msi, Refused> {
-        unreachable!("no interrupt remapping on this machine, and `is_armed` said so")
-    }
-
-    pub fn claim(_slot: usize, _source: StreamId, _vector: u8) -> Msi {
-        unreachable!("no interrupt remapping on this machine, and `is_armed` said so")
-    }
-
-    pub fn release(_slot: usize, _source: StreamId) {
-        unreachable!("no interrupt remapping on this machine, and `is_armed` said so")
-    }
-
-    pub fn pin(_apic_id: u8, _vector: u8, _dest: u32, _level: bool) -> Result<Pin, Refused> {
-        unreachable!("no interrupt remapping on this machine, and `is_armed` said so")
-    }
-}

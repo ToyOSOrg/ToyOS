@@ -1,21 +1,20 @@
 //! The interrupt controller and the timer: a GICv3 — the distributor the
-//! MADT names, this CPU's redistributor, and the system-register CPU
-//! interface (GIC architecture specification IHI 0069H) — and the generic
-//! timer's EL1 virtual timer (Arm ARM K.a, chapter D12), whose PPI the GTDT
-//! names.
+//! MADT names, this CPU's redistributor, the system-register CPU interface
+//! and the ITS ([`its`]) (GIC architecture specification IHI 0069H) — and the
+//! generic timer's EL1 virtual timer (Arm ARM K.a, chapter D12), whose PPI the
+//! GTDT names.
 //!
-//! **What this kernel takes is SGIs, the timer's PPI and the IOMMU's event
-//! SPI ([`route_iommu_events`]), and nothing else.** No other SPI is routed
-//! and no LPI exists: a device's interrupt is a message the
-//! GICv3 ITS translates, and every device that would take one is either a
-//! driver the small-kernel track moves out of the kernel or a claimed function,
-//! which the SMMUv3 of the port's stage 6 must translate first
-//! (`super::msi_message`).
+//! **What this kernel takes is SGIs, the timer's PPI, the IOMMU's event SPI
+//! ([`route_iommu_events`]) and one LPI per claim slot ([`its`]), and nothing
+//! else.** No other SPI is routed: a device's interrupt is a message the ITS
+//! translates, and only a claimed function's is.
 //!
 //! **The virtual timer, not the physical**: it is the one EL1 owns outright —
 //! under a hypervisor the physical one traps — and with `CNTVOFF_EL2` written
 //! zero by the entry from EL2 the two count alike. It is level-triggered, so a
 //! handler that neither re-arms nor stops it takes it again at once.
+
+pub mod its;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
@@ -31,9 +30,7 @@ use crate::mm::policy::MmioPolicy;
 use crate::mm::{DirectMap, Mmio};
 use crate::hw::MIN_ONE_SHOT;
 
-/// Every INTID this kernel names, in one space: the SGIs it raises, then the
-/// identities the generic drivers program for a message-signalled interrupt,
-/// which `super::msi_message` refuses on this machine.
+/// The SGIs this kernel raises.
 #[repr(u8)]
 pub(super) enum Intid {
     /// Asks a CPU for a scheduler pass, or for its counters: x86-64's kick.
@@ -44,8 +41,6 @@ pub(super) enum Intid {
     Off,
     /// What `irq-storm` floods this CPU with.
     Storm,
-    Hda,
-    VirtioSound,
 }
 
 pub(super) const SGI_KICK: u32 = Intid::Kick as u32;
@@ -165,17 +160,20 @@ impl Gic {
 pub fn init(rsdp_addr: u64) -> Gic {
     let madt = toyos_acpi::find_table(direct_phys(), rsdp_addr, b"APIC", toyos_acpi::MADT_ENTRIES)
         .unwrap_or_else(|e| panic!("GIC: the MADT is unusable: {e:?}"));
-    let (mut gicd, mut ranges, mut cpus) = (None, Vec::new(), Vec::new());
+    let (mut gicd, mut ranges, mut cpus, mut translators) = (None, Vec::new(), Vec::new(), Vec::new());
     for entry in toyos_acpi::madt_entries(&madt) {
+        let entry = entry.unwrap_or_else(|halt| {
+            panic!("GIC: a MADT entry at +{} declares {} bytes of a {}-byte list", halt.at, halt.declared, halt.list_len)
+        });
         match entry {
-            Ok(MadtEntry::Gicd { base, .. }) => gicd = Some(base),
-            Ok(MadtEntry::Gicr { base, length }) => ranges.push((
+            MadtEntry::Gicd { base, .. } => gicd = Some(base),
+            MadtEntry::Gicr { base, length } => ranges.push((
                 base,
                 crate::mm::paging::map_mmio(base, u64::from(length), MmioPolicy::Uncacheable),
             )),
-            Ok(MadtEntry::Gicc(gicc)) if gicc.enabled => cpus.push(gicc),
-            Ok(_) => {}
-            Err(halt) => panic!("GIC: a MADT entry at +{} declares {} bytes of a {}-byte list", halt.at, halt.declared, halt.list_len),
+            MadtEntry::Gicc(gicc) if gicc.enabled => cpus.push(gicc),
+            MadtEntry::Its { id, base } => translators.push((id, base)),
+            _ => {}
         }
     }
     let gicd = gicd.expect("GIC: the MADT names no distributor");
@@ -205,8 +203,16 @@ pub fn init(rsdp_addr: u64) -> Gic {
     );
 
     let gic = Gic { cpus, ranges };
-    init_cpu(gic.redistributor(cpu::hardware_id()));
+    let frame = gic.redistributor(cpu::hardware_id());
+    init_cpu(frame);
+    its::init(&translators, frame, rsdp_addr);
     gic
+}
+
+/// `GICD_TYPER`, which says whether the distributor takes LPIs and how wide
+/// an INTID is.
+fn distributor_typer() -> u32 {
+    Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME).read_u32(GICD_TYPER)
 }
 
 /// Bring this CPU's redistributor — the frame at `frame`, which

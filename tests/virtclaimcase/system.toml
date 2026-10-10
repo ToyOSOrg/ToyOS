@@ -1,0 +1,15 @@
+# One job on `virt` with its ITS: the suite's `test_rs_claim_lpi`, which the
+# harness puts on ROOT, claims QEMU's `edu` and reads the interrupts it raises.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# `device` because the job mints the claim, `dup` because test-runner hands a
+# job its capability as a duplicate and hands none without it.
+[programs.test-runner]
+receives = ["power"]
+args = ["--bound-ms=240000", "test_rs_claim_lpi"]
+syscap = ["device", "dup"]

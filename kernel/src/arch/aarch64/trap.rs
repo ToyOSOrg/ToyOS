@@ -160,6 +160,11 @@ fn exception(frame: &Frame, entry: u64) -> ! {
 /// from EL0 a tick or a kick does, once the handler is done, since the context
 /// holds nothing; from EL1 it only asks for the pass the context will run when
 /// it may.
+///
+/// **Every device arm runs with the preempt count raised**, as x86-64's
+/// `device_irq_entry` brackets its handler: an arm that posts a watch or lets
+/// go of a `Lock` reaches `preempt::enable`, whose pass at depth zero would
+/// otherwise run inside the handler, before its `end`.
 fn irq(frame: &Frame, from_el0: bool) -> bool {
     let Some(intid) = irqchip::acknowledge() else {
         percpu::irq_took(Source::Spurious);
@@ -202,37 +207,47 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
         // own, so the interface signals this CPU nothing and the halt stays.
         irqchip::SGI_HALT => cpu::halt(),
         irqchip::SGI_OFF => super::power::cpu_off(),
+        _ => {}
+    }
+    percpu::preempt_count_up();
+    let resched = match intid {
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Kick);
-            // Raised as an interrupt entry raises it, so the answer's post runs no pass here.
-            percpu::preempt_count_up();
             crate::counters::serve_here();
-            percpu::preempt_count_down();
-            irqchip::end(intid);
-            if from_el0 {
-                return true;
-            }
-            crate::preempt::set_need_resched();
+            true
         }
         #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
             storm::sgi();
-            irqchip::end(intid);
+            false
         }
         // Zero until routed, which the kick's arm above takes first.
         intid if intid == irqchip::iommu_events() => {
             percpu::irq_took(Source::DmaFault);
-            percpu::preempt_count_up();
             crate::iommu::fault_interrupt();
-            percpu::preempt_count_down();
-            irqchip::end(intid);
+            false
         }
-        _ => {
-            percpu::irq_took(Source::Unclaimed);
-            UNCLAIMED.fetch_add(1, Relaxed);
-            LAST_UNCLAIMED.store(intid, Relaxed);
-            irqchip::end(intid);
+        _ => match irqchip::its::slot_of(intid) {
+            Some(slot) => {
+                percpu::irq_took(Source::UserDev);
+                crate::pcidev::isr(slot);
+                true
+            }
+            None => {
+                percpu::irq_took(Source::Unclaimed);
+                UNCLAIMED.fetch_add(1, Relaxed);
+                LAST_UNCLAIMED.store(intid, Relaxed);
+                false
+            }
+        },
+    };
+    percpu::preempt_count_down();
+    irqchip::end(intid);
+    if resched {
+        if from_el0 {
+            return true;
         }
+        crate::preempt::set_need_resched();
     }
     false
 }
@@ -497,8 +512,24 @@ pub fn install() {
     }
 }
 
-pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
-pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
+/// What a driver in this kernel names its function's interrupt by, which
+/// it is refused a message for (`irqchip::its::msi`).
+#[derive(Clone, Copy, Debug)]
+pub enum DriverIrq {
+    Xhci,
+    Hda,
+    VirtioSound,
+}
+
+impl core::fmt::Display for DriverIrq {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}'s")
+    }
+}
+
+pub const XHCI_VECTOR: DriverIrq = DriverIrq::Xhci;
+pub const HDA_VECTOR: DriverIrq = DriverIrq::Hda;
+pub const VIRTIO_SOUND_VECTOR: DriverIrq = DriverIrq::VirtioSound;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

@@ -736,13 +736,16 @@ pub enum Profile {
     /// [`Profile::Virt`] with its SMMUv3 and two of QEMU's `iommu-testdev`, a
     /// function that writes where it is told to through the unit.
     VirtSmmu,
+    /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
+    /// and QEMU's `edu`, a function that sends an MSI when told to.
+    VirtIts,
 }
 
 impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu => {
+            Self::Virt | Self::VirtNoRng | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtSmmu | Self::VirtIts => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -895,6 +898,10 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
+    /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
+    /// With it comes one `edu`, whose message is the only one a guest of
+    /// this suite can raise on demand.
+    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -942,6 +949,7 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
+            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -2143,6 +2151,7 @@ fn qemu_command(
             match shape.smmu {
                 Smmu::Absent => machine,
                 Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
+                Smmu::WithIts => format!("{machine},iommu=smmuv3,its=on,kernel-irqchip=off"),
             }
         }
     };
@@ -2275,6 +2284,9 @@ fn qemu_command(
         // routes nothing for the first, whose entry the table holds.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
+    }
+    if shape.smmu == Smmu::WithIts {
+        qemu.arg("-device").arg("edu");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the

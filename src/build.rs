@@ -2932,6 +2932,7 @@ mod tests {
         "tests/proctreecase/system.toml",
         "tests/slotscase/system.toml",
         "tests/testcases/system.toml",
+        "tests/virtclaimcase/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
         "tests/virtrebootcase/system.toml",
