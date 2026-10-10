@@ -14,17 +14,6 @@ pub fn typing(_write_back: &[(u64, u64)]) -> toyos_bootmap::Typing<'_> {
     toyos_bootmap::Typing::Firmware
 }
 
-/// The CPU's physical address width, `CPUID.80000008H:EAX[7:0]` (SDM Vol. 2A,
-/// CPUID; AMD APM Vol. 3, E.4.7), or why it cannot be read.
-pub fn physical_bits() -> Result<u32, alloc::string::String> {
-    use core::arch::x86_64::__cpuid;
-    let max = __cpuid(0x8000_0000).eax;
-    if max < 0x8000_0008 {
-        return Err(alloc::format!("CPUID answers extended leaves to {max:#x}, short of 0x80000008's physical address width"));
-    }
-    Ok(__cpuid(0x8000_0008).eax & 0xFF)
-}
-
 /// The time-stamp counter, which counts from reset.
 pub fn counter() -> u64 {
     // SAFETY: RDTSC reads a counter and nothing else; every x86-64 has it.
