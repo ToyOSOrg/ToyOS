@@ -9,7 +9,7 @@
 //! random source, the kernel's pipes (`pipes`), the clients' connections
 //! (`client`) and their requests (`serve`).
 //!
-//! **One pass**: the card's link and its received frames go to the node, then
+//! **One pass**: the card's link and its received frames, as one batch, go to the node, then
 //! every deadline that is due, then the node is offered the card's transmit
 //! room until it has no frame left or the card no room; what the node has to
 //! say is written to the log and to the clients that waited for it; and the
@@ -381,7 +381,7 @@ fn main() {
                 node.link(clock(), link_up, draw);
             }
         }
-        while card.rx(|frame| node.receive(clock(), frame, draw)) {}
+        node.receive(clock(), |sink| card.rx(sink), draw);
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);

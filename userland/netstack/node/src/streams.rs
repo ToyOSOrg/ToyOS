@@ -37,9 +37,9 @@
 //! may take is bounded nowhere. A client that still holds its reading end, or may still write,
 //! is never timed here: what it cannot send is [tcp]'s to give up on.
 //!
-//! Every call that can move a stream ends in a pass: a frame, a deadline, and each call here. A
-//! transmit opportunity can only fail a connect, whose next hop it found to answer nobody, and
-//! ends in a pass over the connects.
+//! Every call that can move a stream ends in a pass: a batch of frames, a deadline, and each call
+//! here. A transmit opportunity can only fail a connect, whose next hop it found to answer
+//! nobody, and ends in a pass over the connects.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};

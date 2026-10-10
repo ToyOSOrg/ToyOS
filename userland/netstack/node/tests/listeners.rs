@@ -18,7 +18,7 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{arp, terms, Segment, Wire, A, ELSEWHERE, MAC, MAC_R, R};
+use common::{arp, batch, terms, Segment, Wire, A, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
 use toyos_net_tcp::{limits, Counter, Endpoint};
@@ -227,7 +227,7 @@ impl Net {
             }
             for frame in &frames {
                 if let Some(answer) = self.hears(frame) {
-                    self.node.receive(self.now, &answer, draw(&mut self.draws));
+                    self.node.receive(self.now, batch(&[&answer]), draw(&mut self.draws));
                 }
             }
         }
@@ -263,7 +263,7 @@ impl Net {
     }
 
     fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, frame, draw(&mut self.draws));
+        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
@@ -808,7 +808,7 @@ fn a_listener_ended_for_its_wake_gives_its_place_to_another_in_the_same_pass() {
     refusing.borrow_mut().refusal = Some(WriteRefusal::Gone);
     net.syn(P3);
     let ack = net.iss(P3).wrapping_add(1);
-    net.node.receive(net.now, &frame(P3, SSH, ISS + 1, Some(ack), 0, &[]), draw(&mut net.draws));
+    net.node.receive(net.now, batch(&[&frame(P3, SSH, ISS + 1, Some(ack), 0, &[])]), draw(&mut net.draws));
     assert_eq!(wakes(&owner), 2);
     let ended: Vec<(ListenerId, WriteRefusal)> = net.node.drain_ended_listeners().collect();
     assert_eq!((ended, net.node.listeners(), net.node.held()), (vec![(first, WriteRefusal::Gone)], 1, 1));
