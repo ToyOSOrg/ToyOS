@@ -1,6 +1,6 @@
 ---
-status: open
-kind: tooling
+status: owner
+kind: question
 opened: 2026-10-10
 ---
 
@@ -12,8 +12,8 @@ break when something important breaks. `guest.yml` runs `cargo run -- --ci guest
 merge queue (`ci.yml`) and nightly (`nightly.yml`); no tier is declared, so no review can keep a
 new guest test out of it.
 
-Which tests belong in the tier is the owner's call. Owner: the orchestrator, which dispatches the
-reshape once he has named them.
+The question: which tests belong in the tier. Once the owner names them, the orchestrator
+dispatches the reshape.
 
 **Exit condition**: `--ci guest` runs a declared list in `tests/toyos.rs` and nothing else, the
 rest of the suite runs on demand, and root `CLAUDE.md`'s "The guest suite is their `guest /
