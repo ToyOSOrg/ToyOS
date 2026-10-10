@@ -13,7 +13,7 @@ doctest = false
 
 [dependencies]
 toyos-manifest = { path = "../../toyos-manifest" }
-sha2 = "0.10"
+toyos-sha2-hw = { path = "../../toyos-sha2-hw" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]

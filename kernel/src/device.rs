@@ -113,9 +113,7 @@ impl Drop for Claim {
             &Claimed::Class(class) => {
                 // Before the flag goes: a poll the next holder registers is not this claim's to answer.
                 match class {
-                    DeviceType::HdaAudio | DeviceType::VirtioSound => {
-                        crate::drivers::AUDIO_WATCH.cancel_polls()
-                    }
+                    DeviceType::HdaAudio => crate::drivers::AUDIO_WATCH.cancel_polls(),
                     DeviceType::Keyboard
                     | DeviceType::Mouse
                     | DeviceType::Framebuffer
@@ -242,11 +240,6 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::Hda(info, shm(pcm)), claim))
-        }
-        DeviceType::VirtioSound => {
-            let (info, dma) = crate::drivers::virtio_sound::info().ok_or(ClaimError::Absent)?;
-            let claim = Claim::acquire(class)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::VirtioSound(info, shm(dma)), claim))
         }
     }
 }

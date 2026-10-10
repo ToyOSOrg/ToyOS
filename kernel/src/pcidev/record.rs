@@ -6,31 +6,65 @@
 //! not an ordering, and no guest test in this suite lands on it.
 //!
 //! **Two parties race**: the ISR, on whichever CPU the unit routed the message
-//! to, and the holder reading its record through a syscall on any CPU.
+//! to, and the holder reading its record through a syscall on any CPU. One
+//! handler at a time: a slot has one vector, delivered to one CPU.
 //!
 //! **The invariant is that every message is counted exactly once.** The count
 //! is a read-modify-write on both sides and never a load followed by a store:
 //! a reader that loaded a count and then cleared it drops every message the ISR
 //! recorded in between, and a driver that misses one waits for a device that
-//! has already spoken. No ordering carries anything across these words — each
-//! is the whole of what it says — so the orderings here are `Relaxed` and the
-//! model is about the interleaving; the holder reads them after the wake the
-//! claim's watch post owes it, which orders them.
+//! has already spoken.
+//!
+//! **And a read's times are its own messages'.** The count shares its word
+//! with the number of reads that have taken one, so which read a message falls
+//! to and whether it is that read's first are one compare-exchange. The first
+//! message of read `n` stamps the slot of `n`'s parity, before the exchange
+//! that counts it publishes the stamp (`Release`, taken by the read's
+//! `Acquire`), and read `n + 1`'s first message stamps the other slot: one
+//! landing while a reader is between its exchange and its load never
+//! overwrites the time that reader is about to load. A second reader racing
+//! the first can take read `n + 1` and let read `n + 2`'s first message into
+//! the slot the first is loading; that costs the racing holder its own time,
+//! never a count.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Every word here is the whole of what it says and orders nothing else, so
-/// the only property is the interleaving — which `device-irq-lossy` is the
-/// control for and `kernel-loom` is the model of.
+use toyos_abi::pci::DeviceIrqRecord;
+
+/// The words that say only what they hold: the latch, the fault and the
+/// newest stamp, whose reader takes it after the exchange that orders it.
 const ORDER: Ordering = Ordering::Relaxed;
 
-/// The negative control: the read-modify-writes become a load and a store,
-/// which is the whole of what this record's design is. Never on in a kernel
-/// build.
+/// The count is the word's low half and the reads that took one its high half.
+const COUNT: u64 = 0xFFFF_FFFF;
+const READ: u64 = 1 << 32;
+
+/// The negative control: each compare-exchange on the word becomes a load and
+/// a store, which is the whole of what this record's design is. Never on in a
+/// kernel build.
+#[cfg(feature = "device-irq-lossy")]
+macro_rules! exchange {
+    ($word:expr, $held:expr, $new:expr, $success:expr) => {{
+        let seen = $word.load(ORDER);
+        if seen == $held {
+            $word.store($new, ORDER);
+            Ok(seen)
+        } else {
+            Err(seen)
+        }
+    }};
+}
+#[cfg(not(feature = "device-irq-lossy"))]
+macro_rules! exchange {
+    ($word:expr, $held:expr, $new:expr, $success:expr) => {
+        $word.compare_exchange_weak($held, $new, $success, ORDER)
+    };
+}
+
 #[cfg(feature = "device-irq-lossy")]
 macro_rules! take_word {
     ($word:expr, $empty:expr) => {{
@@ -46,26 +80,16 @@ macro_rules! take_word {
     };
 }
 
-#[cfg(feature = "device-irq-lossy")]
-macro_rules! bump {
-    ($word:expr) => {{
-        let held = $word.load(ORDER);
-        $word.store(held.wrapping_add(1), ORDER);
-    }};
-}
-#[cfg(not(feature = "device-irq-lossy"))]
-macro_rules! bump {
-    ($word:expr) => {
-        $word.fetch_add(1, ORDER)
-    };
-}
-
 /// What the ISR writes and the claim reads back.
 ///
 /// Atomics only: the handler allocates nothing.
 pub struct Interrupt {
-    /// Messages since the holder's last read.
-    count: AtomicU32,
+    /// Messages since the holder's last read, under the reads that took one.
+    word: AtomicU64,
+    /// When each read's first message landed, by the read's parity.
+    first: [AtomicU64; 2],
+    /// When the newest message landed.
+    last: AtomicU64,
     /// The unit refused this function an access. Every call the claim answers
     /// refuses from here on: its bus mastering is gone, so a driver that kept
     /// going would be driving nothing.
@@ -84,7 +108,9 @@ impl Interrupt {
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
         Self {
-            count: AtomicU32::new(0),
+            word: AtomicU64::new(0),
+            first: [AtomicU64::new(0), AtomicU64::new(0)],
+            last: AtomicU64::new(0),
             faulted: AtomicBool::new(false),
             unannounced: AtomicBool::new(true),
         }
@@ -95,36 +121,63 @@ impl Interrupt {
     #[cfg(feature = "loom")]
     pub fn new() -> Self {
         Self {
-            count: AtomicU32::new(0),
+            word: AtomicU64::new(0),
+            first: [AtomicU64::new(0), AtomicU64::new(0)],
+            last: AtomicU64::new(0),
             faulted: AtomicBool::new(false),
             unannounced: AtomicBool::new(true),
         }
     }
 
-    /// Record one message. Called from the vector's ISR, so it takes no lock
-    /// and allocates nothing.
+    /// Record one message, which landed at `now`. Called from the vector's
+    /// ISR, so it takes no lock and allocates nothing.
     ///
-    /// `fetch_add` and not a store: the reader may take the count between any
-    /// two of these, and what it took plus what is left has to be what arrived.
-    pub fn took(&self) {
-        bump!(self.count);
+    /// A compare-exchange and not a store: the reader may take the count
+    /// between any two of these, and what it took plus what is left has to be
+    /// what arrived.
+    pub fn took(&self, now: u64) {
+        self.last.store(now, ORDER);
+        let mut word = self.word.load(ORDER);
+        loop {
+            if word & COUNT == 0 {
+                self.first[(word / READ) as usize & 1].store(now, ORDER);
+            }
+            match exchange!(self.word, word, word.wrapping_add(1), Ordering::Release) {
+                Ok(_) => return,
+                Err(seen) => word = seen,
+            }
+        }
     }
 
-    /// The messages since the last read, or `None` for none.
+    /// The messages since the last read and when they landed, or `None` for
+    /// none.
     ///
-    /// `swap` and not a load followed by a store: a message the ISR records
-    /// between the two would be cleared without ever having been counted.
-    pub fn take(&self) -> Option<u32> {
-        match take_word!(self.count, 0) {
-            0 => None,
-            count => Some(count),
+    /// A compare-exchange and not a load followed by a store: a message the
+    /// ISR records between the two would be cleared without ever having been
+    /// counted.
+    pub fn take(&self) -> Option<DeviceIrqRecord> {
+        let mut word = self.word.load(ORDER);
+        loop {
+            if word & COUNT == 0 {
+                return None;
+            }
+            match exchange!(self.word, word, (word / READ).wrapping_add(1) * READ, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(seen) => word = seen,
+            }
         }
+        Some(DeviceIrqRecord {
+            count: (word & COUNT) as u32,
+            _pad: 0,
+            first_nanos: self.first[(word / READ) as usize & 1].load(ORDER),
+            last_nanos: self.last.load(ORDER),
+        })
     }
 
     /// Whether a message is waiting, for a readiness check that consumes
     /// nothing.
     pub fn armed(&self) -> bool {
-        self.count.load(ORDER) != 0
+        self.word.load(ORDER) & COUNT != 0
     }
 
     /// Whether this is the first message this slot has taken. Answers `true`
@@ -149,7 +202,7 @@ impl Interrupt {
     /// Back to the state a fresh slot is in, for a claim being minted or given
     /// up. The holder is not running at either point.
     pub fn clear(&self) {
-        self.count.store(0, ORDER);
+        self.word.store(0, ORDER);
         self.faulted.store(false, ORDER);
         self.unannounced.store(true, ORDER);
     }

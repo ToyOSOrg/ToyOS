@@ -41,7 +41,6 @@ pub(super) fn holds_claim(
 /// The register-access stub a device claim's class selects.
 enum RegTarget {
     Hda,
-    VirtioSound,
     /// A claimed PCI function's own config space, **read-only**, through the
     /// claim itself: what names the function is lent by it for each access.
     ///
@@ -63,7 +62,6 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
     let target = process::with_process_data(|data| {
         data.handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| match claim.class() {
             device::DeviceType::HdaAudio => Some(RegTarget::Hda),
-            device::DeviceType::VirtioSound => Some(RegTarget::VirtioSound),
             device::DeviceType::PciFunction => Some(RegTarget::PciConfig(claim)),
             _ => None,
         })
@@ -81,7 +79,6 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
         None => {
             let read = match target {
                 RegTarget::Hda => crate::drivers::hda::reg_read(offset, width),
-                RegTarget::VirtioSound => crate::drivers::virtio_sound::reg_read(offset, width),
                 // The one place a caller's offset becomes an access: the
                 // witness `pcidev::config_window` answers is the only thing
                 // the register read takes, so an unchecked number cannot
@@ -102,9 +99,6 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
             Ok(value) => {
                 let written = match target {
                     RegTarget::Hda => crate::drivers::hda::reg_write(offset, width, value),
-                    RegTarget::VirtioSound => {
-                        crate::drivers::virtio_sound::reg_write(offset, width, value)
-                    }
                     // Config space has no write path from userland at all.
                     RegTarget::PciConfig(_) => Err(SyscallError::NotSupported),
                 };
@@ -180,7 +174,6 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         | device::DeviceType::Mouse
         | device::DeviceType::Framebuffer
         | device::DeviceType::HdaAudio
-        | device::DeviceType::VirtioSound
         | device::DeviceType::Acpi => 0,
         device::DeviceType::PciFunction => 1,
         device::DeviceType::Partition | device::DeviceType::Isa => 2,
@@ -470,7 +463,6 @@ pub(super) fn sys_partition_transfer(
         | device::DeviceType::Mouse
         | device::DeviceType::Framebuffer
         | device::DeviceType::HdaAudio
-        | device::DeviceType::VirtioSound
         | device::DeviceType::PciFunction
         | device::DeviceType::Isa
         | device::DeviceType::Acpi => {

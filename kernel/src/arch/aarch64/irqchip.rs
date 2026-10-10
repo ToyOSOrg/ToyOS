@@ -4,8 +4,9 @@
 //! timer's EL1 virtual timer (Arm ARM K.a, chapter D12), whose PPI the GTDT
 //! names.
 //!
-//! **What this kernel takes is SGIs and the timer's PPI, and nothing else.**
-//! No SPI is routed and no LPI exists: a device's interrupt is a message the
+//! **What this kernel takes is SGIs, the timer's PPI and the IOMMU's event
+//! SPI ([`route_iommu_events`]), and nothing else.** No other SPI is routed
+//! and no LPI exists: a device's interrupt is a message the
 //! GICv3 ITS translates, and every device that would take one is either a
 //! driver the small-kernel track moves out of the kernel or a claimed function,
 //! which the SMMUv3 of the port's stage 6 must translate first
@@ -16,7 +17,7 @@
 //! zero by the entry from EL2 the two count alike. It is level-triggered, so a
 //! handler that neither re-arms nor stops it takes it again at once.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use alloc::vec::Vec;
 
@@ -44,7 +45,6 @@ pub(super) enum Intid {
     /// What `irq-storm` floods this CPU with.
     Storm,
     Hda,
-    VirtioSound,
 }
 
 pub(super) const SGI_KICK: u32 = Intid::Kick as u32;
@@ -62,6 +62,21 @@ const CTLR_GRP1: u32 = 1 << 1;
 const RWP: u32 = 1 << 31;
 /// `GICD_PIDR2.ArchRev`, bits 7:4: 3 is GICv3, 4 is GICv4.
 const GICD_PIDR2: u64 = 0xFFE8;
+/// `GICD_TYPER.ITLinesNumber`, bits 4:0: the distributor takes INTIDs below
+/// `32 * (ITLinesNumber + 1)`, and none from 1020.
+const GICD_TYPER: u64 = 0x0004;
+/// An SPI's bit in each of the word-per-32 registers, its byte in
+/// `GICD_IPRIORITYR`, its two bits in `GICD_ICFGR` and its doubleword in
+/// `GICD_IROUTER`.
+const GICD_IGROUPR: u64 = 0x0080;
+const GICD_ISENABLER: u64 = 0x0100;
+const GICD_ICENABLER: u64 = 0x0180;
+const GICD_ISPENDR: u64 = 0x0200;
+const GICD_ICPENDR: u64 = 0x0280;
+const GICD_IPRIORITYR: u64 = 0x0400;
+const GICD_ICFGR: u64 = 0x0C00;
+const GICD_IGRPMODR: u64 = 0x0D00;
+const GICD_IROUTER: u64 = 0x6000;
 
 /// A redistributor's frames: `RD_base`, then `SGI_base` 64 KiB above it.
 const GICR_CTLR: u64 = 0x0000;
@@ -91,6 +106,11 @@ const SPURIOUS: u32 = 1023;
 /// zero until [`init`].
 static TIMER_INTID: AtomicU32 = AtomicU32::new(0);
 static TIMER_EDGE: AtomicBool = AtomicBool::new(false);
+
+/// The distributor's physical base, from [`init`].
+static DISTRIBUTOR: AtomicU64 = AtomicU64::new(0);
+/// The IOMMU's event SPI; zero until [`route_iommu_events`].
+static IOMMU_EVENTS: AtomicU32 = AtomicU32::new(0);
 
 /// Wait until `done`, for at most `1 / per_second` of a second counted at the
 /// rate firmware states: the boot has no calibrated clock yet.
@@ -159,6 +179,7 @@ pub fn init(rsdp_addr: u64) -> Gic {
     }
     let gicd = gicd.expect("GIC: the MADT names no distributor");
     let distributor = crate::mm::paging::map_mmio(gicd, FRAME, MmioPolicy::Uncacheable);
+    DISTRIBUTOR.store(gicd, Relaxed);
     let revision = distributor.read_u32(GICD_PIDR2) >> 4 & 0xF;
     assert!(revision >= 3, "GIC: GICD_PIDR2.ArchRev is {revision}, and this kernel drives a GICv3 or later");
 
@@ -277,6 +298,49 @@ pub(super) fn timer_intid() -> u32 {
     TIMER_INTID.load(Relaxed)
 }
 
+/// Take SPI `intid` on this CPU at [`PRIORITY`], edge-triggered, as the
+/// IOMMU's event interrupt: an SMMUv3's wired interrupts are edge-triggered
+/// (IHI 0070 H.a §3.18.2, §12.4), and the IORT names no trigger. Refused
+/// with the distributor's limit where it takes no such SPI.
+pub(super) fn route_iommu_events(intid: u32) -> Result<(), u32> {
+    let gicd = Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME);
+    let limit = (32 * ((gicd.read_u32(GICD_TYPER) & 0x1F) + 1)).min(1020);
+    if !(32..limit).contains(&intid) {
+        return Err(limit);
+    }
+    let (word, bit) = (u64::from(intid / 32) * 4, 1 << (intid % 32));
+    gicd.write_u32(GICD_ICENABLER + word, bit);
+    settles(100, "GICD_CTLR after disabling an SPI", || gicd.read_u32(GICD_CTLR) & RWP == 0);
+    gicd.write_u32(GICD_IGROUPR + word, gicd.read_u32(GICD_IGROUPR + word) | bit);
+    gicd.write_u32(GICD_IGRPMODR + word, gicd.read_u32(GICD_IGRPMODR + word) & !bit);
+    let priority = GICD_IPRIORITYR + u64::from(intid & !3);
+    let shift = 8 * (intid % 4);
+    gicd.write_u32(priority, gicd.read_u32(priority) & !(0xFF << shift) | u32::from(PRIORITY) << shift);
+    let config = GICD_ICFGR + u64::from(intid / 16) * 4;
+    gicd.write_u32(config, gicd.read_u32(config) | 0b10 << (2 * (intid % 16)));
+    gicd.write_u64(GICD_IROUTER + 8 * u64::from(intid), toyos_gicv3::unpacked_affinity(cpu::hardware_id()));
+    gicd.write_u32(GICD_ICPENDR + word, bit);
+    IOMMU_EVENTS.store(intid, Relaxed);
+    gicd.write_u32(GICD_ISENABLER + word, bit);
+    Ok(())
+}
+
+/// Pend the IOMMU's event SPI again, for records its handler left behind: the
+/// unit raises none for them. Taken once the handler's `end` deactivates it:
+/// the write makes an active SPI active and pending, which is never signalled,
+/// and deactivation leaves it pending (IHI 0069D §8.9.16, §4.1.2, §4.1.1).
+pub(super) fn pend_iommu_events() {
+    let intid = IOMMU_EVENTS.load(Relaxed);
+    assert!(intid != 0, "GIC: the IOMMU's event SPI is pended before it is routed");
+    let gicd = Mmio::new(DirectMap::from_phys(DISTRIBUTOR.load(Relaxed)), FRAME);
+    gicd.write_u32(GICD_ISPENDR + u64::from(intid / 32) * 4, 1 << (intid % 32));
+}
+
+/// The IOMMU's event SPI, or zero where [`route_iommu_events`] routed none.
+pub(super) fn iommu_events() -> u32 {
+    IOMMU_EVENTS.load(Relaxed)
+}
+
 /// Write `ICC_SGI1R_EL1` whole: the SGI it names is raised, after every store
 /// before it. Only a `DSB` orders a system register write after stores to
 /// Normal memory, so without it a target could take the SGI before the store
@@ -324,6 +388,7 @@ pub fn send_self(vector: u8) {
 
 /// A pseudo-NMI: an interrupt at a priority `DAIF.I` does not mask, which
 /// needs `ICC_PMR_EL1` priority masking in place of `DAIF` everywhere.
+#[cfg(feature = "boot-actuators")]
 pub fn send_nmi(_cpu: u32) {
     owed!("a pseudo-NMI", "no stage yet")
 }

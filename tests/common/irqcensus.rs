@@ -3,7 +3,7 @@
 //!
 //! The kernel says `irq: cpuN timer=… kick=… …` per online CPU where the
 //! machine ends, as records at its stop and in the record its death seals
-//! (`kernel/src/census.rs`), and in the blocked-task dump; at no process's end. The counters are cumulative since boot, so the
+//! (`kernel/src/census.rs`); at no process's end. The counters are cumulative since boot, so the
 //! largest count each source reaches on a CPU's lines is that boot's whole
 //! census ([`Census::raise`]). `irq_census_conservation` asks whether one
 //! boot's census is internally consistent.
@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 /// and [`Census::parse`] refuses a line whose fields are not exactly these, so
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
-pub const SOURCES: [&str; 12] = [
-    "timer", "kick", "xhci", "userdev", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
+pub const SOURCES: [&str; 11] = [
+    "timer", "kick", "xhci", "userdev", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
     "unclaimed",
 ];
 
@@ -25,7 +25,7 @@ pub const SOURCES: [&str; 12] = [
 /// `MSG_ADDR` names physical destination 0 and the one I/O APIC pin this kernel
 /// routes goes to the BSP, so today every one of these is cpu0's alone. The day
 /// that stops being true is the day the track's change lands.
-pub const DEVICE_SOURCES: [&str; 6] = ["xhci", "userdev", "sound", "i8042", "dmafault", "hda"];
+pub const DEVICE_SOURCES: [&str; 5] = ["xhci", "userdev", "i8042", "dmafault", "hda"];
 
 /// One CPU's counters out of one `irq:` line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,8 +84,7 @@ impl Census {
     /// Raise each source to its count in `read`, another line of this CPU.
     ///
     /// **Lines are in no read order.** The stop's census comes back on the
-    /// black-box page newest first, and a blocked-task dump reads the counters
-    /// before `log::emit` stamps its lines. The counters are monotonic, so the
+    /// black-box page newest first. The counters are monotonic, so the
     /// largest count per source is the newest read whatever the order of the
     /// lines.
     pub fn raise(&mut self, read: &Self) {

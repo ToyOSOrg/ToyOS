@@ -219,6 +219,14 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
             storm::sgi();
             irqchip::end(intid);
         }
+        // Zero until routed, which the kick's arm above takes first.
+        intid if intid == irqchip::iommu_events() => {
+            percpu::irq_took(Source::DmaFault);
+            percpu::preempt_count_up();
+            crate::iommu::fault_interrupt();
+            percpu::preempt_count_down();
+            irqchip::end(intid);
+        }
         _ => {
             percpu::irq_took(Source::Unclaimed);
             UNCLAIMED.fetch_add(1, Relaxed);
@@ -490,7 +498,6 @@ pub fn install() {
 }
 
 pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
-pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

@@ -209,10 +209,6 @@ pub fn shards() -> [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARD
 #[path = "../../src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
-/// Ctrl+Alt+D's request word. Pure atomics, so it compiles here unshimmed.
-#[path = "../../src/sched/dump_request.rs"]
-pub mod dump_request;
-
 /// The interrupt record a claimed PCI function's ISR writes and its holder
 /// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
 #[path = "../../src/pcidev/record.rs"]

@@ -178,8 +178,9 @@ pub fn kick_all_but_self() {
     }
 }
 
-/// Send a non-maskable interrupt to one CPU — for a CPU that failed to answer `kick_cpu`, since IF cannot mask NMI.
-// Diagnostic only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
+/// Send a non-maskable interrupt to one CPU: a test kernel's staged NMI, since IF cannot mask one.
+// Test kernels only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
+#[cfg(feature = "boot-actuators")]
 pub fn send_nmi(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);

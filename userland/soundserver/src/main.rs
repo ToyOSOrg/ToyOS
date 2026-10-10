@@ -22,7 +22,7 @@
 use toyos::endow;
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
-use toyos::{HdaDev, VirtioSoundDev};
+use toyos::{HdaDev, PciDev};
 use toyos_abi::syscall::{self, DeviceType};
 use toyos_mixer::{period_frames, ramp_frames};
 
@@ -83,7 +83,7 @@ fn main() {
     //
     // The order is virtio first, and it is not a preference between two cards:
     // no machine in this project has both. The T14 has only the second.
-    if let Some(dev) = endow::device::<VirtioSoundDev>(DeviceType::VirtioSound) {
+    if let Some(dev) = endow::pci_function::<PciDev>(virtio::PCI_ID) {
         match virtio::Virtio::claim(dev) {
             Ok((virtio, rate, channels)) => return run_virtio(acceptor, virtio, rate, channels),
             Err(why) => {
@@ -109,10 +109,10 @@ fn run_virtio(acceptor: Acceptor, virtio: virtio::Virtio, rate: u32, channels: u
         acceptor,
         "virtio-sound",
         &mut VirtioBackend { virtio },
-        toyos_abi::virtio_sound::PERIODS,
+        toyos_virtio_sound::PERIODS,
         rate,
         channels as u16,
-        toyos_abi::virtio_sound::PERIOD_BYTES,
+        toyos_virtio_sound::PERIOD_BYTES,
     );
 }
 

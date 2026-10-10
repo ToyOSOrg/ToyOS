@@ -140,7 +140,7 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   (`scheduler.rs`, `sched/driver.rs`), `heartbeat.rs`, `irq_ring.rs`,
   `log/console.rs`.
 - **TSC.** 112 mentions in 11 non-arch files (`clock.rs`, `deadline.rs`,
-  `hardlockup/`, `panic_reboot.rs`, `xhci/`, `sched/dump.rs`). The bootloader
+  `hardlockup/`, `panic_reboot.rs`, `xhci/`). The bootloader
   calls `_rdtsc`/`__cpuid` and reads MSR 0x3B at
   `bootloader/src/main.rs:583-598`.
 - **CPU-state declaration.** `arch/control_regs.rs:1-6` is CR0/CR4/EFER;
@@ -328,8 +328,9 @@ Each stage names its exit; "measured" means a number from a run.
    stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
    track, which moves the driver out of the kernel:
    - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
-     HDA, virtio-sound, virtio-console and virtio-gpu drivers each
-     refuse their function by name.
+     HDA, virtio-console and virtio-gpu drivers each refuse their function by
+     name, and a process's claim on one (netstack's, soundserver's
+     virtio-sound) is refused with them.
    - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
      own, which a `ramfb` scanout carved out of RAM need not be.
 
@@ -345,11 +346,7 @@ Each stage names its exit; "measured" means a number from a run.
    **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
    stage 4 did:** it ports no device interrupt, so nothing of the relay.
    Owed before the exit holds: the TLS-descriptor resolver;
-   `issues/the-crash-evidence-records-x86-fault-registers.md`; the
-   blocked-task dump's probe of a CPU that ignored its kick
-   (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s
-   `owed!` on a machine of more than one CPU, and which nothing but the
-   `dump-deaf-cpu` actuator asks for until AArch64 has a keyboard; and, for
+   `issues/the-crash-evidence-records-x86-fault-registers.md`; and, for
    the clean of an AP's start block to the point of coherency, which TCG
    cannot fail on: `virt_el1_smp` under HVF started eight CPUs through PSCI
    in each of 131 boots of the entropy stage's measurement, all eight online

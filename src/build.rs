@@ -157,7 +157,7 @@ struct ProgramConfig {
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
-    /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
+    /// The idle slot (`toyos_manifest::Program::slots`).
     slots: bool,
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
@@ -592,6 +592,11 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
+        }
+        // The supervisor grants the idle slot to a launch alone, so a row it
+        // starts at boot, or again, would run holding nothing.
+        if program.slots && config.boot.start.contains(name) {
+            return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
     }
     if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
@@ -1186,7 +1191,7 @@ fn check_params(root: &Path, params: &[String]) {
     let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name) || own.contains(name) || is_valued_param(name),
+            declared.iter().any(|a| arms(a, name)) || own.contains(name) || is_valued_param(name),
             "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
              Actuators it declares: {}.\n\
              Boot parameters it declares: {}.\n\
@@ -1359,6 +1364,12 @@ pub fn manifest_and_symlinks(config: &Path) -> (Vec<u8>, Vec<(String, String)>) 
     let config = parse_config(config);
     let symlinks = config.symlinks.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     (render_manifest(&config), symlinks)
+}
+
+/// Whether the boot parameter `param` arms `actuator`: by its whole name, or,
+/// for a name that ends in `=`, with the value it carries after it.
+pub fn arms(actuator: &str, param: &str) -> bool {
+    param == actuator || (actuator.ends_with('=') && param.starts_with(actuator))
 }
 
 /// Every actuator `kernel/src/actuator.rs` declares, read out of the file that
@@ -2447,8 +2458,11 @@ mod tests {
         let both: Vec<&String> = actuators.iter().filter(|a| features.contains(a)).collect();
         assert!(both.is_empty(), "declared as both an actuator and a kernel feature: {both:?}");
         assert!(
-            actuators.iter().all(|a| a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')),
-            "an actuator name is ASCII `[a-z0-9-]`, and these are not: {actuators:?}"
+            actuators.iter().all(|a| {
+                a.strip_suffix('=').unwrap_or(a).bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
+            "an actuator name is ASCII `[a-z0-9-]`, `=` after it where it carries a value, and \
+             these are not: {actuators:?}"
         );
     }
 
@@ -2907,6 +2921,7 @@ mod tests {
         "diag/system.toml",
         "console/system.toml",
         "tests/acpicase/system.toml",
+        "tests/blockgrantcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
@@ -2915,6 +2930,7 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/panelcase/system.toml",
         "tests/proctreecase/system.toml",
+        "tests/slotscase/system.toml",
         "tests/testcases/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
@@ -2979,6 +2995,9 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+        let booted: SystemConfig =
+            toml::from_str("[boot]\nstart = [\"update\"]\n[programs.update]\nslots = true\n").unwrap();
+        assert!(held_by_their_holders_alone(&booted).is_err());
     }
 
     /// Every committed config passes, and each refusal has a config that

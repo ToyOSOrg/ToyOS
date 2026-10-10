@@ -3014,10 +3014,12 @@ dependencies = [
  "toyos-gpt",
  "toyos-hda",
  "toyos-pci",
+ "toyos-phys",
  "toyos-ps2",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
+ "toyos-smmu",
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
@@ -3341,6 +3343,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-virtio",
 ]
@@ -4091,8 +4094,8 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -5156,6 +5159,9 @@ dependencies = [
  "toyos-hda",
  "toyos-inspect",
  "toyos-mixer",
+ "toyos-pci-claim",
+ "toyos-virtio",
+ "toyos-virtio-sound",
 ]
 
 [[package]]
@@ -5251,6 +5257,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "supervisor"
 version = "0.1.0"
 dependencies = [
+ "diskserver",
  "toyos",
  "toyos-abi",
  "toyos-blockring",
@@ -5666,7 +5673,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tar",
  "toml",
  "toyos-abi",
@@ -5680,6 +5686,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-sha2-hw",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -5909,6 +5916,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
+]
+
+[[package]]
 name = "toyos-phys"
 version = "0.1.0"
 
@@ -5929,6 +5946,20 @@ name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-sha2"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "toyos-sha2-hw"
+version = "0.1.0"
+dependencies = [
+ "toyos-sha2",
+]
+
+[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -5947,8 +5978,8 @@ dependencies = [
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
  "toyos-manifest",
+ "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -5998,7 +6029,8 @@ name = "toyos-update"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
- "sha2 0.10.9",
+ "toyos-sha2",
+ "toyos-sha2-hw",
  "toyos-wallclock",
 ]
 
@@ -6020,6 +6052,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-untrusted",
+]
+
+[[package]]
+name = "toyos-virtio-sound"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-virtio",
 ]
 
 [[package]]
@@ -6254,10 +6294,10 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 name = "update"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
+ "diskserver",
  "toyos",
- "toyos-abi",
  "toyos-fat32",
+ "toyos-sha2-hw",
  "toyos-update",
 ]
 
@@ -6287,6 +6327,16 @@ dependencies = [
  "http",
  "httparse",
  "log",
+]
+
+[[package]]
+name = "usbd"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+ "toyos-xhci",
 ]
 
 [[package]]

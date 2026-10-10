@@ -114,6 +114,13 @@ pub fn init(devices: &[PciDevice]) {
     let mut controllers = Vec::new();
     let mut present = 0;
     for pci_dev in devices.iter().filter(|d| d.matches_class(0x0C, 0x03, Some(0x30))) {
+        // Before anything that touches the function, `enable_bus_master`'s
+        // record of it as this kernel's above all: that is what refuses a claim.
+        if crate::actuator::xhci_left().is_some_and(|id| pci_dev.is_id(id.vendor, id.device)) {
+            log!("xHCI: leaving PCI {:02x}:{:02x}.{} {:04x}:{:04x} to a claim (xhci-leave)",
+                pci_dev.bus, pci_dev.dev, pci_dev.func, pci_dev.vendor_id(), pci_dev.device_id());
+            continue;
+        }
         present += 1;
         if let Some(ctrl) = init_one(pci_dev) {
             controllers.push(ctrl);

@@ -61,6 +61,8 @@ members = [
     "toyos-quiesce",
     "toyos-random",
     "toyos-rootimage",
+    "toyos-sha2",
+    "toyos-sha2-hw",
     "toyos-smmu",
     "toyos-ssh",
     "toyos-swap",
@@ -107,6 +109,7 @@ members = [
     "userland/snake",
     "userland/soundserver",
     "userland/soundserver/mixer",
+    "userland/soundserver/virtio-sound",
     "userland/sprite",
     "userland/sshserver",
     "userland/supervisor",
@@ -116,9 +119,11 @@ members = [
     "userland/test-runner",
     "userland/toybox",
     "userland/toyos-font",
+    "userland/toyos-pci-claim",
     "userland/toyos-window",
     "userland/trace",
     "userland/update",
+    "userland/usbd",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and
@@ -208,9 +213,10 @@ toyos-ssh = { path = "toyos-ssh" }
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-# The digest behind `NOTICE`'s record of every committed binary file
-# (`src/sourcegate.rs`).
-sha2 = "0.10"
+# Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
+# store key, a ROOT's name, a release asset's digest, and the harness's of a
+# body a guest fetches over TLS.
+toyos-sha2-hw = { path = "toyos-sha2-hw" }
 # The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
