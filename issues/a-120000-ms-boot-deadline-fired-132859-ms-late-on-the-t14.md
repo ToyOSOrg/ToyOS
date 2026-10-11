@@ -14,7 +14,7 @@ against `rdtsc` from the timer interrupt entry — `kernel/src/arch/x86_64/idt/t
 seals the record and writes the reset register through `acpi::reset_now`.
 `start` arms the other half of the same parameter at `:182`,
 `crate::hardlockup::start(ms)`: a bound of `toyos_tco::hard_lockup_bound_ms`,
-`deadline_ms / 2` (`toyos-tco/src/lib.rs:154-156`), sampled by an NMI every
+`deadline_ms / 2` (`lib/tco/src/lib.rs:154-156`), sampled by an NMI every
 second on every CPU (`kernel/src/hardlockup/mod.rs:1-31`). The two share one
 seal (`claim_the_reset`, `deadline.rs:69-71`).
 

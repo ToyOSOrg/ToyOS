@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # A full DATA volume frees space only at a commit
 
-The DATA volume's commit is shadow paging (`bcachefs/src/fs.rs`), so a block
+The DATA volume's commit is shadow paging (`lib/bcachefs/src/fs.rs`), so a block
 the last committed tree reaches is not free until the next commit lands
 (`BitmapAllocator`'s `pending`): an unlink or a truncate of a file a sync
 already wrote gives its blocks back only at the next sync, and every change

@@ -12,12 +12,12 @@ what survives it is a different question.
 
 **Answered:**
 
-- `elf.rs` → `toyos-elf/` (host-tested, crafted-input corpus), `e2c6a06`; the
+- `elf.rs` → `lib/elf/` (host-tested, crafted-input corpus), `e2c6a06`; the
   mapping half stayed as `kernel/src/elf/`, `42b29c9`.
 - `compositor/main.rs` → `toyos-desktop/` (pure, since moved to
   `userland/compositor/desktop/`), `763712b`; the effects shell
   is `userland/compositor/` over five files with a 71-line `main.rs`, `72705d9`.
-- `xhci/mod.rs` → the port machine is `toyos-xhci/`, with a host simulator,
+- `xhci/mod.rs` → the port machine is `lib/xhci/`, with a host simulator,
   `2e81ae8`.
 - `soundd/main.rs` → `toyos-mixer/` (pure, `no_std`; since moved to
   `userland/soundserver/mixer/`), 2026-08-20; the effects
@@ -56,7 +56,7 @@ what survives it is a different question.
   inside a function that also does device I/O), and the accounting
   (`stats_from`, `retire_threads`' merge, `PageFaultTrace`). #142 and #156
   remain the standing evidence.
-- `symbols.rs` → `toyos-symbols/` (`no_std`, no alloc, `forbid(unsafe_code)` —
+- `symbols.rs` → `lib/symbols/` (`no_std`, no alloc, `forbid(unsafe_code)` —
   stricter than the "core + alloc" expected; a real 1.6 MB ToyOS binary is the
   fixture, cross-checked against GNU readelf/nm). The raw-pointer `SymbolTable`
   read from fault handlers stays in the kernel, by design.
@@ -68,7 +68,7 @@ the note feared in kind as well: typed `TableError`, named bounds, packed
 structs only for `offset_of!`. Nothing about it is owed to *this* record.
 
 What the note was really reaching for outlived the size, and it is answered:
-the decode is `toyos-acpi/`, host-tested against QEMU's own tables and a
+the decode is `lib/acpi/`, host-tested against QEMU's own tables and a
 crafted corpus, and what stays in `drivers/acpi.rs` is the machine.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; promoted **in

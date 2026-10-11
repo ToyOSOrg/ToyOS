@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # `toyos-elide`'s `limit` has one user and lives in a shared crate
 
-`toyos-elide/src/limit.rs` (`Limit`, `Admit`) is used by
+`lib/elide/src/limit.rs` (`Limit`, `Admit`) is used by
 `userland/logkeeper/src/origin.rs` and by nothing else: the kernel's
 `log_limited!`, its other user, is deleted with the thread-exit record it
 limited. The crate is shared for `Elided`, which `toyos-symbols` uses; what

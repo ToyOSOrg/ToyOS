@@ -27,10 +27,10 @@ What the kernel bounds:
   own command or nobody's. ACPI 6.5 Table 5.9 names no other value for the
   port. A zero names none in four of them; `S4BIOS_REQ` names the byte it
   holds, zero too, where the FACS's `S4BIOS_F` is set, and none where it is
-  clear (`SmiCmd::named`, `toyos-acpi/src/fadt.rs`, which quotes each). A
+  clear (`SmiCmd::named`, `lib/acpi/src/fadt.rs`, which quotes each). A
   write wider than a byte that reaches the port is refused whole.
 - **How often a byte is written to the command port**: eight in any second
-  (`firmware::CALLS`, `toyos-userbound/src/firmware.rs`), counted for every
+  (`firmware::CALLS`, `lib/userbound/src/firmware.rs`), counted for every
   holder there has been. The ninth is refused to the caller by name and
   written nowhere. That is a bound on writes to `SMI_CMD` and on nothing
   else that raises a firmware interrupt: the chipset's own SMI enable

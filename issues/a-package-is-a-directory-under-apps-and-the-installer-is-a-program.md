@@ -57,7 +57,7 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **Verification is by a signed repository** (owner ruling: `pkg install
   <url>` and the release's `SHA256SUMS` behind it are retired): a root pinned
   in the image, then a timestamp and a targets naming each archive by length
-  and SHA-256 (`toyos-update/src/repo.rs`, written by `src/publish.rs`).
+  and SHA-256 (`lib/update/src/repo.rs`, written by `src/publish.rs`).
   `pkg install <file>` stays for local and offline installs, checked against
   the `SHA256SUMS` beside it.
 - **Fetching is HTTPS.** GitHub serves releases only over TLS, so `pkg`

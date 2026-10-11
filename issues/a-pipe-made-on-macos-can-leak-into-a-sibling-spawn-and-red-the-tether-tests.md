@@ -19,7 +19,7 @@ in `cargo test -p toyos-build --lib`, whose other tests spawn processes, and
 compiles and other guests' QEMUs. Such a leak turns a working tether into a
 red: the pipe does not end within `WITHIN`, the owner's group is killed, and
 the refusal says a holder outside that group still ran.
-`toyos-tmpdir/tests/reclaim.rs` serialises its own spawns (`SPAWNING`) against
+`lib/tmpdir/tests/reclaim.rs` serialises its own spawns (`SPAWNING`) against
 exactly this, and nothing here does.
 
 Owner: whoever next changes `src/tether.rs`. Exit condition: the verdict no

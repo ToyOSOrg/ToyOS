@@ -56,7 +56,7 @@ nothing.
 **Licence.** `LicenseRef-Intel-Microcode` is in no `ALLOWED` row of
 `src/licence.rs`, and a committed file ships once a shipped package's directory
 holds it. So the commit that makes the kernel depend on `toyos-microcode` reds
-the licence gate on both files under `toyos-microcode/intel-ucode/`, the
+the licence gate on both files under `kernel/microcode/intel-ucode/`, the
 test-only `06-cc-02` included, whatever the kernel embeds, until an exception
 scoped to CPU microcode admits them.
 

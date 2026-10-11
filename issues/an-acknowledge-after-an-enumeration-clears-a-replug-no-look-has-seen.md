@@ -22,7 +22,7 @@ it is never torn down or enumerated. The look `PortState::believe` owes the
 port catches a pull, because CCS reads 0, and not a replug.
 
 **Not measured.** No test stages it. The simulator's `enumerated`
-(`toyos-xhci/sim/src/driver.rs`) acknowledges nothing, so no host test can see
+(`lib/xhci/sim/src/driver.rs`) acknowledges nothing, so no host test can see
 it either.
 
 **Owner**: the xHCI driver, `kernel/src/drivers/xhci/`.

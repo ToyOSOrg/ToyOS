@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # A read or write answered Lost is never answered
 
-`Client::complete` (`toyos-blockring/src/client.rs`) takes a completion's tag
+`Client::complete` (`lib/blockring/src/client.rs`) takes a completion's tag
 off the wire before it looks at the status. A user read or write answered
 `Status::Lost` is then refused as `Violation::Entry`, and the session ends; but
 the tag is no longer on the wire, so `Client::session_ended` does not answer it

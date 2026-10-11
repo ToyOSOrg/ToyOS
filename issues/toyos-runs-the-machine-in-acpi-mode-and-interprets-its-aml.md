@@ -64,7 +64,7 @@ button, and not to power the machine on again.
 - **"Local only; decode the 186 bytes"** (2026-10-04): "Full tables stay out
   of the repo (a copy you hold); the 186-byte fixture on main is replaced by
   decoded values, as 'Extracts only' says." The T14's root-bridge list is
-  `t14_root_bridge` in `toyos-acpi/tests/common/mod.rs`.
+  `t14_root_bridge` in `lib/acpi/tests/common/mod.rs`.
 - **"full clean room write with the spec"**: the AML interpreter is written
   from the ACPI specification.
 
@@ -151,7 +151,7 @@ host-tested, beside the server, which loads the tables with it
 (`userland/acpiserver/src/aml.rs`). It owns
 `issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
 **Exit**: a host test loads QEMU 11.1.1's DSDT
-(`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
+(`lib/acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
 `SLP_TYPa` its boot logged, 0; and the T14's DSDT and SSDTs, read by a
 check run outside the tree, load and evaluate `\_S5`, its pull request
 recording the result; and on the T14 the server evaluates the method of each

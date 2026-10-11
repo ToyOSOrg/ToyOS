@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # A btree split leaves nodes holding a few entries
 
-`bcachefs/src/btree.rs`'s `split_node` packs a leaf that overflows into as
+`lib/bcachefs/src/btree.rs`'s `split_node` packs a leaf that overflows into as
 few nodes as hold it (`pack`), each filled in key order: a full node and a
 node holding what is left over, often one entry. Keys are hashes of names, so
 the next insert lands in the full node more often than not and splits it

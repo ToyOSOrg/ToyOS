@@ -102,7 +102,7 @@ pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, 
 
 **No.** The owner ruled that `SYS_SYSINFO` demands a right, and it does:
 `Rights::ROSTER` on a `SysCap` (`sdk/abi/src/handle.rs`), spelled `roster` in
-`toyos_manifest`'s `SYSCAP_RIGHTS` (`toyos-manifest/src/lib.rs`), demanded by
+`toyos_manifest`'s `SYSCAP_RIGHTS` (`lib/manifest/src/lib.rs`), demanded by
 `sys_sysinfo` before a single per-process entry is collected or written
 (`4a98107f^:kernel/src/arch/syscall.rs`), and endowed by `system.toml` to `toybox` —
 which is what `/system/bin/ps` is under another name — exactly as `logread` is endowed
@@ -276,7 +276,7 @@ device-driving syscall then presents that handle and the kernel checks the
 setting the resolution than one holding nothing"
 (`4a98107f^:kernel/src/arch/syscall.rs:895`). `SYS_RT_ENTER` is the same shape
 on `Rights::RT` (`:1655`), narrowed per program by
-`toyos_manifest::syscap_rights` (`toyos-manifest/src/lib.rs:73`) — `system.toml`
+`toyos_manifest::syscap_rights` (`lib/manifest/src/lib.rs:73`) — `system.toml`
 grants exactly two, `logread` to `logd` and `rt` to `soundd`.
 
 One inconsistency, known and unobservable: three arms demand three different

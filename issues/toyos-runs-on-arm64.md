@@ -106,7 +106,7 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 
 **x86-only pure code, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
 `kernel/pure/pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
-(PML4[0]/PML4[256], `toyos-bootmap/src/lib.rs:21-29`).
+(PML4[0]/PML4[256], `lib/bootmap/src/lib.rs:21-29`).
 
 **Inline assembly**, 834 lines by a paren-depth scan of
 `asm!`/`naked_asm!`/`global_asm!` bodies (undercounts: macro bodies like
@@ -173,7 +173,7 @@ across `src/` and `tests/`. The harness hardwires q35
 `cfg!(target_arch = "x86_64") && …` (`src/lib.rs:65`). The rust fork has only
 `x86_64_unknown_toyos.rs`; its base `base/toyos.rs` is arch-neutral.
 `toyos-elf`
-refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
+refuses anything but `EM_X86_64` (`lib/elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
 (`sdk/abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`

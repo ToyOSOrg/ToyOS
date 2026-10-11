@@ -105,7 +105,7 @@ first read and turned out not to be, which is the whole point of reading
 before adopting:
 
 - **`suspicious_operation_groupings` (8 findings, 2 distinct sites)**:
-  `toyos-gpt/src/lib.rs`'s three-clause partition-bounds check
+  `lib/gpt/src/lib.rs`'s three-clause partition-bounds check
   (`partition.first_lba > partition.last_lba || partition.first_lba <
   header.first_usable_lba || partition.last_lba > header.last_usable_lba`)
   and a since-deleted linker's Mach-O header-size sum both look like

@@ -68,7 +68,7 @@ share a lot of code there? should we?". The kernel keeps its own ELF reader,
 day, "if it makes sense we wrote our own elf parser or aml interpreter due to
 security or other important reasons we do it". The kernel names only itself: a
 killed program's frame is recorded as the file it ran, the offset in that file
-and the file's build-id (`toyos-symbols/src/frame.rs`), and
+and the file's build-id (`lib/symbols/src/frame.rs`), and
 `/system/bin/symbolize` names it with the kernel's own lookup and demangling
 code. What is left: a library's frames print bare, because the kernel records
 only the executable's image for a process; and `rustc-demangle`'s standing. It

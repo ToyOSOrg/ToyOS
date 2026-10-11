@@ -11,7 +11,7 @@ performance controls through CPPC, not HWP. On both the kernel declares no
 performance request, firmware's values stand, and `SYS_COUNTERS` carries no
 power envelope.
 
-The refusals are `toyos_cpuvuln::hwp`'s (`toyos-cpuvuln/src/hwp.rs`):
+The refusals are `toyos_cpuvuln::hwp`'s (`kernel/cpuvuln/src/hwp.rs`):
 - `HwpRefusal::Hybrid`, for CPUID.(7,0):EDX[15]: the declared minimum is a
   ratio (`MSR_PLATFORM_INFO[47:40]`), and a hybrid CPU's HWP scale is not its
   ratio scale.

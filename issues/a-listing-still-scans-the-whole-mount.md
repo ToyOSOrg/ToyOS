@@ -12,7 +12,7 @@ to it (`Fat32::walk`'s `under`). The other two mounts still read every name in
 the mount and drop the ones that do not match:
 
 - `TmpFs::list` (`kernel/src/tmpfs.rs`) iterates the whole `entries` map.
-- `Mounted::list` (`bcachefs/src/fs.rs`) walks the whole B+tree through
+- `Mounted::list` (`lib/bcachefs/src/fs.rs`) walks the whole B+tree through
   `btree::for_each_live`, decoding every leaf value to learn its name.
 
 So a `readdir` of one directory is O(mount) on `/tmp` and `/home`, and it
@@ -34,7 +34,7 @@ that is an on-disk format change, so it is not a small one.
 
 **`SYS_CHDIR` and `SYS_SPAWN` pay the same worst case on bcachefs.** Both judge
 their directory with `FileSystem::is_dir` under the VFS lock, and
-`Mounted::is_dir` (`bcachefs/src/fs.rs`) is a `for_each_live` walk that stops
+`Mounted::is_dir` (`lib/bcachefs/src/fs.rs`) is a `for_each_live` walk that stops
 at the first name beneath the directory — so a directory that is there costs
 the walk up to its first entry, and one that is not costs every node on the
 mount. Every spawn states a cwd, so this is on the path of every process start

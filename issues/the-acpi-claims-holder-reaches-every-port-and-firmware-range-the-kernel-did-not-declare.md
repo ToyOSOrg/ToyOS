@@ -9,7 +9,7 @@ opened: 2026-10-07
 The kernel reads and writes for the holder of the `acpi` claim whatever the
 firmware's AML names (`SYS_ACPI`, `kernel/src/arch/x86_64/acpi_mode.rs`), and
 decides each access by what its address is
-(`toyos-userbound/src/firmware.rs`). What that decision passes is wider than
+(`lib/userbound/src/firmware.rs`). What that decision passes is wider than
 what any one machine's AML needs, because nothing tells the kernel which
 regions a machine's tables define until the holder's interpreter has loaded
 them:

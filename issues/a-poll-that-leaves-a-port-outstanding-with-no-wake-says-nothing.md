@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # A poll that leaves a port outstanding with no wake says nothing
 
-The simulator's pump (`toyos-xhci/sim/src/driver.rs`) fails with
+The simulator's pump (`lib/xhci/sim/src/driver.rs`) fails with
 `Stuck::Unwoken` when a pass leaves the port outstanding
 (`PortState::outstanding`) with no instant to come back at. The kernel has no
 counterpart. `XhciController::poll` (`kernel/src/drivers/xhci/mod.rs`) returns

@@ -7,7 +7,7 @@ opened: 2026-10-07
 # A dead scratch root another user owns panics every sweep of its base
 
 `toyos-tmpdir`'s sweep moves every root whose process is gone into the
-sweeping process's own root (`reap_into`, `toyos-tmpdir/src/lib.rs`) and
+sweeping process's own root (`reap_into`, `lib/tmpdir/src/lib.rs`) and
 panics when the move is refused. In a sticky base such as `/tmp` a user who is
 not root cannot rename a directory another user owns, so one dead root left by
 another user's killed process panics the first `TempDir` of every later

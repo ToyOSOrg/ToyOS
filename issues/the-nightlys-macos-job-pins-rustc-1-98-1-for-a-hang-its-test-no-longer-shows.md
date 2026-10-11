@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # The nightly's macOS job pins rustc 1.98.1 for a hang its test no longer shows, and the host's rustc still has the fault
 
-`toyos-userbound/tests/firmware.rs`'s `a_port_answers_as_its_declaration_says`
+`lib/userbound/tests/firmware.rs`'s `a_port_answers_as_its_declaration_says`
 never ended in `nightly.yml`'s `portability-macos`, the one job that runs the
 host suite on macOS, from the first nightly that had the test (#749): the
 compiler that job installed, `rustc 1.99.0 (b940084d7 2026-09-28)`, LLVM

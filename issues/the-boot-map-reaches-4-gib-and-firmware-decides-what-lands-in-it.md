@@ -31,6 +31,6 @@ reach all of firmware's write-back memory), the memory map is among what
 profile has.
 
 **The AArch64 typing refuses a part-typed page.** `Typing::of`
-(`toyos-bootmap/src/lib.rs`) refuses the boot (`Refusal::Mixed`) for any 2 MiB
+(`lib/bootmap/src/lib.rs`) refuses the boot (`Refusal::Mixed`) for any 2 MiB
 page of the low 4 GiB that firmware's memory map types in part: written back
 for some of it and not the rest. QEMU `virt`'s map has no such page.

@@ -206,7 +206,7 @@ Each stage lands on its own, in this order.
 5. **Tries and a good flag per slot, decided on the host.** Each slot in the
    table carries a priority, the tries it has left and a good flag, in the
    word the format reserves; the table's format rises. They replace the
-   attempts file (`attempt.rs`, `toyos-update/src/record.rs` and `main.rs`'
+   attempts file (`attempt.rs`, `lib/update/src/record.rs` and `main.rs`'
    accounting), the dead-slot retry and `slot::proven`.
    - A freshly built image's slot A starts untried with 3 tries. An install
      writes its slot untried with 3 tries, the good flag clear and a priority

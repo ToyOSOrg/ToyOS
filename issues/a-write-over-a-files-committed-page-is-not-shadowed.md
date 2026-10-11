@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # A write over a file's committed page is not shadowed
 
-DATA's commit (`bcachefs/src/fs.rs`, the read-write block's header) holds
+DATA's commit (`lib/bcachefs/src/fs.rs`, the read-write block's header) holds
 every name, and each entry's length and extents, to one sync or the other,
 and not a file's bytes. Fileserver's `write` (`userland/fileserver/src/data.rs`)
 resolves a page the file's extents already reach to the block they name
@@ -15,7 +15,7 @@ cache, which may write the block out before the next sync. So a kill can leave
 a file's committed blocks holding some pages of a write and the rest from
 before it, under whichever length the committed entry names.
 
-Read from the code, not measured: `bcachefs/tests/crash.rs` and fileserver's
+Read from the code, not measured: `lib/bcachefs/tests/crash.rs` and fileserver's
 kill tests overwrite no page a sync already committed.
 
 ## Exit condition

@@ -10,10 +10,10 @@ The kernel's direct map has no 1 GiB leaf: `paging::init` maps it 2 MiB at a
 time (`kernel/src/arch/x86_64/paging.rs:953-956`). On a CPU that enumerates
 `pdpe1gb`, CPUID.80000001H:EDX bit 26, a GiB the direct map covers whole and
 that holds one memory type takes one 1 GiB leaf; the GiB that `direct_map_end`
-cuts (it rounds only to 2 MiB, `toyos-bootmap/src/x86_64.rs:22`), any other
+cuts (it rounds only to 2 MiB, `lib/bootmap/src/x86_64.rs:22`), any other
 GiB, and every GiB on a CPU without it keep 2 MiB leaves. Which leaf a GiB
 takes is a pure function that `paging::init` calls, living beside
-`direct_map_end` in `toyos-bootmap/src/x86_64.rs` and host-tested there. The
+`direct_map_end` in `lib/bootmap/src/x86_64.rs` and host-tested there. The
 walkers that write, `guard_4k` (`paging.rs:749`) and `ensure_table` (`:820`)
 under `map_2m`, split a 1 GiB leaf into 2 MiB leaves of its type before they
 descend; unsplit, `guard_kernel_page` writes a page table into the GiB's first

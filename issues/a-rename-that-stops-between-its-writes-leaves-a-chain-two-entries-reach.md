@@ -6,13 +6,13 @@ opened: 2026-09-26
 
 # A rename that stops between its writes leaves a chain two entries reach
 
-`toyos-fat32/src/fs.rs`'s rename writes the new entry run, then erases the old
+`lib/fat32/src/fs.rs`'s rename writes the new entry run, then erases the old
 one, then repoints a moved directory's `..`. A refused write is undone before the
 call returns, but a machine that stops between those writes — a reset, a power
 loss, or a device that stops answering so the undo never lands — leaves the
 state the order had reached. Measured by
 `a_stop_at_any_write_leaves_only_the_named_windows`
-(`toyos-fat32/tests/refused_writes.rs`), which freezes the device at every write
+(`lib/fat32/tests/refused_writes.rs`), which freezes the device at every write
 of a directory move and lists what `toyos-fat32-check` says: `cluster 5 is
 already held by /into/A moved directory` (both entries live), `".." names
 cluster 0; the format requires the parent's cluster 4` (moved, `..` not yet
