@@ -48,6 +48,7 @@ const KICK_END: u32 = 4;
 const ARRIVE: u32 = 5;
 const HALT_RETURN: u32 = 6;
 const ARM_BEGIN: u32 = 7;
+const STOP_BEGIN: u32 = 8;
 const RESUMED: u32 = 9;
 
 fn spin(ticks: u64) {
@@ -203,7 +204,22 @@ fn main() {
     let window = 50 * mhz;
     let ours = |t: Option<Thread>| t.is_some_and(|t| ours.contains(&t.pid));
     let mut splits: BTreeMap<(u16, u16), Split> = BTreeMap::new();
-    let (mut unpaired, mut busy, mut foreign) = (0, 0, 0);
+    let (mut unpaired, mut interleaved, mut busy, mut foreign) = (0, 0, 0, 0);
+    // The idle entry's timer stop, wherever it happened: mark to `TimerStop`.
+    let mut stop: Vec<u64> = Vec::new();
+    let mut cal_all: Vec<u64> = Vec::new();
+    for v in by_cpu.values() {
+        for (i, e) in v.iter().enumerate() {
+            if is_mark(e, STOP_BEGIN) {
+                if let Some(ts) = v[i + 1..].iter().take(4).find(|n| n.event == Event::TimerStop) {
+                    stop.push(ts.stamp - e.stamp);
+                }
+            }
+            if is_mark(e, CAL_B) && i > 0 && is_mark(&v[i - 1], CAL_A) && e.seq - v[i - 1].seq == 1 {
+                cal_all.push(e.stamp - v[i - 1].stamp);
+            }
+        }
+    }
     for (&c, v) in &by_cpu {
         for (i, a) in v.iter().enumerate() {
             if !is_mark(a, ARRIVE) {
@@ -224,7 +240,7 @@ fn main() {
                 || !is_mark(&wv[j - 3], CAL_A)
                 || wv[j].seq - wv[j - 3].seq != 3
             {
-                unpaired += 1;
+                interleaved += 1;
                 continue;
             }
             let (cal_a, cal_b, begin) = (wv[j - 3].stamp, wv[j - 2].stamp, wv[j - 1].stamp);
@@ -248,10 +264,11 @@ fn main() {
                 foreign += 1;
                 continue;
             };
-            let Some(r) = after[pk..].iter().find(|e| is_mark(e, RESUMED) && e.thread == wk.thread) else {
+            let Some(ri) = after[pk..].iter().position(|e| is_mark(e, RESUMED) && e.thread == wk.thread) else {
                 foreign += 1;
                 continue;
             };
+            let r = after[pk + ri];
             let s = splits.entry((w, c)).or_default();
             s.cal.push(cal);
             s.send.push((end - begin).saturating_sub(cal));
@@ -260,8 +277,10 @@ fn main() {
             s.drain.push(wk.stamp - halt);
             s.pick.push(after[pk].stamp - halt);
             s.switch.push(r.stamp - after[pk].stamp);
-            if let Some(ab) = after[..pk].iter().position(|e| is_mark(e, ARM_BEGIN)) {
-                if let Some(ta) = after[ab..pk].iter().find(|e| matches!(e.event, Event::TimerArm { .. })) {
+            // `switch_to_current` arms the one-shot after the pick.
+            let to_r = pk + ri;
+            if let Some(ab) = after[..to_r].iter().position(|e| is_mark(e, ARM_BEGIN)) {
+                if let Some(ta) = after[ab..to_r].iter().find(|e| matches!(e.event, Event::TimerArm { .. })) {
                     s.rearm.push((ta.stamp - after[ab].stamp).saturating_sub(cal));
                 }
             }
@@ -276,7 +295,20 @@ fn main() {
             }
         }
     }
-    println!("scout_wake: arrivals unpaired {unpaired}, not halted {busy}, not our wake {foreign}");
+    println!(
+        "scout_wake: arrivals with no kick within 50us {unpaired}, kick marks interleaved {interleaved}, \
+         not halted {busy}, not our wake {foreign}"
+    );
+    let cal50 = p(&mut cal_all, 50);
+    println!(
+        "scout_wake: one record p50={cal50} ticks over {} pairs; idle-entry timer stop (record included) \
+         p10={} p50={} p90={} over {}",
+        cal_all.len(),
+        p(&mut stop, 10),
+        p(&mut stop, 50),
+        p(&mut stop, 90),
+        stop.len(),
+    );
 
     let ns = |t: i64| t * 1_000 / mhz as i64;
     let mut deliver_p50 = BTreeMap::new();

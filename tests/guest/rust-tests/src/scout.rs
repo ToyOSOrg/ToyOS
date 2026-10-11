@@ -32,12 +32,12 @@ pub fn tsc_mhz() -> u64 {
 /// kernel sets `CR4.PCE` exactly where this answers `Some`.
 pub fn pmc_programme() -> Option<&'static str> {
     use core::arch::x86_64::__cpuid_count;
-    let leaf0 = unsafe { __cpuid_count(0, 0) };
+    let leaf0 = __cpuid_count(0, 0);
     let mut vendor = [0u8; 12];
     vendor[0..4].copy_from_slice(&leaf0.ebx.to_le_bytes());
     vendor[4..8].copy_from_slice(&leaf0.edx.to_le_bytes());
     vendor[8..12].copy_from_slice(&leaf0.ecx.to_le_bytes());
-    let sig = unsafe { __cpuid_count(1, 0) }.eax;
+    let sig = __cpuid_count(1, 0).eax;
     let base = (sig >> 8) & 0xF;
     let family = base + if base == 0xF { (sig >> 20) & 0xFF } else { 0 };
     match &vendor {
@@ -45,7 +45,7 @@ pub fn pmc_programme() -> Option<&'static str> {
             if leaf0.eax < 0x0A {
                 return None;
             }
-            let eax = unsafe { __cpuid_count(0x0A, 0) }.eax;
+            let eax = __cpuid_count(0x0A, 0).eax;
             ((eax & 0xFF) >= 2 && ((eax >> 8) & 0xFF) >= 4).then_some("intel")
         }
         b"AuthenticAMD" if family == 0x17 || family == 0x19 => Some("amd"),

@@ -481,14 +481,10 @@ fn supported(cpu_id: u32) -> u64 {
     if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 && !invlpg_misses_global(cpu_id, ecx1) {
         have |= cr4::PCIDE;
     }
+    // On PCID alone; a CPU without it boots as the baseline, and
+    // `scout_pmc::log_cpuid` says so by name for the row's judge.
     #[cfg(feature = "scout-pcid-without-invpcid")]
-    {
-        assert!(
-            ecx1 & (1 << 17) != 0,
-            "scout-pcid-without-invpcid: CPUID.01H:ECX[17] (PCID) is clear on this CPU, so the \
-             twin cannot exist here"
-        );
-        let _ = ebx7;
+    if ecx1 & (1 << 17) != 0 {
         have |= cr4::PCIDE;
     }
     #[cfg(feature = "scout-no-pcid")]
