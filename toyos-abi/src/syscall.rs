@@ -8,6 +8,8 @@ pub const SYS_CLOSE: u64 = 10;
 pub const SYS_SEEK: u64 = 13;
 pub const SYS_FSTAT: u64 = 14;
 pub const SYS_FSYNC: u64 = 15;
+/// What a path names, as a [`Stat`]: [`stat`].
+pub const SYS_STAT: u64 = 16;
 pub const SYS_READDIR: u64 = 17;
 pub const SYS_DELETE: u64 = 18;
 pub const SYS_SHUTDOWN: u64 = 19;
@@ -555,6 +557,10 @@ pub enum FileType {
     /// A shared-memory region; `size` is its length. A program's stdout and
     /// stderr are one when they are its log ring (`toyos::log`).
     SharedMemory = 10,
+    /// A directory, which only [`stat`] answers.
+    Directory = 11,
+    /// A symbolic link, which only [`stat`] answers; `size` is its target's length.
+    Symlink = 12,
 }
 
 impl FileType {
@@ -570,6 +576,8 @@ impl FileType {
             7 => Some(Self::Mouse),
             8 => Some(Self::Socket),
             10 => Some(Self::SharedMemory),
+            11 => Some(Self::Directory),
+            12 => Some(Self::Symlink),
             _ => None,
         }
     }
@@ -660,7 +668,7 @@ pub struct RealTime {
     pub seconds: u8,
 }
 
-/// File metadata returned by [`fstat`].
+/// File metadata returned by [`fstat`] and [`stat`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stat {
@@ -1069,6 +1077,15 @@ pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
     Ok(stat)
 }
 
+/// What the kernel's `path` names: a file, a directory, or, unless `follow`
+/// follows it, a symlink, each with the identity [`fstat`] answers a file.
+pub fn stat(path: &[u8], follow: bool) -> Result<Stat, SyscallError> {
+    let mut stat = Stat::default();
+    let out = &mut stat as *mut Stat as u64;
+    check_unit(syscall(SYS_STAT, path.as_ptr() as u64, path.len() as u64, out, follow as u64))?;
+    Ok(stat)
+}
+
 /// Flush a file handle to disk, or a partition claim's writes out of its
 /// device's cache ([`crate::part`]): `Ok` is the device's own word that every
 /// write the claim returned from before this call is durable.
@@ -1099,11 +1116,11 @@ pub const DIRENT_FILE: u8 = 1;
 pub const DIRENT_DIR: u8 = 2;
 
 /// One entry of a [`readdir`] listing: its kind byte, its name, a NUL, and its
-/// size as eight bytes, little-endian.
+/// node as eight bytes, little-endian: the [`Stat::node`] [`stat`] answers it.
 pub struct Dirent<'a> {
     pub is_dir: bool,
     pub name: &'a [u8],
-    pub size: u64,
+    pub node: u64,
 }
 
 /// The entry at `*at` in a whole [`readdir`] listing, with `*at` moved past
@@ -1117,11 +1134,11 @@ pub fn dirent<'a>(listing: &'a [u8], at: &mut usize) -> Option<Dirent<'a>> {
         kind => panic!("SYS_READDIR answered an entry of kind {kind}"),
     };
     let len = rest[1..].iter().position(|&b| b == 0).expect("SYS_READDIR answered a name with no NUL");
-    let size = rest
+    let node = rest
         .get(len + 2..len + 10)
-        .expect("SYS_READDIR answered an entry with no size");
+        .expect("SYS_READDIR answered an entry with no node");
     *at += len + 10;
-    Some(Dirent { is_dir, name: &rest[1..1 + len], size: u64::from_le_bytes(size.try_into().unwrap()) })
+    Some(Dirent { is_dir, name: &rest[1..1 + len], node: u64::from_le_bytes(node.try_into().unwrap()) })
 }
 
 /// Delete a file or directory.
@@ -2873,14 +2890,14 @@ mod tests {
     }
 
     /// A listing of `entries`, each a name, whether it is a directory and a
-    /// size, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
+    /// node, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
     fn listing(entries: &[(&str, bool, u64)]) -> std::vec::Vec<u8> {
         let mut out = std::vec::Vec::new();
-        for (name, is_dir, size) in entries {
+        for (name, is_dir, node) in entries {
             out.push(if *is_dir { 2 } else { 1 });
             out.extend_from_slice(name.as_bytes());
             out.push(0);
-            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&node.to_le_bytes());
         }
         out
     }
@@ -2889,15 +2906,15 @@ mod tests {
         let mut at = 0;
         let mut out = std::vec::Vec::new();
         while let Some(entry) = dirent(bytes, &mut at) {
-            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.size));
+            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.node));
         }
         assert_eq!(at, bytes.len(), "the reader stopped short of the listing's end");
         out
     }
 
     #[test]
-    fn every_dirent_is_read_back_whatever_its_size_holds() {
-        // Sizes whose bytes are NULs, kind bytes and letters: a reader that
+    fn every_dirent_is_read_back_whatever_its_node_holds() {
+        // Nodes whose bytes are NULs, kind bytes and letters: a reader that
         // does not step over all eight takes them for names.
         let entries = [
             ("a", false, 0),
@@ -2918,7 +2935,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "no size")]
+    #[should_panic(expected = "no node")]
     fn a_short_dirent_is_a_broken_kernel() {
         read_listing(&[1, b'x', 0, 0, 0]);
     }

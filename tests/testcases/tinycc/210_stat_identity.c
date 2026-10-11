@@ -1,8 +1,12 @@
 /* `st_dev` and `st_ino` as the C library fills them: one file is one pair
    through every path, a link and its open descriptor, and across a rename;
-   two files are two; and the two kernel mounts are two volumes. */
+   two files are two; and the two kernel mounts are two volumes. A kernel
+   directory and symlink are each one as well, and `d_ino` is its entry's
+   `st_ino`. */
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -10,8 +14,8 @@ static int same(const struct stat *a, const struct stat *b) {
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
 }
 
-static int stat_of(const char *path, struct stat *st) {
-    if (stat(path, st) != 0) {
+static int identity(const char *path, struct stat *st, int follow) {
+    if ((follow ? stat(path, st) : lstat(path, st)) != 0) {
         printf("stat %s failed\n", path);
         return 1;
     }
@@ -20,6 +24,27 @@ static int stat_of(const char *path, struct stat *st) {
         return 1;
     }
     return 0;
+}
+
+static int stat_of(const char *path, struct stat *st) {
+    return identity(path, st, 1);
+}
+
+static int lstat_of(const char *path, struct stat *st) {
+    return identity(path, st, 0);
+}
+
+/* The `d_ino` `dir`'s listing answers for `name`, 0 when it lists none. */
+static ino_t listed(const char *dir, const char *name) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    ino_t ino = 0;
+    while (d && (e = readdir(d)))
+        if (strcmp(e->d_name, name) == 0)
+            ino = e->d_ino;
+    if (d)
+        closedir(d);
+    return ino;
 }
 
 static int write_file(const char *path) {
@@ -38,6 +63,7 @@ static void judge(const char *what, int is, int want) {
 
 int main(void) {
     struct stat a, b, a2, opened, moved, toybox, cat, supervisor;
+    struct stat bin, bin2, etc, sys, tmpdir, catlink, cplink;
     int fd;
 
     if (write_file("/tmp/210_a") || write_file("/tmp/210_b"))
@@ -70,6 +96,27 @@ int main(void) {
     judge("two files on /system are two", same(&toybox, &supervisor), 0);
     judge("/system and /tmp are two volumes", toybox.st_dev == a.st_dev, 0);
 
+    if (mkdir("/tmp/210_d", 0755) != 0 || stat_of("/system/bin", &bin) || stat_of("/system/etc/../bin", &bin2) ||
+        stat_of("/system/etc", &etc) || stat_of("/system", &sys) || stat_of("/tmp/210_d", &tmpdir))
+        return 1;
+    judge("two directories on /system are two", same(&bin, &etc), 0);
+    judge("a directory and its mount's root are two", same(&bin, &sys), 0);
+    judge("one directory through two paths is one", same(&bin, &bin2), 1);
+    judge("a directory is on its mount's volume", bin.st_dev == toybox.st_dev && tmpdir.st_dev == a.st_dev, 1);
+    judge("a directory is no file", same(&tmpdir, &b), 0);
+
+    if (lstat_of("/system/bin/cat", &catlink) || lstat_of("/system/bin/cp", &cplink))
+        return 1;
+    judge("two links on /system are two", same(&catlink, &cplink), 0);
+    judge("a link is not the file it names", same(&catlink, &toybox), 0);
+
+    judge("d_ino is a directory's st_ino", listed("/system", "bin") == bin.st_ino, 1);
+    judge("d_ino is a file's st_ino", listed("/system/bin", "toybox") == toybox.st_ino, 1);
+    judge("d_ino is a link's st_ino", listed("/system/bin", "cat") == catlink.st_ino, 1);
+    judge("d_ino is a mount's st_ino", listed("/", "system") == sys.st_ino, 1);
+    judge("d_ino on /tmp is st_ino", listed("/tmp", "210_b") == b.st_ino && listed("/tmp", "210_d") == tmpdir.st_ino, 1);
+
+    rmdir("/tmp/210_d");
     unlink("/tmp/210_moved");
     unlink("/tmp/210_b");
     return 0;

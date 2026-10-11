@@ -29,7 +29,7 @@ const WITH_FILE: &str = "/tmp/empty_dir_stat_full";
 fn readdir(path: &str) -> Result<usize, SyscallError> {
     // One byte on purpose: the kernel reports the size the listing *needs*
     // whether or not it fits, so the answer is the return value and the bytes
-    // are not wanted. It is also what `std`'s `is_dir` passes.
+    // are not wanted.
     let mut buf = [0u8; 1];
     syscall::readdir(path.as_bytes(), &mut buf)
 }

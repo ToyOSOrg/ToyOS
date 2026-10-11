@@ -27,7 +27,12 @@ costs and refuse past it, and a pipe allocates its ring page on first use rather
 than at `create`. **What a bound alone still does not answer is whose window to
 refuse.** The memory is charged to nobody, so a cap is the only thing between one
 client and the machine — which is this entry, and is why both of those functions'
-doc comments name a kernel memory limit as what deletes them.
+doc comments name a kernel memory limit as what deletes them. A third such cap
+is the kernel's directory numbering, `MAX_DIRECTORIES` in `kernel/pure/dirnodes.rs`,
+and its refusal crosses processes: once one process's `/tmp` names fill it, every
+process's `stat`, `access`, `opendir` or listing that reaches a directory not yet
+numbered is refused `ResourceExhausted`. Charging each number to whoever made it
+deletes the cap.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: isolation
 findings are security-adjacent and are promoted, never folded). One process

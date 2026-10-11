@@ -116,8 +116,8 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         let built = if truncate && create {
             let mtime = crate::clock::mtime_now();
             // `NotFound` is not a failure: truncating past a name that was not there is fine.
-            // Any `vfs.delete` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
-            match vfs.delete(target.as_str()) {
+            // Any `vfs.delete_file` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
+            match vfs.delete_file(target.as_str()) {
                 Ok(()) | Err(SyscallError::NotFound) => {}
                 Err(e) => return e.to_u64(),
             }
