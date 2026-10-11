@@ -391,7 +391,7 @@ impl Node {
     }
 
     /// Where `/sys` answers for the disk, and for one of its partitions.
-    pub(crate) fn sysfs(&self) -> String {
+    fn sysfs(&self) -> String {
         format!("/sys/class/block/{}", self.name())
     }
 
@@ -403,17 +403,17 @@ impl Node {
 /// What `/sys/class/block/<disk>/` answered, in the order [`Target::identity`]
 /// asks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Identity {
-    pub(crate) sectors: u64,
-    pub(crate) vendor: String,
-    pub(crate) model: String,
-    pub(crate) removable: bool,
+struct Identity {
+    sectors: u64,
+    vendor: String,
+    model: String,
+    removable: bool,
 }
 
 impl Identity {
     /// The four `sysfs` files as `cat` concatenates them. The trailing padding
     /// is the SCSI inquiry's own: vendor and model are fixed-width fields.
-    pub(crate) fn parse(text: &str) -> Result<Self, Refusal> {
+    fn parse(text: &str) -> Result<Self, Refusal> {
         let fields: Vec<&str> = text.lines().map(str::trim).collect();
         let [size, vendor, model, removable] = fields[..] else {
             return Err(Refusal::Identity {

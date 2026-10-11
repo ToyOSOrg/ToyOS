@@ -233,12 +233,6 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 webpki-root-certs = "1"
 pem = "4"
 
-# How `toyos-flash` reads a disk on macOS: the IOKit registry, through the
-# objc2 project's bindings, which the sysinfo fork already takes.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
-objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "libc"] }
-
 [dev-dependencies]
 # The FAT implementation `src/fatformat.rs` is judged against, byte for byte.
 fatfs = "0.3.6"

@@ -208,9 +208,11 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    (`src/metal*.rs` and `tests/t14-linux/` as package
    `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
    `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
-   `bootable-<stem>.img`. **Exit:** no `tests/*case/`, `console/` or `diag/`
-   directory and no root `system.toml` remains, and `--diag-boot`,
-   `--console-boot` and a `--metal-readback` build green.
+   `bootable-<stem>.img`. `src/flash.rs` reads `metal`'s `whole_disk` and
+   `Node`, which move with it: they go to an owner both share, or
+   `toyos-flash` moves into `toyos-metal`. **Exit:** no `tests/*case/`,
+   `console/` or `diag/` directory and no root `system.toml` remains, and
+   `--diag-boot`, `--console-boot` and a `--metal-readback` build green.
 9. **`src/` becomes `build/`, `bootloader/` becomes `loader/`,** and
    `examples/imgstat.rs` becomes a binary of the root package in `build/`
    (rule step 2). **Exit:** `src/`, `bootloader/` and `examples/` are gone;

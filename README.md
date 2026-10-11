@@ -279,10 +279,11 @@ the boot configuration differs.
 
 ### Writing it to a USB stick
 
-The image is a whole disk, and `toyos-flash` writes it over the whole stick,
-on macOS and Linux. It finds the stick itself: it writes only an external USB
-disk, and `--disk <name>` chooses one when more than one is plugged in. It
-shows the disk it chose, and writes it only when run as root and answered `y`.
+The image is a whole disk, and `toyos-flash` writes it over the whole stick
+from a Linux host; on any other it refuses. It finds the stick itself: it
+writes only a disk on a USB port the kernel calls removable, and `--disk
+<name>` chooses one when more than one is plugged in. It shows the disk it
+chose, and writes it only when run as root and answered `y`.
 **What was on the stick is destroyed.**
 
 ```
@@ -290,7 +291,8 @@ cargo run --bin toyos-flash                # shows the stick and the sudo line t
 sudo target/debug/toyos-flash --disk <name>
 ```
 
-`--diag-boot` or `--console-boot` on both lines flashes that image instead.
+`--diag-boot`, `--console-boot` or `--image <path>` on both lines flashes that
+image instead.
 
 Then boot the machine from it. Secure Boot has to be off — ToyOS's bootloader
 is signed by nobody.
