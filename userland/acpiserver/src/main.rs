@@ -658,37 +658,46 @@ mod tests {
     }
 
     /// The controller is attached to AML as it is armed, its `_REG` run and
-    /// the battery found through it; a port of it the kernel then refuses to
-    /// AML, at the battery's next read, ends the controller as one refused to
-    /// the server's own drain does: detached, its GPE disabled, and neither
-    /// AML nor the drain asks the kernel for it again.
+    /// the battery found through it. A port of it the kernel then refuses,
+    /// to AML at the battery's next read or to the server's own drain, ends
+    /// the controller for both: detached from AML, unserved, its GPE
+    /// disabled, and neither AML nor the drain asks the kernel for it again.
     #[test]
-    fn a_controller_port_the_kernel_refuses_to_aml_ends_the_controller() {
-        let kernel = crate::battery::tests::laptop_machine(None);
-        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
-        let mut server = Server::new(&kernel, Bytes::default(), info);
-        for (_, enable) in bytes(GPE0) {
-            server.ports.out8(enable, 0);
-        }
-        server.aml = load(&kernel, CRAFTED_RSDP).1;
-        let (batteries, adapters) = server.arm_controller();
-        assert_eq!(server.served.ec_gpe, Some(3));
-        assert!(server.aml.as_ref().is_some_and(|aml| aml.host.ec.is_some()), "the served controller is not attached to AML");
-        server.find_power(batteries, adapters);
-        assert!(server.power.is_some(), "no battery read through the attached controller");
-        assert_eq!(server.ec.as_ref().map(|ec| ec.gpe), Some(3));
+    fn a_controller_port_the_kernel_refuses_to_aml_or_the_drain_ends_it_for_both() {
+        for to_aml in [true, false] {
+            let kernel = crate::battery::tests::laptop_machine(None);
+            let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+            let mut server = Server::new(&kernel, Bytes::default(), info);
+            for (_, enable) in bytes(GPE0) {
+                server.ports.out8(enable, 0);
+            }
+            server.aml = load(&kernel, CRAFTED_RSDP).1;
+            let (batteries, adapters) = server.arm_controller();
+            assert_eq!(server.served.ec_gpe, Some(3));
+            assert!(server.aml.as_ref().is_some_and(|aml| aml.host.ec.is_some()), "the served controller is not attached to AML");
+            server.find_power(batteries, adapters);
+            assert!(server.power.is_some(), "no battery read through the attached controller");
+            assert_eq!(server.ec.as_ref().map(|ec| ec.gpe), Some(3));
 
-        // The kernel keeps the controller's ports from here on.
-        *kernel.controller.borrow_mut() = None;
-        server.read_power();
-        assert_eq!((server.ec.is_some(), server.served.ec_gpe), (false, None), "a controller refused to AML is still served");
-        assert!(server.aml.as_ref().is_some_and(|aml| aml.host.ec.is_none() && aml.host.ended.is_none()));
-        assert!(bytes(GPE0).all(|(_, enable)| server.ports.in8(enable) == 0), "the controller's GPE is left enabled");
-        let asked = kernel.asked.borrow().len();
-        server.read_power();
-        server.drain();
-        let ports = kernel.asked.borrow().iter().skip(asked).filter(|access| access.space == Space::SystemIo as u8).count();
-        assert_eq!(ports, 0, "a controller refused to AML was asked again");
+            // The kernel keeps the controller's ports from here on.
+            *kernel.controller.borrow_mut() = None;
+            if to_aml {
+                server.read_power();
+            } else {
+                server.drain();
+            }
+            assert_eq!((server.ec.is_some(), server.served.ec_gpe), (false, None), "refused to AML {to_aml}: the controller is still served");
+            assert!(
+                server.aml.as_ref().is_some_and(|aml| aml.host.ec.is_none() && aml.host.ended.is_none()),
+                "refused to AML {to_aml}: the controller is still attached to AML"
+            );
+            assert!(bytes(GPE0).all(|(_, enable)| server.ports.in8(enable) == 0), "refused to AML {to_aml}: the controller's GPE is left enabled");
+            let asked = kernel.asked.borrow().len();
+            server.read_power();
+            server.drain();
+            let ports = kernel.asked.borrow().iter().skip(asked).filter(|access| access.space == Space::SystemIo as u8).count();
+            assert_eq!(ports, 0, "refused to AML {to_aml}: the controller was asked again");
+        }
     }
 
     /// The owner's ruling: a machine whose power button is a control method
