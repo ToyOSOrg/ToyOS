@@ -30,10 +30,11 @@
 //! whose work a `cfg` compiles out of a host checks green there: only review
 //! holds that (`.claude/agents/reviewer.md`, Hosts).
 //!
-//! Most programs build for ToyOS alone, so no crate under a
-//! [`crate::build::PROGRAM_ROOTS`] entry is among the workspace's host members
-//! ([`crate::hostws`]); the gate runs `cargo test` on each crate [`survey`]
-//! gates in each of them instead. There is no list: a crate's
+//! Most programs build for ToyOS alone, so no program, a crate directly under a
+//! [`crate::build::PROGRAM_ROOTS`] entry, is among the workspace's host members
+//! ([`crate::hostws`]); the gate runs `cargo test` on each program [`survey`]
+//! gates instead. A crate nested in a program is a host member, and the
+//! survey leaves it to the workspace's step. There is no list: a crate's
 //! first test gates the merge that adds it.
 //!
 //! **A test is found by reading text**, because cargo's metadata knows targets
@@ -62,9 +63,13 @@ pub struct Survey {
     /// Every test the gate would not run, each as `<path under the root>: why`,
     /// sorted. `host` is red while this is not empty.
     pub escapes: Vec<String>,
+    /// The crates nested in a program that hold a test, by directory under the
+    /// root, sorted: the workspace's step runs them, so each has to be a host
+    /// member, and this survey runs none.
+    pub nested: Vec<String>,
 }
 
-/// Every crate under the program root `userland` that holds a test, and every
+/// Every program under the program root `userland` that holds a test, and every
 /// test that no `cargo test` in one of them runs.
 pub fn survey(userland: &Path) -> Result<Survey, String> {
     let mut files = Vec::new();
@@ -73,6 +78,7 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
     let mut crates = BTreeSet::new();
     let mut gated = BTreeSet::new();
     let mut escapes = BTreeSet::new();
+    let mut nested = BTreeSet::new();
     // Refusals that bind only once the file's crate turns out to be gated.
     let mut conditional: Vec<(String, PathBuf, &'static str)> = Vec::new();
     for file in &files {
@@ -90,6 +96,14 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
             }
             continue;
         };
+        // A crate nested in a program is a host member, which the workspace's
+        // own step tests.
+        if owner.parent() != Some(userland) {
+            if scan.test {
+                nested.insert(rel(userland, owner));
+            }
+            continue;
+        }
         let crate_name = rel(userland, owner);
         crates.insert(crate_name.clone());
         for why in &scan.conditions {
@@ -131,7 +145,11 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
             }
         }
     }
-    Ok(Survey { gated: gated.into_iter().collect(), escapes: escapes.into_iter().collect() })
+    Ok(Survey {
+        gated: gated.into_iter().collect(),
+        escapes: escapes.into_iter().collect(),
+        nested: nested.into_iter().collect(),
+    })
 }
 
 /// A host an app builds for, as a manifest spells it.
@@ -445,10 +463,18 @@ mod tests {
     /// **Every userland test gates a merge.**
     #[test]
     fn every_userland_test_is_in_the_gate() {
+        let hosted = crate::hostws::host_members(&repo_root());
         let mut gated = 0;
         for program_root in crate::build::PROGRAM_ROOTS {
             let survey = survey(&repo_root().join(program_root)).expect("a program root is readable");
             gated += survey.gated.len();
+            for nested in &survey.nested {
+                let member = format!("{program_root}/{nested}");
+                assert!(
+                    hosted.contains(&member),
+                    "{member} holds a test and is nested in a program, which no survey runs, and no host member"
+                );
+            }
             assert!(
                 survey.escapes.is_empty(),
                 "`cargo run -- --ci host` runs none of these under {program_root}/:\n  {}",
@@ -497,7 +523,7 @@ mod tests {
         assert_eq!(
             found,
             Ok(Survey {
-                gated: vec!["gated".into(), "gated/sub".into(), "switched".into(), "testsonly".into()],
+                gated: vec!["gated".into(), "switched".into(), "testsonly".into()],
                 escapes: vec![
                     "doctested/Cargo.toml: a library without [lib] doctest = false, whose \
                      doc-tests the gate does not read"
@@ -512,6 +538,7 @@ mod tests {
                     "loose.rs: a test in no crate".into(),
                     "switched/Cargo.toml: [lib] test = false leaves its tests unrun".into(),
                 ],
+                nested: vec!["gated/sub".into()],
             })
         );
     }

@@ -1,6 +1,6 @@
 //! Default clippy with warnings denied.
 //!
-//! `cargo run -- --clippy` runs [`SHAPES`] and [`NESTED`] alone; `cargo run --
+//! `cargo run -- --clippy` runs [`SHAPES`] alone; `cargo run --
 //! --ci host` runs the same list as one of its steps, so the local command and
 //! the merge gate cannot verify different sets. The kernel and the bootloader
 //! are linted for every architecture.
@@ -26,8 +26,7 @@ const ADOPTED: &[&str] = &[
 /// [`ADOPTED`] there, a `$CONTROLS` token [`control_features`], a
 /// `$KERNEL_CONTROLS` token those of them whose package is `kernel`, a `$GUESTS`
 /// token an `--exclude` of each package no host builds
-/// ([`crate::hostws::guest_packages`]), and a `$MANIFEST` token the manifest
-/// the run names.
+/// ([`crate::hostws::guest_packages`]).
 struct Shape {
     before: &'static [&'static str],
     after: &'static [&'static str],
@@ -190,38 +189,16 @@ const SHAPES: &[Shape] = &[
     },
 ];
 
-/// Run once per crate nested under a userland program that the survey gates,
-/// against the host as `--ci host` tests it.
-const NESTED: Shape = Shape {
-    before: &["--manifest-path", "$MANIFEST", "--all-targets"],
-    after: &["$ADOPTED", "-D", "warnings"],
-};
-
-/// Every run: each of [`SHAPES`], then [`NESTED`] with the manifest of each
-/// nested crate `src/userlandhost.rs`'s survey gates.
-fn runs(root: &Path) -> Result<Vec<(&'static Shape, Option<String>)>, String> {
-    let mut nested = Vec::new();
-    for program_root in crate::build::PROGRAM_ROOTS {
-        let survey = crate::userlandhost::survey(&root.join(program_root))?;
-        let crates = survey.gated.into_iter().filter(|c| c.contains('/'));
-        nested.extend(crates.map(|c| (&NESTED, Some(format!("{program_root}/{c}/Cargo.toml")))));
-    }
-    Ok(SHAPES.iter().map(|s| (s, None)).chain(nested).collect())
-}
-
 /// The bare targets the kernel and bootloader shapes lint against, which
 /// `rustup target add` installs: every architecture's.
 pub const BARE_TARGETS: [&str; 4] =
     [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader()];
 
 impl Shape {
-    /// The command as a reader writes it, its tokens but `$MANIFEST` unexpanded.
-    fn line(&self, manifest: Option<&str>) -> String {
+    /// The command as a reader writes it, its tokens unexpanded.
+    fn line(&self) -> String {
         let mut parts = vec!["cargo clippy".to_string()];
-        parts.extend(self.before.iter().map(|s| match *s {
-            "$MANIFEST" => manifest.expect("a `$MANIFEST` shape runs with a manifest").to_string(),
-            arg => arg.to_string(),
-        }));
+        parts.extend(self.before.iter().map(|s| (*s).to_string()));
         parts.push("--".to_string());
         parts.extend(self.after.iter().map(|s| (*s).to_string()));
         parts.join(" ")
@@ -229,13 +206,12 @@ impl Shape {
 
     /// The arguments to `cargo clippy`, every token spliced in — what actually
     /// runs.
-    fn args(&self, root: &Path, manifest: Option<&str>) -> Vec<String> {
+    fn args(&self, root: &Path) -> Vec<String> {
         let kernel = format!("{KERNEL}/");
         let mut args: Vec<String> = self
             .before
             .iter()
             .flat_map(|s| match *s {
-                "$MANIFEST" => vec![manifest.expect("a `$MANIFEST` shape runs with a manifest").to_string()],
                 "$CONTROLS" => vec![control_features().join(",")],
                 "$KERNEL_CONTROLS" => {
                     let ours = control_features().into_iter().filter(|f| f.starts_with(&kernel));
@@ -265,36 +241,31 @@ impl Shape {
 
 /// Run every shape, keeping going across them, and name the ones that found
 /// warnings or failed to run, out of how many ran.
-pub fn run(root: &Path) -> Result<(Vec<String>, usize), String> {
-    let runs = runs(root)?;
+pub fn run(root: &Path) -> (Vec<String>, usize) {
     let mut failed = Vec::new();
-    for (shape, manifest) in &runs {
-        let manifest = manifest.as_deref();
-        eprintln!("=== clippy: {}", shape.line(manifest));
+    for shape in SHAPES {
+        eprintln!("=== clippy: {}", shape.line());
         let status = Command::new("cargo")
             .arg("clippy")
-            .args(shape.args(root, manifest))
+            .args(shape.args(root))
             // The loader will not compile without the key it embeds; a
             // throwaway one, since nothing linted here is signed.
             .env(crate::signing::KEY_ENV, crate::signing::key().public_hex())
             .env(crate::signing::FLOOR_ENV, crate::signing::key().floor_scope().word())
             .current_dir(root)
             .status()
-            .unwrap_or_else(|e| panic!("running {}: {e}", shape.line(manifest)));
+            .unwrap_or_else(|e| panic!("running {}: {e}", shape.line()));
         if !status.success() {
-            failed.push(shape.line(manifest));
+            failed.push(shape.line());
         }
     }
-    Ok((failed, runs.len()))
+    (failed, SHAPES.len())
 }
 
 /// `cargo run -- --clippy`: exit non-zero if any shape reports a finding, so the
 /// whole set is one green/red answer.
 pub fn dispatch(root: &Path) {
-    let (failed, ran) = run(root).unwrap_or_else(|why| {
-        eprintln!("clippy: {why}");
-        std::process::exit(1)
-    });
+    let (failed, ran) = run(root);
     if !failed.is_empty() {
         eprintln!("clippy: {} of {ran} invocation(s) found warnings:", failed.len());
         for line in &failed {
@@ -314,10 +285,10 @@ mod tests {
     fn the_adopted_set_expands_into_the_shapes_that_name_it() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = &SHAPES[0];
-        assert!(workspace.args(root, None).windows(2).any(|w| w == ["-W", "clippy::redundant_clone"]));
+        assert!(workspace.args(root).windows(2).any(|w| w == ["-W", "clippy::redundant_clone"]));
         let abi = SHAPES.last().unwrap();
-        assert!(!abi.args(root, None).iter().any(|a| a == "clippy::redundant_clone"));
-        assert!(abi.args(root, None).iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
-        assert!(!abi.args(root, None).iter().any(|a| a == "$ADOPTED"));
+        assert!(!abi.args(root).iter().any(|a| a == "clippy::redundant_clone"));
+        assert!(abi.args(root).iter().any(|a| a == "clippy::undocumented_unsafe_blocks"));
+        assert!(!abi.args(root).iter().any(|a| a == "$ADOPTED"));
     }
 }

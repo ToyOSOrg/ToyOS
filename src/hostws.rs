@@ -85,13 +85,16 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 
 /// Whether the member at `member` is built for a guest: the kernel, whose
 /// library alone a host tests, and the SDK, each from a step of its own; the
-/// loader; the SDK's window, font and file-picker clients; and every crate
-/// under a [`crate::build::PROGRAM_ROOTS`] entry, which `src/userlandhost.rs`
-/// surveys.
+/// loader; the SDK's window, font and file-picker clients; and every program,
+/// a crate directly under a [`crate::build::PROGRAM_ROOTS`] entry, which
+/// `src/userlandhost.rs` surveys. A crate nested in a program, as in the
+/// kernel, is a host member.
 fn guest_built(member: &str) -> bool {
     [crate::ci::KERNEL_DIR, crate::ci::SDK_DIR, "bootloader", "sdk/window", "sdk/font", "sdk/filepicker"]
         .contains(&member)
-        || crate::build::PROGRAM_ROOTS.iter().any(|r| member.starts_with(&format!("{r}/")))
+        || crate::build::PROGRAM_ROOTS.iter().any(|r| {
+            member.strip_prefix(r).and_then(|m| m.strip_prefix('/')).is_some_and(|name| !name.contains('/'))
+        })
 }
 
 /// The members a host tests: all but the [`guest_built`].
