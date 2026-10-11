@@ -8,7 +8,7 @@ opened: 2026-10-05
 
 `toyos::launch::launch` consumes every handle a `Launch` names: the kernel
 moves them to the launcher, or refuses the move and `Connection::send_handles`
-closes them in the caller (`toyos/src/ipc.rs`, `toyos/src/launch.rs`). The
+closes them in the caller (`sdk/toyos/src/ipc.rs`, `sdk/toyos/src/launch.rs`). The
 prose of std's ToyOS backend about the same handles says something else:
 
 - `sdk/std/sys/process.rs`, the comment over the match on

@@ -10,7 +10,7 @@ A deleted syscall is simply deleted, and a past implementation lives in a commit
 message, never in source. Six comments still tell the history of a syscall
 `toyos-abi` no longer declares:
 
-- `userland/libc/src/misc.rs`, `waitpid`'s doc: "`SYS_WAITPID` is retired";
+- `sdk/libc/src/misc.rs`, `waitpid`'s doc: "`SYS_WAITPID` is retired";
 - `kernel/src/pipe.rs`, `Pipe::backing`'s doc: a pending `SYS_CONNECT`;
 - `userland/soundd/src/virtio.rs`, `submit`'s doc: "the deleted
   `SYS_AUDIO_SUBMIT`";

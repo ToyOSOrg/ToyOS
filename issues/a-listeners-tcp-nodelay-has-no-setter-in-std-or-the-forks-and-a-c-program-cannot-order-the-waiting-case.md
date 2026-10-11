@@ -21,7 +21,7 @@ loopback delivers in. A red there prints the host's name and both answers.
 `ubuntu-24.04`, whose log names
 `a_host_gives_a_connection_the_nodelay_its_listener_had_when_it_began ... ok`.
 
-The pipe ABI carries both halves (`toyos/src/net.rs`): a bind's request
+The pipe ABI carries both halves (`sdk/toyos/src/net.rs`): a bind's request
 carries its listener's options and `MsgType::TcpListenerSetOption` sets one
 afterwards, and an accept's answer says what its connection holds
 (`TcpOptions`). netstack answers the rule for both by the node's calls
@@ -34,7 +34,7 @@ and the connections dialled after each. What no program reads yet:
 
 - A C program cannot set the option while a connection waits and know that
   one does: libc's `poll` watches kernel handles and a socket descriptor is
-  none (`userland/libc/src/posix_io.rs`), so the only call that says a
+  none (`sdk/libc/src/posix_io.rs`), so the only call that says a
   connection waits is the `accept` that takes it. `nodelay_kept.c` therefore
   holds the half of the rule a second dial orders, and not the first.
 - No Rust program can set the option on a listener. `std::net::TcpListener`

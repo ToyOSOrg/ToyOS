@@ -139,7 +139,7 @@ that hold nothing against 7 ms finding everything that is there
 `Enumeration complete, 24 functions.` 0.145).
 
 The record this came from also warned about a NIC retry that looks like boot
-cost; that warning is spent. `toyos/src/net.rs:272` says the hundred retries at
+cost; that warning is spent. `sdk/toyos/src/net.rs:272` says the hundred retries at
 ten milliseconds are gone — a `netd` connector is live from a process's first
 instruction — so nothing after `Boot: complete` inflates a reading any more.
 

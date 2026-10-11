@@ -19,7 +19,7 @@ comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
 and one forbidden operation for one authority class on one of them. The
 effective-authority side is a shipped syscall too — `SYS_ENDOWMENTS`
-(`toyos-abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
+(`sdk/abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
 endowment table back.
 
 **The enumeration exists now, and it reds on the image that boots.**

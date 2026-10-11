@@ -26,7 +26,7 @@ after the read that reported the reset:
 So the write is refused as macOS refuses it, under another kind. The read asks
 netstack nothing: std answers from the value its `TcpStream` holds
 (`sdk/std/sys/net/connection.rs`) and libc's `getsockopt` from its socket's
-entry (`userland/libc/src/socket.rs`). Keeping the id until the client's close
+entry (`sdk/libc/src/socket.rs`). Keeping the id until the client's close
 request is not the fix: a client that dies sends none, and netstack, having
 closed its pipe ends, has nothing left that says the client is gone.
 

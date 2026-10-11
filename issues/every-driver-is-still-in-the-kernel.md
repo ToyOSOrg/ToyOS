@@ -9,7 +9,7 @@ opened: 2026-08-02
 The owner's target is that `virtio` does not appear anywhere in the kernel. The
 strongest check on it is not the driver files but the ABI: no syscall name may
 carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO)_'
-toyos-abi/src/syscall.rs` is the check — the three `SYS_NIC_*` names went with
+sdk/abi/src/syscall.rs` is the check — the three `SYS_NIC_*` names went with
 the virtio NIC driver, which is `userland/netd/src/virtio_net.rs` now, and the
 `SYS_GPU_*` names are what is left.
 

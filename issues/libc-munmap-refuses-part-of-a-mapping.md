@@ -8,7 +8,7 @@ opened: 2026-10-08
 
 POSIX's `munmap(addr, len)` removes every whole page that holds a byte of
 `[addr, addr + len)`, whatever mappings those pages belong to, and answers 0
-for a range that holds none. `userland/libc/src/posix_io.rs`'s `munmap`
+for a range that holds none. `sdk/libc/src/posix_io.rs`'s `munmap`
 unmaps one whole mapping or nothing:
 
 - `addr` starts a mapping and `len`, in the 4096-byte pages
@@ -43,7 +43,7 @@ no bytes and a byte past both; its `.expect` holds `-1, EINVAL` for each and
 both pages' bytes after them. Before those it maps the first page fixed, and
 the `.expect` holds `mmap the first of two pages fixed: -1, ENOMEM` and both
 pages' bytes after it. The lengths that name a mapping are
-`memreq::whole_pages`, host-tested in `tests/libc-arch/src/memory_refusals.rs`.
+`memreq::whole_pages`, host-tested in `sdk/libc/arch/src/memory_refusals.rs`.
 No program in the tree trims a mapping: read, across `userland/` and the C
 corpus, and not across what a user builds against this libc.
 

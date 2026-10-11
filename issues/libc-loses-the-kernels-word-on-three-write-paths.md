@@ -6,16 +6,16 @@ opened: 2026-08-31
 
 # `send`, `sendto` and `fwrite` throw the kernel's error away
 
-`userland/libc/src/posix_io.rs`'s `write(2)` passes the kernel's
+`sdk/libc/src/posix_io.rs`'s `write(2)` passes the kernel's
 `SyscallError` to `set_errno`, so a write whose reader is gone is `EPIPE` and a
 full non-blocking pipe is `EAGAIN`. Three sibling paths do not:
 
-* `userland/libc/src/socket.rs:354` — `send`'s TCP arm:
+* `sdk/libc/src/socket.rs:354` — `send`'s TCP arm:
   `Err(_) => { set_errno(EIO); -1 }`. Every refusal is `EIO`, including the
   dead peer that `write(2)` reports as `EPIPE`.
-* `userland/libc/src/socket.rs:430-431` — `sendto`'s UDP arm, the same
+* `sdk/libc/src/socket.rs:430-431` — `sendto`'s UDP arm, the same
   `if let Err(_) = ... { set_errno(EIO); return -1; }`.
-* `userland/libc/src/stdio.rs:32` — `sys_write` answers `-1` and sets **no**
+* `sdk/libc/src/stdio.rs:32` — `sys_write` answers `-1` and sets **no**
   `errno` at all, so a failed `fwrite`/`fputs` leaves whatever the last failing
   call left behind.
 

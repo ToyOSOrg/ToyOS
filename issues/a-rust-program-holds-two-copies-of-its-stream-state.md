@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 `std` links the SDK as its own dependency (`rust/library/std/Cargo.toml`,
 `toyos` with `rustc-dep-of-std`), and a program that names `toyos` itself links
-a second instance of the same crate. `toyos/src/log/stdio.rs`'s statics — which
+a second instance of the same crate. `sdk/toyos/src/log/stdio.rs`'s statics — which
 slot each stream holds, the mapping of the log ring, the partial line each
 stream is assembling, the cached pid — exist once per instance.
 

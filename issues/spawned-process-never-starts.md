@@ -45,7 +45,7 @@ and `sys_waitpid` registering on the park lot before it reads the table
 **Refuted, and it was the first hypothesis because it was a same-day change**
 (#129, `85a8433`): a child that takes a surface grab and dies without releasing
 it does *not* leave the terminal mute. `surface::Host::poll` clears the grab on
-`RxStep::Eof` (`toyos/src/surface.rs:218-224`, `close` at `:322`), the terminal
+`RxStep::Eof` (`sdk/toyos/src/surface.rs:218-224`, `close` at `:322`), the terminal
 polls every client fd every pass (`userland/terminal/src/main.rs:73-75`,
 `:107`), and **the only program in the tree that grabs is `locale detect`**
 (`userland/toybox/src/locale.rs:161`) — neither `ls` nor `snake` does.

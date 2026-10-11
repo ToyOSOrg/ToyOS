@@ -93,6 +93,6 @@ only by explicit exit; the main thread stops being special either way.
   pressure, never for this.
 - **Invalid handles keep killing the caller.** A process naming a handle it does
   not hold is buggy or probing, and the kill stops handle-guessing cold.
-  Compatibility lives in `userland/libc`, which tracks its own fds.
+  Compatibility lives in `sdk/libc`, which tracks its own fds.
 - **The lifetime models are not unified in place.** They shrink as their
   subjects leave the kernel.

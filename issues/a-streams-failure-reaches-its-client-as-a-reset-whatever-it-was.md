@@ -13,7 +13,7 @@ one bit: the peer's FIN, or a failure. The node knows which failure
 answers every one `ConnectionReset`, where Linux answers a connection [tcp]
 gave up on `ETIMEDOUT` and one an ICMP error ended `EHOSTUNREACH` or
 `ENETUNREACH`. libc answers every one `ECONNRESET`
-(`userland/libc/src/streamend.rs`).
+(`sdk/libc/src/streamend.rs`).
 
 A pipe's end carries no word, and every other carrier costs what this one does
 not: a third pipe or a kept request connection is a 2 MiB page each

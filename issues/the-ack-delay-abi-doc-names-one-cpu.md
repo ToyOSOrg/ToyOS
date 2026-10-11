@@ -6,7 +6,7 @@ opened: 2026-09-14
 
 # `TLB_ACK_DELAY_ARM`'s ABI doc still names one CPU
 
-`toyos-abi/src/syscall.rs`'s `debug_action::TLB_ACK_DELAY_ARM` reads
+`sdk/abi/src/syscall.rs`'s `debug_action::TLB_ACK_DELAY_ARM` reads
 
 > Make the last CPU a shootdown waits for answer `arg` nanoseconds late, and
 > take it away again.
@@ -21,7 +21,7 @@ sentence userland reads to learn what action 12 does describes a selection the
 kernel does not make, omits the answer it returns, and says nothing about how
 long what it leaves behind lasts.
 
-`toyos-abi/src` is one of `toolchain::SYSROOT_SOURCES`, so the correction is a
+`sdk/abi/src` is one of `toolchain::SYSROOT_SOURCES`, so the correction is a
 single-commit branch of its own.
 
 **Exit condition.** The doc names what the kernel does: each other CPU in turn,

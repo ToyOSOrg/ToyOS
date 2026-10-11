@@ -7,7 +7,7 @@ opened: 2026-08-20
 # `[programs.toybox]` is one authority row for every applet in the binary
 
 Noticed while giving `/system/bin/shutdown` the `power` right
-(`toyos-abi/src/handle.rs`'s `Rights::POWER`).
+(`sdk/abi/src/handle.rs`'s `Rights::POWER`).
 
 A manifest row's granularity is the **binary**, and `/system/bin/toybox` is many
 programs behind that many symlinks. `/system/bin/init`'s `declared` resolves

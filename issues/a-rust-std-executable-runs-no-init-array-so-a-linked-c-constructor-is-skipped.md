@@ -8,7 +8,7 @@ opened: 2026-09-29
 
 `sdk/std/sys/pal/mod.rs:93` starts a std binary at
 `start_rust`, which calls `main` directly and never walks `.init_array`
-(the comment there: "exes don't run .init_array"). `userland/libc/src/lib.rs`'s
+(the comment there: "exes don't run .init_array"). `sdk/libc/src/lib.rs`'s
 `start_c` does walk it, but only `#[cfg(not(feature = "std-runtime"))]`: a
 Rust program with std never links that module.
 

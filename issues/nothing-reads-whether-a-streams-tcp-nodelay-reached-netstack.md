@@ -8,7 +8,7 @@ opened: 2026-10-08
 
 netstack answers `MsgType::TcpSetOption` done or with an error, and nothing
 answers what a stream holds once it is a client's: the pipe ABI says it once,
-in the accept's answer (`TcpOptions`, `toyos/src/net.rs`), and has no option
+in the accept's answer (`TcpOptions`, `sdk/toyos/src/net.rs`), and has no option
 read, and std's `nodelay()` and libc's `getsockopt` answer the value their own
 side stored. So a setter of a stream's option that stores the value and sends
 nothing is seen by no test. Measured on libc's `connect`, which hands over a

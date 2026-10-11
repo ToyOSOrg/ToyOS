@@ -7,7 +7,7 @@ opened: 2026-10-09
 # The pipe ABI has no word for an unreachable host or a lookup to try again
 
 netstack answers three of the node's endings in a word of the pipe ABI
-(`toyos/src/net.rs`) that is not theirs (`userland/netstack/src/serve.rs`,
+(`sdk/toyos/src/net.rs`) that is not theirs (`userland/netstack/src/serve.rs`,
 `connect_failed` and `Sockets::settle`):
 
 - **A connect an ICMP error ended**, `Failure::Unreachable(_)` and

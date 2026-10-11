@@ -7,7 +7,7 @@ opened: 2026-09-26
 # A program's two streams map its one ring twice
 
 Found in the review of PR #527. init puts one log ring in a program's slots 1
-and 2, and `toyos/src/log/stdio.rs`'s `ask` takes each stream on its own: it
+and 2, and `sdk/toyos/src/log/stdio.rs`'s `ask` takes each stream on its own: it
 duplicates the slot's handle and maps the region, once for stdout and once for
 stderr. So every program holds two handles and two 2 MiB mappings of the same
 ring, within one instance of the SDK — before the second instance

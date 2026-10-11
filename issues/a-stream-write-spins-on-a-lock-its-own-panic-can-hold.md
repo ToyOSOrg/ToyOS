@@ -6,10 +6,10 @@ opened: 2026-09-26
 
 # A stream write spins on a lock its own panic can hold
 
-Found in the review of PR #527. `toyos/src/log/stdio.rs`'s `Held` is a
+Found in the review of PR #527. `sdk/toyos/src/log/stdio.rs`'s `Held` is a
 userland spinlock around each stream's partial line, taken by every
 `stdout`/`stderr` write to a log ring and by libc's fds 1 and 2
-(`userland/libc/src/posix_io.rs`). Two ways it waits:
+(`sdk/libc/src/posix_io.rs`). Two ways it waits:
 
 - **A thread that runs at a real-time priority spins on a preempted holder.**
   At smp 1 the holder cannot run until the spinner yields, and the spinner

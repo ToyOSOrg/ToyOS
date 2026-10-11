@@ -10,14 +10,14 @@ POSIX's `write` to a pipe or socket whose reader is gone, and its `send` on a
 stream that can send no more, fail `EPIPE` and also send the calling thread
 `SIGPIPE`, whose default action ends the process; `send` raises none only with
 `MSG_NOSIGNAL`. ToyOS's libc fails `EPIPE` and raises nothing
-(`userland/libc/src/posix_io.rs`, `SyscallError::Gone`): it has no signals
-(`signal`, `sigaction` and `raise` in `userland/libc/src/misc.rs` do nothing),
+(`sdk/libc/src/posix_io.rs`, `SyscallError::Gone`): it has no signals
+(`signal`, `sigaction` and `raise` in `sdk/libc/src/misc.rs` do nothing),
 and none of those
 `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
 has it imitate is `SIGPIPE`. So every write behaves as if `MSG_NOSIGNAL` were
 given, and a C program that relies on the default action to stop writing into a
 closed pipe runs on, and stops only if it reads the error. `send` on a stream answers `EPIPE` after
-`shutdown(SHUT_WR)` (`userland/libc/src/socket.rs`), and raises nothing either.
+`shutdown(SHUT_WR)` (`sdk/libc/src/socket.rs`), and raises nothing either.
 
 Whether libc raises `SIGPIPE` on these, or states the departure as it states
 others, is a decision of libc's design that nobody has made.
@@ -31,4 +31,4 @@ action ends the process, an ignored one leaves `EPIPE` and `MSG_NOSIGNAL`
 raises none; with the departure kept, each answers `EPIPE` and the process
 lives on.
 
-**Owner**: `userland/libc`.
+**Owner**: `sdk/libc`.

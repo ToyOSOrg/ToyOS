@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # `SharedMemory`'s safe slices rest on a size nobody checks
 
-`SharedMemory::as_slice`, `as_mut_slice` and `as_atomic` (`toyos/src/shm.rs`)
+`SharedMemory::as_slice`, `as_mut_slice` and `as_atomic` (`sdk/toyos/src/shm.rs`)
 are safe functions that make a slice of `size` bytes over the mapping. The type
 enforces neither premise that makes this sound:
 

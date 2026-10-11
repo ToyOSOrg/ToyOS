@@ -12,12 +12,12 @@ and `aligned_alloc` set `ENOMEM` when they answer null for want of memory, and
 
 In a Rust program, C code allocates through std's C allocator
 (`sdk/std/sys/pal/mod.rs`, `c_allocator`), which sets
-`errno` in none of the four. `errno` is libc's (`userland/libc/src/errno.rs`),
+`errno` in none of the four. `errno` is libc's (`sdk/libc/src/errno.rs`),
 and std names no libc symbol: setting it from std puts `__errno_location` in
 every Rust program's link.
 
 `realloc(p, 0)` frees `p` and answers null with `errno` untouched, in libc
-(`userland/libc/src/memory.rs`) and in std's. POSIX.1-2024 has it answer
+(`sdk/libc/src/memory.rs`) and in std's. POSIX.1-2024 has it answer
 either null with `errno` `EINVAL`, or a pointer with `p` freed; its
 application usage frees `p` only if `errno` changed, so `EINVAL` beside the
 free invites a double free. LLVM's `safe_realloc`

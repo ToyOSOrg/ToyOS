@@ -29,8 +29,8 @@ typed can be ended by whoever sent it.** The sender needs nothing but
   answer `InvalidArgument` rather than fault, and `launcher_refusals` gates it —
   but that is one call site, not the class.
 - An audio client receives two handles from soundd and calls `SYS_SHM_MAP` on
-  the first (`toyos/src/audio.rs`). A hostile *server* ends every client.
-- A window client receives its buffer the same way (`userland/toyos-window/src/lib.rs`).
+  the first (`sdk/toyos/src/audio.rs`). A hostile *server* ends every client.
+- A window client receives its buffer the same way (`sdk/window/src/lib.rs`).
 - blockd maps the region a client sends with its open (`Region::adopt` in
   `userland/blockd/src/region.rs`), so a *client* holding its connector ends it.
 - netstack adopts as pipes the two handles a client sends with a piped socket

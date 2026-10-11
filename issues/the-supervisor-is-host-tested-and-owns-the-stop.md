@@ -17,8 +17,8 @@ nothing.
 1. **Done. The rename**, one mechanical PR. Before stage 1 is
    briefed, the exit's search below runs once over the `rust/` fork's delta and
    the delta of every fork a lockfile pins as well as the superproject, so its
-   hits are known going in. It touches `toyos/src`, `toyos-abi/src`,
-   `userland/libc/src` and the `rust/`, `mio`, `socket2`, `cpal` and `tokio`
+   hits are known going in. It touches `sdk/toyos/src`, `sdk/abi/src`,
+   `sdk/libc/src` and the `rust/`, `mio`, `socket2`, `cpal` and `tokio`
    forks' deltas, and its
    `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed

@@ -6,10 +6,10 @@ opened: 2026-09-28
 
 # `toyos-abi` decodes only the roster header, not its entries
 
-`SysinfoHeader::decode` (`toyos-abi/src/syscall.rs:85`) is "the one spelling of
+`SysinfoHeader::decode` (`sdk/abi/src/syscall.rs:85`) is "the one spelling of
 the header's offsets, so a reader takes a field rather than an index" — but
 that one spelling stops at the header. `SYSINFO_ENTRY_SIZE`
-(`toyos-abi/src/syscall.rs:103`) documents the entry's byte layout in prose
+(`sdk/abi/src/syscall.rs:103`) documents the entry's byte layout in prose
 only, and every reader of an entry hand-spells its offsets instead of calling
 a decoder:
 
@@ -29,4 +29,4 @@ one silent renumbering away from reading the wrong column.
 readers above converted to call it, and no roster-entry offset left
 hand-spelled outside that one function.
 
-Owner: `toyos-abi/src/syscall.rs`, whoever next touches the roster ABI.
+Owner: `sdk/abi/src/syscall.rs`, whoever next touches the roster ABI.

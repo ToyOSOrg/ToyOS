@@ -45,7 +45,7 @@ one that drops `tid=0`.
 
 ## Why it was not fixed there
 
-`toyos-abi/src/log.rs` is a sysroot source (`src/toolchain.rs`'s
+`sdk/abi/src/log.rs` is a sysroot source (`src/toolchain.rs`'s
 `SYSROOT_SOURCES`), so an ABI change lands on its own pull request and the
 kernel-side commit could not carry one.
 
@@ -77,5 +77,5 @@ main thread — noise bought for nothing, until the second PR.
 
 So this one is not the two-PR sequence `LogRecord::tagged` was: there the ABI
 half had an in-tree caller (`Display`) and changed no byte of output. Option 1
-or 2 wants a single PR carrying `toyos-abi/src/log.rs` and the kernel's
+or 2 wants a single PR carrying `sdk/abi/src/log.rs` and the kernel's
 producer together.

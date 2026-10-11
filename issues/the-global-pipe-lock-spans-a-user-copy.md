@@ -14,7 +14,7 @@ The bulk copy is inside that closure, not outside it.
 
 * `pipe::try_read` (`pipe.rs:210`) calls `ring.read(len, |off, src| buf.write_at(off, src))` at `pipe.rs:220`, inside `with_pipes_mut`.
 * `pipe::try_write` (`pipe.rs:244`) calls `backing.ring.write(buf.len(), |off, dst| buf.read_at(off, dst))` at `pipe.rs:254`, same acquisition.
-* `Ring::read`/`Ring::write` (`toyos-abi/src/ring.rs:141`, `:178`) hand the closure one or two contiguous runs; the closure is `UserBytesMut::write_at` / `UserBytes::read_at` (`kernel/src/user_ptr.rs:206`, `:164`), a `copy_nonoverlapping` of the whole run.
+* `Ring::read`/`Ring::write` (`sdk/abi/src/ring.rs:141`, `:178`) hand the closure one or two contiguous runs; the closure is `UserBytesMut::write_at` / `UserBytes::read_at` (`kernel/src/user_ptr.rs:206`, `:164`), a `copy_nonoverlapping` of the whole run.
 
 The size is bounded only by the ring: `PIPE_SIZE = PAGE_2M` (`pipe.rs:104`), `PAGE_2M = 2 * 1024 * 1024` (`toyos-userbound/src/span.rs:27`), and `capacity = total_size - size_of::<RingHeader>()` (`ring.rs:60`) with `RingHeader` `#[repr(C, align(64))]` holding one `AtomicU32` (`ring.rs:24-27`) — so **2,097,088 bytes** is the largest single copy under the lock. Nothing above caps it: `SYS_READ`/`SYS_WRITE` pass the userland length straight through (`kernel/src/syscall/dispatch.rs:110-116`), `object::ops::try_read` hands the full window to `pipe::try_read` (`kernel/src/object/ops.rs:339-340`), and the only other bound, `user_ptr::window` (`user_ptr.rs:269`), requires physical contiguity — which a demand-paged 2 MiB frame satisfies exactly.
 
@@ -48,7 +48,7 @@ The shape that keeps that argument true is a per-pipe lock under the table lock:
 
 The lazy allocation should move out from under both: allocate the ring page before taking the table lock (or, on the miss, drop and retry the way `file_cache::read_page` already does at `kernel/src/file_cache.rs:217-231`), so neither the bitmap scan nor the 2 MiB zeroing runs with a global held.
 
-Sequencing note: this touches `toyos-abi/src/ring.rs`'s doc contract — the sentence naming `PIPES` as the serializing lock — so it lands as one commit over `toyos-abi/src` and `kernel/src` together. The two closures at `pipe.rs:220` and `pipe.rs:254` now hand `Ring` a `toyos_abi::ring::Src`/`Dst` rather than a slice; a per-pipe lock changes who serializes them, not their shape.
+Sequencing note: this touches `sdk/abi/src/ring.rs`'s doc contract — the sentence naming `PIPES` as the serializing lock — so it lands as one commit over `sdk/abi/src` and `kernel/src` together. The two closures at `pipe.rs:220` and `pipe.rs:254` now hand `Ring` a `toyos_abi::ring::Src`/`Dst` rather than a slice; a per-pipe lock changes who serializes them, not their shape.
 
 ## Two checks
 

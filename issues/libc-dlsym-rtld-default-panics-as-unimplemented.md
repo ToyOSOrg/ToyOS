@@ -7,7 +7,7 @@ opened: 2026-09-29
 # libc's `dlsym(RTLD_DEFAULT, …)` panics as unimplemented
 
 `dlfcn.h` defines `RTLD_DEFAULT` as the null handle, and libc's `dlsym`
-(`userland/libc/src/misc.rs`) panics on it: a handle is a module index plus
+(`sdk/libc/src/misc.rs`) panics on it: a handle is a module index plus
 one, and `SYS_DLSYM` answers from one loaded library by index. Nothing searches
 the global scope — the executable's exports, then every library in load order —
 which is what glibc's `dlsym(RTLD_DEFAULT, …)` answers from. A C program that

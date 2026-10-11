@@ -8,7 +8,7 @@ opened: 2026-10-02
 
 `Poller::watch_raw` loads the submission tail, writes the entry at it and
 stores the tail plus one, through `&self`, and `Poller` is `unsafe impl Sync`
-(`toyos/src/poller.rs`). Two threads watching through one `&Poller` write one
+(`sdk/toyos/src/poller.rs`). Two threads watching through one `&Poller` write one
 slot at once and advance the tail once, so one watch is lost. `rg 'Arc<Poller>'`
 and `rg 'static.*Poller'` over `toyos`, `userland` and `tests` find no poller
 shared between threads.

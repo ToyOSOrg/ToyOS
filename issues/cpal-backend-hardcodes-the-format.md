@@ -21,7 +21,7 @@ fade (`toyos_mixer::ramp_frames`) and the ring depth (soundd's `slot_count`, see
 and no message carries the fade. If soundd's fade grows or a device's pipeline
 deepens, the bound shrinks under what soundd needs, and a healthy soundd is
 refused. That part goes when `AudioStream` says the ring depth and the fade and
-the host derives `RELEASE_WITHIN` from them, which changes `toyos/src` and the
+the host derives `RELEASE_WITHIN` from them, which changes `sdk/toyos/src` and the
 audio protocol.
 
 Deferred to the quiet-tree window, not neglected: editing that fork needs

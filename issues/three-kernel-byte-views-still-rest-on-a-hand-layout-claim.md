@@ -12,7 +12,7 @@ the kernel copies out are not declared through the macro, and each reaches
 user memory through an `unsafe` `from_raw_parts` of the kernel's own whose
 `SAFETY` comment cites an assertion beside the declaration:
 
-| struct (`toyos-abi/src/pci.rs`) | the kernel's view | what the comment rests on |
+| struct (`sdk/abi/src/pci.rs`) | the kernel's view | what the comment rests on |
 |---|---|---|
 | `DmaGrant` | `grant_bytes`, `kernel/src/syscall/device.rs` | `size_of == 4 + 4 + 8 + 8`, a sum written by hand |
 | `DmaMapping` | inline in `sys_device_dma_map`, the same file | `size_of == 8 + 8`, a sum written by hand |
@@ -37,5 +37,5 @@ deleted.
 
 ## Owner
 
-`toyos-abi/src/pci.rs`, `kernel/src/syscall/device.rs`,
+`sdk/abi/src/pci.rs`, `kernel/src/syscall/device.rs`,
 `kernel/src/object/ops.rs`. Nobody holds it.

@@ -7,7 +7,7 @@ opened: 2026-10-01
 # libc refuses what ToyOS cannot yet answer
 
 These answer failure in their POSIX form and do nothing
-(`userland/libc/src/refused.rs`, `posix_io.rs`), each asserted by
+(`sdk/libc/src/refused.rs`, `posix_io.rs`), each asserted by
 `tests/testcases/tinycc/206_libc_refusals.c`. Each waits on what it names:
 
 - `link`, `ENOSYS`: no call gives a file a second name.

@@ -9,7 +9,7 @@ opened: 2026-10-01
 The guest suite's first cut
 (`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`) deleted the only
 callers of eight `SYS_DEBUG` actions and the loader's reading of two boot words, and left their
-names in `toyos-abi/src`, because a deletion there is an ABI change and that pull request was not
+names in `sdk/abi/src`, because a deletion there is an ABI change and that pull request was not
 one. Each kernel arm still answers its action. `git grep -w <name> -- tests userland toyos src`
 finds no caller of:
 

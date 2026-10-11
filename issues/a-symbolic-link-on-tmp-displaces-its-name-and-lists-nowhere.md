@@ -9,7 +9,7 @@ opened: 2026-10-01
 Read from the code, not run. The kernel's `/tmp` (`kernel/src/tmpfs.rs`)
 makes a link over whatever file its name held, where POSIX's `symlink` refuses
 a name that exists `EEXIST`, so libc's `symlink` refuses `ENOSYS`
-(`userland/libc/src/refused.rs`). Its `list` answers files alone, so no
+(`sdk/libc/src/refused.rs`). Its `list` answers files alone, so no
 `readdir` of a directory shows a link it holds.
 
 **Exit**: `symlink` is the file server's, not the kernel's. libc's `symlink`

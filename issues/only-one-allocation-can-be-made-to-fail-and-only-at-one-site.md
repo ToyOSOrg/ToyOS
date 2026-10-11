@@ -14,7 +14,7 @@ and the call site all named. Measured rather than reasoned. The absent attribute
 is not the gap; the gap is below.
 
 **What exists, and why it is not enough.** `debug_action::HEAP_AT_CEILING_PAGE_ALIGNED`
-(a `pub const` in `toyos-abi/src/syscall.rs`'s `debug_action` module, `:709` and `:723`;
+(a `pub const` in `sdk/abi/src/syscall.rs`'s `debug_action` module, `:709` and `:723`;
 dispatched at `kernel/src/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
 `MAX_HEAP_ALLOC` with 4096-byte alignment, which the page source cannot back;
 `kernel/src/syscall/debug.rs:25-27` reports the null as

@@ -115,7 +115,7 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 `sched/driver.rs:1019-1062`), `irq_census.rs` 19, `nmi_gate.rs` 16, `main.rs`
 13, `drivers/serial.rs` 13, `hw.rs` 10, `blackbox.rs` 6, `iommu/vtd/table.rs`
 6, `panic_console/mod.rs:1294` 1, `xhci/wait/mod.rs:36` 1. Userland plus
-`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). std's
+`toyos-abi`: 54 lines (`libc/memory.rs` 23, `sdk/abi/src/syscall.rs` 20). std's
 ToyOS backend has two naked-asm sites: `_start`
 (`sdk/std/sys/pal/mod.rs:44`) and `__tls_get_addr` reading
 `fs:[8]` (`sdk/std/sys/pal/tls.rs:43`).
@@ -158,7 +158,7 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   `deadline.rs:194`, `sched/driver.rs:892`, `i8042/mod.rs:490`,
   `bootloader/src/main.rs:785`.
 - **Entropy.** `hasher.rs:37` asserts RDRAND; HVF exposes no RNDR.
-- **Boot protocol.** `toyos-abi/src/boot.rs:3-20` carries `rsdp_addr` and
+- **Boot protocol.** `sdk/abi/src/boot.rs:3-20` carries `rsdp_addr` and
   `boot_pml4_addr`, no DTB field.
 - **Memory ordering.** 980 explicit orderings in the kernel, 711 `Relaxed`,
   plus 17 `fence(` calls. `mm/mmio.rs:14` justifies `Sync` by saying volatile
@@ -176,7 +176,7 @@ across `src/` and `tests/`. The harness hardwires q35
 refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
-(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
+(`sdk/abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
 (8,099 lines) is pure behind `Machine`/`Hw`
 (`kernel/pure/sched/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
 `irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as

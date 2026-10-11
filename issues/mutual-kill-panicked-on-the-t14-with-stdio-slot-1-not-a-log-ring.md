@@ -33,7 +33,7 @@ Then pid 28 itself, under the runner's name:
       19:      0x10000028f12 - mutual_kill[652ee4c06bb687b]::main
     [2026-09-29 18:49:34 10.085 cpu5] exit: test_rs_mutual_kill pid=28 code=101 cpu=5840ms
 
-`toyos/src/log/stdio.rs:209` is `sink`'s panic on the first write to a
+`sdk/toyos/src/log/stdio.rs:209` is `sink`'s panic on the first write to a
 stream whose slot `ask` refused, with `NotARing`'s words (`:276`). The path is
 the sysroot's source, which is keyed by content and so names whichever
 worktree built that key first.

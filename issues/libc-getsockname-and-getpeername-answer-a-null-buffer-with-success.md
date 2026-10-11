@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # libc's getsockname and getpeername answer a null buffer with success
 
-`getsockname` and `getpeername` (`userland/libc/src/socket.rs`) answer through
+`getsockname` and `getpeername` (`sdk/libc/src/socket.rs`) answer through
 `fill_sockaddr`, which returns having written nothing where the address
 buffer or the length pointer is null, and each call then answers 0. A program
 that passed a null pointer is told its address was written.
@@ -23,9 +23,9 @@ connected stream:
 Linux is unread; by the review that found this, it reads the buffer only when
 the length is not 0, which is Darwin's third row.
 
-`SockaddrIn::answer` (`userland/libc/src/inaddr.rs`), which the host test
+`SockaddrIn::answer` (`sdk/libc/src/inaddr.rs`), which the host test
 `an_address_is_truncated_to_the_callers_buffer_as_the_host_truncates_it`
-(`tests/libc-arch/src/internet_addresses.rs`) holds against the host's
+(`sdk/libc/arch/src/internet_addresses.rs`) holds against the host's
 `getsockname` at every length, excludes both pointers by its contract, so no
 test reaches the difference.
 
@@ -34,8 +34,8 @@ which POSIX gives them, and Darwin's `accept` answers a null pair with a
 socket; what either answers a buffer with a null length is not read.
 
 **Exit**: the null cases are in the module a host builds, and a test in
-`tests/libc-arch` compares the answer, `errno` and the length written back
+`sdk/libc/arch` compares the answer, `errno` and the length written back
 with the host's own `getsockname` for the table's three rows, on each host
 the `host` check runs on; `getpeername` answers through the same function.
 
-**Owner**: libc, `userland/libc`; whoever next changes its address calls.
+**Owner**: libc, `sdk/libc`; whoever next changes its address calls.

@@ -14,7 +14,7 @@ there. They are not clean:
 `cargo clippy --manifest-path userland/<crate>/Cargo.toml --target
 aarch64-apple-darwin --all-targets -- -D warnings` exits 101 with 8 findings
 in soundd and 10 in netd. The compositor stops on 1 finding in its dependency
-`userland/toyos-window`.
+`sdk/window`.
 
 **Exit:** a shape in `src/clippy.rs`, which `--clippy` and `--ci host` both
 run, lints every crate the survey gates, on the host target, with warnings

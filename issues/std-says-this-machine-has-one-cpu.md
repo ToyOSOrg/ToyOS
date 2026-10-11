@@ -10,7 +10,7 @@ opened: 2026-08-23
 `NonZero::new_unchecked(1)`, and the comment above it says why: "ToyOS runs on
 QEMU with a known number of CPUs, but we don't expose a syscall for this yet."
 That is no longer true. `SYS_CPU_COUNT` exists, `toyos_abi::syscall::cpu_count`
-wraps it, and `userland/libc/src/misc.rs:222` already answers
+wraps it, and `sdk/libc/src/misc.rs:222` already answers
 `_SC_NPROCESSORS_ONLN` from it — so a C program on this system learns the CPU
 count and a Rust program is told there is one CPU.
 
