@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::{SyscallError, MAX_LINKS};
+use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 use crate::file_cache::FileId;
 use crate::sync::{Lock, LockGuard};
 
@@ -139,9 +139,6 @@ pub struct Vfs {
     mounts: Vec<Mount>,
     created_dirs: BTreeSet<String>,
 }
-
-/// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
-pub const MAX_PATH: usize = 4096;
 
 /// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
