@@ -54,6 +54,11 @@ impl Watches {
         }
     }
 
+    /// Measurement only, never lands: the submissions the next wait hands over.
+    pub fn pending(&self) -> u32 {
+        self.poller.pending()
+    }
+
     /// [`Poller::wait_answers`], each answer letting its watch's record go
     /// before `f` sees it.
     pub fn wait_answers(&mut self, min_complete: u32, timeout_nanos: u64, mut f: impl FnMut(u64, Result<u32, SyscallError>)) {
