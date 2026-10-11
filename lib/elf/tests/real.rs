@@ -6,7 +6,7 @@
 //! `--build-id` — which is all [`Layout::parse`] ever reads — so this is the
 //! shape the loader actually meets at every boot.
 //!
-//! Refresh it with `dd if=userland/target/x86_64-unknown-toyos/toyos/shell
+//! Refresh it with `dd if=target/x86_64-unknown-toyos/toyos/shell
 //! of=lib/elf/tests/fixtures/lld-headers.bin bs=4096 count=1`, and expect
 //! every number below to move: each is `readelf -hlnW` of the fixture.
 

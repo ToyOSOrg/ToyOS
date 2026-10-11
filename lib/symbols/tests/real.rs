@@ -13,7 +13,7 @@ const BINARY: &[u8] = include_bytes!("fixtures/input-test.bin");
 fn locate_finds_the_same_tables_readelf_reports() {
     let (symtab, strtab) = toyos_symbols::locate(BINARY).expect("input-test has a symtab");
 
-    // `readelf -S userland/target/x86_64-unknown-toyos/toyos/input-test`:
+    // `readelf -S lib/symbols/tests/fixtures/input-test.bin`:
     //   [ 6] .symtab  SYMTAB  ...  00016ea8  ...
     //   [ 7] .strtab  STRTAB  ...  0004b65f  ...
     assert_eq!(symtab.len(), 0x16ea8);
