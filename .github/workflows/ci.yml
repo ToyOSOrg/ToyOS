@@ -1,14 +1,14 @@
 name: ci
 
+# CI runs once per pull request, in the merge queue. On `pull_request` every
+# check reports skipped, which a required check reads as green; the skip sits
+# in the called workflow's job, because a skipped caller reports its own name
+# and not `toolchain / build` or `guest / suite`.
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 # No job here writes: a toolchain release is main's publisher's alone.
 permissions:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   host:
-    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -43,14 +43,13 @@ jobs:
       - run: cargo run -- --ci host
 
   toolchain:
-    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
     uses: ./.github/workflows/toolchain.yml
 
   # A required check that is skipped reads as green, so this runs whatever
   # `toolchain` concluded.
   guest:
     needs: toolchain
-    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/guest.yml
     with:
       kvm: true

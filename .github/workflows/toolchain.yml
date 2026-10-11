@@ -10,6 +10,8 @@ on:
 
 jobs:
   build:
+    # ci.yml's pull request run reports this check skipped.
+    if: github.event_name != 'pull_request'
     # Bare, not a container: its glibc is a build's floor.
     runs-on: ubuntu-24.04
     timeout-minutes: 350
