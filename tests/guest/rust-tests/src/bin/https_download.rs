@@ -533,7 +533,7 @@ const LAPS: u64 = 100_000;
 /// span at least two cores, so at least two of every lap's hops cross one.
 const RING: u64 = 4;
 /// MEASUREMENT ONLY: the hang ceiling on the ring's laps.
-const RING_CEILING: Duration = Duration::from_secs(20);
+const RING_CEILING: Duration = Duration::from_secs(10);
 
 /// MEASUREMENT ONLY: the HITM counters' positive control. A token goes round
 /// a ring of [`RING`] spinning threads [`LAPS`] times; each holder reads the
@@ -563,6 +563,10 @@ fn hitm_control(cap: &SysCap) -> String {
                     while token.0.load(Ordering::Acquire) != mine {
                         core::hint::spin_loop();
                         spins += 1;
+                        // A holder that shares this CPU runs only once this one gives it up.
+                        if spins % 1024 == 0 {
+                            std::thread::yield_now();
+                        }
                         if spins % 4096 == 0 && (gave_up.load(Ordering::Relaxed) || at.elapsed() > RING_CEILING) {
                             gave_up.store(true, Ordering::Relaxed);
                             return;
