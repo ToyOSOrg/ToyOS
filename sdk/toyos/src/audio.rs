@@ -48,6 +48,8 @@ crate::ipc_payload! {
 pub const STREAM_OPENED_HANDLES: usize = 2;
 pub const STREAM_OPENED_SHM: usize = 0;
 pub const STREAM_OPENED_SIGNAL: usize = 1;
+pub const STREAM_OPENED_KINDS: [crate::ObjectKind; STREAM_OPENED_HANDLES] =
+    [crate::ObjectKind::SharedMem, crate::ObjectKind::PipeRead];
 
 pub struct AudioSlotWriter {
     shm: SharedMemory,
@@ -182,6 +184,8 @@ pub enum AudioError {
     /// pipe with it. Handles cross before the frame that names them, so a
     /// short batch is a protocol violation and never something to wait for.
     MissingHandles,
+    /// The slot ring soundserver sent is refused ([`SharedMemory::lent`]).
+    Lent(crate::shm::Lent),
     Ipc(IpcError),
     Protocol(u32),
 }
@@ -209,14 +213,13 @@ impl AudioStream {
         };
 
         let batch = control
-            .recv_handles_exact::<STREAM_OPENED_HANDLES>()
+            .recv_handles_exact(STREAM_OPENED_KINDS)
             .ok_or(AudioError::MissingHandles)?;
         let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
 
         let slot_count = resp.slot_count as u32;
         let shm_size = AudioSlotHeader::SIZE + slot_count as usize * resp.client_period_bytes as usize;
-        let shm = SharedMemory::adopt(batch[STREAM_OPENED_SHM], shm_size)
-            .map_err(|e| AudioError::Ipc(IpcError::Syscall(e)))?;
+        let shm = SharedMemory::lent(batch[STREAM_OPENED_SHM], shm_size).map_err(AudioError::Lent)?;
         let slot_writer = AudioSlotWriter::new(shm, resp.client_period_bytes, slot_count);
 
         Ok(Self {

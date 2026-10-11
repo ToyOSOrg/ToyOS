@@ -57,6 +57,99 @@ impl RawHandle {
 /// any table issues.
 pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 
+/// Every kind of kernel object a handle can name, in the order the kernel's
+/// `kobject!` declares them: the kernel answers a received handle's kind as
+/// this word, and an index into [`ObjectKind::ALL`] is the one
+/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ObjectKind {
+    PipeRead = 0,
+    PipeWrite = 1,
+    Connection = 2,
+    Device = 3,
+    Acceptor = 4,
+    Inbox = 5,
+    SharedMem = 6,
+    Connector = 7,
+    Namespace = 8,
+    File = 9,
+    Console = 10,
+    SysCap = 11,
+    Process = 12,
+}
+
+impl ObjectKind {
+    pub const ALL: [ObjectKind; 13] = [
+        Self::PipeRead,
+        Self::PipeWrite,
+        Self::Connection,
+        Self::Device,
+        Self::Acceptor,
+        Self::Inbox,
+        Self::SharedMem,
+        Self::Connector,
+        Self::Namespace,
+        Self::File,
+        Self::Console,
+        Self::SysCap,
+        Self::Process,
+    ];
+
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if (word as usize) < Self::ALL.len() { Some(Self::ALL[word as usize]) } else { None }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PipeRead => "PipeRead",
+            Self::PipeWrite => "PipeWrite",
+            Self::Connection => "Connection",
+            Self::Device => "Device",
+            Self::Acceptor => "Acceptor",
+            Self::Inbox => "Inbox",
+            Self::SharedMem => "SharedMem",
+            Self::Connector => "Connector",
+            Self::Namespace => "Namespace",
+            Self::File => "File",
+            Self::Console => "Console",
+            Self::SysCap => "SysCap",
+            Self::Process => "Process",
+        }
+    }
+}
+
+// `from_word` indexes `ALL` by the word: a row out of order would answer a
+// received handle's kind as its neighbour.
+const _: () = {
+    let mut i = 0;
+    while i < ObjectKind::ALL.len() {
+        assert!(ObjectKind::ALL[i] as usize == i, "ObjectKind::ALL is out of word order");
+        i += 1;
+    }
+};
+
+crate::user_safe! {
+    /// One handle [`handle_recv`](crate::syscall::handle_recv) installed, and
+    /// what it names: a receiver refuses a handle of the wrong kind by name,
+    /// where using it typed would end the receiver.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Received {
+        pub handle: RawHandle,
+        /// An [`ObjectKind`] word; [`Received::kind`] decodes it.
+        pub kind: u32,
+    }
+}
+
+impl Received {
+    /// The kernel writes only [`ObjectKind`] words here, so any other is a
+    /// kernel and SDK that disagree on the ABI.
+    pub fn kind(&self) -> ObjectKind {
+        ObjectKind::from_word(self.kind)
+            .unwrap_or_else(|| panic!("handle_recv answered object kind {}, which the ABI has no kind for", self.kind))
+    }
+}
+
 /// What the holder of a handle may do with the object behind it.
 ///
 /// Rights only ever shrink: a duplicate may ask for a subset and nothing

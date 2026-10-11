@@ -508,7 +508,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return SyscallError::InvalidArgument.to_u64();
             }
             let Some(mut out) = (a3 as usize)
-                .checked_mul(HANDLE_LEN)
+                .checked_mul(core::mem::size_of::<toyos_abi::handle::Received>())
                 .and_then(|len| ctx.user_bytes_mut(UserAddr::new(a2), len as u64))
             else {
                 return bad_addr;
@@ -516,7 +516,12 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_handle_recv(RawHandle(a1 as u32), &mut out, a3 as usize)
         }
         SYS_SHM_CREATE => sys_shm_create(a1),
-        SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
+        SYS_SHM_MAP => {
+            // Taken before the mapping exists: a bad address must not leave a mapping the caller was never told of.
+            let len = core::mem::size_of::<ShmMapping>() as u64;
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_shm_map(RawHandle(a1 as u32), &mut out)
+        }
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
@@ -614,8 +619,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 assert!(
                     crate::object::census::live()
                         .map(|(kind, _)| kind)
-                        .eq(toyos_abi::syscall::OBJECT_KINDS.iter().copied()),
-                    "kobject! and toyos_abi::syscall::OBJECT_KINDS declare different objects",
+                        .eq(toyos_abi::handle::ObjectKind::ALL.iter().map(|kind| kind.name())),
+                    "kobject! and toyos_abi::handle::ObjectKind declare different objects",
                 );
                 match crate::object::census::live().nth(a2 as usize) {
                     Some((_, live)) => live,

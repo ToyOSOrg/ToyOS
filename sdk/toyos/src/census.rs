@@ -8,30 +8,25 @@
 use core::fmt;
 
 use toyos_abi::syscall::debug_action::CENSUS_KIND;
-use toyos_abi::syscall::{self, OBJECT_KINDS};
+use toyos_abi::handle::ObjectKind;
+use toyos_abi::syscall;
 
 /// How many objects of every kind are alive right now.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Census([u64; OBJECT_KINDS.len()]);
+pub struct Census([u64; ObjectKind::ALL.len()]);
 
 impl Census {
     pub fn now() -> Self {
-        let mut counts = [0u64; OBJECT_KINDS.len()];
+        let mut counts = [0u64; ObjectKind::ALL.len()];
         for (i, slot) in counts.iter_mut().enumerate() {
             *slot = syscall::debug_with(CENSUS_KIND, i as u64);
         }
         Self(counts)
     }
 
-    /// Live objects of one kind. The name is an [`OBJECT_KINDS`] entry and a
-    /// name that is not one is a caller with a typo, so it panics rather than
-    /// answering zero — which would read as "nothing of that kind leaked".
-    pub fn kind(&self, name: &str) -> u64 {
-        let i = OBJECT_KINDS
-            .iter()
-            .position(|k| *k == name)
-            .unwrap_or_else(|| panic!("no kernel object kind is called {name:?}"));
-        self.0[i]
+    /// Live objects of one kind.
+    pub fn kind(&self, kind: ObjectKind) -> u64 {
+        self.0[kind as usize]
     }
 
     pub fn total(&self) -> u64 {
@@ -44,22 +39,22 @@ impl Census {
         before: &Census,
     ) -> impl Iterator<Item = (&'static str, u64, u64)> + '_ {
         let earlier = before.0;
-        OBJECT_KINDS
+        ObjectKind::ALL
             .iter()
             .enumerate()
             .filter(move |(i, _)| self.0[*i] > earlier[*i])
-            .map(move |(i, name)| (*name, earlier[i], self.0[i]))
+            .map(move |(i, kind)| (kind.name(), earlier[i], self.0[i]))
     }
 }
 
 impl fmt::Display for Census {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
-        for (name, live) in OBJECT_KINDS.iter().zip(self.0.iter()).filter(|(_, n)| **n > 0) {
+        for (kind, live) in ObjectKind::ALL.iter().zip(self.0.iter()).filter(|(_, n)| **n > 0) {
             if !first {
                 write!(f, ", ")?;
             }
-            write!(f, "{name} {live}")?;
+            write!(f, "{} {live}", kind.name())?;
             first = false;
         }
         if first {

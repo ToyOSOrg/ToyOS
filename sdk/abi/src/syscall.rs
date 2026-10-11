@@ -177,14 +177,19 @@ pub const SYS_NAMESPACE_OPEN: u64 = 102;
 /// **handles are sent before the frame that announces them** and a receiver
 /// that has the frame already has the handles.
 pub const SYS_HANDLE_SEND: u64 = 103;
-/// Take the oldest batch of handles the peer sent. See [`handle_recv`].
+/// Take the oldest batch of handles the peer sent, each with its kind. See
+/// [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
-/// Make a shared-memory region, sized up to whole 2 MiB pages.
+/// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
-/// Map a region into the caller. Idempotent: a second call answers the first
-/// call's address. See [`shm_map`].
+/// Map a region into the caller, and answer where, how long, and whether it
+/// is memory the kernel allocated. Idempotent: a second call answers the
+/// first call's address. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
+
+/// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
+pub const SHM_PAGE: usize = 2 << 20;
 
 /// Wait for the process a handle names and take its exit code, gated by
 /// [`Rights::WAIT`]. See [`process_wait`].
@@ -434,7 +439,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
-use crate::handle::Rights;
+use crate::handle::{Received, Rights};
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
 
@@ -815,7 +820,7 @@ pub mod debug_action {
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
     /// How many kernel objects of one kind are alive right now. The argument is
-    /// an [`OBJECT_KINDS`](super::OBJECT_KINDS) index.
+    /// an [`ObjectKind::ALL`](crate::handle::ObjectKind::ALL) index.
     ///
     /// **Per kind and not a total**: an object of one kind that is never
     /// released is invisible behind ordinary churn in another.
@@ -885,31 +890,6 @@ pub mod debug_action {
     pub const RING0_FIRE_NEVER: u64 = 1;
     pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
 }
-
-/// Every kind of kernel object, in the order the kernel's own `kobject!`
-/// declares them — so an index into this is the index
-/// [`debug_action::CENSUS_KIND`] takes.
-///
-/// In the ABI rather than in the kernel alone, because a census nobody can read
-/// per kind is a total. The kernel checks this list against its own declaration
-/// order when the action is called, so a row added to `kobject!` without a row
-/// here is a named refusal rather than an index that quietly names its
-/// neighbour.
-pub const OBJECT_KINDS: &[&str] = &[
-    "PipeRead",
-    "PipeWrite",
-    "Connection",
-    "Device",
-    "Acceptor",
-    "Inbox",
-    "SharedMem",
-    "Connector",
-    "Namespace",
-    "File",
-    "Console",
-    "SysCap",
-    "Process",
-];
 
 /// Create a pipe. Returns the read and write ends.
 ///
@@ -2001,12 +1981,13 @@ pub fn handle_send(conn: RawHandle, handles: &[RawHandle]) -> Result<(), Syscall
     ))
 }
 
-/// Take the oldest batch the peer sent, into `out`. Answers how many it wrote.
+/// Take the oldest batch the peer sent, into `out`, each handle with the kind
+/// of object it names. Answers how many it wrote.
 ///
 /// Never blocks: zero means nothing is queued right now. A batch larger than
 /// `out` is `InvalidArgument` and stays queued — `out` should be
 /// [`MAX_TRANSFER_HANDLES`] long.
-pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
+pub fn handle_recv(conn: RawHandle, out: &mut [Received]) -> Result<usize, SyscallError> {
     check(syscall(
         SYS_HANDLE_RECV,
         conn.0 as u64,
@@ -2027,7 +2008,38 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_CREATE, size as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Map the region `shm` names into this process. Needs [`Rights::MAP`].
+crate::user_safe! {
+    /// Where [`shm_map`] put a region, and what the region is.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct ShmMapping {
+        pub addr: u64,
+        /// The mapping's length: the whole region.
+        pub len: u64,
+        /// 1 for memory the kernel allocated, as [`SYS_SHM_CREATE`] makes; 0
+        /// for anything else, a device's registers or a scanout.
+        pub ram: u32,
+        pub _pad: u32,
+    }
+}
+
+impl ShmMapping {
+    pub fn ptr(&self) -> *mut u8 {
+        core::ptr::with_exposed_provenance_mut(self.addr as usize)
+    }
+
+    /// Whether the region is memory the kernel allocated: the only kind a
+    /// process may take from a peer as a buffer.
+    pub fn is_ram(&self) -> bool {
+        match self.ram {
+            0 => false,
+            1 => true,
+            other => panic!("shm_map answered memory word {other}, which is neither 0 nor 1"),
+        }
+    }
+}
+
+/// Map the region `shm` names into this process, and answer where, how long,
+/// and whether it is memory the kernel allocated. Needs [`Rights::MAP`].
 ///
 /// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
 /// when the region's last handle was closed under the call: nothing is mapped.
@@ -2036,9 +2048,9 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
 ///
 /// # Safety
 /// Caller must manage the returned pointer.
-pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
-    check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
-        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
+pub unsafe fn shm_map(shm: RawHandle) -> Result<ShmMapping, SyscallError> {
+    let mut out = ShmMapping { addr: 0, len: 0, ram: 0, _pad: 0 };
+    check_unit(syscall(SYS_SHM_MAP, shm.0 as u64, core::ptr::from_mut(&mut out) as u64, 0, 0)).map(|()| out)
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

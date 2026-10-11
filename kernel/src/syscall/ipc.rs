@@ -360,7 +360,8 @@ pub(super) fn sys_shm_create(size: u64) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
+/// Map a region into the caller and answer where, how long, and whether it is RAM this kernel allocated: what a receiver needs to refuse a region a peer lent it.
+pub(super) fn sys_shm_map(h: RawHandle, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     let shm = match process::with_process_data(|data| {
         data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)
     }) {
@@ -369,7 +370,11 @@ pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     };
     let pt = process::current_address_space();
     match shm.map_into(process::current_process(), &pt) {
-        Ok(vaddr) => vaddr,
+        Ok(addr) => {
+            let ram = u32::from(shm.ram().is_some());
+            out.write_at(0, toyos_abi::usersafe::bytes(&ShmMapping { addr, len: shm.size(), ram, _pad: 0 }));
+            0
+        }
         Err(e) => e.to_u64(),
     }
 }
@@ -408,7 +413,7 @@ pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::User
     }
 }
 
-/// Take the oldest batch the peer sent. Never blocks; zero means none queued.
+/// Take the oldest batch the peer sent, each handle with its kind. Never blocks; zero means none queued.
 pub(super) fn sys_handle_recv(
     conn_h: RawHandle,
     out: &mut crate::user_ptr::UserBytesMut,
@@ -430,8 +435,10 @@ pub(super) fn sys_handle_recv(
         let Some(batch) = conn.recv_bounded(cap)? else { return Ok(0) };
         let count = batch.len();
         for (i, entry) in batch.into_iter().enumerate() {
-            let h = data.handles.install(entry).expect("room was asked for first");
-            out.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
+            let kind = entry.object().object_kind() as u32;
+            let handle = data.handles.install(entry).expect("room was asked for first");
+            let received = toyos_abi::handle::Received { handle, kind };
+            out.write_at(i * size_of::<toyos_abi::handle::Received>(), toyos_abi::usersafe::bytes(&received));
         }
         Ok::<_, crate::object::Refusal>(count as u64)
     });

@@ -373,7 +373,7 @@ pub fn launch<'a>(
     conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
-        MSG_LAUNCHED => match conn.recv_handles_exact::<1>() {
+        MSG_LAUNCHED => match conn.recv_handles_exact([crate::ObjectKind::Process]) {
             Some([process]) => Ok(Outcome::Started(process)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },

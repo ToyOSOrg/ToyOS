@@ -40,6 +40,7 @@ pub use device::{
 };
 
 pub use toyos_abi::RawHandle;
+pub use toyos_abi::handle::ObjectKind;
 pub use toyos_abi::ioport;
 
 /// Trait for types that wrap a kernel handle.

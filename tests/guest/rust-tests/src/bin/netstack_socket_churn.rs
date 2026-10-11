@@ -8,13 +8,12 @@
 //! drops both pipe ends, and waits for netstack's own count of live piped
 //! connections to return.
 //!
-//! argv[2] is the port of a second, which holds every connection it accepts
-//! and reads nothing. On it, a client that moves netstack a handle that is no
-//! pipe end where its receive end belongs, and keeps its send end: the kernel
-//! refuses netstack's watch of it, and that refusal is all that ends the
-//! connection.
+//! A connect that moves netstack a handle that is no pipe end where its
+//! receive end belongs is refused `InvalidInput` by the kind the kernel
+//! answered for it, and netstack holds nothing for it.
 //!
-//! On the same server, a client that shut its sending half down and left:
+//! argv[2] is the port of a second, which holds every connection it accepts
+//! and reads nothing. On it, a client that shut its sending half down and left:
 //! netstack let its send pipe go at the shutdown and its peer sends nothing,
 //! so nothing but the kernel's word on its receive pipe's other end can tell
 //! netstack it is gone.
@@ -141,17 +140,16 @@ fn a_connect_past_the_places_is_refused(port: u16) {
     assert_eq!(count("net.places.held"), max, "every place is held where the connect was refused");
 }
 
-/// A connection the peer holds open, whose client keeps its send end and moved
-/// netstack an acceptor for the end netstack writes the peer's bytes into. The
-/// peer sends none, so netstack never writes it: its watch is refused, and the
-/// connection is reset and let go.
+/// A connect whose client moved netstack an acceptor for the end netstack
+/// writes the peer's bytes into: refused before netstack holds a place or a
+/// stream for it.
 fn a_receive_end_that_is_no_pipe_end_is_refused(port: u16) {
-    let live = count("net.piped.live");
+    let (live, held) = (count("net.piped.live"), count("net.places.held"));
     let (acceptor, _connector) = toyos::port::create().expect("a port");
     // SAFETY: the acceptor's one handle, which nothing else answers for.
     let no_pipe_end = unsafe { OwnedHandle::from_raw(acceptor.into_raw()) };
     let (from_client, kept) = toyos::pipe_pair().expect("a pipe");
-    let connected: TcpConnectResponse = NetstackConn::connect()
+    let connected = NetstackConn::connect()
         .and_then(|netstack| {
             netstack.request_with_handles(
                 [no_pipe_end, OwnedHandle::from(from_client)],
@@ -159,13 +157,14 @@ fn a_receive_end_that_is_no_pipe_end_is_refused(port: u16) {
                 &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 0 },
             )
         })
-        .and_then(|pending| pending.response())
-        .unwrap_or_else(|e| panic!("the holding server, with an acceptor for a receive end: {e:?}"));
-    returns(
-        "net.piped.live",
-        live,
-        &format!("the kernel refused the watch of connection {}'s receive end, which is no pipe end", connected.socket_id),
+        .and_then(|pending| pending.response::<TcpConnectResponse>());
+    assert_eq!(
+        connected.map(|c| c.socket_id).err(),
+        Some(NetError::InvalidInput),
+        "a connect with an acceptor for its receive end"
     );
+    assert_eq!(count("net.piped.live"), live, "netstack keeps a stream for a connect it refused");
+    assert_eq!(count("net.places.held"), held, "netstack holds a place for a connect it refused");
     drop(kept);
 }
 

@@ -24,7 +24,7 @@ pub fn read() -> Result<Served, String> {
     }
     let boot_so_far: u64 =
         conn.recv_payload(&header).map_err(|e| format!("logkeeper's answer is short: {e:?}"))?;
-    let [raw] = conn.recv_handles_exact::<1>().ok_or("logkeeper's answer carried no pipe")?;
+    let [raw] = conn.recv_handles_exact([toyos::ObjectKind::PipeRead]).ok_or("logkeeper's answer carried no pipe")?;
     // SAFETY: the kernel moved this handle into this table with the frame
     // that names it, and nothing else answers for it.
     let pipe = unsafe { Pipe::from_raw(raw) };

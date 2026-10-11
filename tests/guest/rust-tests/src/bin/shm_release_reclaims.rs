@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 
 use toyos::census::Census;
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port};
+use toyos::{namespace, port, ObjectKind};
 use toyos_abi::syscall::SVC_LABEL;
 
 #[path = "../census_wait.rs"]
@@ -56,7 +56,7 @@ fn main() {
     // Non-vacuity: if the instrument could not see sixteen regions arrive, it
     // cannot see them come back either, and the reclaim assertion below would
     // pass on a kernel that frees nothing.
-    let taken = held.kind("SharedMem").saturating_sub(start.kind("SharedMem"));
+    let taken = held.kind(ObjectKind::SharedMem).saturating_sub(start.kind(ObjectKind::SharedMem));
     assert!(
         taken >= ROUNDS as u64,
         "{ROUNDS} regions were allocated and the live SharedMem count moved {taken}: \
@@ -84,7 +84,7 @@ fn main() {
     let conn = acceptor.accept().expect("the donor connects");
     conn.recv_header().expect("the donor announces its region");
     let [sent] = conn
-        .recv_handles_exact::<1>()
+        .recv_handles_exact([ObjectKind::SharedMem])
         .expect("the donor sent the region ahead of the frame");
 
     // Only now, after the donor has let go — its line says so.
@@ -93,7 +93,7 @@ fn main() {
     out.read_line(&mut line).expect("donor release line");
     assert_eq!(line.trim(), "released", "the donor did not report letting go");
 
-    let region = SharedMemory::adopt(sent, REGION)
+    let region = SharedMemory::lent(sent, REGION)
         .expect("a region this process holds a handle to was reclaimed under it");
     assert_eq!(
         &region.as_slice()[..PAYLOAD.len()],

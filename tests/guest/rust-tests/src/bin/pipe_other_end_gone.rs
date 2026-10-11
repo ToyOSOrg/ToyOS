@@ -85,7 +85,7 @@ fn test() {
     let (reader, writer) = pipe("");
     client.send_handles([OwnedHandle::from(writer)]).expect("the write end into the connection's queue");
     held(&reader, "its handle sits unreceived in a connection's queue");
-    let [received] = server.recv_handles_exact::<1>().expect("the handle the queue held");
+    let [received] = server.recv_handles_exact([toyos::ObjectKind::PipeWrite]).expect("the handle the queue held");
     held(&reader, "its handle was received");
     syscall::close(received);
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the received handle closed");

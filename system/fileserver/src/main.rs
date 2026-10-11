@@ -56,9 +56,9 @@ use toyos::fs::*;
 use toyos::ipc::{self, Connection, RxStep, TrySendError};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::shm::SharedMemory;
+use toyos::shm::{Lent, SharedMemory};
 use toyos::volatile::Window;
-use toyos::Pipe;
+use toyos::{ObjectKind, Pipe};
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
 
 /// Clients served at once, machine-wide: one connection per directory per
@@ -589,12 +589,14 @@ impl Server {
                 let why = format!("it is refused, since its share is served {SERVED_SHARE} clients already");
                 return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
-            let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
+            let Some([lent]) = client.conn.recv_handles_exact([ObjectKind::SharedMem]) else {
                 return Answer::Drop("its hello carried no window");
             };
-            match SharedMemory::adopt(lent, WINDOW_BYTES) {
+            match SharedMemory::lent(lent, WINDOW_BYTES) {
                 Ok(window) => client.window = Some(window),
-                Err(_) => return Answer::Drop("its window would not map"),
+                Err(Lent::Map(_)) => return Answer::Drop("its window would not map"),
+                Err(Lent::NotRam) => return Answer::Drop("its window is not memory the kernel allocated"),
+                Err(Lent::Length { .. }) => return Answer::Drop("its window is not WINDOW_BYTES long"),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
             // The volume is this start's pid, which the kernel never issues

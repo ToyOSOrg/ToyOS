@@ -237,8 +237,11 @@ mod target {
         let own = syscall::dup(slot).map_err(Why::Dup)?;
         // SAFETY: `own` is a live shared-memory handle this process holds and
         // never closes, so the mapping stays for the process's life.
-        let at = unsafe { syscall::shm_map(own) }.map_err(Why::Map)?;
-        let at = NonNull::new(at).ok_or(Why::Null)?;
+        let mapping = unsafe { syscall::shm_map(own) }.map_err(Why::Map)?;
+        if !mapping.is_ram() {
+            return Err(Why::NotRam);
+        }
+        let at = NonNull::new(mapping.ptr()).ok_or(Why::Null)?;
         // SAFETY: a fresh mapping of a region at least `RING_BYTES` long.
         if !unsafe { Ring::at(at) }.is_laid_out() {
             return Err(Why::NotARing);
@@ -259,6 +262,7 @@ mod target {
             Dup(SyscallError),
             Map(SyscallError),
             Null,
+            NotRam,
             NotARing,
         }
 
@@ -274,6 +278,7 @@ mod target {
                     Self::Dup(e) => write!(f, "holds a ring that will not duplicate: {e:?}"),
                     Self::Map(e) => write!(f, "holds a ring that will not map: {e:?}"),
                     Self::Null => write!(f, "holds a ring the kernel mapped at null"),
+                    Self::NotRam => write!(f, "holds a region that is not memory the kernel allocated"),
                     Self::NotARing => write!(f, "holds a region that is not a log ring"),
                 }
             }

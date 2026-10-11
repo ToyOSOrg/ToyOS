@@ -1754,7 +1754,8 @@ impl Supervisor<'_> {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
-        let mut batch = [toyos::RawHandle(0); toyos_abi::syscall::MAX_TRANSFER_HANDLES];
+        let mut batch = [toyos_abi::handle::Received { handle: toyos_abi::HANDLE_INVALID, kind: 0 };
+            toyos_abi::syscall::MAX_TRANSFER_HANDLES];
         let received = conn.recv_handles(&mut batch).unwrap_or(0);
 
         // **Owned on the statement after they arrive, and before anything can
@@ -1762,7 +1763,7 @@ impl Supervisor<'_> {
         // here releases them — a launcher that leaked a handle per refused launch
         // would exhaust the one table the machine cannot do without, and a client
         // picks which refusal it takes.
-        let mut held = Moved(batch[..received].to_vec());
+        let mut held = Moved(batch[..received].iter().map(|r| r.handle).collect());
 
         let Some(request) = Request::decode(payload) else { return };
         // `extra_names` drops an empty or non-UTF-8 name, so its count is what

@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use toyos::net::*;
 use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE, Poller};
-use toyos::{ipc, say, AsHandle, Pipe};
+use toyos::{ipc, say, AsHandle, ObjectKind, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_inspect::Snapshot;
 use toyos_net_node::{
@@ -119,10 +119,14 @@ pub struct Sockets {
     readable: Vec<StreamId>,
 }
 
+/// The ends a client moves for a stream or a datagram socket, in
+/// [`DATA_TO_CLIENT`], [`DATA_FROM_CLIENT`] order: a reversed pair is refused.
+const DATA_KINDS: [ObjectKind; DATA_HANDLES] = [ObjectKind::PipeWrite, ObjectKind::PipeRead];
+
 /// The two ends a connect or an accept moves, each split into the node's half
 /// and the watched one.
 fn data_pipes(client: &Client) -> Option<(Pipes, Watched, Watched)> {
-    let [to_client, from_client] = client.conn.recv_handles_exact::<{ DATA_HANDLES }>()?;
+    let [to_client, from_client] = client.conn.recv_handles_exact(DATA_KINDS)?;
     // SAFETY: the kernel moved both handles into this process with the frame
     // just read, and nothing else answers for either.
     let (to_client, from_client) = unsafe { (Pipe::from_raw(to_client), Pipe::from_raw(from_client)) };
@@ -414,7 +418,7 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some([wakes]) = msg.client.conn.recv_handles_exact::<{ NOTIFY_HANDLES }>() else {
+        let Some([wakes]) = msg.client.conn.recv_handles_exact([ObjectKind::PipeWrite]) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
@@ -471,7 +475,7 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some([to_client, from_client]) = msg.client.conn.recv_handles_exact::<{ DATA_HANDLES }>() else {
+        let Some([to_client, from_client]) = msg.client.conn.recv_handles_exact(DATA_KINDS) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };

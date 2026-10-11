@@ -164,6 +164,13 @@ macro_rules! kobject {
                 }
             }
 
+            /// This object's type, as `SYS_HANDLE_RECV` answers it.
+            pub fn object_kind(&self) -> toyos_abi::handle::ObjectKind {
+                match self {
+                    $(Self::$variant(_) => toyos_abi::handle::ObjectKind::$variant,)+
+                }
+            }
+
             fn run_zero_handles(&self) {
                 match self {
                     $(Self::$variant(o) => o.on_zero_handles(),)+
