@@ -54,7 +54,6 @@ impl Card {
     /// while it holds an undrained interrupt, so a pass that saw the token and
     /// left it would find the same one on the next `wait` and every one after
     /// it.
-    /// This is also where a driver with a per-pass budget gets it back.
     ///
     /// A claim that refuses the read for anything but `WouldBlock` is the
     /// kernel saying this function is no longer this process's: a fault at the

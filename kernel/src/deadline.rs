@@ -87,7 +87,7 @@ pub fn stand_down() {
 ///
 /// **What the idle path asks before it re-arms a one-shot.** Both bounds rest on
 /// some CPU taking a timer interrupt, and a CPU woken by an IPI and held in Ring
-/// 0 takes none; on a boot that named no bound that re-arm is an x2APIC read and
+/// 0 takes none; on a boot that named no bound that re-arm is a local APIC read and
 /// two writes per wake that buy nothing.
 pub fn armed() -> bool {
     AT_TSC.load(Relaxed) != 0

@@ -210,7 +210,16 @@ pub extern "C" fn trunc(x: f64) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn round(x: f64) -> f64 {
-    floor(x + 0.5)
+    crate::fparts::round(x)
+}
+
+/// A domain error answers `long`'s least value, as x86-64's conversion does.
+#[no_mangle]
+pub extern "C" fn lround(x: f64) -> i64 {
+    crate::fparts::lround(x).unwrap_or_else(|crate::fparts::Domain| {
+        crate::errno::set(crate::errno::EDOM);
+        i64::MIN
+    })
 }
 
 #[no_mangle]

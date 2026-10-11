@@ -21,8 +21,10 @@
 //! where none did**, whatever kept it — tables unread, a DSDT refused,
 //! an `\_S5` that is no package of two integers, a value the register does
 //! not hold — and that is said once, loudly ([`NO_S5_HANDED`]); the server
-//! goes on serving. Nothing is evaluated after it yet, so the namespace is
-//! not kept: no embedded-controller query is served.
+//! goes on serving. **A namespace whose DSDT loaded is kept** ([`Aml`]),
+//! with the host that answered its load, for what the server evaluates in it
+//! after: the devices it serves ([`crate::devices`]), and, where the power
+//! button is a control method device, each embedded-controller query's method.
 //!
 //! A table's line says its place, whether it is the DSDT or an SSDT, and a
 //! refusal by its kind; what the firmware chose — a name, an offset, an
@@ -36,10 +38,11 @@ use toyos_aml::{Error, Host, Interpreter, Value};
 use crate::host::{Firmware, Kernel, Refusal, Stopping, OWN};
 use crate::tables::Tables;
 
-/// An embedded-controller query, taken off the controller, run once the
-/// drain that took it has ended: a query's method may itself talk to the
-/// controller.
-pub fn query(_q: u8) {}
+/// A machine's namespace, and the host every evaluation in it is answered by.
+pub struct Aml<'k, K> {
+    pub interpreter: Interpreter,
+    pub host: Firmware<'k, K>,
+}
 
 /// What became of the machine's definition blocks: the load's verdict, which
 /// its lines say. Whoever evaluates a method after the load asks `blocks`
@@ -56,7 +59,7 @@ pub struct Loaded {
 }
 
 /// What a refused evaluation or load is called in a line anyone may quote.
-fn kind(why: &Error) -> String {
+pub fn kind(why: &Error) -> String {
     match why {
         Error::Malformed { why, .. } => format!("malformed AML: {why}"),
         Error::NotFound(_) => "a name that does not resolve".into(),
@@ -97,8 +100,16 @@ pub const NO_S5_HANDED: &str =
     "acpiserver: no \\_S5 was handed to the kernel, which powers off only on one an ACPI server supplied and refuses a shutdown without one";
 
 /// Load the machine's definition blocks from the RSDP at `rsdp`, and
-/// evaluate `\_S5`.
-pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
+/// evaluate `\_S5`; the namespace, where its DSDT loaded, is kept.
+pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> (Loaded, Option<Aml<'_, K>>) {
+    let mut host = Firmware::new(kernel);
+    let mut interpreter = Interpreter::new();
+    let loaded = load_into(kernel, &mut interpreter, &mut host, rsdp);
+    let kept = loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) && !host.stopping;
+    (loaded, kept.then_some(Aml { interpreter, host }))
+}
+
+fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Firmware<'_, K>, rsdp: u64) -> Loaded {
     let began = Instant::now();
     let mut loaded = Loaded::default();
     let tables = Tables::new(kernel);
@@ -124,14 +135,12 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
         return loaded;
     }
 
-    let mut host = Firmware::new(kernel);
-    let mut interpreter = Interpreter::new();
     let count = blocks.len();
     for (place, block) in blocks.iter().enumerate() {
         let name = if place == 0 { "DSDT" } else { "SSDT" };
         let place = place + 1;
         let done = match block {
-            Ok(table) => interpreter.load(&mut host, table).map_err(|why| {
+            Ok(table) => interpreter.load(host, table).map_err(|why| {
                 println!("{OWN}table {place} was refused {why:x?}");
                 kind(&why)
             }),
@@ -184,7 +193,7 @@ pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
     );
 
     if loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) {
-        match s5(&mut interpreter, &mut host) {
+        match s5(interpreter, host) {
             Ok((a, b)) => {
                 println!("acpiserver: \\_S5 evaluated: SLP_TYPa={a} SLP_TYPb={b}");
                 loaded.s5 = Some((a, b));
@@ -233,10 +242,14 @@ fn s5(interpreter: &mut Interpreter, host: &mut dyn Host) -> Result<(u64, u64), 
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::host::tests::Scripted;
     use crate::host::{Take, HELD};
+
+    fn load_only<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
+        load(kernel, rsdp).0
+    }
 
     /// QEMU's own tables where its guest held them
     /// (`toyos-acpi/fixtures/qemu-11.1.1/SOURCE`), as ACPI reclaim memory.
@@ -260,11 +273,18 @@ mod tests {
 
     /// What every guest boot does, against the kernel's stand-in: QEMU's
     /// DSDT is fetched, loads asking the machine for nothing, and its `\_S5`
-    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of.
+    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of;
+    /// its namespace names no embedded controller, and no control-method
+    /// button where one is looked for.
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
         let kernel = machine(QEMU);
-        assert_eq!(load(&kernel, RSDP), Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let (loaded, kept) = load(&kernel, RSDP);
+        assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let Aml { mut interpreter, mut host } = kept.expect("QEMU's DSDT loads");
+        for control_method in [false, true] {
+            assert_eq!(crate::devices::find(&mut interpreter, &mut host, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());
+        }
         assert!(kernel.asked.borrow().iter().all(|access| access.write == 0 && access.space == 0));
         assert!(!kernel.held.get());
         assert_eq!(kernel.handed.get(), Some(0));
@@ -273,7 +293,7 @@ mod tests {
     // The builders below are `toyos-aml`'s test encodings of §20.2, the few a
     // definition block here needs.
 
-    fn sealed(signature: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    pub fn sealed(signature: &[u8; 4], body: &[u8]) -> Vec<u8> {
         let mut table = vec![0u8; 36];
         table[..4].copy_from_slice(signature);
         table[4..8].copy_from_slice(&(36 + body.len() as u32).to_le_bytes());
@@ -283,22 +303,22 @@ mod tests {
         table
     }
 
-    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+    pub fn cat(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
     }
 
     /// `Name (<name>, <value>)` for a four-character name and a byte.
-    fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
+    pub fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
         cat(&[&[0x08], name, &[0x0A, value]])
     }
 
     /// `Name (_S5_, Package (2) { a, b })`.
-    fn s5_package(a: u8, b: u8) -> Vec<u8> {
+    pub fn s5_package(a: u8, b: u8) -> Vec<u8> {
         cat(&[&[0x08], b"_S5_", &[0x12, 0x06, 0x02, 0x0A, a, 0x0A, b]])
     }
 
     /// A machine whose XSDT lists a FADT naming `dsdt` and then `ssdts`.
-    fn crafted(dsdt: &[u8], ssdts: &[&[u8]]) -> Scripted {
+    pub fn crafted(dsdt: &[u8], ssdts: &[&[u8]]) -> Scripted {
         const AT: u64 = 0x10_0000;
         let at = |n: usize| AT + 0x1_0000 * n as u64;
         let mut fadt_body = vec![0u8; 116 - 36];
@@ -324,7 +344,7 @@ mod tests {
         Scripted { memory, ..Default::default() }
     }
 
-    const CRAFTED_RSDP: u64 = 0x10_0000 - 0x1000;
+    pub const CRAFTED_RSDP: u64 = 0x10_0000 - 0x1000;
 
     #[test]
     fn a_refused_ssdt_is_one_block_refused_and_the_rest_load() {
@@ -335,7 +355,7 @@ mod tests {
         let good = sealed(b"SSDT", &name(b"CCCC", 4));
         let kernel = crafted(&dsdt, &[&collides, &unsummed, &good]);
         assert_eq!(
-            load(&kernel, CRAFTED_RSDP),
+            load_only(&kernel, CRAFTED_RSDP),
             Loaded {
                 blocks: vec![Ok(()), Err("a name defined twice".into()), Err("its bytes do not sum to zero".into()), Ok(())],
                 s5: Some((5, 7)),
@@ -350,7 +370,7 @@ mod tests {
         let dsdt = sealed(b"DSDT", &[0x08, b'A']);
         let ssdt = sealed(b"SSDT", &name(b"CCCC", 4));
         let kernel = crafted(&dsdt, &[&ssdt, &ssdt]);
-        let loaded = load(&kernel, CRAFTED_RSDP);
+        let loaded = load_only(&kernel, CRAFTED_RSDP);
         assert_eq!(loaded.blocks.len(), 1, "an SSDT was loaded onto no DSDT: {loaded:?}");
         assert!(matches!(&loaded.blocks[0], Err(kind) if kind.starts_with("malformed AML: ")), "{loaded:?}");
         assert_eq!(loaded.s5, None);
@@ -359,12 +379,12 @@ mod tests {
     #[test]
     fn tables_the_kernel_will_not_read_are_refused_by_its_name_for_it() {
         // No RSDP where the claim says: RAM, to the stand-in.
-        assert_eq!(load(&machine(QEMU), 0x1000), Loaded::default());
+        assert_eq!(load_only(&machine(QEMU), 0x1000), Loaded::default());
 
         // The DSDT's own bytes are not the firmware's to read.
         let kernel = machine(&QEMU[..QEMU.len() - 1]);
         let ram = "its bytes could not be read: a SystemMemory read the kernel refused UsableMemory, in memory of type 7";
-        assert_eq!(load(&kernel, RSDP), Loaded { blocks: vec![Err(ram.into())], s5: None, handed: false });
+        assert_eq!(load_only(&kernel, RSDP), Loaded { blocks: vec![Err(ram.into())], s5: None, handed: false });
     }
 
     /// The shape the first load on the real machine had: its RSDP and XSDT
@@ -381,17 +401,17 @@ mod tests {
         let listed = kernel.memory.split_off(2);
         kernel.kept = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 5)).collect();
         let kept = "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of type 5";
-        assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Err(kept.into())], s5: None, handed: false });
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Err(kept.into())], s5: None, handed: false });
     }
 
     #[test]
     fn an_s5_that_is_no_package_of_two_integers_is_refused_by_kind() {
         let absent = sealed(b"DSDT", &name(b"AAAA", 1));
-        assert_eq!(load(&crafted(&absent, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
+        assert_eq!(load_only(&crafted(&absent, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
         let integer = sealed(b"DSDT", &name(b"_S5_", 5));
-        assert_eq!(load(&crafted(&integer, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
+        assert_eq!(load_only(&crafted(&integer, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
         let short = sealed(b"DSDT", &cat(&[&[0x08], b"_S5_", &[0x12, 0x04, 0x01, 0x0A, 0x05]]));
-        assert_eq!(load(&crafted(&short, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
+        assert_eq!(load_only(&crafted(&short, &[]), CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
     }
 
     /// `SLP_TYPa` is the package's first element and the only one handed
@@ -401,20 +421,20 @@ mod tests {
     #[test]
     fn only_an_s5_the_kernel_kept_is_a_power_off() {
         let kernel = crafted(&sealed(b"DSDT", &s5_package(7, 9)), &[]);
-        assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((7, 9)), handed: true });
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((7, 9)), handed: true });
         assert_eq!(kernel.handed.get(), Some(7));
 
         let kernel = crafted(&sealed(b"DSDT", &s5_package(8, 0)), &[]);
-        assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((8, 0)), handed: false });
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((8, 0)), handed: false });
         assert_eq!(kernel.handed.get(), None);
 
         for dsdt in [sealed(b"DSDT", &name(b"AAAA", 1)), sealed(b"DSDT", &[0x08, b'A'])] {
             let kernel = crafted(&dsdt, &[]);
-            assert!(!load(&kernel, CRAFTED_RSDP).handed);
+            assert!(!load_only(&kernel, CRAFTED_RSDP).handed);
             assert_eq!(kernel.handed.get(), None);
         }
         let kernel = machine(QEMU);
-        assert!(!load(&kernel, 0x1000).handed);
+        assert!(!load_only(&kernel, 0x1000).handed);
         assert_eq!(kernel.handed.get(), None);
     }
 
@@ -423,7 +443,7 @@ mod tests {
         for answered in [0, 3, 40] {
             let kernel = machine(QEMU);
             kernel.stops_after.set(Some(answered));
-            assert_eq!(load(&kernel, RSDP), Loaded::default(), "after {answered} reads");
+            assert_eq!(load_only(&kernel, RSDP), Loaded::default(), "after {answered} reads");
         }
     }
 
@@ -483,13 +503,13 @@ mod tests {
         let field = toyos_abi::acpi::Access::read(toyos_abi::acpi::Space::SystemMemory, NVS, toyos_abi::acpi::Width::Byte);
 
         let kernel = with_nvs();
-        assert_eq!(load(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((5, 0)), handed: true });
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: Some((5, 0)), handed: true });
         assert!(!kernel.held.get(), "the load ended holding the Global Lock");
         assert_eq!(kernel.asked.borrow().last(), Some(&field));
 
         let kernel = with_nvs();
         kernel.takes.borrow_mut().push_back(Take::Pending);
-        let loaded = load(&kernel, CRAFTED_RSDP);
+        let loaded = load_only(&kernel, CRAFTED_RSDP);
         assert_eq!(loaded, Loaded { blocks: vec![Err(format!("denied by this server: {HELD}"))], s5: None, handed: false });
         assert_ne!(kernel.asked.borrow().last(), Some(&field), "the field was read without the lock");
     }

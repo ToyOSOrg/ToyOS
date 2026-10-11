@@ -13,7 +13,7 @@ toyos-virtio-sound = { path = "virtio-sound" }
 toyos-virtio = { path = "../../toyos-virtio" }
 toyos-pci-claim = { path = "../toyos-pci-claim" }
 toyos-inspect = { path = "../../toyos-inspect" }
-rubato = "0.16"
+rubato = { version = "0.16", default-features = false }
 
 [package.metadata.toyos.host]
 exempt.owns = "ToyOS's audio devices, claimed from the kernel"

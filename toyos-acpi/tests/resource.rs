@@ -5,7 +5,7 @@ mod common;
 
 use common::{qword_descriptor, resource_list as list, Machine, BUS, IO, MEMORY};
 use toyos_abi::boot::RootBridgeWindow;
-use toyos_acpi::{memory_windows, ResourceError, MAX_LIST_BYTES};
+use toyos_acpi::{io_ports, memory_windows, ResourceError, MAX_LIST_BYTES};
 
 /// Where a firmware pool allocation sits in the crafted machines below.
 const AT: u64 = 0x7f00_1234;
@@ -192,4 +192,60 @@ fn a_list_that_runs_off_the_end_of_what_can_be_read_is_refused() {
     let mut bytes = qword(MEMORY, 0xa080_0000, 0x1000, 0);
     bytes.truncate(40);
     assert_eq!(windows(&bytes, 8), Err(ResourceError::Unreadable { at: AT, len: 46 }));
+}
+
+/// An I/O Port Descriptor (ACPI 6.5 §6.4.2.5): 16-bit decode, a run of `len`
+/// ports whose base is anywhere from `min` to `max`.
+fn io(min: u16, max: u16, len: u8) -> Vec<u8> {
+    let [min_lo, min_hi] = min.to_le_bytes();
+    let [max_lo, max_hi] = max.to_le_bytes();
+    vec![0x47, 0x01, min_lo, min_hi, max_lo, max_hi, 0x00, len]
+}
+
+/// A Fixed Location I/O Port Descriptor (§6.4.2.6).
+fn fixed_io(base: u16, len: u8) -> Vec<u8> {
+    let [lo, hi] = base.to_le_bytes();
+    vec![0x4B, lo, hi, len]
+}
+
+/// The first port of every run `bytes` names, read from [`AT`].
+fn ports(bytes: &[u8], room: usize) -> Result<Vec<u16>, ResourceError> {
+    let regions: &[(u64, &[u8])] = &[(AT, bytes)];
+    let mut out = vec![0; room];
+    let count = io_ports(Machine { regions }, AT, &mut out)?;
+    out.truncate(count);
+    Ok(out)
+}
+
+/// An AMD laptop's embedded controller, as its `_CRS` names it, decoded:
+/// two I/O Port Descriptors of one port each, 0x62 then 0x66, each fixed by
+/// a minimum equal to its maximum. ACPI 6.5 §12.11 puts the data register
+/// first and the command/status register second; the order is the list's.
+#[test]
+fn an_amd_laptops_controller_is_two_fixed_ports_in_the_lists_order() {
+    let crs = list(&[io(0x62, 0x62, 1), io(0x66, 0x66, 1)]);
+    assert_eq!(ports(&crs, 2), Ok(vec![0x62, 0x66]));
+    // The same list as an evaluation hands the buffer over, from address 0.
+    let mut out = [0; 2];
+    assert_eq!(io_ports(&crs[..], 0, &mut out), Ok(2));
+    assert_eq!(out, [0x62, 0x66]);
+    // The fixed form names the same two, its base in ten bits.
+    assert_eq!(ports(&list(&[fixed_io(0x62, 1), fixed_io(0xFC66, 1)]), 2), Ok(vec![0x62, 0x66]));
+}
+
+/// A run the OS would choose within, a run of no ports, any other descriptor
+/// and more runs than there is room for are each refused by name, never
+/// stepped over.
+#[test]
+fn an_io_run_that_is_no_fixed_port_is_refused_by_name() {
+    assert_eq!(ports(&list(&[io(0x62, 0x6A, 1)]), 2), Err(ResourceError::Relocatable { min: 0x62, max: 0x6A }));
+    assert_eq!(ports(&list(&[io(0x62, 0x62, 0)]), 2), Err(ResourceError::NoPorts { port: 0x62 }));
+    assert_eq!(ports(&list(&[fixed_io(0x66, 0)]), 2), Err(ResourceError::NoPorts { port: 0x66 }));
+    // IRQ (§6.4.2.1) beside the two ports.
+    assert_eq!(ports(&list(&[io(0x62, 0x62, 1), vec![0x22, 0x01, 0x00]]), 2), Err(ResourceError::UnknownTag { tag: 0x22 }));
+    let three = list(&[io(0x62, 0x62, 1), io(0x66, 0x66, 1), io(0x68, 0x68, 1)]);
+    assert_eq!(ports(&three, 2), Err(ResourceError::TooMany { room: 2 }));
+    assert_eq!(ports(&[0x47, 0x01, 0x62], 2), Err(ResourceError::Unreadable { at: AT, len: 8 }));
+    let unterminated = io(0x62, 0x62, 1).repeat(MAX_LIST_BYTES / 8 + 1);
+    assert_eq!(ports(&unterminated, MAX_LIST_BYTES), Err(ResourceError::Unterminated));
 }

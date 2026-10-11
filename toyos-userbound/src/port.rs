@@ -125,9 +125,11 @@ pub enum Mediated {
 }
 
 /// The bytes a port that commands the firmware takes from the kernel alone:
-/// those the machine's tables give a meaning, `None` where they name none.
+/// those the machine's tables give a meaning, `None` where they name none:
+/// the FADT's five for `SMI_CMD`, and its reset register's value where that
+/// register is the same port, so no write asked of it resets the machine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct KeptCommands(pub [Option<u8>; 5]);
+pub struct KeptCommands(pub [Option<u8>; 6]);
 
 impl KeptCommands {
     pub fn holds(self, value: u8) -> bool {

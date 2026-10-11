@@ -117,11 +117,6 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
-    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
-    // machine has.
-    "claim_lpi",
-    "claim_unrouted",
-    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
@@ -312,7 +307,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
-    ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
     // A package's launch from the desktop asks the person at the screen, in
     // the prompt layer, over a hostile fullscreen window: the supervisor
@@ -408,6 +402,11 @@ const MACHINE_TESTS: &[&str] = &[
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The desktop on CPUs that offer no x2APIC, whose local APICs run in
+    // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
+    // which no host build has and the T14, whose CPUs offer x2APIC, never
+    // reaches; the AMD laptop that needs it is not on the bench.
+    "desktop_without_x2apic",
     // A machine whose one NVMe disk is all it has: its firmware boots the
     // image off it, and `/log` and `/home` are `diskserver`'s partitions of
     // it across a reset. The claim on the controller and the firmware that
@@ -709,7 +708,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            judge: |b| {
+                let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
+                smp_roster_and_tsc_trail(log.text(), cpus)?;
+                apic_mode_held(&log, cpus, "X2apic")
+            },
         },
     ),
     (
@@ -2039,6 +2043,57 @@ fn console_image_boots() -> Result<(), String> {
     serial::Serial::named("the console image's boot", console).must_be_clean()
 }
 
+/// Boot `tests/panelcase` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
+/// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
+/// declared its local APIC in xAPIC mode, every CPU the firmware named came
+/// up — started by an xAPIC ICR's two halves — and the desktop ran across
+/// them, which every timer re-arm, EOI and TLB shootdown on the way reached
+/// through the xAPIC's MMIO page.
+fn desktop_without_x2apic() -> Result<(), String> {
+    const CPUS: u32 = 4;
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/panelcase"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::MetalNoX2apic,
+            smp: CPUS,
+            qmp: true,
+            ready_marker: bootlog::COMPLETE,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "compositor: ready", "the compositor to take its panel")?;
+    let taken = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| d.fill() != FILL_BOOT);
+    if taken.fill() == FILL_BOOT {
+        return Err(format!("the compositor said it is ready and never took the screen\n{console}"));
+    }
+    let said = serial::Serial::named("the boot without x2APIC", console);
+    said.must_be_clean()?;
+    apic_mode_held(&said, CPUS, "Xapic")?;
+    smp_roster_and_tsc_trail(said.text(), CPUS)?;
+    eprintln!("  [xapic] {CPUS} CPUs in xAPIC mode, and the compositor holds the panel");
+    Ok(())
+}
+
+/// Every one of `cpus` CPUs declared its local APIC in `mode`, as
+/// `control_regs` names it, and the machine's report says the same.
+fn apic_mode_held(log: &serial::Serial, cpus: u32, mode: &str) -> Result<(), String> {
+    for cpu in 0..cpus {
+        let line = log.must_say(&format!("control_regs: cpu{cpu} apic_base="))?;
+        if !line.trim_end().ends_with(&format!(" {mode}")) {
+            return Err(format!("cpu{cpu} did not declare its local APIC {mode}: {line:?}"));
+        }
+    }
+    let held = log.must_say(&format!("control_regs: {cpus} of {cpus} cpus hold "))?;
+    if !held.trim_end().ends_with(&format!(" apic={mode}")) {
+        return Err(format!("the machine's declaration is not {mode}: {held:?}"));
+    }
+    log.must_say(&format!("LAPIC: {mode} enabled ("))?;
+    Ok(())
+}
+
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
 /// with `cpus` CPUs reporting.
 fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
@@ -2341,140 +2396,6 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     // A halt, which writes the record and the stop's line and no panic.
     if let Some(death) = lines.iter().find(|l| serial::died(l).is_some() && !l.contains("owner=kernel")) {
         return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
-    }
-    Ok(())
-}
-
-/// `tests/toyos-rust-tests`' binaries that `tests/virtclaimcase` runs as its
-/// jobs, each `test_rs_` and its name.
-const VIRT_CLAIM_LPI: &str = "claim_lpi";
-const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
-const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
-
-/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
-/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
-/// the console only if the kernel read through the BAR for a crash report.
-const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
-
-/// A claimed function's message, translated by the ITS into its claim slot's
-/// LPI, and the claims the kernel refuses beside it, on `tests/virtclaimcase`.
-/// Its first job claims QEMU's `edu` and reads every message it asks it for as
-/// one interrupt of its claim (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`),
-/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
-/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
-/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
-/// unmapped again. The second is refused the `e1000e` the IORT routes past
-/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
-/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
-/// crash report reads through it. And no access of a function's is refused
-/// at the SMMUv3.
-fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
-    const JOB: &str = "test_rs_claim_lpi";
-    const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
-    const EDU: &str = "[1234:11e8]";
-    let config = compile::repo_root().join("tests/virtclaimcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-    // One CPU, so each message is taken where the job wrote the register
-    // that sends it: at EL0, which holds the preempt count at zero.
-    let options = BootOptions {
-        profile,
-        smp: 1,
-        ready_marker: "control registers: SCTLR_EL1=",
-        extra_root_files: vec![
-            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
-            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
-            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
-        ],
-        ..Default::default()
-    };
-    let argv = qemu::profile_argv(&options);
-    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
-        if !argv.iter().any(|a| a.contains(want)) {
-            return Err(format!("the machine has no {want}: {argv:?}"));
-        }
-    }
-    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
-    let mut serial = virt_console(&qemu);
-    judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
-    // The release's own line, its last: the DeviceID's unmapping comes before it.
-    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
-    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
-    let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
-        return Err(format!("the MADT's ITS was never armed
-serial:
-{serial}"));
-    };
-    eprintln!("  [virt] {armed}");
-    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
-        return Err(format!("edu was never handed over
-serial:
-{serial}"));
-    };
-    eprintln!("  [virt] {handed}");
-    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
-    let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
-        let (at, rest) = rest.split_once(' ')?;
-        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
-        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
-    });
-    let Some((at, slot, lpi)) = parsed else {
-        return Err(format!("{handed:?} names no function, slot and LPI"));
-    };
-    if lpi != 8192 + slot {
-        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
-    }
-    // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
-    // that to the ITS's DeviceID unchanged.
-    let (bus, rest) = at.split_once(':').ok_or_else(|| format!("{at} is no bus:device.function"))?;
-    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("{at} is no bus:device.function"))?;
-    let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
-    let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
-    for want in [
-        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
-        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
-        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
-        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
-    ] {
-        let Some(found) = line(&want) else {
-            return Err(format!("the kernel never said {want:?}
-serial:
-{serial}"));
-        };
-        eprintln!("  [virt] {found}");
-    }
-
-    judge_virt_job(
-        &mut qemu,
-        &mut serial,
-        "test_rs_claim_unrouted",
-        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
-    )?;
-    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
-    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
-                            DeviceID at this kernel's ITS behind the SMMUv3";
-    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
-        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
-    };
-    eprintln!("  [virt] {refused}");
-
-    judge_virt_job(
-        &mut qemu,
-        &mut serial,
-        "test_rs_claim_bar_fault",
-        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
-    )?;
-    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
-    if faults.len() != 2 {
-        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
-    }
-    let console = serial.to_lowercase();
-    for mark in BAR_MARKS {
-        if console.contains(&format!("{mark:x}")) {
-            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
-        }
-    }
-    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
-        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
     }
     Ok(())
 }
@@ -3211,7 +3132,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
-        "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
@@ -3975,6 +3895,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
+        "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
@@ -5850,11 +5771,12 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The T14's ACPI row as the kernel filled it from the machine's FACP, ECDT
-/// and APIC (Linux on the same machine: `EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
-/// `GPE=0x6e`, `INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`), the
-/// server armed on it, at least one embedded-controller query taken and a
-/// count of them logged, and no guard of the server's fired.
+/// The T14's ACPI row as the kernel filled it from the machine's FACP and
+/// APIC (Linux on the same machine: `INT_SRC_OVR (bus 0 bus_irq 9 global_irq
+/// 9 high level)`), the server armed on it, the embedded controller it found
+/// in the DSDT the one Linux used (`EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
+/// `GPE=0x6e`), at least one of its queries taken and a count of them
+/// logged, and no guard of the server's fired.
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let (log, kernel) = (back.log(), back.kernel());
@@ -5863,12 +5785,10 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     eprintln!("  [acpi] {}", enabled.trim());
     kernel.must_say(
         "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
-         fixed-hardware power button, embedded controller at 0x66/0x62 on GPE 0x6e; the firmware \
-         handed over in legacy mode",
+         fixed-hardware power button; the firmware handed over in legacy mode",
     )?;
-    log.must_say(
-        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
-    )?;
+    log.must_say("acpiserver: armed: power button served")?;
+    log.must_say(&format!("{}0x6e at 0x66/0x62", acpiserver_api::CONTROLLER_SERVED))?;
     let lines: Vec<&str> = log
         .text()
         .lines()

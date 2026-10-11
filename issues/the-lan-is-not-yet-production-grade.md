@@ -39,8 +39,9 @@ why, and the boot still leases.
   and raise it under traffic. Nothing has one, and
   `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` waits on it.
 - **Throughput** is measured against Ubuntu on the same machine and cable, with
-  line rate (about 940 Mb/s of TCP) as the target: interrupt moderation (off
-  today), ring sizes, checksum and segmentation offload.
+  line rate (about 940 Mb/s of TCP) as the target: interrupt moderation (a
+  fixed 128 µs throttle today, not adaptive), ring sizes, checksum and
+  segmentation offload.
 - **The part is handed back** in the state the next operating system and the
   management firmware that shares it expect. Ubuntu has had link after every
   ToyOS boot so far; that becomes a tested property.

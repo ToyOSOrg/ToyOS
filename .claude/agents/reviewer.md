@@ -113,10 +113,20 @@ if it meets the bar above; otherwise it is a NOTE.
   reader can check: that rule is a sentence in a prompt. What could be deleted, merged into what
   exists, or made smaller? An abstraction with one caller, a parameter with one value, dead code,
   code kept "just in case" or because nobody knows whether it is needed. Size is never bought with
-  a weaker check: a test is cut only when it tests nothing, when this prompt takes its rule, or
-  as **Guest tests** says. A compromise the branch found is removed or recorded in `issues/` with
-  an owner, evidence and an exit condition.
-- **Tests.** The refusals and the boundary, not the happy path.
+  a weaker check: a test is cut only when it tests nothing or is a measurement, when this prompt
+  takes its rule, or as **Guest tests** says. A compromise the branch found is removed or
+  recorded in `issues/` with an owner, evidence and an exit condition.
+- **Tests.** The refusals and the boundary, not the happy path. A test is hermetic, deterministic
+  and makes one claim, in setup, act and assert under a name that says the claim, and it reaches
+  no internet. However loaded the host, no guest test goes red: a guest test's only clock is a
+  hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
+  red past its bound. A measurement, a number held to no bound — throughput, latency, a
+  comparison against Ubuntu — is not a test: it is posted on the pull request as evidence and
+  never becomes a suite row. Another OS's or a reference implementation's output, recorded or
+  live, is an oracle only when it is committed with its provenance and read hermetically, and a
+  timing held to another's only when it was read on the same machine. A policy another OS chose is
+  never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source
+  states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
@@ -124,10 +134,10 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Guest tests.** A behaviour is tested on root `CLAUDE.md`'s cheapest tier that reaches it. A new
   guest test, or one whose behaviour changes, whose pull request body does not say why a type, a
   host test and a metal row cannot reach its behaviour is a BLOCKER, and so is one whose reason a
-  cheaper tier answers. A guest test is cut only where a cheaper tier already holds its behaviour,
-  named in the pull request body; where a stage of a track names it, in the same diff, with the
-  behaviour it guarded and an exit a build or test can fail; or as root `CLAUDE.md` deletes a red
-  or flaky test. Any other cut is a BLOCKER.
+  cheaper tier answers. A guest test is cut only where it is a measurement (**Tests**); where a
+  cheaper tier already holds its behaviour, named in the pull request body; where a stage of a
+  track names it, in the same diff, with the behaviour it guarded and an exit a build or test can
+  fail; or as root `CLAUDE.md` deletes a red or flaky test. Any other cut is a BLOCKER.
 - **Waits.** A flat wait, or defensive code that hides a failure instead of failing fast (root
   `CLAUDE.md`, "Fail fast"), is a BLOCKER, in code and in tests.
 - **Actuators.** A kernel static of any kind, atomic or `Lock`-wrapped, that an `actuator::` guard's

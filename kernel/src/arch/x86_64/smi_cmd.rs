@@ -30,7 +30,9 @@
 //! `issues/a-firmware-call-does-what-its-handler-chooses-and-the-kernel-bounds-only-the-call.md`'s.
 //!
 //! The port is this module's alone, so the `out` in [`answer`] is the only
-//! one the kernel can make to it, and [`answer`] reads which CPU it is on
+//! command the kernel can make to it, the reset's `out` aside where the
+//! FADT's reset register is this port (`power::reset`), which ends the
+//! machine; and [`answer`] reads which CPU it is on
 //! with interrupts closed beside that `out`: no caller's state decides it.
 //! It is counted there too, with the time it held the boot processor
 //! ([`counted`]), whoever asked for it.
@@ -38,7 +40,7 @@
 //! **The `acpi` claim's holder writes no byte here: it asks for one**, and the
 //! declaration says which bytes are never written for it
 //! (`toyos_userbound::Mediated::Command`): those the FADT gives a meaning,
-//! which are this kernel's own commands.
+//! which are this kernel's own commands and its reset's value.
 //!
 //! **None is made once the stop has begun**: the power-off waits out a write
 //! in flight ([`settle`]) and then owns the hardware, and an SMI it did not
@@ -50,7 +52,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Rel
 
 use toyos_userbound::{KeptCommands, Mediated, Ports, Undeclared};
 
-use super::pio::{self, Slot, TakenBack};
+use super::pio::{self, Declared, Slot, TakenBack};
 use super::{apic, cpu, percpu, IrqGuard};
 use crate::shootdown::Shootdown;
 use crate::sync::Lock;
@@ -113,9 +115,14 @@ impl fmt::Display for Written {
 /// Declare the port the FADT names, and the values it names for it. Boot's.
 /// The `acpi` claim's holder reads it and never writes it: a write is a
 /// command to the firmware, and [`write`] makes every one.
-pub fn declare(port: u16, named: [Option<u8>; 5]) -> Result<(), Undeclared> {
+pub fn declare(port: u16, named: [Option<u8>; 6]) -> Result<(), Undeclared> {
     PORT.set(pio::declare("SMI_CMD", Ports::one(port), Mediated::Command(KeptCommands(named)))?);
     Ok(())
+}
+
+/// The port, where [`declare`] declared one.
+pub fn declared() -> Option<Declared> {
+    PORT.get()
 }
 
 /// How many writes this CPU has made and the nanoseconds they held it, on
