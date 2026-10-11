@@ -9,6 +9,11 @@
 //! no `_STA` has none), and its static information is read once, from
 //! `_BIX` where it has one and `_BIF` where it has not (§10.2.2).
 //!
+//! The census line [`Power::find`] says counts the Global Lock's takes of
+//! the batteries' and adapters' own methods alone ([`Locked`]): the
+//! controller's `_REG` and the walk that named the devices ran before it,
+//! and are not theirs.
+//!
 //! **Every [`POLL`]** each battery's `_BST` and each adapter's `_PSR` are
 //! evaluated ([`Power::read`]), and a line is said on the first reading and
 //! wherever a battery's whole percent or state, or the adapter's, moved since
@@ -255,6 +260,16 @@ struct Battery {
     said: Option<(Option<u64>, u64)>,
 }
 
+/// The Global Lock as the host counted it across [`Power::find`]'s
+/// evaluations: the takes, the gives back, and the takes that found the
+/// firmware holding it.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Locked {
+    taken: u64,
+    given_back: u64,
+    contended: u64,
+}
+
 /// The machine's power sources, found once and read every [`POLL`].
 pub struct Power {
     batteries: Vec<Battery>,
@@ -264,6 +279,8 @@ pub struct Power {
     refused: Ledger,
     /// The last evaluation found the machine stopping.
     stopping: bool,
+    /// What `find`'s evaluations took of the Global Lock.
+    locked: Locked,
 }
 
 impl Power {
@@ -294,7 +311,7 @@ impl Power {
     /// reading, with `adapters`' (the devices [`crate::devices::find`] named
     /// by path); `None` where there is no battery to read.
     pub fn find<K: Kernel>(aml: &mut Aml<'_, K>, batteries: Vec<String>, adapters: Vec<String>) -> Option<Power> {
-        let mut power = Power { batteries: Vec::new(), adapters, ac_said: None, refused: Ledger::default(), stopping: false };
+        let mut power = Power { batteries: Vec::new(), adapters, ac_said: None, refused: Ledger::default(), stopping: false, locked: Locked::default() };
         let (takes, contended, given_back) = (aml.host.takes, aml.host.contended, aml.host.given_back);
         let count = batteries.len();
         for device in batteries {
@@ -342,13 +359,14 @@ impl Power {
                 println!("{line}");
             }
         }
+        power.locked = Locked { taken: aml.host.takes - takes, given_back: aml.host.given_back - given_back, contended: aml.host.contended - contended };
         let found = format!(
             "{present} of {count} control-method batteries present, {} AC adapter(s), with {} embedded controller attached; the Global Lock taken {} times on the way and given back {} times, the firmware found holding it by {} of the takes",
             power.adapters.len(),
             if aml.host.ec.is_some() { "an" } else { "no" },
-            aml.host.takes - takes,
-            aml.host.given_back - given_back,
-            aml.host.contended - contended,
+            power.locked.taken,
+            power.locked.given_back,
+            power.locked.contended,
         );
         if present == 0 {
             println!("acpiserver: {}{found}", acpiserver_api::NO_BATTERY);
@@ -422,6 +440,7 @@ pub mod tests {
     use crate::devices::{self, Found};
     use crate::ec::tests::Emulated;
     use crate::host::tests::{Scripted, EC_COMMAND, EC_DATA};
+    use crate::host::Take;
 
     use super::common;
     use common::{device, field, if_, index, int, lequal, method, op_region, package, ret, scope, skip, store, string, unit as field_unit};
@@ -437,10 +456,12 @@ pub mod tests {
     /// A laptop's namespace as §10.2.2, §10.3, §6.5.4 and §12.11 have one: an
     /// embedded controller at [`EC_DATA`] and [`EC_COMMAND`] whose `_REG`
     /// records that its space is there, in itself and, as the T14's writes
-    /// offset 0x03, in the controller; a battery below it whose `_STA` says
-    /// it is present only once `_REG` has run, whose `_BIX` is constant and
-    /// whose `_BST` selects a page of the controller's space with a write and
-    /// then reads it; and an adapter whose `_PSR` reads the controller.
+    /// offset 0x03, in the controller, and reads a byte of firmware memory
+    /// under the Global Lock; a battery below it whose `_STA` says it is
+    /// present only once `_REG` has run, whose `_BIX` is constant and whose
+    /// `_BST` reads that byte too, then selects a page of the controller's
+    /// space with a write and reads it; and an adapter whose `_PSR` reads
+    /// the controller.
     /// `glk` is the controller's `_GLK`, where it has one.
     fn laptop(glk: Option<u64>) -> Vec<u8> {
         let fields = [
@@ -491,11 +512,12 @@ pub mod tests {
                 crs(&[EC_DATA as u16, EC_COMMAND as u16]),
                 byte(b"_GPE", 3),
                 op_region("NVSR", 0x00, &int(NVS), &int(1)),
-                field("NVSR", 0x01, &[field_unit("NVSB", 8)]),
+                // ByteAcc, Lock (§20.2.5.2).
+                field("NVSR", 0x11, &[field_unit("NVSB", 8)]),
                 op_region("ECOR", 0x03, &int(0), &int(0x100)),
                 field("ECOR", 0x01, &fields),
                 common::def_name("ECOK", &int(0)),
-                method("_REG", 2, &if_(&lequal(&[0x68], &int(3)), &[store(&[0x69], b"ECOK"), store(&[0x69], b"REGS")].concat())),
+                method("_REG", 2, &if_(&lequal(&[0x68], &int(3)), &[store(b"NVSB", &[0x60]), store(&[0x69], b"ECOK"), store(&[0x69], b"REGS")].concat())),
                 glk.map_or(Vec::new(), |glk| common::def_name("_GLK", &int(glk))),
                 battery,
             ]
@@ -518,8 +540,8 @@ pub mod tests {
         space
     }
 
-    /// A byte of firmware memory `_BST` reads first, as real ones read their
-    /// NVS.
+    /// A byte of firmware memory `_REG` and `_BST` read first under the
+    /// Global Lock, as real ones read their NVS.
     const NVS: u64 = 0x7700_0000;
 
     /// The fixture's machine, its controller answering at its two ports.
@@ -598,6 +620,22 @@ pub mod tests {
         assert!(power.refused.is_empty() && aml.host.refused.is_empty());
         let asked = kernel.asked.borrow();
         assert!(asked.iter().all(|access| access.write == 0 || [EC_DATA, EC_COMMAND].contains(&access.address)), "the kernel was asked for a write but the controller's");
+    }
+
+    /// The census counts the Global Lock's takes of the battery's and
+    /// adapter's methods alone: `_BST`'s, which finds the firmware holding
+    /// it and waits out its release, and not the controller's `_REG`'s,
+    /// made as it was attached.
+    #[test]
+    fn the_census_counts_the_global_lock_of_the_power_sources_methods_alone() {
+        let kernel = laptop_machine(None);
+        *kernel.takes.borrow_mut() = [Take::Taken, Take::Pending, Take::Taken].into();
+        *kernel.releases.borrow_mut() = [true].into();
+        let (aml, power) = found(&kernel);
+        let power = power.expect("a battery");
+        assert_eq!(power.locked, Locked { taken: 1, given_back: 1, contended: 1 });
+        assert_eq!((aml.host.takes, aml.host.given_back, aml.host.contended), (2, 2, 1), "the controller's _REG took no lock of its own");
+        assert!(kernel.takes.borrow().is_empty() && kernel.releases.borrow().is_empty() && !kernel.held.get());
     }
 
     /// A line is said only where what it says moved: the percent, the state

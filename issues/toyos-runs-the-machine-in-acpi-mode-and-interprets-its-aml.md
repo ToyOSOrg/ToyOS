@@ -277,9 +277,11 @@ mediated access, leaves open:
   where the firmware holds the lock past 1 s** (`RELEASE`,
   `userland/acpiserver/src/host.rs`). The bound is this server's guess, not
   a measurement. The firmware is meant to hold the lock for the run of one
-  SMI handler, and no hold has been seen. The T14's battery read took the
-  lock 3 times, and the firmware held it for none of them. Linux's
-  `ff_gbl_lock` counter there read 0 at 2 minutes of uptime, and a reading
+  SMI handler, and no hold has been seen. On the T14 the load takes the
+  lock 241 times, the namespace's `_HID` walk, the controller's `_GLK` and
+  `_REG` and the battery's first read together 3 times, and the battery's
+  and adapter's methods alone none; the firmware held it for none of them.
+  Linux's `ff_gbl_lock` counter there read 0 at 2 minutes of uptime, and a reading
   after a longer session is still owed. A Lock field and an `Acquire(\_GL,
   0xFFFF)` take with no bound. An Acquire with a TimeoutValue waits that
   long, at most what the evaluation has left of its 10 s, and the
