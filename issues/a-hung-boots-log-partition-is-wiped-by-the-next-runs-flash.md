@@ -6,7 +6,7 @@ opened: 2026-09-16
 
 # A hung boot's log partition is wiped by the next run's flash, and survives only if something outside the loop read it first
 
-`src/metal.rs`'s `run` (`:1416`) is one sequence: `driver.flash(&image)` at
+`tests/metal/src/lib.rs`'s `run` is one sequence: `driver.flash(&image)` at
 `:1471`, the reboot at `:1475`, `ride_the_reboot` at `:1483`,
 `wait_for_the_stick` at `:1487`, `read_log` at `:1489` and, under
 `--fat32-check`, `raw_log` at `:1496`. `flash` (`:1000-1002`) is `wipefs --all`

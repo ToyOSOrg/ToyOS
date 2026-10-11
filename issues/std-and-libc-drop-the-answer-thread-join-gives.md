@@ -7,7 +7,7 @@ opened: 2026-09-27
 # std and libc drop the answer `thread_join` gives
 
 `sdk/std/sys/thread.rs`'s `Thread::join` and
-`userland/libc/src/pthread.rs`'s `pthread_join` call
+`sdk/libc/src/pthread.rs`'s `pthread_join` call
 `toyos_abi::syscall::thread_join` and discard what it returns. A join the
 kernel refuses — `NotFound` for a tid it never had or already collected,
 `Gone` for a cancelled wait — reads as a thread that finished. std's unix

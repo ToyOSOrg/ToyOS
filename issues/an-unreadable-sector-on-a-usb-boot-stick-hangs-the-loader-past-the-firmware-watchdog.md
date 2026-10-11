@@ -9,7 +9,7 @@ opened: 2026-09-28
 On stock edk2, a ROOT sector the USB boot stick fails with EIO stops the boot
 inside the loader's read of ROOT. The read did not return in 147 s, and the 60 s
 watchdog the loader arms at entry did not reset the machine.
-`bootloader/src/rootimage.rs`'s `read_root` leans on that watchdog "if the
+`loader/src/rootimage.rs`'s `read_root` leans on that watchdog "if the
 firmware honours it". This firmware did not.
 
 Measured on the dev host with Homebrew QEMU 11.1.1's own
@@ -54,8 +54,8 @@ this file is deleted.
 
 ## Owner
 
-`bootloader/src/rootimage.rs`'s `read_root` and the loader's watchdog in
-`bootloader/src/main.rs`; unheld.
+`loader/src/rootimage.rs`'s `read_root` and the loader's watchdog in
+`loader/src/main.rs`; unheld.
 
 **Its test is deleted**: `86e606616` took `root_chunk_refused_on_a_usb_stick`
 out.

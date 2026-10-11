@@ -8,7 +8,7 @@ opened: 2026-08-31
 
 Commit `09250c97` closed the design-debt entry over a hand-written
 `DeviceError::Failed` collapsing a refusal by sealing `DeviceError`'s
-variants behind a private `Sealed` witness (`bcachefs/src/block_io.rs:69-100`)
+variants behind a private `Sealed` witness (`lib/bcachefs/src/block_io.rs:69-100`)
 and stating the class was now "unrepresentable in safe code outside the
 crate rather than merely unused." Two `compile_fail` doctests back that —
 the old `.map_err(|_| DeviceError::Failed)` erasure, and naming `Sealed`
@@ -73,7 +73,7 @@ verdict with no transfer behind it stops being expressible.
 
 **Not attempted here, and the obstacle is object safety rather than size.**
 `DeviceError` itself is narrow — counted with `grep -c 'DeviceError'` over
-`bcachefs/src/*.rs`: `block_io.rs` 18, `fs.rs` 4, `lib.rs` 1, and **zero** in
+`lib/bcachefs/src/*.rs`: `block_io.rs` 18, `fs.rs` 4, `lib.rs` 1, and **zero** in
 `btree.rs`, `alloc_bitmap.rs` and `superblock.rs`. What threads through those
 files is `&dyn BlockIO`: `grep -o 'dyn BlockIO' | wc -l` gives `btree.rs` 12,
 `alloc_bitmap.rs` 10, `fs.rs` 3, `superblock.rs` 2 — **27 occurrences**. An

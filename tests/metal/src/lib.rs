@@ -1,0 +1,3236 @@
+//! `toyos-metal` — the loop that flashes ToyOS to a metal bench's stick, boots
+//! it once, and answers with [`toyos_build::bootlog`]'s verdict on what that boot
+//! wrote to the log partition.
+//!
+//! It runs on the development host and reaches the machine over `ssh`: the
+//! T14 unless `--host` names another bench, whose account's home holds the
+//! log's mount point.
+//! [`Target::words`] is the one place a root command line is written — the
+//! installed `/etc/sudoers.d/toyos-metal` and every argv are rendered from it —
+//! so the loop constructs no command outside [`JOBS`] but the one that puts
+//! that rule there, [`install_sudoers`], which the rule does not permit either.
+//!
+//! Two admission checks stand before any write: the image is a whole number of
+//! [`LBA`]-byte sectors carrying `EFI PART` in its final one, and the disk
+//! answers with the stick the machine's record names — the machine read by its
+//! SMBIOS first, and a machine with no record refused. A node is a whole SCSI or
+//! NVMe disk, `/dev/sd<letter>` or `/dev/nvme<n>n<m>`, and nothing else: the
+//! T14 is a playground whose internal NVMe ToyOS may be installed on and a
+//! broken driver may wipe, so it is nameable like the stick.
+//!
+//! Beside the loop: [`testargs`], the suite's command line, which carries the
+//! metal profile's flags; [`image`], the config a metal boot derives;
+//! [`timings`], each bench's record; and [`devices`], what a boot's reset says
+//! about itself.
+
+use std::fmt;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use toyos_build::bootlog;
+use toyos_build::disk::{whole_disk, Node, Unfit};
+use toyos_build::flags::{declare_flags, Flag};
+use toyos_build::image::LBA;
+
+use crate::timings::{Machine, Record, Stick};
+
+pub mod devices;
+pub mod image;
+pub mod testargs;
+pub mod timings;
+
+const CONNECT_SECS: u64 = 10;
+
+/// The port the machine's ssh server listens on, which is the protocol's own.
+const SSH_PORT: u16 = 22;
+
+/// How long the machine has to go quiet after `reboot`.
+const GOING_DOWN_SECS: u64 = 120;
+
+/// What the machine spends getting back to Ubuntu's ssh server once a ToyOS boot is over:
+/// the firmware's pass and Ubuntu's own boot.
+const RETURN_ALLOWANCE_SECS: u64 = 300;
+
+/// Every bound a metal boot runs under that its image does not carry, by the
+/// constant that arms it: the firmware's over the span before the handoff, the
+/// TCO the loader arms there and the kernel keeps feeding, and the panicked
+/// kernel's own over its panel.
+const WATCHDOG_BOUNDS_MS: &[u64] =
+    &[toyos_tco::FIRMWARE_BOUND_MS, toyos_tco::BOUND_MS, toyos_tco::PANIC_BOUND_MS];
+
+/// How long a machine flashed with an image armed with `deadline_ms` has to
+/// answer `ssh` again after `reboot`.
+///
+/// **Derived, because a literal is wrong the day any of it moves.** A boot is
+/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] and the
+/// kernel's own bound over the whole boot could have fired: that one is the
+/// image's, the only one that reaches a machine still executing and making no
+/// progress, and it outlasts the runner's bound over its list, which
+/// `toyos_tco::wedge_bound_ms` derives it from. [`RETURN_ALLOWANCE_SECS`] is
+/// what coming back costs after that.
+pub fn return_secs(deadline_ms: u64) -> u64 {
+    let longest = WATCHDOG_BOUNDS_MS.iter().copied().fold(deadline_ms, u64::max);
+    longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
+}
+
+/// How often the loop asks whether the machine is there.
+const POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long the boot stick gets to be there again once Ubuntu is up.
+///
+/// **The bench's own device is the one judge there is of whether a reset left a
+/// USB device its next host can enumerate.** Ten times the three seconds
+/// Ubuntu's whole enumeration — four addressing attempts and a port power cycle
+/// — spends before it gives up, so a stick this wait does not find is one the
+/// host has already finished refusing.
+pub const STICK_SECS: u64 = 30;
+
+/// The absolute paths `which` answered on the machine; sudo matches a path and
+/// not a name, so nothing here is spelled relatively.
+const DD: &str = "/usr/bin/dd";
+const EFIBOOTMGR: &str = "/usr/bin/efibootmgr";
+const MOUNT: &str = "/usr/bin/mount";
+const UMOUNT: &str = "/usr/bin/umount";
+const REBOOT: &str = "/usr/sbin/reboot";
+const TRUE: &str = "/usr/bin/true";
+const WIPEFS: &str = "/usr/sbin/wipefs";
+
+/// What the firmware loads off the stick's ESP.
+const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
+
+/// The three logind keys that keep a closed-lid machine awake.
+const LID_KEYS: &[&str] =
+    &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
+
+/// What `toyos-metal`'s last statement on its stderr opens with, past the
+/// printer's stamp, when it refuses: the harness reads the refusal back by it,
+/// to name it beside the exit status.
+pub const REFUSAL_HEAD: &str = "toyos-metal: ";
+
+/// The refusal a `toyos-metal` run's stderr ends on, from its [`REFUSAL_HEAD`]
+/// line to the end, or `None` where it said none. Only a statement's first line
+/// carries the stamp, so only that line is read past it.
+pub fn said_refusal(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let at = lines
+        .iter()
+        .rposition(|line| toyos_build::printer::unstamped(line).starts_with(REFUSAL_HEAD))?;
+    let mut said = vec![&toyos_build::printer::unstamped(lines[at])[REFUSAL_HEAD.len()..]];
+    said.extend(&lines[at + 1..]);
+    Some(said.join("\n").trim_end().to_string())
+}
+
+/// Every way this loop refuses, by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// The node is no whole disk's, or the image no whole disk's image.
+    Disk(Unfit),
+    /// A word that cannot be written into a sudoers rule unambiguously.
+    Word(String),
+    /// No `HOME`, so the default key path would be rooted at `/`.
+    NoHome,
+    /// The disk did not answer with the identity this loop was given.
+    Identity { field: &'static str, want: String, got: String },
+    File { path: String, why: String },
+    Table(String),
+    /// The table does not hold exactly one partition of a type the loop needs.
+    Partitions { what: &'static str, matched: u32 },
+    /// The image is armed with a parameter [`FLASHABLE`] does not clear.
+    Armed { name: String },
+    /// **The image carries no bound on its own boot.** Every metal image is
+    /// built with `boot-deadline=<ms>`; one without it is not a metal-staged
+    /// image, and flashing it puts the machine somewhere only a hand gets it out
+    /// of. `staged_a_wedge` is the sharpest form: an image that stops every CPU
+    /// on purpose and has nothing to end the boot it stopped.
+    NoBound { staged_a_wedge: bool },
+    /// **The outside judge's verdict on the volume the boot left.** What
+    /// `toyos-fat32-check` said about the log partition read straight off the
+    /// stick — the bytes, not a driver's opinion of them, and not the FAT32
+    /// implementation that wrote them.
+    Fat32(String),
+    /// The image puts a partition somewhere the installed rule does not name.
+    PartitionIndex { what: &'static str, want: u32, got: u32 },
+    /// What landed on the disk is not what the image says.
+    Landed { what: String, want: u64, got: u64 },
+    /// `efibootmgr` named no four-hex-digit boot entry.
+    BootEntry(String),
+    /// Creating the entry moved the firmware's boot order.
+    BootOrder { before: String, now: String },
+    Sudo(String),
+    /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
+    Lid { key: &'static str, got: String },
+    Remote { what: String, status: String, stderr: String },
+    /// The machine did not go down, or did not come back.
+    Silent { what: &'static str, secs: u64 },
+    /// The machine came back and the boot stick did not: the boot before this
+    /// left a USB device its next host cannot enumerate.
+    Stick { node: String, secs: u64 },
+    /// The log the boot left is not a passing boot's.
+    Log(bootlog::Unfit),
+    /// **The loader reported a record and booted no kernel.** Not the same thing
+    /// as an absent boot record, and the difference is the whole diagnosis: the
+    /// pass that reads the black box ends the chain by design, so a machine that
+    /// came back with `loader.log` carrying a reporting pass and `logkeeper` carrying
+    /// nothing did exactly what it was told — the question is why it had a
+    /// record to report at all.
+    ReportedAndBootedNothing { said: String },
+    /// **The last boot of this image was handed the machine and hung.** The
+    /// loader counts attempts on the stick, and this pass is the second of an
+    /// image whose first never reported — so it booted no kernel and handed the
+    /// machine back rather than starting the same hang again. What is owed is a
+    /// look at why that kernel stopped, and the boot before this one is where.
+    HungWithoutARecord,
+    /// **An image armed to stop itself did not, or was not ended by its own
+    /// bound.** Said only of an image carrying [`WEDGE_ARM`], for which
+    /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
+    /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
+    Wedge { why: &'static str },
+    /// The machine did not name itself: its SMBIOS answer is not
+    /// [`Machine::QUERY`]'s three lines.
+    Machine(String),
+    /// The account's home on the machine is no absolute path a rule can name.
+    Home(String),
+    /// The machine has no record, so no stick this loop may write.
+    Unrecorded { path: String },
+    /// The machine's record is there and does not read.
+    Record(String),
+    Usage(String),
+}
+
+impl Refusal {
+    /// Whether the machine failed rather than the loop: the boot is the subject
+    /// only once the stick is written and the reboot asked for.
+    pub fn about_the_boot(&self) -> bool {
+        matches!(
+            self,
+            Self::Silent { .. }
+                | Self::Stick { .. }
+                | Self::Log(_)
+                | Self::Fat32(_)
+                | Self::ReportedAndBootedNothing { .. }
+                | Self::HungWithoutARecord
+                | Self::Wedge { .. }
+        )
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disk(unfit) => write!(f, "{unfit}"),
+            Self::Word(got) => {
+                write!(f, "{got:?} cannot be written into a sudoers command line unambiguously")
+            }
+            Self::NoHome => write!(f, "no HOME, so there is no default key path; pass --key"),
+            Self::Identity { field, want, got } => {
+                write!(f, "the disk's {field} reads {got:?} where this loop was given {want:?}")
+            }
+            Self::File { path, why } => write!(f, "{path}: {why}"),
+            Self::Table(why) => write!(f, "the image carries no readable partition table: {why}"),
+            Self::Partitions { what, matched } => {
+                write!(f, "the image carries {matched} {what} partitions and this loop needs one")
+            }
+            Self::NoBound { staged_a_wedge } => write!(
+                f,
+                "the image carries no `{}<ms>` on its parameter line{}. Every image the \
+                 metal profile builds carries one, so this is not one of them — and a \
+                 flashed boot with no bound on itself is what this loop exists to prevent: \
+                 a kernel that stops making progress without panicking is bounded by \
+                 nothing else, and the machine has no power switch",
+                toyos_tco::DEADLINE_PARAM,
+                if *staged_a_wedge {
+                    ", and it stages a wedge that stops every CPU on purpose"
+                } else {
+                    ""
+                }
+            ),
+            Self::Fat32(said) => write!(
+                f,
+                "the log partition the boot left does not check out: {said}. This is \
+                 `toyos-fat32-check` reading the volume off the stick, so what it names is \
+                 what the kernel wrote and not what a driver read back"
+            ),
+            Self::Armed { name } => write!(
+                f,
+                "the image is armed with {name:?}, and nothing in this tree has ruled on whether \
+                 the machine survives it. Every parameter a flashed image carries needs a row \
+                 in `toyos_metal::FLASHABLE`"
+            ),
+            Self::PartitionIndex { what, want, got } => write!(
+                f,
+                "the image puts {what} at partition {got} where the installed rule names {want}"
+            ),
+            Self::Landed { what, want, got } => {
+                write!(f, "{what} on the disk is {got} where the image says {want}")
+            }
+            Self::BootEntry(saw) => {
+                write!(f, "efibootmgr named no four-hex-digit boot entry: {saw:?}")
+            }
+            Self::BootOrder { before, now } => write!(
+                f,
+                "creating the boot entry moved BootOrder from {before:?} to {now:?}: this loop \
+                 buys one boot with --bootnext and leaves the order alone"
+            ),
+            Self::Sudo(saw) => {
+                write!(f, "`sudo -n` on the machine did not answer: {saw}. Install the rule first")
+            }
+            Self::Lid { key, got } => write!(
+                f,
+                "logind's {key} reads {got:?} and not \"ignore\": the machine suspends on a \
+                 closed lid and no loop survives that"
+            ),
+            Self::Remote { what, status, stderr } => {
+                write!(f, "{what} on the machine {status}: {stderr}")
+            }
+            Self::Silent { what, secs } => write!(
+                f,
+                "the machine did not {what} within {secs} s, which is longer than every watchdog \
+                 a boot runs under plus the time coming back costs; why it did not is what the \
+                 panel and the log partition say, and neither is readable from here"
+            ),
+            Self::Stick { node, secs } => write!(
+                f,
+                "the machine came back and {node} did not, within {secs} s: the boot that just \
+                 ran left this USB device in a state its next host cannot enumerate, and a \
+                 physical replug is what clears one — see `usb 3-1: device descriptor read/64, \
+                 error -71` on the machine's own journal"
+            ),
+            Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
+            Self::Wedge { why } => write!(
+                f,
+                "this image is armed to stop itself, so it is judged by the record its own \
+                 deadline sealed and not by the word a shutdown writes — and {why}"
+            ),
+            Self::HungWithoutARecord => write!(
+                f,
+                "the last boot of this image was handed the machine and never reported: no panic, \
+                 no fault and no deliberate handover, which is a hang. This pass refused to \
+                 boot the same kernel again and gave the machine back, so the machine is free \
+                 and nothing needs a hand — but this boot measured no test, and why that kernel \
+                 stopped is the boot before it"
+            ),
+            Self::ReportedAndBootedNothing { said } => write!(
+                f,
+                "the loader reported a record and booted no kernel: `loader.log` carries a \
+                 pass that read the black box and ended the chain, and `logkeeper` wrote nothing \
+                 because nothing ran. This boot measured no test. What the pass said was: \
+                 {said}"
+            ),
+            Self::Machine(why) => write!(f, "the machine did not say what it is: {why}"),
+            Self::Home(got) => write!(
+                f,
+                "the account's home on the machine reads {got:?}, which is no normal absolute path \
+                 a sudoers rule can name"
+            ),
+            Self::Unrecorded { path } => write!(
+                f,
+                "this machine has no record at {path}, so nothing names the stick this loop may \
+                 write. Record it once, with the boot stick in: `cargo run -p toyos-metal -- \
+                 --install-sudoers <password file> --host <user>@<machine>` writes the record from \
+                 what the machine and the stick answer, and installs the rule"
+            ),
+            Self::Record(why) => write!(f, "the machine's record does not read: {why}"),
+            Self::Usage(why) => write!(f, "{why}"),
+        }
+    }
+}
+
+/// What `/sys/class/block/<disk>/` answered, in the order [`Target::identity`]
+/// asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Identity {
+    sectors: u64,
+    vendor: String,
+    model: String,
+    removable: bool,
+}
+
+impl Identity {
+    /// The four `sysfs` files as `cat` concatenates them. The trailing padding
+    /// is the SCSI inquiry's own: vendor and model are fixed-width fields.
+    fn parse(text: &str) -> Result<Self, Refusal> {
+        let fields: Vec<&str> = text.lines().map(str::trim).collect();
+        let [size, vendor, model, removable] = fields[..] else {
+            return Err(Refusal::Identity {
+                field: "the whole query",
+                want: "four lines".to_string(),
+                got: text.to_string(),
+            });
+        };
+        Ok(Self {
+            sectors: size.parse().map_err(|_| Refusal::Identity {
+                field: "size",
+                want: "a sector count".to_string(),
+                got: size.to_string(),
+            })?,
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            removable: removable == "1",
+        })
+    }
+
+    fn check(&self, want: &Stick) -> Result<(), Refusal> {
+        let no = |field, want: String, got: String| Refusal::Identity { field, want, got };
+        if self.sectors != want.sectors {
+            return Err(no("size", want.sectors.to_string(), self.sectors.to_string()));
+        }
+        if self.vendor != want.vendor {
+            return Err(no("vendor", want.vendor.clone(), self.vendor.clone()));
+        }
+        if self.model != want.model {
+            return Err(no("model", want.model.clone(), self.model.clone()));
+        }
+        if !self.removable {
+            return Err(no("removable", "1".to_string(), "0".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `disk` is the stick `machine`'s record in `dir` names: the one disk
+/// this loop writes on that machine.
+fn recorded_stick(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Stick, Refusal> {
+    let record = Record::load(dir, machine)
+        .map_err(Refusal::Record)?
+        .ok_or_else(|| Refusal::Unrecorded { path: dir.join(machine.file()).display().to_string() })?;
+    disk.check(&record.stick)?;
+    Ok(record.stick)
+}
+
+/// What a capture left: the machine's record, the stick it names, and whether
+/// this capture wrote it.
+#[derive(Debug, PartialEq, Eq)]
+struct Captured {
+    at: PathBuf,
+    stick: Stick,
+    wrote: bool,
+}
+
+impl Captured {
+    /// The capture's account of itself: the record, and the disk every later
+    /// run on this machine wipes and writes, by its node and its identity.
+    fn said(&self, node: &Node) -> String {
+        let Stick { sectors, vendor, model } = &self.stick;
+        format!(
+            "{} {}: the stick is {}, {sectors} sectors, {vendor} {model}, removable; every run on \
+             this machine wipes and writes that disk",
+            self.at.display(),
+            if self.wrote { "records this machine now" } else { "already recorded this machine" },
+            node.whole(),
+        )
+    }
+}
+
+/// Record `machine` with `disk` as its stick where it has no record, and check
+/// `disk` against the record where it has one. **It never moves a record**: a
+/// machine is re-recorded by deleting its file.
+fn record_machine(dir: &Path, machine: &Machine, disk: &Identity) -> Result<Captured, Refusal> {
+    let wrote = match Record::load(dir, machine).map_err(Refusal::Record)? {
+        Some(_) => false,
+        None => {
+            let stick =
+                Stick { sectors: disk.sectors, vendor: disk.vendor.clone(), model: disk.model.clone() };
+            // Before the write, so a fixed disk is never recorded as a stick.
+            disk.check(&stick)?;
+            Record::new(machine, stick).save(dir).map_err(Refusal::Record)?;
+            true
+        }
+    };
+    let stick = recorded_stick(dir, machine, disk)?;
+    Ok(Captured { at: dir.join(machine.file()), stick, wrote })
+}
+
+/// Declares every command this loop runs as root and the table the rule is
+/// rendered from out of one list, so a `Job` the rule does not carry cannot be
+/// written down.
+macro_rules! jobs {
+    ($($name:ident),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Job { $($name),+ }
+        const JOBS: &[Job] = &[$(Job::$name),+];
+    };
+}
+
+jobs!(Wipe, Flash, ReadLog, Create, Delete, BootNext, Mount, Umount, Reboot, Probe);
+
+/// One word of a root command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Word {
+    Is(String),
+    /// The four hex digits `efibootmgr` numbers a boot entry with: the rule
+    /// masks it, the argv fills it.
+    Hex4,
+}
+
+impl Word {
+    /// A literal this loop will neither shell-quote wrongly nor let sudo read
+    /// as a glob. Whitespace and the metacharacters are refused rather than
+    /// escaped: no command here needs one.
+    fn literal(text: &str) -> Result<Self, Refusal> {
+        let bad = |c: char| {
+            c.is_whitespace() || matches!(c, '*' | '?' | '[' | ']' | '#' | '!' | '"' | '\'')
+        };
+        if text.is_empty() || text.chars().any(bad) {
+            return Err(Refusal::Word(text.to_string()));
+        }
+        Ok(Self::Is(text.to_string()))
+    }
+
+    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and a `^` escaped once,
+    /// and a backslash four times — the page's "you must escape the backslash
+    /// twice", for the two levels of escaping it names, the sudoers parser's
+    /// and `fnmatch(3)`'s.
+    fn sudoers(&self) -> String {
+        match self {
+            Self::Is(text) => {
+                let mut out = String::new();
+                for c in text.chars() {
+                    match c {
+                        '\\' => out.push_str(r"\\\\"),
+                        ',' | ':' | '=' | '^' => {
+                            out.push('\\');
+                            out.push(c);
+                        }
+                        _ => out.push(c),
+                    }
+                }
+                out
+            }
+            Self::Hex4 => "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]".to_string(),
+        }
+    }
+}
+
+/// The account name as the rule's *user* field, which [`Word::sudoers`] cannot
+/// render: every character the two escape differently is refused, along with
+/// the four that carry meaning in that field — `,`, `:`, `%` and `+`.
+fn user_word(user: &str) -> Result<Word, Refusal> {
+    if user.contains([',', ':', '%', '+', '\\', '(', ')']) {
+        return Err(Refusal::Word(user.to_string()));
+    }
+    Word::literal(user)
+}
+
+/// One word as the machine's login shell must receive it: `ssh` hands the whole
+/// command to that shell, and what `sudo` matches is the argv the shell made.
+fn shell_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// The account's home on the machine, as its login shell answers [`Home::QUERY`]
+/// and never as a convention guesses it: the log is mounted and the rule staged
+/// under it, so no root command creates either and nothing lands in a
+/// world-writable directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Home(String);
+
+impl Home {
+    const QUERY: &str = "printf %s \"$HOME\"";
+
+    /// Normal and absolute, and one word a rule can name.
+    fn parse(text: &str) -> Result<Self, Refusal> {
+        let refused = || Refusal::Home(text.to_string());
+        Word::literal(text).map_err(|_| refused())?;
+        let rest = text.strip_prefix('/').ok_or_else(refused)?;
+        if rest.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            return Err(refused());
+        }
+        Ok(Self(text.to_string()))
+    }
+
+    /// Where the log partition is mounted.
+    fn mount(&self) -> String {
+        format!("{}/toyos-log", self.0)
+    }
+
+    /// Where the rule waits between `visudo -c` and `install`.
+    fn staged(&self) -> String {
+        format!("{}/.toyos-metal.sudoers", self.0)
+    }
+}
+
+/// Where the loop runs and what it may touch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    user: String,
+    host: String,
+    key: PathBuf,
+    node: Node,
+    /// The image's ESP, the partition the firmware is pointed at.
+    esp_part: u32,
+    /// The image's TOYOS-LOG partition, the one channel out of a metal boot.
+    log_part: u32,
+    /// The boot entry's label in the firmware's list.
+    label: String,
+}
+
+impl Target {
+    /// The T14 as the track names it, with the runner key this host holds.
+    fn t14() -> Result<Self, Refusal> {
+        let home = std::env::var_os("HOME").ok_or(Refusal::NoHome)?;
+        Ok(Self {
+            user: "t14".to_string(),
+            host: "t14".to_string(),
+            key: PathBuf::from(home).join(".ssh/id_ed25519_toyos_runner"),
+            node: Node::Scsi(b'a'),
+            esp_part: 1,
+            log_part: 3,
+            label: "ToyOS".to_string(),
+        })
+    }
+
+    /// **The one place a root command line is written.** The installed rule and
+    /// every argv are rendered from what this returns.
+    fn words(&self, job: Job, home: &Home) -> Result<Vec<Word>, Refusal> {
+        let node = self.node.whole();
+        let of = format!("of={node}");
+        let read_log = format!("if={}", self.node.partition(self.log_part));
+        let log = self.node.partition(self.log_part);
+        let esp = self.esp_part.to_string();
+        let literal =
+            |words: &[&str]| -> Result<Vec<Word>, Refusal> { words.iter().map(|w| Word::literal(w)).collect() };
+        let masked = |head: &[&str]| -> Result<Vec<Word>, Refusal> {
+            let mut words = literal(head)?;
+            words.push(Word::Hex4);
+            Ok(words)
+        };
+        match job {
+            Job::Wipe => literal(&[WIPEFS, "--all", &node]),
+            Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
+            // The log partition read whole, as bytes rather than as files: what
+            // `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
+            // `mount` has already had a driver's opinion about it. Read-only, and
+            // the partition is the only node named, spelled from the disk's.
+            Job::ReadLog => literal(&[DD, &read_log, "bs=4M"]),
+            // `--create-only`, never `--create`: the latter "add[s] to
+            // bootorder" (efibootmgr(8)) at the top, so the boot after the one
+            // `--bootnext` bought picks ToyOS again, and a job list whose one
+            // job is a reboot then loops.
+            Job::Create => literal(&[
+                EFIBOOTMGR,
+                "--create-only",
+                "--disk",
+                &node,
+                "--part",
+                &esp,
+                "--label",
+                &self.label,
+                "--loader",
+                LOADER,
+            ]),
+            Job::Delete => masked(&[EFIBOOTMGR, "--delete-bootnum", "--bootnum"]),
+            Job::BootNext => masked(&[EFIBOOTMGR, "--bootnext"]),
+            Job::Mount => literal(&[MOUNT, "-o", "ro", &log, &home.mount()]),
+            Job::Umount => literal(&[UMOUNT, &home.mount()]),
+            Job::Reboot => literal(&[REBOOT]),
+            Job::Probe => literal(&[TRUE]),
+        }
+    }
+
+    /// The rule, one line per job.
+    ///
+    /// **A command written with no arguments permits any arguments**
+    /// (`sudoers(5)`, "Command Arguments"), so a one-word job renders `""`.
+    fn sudoers(&self, home: &Home) -> Result<String, Refusal> {
+        let user = user_word(&self.user)?.sudoers();
+        let mut out =
+            String::from("# toyos-metal: the whole of what the metal loop runs as root.\n");
+        for job in JOBS {
+            let rendered: Vec<String> = self.words(*job, home)?.iter().map(Word::sudoers).collect();
+            let line = match rendered.len() {
+                1 => format!("{} \"\"", rendered[0]),
+                _ => rendered.join(" "),
+            };
+            out.push_str(&format!("{user} ALL=(root) NOPASSWD: {line}\n"));
+        }
+        Ok(out)
+    }
+
+    /// One job's argv, with `fill` substituted for the masked word: a job's mask
+    /// count and its caller must agree, and a `fill` that is not four hex digits
+    /// is a bad reading of `efibootmgr` rather than a bug here.
+    fn argv(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<Vec<String>, Refusal> {
+        let words = self.words(job, home)?;
+        let masked = words.iter().filter(|w| **w == Word::Hex4).count();
+        assert_eq!(masked, usize::from(fill.is_some()), "{job:?} takes {masked} filled word(s)");
+        words
+            .iter()
+            .map(|word| match word {
+                Word::Is(text) => Ok(text.clone()),
+                Word::Hex4 => {
+                    let fill = fill.unwrap_or_default();
+                    let hex = fill.len() == 4 && fill.bytes().all(|b| b.is_ascii_hexdigit());
+                    hex.then(|| fill.to_string())
+                        .ok_or_else(|| Refusal::BootEntry(fill.to_string()))
+                }
+            })
+            .collect()
+    }
+
+    /// One job as the machine's login shell must receive it.
+    fn remote(&self, job: Job, fill: Option<&str>, home: &Home) -> Result<String, Refusal> {
+        let words: Vec<String> = self.argv(job, fill, home)?.iter().map(|w| shell_word(w)).collect();
+        Ok(format!("sudo -n {}", words.join(" ")))
+    }
+
+    /// The one read that decides whether anything is written.
+    fn identity(&self) -> String {
+        let at = self.node.sysfs();
+        format!("cat {at}/size {at}/device/vendor {at}/device/model {at}/removable")
+    }
+
+    /// `ssh`'s argv without its own name, so a test reads the whole line.
+    fn ssh_argv(&self, command: &str) -> Vec<String> {
+        vec![
+            "-i".to_string(),
+            self.key.display().to_string(),
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            format!("ConnectTimeout={CONNECT_SECS}"),
+            format!("{}@{}", self.user, self.host),
+            command.to_string(),
+        ]
+    }
+}
+
+/// One partition of the image, in [`LBA`]-byte sectors — the unit `/sys`
+/// reports `start` and `size` for a disk in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Part {
+    index: u32,
+    start: u64,
+    sectors: u64,
+    guid: toyos_gpt::Guid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Flashable {
+    path: PathBuf,
+    bytes: u64,
+    esp: Part,
+    log: Part,
+}
+
+/// Every parameter the T14 survives — the boot ends and the machine is what it
+/// was — and nothing else reaches the stick.
+///
+/// **The metal profile flashes test images**, so an actuator is admissible here
+/// where `build::flashable_params` refuses it for the owner's own flash path.
+/// What is not admissible is an arm that would leave the machine changed where
+/// a flash cannot put it back: firmware state a reboot does not undo is a
+/// machine somebody has to open a lid to repair. The internal NVMe is not such
+/// state — the T14 is a playground, and a disk a broken driver wipes is a disk
+/// the next install writes again.
+///
+/// **A deny-list fails open on the next actuator**, so this is the whole
+/// judgement: an image armed with a name that has no row here is refused by
+/// that name rather than flashed on the assumption it is harmless.
+pub const FLASHABLE: &[&str] = &[
+    // The kernel's own boot parameters. Both are what a shipped image carries,
+    // and `build::flashable_params` already lets the owner flash them.
+    "watchdog",
+    "early-panel",
+    // It issues machine-wide TLB shootdowns from the BSP after the roster is
+    // released and before the idle loop, and reports how long each took. It
+    // reaches no device, writes no register outside `CR3`, and leaves nothing
+    // behind: the boot goes on to userland and ends the way an unarmed one does.
+    "tlb-shootdown-bench",
+    // **The in-kernel self-tests.** Each stages inputs the hardware cannot
+    // produce — a crafted PCI capability list, a malformed USB descriptor, a
+    // vector nothing claims — runs a check over them in memory and prints a
+    // count. None reaches a device register, none writes firmware state, and
+    // the boot goes on to userland and ends the way an unarmed one does; what
+    // an armed image leaves behind is a longer log.
+    "pci-cap-selftest",
+    "revoked-backing-selftest",
+    "leak-rollback-selftest",
+    "lapic-spurious-selftest",
+    "unclaimed-vector-selftest",
+    "xhci-xecp-selftest",
+    "xhci-descriptor-selftest",
+    // Two probes rather than staged inputs, and both are reads: the SS-reload
+    // one runs inside the first syscall's own context switch, and the input-core one merges
+    // events it made up itself.
+    "sysret-ss-probe",
+    "test-input-merge",
+    // Three nested `scheduler::Operation`s with known deadlines, in both homes,
+    // each printing what it asked for and what it observed. It establishes and
+    // drops them and reaches nothing else.
+    "sched-operation-nesting",
+    // Every IOMMU unit left translating, remapping and queueing just before the
+    // kernel programs it, which switches each of those off again first. It
+    // writes only the units' registers, which a reset returns to firmware, and
+    // tables in memory this boot owns.
+    "iommu-firmware-left",
+    // The DMAR's flags read with INTR_REMAP clear, so every IOMMU unit is left
+    // without interrupt remapping. It writes no register a reset does not
+    // return to firmware.
+    "iommu-no-remap",
+    // It seals this boot's own record under an identity one bit from this
+    // stick's, so the pass that finds it clears it and boots a kernel. The page
+    // is memory the loader allocated and the machine is what it was after.
+    FOREIGN_RECORD_ARM,
+    // **The one arm that deliberately stops this machine.** At the shutdown
+    // syscall, after the job list, every CPU stops taking scheduler passes.
+    // Admissible only because `kernel/src/deadline.rs` is what ends it, which
+    // [`arms_are_admissible`] refuses an image without: it reaches no device
+    // register, writes no firmware state, and the boot after it is ordinary.
+    WEDGE_ARM,
+    // **The other arm that deliberately stops this machine, and it stops one
+    // CPU harder.** It takes a lock of its own, clears `IF` on the last CPU and
+    // never gives either back, which is the state this machine hung in for
+    // 420 s. Admissible for the same reason as the row above and one more:
+    // `kernel/src/hardlockup` ends it at half the bound the image carries, and
+    // the boot deadline is still armed behind that. It reaches no device
+    // register and writes no firmware state; the kernel implies `WEDGE_ARM`
+    // behind it, so the boot cannot end itself before its own bound.
+    LOCKUP_ARM,
+    // **The arm that stops nothing and never stops writing**, so the reset
+    // lands on a controller that is moving bytes. Admissible for the rows
+    // above's reason and one more: every run is read first and written back
+    // byte for byte in the last eighth of the disk, once and never twice, so
+    // the medium is what it was and no partition a boot mounts is the subject;
+    // and the sweep is refused by name on a disk with no room for it.
+    LOAD_ARM,
+    // It withholds transfers to the boot stick so the transport breaks on
+    // purpose. Admissible because it writes nothing the stick did not already
+    // hold, reaches no firmware state, and the worst
+    // it leaves is a stick a replug clears — the defect the arm exists to stage.
+    "usb-transport-break",
+    // The kernel leaves the i8042 unprobed and a test process drives it through
+    // an `isa` claim: it reads the configuration byte, has the keyboard
+    // acknowledge `0xF4` and writes the byte back, each a command this kernel's
+    // own driver sends the controller on every boot. It reaches no firmware
+    // state, and firmware programs the controller again at the next power-on.
+    "i8042-withheld",
+    // The kernel leaves the Type-C xHCI controller to a claim, and `usbd`
+    // drives it through the unit: the handoff, a reset and its own rings, as
+    // this kernel's driver does every boot. Firmware owns neither of the
+    // T14's two (each reads `USBLEGSUP 0x01002201`, every SMI enable clear),
+    // and firmware takes the controller back at the next power-on. Only this
+    // id: the other controller carries the boot stick.
+    "xhci-leave=8086:9a13",
+];
+
+/// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
+/// [`arms_are_admissible`] refuses an image carrying it with no bound to end it.
+pub const WEDGE_ARM: &str = "wedge-before-reset";
+
+/// The arm that stops one CPU harder — interrupts off, inside a lock — which
+/// only `kernel/src/hardlockup`'s NMI sample reaches. A second name rather than
+/// a second judge: what it owes a readback is exactly what [`WEDGE_ARM`] owes,
+/// and which bound sealed the page is the page's own first line to say.
+pub const LOCKUP_ARM: &str = "hard-lockup-probe";
+
+/// The arm that leaves the machine to its bound with the bus busy rather than
+/// idle: it stops no CPU and never stops writing.
+pub const LOAD_ARM: &str = "usb-reset-under-load";
+
+/// Every arm that deliberately leaves this machine to be ended by a bound.
+///
+/// **One list and not a condition spelled out at each reader.** A further such
+/// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
+/// the word a shutdown writes — which it never reaches — so the reader that
+/// forgot it reds every boot it was staged for.
+pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
+
+/// The arm whose boot the pass after it reads as a hang on purpose: its record
+/// is sealed under another stick's identity, so that pass clears it and finds
+/// an attempt nothing reported, and hands the machine back.
+pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
+
+/// Whether this image is armed to stop itself, and so owes a sealed record
+/// rather than `Rebooting.`.
+pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
+}
+
+/// The `boot-deadline=` bound an image armed with `armed` carries, whose
+/// runner bounds its list at `list_ms`.
+pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
+    if stages_a_wedge(armed) {
+        toyos_tco::STAGED_BOUND_MS
+    } else {
+        toyos_tco::wedge_bound_ms(list_ms)
+    }
+}
+
+/// Whether this image is armed so the pass after its reset clears its record
+/// as another image's: nothing crosses on the page but the record's state, and
+/// that pass hands the machine back as a hang.
+pub fn clears_its_own_page(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| name.as_ref() == FOREIGN_RECORD_ARM)
+}
+
+/// Whether [`FLASHABLE`] clears `name`.
+pub fn flashable(name: &str) -> bool {
+    // The two parameters that carry a value are not names: the black-box page's
+    // address, which every image the harness builds has, and the boot
+    // deadline's bound. Neither arms an instrument, and the second is what ends
+    // a boot this loop would otherwise wait 360 s for and then need a hand on.
+    toyos_build::build::is_valued_param(name) || FLASHABLE.contains(&name)
+}
+
+/// The pre-flash gate: what the image is armed with, judged before it is
+/// written. Read off the image's own ESP, so it answers about the artifact
+/// rather than about whoever built it.
+fn arms_are_admissible(path: &Path) -> Result<(Vec<String>, u64), Refusal> {
+    let armed = toyos_build::image::params_of(path)
+        .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
+    let deadline_ms = judge_arms(&armed)?;
+    Ok((armed, deadline_ms))
+}
+
+/// The gate's decision, over the list alone — so it can be staged without an
+/// image, which is the only way the refusals below get a test at all. An
+/// admitted image answers with the bound on its own boot, in milliseconds,
+/// which is what the loop waits it out by.
+pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
+    // **Every flashed image carries a bound on its own boot, and this is the
+    // gate.** The bound was first asked for only of the image that stages a
+    // wedge, which is the sharpest case and not the only one: a kernel that
+    // stops making progress without panicking is bounded by nothing else, and a
+    // flashed boot with no bound is precisely what this loop exists to prevent —
+    // measured twice on the T14, once as a hang after the job list and once as
+    // a `--install-sudoers` that fell through into flashing an ordinary
+    // `target/bootable.img`, which has no job list and no deadline at all.
+    // A bound nothing can read is no bound: the kernel panics on it.
+    let Some(Ok(deadline_ms)) = toyos_tco::deadline_in(&armed.join(",")) else {
+        return Err(Refusal::NoBound { staged_a_wedge: stages_a_wedge(armed) });
+    };
+    match armed.iter().find(|name| !flashable(name)) {
+        Some(name) => Err(Refusal::Armed { name: name.clone() }),
+        None => Ok(deadline_ms),
+    }
+}
+
+/// [`whole_disk`], and exactly one partition of each of the three types at the
+/// numbers the installed rule names.
+fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
+    let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
+    let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
+    let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
+    one_partition(&mut file, toyos_gpt::Guid::TOYOS_ROOT, "TOYOS-ROOT")?;
+    for (what, got, want) in
+        [("the ESP", esp.index, target.esp_part), ("TOYOS-LOG", log.index, target.log_part)]
+    {
+        if got != want {
+            return Err(Refusal::PartitionIndex { what, want, got });
+        }
+    }
+    Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
+}
+
+/// The one partition of type `guid`, numbered as Linux numbers it: the entry
+/// index plus one.
+fn one_partition(
+    file: &mut std::fs::File,
+    guid: toyos_gpt::Guid,
+    what: &'static str,
+) -> Result<Part, Refusal> {
+    let mut out = [None; 2];
+    let scan = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(file), guid, &mut out)
+        .map_err(|e| Refusal::Table(format!("{e:?}")))?;
+    let part = toyos_build::image::one_partition_of(scan, out[0]).map_err(|e| match e {
+        toyos_build::image::OnePartitionError::Unplaced(unplaced) => {
+            Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}"))
+        }
+        toyos_build::image::OnePartitionError::Matched(matched) => Refusal::Partitions { what, matched },
+    })?;
+    Ok(Part {
+        index: part.index() + 1,
+        start: part.first_lba(),
+        sectors: part.lba_count().get(),
+        guid: part.unique_guid(),
+    })
+}
+
+/// What `dd` said of a copy on its own last line,
+/// `<bytes> bytes (…) copied, <secs> s, <rate>`.
+#[derive(Debug, Clone, PartialEq)]
+struct DdSaid {
+    bytes: u64,
+    secs: f64,
+}
+
+fn dd_said(stderr: &str) -> Option<DdSaid> {
+    let line = stderr.lines().find(|l| l.contains(" bytes ") && l.contains("copied"))?;
+    let bytes = line.split_whitespace().next()?.parse().ok()?;
+    let (_, after) = line.split_once("copied, ")?;
+    let (secs, _) = after.split_once(" s, ")?;
+    Some(DdSaid { bytes, secs: secs.parse().ok()? })
+}
+
+/// The id and the partition GUID of every entry `efibootmgr` lists under
+/// `label`, out of `Boot0027* ToyOS<tab>HD(1,GPT,<guid>,…)/File(…)`.
+fn entries_labelled(listing: &str, label: &str) -> Vec<(String, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("Boot")?;
+            let id = rest.get(..4)?;
+            if !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let named = rest.get(4..)?;
+            let named = named.strip_prefix('*').unwrap_or(named);
+            let (name, path) = named.trim_start().split_once('\t')?;
+            if name.trim() != label {
+                return None;
+            }
+            let guid =
+                path.split_once("HD(").and_then(|(_, hd)| hd.split(',').nth(2)).unwrap_or_default();
+            Some((id.to_string(), guid.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
+/// Every boot entry id a listing carries under `label`.
+fn ids(listing: &str, label: &str) -> Vec<String> {
+    entries_labelled(listing, label).into_iter().map(|(id, _)| id).collect()
+}
+
+/// The id a create left behind, or the refusal it earned: the order it must not
+/// have moved, and the entry it must have made.
+fn entry_after_create(
+    before: &str,
+    after: &str,
+    label: &str,
+    guid: &str,
+) -> Result<String, Refusal> {
+    let (was, now) = (boot_order(before), boot_order(after));
+    if was != now {
+        return Err(Refusal::BootOrder { before: was, now });
+    }
+    entries_labelled(after, label)
+        .into_iter()
+        .find(|(_, made)| made == guid)
+        .map(|(id, _)| id)
+        .ok_or_else(|| Refusal::BootEntry(after.trim().to_string()))
+}
+
+/// The firmware's boot order, out of `efibootmgr`'s `BootOrder:` line. Empty
+/// where there is none, which is a machine whose order this loop did not move
+/// either.
+fn boot_order(listing: &str) -> String {
+    listing
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("BootOrder:"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
+/// the last assignment of a key wins, and `Key = value` is legal spacing.
+fn lid_policy(text: &str) -> Result<(), Refusal> {
+    for key in LID_KEYS {
+        let got = text
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == *key).then(|| value.trim().to_string())
+            })
+            .next_back()
+            .unwrap_or_default();
+        if got != "ignore" {
+            return Err(Refusal::Lid { key, got });
+        }
+    }
+    Ok(())
+}
+
+/// The loop, over one target.
+struct Driver {
+    target: Target,
+    home: Home,
+    /// Print each write this run would make instead of making it; every read
+    /// still happens, or the rehearsal would be of a different loop.
+    dry_run: bool,
+}
+
+/// One command on `target`, as its account and never as root.
+fn ssh(target: &Target, what: &str, command: &str) -> Result<String, Refusal> {
+    let out = Command::new("ssh")
+        .args(target.ssh_argv(command))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| unstarted(what, &e))?;
+    answer(what, out).map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+impl Driver {
+    /// The loop over `target`, once the machine has said where its account's
+    /// home is.
+    fn reach(target: Target, dry_run: bool) -> Result<Self, Refusal> {
+        let home = Home::parse(&ssh(&target, "reading the account's home", Home::QUERY)?)?;
+        Ok(Self { target, home, dry_run })
+    }
+
+    fn ssh(&self, what: &str, command: &str) -> Result<String, Refusal> {
+        ssh(&self.target, what, command)
+    }
+
+    /// One root command, with `stdin` streamed into it. Announced either way,
+    /// and run only when this is not a dry run — which is what `None` means.
+    fn as_root(
+        &self,
+        what: &str,
+        job: Job,
+        fill: Option<&str>,
+        stdin: Option<&Path>,
+    ) -> Result<Option<Output>, Refusal> {
+        let line = self.target.remote(job, fill, &self.home)?;
+        println!("  {} {line}", if self.dry_run { "would run:" } else { "run:" });
+        if self.dry_run {
+            return Ok(None);
+        }
+        let mut command = Command::new("ssh");
+        command.args(self.target.ssh_argv(&line));
+        match stdin {
+            Some(path) => {
+                let file = std::fs::File::open(path).map_err(|e| Refusal::File {
+                    path: path.display().to_string(),
+                    why: e.to_string(),
+                })?;
+                command.stdin(Stdio::from(file));
+            }
+            None => {
+                command.stdin(Stdio::null());
+            }
+        }
+        let out = command.output().map_err(|e| unstarted(what, &e))?;
+        answer(what, out).map(Some)
+    }
+
+    /// The loop refuses to run at all until the rule is on the machine.
+    fn require_sudo(&self) -> Result<(), Refusal> {
+        let probe = self.target.remote(Job::Probe, None, &self.home)?;
+        self.ssh("sudo -n", &probe).map(|_| ()).map_err(|e| Refusal::Sudo(e.to_string()))
+    }
+
+    /// **The write is verified, not assumed**: a short local read ends `ssh`
+    /// and the remote `dd` exits 0 on the prefix it got, so `dd`'s own byte
+    /// count and then the table the kernel re-read are both compared. `wipefs`
+    /// first, because the stick outlives the image and its old backup GPT would
+    /// otherwise leave the firmware two tables.
+    ///
+    /// `None` is a dry run, which wrote nothing to time.
+    fn flash(&self, image: &Flashable) -> Result<Option<Flashed>, Refusal> {
+        let began = std::time::Instant::now();
+        self.as_root("wiping the old signatures", Job::Wipe, None, None)?;
+        let wipe = began.elapsed().as_secs_f64();
+        let began = std::time::Instant::now();
+        let out = self.as_root("flashing the stick", Job::Flash, None, Some(&image.path))?;
+        let Some(out) = out else { return Ok(None) };
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let dd = dd_said(&stderr).ok_or_else(|| Refusal::Remote {
+            what: "flashing the stick".to_string(),
+            status: "printed no byte count and seconds".to_string(),
+            stderr,
+        })?;
+        if dd.bytes != image.bytes {
+            let what = "the byte count dd reported".to_string();
+            return Err(Refusal::Landed { what, want: image.bytes, got: dd.bytes });
+        }
+        self.ssh("settling the new table", "udevadm settle")?;
+        for (name, part) in [("the ESP", image.esp), ("TOYOS-LOG", image.log)] {
+            let at = self.target.node.part_sysfs(part.index);
+            let read = self.ssh("reading the new table back", &format!("cat {at}/start {at}/size"))?;
+            let mut numbers = read.lines().map(str::trim).map(str::parse::<u64>);
+            let start = numbers.next().and_then(Result::ok).unwrap_or_default();
+            let sectors = numbers.next().and_then(Result::ok).unwrap_or_default();
+            for (what, want, got) in
+                [("first sector", part.start, start), ("sector count", part.sectors, sectors)]
+            {
+                if want != got {
+                    return Err(Refusal::Landed { what: format!("{name}'s {what}"), want, got });
+                }
+            }
+        }
+        Ok(Some(Flashed { wipe, flash: began.elapsed().as_secs_f64(), dd: dd.secs }))
+    }
+
+    /// The boot entry for *this* image's ESP. An entry carrying the label but
+    /// another partition's GUID names a partition that is gone — every
+    /// `--build-only` draws a fresh one — so it is deleted rather than reused.
+    fn boot_entry(&self, esp: &Part) -> Result<String, Refusal> {
+        let want = esp.guid.to_string().to_ascii_lowercase();
+        let ours = |listing: &str| {
+            entries_labelled(listing, &self.target.label)
+                .into_iter()
+                .partition::<Vec<_>, _>(|(_, guid)| *guid == want)
+        };
+        let listing = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        let (mine, stale) = ours(&listing);
+        if let Some((id, _)) = mine.first() {
+            return Ok(id.clone());
+        }
+        for (id, _) in stale {
+            self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
+        }
+        // Read after those deletions, because a delete takes its entry out of
+        // the order too: what the create is judged against is the state the
+        // create acts on.
+        let before = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        self.as_root("creating the boot entry", Job::Create, None, None)?;
+        // Read back rather than parsed out of the create's own output: the
+        // firmware's list is what the next command names, and one parser reads
+        // it.
+        let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        match entry_after_create(&before, &after, &self.target.label, &want) {
+            Ok(id) => Ok(id),
+            // A dry run created nothing, so `0000` stands for the id the
+            // firmware would have given it — the only value in the run that is
+            // not the real run's.
+            Err(Refusal::BootEntry(_)) if self.dry_run => Ok("0000".to_string()),
+            Err(refusal) => {
+                // Every entry this create added under the loop's own label,
+                // whatever partition it names: one left behind is one the next
+                // run inherits. A failure to clear it does not replace the
+                // refusal being answered.
+                let had: Vec<String> = ids(&before, &self.target.label);
+                for id in ids(&after, &self.target.label) {
+                    if had.contains(&id) {
+                        continue;
+                    }
+                    let what = "deleting the entry this create made";
+                    let _ = self.as_root(what, Job::Delete, Some(&id), None);
+                }
+                Err(refusal)
+            }
+        }
+    }
+
+    /// **`reboot` is `systemctl` and returns before the machine goes down**, so
+    /// the machine is watched down before it is watched back up: a probe that
+    /// caught dying Ubuntu would read a stick ToyOS had never booted. Answers
+    /// the wall seconds going down took, and the whole seconds coming back did.
+    fn ride_the_reboot(&self, secs: u64) -> Result<(f64, u64), Refusal> {
+        let began = std::time::Instant::now();
+        self.wait(GOING_DOWN_SECS, "go down", false)?;
+        let down = began.elapsed().as_secs_f64();
+        Ok((down, self.wait(secs, "come back", true)?))
+    }
+
+    /// Wait for the log partition's device node, and say how long it took.
+    ///
+    /// **A number and not an implication.** Whether the stick came back is what
+    /// the T14 alone can say about the ruling, and before this it was only ever
+    /// visible as `mount: special device /dev/sda3 does not exist` — a mount
+    /// that fails for a dozen other reasons too.
+    fn wait_for_the_stick(&self) -> Result<u64, Refusal> {
+        let node = self.target.node.partition(self.target.log_part);
+        let probe = format!("test -b {}", shell_word(&node));
+        let began = std::time::Instant::now();
+        loop {
+            if self.ssh("probing for the stick", &probe).is_ok() {
+                return Ok(began.elapsed().as_secs());
+            }
+            if began.elapsed().as_secs() >= STICK_SECS {
+                return Err(Refusal::Stick { node, secs: STICK_SECS });
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    /// [`wait_on`] the machine's `ssh`.
+    fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
+        let host = self.target.host.as_str();
+        wait_on(
+            secs,
+            what,
+            answering,
+            |within| port_accepts(host, SSH_PORT, within),
+            || self.ssh("probing", "true").is_ok(),
+        )
+    }
+
+    /// The loader's own file, and then everything `logkeeper` wrote, in name order:
+    /// a freshly flashed volume holds one boot's files, and its newest file
+    /// alone would miss the continuations `logkeeper` rotates into.
+    ///
+    /// Two strings and not one, because only the second is the boot's log and
+    /// [`bootlog::verdict`] is about that.
+    fn read_log(&self) -> Result<(String, String), Refusal> {
+        self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.home.mount())))?;
+        self.as_root("mounting the log partition", Job::Mount, None, None)?;
+        let read = self.read_mounted();
+        // Unconditional, because a failure in the read would otherwise leave
+        // the partition mounted and wedge the next run — and subordinate,
+        // because the read's failure is the one worth answering with.
+        let unmounted = self.as_root("unmounting the log partition", Job::Umount, None, None);
+        match (read, unmounted) {
+            (Ok(both), Ok(_)) => Ok(both),
+            (Ok(_), Err(umount)) => Err(umount),
+            (Err(read), Ok(_)) => Err(read),
+            (Err(read), Err(umount)) => Err(Refusal::Remote {
+                what: format!("reading the log ({read}), and then unmounting it"),
+                status: "both failed".to_string(),
+                stderr: umount.to_string(),
+            }),
+        }
+    }
+
+    fn read_mounted(&self) -> Result<(String, String), Refusal> {
+        let at = shell_word(&self.home.mount());
+        let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
+        let (loader, logkeeper) = bootlog::split_listing(&listing);
+        // Absence is an answer and not a failure: the boot is judged on what
+        // `logkeeper` wrote either way.
+        let loader = match loader {
+            Some(name) => self.cat(name)?,
+            None => format!("{}: the loader wrote none\n", bootlog::LOADER_LOG),
+        };
+        let mut text = String::new();
+        for name in logkeeper {
+            text.push_str(&self.cat(name)?);
+        }
+        Ok((loader, text))
+    }
+
+    /// The log partition read whole, as bytes.
+    ///
+    /// **The outside judge needs the volume and not a listing of it.** `read_log`
+    /// mounts read-only and `cat`s, so everything it can say has already been
+    /// filtered through a FAT driver — the same family of code that wrote the
+    /// volume. This reads the sectors.
+    fn raw_log(&self, sectors: u64) -> Result<Vec<u8>, Refusal> {
+        let line = self.target.remote(Job::ReadLog, None, &self.home)?;
+        println!("  run: {line}  ({sectors} sectors)");
+        let out = Command::new("ssh")
+            .args(self.target.ssh_argv(&line))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| unstarted("reading the log partition", &e))?;
+        let out = answer("reading the log partition", out)?;
+        let want = sectors * u64::from(LBA);
+        let got = out.stdout.len() as u64;
+        if got != want {
+            return Err(Refusal::Landed {
+                what: "the log partition read back off the stick".to_string(),
+                want,
+                got,
+            });
+        }
+        Ok(out.stdout)
+    }
+
+    fn cat(&self, name: &str) -> Result<String, Refusal> {
+        let file = shell_word(&format!("{}/{name}", self.home.mount()));
+        self.ssh("reading a log file", &format!("cat {file}"))
+    }
+}
+
+/// Poll once a [`POLL`] whether a port `accepts` a dial bounded by what it is
+/// handed, and say how long the machine took to answer as asked. **Coming back
+/// is `ssh` itself answering**: a port that accepts is only asked whether `ssh`
+/// `answers`, since a listener can come up before the service behind it.
+/// **Going down is a dial refused or unanswered for [`CONNECT_SECS`]**, what
+/// `ssh`'s own connect is given: a SYN lost while Ubuntu is still up would
+/// otherwise read as down, and the stick be read before ToyOS booted it.
+fn wait_on(
+    secs: u64,
+    what: &'static str,
+    answering: bool,
+    mut accepts: impl FnMut(std::time::Duration) -> bool,
+    mut answers: impl FnMut() -> bool,
+) -> Result<u64, Refusal> {
+    let dial = if answering { POLL } else { std::time::Duration::from_secs(CONNECT_SECS) };
+    let began = std::time::Instant::now();
+    while began.elapsed().as_secs() < secs {
+        let next = std::time::Instant::now() + POLL;
+        let listening = accepts(dial);
+        let answered = listening && (!answering || answers());
+        if answered == answering {
+            return Ok(began.elapsed().as_secs());
+        }
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+    }
+    Err(Refusal::Silent { what, secs })
+}
+
+/// Whether `host`'s `port` accepts a connection `within`; a name that does not
+/// resolve is a machine that is not there.
+fn port_accepts(host: &str, port: u16, within: std::time::Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, within).is_ok())
+}
+
+fn unstarted(what: &str, e: &std::io::Error) -> Refusal {
+    Refusal::Remote {
+        what: what.to_string(),
+        status: format!("could not be started: {e}"),
+        stderr: String::new(),
+    }
+}
+
+fn answer(what: &str, out: Output) -> Result<Output, Refusal> {
+    if out.status.success() {
+        return Ok(out);
+    }
+    Err(Refusal::Remote {
+        what: what.to_string(),
+        status: format!("exited {}", out.status),
+        stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    })
+}
+
+declare_flags!(METAL = {
+    IMAGE = "--image", Next;
+    HOST = "--host", Next;
+    KEY = "--key", Next;
+    DEVICE = "--device", Next;
+    INSTALL_SUDOERS = "--install-sudoers", Next;
+    READBACK = "--readback", Next;
+    FAT32_CHECK = "--fat32-check", None;
+    DRY_RUN = "--dry-run", None;
+});
+
+/// The flags that describe a boot, as against the ones that say which machine
+/// to reach: [`Args::parse`] refuses an `--install-sudoers` beside any of them.
+const ABOUT_A_BOOT: &[&Flag] = &[&DRY_RUN, &IMAGE, &READBACK, &FAT32_CHECK];
+
+/// What the binary was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Args {
+    /// **No default, and that is the second half of the fix.** A default was
+    /// something to fall through *to*: `--install-sudoers` installed the rule
+    /// and carried on into the ordinary loop with `target/bootable.img`, which
+    /// in one worktree was a 184 MB image with no job list and no bound. There
+    /// is nothing to fall through to now, and the gate below would refuse that
+    /// image anyway — the loop flashes metal-staged images and nothing else.
+    image: Option<PathBuf>,
+    target: Target,
+    dry_run: bool,
+    /// Where the account's password is read from, once, to install the rule.
+    ///
+    /// **An action of its own, and it writes no disk.** It records the machine
+    /// or checks its stick against the record, installs, checks with `visudo`,
+    /// says so and exits; every flag that describes a boot is a
+    /// usage refusal beside it. It used to fall through into the ordinary loop
+    /// with whatever `--image` defaulted to, and a reinstall in a worktree whose
+    /// `target/bootable.img` was a 184 MB image with no job list flashed that
+    /// image and booted the T14 into a boot that never ends.
+    install_sudoers: Option<PathBuf>,
+    /// The boot-describing flags this command line named, in the order given —
+    /// so a refusal can say which ones rather than that there were some.
+    about_a_boot: Vec<&'static str>,
+    /// Where the stick's two files and this boot's own facts are written, for a
+    /// judge that is not this process. Absent leaves the run's only account its
+    /// standard output, which no per-test predicate can be held to.
+    readback: Option<PathBuf>,
+    /// Read the log partition whole off the stick and hand it to
+    /// `toyos-fat32-check`. The outside judge, and the only reader of that
+    /// volume in this tree that is not the family of code that wrote it.
+    fat32_check: bool,
+}
+
+impl Args {
+    pub fn parse(args: &[String]) -> Result<Self, Refusal> {
+        let line = METAL.walk(args);
+        if let Some(word) = line.unknown.or_else(|| line.positionals.first().copied()) {
+            return Err(Refusal::Usage(format!(
+                "unknown argument {word:?}. toyos-metal accepts:\n{}",
+                METAL.usage()
+            )));
+        }
+        if let Some(why) = line.malformed() {
+            return Err(Refusal::Usage(why));
+        }
+        let value = |flag: &Flag| METAL.value(args, flag);
+        let mut out = Args {
+            image: value(&IMAGE).map(PathBuf::from),
+            target: Target::t14()?,
+            dry_run: METAL.present(args, &DRY_RUN),
+            install_sudoers: value(&INSTALL_SUDOERS).map(PathBuf::from),
+            about_a_boot: line
+                .seen
+                .iter()
+                .map(|seen| seen.flag.name)
+                .filter(|name| ABOUT_A_BOOT.iter().any(|flag| flag.name == *name))
+                .collect(),
+            readback: value(&READBACK).map(PathBuf::from),
+            fat32_check: METAL.present(args, &FAT32_CHECK),
+        };
+        if let Some(host) = value(&HOST) {
+            let (user, machine) = host_of(host)?;
+            out.target.user = user.to_string();
+            out.target.host = machine.to_string();
+        }
+        if let Some(key) = value(&KEY) {
+            out.target.key = PathBuf::from(key);
+        }
+        if let Some(node) = value(&DEVICE) {
+            out.target.node = Node::parse(node).map_err(Refusal::Disk)?;
+        }
+        // **`--install-sudoers` is an action, not a mode.** It installs the
+        // rule and exits; a command line that also describes a boot is asking
+        // for two things and would get both, which is how a reinstall came to
+        // flash whatever `--image` defaulted to.
+        if out.install_sudoers.is_some() && !out.about_a_boot.is_empty() {
+            return Err(Refusal::Usage(format!(
+                "--install-sudoers installs the rule and exits; it writes no disk and boots \
+                 nothing, so {} describes a boot it will not make. Run it alone, then run \
+                 the boot.",
+                out.about_a_boot.join(" and ")
+            )));
+        }
+        Ok(out)
+    }
+}
+
+/// `--host`'s `<user>@<machine>`, split. Neither half may open with `-`, which
+/// `ssh` takes for a flag.
+pub fn host_of(host: &str) -> Result<(&str, &str), Refusal> {
+    let usage = || Refusal::Usage(format!("--host wants <user>@<machine>, not {host:?}"));
+    let (user, machine) = host.split_once('@').ok_or_else(usage)?;
+    user_word(user)?;
+    Word::literal(machine)?;
+    if [user, machine].iter().any(|half| half.starts_with('-')) {
+        return Err(usage());
+    }
+    Ok((user, machine))
+}
+
+/// Set a machine up for the loop: its record, then the rule.
+///
+/// **The record before the rule**, so no rule is installed for a disk the
+/// record refuses. A machine with none is recorded with the disk the target
+/// names as its stick; one with a record has that disk checked against it.
+/// Either way it says which disk that is, and asks nothing: a bench holds
+/// nothing a wrong capture could lose, and the loop reaches no other machine.
+///
+/// The rule goes on with the account's password on one command's stdin and
+/// nowhere else — never in an argument, never in output.
+fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
+    let driver = Driver::reach(target.clone(), false)?;
+    let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
+        .map_err(Refusal::Machine)?;
+    let disk = Identity::parse(&driver.ssh("reading the disk", &target.identity())?)?;
+    println!("{}", record_machine(&timings::dir(), &machine, &disk)?.said(&target.node));
+    // Staged in the account's own home rather than in a world-writable /tmp,
+    // where another user could win the race between `visudo -c` and `install`.
+    let staged = shell_word(&driver.home.staged());
+    // Cleared whichever way the install went: a refused rule left behind is a
+    // file the next run would `visudo -c` instead of the one it just wrote.
+    let installed = stage_and_install(&driver, password, &staged);
+    let cleared = driver.ssh("clearing the staged rule", &format!("rm -f {staged}"));
+    installed.and(cleared)?;
+    println!("installed /etc/sudoers.d/toyos-metal");
+    Ok(())
+}
+
+/// `staged` is one shell word already.
+fn stage_and_install(driver: &Driver, password: &Path, staged: &str) -> Result<String, Refusal> {
+    let target = &driver.target;
+    let rule = target.sudoers(&driver.home)?;
+
+    let mut stage = Command::new("ssh")
+        .args(target.ssh_argv(&format!("umask 077 && cat > {staged}")))
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| unstarted("staging the rule", &e))?;
+    stage
+        .stdin
+        .take()
+        .expect("the pipe was just asked for")
+        .write_all(rule.as_bytes())
+        .map_err(|e| unstarted("staging the rule", &e))?;
+    let out = stage.wait_with_output().map_err(|e| unstarted("staging the rule", &e))?;
+    answer("staging the rule", out)?;
+    driver.ssh("checking the rule", &format!("/usr/sbin/visudo -c -f {staged}"))?;
+
+    // The password crosses this process as bytes on one pipe and reaches no
+    // argument, no formatter and no output; `sudo -S` reads one line, so the
+    // newline is supplied whether or not the file carries one.
+    let mut secret = std::fs::read(password)
+        .map_err(|e| Refusal::File { path: password.display().to_string(), why: e.to_string() })?;
+    while secret.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        secret.pop();
+    }
+    secret.push(b'\n');
+    let command = format!(
+        "sudo -S -p '' /usr/bin/install -m 0440 -o root -g root {staged} \
+         /etc/sudoers.d/toyos-metal"
+    );
+    let mut install = Command::new("ssh")
+        .args(target.ssh_argv(&command))
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| unstarted("installing the rule", &e))?;
+    install
+        .stdin
+        .take()
+        .expect("the pipe was just asked for")
+        .write_all(&secret)
+        .map_err(|e| unstarted("installing the rule", &e))?;
+    let out = install.wait_with_output().map_err(|e| unstarted("installing the rule", &e))?;
+    answer("installing the rule", out)?;
+    Ok(String::new())
+}
+
+/// The whole loop, answering this boot's own millisecond count. `None` is a
+/// dry run, which reaches no boot record because it wrote nothing.
+pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
+    // **First and last**: the rule is installed and this returns. Nothing below
+    // runs, no disk is touched and no machine is rebooted — which is what
+    // `Args::parse` refuses a boot-describing flag beside this one for.
+    if let Some(password) = &args.install_sudoers {
+        install_sudoers(&args.target, password)?;
+        return Ok(None);
+    }
+    let began = std::time::Instant::now();
+
+    let Some(asked) = &args.image else {
+        return Err(Refusal::Usage(String::from(
+            "--image names the image to flash, and there is no default: the loop flashes \
+             what the metal profile staged, and a default was something an action that \
+             boots nothing could fall through to",
+        )));
+    };
+    let image = admit(asked, &args.target)?;
+    // **Before the flash, and before anything can refuse.** Every refusal below
+    // returns without reaching `write_readback`, so a directory left holding the
+    // last run's files is one a judge reads as this run's — which is how a boot
+    // that never happened came back green.
+    if let Some(dir) = &args.readback {
+        clear_readback(dir)?;
+    }
+    println!(
+        "image {}: {} bytes, ESP p{} at {}+{}, log p{} at {}+{}",
+        image.path.display(),
+        image.bytes,
+        image.esp.index,
+        image.esp.start,
+        image.esp.sectors,
+        image.log.index,
+        image.log.start,
+        image.log.sectors
+    );
+    // The pre-flash gate, before the disk is even asked what it is: what this
+    // image will arm, judged against the only table that has ruled on any of it.
+    let (armed, deadline_ms) = arms_are_admissible(asked)?;
+    // Off the image and not off this build's constants: the bound is the
+    // artifact's, and the wait for it is as long as that boot can last.
+    let wait_secs = return_secs(deadline_ms);
+    println!(
+        "image {}: armed with {armed:?}, so it is waited {wait_secs} s to come back",
+        image.path.display()
+    );
+
+    let driver = Driver::reach(args.target.clone(), args.dry_run)?;
+    driver.require_sudo()?;
+    let policy =
+        driver.ssh("reading the lid policy", "systemd-analyze cat-config systemd/logind.conf")?;
+    lid_policy(&policy)?;
+    let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
+        .map_err(Refusal::Machine)?;
+    println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
+    let identity = Identity::parse(&driver.ssh("reading the disk", &args.target.identity())?)?;
+    recorded_stick(&timings::dir(), &machine, &identity)?;
+    println!(
+        "disk {}: {} sectors, {} {}, removable — the stick {} names",
+        args.target.node.whole(),
+        identity.sectors,
+        identity.vendor,
+        identity.model,
+        timings::dir().join(machine.file()).display()
+    );
+    let preamble = began.elapsed().as_secs_f64();
+
+    let flashed = driver.flash(&image)?;
+    let began = std::time::Instant::now();
+    let entry = driver.boot_entry(&image.esp)?;
+
+    driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
+    driver.as_root("rebooting", Job::Reboot, None, None)?;
+    let entry = began.elapsed().as_secs_f64();
+    if driver.dry_run {
+        driver.as_root("mounting the log partition", Job::Mount, None, None)?;
+        driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
+        println!("dry run: nothing was written and the machine was not rebooted");
+        return Ok(None);
+    }
+    let flashed = flashed.expect("only a dry run flashes nothing, and it has returned");
+
+    let (down, back) = driver.ride_the_reboot(wait_secs)?;
+    println!("the machine answered ssh again after {back} s");
+    // Before the mount, so the stick's own answer is a number rather than
+    // the reason a mount failed.
+    let stick = driver.wait_for_the_stick()?;
+    println!("the boot stick enumerated {stick} s after the machine answered");
+    let began = std::time::Instant::now();
+    let (loader, log) = driver.read_log()?;
+    let read_log = began.elapsed().as_secs_f64();
+    print!("{loader}{log}");
+    // The outside judge, and it runs before the verdict: a volume this
+    // cannot read is a finding about what the boot wrote, and the reason to
+    // read the sectors rather than the mount is that a mount has already
+    // had a FAT driver's opinion about them.
+    let began = std::time::Instant::now();
+    if args.fat32_check {
+        let bytes = driver.raw_log(image.log.sectors)?;
+        if let Some(dir) = &args.readback {
+            let at = dir.join(READBACK_VOLUME);
+            std::fs::write(&at, &bytes).map_err(|e| Refusal::File {
+                path: at.display().to_string(),
+                why: e.to_string(),
+            })?;
+        }
+        let complaints = toyos_fat32_check::check(&bytes);
+        if !complaints.is_empty() {
+            return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
+        }
+        println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
+    }
+    let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
+    let phases = Phases {
+        preamble,
+        wipe: flashed.wipe,
+        flash: flashed.flash,
+        dd_secs: flashed.dd,
+        entry,
+        down,
+        read_log,
+        raw_log,
+    };
+    println!("phases: {phases}");
+    let boot = BootFile { back, stick, machine, phases }.text();
+    judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
+}
+
+/// What [`Driver::flash`] took, on a run that was no rehearsal.
+struct Flashed {
+    wipe: f64,
+    /// The write and the table read back after it.
+    flash: f64,
+    /// `dd`'s own seconds for the write.
+    dd: f64,
+}
+
+/// This boot's verdict, **judged before the readback is written, and written
+/// into it**, so a judge reading the directory later reads the verdict this
+/// run returns.
+fn judge_and_write_readback(
+    armed: &[String],
+    loader: &str,
+    log: &str,
+    readback: Option<&Path>,
+    boot: &str,
+) -> Result<u64, Refusal> {
+    let verdict = boot_verdict(armed, loader, log);
+    if let Some(dir) = readback {
+        write_readback(dir, loader, log, boot, &verdict_file(verdict.as_ref().err()))?;
+        println!("readback written to {}", dir.display());
+    }
+    verdict
+}
+
+/// The stick's own verdict on one boot, off what its image is armed with, the
+/// loader's file and the log.
+fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusal> {
+    let staged_hang = clears_its_own_page(armed);
+    // **Named by evidence, before the boot record is missed.** A boot that
+    // never happened and a boot that failed both leave no `Boot: complete`,
+    // and `Unfit::NoBootRecord` says the second where it is often the first.
+    // The loader's own file is what tells them apart: a pass that read the
+    // black box says so and ends the chain, and this is the only way a
+    // machine can come back with a whole `loader.log` and an empty kernel one.
+    // **First, because it is the one refusal that is not a machine needing a
+    // hand.** The loader bounded a hang and gave the machine back; every
+    // other reading of an empty kernel log would send a reader to the wrong
+    // place, and `NoBootRecord` would send them to a kernel that never ran.
+    if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) && !staged_hang {
+        return Err(Refusal::HungWithoutARecord);
+    }
+    if let Some(said) = reported_and_booted_nothing(loader, log) {
+        return Err(Refusal::ReportedAndBootedNothing { said });
+    }
+    // **An image armed to stop itself is judged by the record its own bound
+    // sealed, not by the word a shutdown writes.** Read off what the image
+    // is armed with rather than off its label or its readback directory: the
+    // arm comes out of the artifact, so no boot can be judged as something
+    // it was not flashed as. *Which* bound sealed it is the page's to say
+    // and not this list's — the arm says a bound was staged, and two of them
+    // can reach a staged boot.
+    if stages_a_wedge(armed) {
+        return wedged_boot(loader, log);
+    }
+    let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
+    if staged_hang {
+        bootlog::foreign_done(loader).map_err(Refusal::Log)?;
+    } else {
+        bootlog::handed_back(loader).map_err(Refusal::Log)?;
+    }
+    Ok(ms)
+}
+
+/// What an image armed to stop itself owes instead of `Rebooting.`, and the
+/// `Boot: complete` it still owes as well.
+///
+/// **Both halves, because either alone passes for the wrong reason.** A boot
+/// that reached `Rebooting.` was never wedged, and a boot with no sealed record
+/// is one somebody's hand ended — which is the whole thing these arms exist to
+/// prove cannot happen any more.
+///
+/// **The record's own first line is what says which bound ended the machine**,
+/// and nothing else may: an arm staged for one of them is still a machine the
+/// other can reach first, and the T14 read back a `hard-lockup-probe` boot as a
+/// failure for exactly that reason — this judge knew one line and the page
+/// carried the other.
+fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
+    if bootlog::handed_back(loader).is_ok() {
+        return Err(Refusal::Wedge {
+            why: "it reached the shutdown's own last word, so nothing about it was wedged",
+        });
+    }
+    let Some(said) = sealed_by(loader) else {
+        return Err(Refusal::Wedge {
+            why: "the pass after the reset reports neither of this kernel's bounds, so what \
+                  ended this boot was not one of them",
+        });
+    };
+    let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
+        why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase these \
+              bounds are armed for",
+    })?;
+    println!("{}", said.trim_start_matches("| ").trim());
+    Ok(ms)
+}
+
+/// The line the pass after the reset printed about whichever bound sealed the
+/// page, or `None` where it printed neither.
+fn sealed_by(loader: &str) -> Option<&str> {
+    loader
+        .lines()
+        .find(|l| l.contains(bootlog::DEADLINE_EXPIRED) || l.contains(bootlog::LOCKED_UP))
+}
+
+/// The lateness of a deadline that expired, in milliseconds past the bound it
+/// was armed with, out of the line the pass after the reset printed; `None` on
+/// a boot whose deadline did not expire.
+///
+/// **Counted from the kernel's own record of arming it** (`log`): the bound
+/// runs from the arm and the expiry is quoted since boot, so the difference
+/// alone is the boot's first tens of milliseconds and not the poll's lateness.
+/// Signed, because both instants are floored milliseconds: an expiry at its
+/// bound can read one early, and one before it is a reading, not an absence.
+pub fn deadline_lateness_ms(loader: &str, log: &str) -> Option<Result<i64, String>> {
+    let said = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED))?;
+    let fields = || {
+        let (_, rest) = said.split_once("a bound of ")?;
+        let (bound, rest) = rest.split_once(" ms, reached at ")?;
+        let (reached, _) = rest.split_once(" ms,")?;
+        Some((bound.parse::<i64>().ok()?, reached.parse::<i64>().ok()?))
+    };
+    let armed = || {
+        let line = log.lines().find(|line| line.contains(bootlog::DEADLINE_ARMED))?;
+        i64::try_from(bootlog::record_millis(line)?).ok()
+    };
+    Some(match (fields(), armed()) {
+        (Some((bound, reached)), Some(armed)) => Ok(reached - armed - bound),
+        (None, _) => Err(format!("{said:?} is not the expiry the kernel writes")),
+        (_, None) => Err(format!(
+            "the deadline expired and this boot's log carries no {:?} record to count its bound \
+             from",
+            bootlog::DEADLINE_ARMED
+        )),
+    })
+}
+
+/// What the kernel's stop wrote about itself in `text`: the loader's pass after
+/// the reset, which prints the tail the stop sealed.
+///
+/// `None` on a boot that wrote none, which is every boot that reset without
+/// going through `quiesce`.
+pub fn park(text: &str) -> Option<toyos_quiesce::Record> {
+    text.lines().find_map(toyos_quiesce::Record::parse)
+}
+
+/// The same for the other bound: how far past its own bound the hard-lockup
+/// sample was when it found the CPU stuck.
+///
+/// **A number of its own and not [`deadline_lateness_ms`]'s**, because what
+/// bounds it is a different thing: this one lands within one of that detector's
+/// sample periods rather than within one timer period.
+pub fn lockup_lateness_ms(loader: &str) -> Option<Result<i64, String>> {
+    let said = loader.lines().find(|l| l.contains(bootlog::LOCKED_UP))?;
+    let fields = || {
+        let (_, rest) = said.split_once("has taken no interrupt for ")?;
+        let (reached, rest) = rest.split_once(" ms,")?;
+        let (_, rest) = rest.split_once("Its bound is ")?;
+        let (bound, _) = rest.split_once(" ms")?;
+        Some(reached.parse::<i64>().ok()? - bound.parse::<i64>().ok()?)
+    };
+    Some(fields().ok_or_else(|| format!("{said:?} is not the lockup record the kernel writes")))
+}
+
+/// What the two files and this boot's own facts are called under `--readback`.
+///
+/// **Written here rather than parsed back out of this program's output**: a
+/// judge that split one stream into a loader half and a kernel half would be
+/// guessing where one ended, and the guess is wrong on the boot that says
+/// something unusual — which is every boot a per-test predicate is for.
+pub const READBACK_LOADER: &str = "loader.log";
+pub const READBACK_KERNEL: &str = "kernel.log";
+pub const READBACK_BOOT: &str = "boot.txt";
+
+/// The loop's own verdict on the boot: [`PASSED`], or [`REFUSED`] and the
+/// refusal on the lines after it. Written last, so a directory holding it holds
+/// the whole readback, and read by every judge of it, so a run judging these
+/// files later rules on the boot as the run that wrote them did.
+pub const READBACK_VERDICT: &str = "verdict.txt";
+const PASSED: &str = "passed";
+const REFUSED: &str = "refused";
+
+/// [`READBACK_VERDICT`]'s text.
+pub fn verdict_file(refused: Option<&Refusal>) -> String {
+    match refused {
+        None => format!("{PASSED}\n"),
+        Some(why) => format!("{REFUSED}\n{why}\n"),
+    }
+}
+
+/// The loop's verdict a readback carries: `Err` with the refusal's own words
+/// for a boot it refused, or with why the file says neither.
+pub fn loop_verdict(text: &str) -> Result<(), String> {
+    match text.split_once('\n') {
+        Some((PASSED, "")) => Ok(()),
+        Some((REFUSED, why)) if !why.trim().is_empty() => Err(why.trim_end().to_string()),
+        _ => Err(format!(
+            "{READBACK_VERDICT} reads {text:?}, which is neither {PASSED:?} nor {REFUSED:?} and a \
+             reason"
+        )),
+    }
+}
+
+/// The log partition's own bytes, kept beside them under `--fat32-check`: what
+/// the outside judge read, so a complaint can be looked at rather than retold.
+pub const READBACK_VOLUME: &str = "log-partition.img";
+
+/// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
+pub const BACK_SECS: &str = "back_secs";
+pub const STICK_SECS_KEY: &str = "stick_secs";
+
+/// The machine the boot ran on, as [`Machine::QUERY`] answered before the flash.
+pub const VENDOR_KEY: &str = "machine_vendor";
+pub const PRODUCT_KEY: &str = "machine_product";
+pub const BIOS_KEY: &str = "machine_bios";
+
+/// [`Phases`]' keys, each in wall seconds; [`RAW_LOG_KEY`] reads [`NOT_READ`]
+/// on a run that read no volume.
+const PREAMBLE_KEY: &str = "preamble_secs";
+const WIPE_KEY: &str = "wipe_secs";
+const FLASH_KEY: &str = "flash_secs";
+const DD_SECS_KEY: &str = "dd_secs";
+const ENTRY_KEY: &str = "entry_secs";
+const DOWN_KEY: &str = "down_secs";
+const READ_LOG_KEY: &str = "read_log_secs";
+const RAW_LOG_KEY: &str = "raw_log_secs";
+const NOT_READ: &str = "-";
+
+/// Where one run of the loop spent its wall time, by the host's clock, phase
+/// by phase; coming back and the stick are [`BACK_SECS`] and
+/// [`STICK_SECS_KEY`]. Any save of the log partition before the flash is no
+/// phase of this loop's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phases {
+    /// Admitting the image, then the account's home, the rule, the lid policy,
+    /// the machine and the disk read off the machine.
+    pub preamble: f64,
+    pub wipe: f64,
+    /// `dd` over `ssh`, and the table read back.
+    pub flash: f64,
+    /// What `dd` itself said of the write. It reads `ssh`'s stdin, so this is
+    /// whichever of the wire and the stick is slower, and splits neither out.
+    pub dd_secs: f64,
+    /// The boot entry, `--bootnext` and `reboot`.
+    pub entry: f64,
+    pub down: f64,
+    pub read_log: f64,
+    /// The volume read whole and the outside judge's check of it; `None` on a
+    /// run without `--fat32-check`.
+    pub raw_log: Option<f64>,
+}
+
+impl fmt::Display for Phases {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "preamble {:.1} s, wipe {:.1} s, flash {:.1} s (dd {:.1} s), entry {:.1} s, down {:.1} \
+             s, read_log {:.1} s, raw_log ",
+            self.preamble,
+            self.wipe,
+            self.flash,
+            self.dd_secs,
+            self.entry,
+            self.down,
+            self.read_log
+        )?;
+        match self.raw_log {
+            Some(secs) => write!(f, "{secs:.1} s"),
+            None => f.write_str(NOT_READ),
+        }
+    }
+}
+
+/// [`READBACK_BOOT`]'s content: what the host measured about the boot, and the
+/// machine it ran on.
+pub struct BootFile {
+    pub back: u64,
+    pub stick: u64,
+    pub machine: Machine,
+    pub phases: Phases,
+}
+
+impl BootFile {
+    pub fn text(&self) -> String {
+        let Self { back, stick, machine, phases } = self;
+        let secs = |s: f64| format!("{s:.3}");
+        let rows = [
+            (BACK_SECS, back.to_string()),
+            (STICK_SECS_KEY, stick.to_string()),
+            (VENDOR_KEY, machine.vendor.clone()),
+            (PRODUCT_KEY, machine.product.clone()),
+            (BIOS_KEY, machine.bios.clone()),
+            (PREAMBLE_KEY, secs(phases.preamble)),
+            (WIPE_KEY, secs(phases.wipe)),
+            (FLASH_KEY, secs(phases.flash)),
+            (DD_SECS_KEY, secs(phases.dd_secs)),
+            (ENTRY_KEY, secs(phases.entry)),
+            (DOWN_KEY, secs(phases.down)),
+            (READ_LOG_KEY, secs(phases.read_log)),
+            (RAW_LOG_KEY, phases.raw_log.map_or_else(|| NOT_READ.to_string(), secs)),
+        ];
+        rows.iter().map(|(name, value)| format!("{name} {value}\n")).collect()
+    }
+}
+
+/// The phases a readback names, or why it names none.
+pub fn phases(text: &str) -> Result<Phases, String> {
+    let named = |name: &str| word(text, name).ok_or_else(|| format!("names no `{name}`"));
+    let secs = |name: &str| -> Result<f64, String> {
+        let got = named(name)?;
+        got.parse().map_err(|_| format!("reads `{name} {got}`, which is no count of seconds"))
+    };
+    Ok(Phases {
+        preamble: secs(PREAMBLE_KEY)?,
+        wipe: secs(WIPE_KEY)?,
+        flash: secs(FLASH_KEY)?,
+        dd_secs: secs(DD_SECS_KEY)?,
+        entry: secs(ENTRY_KEY)?,
+        down: secs(DOWN_KEY)?,
+        read_log: secs(READ_LOG_KEY)?,
+        raw_log: match named(RAW_LOG_KEY)?.as_str() {
+            NOT_READ => None,
+            _ => Some(secs(RAW_LOG_KEY)?),
+        },
+    })
+}
+
+/// Every file a readback directory carries, so a run that writes none of them
+/// leaves none of the last run's behind.
+pub const READBACK_FILES: &[&str] = &[
+    READBACK_LOADER,
+    READBACK_KERNEL,
+    READBACK_BOOT,
+    READBACK_VERDICT,
+    READBACK_VOLUME,
+];
+
+/// Empty a readback directory, before this run can leave any of it standing.
+///
+/// **A file that is still there after this ran is one this boot wrote.**
+/// [`write_readback`] is reached only after the machine came back and the stick
+/// was read, so every refusal before it — a machine that never returned, a
+/// stick that never enumerated, a volume the outside judge complained about —
+/// used to leave the *previous* run's `kernel.log` in place for a judge that
+/// cannot tell one boot's file from another's.
+pub fn clear_readback(dir: &Path) -> Result<(), Refusal> {
+    for name in READBACK_FILES {
+        let at = dir.join(name);
+        match std::fs::remove_file(&at) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Refusal::File {
+                    path: at.display().to_string(),
+                    why: e.to_string(),
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_readback(
+    dir: &Path,
+    loader: &str,
+    log: &str,
+    boot: &str,
+    verdict: &str,
+) -> Result<(), Refusal> {
+    let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
+        std::fs::write(path, text)
+            .map_err(|e| Refusal::File { path: path.display().to_string(), why: e.to_string() })
+    };
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
+    wrote(&dir.join(READBACK_LOADER), loader)?;
+    wrote(&dir.join(READBACK_KERNEL), log)?;
+    wrote(&dir.join(READBACK_BOOT), boot)?;
+    wrote(&dir.join(READBACK_VERDICT), verdict)
+}
+
+/// Whether this boot was a loader pass that reported a record and booted no
+/// kernel, and what that pass said if so.
+///
+/// **Three things together, and no one of them alone.** `loader.log` carries a
+/// pass that ended the chain; the loader never reached its handoff line, which
+/// is what a pass that *did* boot a kernel writes; and the kernel log carries no
+/// boot record. A boot whose kernel died early has the handoff line and no
+/// chain-end; a boot that panicked has both, and a `logkeeper` file besides.
+///
+/// It exists because `Unfit::NoBootRecord` says "this boot failed" where the
+/// answer is "this boot never happened", and the two send a reader to different
+/// places. On the T14 the first flash of a run read a record another image had
+/// left in the same DRAM, took itself for that record's reporting pass, and
+/// handed the machine back in 24 s having run nothing.
+///
+/// Pure, so the reading can be staged: text in, a name out.
+pub fn reported_and_booted_nothing(loader: &str, log: &str) -> Option<String> {
+    let ended = loader.lines().find(|line| line.contains(bootlog::CHAIN_ENDS_LINE))?;
+    if loader.contains(bootlog::LOADER_LAST_LINE) || bootlog::boot_millis(log).is_some() {
+        return None;
+    }
+    // The report rather than the line that ends the chain, and the *last* of it:
+    // the pass writes the record's date first and what it found second, and what
+    // it found is the half that identifies the record.
+    let said = loader
+        .lines()
+        .rfind(|line| {
+            line.contains(bootlog::PREVIOUS_PANIC) || line.contains(bootlog::BLACKBOX_HEAD)
+        })
+        .unwrap_or(ended);
+    Some(said.trim().to_string())
+}
+/// What the host measured about a boot, out of [`READBACK_BOOT`].
+pub fn back_secs(text: &str) -> Option<u64> {
+    key(text, BACK_SECS)
+}
+
+/// How long after the machine answered the boot stick was there again — the
+/// one thing only this machine can say about the ruling that no reset this
+/// kernel performs may leave a USB device its next host cannot enumerate.
+pub fn stick_secs(text: &str) -> Option<u64> {
+    key(text, STICK_SECS_KEY)
+}
+
+/// The machine a readback names, or why it names none.
+pub fn machine(text: &str) -> Result<Machine, String> {
+    match (word(text, VENDOR_KEY), word(text, PRODUCT_KEY), word(text, BIOS_KEY)) {
+        (Some(vendor), Some(product), Some(bios)) => Ok(Machine { vendor, product, bios }),
+        _ => Err(format!(
+            "names no machine: {VENDOR_KEY}, {PRODUCT_KEY} and {BIOS_KEY} are owed together"
+        )),
+    }
+}
+
+fn word(text: &str, name: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(name))
+        .map(|rest| rest.trim().to_string())
+        .filter(|got| !got.is_empty())
+}
+
+fn key<T: std::str::FromStr>(text: &str, name: &str) -> Option<T> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(name))
+        .and_then(|rest| rest.trim().parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The T14's account's home, as its shell answers [`Home::QUERY`].
+    fn home() -> Home {
+        Home::parse("/home/t14").expect("a home")
+    }
+
+    fn target() -> Target {
+        Target {
+            key: PathBuf::from("/home/dev/.ssh/id_ed25519_toyos_runner"),
+            ..Target::t14().expect("a test run has HOME")
+        }
+    }
+
+    /// **A port that accepts is not a machine that came back**, and a machine
+    /// going down is its port refusing.
+    /// Staged through [`port_accepts`] on a listener of this host's own, which
+    /// accepts and never speaks `ssh`, and on port 0, which nothing listens on:
+    /// a port the listener let go of can be another socket's by the time it is
+    /// dialled.
+    #[test]
+    fn coming_back_is_ssh_answering_and_not_its_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("its address").port();
+        let accepts = |within| port_accepts("127.0.0.1", port, within);
+        let mut asked = 0;
+        let back = wait_on(1, "come back", true, accepts, || {
+            asked += 1;
+            false
+        });
+        assert_eq!(back, Err(Refusal::Silent { what: "come back", secs: 1 }));
+        assert!(asked > 0, "`ssh` was never asked of a port that accepts");
+        assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
+        let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
+        assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
+        let refuses = |within| port_accepts("127.0.0.1", 0, within);
+        assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
+    }
+
+    /// **The harness names the refusal, not only the exit status.** Cargo's own
+    /// lines come first and the driver's statement under the printer's stamp,
+    /// and the refusal it ends on is read back whole, past its first line.
+    #[test]
+    fn a_refusal_is_read_back_off_the_drivers_stderr() {
+        let stderr = "    Blocking waiting for file lock on package cache\n\
+            \x20   Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s\n\
+            \x20    Running `target/debug/toyos-metal --image i --readback r --fat32-check`\n\
+            14:02:11 toyos-metal: reading the disk on the machine exited exit status: 255: the first line\n\
+            \x20 and the second\n";
+        let said = Refusal::Remote {
+            what: "reading the disk".into(),
+            status: "exited exit status: 255".into(),
+            stderr: "the first line\n  and the second".into(),
+        };
+        assert_eq!(said_refusal(stderr), Some(said.to_string()));
+        assert_eq!(said_refusal(&stderr[..stderr.find(REFUSAL_HEAD).unwrap()]), None, "cargo's lines are no refusal");
+    }
+
+    /// **An image with no bound on its own boot never reaches the stick.**
+    ///
+    /// The case, measured twice: a kernel that hung after its job list, and a
+    /// `--install-sudoers` that fell through into flashing an ordinary
+    /// `target/bootable.img` — 184 MB, no job list, no deadline — which booted
+    /// the T14 into a boot that never ends and cost the owner a power cut. Every
+    /// image the metal profile builds carries `boot-deadline=`; one that does
+    /// not is not one of them.
+    #[test]
+    fn an_image_with_no_bound_on_its_own_boot_is_refused() {
+        let armed = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|n| (*n).to_string()).collect()
+        };
+        let bound = alloc_deadline();
+
+        // The shape a stray `target/bootable.img` has: nothing armed at all.
+        let refusal = judge_arms(&armed(&[])).unwrap_err();
+        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: false });
+        let said = refusal.to_string();
+        assert!(said.contains(toyos_tco::DEADLINE_PARAM), "{said}");
+        assert!(said.contains("no power switch"), "{said}");
+        // A build fault and not the machine's, so exit 2 rather than 1.
+        assert!(!refusal.about_the_boot());
+
+        // The sharpest form, and it says so: an image that stops every CPU on
+        // purpose with nothing to end the boot it stopped.
+        let refusal = judge_arms(&armed(&[WEDGE_ARM])).unwrap_err();
+        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: true });
+        assert!(refusal.to_string().contains("stops every CPU on purpose"), "{refusal}");
+
+        // And with the bound, both go through — the wedge because it is paired.
+        // The gate answers with the bound the image carries, which is what the
+        // loop waits it out by.
+        assert_eq!(judge_arms(&armed(&[&bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+        let longer = format!("{}271360", toyos_tco::DEADLINE_PARAM);
+        assert_eq!(judge_arms(&armed(&["watchdog", &longer])), Ok(271_360));
+        // A bound nothing can read is no bound.
+        for unread in ["soon", "", "0"] {
+            let unread = format!("{}{unread}", toyos_tco::DEADLINE_PARAM);
+            assert_eq!(
+                judge_arms(&armed(&[&unread])),
+                Err(Refusal::NoBound { staged_a_wedge: false }),
+                "{unread}"
+            );
+        }
+        // The bound does not excuse an arm nobody ruled on.
+        assert!(matches!(
+            judge_arms(&armed(&["nvme-write-selftest", &bound])),
+            Err(Refusal::Armed { .. })
+        ));
+    }
+
+    /// **The gate refuses an image with no bound and clears the bound itself.**
+    /// Two rules meeting on one token: `judge_arms` asks for a `boot-deadline=`
+    /// and then asks `flashable` about every arm including that one, so a
+    /// bound the ruling table did not clear would make every metal image
+    /// unflashable. It is cleared as one of `build::VALUED_PARAMS`, and this is
+    /// what holds the two together.
+    #[test]
+    fn the_bound_the_gate_demands_is_a_bound_the_gate_clears() {
+        let bound = alloc_deadline();
+        assert!(toyos_build::build::is_valued_param(&bound), "{bound}");
+        assert!(flashable(&bound));
+        // And it is exactly what `tests/common/metal.rs` arms every image with:
+        // the same two constants, so a change to either moves both.
+        assert!(bound.starts_with(toyos_tco::DEADLINE_PARAM));
+        assert_eq!(judge_arms(&[bound]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)));
+    }
+    /// What every metal image is armed with, spelled the way `tests/common/metal.rs`
+    /// spells it.
+    fn alloc_deadline() -> String {
+        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS))
+    }
+
+    /// **`--install-sudoers` is an action and not a mode.** It installed the
+    /// rule and then fell through into the ordinary loop with whatever
+    /// `--image` defaulted to; in a worktree where that file existed, the
+    /// orchestrator's reinstall flashed it and rebooted the T14 into a boot
+    /// with no job list and no bound.
+    #[test]
+    fn installing_the_rule_is_not_also_a_boot() {
+        let alone = ["--install-sudoers", "/tmp/pw"].map(String::from);
+        let args = Args::parse(&alone).expect("installing the rule alone");
+        assert!(args.install_sudoers.is_some());
+        assert!(args.about_a_boot.is_empty());
+
+        for flag in [
+            vec!["--image", "target/bootable.img"],
+            vec!["--readback", "target/metal/x"],
+            vec!["--fat32-check"],
+            vec!["--dry-run"],
+        ] {
+            let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
+            words.extend(flag.iter().map(|w| (*w).to_string()));
+            let refusal = Args::parse(&words).unwrap_err();
+            let said = refusal.to_string();
+            assert!(said.contains(flag[0]), "{flag:?}: {said}");
+            assert!(said.contains("describes a boot it will not make"), "{said}");
+            // A command line and not a machine: exit 2.
+            assert!(!refusal.about_the_boot(), "{flag:?}");
+        }
+
+        // The flags that say *which machine* are not a boot, and the rule needs
+        // them: an install against another host or key is still an install.
+        let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
+            .map(String::from);
+        assert!(Args::parse(&hosted).is_ok());
+    }
+
+    /// **There is nothing to fall through to.** A default image was what let the
+    /// fall-through reach a disk at all; a command line that names none is
+    /// refused by name rather than given one.
+    #[test]
+    fn a_command_line_that_names_no_image_flashes_none() {
+        let bare: [String; 0] = [];
+        let args = Args::parse(&bare).expect("an empty command line parses");
+        assert_eq!(args.image, None);
+        let refusal = run(&args).unwrap_err();
+        let said = refusal.to_string();
+        assert!(said.contains("there is no default"), "{said}");
+        // A command line and not a machine: exit 2.
+        assert!(!refusal.about_the_boot());
+    }
+
+    /// The gate fails closed: a name nobody has ruled on is refused, and it is
+    /// refused *by that name* rather than by a count.
+    #[test]
+    fn an_arm_with_no_ruling_never_reaches_the_stick() {
+        assert!(flashable("watchdog"));
+        assert!(flashable("blackbox=0x8000000"));
+        assert!(!flashable("nvme-write-selftest"));
+        let refusal = Refusal::Armed { name: "nvme-write-selftest".to_string() };
+        let said = refusal.to_string();
+        assert!(said.contains("nvme-write-selftest"), "{said}");
+        assert!(said.contains("FLASHABLE"), "{said}");
+        // A refusal about the image is the loop's, never the machine's: exit 2.
+        assert!(!refusal.about_the_boot());
+    }
+
+    /// **An arm that stops the machine and is judged as an ordinary boot reds
+    /// every run it is staged for**, because `Rebooting.` is the word it never
+    /// reaches. The two halves are `WEDGE_ARMS` and `FLASHABLE`, and this is
+    /// what holds them together — a name in either that the other does not know
+    /// about is the hole.
+    #[test]
+    fn every_arm_that_stops_this_machine_is_cleared_and_judged_as_one() {
+        let bound = alloc_deadline();
+        for arm in WEDGE_ARMS {
+            assert!(flashable(arm), "{arm} reaches no stick");
+            assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(toyos_tco::wedge_bound_ms(toyos_tco::JOB_BOUND_MS)), "{arm}");
+            assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
+            assert_eq!(bound_for(&[arm], 135_680), toyos_tco::STAGED_BOUND_MS, "{arm}");
+            // And with no bound behind it, the sharpest refusal names it as the
+            // wedge it is rather than as a plain image.
+            assert_eq!(
+                judge_arms(&[arm.to_string()]),
+                Err(Refusal::NoBound { staged_a_wedge: true }),
+                "{arm}"
+            );
+        }
+        // The negative half: an arm that stops nothing is not judged as one,
+        // and keeps the bound a wedge nobody staged is ended by, which is
+        // twice its list's.
+        assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
+        assert_eq!(bound_for(&["watchdog"], 60_000), 120_000);
+        assert_eq!(bound_for(&["watchdog"], 135_680), 271_360);
+    }
+
+    /// A row for a name the kernel no longer declares is a ruling about
+    /// nothing, and it would keep an image admissible after the arm it cleared
+    /// was deleted. Read off the kernel's own two declarations.
+    #[test]
+    fn every_ruling_names_a_parameter_the_kernel_declares() {
+        let root = &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut declared = toyos_build::build::declared_actuators(root);
+        declared.extend(toyos_build::build::declared_params(root));
+        for name in FLASHABLE {
+            assert!(
+                declared.iter().any(|d| toyos_build::build::arms(d, name)),
+                "`FLASHABLE` rules on {name:?}, which the kernel declares as neither an \
+                 actuator nor a boot parameter: {declared:?}"
+            );
+        }
+    }
+
+    /// **The case, off the machine that produced it.** A `DONE` record another
+    /// image had left in the same DRAM is read as this boot's predecessor, and
+    /// the driver's only word for it was "the log carries no `Boot: complete`
+    /// record" — which sends a reader after a kernel that never ran.
+    #[test]
+    fn a_pass_that_reported_and_booted_nothing_is_named_as_that() {
+        let stale = "ToyOS Bootloader 1.0\n\
+             Black box: the record below is from the boot armed at 2026-09-07-045553\n\
+             Black box: the last boot read DONE, so it handed the machine back on purpose \
+             and this chain ends here\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n";
+        let said = reported_and_booted_nothing(stale, "").expect("the case, named");
+        assert!(said.contains("the last boot read DONE"), "{said}");
+        let refusal = Refusal::ReportedAndBootedNothing { said };
+        let words = refusal.to_string();
+        assert!(words.contains("booted no kernel"), "{words}");
+        assert!(words.contains("This boot measured no test."), "{words}");
+        // The machine failed, not the loop: exit 1.
+        assert!(refusal.about_the_boot());
+
+        // **The three controls, and each is a boot this must not name.** A pass
+        // that booted a kernel says so at its handoff line; a boot that got as
+        // far as its own record is a boot that ran; and a machine with no
+        // finding at all has no chain-end line to find.
+        let booted = format!("{stale}{}\n", bootlog::LOADER_LAST_LINE);
+        assert_eq!(reported_and_booted_nothing(&booted, ""), None);
+        assert_eq!(
+            reported_and_booted_nothing(stale, "[ 1.200 cpu0 kernel] Boot: complete (1220ms)\n"),
+            None
+        );
+        assert_eq!(
+            reported_and_booted_nothing("ToyOS Bootloader 1.0\nLoading kernel...\n", ""),
+            None
+        );
+    }
+    #[test]
+    fn the_host_clock_crosses_in_the_boot_file() {
+        assert_eq!(back_secs("back_secs 47\n"), Some(47));
+        assert_eq!(back_secs("back_secs 47"), Some(47));
+        assert_eq!(back_secs(""), None);
+        assert_eq!(back_secs("back_secs later\n"), None);
+    }
+
+    fn t14() -> Machine {
+        Machine::parse("LENOVO\n20W0003AMZ\nN34ET71W (1.71 )\n").expect("three lines")
+    }
+
+    fn phased(raw_log: Option<f64>) -> Phases {
+        Phases {
+            preamble: 3.104,
+            wipe: 0.412,
+            flash: 121.5,
+            dd_secs: 117.234,
+            entry: 2.25,
+            down: 8.0,
+            read_log: 1.375,
+            raw_log,
+        }
+    }
+
+    #[test]
+    fn the_machine_crosses_in_the_boot_file() {
+        let boot = BootFile { back: 47, stick: 0, machine: t14(), phases: phased(None) }.text();
+        assert_eq!(machine(&boot), Ok(t14()));
+        assert_eq!(back_secs(&boot), Some(47));
+        assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
+    }
+
+    /// Every phase the loop timed is the one a judge reads back, the volume
+    /// read's absence included, and a file missing any phase names none.
+    #[test]
+    fn the_phases_cross_in_the_boot_file() {
+        for raw_log in [Some(9.875), None] {
+            let boot =
+                BootFile { back: 141, stick: 2, machine: t14(), phases: phased(raw_log) }.text();
+            assert_eq!(phases(&boot), Ok(phased(raw_log)), "{boot}");
+            assert_eq!((back_secs(&boot), stick_secs(&boot)), (Some(141), Some(2)));
+            for line in boot.lines().filter(|line| line.contains("_secs ")) {
+                if line.starts_with(BACK_SECS) || line.starts_with(STICK_SECS_KEY) {
+                    continue;
+                }
+                let short = boot.replace(&format!("{line}\n"), "");
+                assert!(phases(&short).is_err(), "{line:?} gone still names phases");
+            }
+        }
+        assert!(phases("back_secs 47\nstick_secs 0\n").is_err());
+        let garbled = BootFile { back: 1, stick: 0, machine: t14(), phases: phased(None) }
+            .text()
+            .replace("flash_secs 121.500", "flash_secs later");
+        assert!(phases(&garbled).is_err());
+    }
+
+    /// A judge reading the readback later rules on the boot as the loop did.
+    #[test]
+    fn the_loops_verdict_crosses_in_the_readback() {
+        assert_eq!(loop_verdict(&verdict_file(None)), Ok(()));
+        let refused = Refusal::HungWithoutARecord;
+        assert_eq!(
+            loop_verdict(&verdict_file(Some(&refused))),
+            Err(refused.to_string().trim_end().to_string())
+        );
+        for unread in ["", "passed", "passed\nand more\n", "refused\n", "refused\n  \n", "green\n"] {
+            assert!(loop_verdict(unread).is_err(), "{unread:?}");
+        }
+    }
+
+    /// The writer's half: the verdict the loop returns is the one its readback
+    /// carries, for a boot it refused and for one it passed.
+    #[test]
+    fn the_readback_carries_the_verdict_the_loop_returns() {
+        let dir = toyos_tmpdir::TempDir::new("verdict");
+        let armed = [alloc_deadline()];
+        let boot = "back_secs 40\nstick_secs 0\n";
+        let written = || {
+            let at = dir.join(READBACK_VERDICT);
+            loop_verdict(&std::fs::read_to_string(&at).expect("the verdict is written"))
+        };
+
+        let hung = format!("{}\n{}\n", bootlog::LOADER_FIRST_LINE, bootlog::HUNG_WITHOUT_A_RECORD);
+        assert_eq!(
+            judge_and_write_readback(&armed, &hung, "", Some(dir.path()), boot),
+            Err(Refusal::HungWithoutARecord)
+        );
+        assert_eq!(written(), Err(Refusal::HungWithoutARecord.to_string().trim_end().to_string()));
+
+        let loader = format!(
+            "{}\n{}\n{}\n{}\nBlack box: {}, so it handed the machine back on purpose and this \
+             chain ends here\n| {} (16)\n| {}[ 1.516 cpu0 kernel] {}\n{}\n",
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::LOADER_LAST_LINE,
+            bootlog::SEPARATOR,
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL_HEAD,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING,
+            bootlog::CHAIN_ENDS_LINE,
+        );
+        let log = format!(
+            "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n[ 1.203 supervisor] {} (Reboot)\n",
+            bootlog::STOPPING
+        );
+        assert_eq!(
+            judge_and_write_readback(&armed, &loader, &log, Some(dir.path()), boot),
+            Ok(1151)
+        );
+        assert_eq!(written(), Ok(()));
+    }
+
+    /// **The stick a machine's loop writes is the one its record names.**
+    #[test]
+    fn the_identity_is_the_recorded_stick_or_it_is_refused() {
+        let dir = toyos_tmpdir::TempDir::new("metal-record");
+        let root: &Path = &dir;
+        let t14 = t14();
+        let recorded = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
+        Record::new(&t14, recorded.clone()).save(root).expect("a record");
+        let stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
+        assert_eq!(stick.sectors, 60_062_500);
+        assert_eq!(recorded_stick(root, &t14, &stick), Ok(recorded));
+
+        let bigger = Identity::parse("500118192\nSanDisk \nUltra           \n1\n").unwrap();
+        assert_eq!(
+            recorded_stick(root, &t14, &bigger),
+            Err(Refusal::Identity {
+                field: "size",
+                want: "60062500".to_string(),
+                got: "500118192".to_string(),
+            })
+        );
+        for (answer, field) in [
+            ("60062500\nKingston\nUltra           \n1\n", "vendor"),
+            ("60062500\nSanDisk \nCruzer          \n1\n", "model"),
+            ("60062500\nSanDisk \nUltra           \n0\n", "removable"),
+        ] {
+            let disk = Identity::parse(answer).unwrap();
+            let refused = recorded_stick(root, &t14, &disk);
+            assert!(matches!(refused, Err(Refusal::Identity { field: f, .. }) if f == field), "{field}");
+        }
+        assert!(Identity::parse("60062500\nSanDisk \n").is_err());
+        assert!(Identity::parse("many\nSanDisk \nUltra\n1\n").is_err());
+    }
+
+    /// **A second bench is checked against its own record, and a machine with
+    /// none is refused with how to make one.** Recording writes the disk that
+    /// answered, refuses one that is not removable, and never moves a record
+    /// that is there: a second capture with another disk is refused by it.
+    #[test]
+    fn a_machine_is_recorded_once_and_then_checked_against_its_record() {
+        let root = toyos_tmpdir::TempDir::new("metal-record");
+        let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
+        let stick = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
+
+        let refused = recorded_stick(&root, &bench, &stick);
+        let at = root.join("acme-bench-2.toml");
+        let path = at.display().to_string();
+        assert_eq!(refused, Err(Refusal::Unrecorded { path: path.clone() }));
+        let said = refused.unwrap_err().to_string();
+        assert!(said.contains("--install-sudoers") && said.contains(&path), "{said}");
+
+        let fixed = Identity::parse("120176640\nKingston\nDataTraveler    \n0\n").unwrap();
+        assert!(matches!(
+            record_machine(&root, &bench, &fixed),
+            Err(Refusal::Identity { field: "removable", .. })
+        ));
+        assert_eq!(Record::load(&root, &bench), Ok(None), "a refused capture wrote a record");
+
+        let want = Stick { sectors: 120_176_640, vendor: "Kingston".to_string(), model: "DataTraveler".to_string() };
+        assert_eq!(
+            record_machine(&root, &bench, &stick),
+            Ok(Captured { at: at.clone(), stick: want.clone(), wrote: true })
+        );
+        assert_eq!(recorded_stick(&root, &bench, &stick), Ok(want.clone()));
+        let record = Record::load(&root, &bench).expect("a readable record").expect("a record");
+        assert_eq!(record.stick, want);
+        assert!(record.measured.is_empty());
+        assert_eq!(record_machine(&root, &bench, &stick), Ok(Captured { at, stick: want, wrote: false }));
+
+        // The T14's stick is not this bench's.
+        let t14_stick = Identity::parse("60062500\nSanDisk \nUltra           \n1\n").unwrap();
+        assert!(matches!(
+            recorded_stick(&root, &bench, &t14_stick),
+            Err(Refusal::Identity { field: "size", .. })
+        ));
+        assert!(matches!(
+            record_machine(&root, &bench, &t14_stick),
+            Err(Refusal::Identity { field: "size", .. })
+        ));
+        assert_eq!(Record::load(&root, &bench), Ok(Some(record)), "a refused capture moved the record");
+        // Neither refusal is about a boot: the loop exits 2.
+        assert!(!Refusal::Unrecorded { path }.about_the_boot());
+    }
+
+    /// **The capture says which disk every later run writes**: the record's
+    /// path, the node, and the identity it recorded or found recorded.
+    #[test]
+    fn a_capture_says_the_disk_it_recorded_and_every_run_will_write() {
+        let root = toyos_tmpdir::TempDir::new("metal-record");
+        let bench = Machine::parse("ACME\nBench 2\nX1.0\n").expect("three lines");
+        let disk = Identity::parse("120176640\nKingston\nDataTraveler    \n1\n").unwrap();
+        let node = Node::parse("/dev/sdb").unwrap();
+        let at = root.join("acme-bench-2.toml").display().to_string();
+        let first = record_machine(&root, &bench, &disk).expect("recorded").said(&node);
+        let again = record_machine(&root, &bench, &disk).expect("checked").said(&node);
+        for (said, how) in [(first, "records this machine now"), (again, "already recorded this machine")] {
+            assert_eq!(
+                said,
+                format!(
+                    "{at} {how}: the stick is /dev/sdb, 120176640 sectors, Kingston DataTraveler, \
+                     removable; every run on this machine wipes and writes that disk"
+                )
+            );
+        }
+    }
+
+    /// **The home is the one the machine names**: the rule, the argv, the
+    /// mount point and the staged rule all sit under it, and a home the
+    /// machine answers that is no normal absolute path is refused.
+    #[test]
+    fn the_mount_and_the_staged_rule_are_under_the_home_the_machine_named() {
+        let words = ["--host", "dev@box"].map(String::from);
+        let target = Args::parse(&words).unwrap().target;
+        let home = Home::parse("/var/home/dev").expect("a home");
+        assert_eq!(home.mount(), "/var/home/dev/toyos-log");
+        assert_eq!(home.staged(), "/var/home/dev/.toyos-metal.sudoers");
+        assert_eq!(
+            target.argv(Job::Mount, None, &home).unwrap(),
+            ["/usr/bin/mount", "-o", "ro", "/dev/sda3", "/var/home/dev/toyos-log"]
+        );
+        let rule = target.sudoers(&home).unwrap();
+        assert!(rule.contains("dev ALL=(root) NOPASSWD: /usr/bin/umount /var/home/dev/toyos-log\n"), "{rule}");
+        assert!(!rule.contains(" /home/"), "{rule}");
+        for answer in ["", "var/home/dev", "/", "/var/home/dev/", "/var//dev", "/var/./dev", "/var/../root", "/a b", "/a'b", "/a\n"]
+        {
+            assert_eq!(Home::parse(answer), Err(Refusal::Home(answer.to_string())), "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn a_host_is_a_user_and_a_machine_that_ssh_reads_as_no_flag() {
+        assert_eq!(host_of("dev@box"), Ok(("dev", "box")));
+        for host in ["box", "-oProxyCommand=x@box", "dev@-oProxyCommand=x", "dev@", "dev@a b"]
+        {
+            assert!(
+                matches!(host_of(host), Err(Refusal::Usage(_) | Refusal::Word(_))),
+                "{host}: {:?}",
+                host_of(host)
+            );
+            let words = ["--host".to_string(), host.to_string()];
+            assert!(Args::parse(&words).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn the_rule_is_the_command_table_rendered() {
+        let hex = "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]";
+        assert_eq!(
+            target().sudoers(&home()).unwrap(),
+            format!(
+                "# toyos-metal: the whole of what the metal loop runs as root.\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/dd if\\=/dev/sda3 bs\\=4M\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create-only --disk /dev/sda \
+                 --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
+            )
+        );
+    }
+
+    /// A one-field mutation has to move both renderings at once, which is what
+    /// makes them one table rather than two lists that agree today.
+    #[test]
+    fn one_table_feeds_the_rule_and_the_argv() {
+        let mut moved = target();
+        moved.node = Node::parse("/dev/sdb").unwrap();
+        moved.log_part = 2;
+        let rule = moved.sudoers(&home()).unwrap();
+        assert!(rule.contains("/usr/bin/mount -o ro /dev/sdb2 /home/t14/toyos-log"), "{rule}");
+        assert_eq!(
+            moved.argv(Job::Mount, None, &home()).unwrap(),
+            ["/usr/bin/mount", "-o", "ro", "/dev/sdb2", "/home/t14/toyos-log"]
+        );
+        assert!(rule.contains("/usr/sbin/wipefs --all /dev/sdb"), "{rule}");
+        assert_eq!(moved.argv(Job::Wipe, None, &home()).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
+        // The outside judge's read moves with the same field the mount does,
+        // and it is a *partition*, spelled from the disk's own name.
+        assert!(rule.contains("/usr/bin/dd if\\=/dev/sdb2 bs\\=4M"), "{rule}");
+        assert_eq!(
+            moved.argv(Job::ReadLog, None, &home()).unwrap(),
+            ["/usr/bin/dd", "if=/dev/sdb2", "bs=4M"]
+        );
+        assert!(!rule.contains("/dev/sda"), "{rule}");
+    }
+
+    /// The read the outside judge needs is a read, and the rule says so: it
+    /// carries no `of=` and no `conv=`, so nothing that matches this line can
+    /// write to the disk it names.
+    #[test]
+    fn the_outside_judges_read_can_write_nothing() {
+        let argv = target().argv(Job::ReadLog, None, &home()).unwrap();
+        assert!(argv.iter().any(|w| w.starts_with("if=")), "{argv:?}");
+        assert!(!argv.iter().any(|w| w.starts_with("of=") || w.starts_with("conv=")), "{argv:?}");
+        // And it names a partition rather than the whole disk, so it cannot be
+        // the flash line with one word changed.
+        assert_eq!(argv[1], "if=/dev/sda3");
+    }
+
+    #[test]
+    fn a_boot_entry_the_firmware_did_not_name_cannot_be_filled_in() {
+        let t = target();
+        assert_eq!(t.argv(Job::BootNext, Some("001D"), &home()).unwrap().last().unwrap(), "001D");
+        assert_eq!(t.argv(Job::Delete, Some("ffff"), &home()).unwrap().last().unwrap(), "ffff");
+        for bad in ["12345", "00g1", "1", "", "0 1", "../."] {
+            assert_eq!(
+                t.argv(Job::BootNext, Some(bad), &home()),
+                Err(Refusal::BootEntry(bad.to_string())),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_name_that_would_widen_the_rule_is_refused() {
+        for user in [
+            "t14,root",
+            "t14 root",
+            "t14:x",
+            "%sudo",
+            "+netgroup",
+            "",
+            "t*",
+            "t14 ALL=(root) NOPASSWD",
+            "t14\t",
+            // The three a word escapes differently from an argument, so the
+            // argument rendering can never reach the user field.
+            r"t14\root",
+            "t14(x",
+            "t14)x",
+        ] {
+            let mut t = target();
+            t.user = user.to_string();
+            assert_eq!(t.sudoers(&home()), Err(Refusal::Word(user.to_string())), "{user}");
+            let host = ["--host".to_string(), format!("{user}@box")];
+            assert!(
+                matches!(Args::parse(&host), Err(Refusal::Word(_) | Refusal::Usage(_))),
+                "{user}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sudoers_word_escapes_what_sudoers_reads() {
+        let escaped = |text: &str| Word::Is(text.to_string()).sudoers();
+        assert_eq!(escaped("of=/dev/sda"), r"of\=/dev/sda");
+        assert_eq!(escaped("a,b"), r"a\,b");
+        assert_eq!(escaped("a:b"), r"a\:b");
+        assert_eq!(escaped("^a"), r"\^a");
+        assert_eq!(Word::Hex4.sudoers(), "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]");
+        assert_eq!(escaped(LOADER), r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
+    }
+
+    #[test]
+    fn the_ssh_line_carries_the_key_and_nothing_interactive() {
+        let t = target();
+        assert_eq!(
+            t.ssh_argv("true"),
+            [
+                "-i",
+                "/home/dev/.ssh/id_ed25519_toyos_runner",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "t14@t14",
+                "true",
+            ]
+        );
+        assert_eq!(
+            t.identity(),
+            "cat /sys/class/block/sda/size /sys/class/block/sda/device/vendor \
+             /sys/class/block/sda/device/model /sys/class/block/sda/removable"
+        );
+        assert_eq!(
+            t.remote(Job::Flash, None, &home()).unwrap(),
+            "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync'"
+        );
+        assert_eq!(
+            t.remote(Job::Create, None, &home()).unwrap(),
+            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/sda' '--part' '1' \
+             '--label' 'ToyOS' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
+        );
+    }
+
+    #[test]
+    fn a_create_that_moved_the_boot_order_is_refused() {
+        let guid = "69ddc8f6-fab2-423f-9818-93bb0ba7349c";
+        let before = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
+             Boot0001* Ubuntu\tHD(1,GPT,33333333-3333-3333-3333-333333333333,0x800,0x1000)\
+             /File(\\EFI\\ubuntu\\shimx64.efi)\n";
+        let made = format!(
+            "Boot0002* ToyOS\tHD(1,GPT,{guid},0x800,0x11000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+        );
+
+        let created_only = format!("{before}{made}");
+        assert_eq!(entry_after_create(before, &created_only, "ToyOS", guid), Ok("0002".to_string()));
+
+        let ordered = created_only.replace("BootOrder: 0001,001D", "BootOrder: 0002,0001,001D");
+        assert_eq!(
+            entry_after_create(before, &ordered, "ToyOS", guid),
+            Err(Refusal::BootOrder {
+                before: "0001,001D".to_string(),
+                now: "0002,0001,001D".to_string(),
+            })
+        );
+
+        assert!(matches!(
+            entry_after_create(before, before, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+        let elsewhere = created_only.replace(guid, "11111111-1111-1111-1111-111111111111");
+        assert!(matches!(
+            entry_after_create(before, &elsewhere, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+
+        assert_eq!(boot_order("BootCurrent: 0001\n"), "");
+        assert_eq!(boot_order(""), "");
+        assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
+            .about_the_boot());
+    }
+
+    #[test]
+    fn a_boot_entry_is_matched_on_the_partition_its_path_names() {
+        let listing = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
+             Boot0001* Ubuntu\tHD(1,GPT,33333333-3333-3333-3333-333333333333,0x800,0x219800)\
+             /File(\\EFI\\ubuntu\\shimx64.efi)\n\
+             Boot0010  Setup\tFvFile(721c8b66-426c-4e86-8e99-3457c46ab0b9)\n\
+             Boot0026* ToyOS\tHD(1,GPT,11111111-1111-1111-1111-111111111111,0x800,0x800)\
+             /File(\\EFI\\BOOT\\BOOTX64.EFI)\n\
+             Boot0027* ToyOS\tHD(1,GPT,22222222-2222-2222-2222-222222222222,0x800,0x800)\
+             /File(\\EFI\\BOOT\\BOOTX64.EFI)\n";
+        assert_eq!(
+            entries_labelled(listing, "ToyOS"),
+            [
+                ("0026".to_string(), "11111111-1111-1111-1111-111111111111".to_string()),
+                ("0027".to_string(), "22222222-2222-2222-2222-222222222222".to_string()),
+            ]
+        );
+        assert_eq!(entries_labelled(listing, "Ubuntu").len(), 1);
+        assert!(entries_labelled(listing, "ToyO").is_empty());
+        assert!(entries_labelled("BootOrder: 0001,001D\n", "ToyOS").is_empty());
+        assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
+    }
+
+    /// The wait is the *longest* bound plus the allowance, computed here by
+    /// hand from the constants rather than from the expression under test — so
+    /// a `max` that became a `min` reds instead of agreeing with itself. The
+    /// image's own deadline is one of them: a boot armed past every constant
+    /// is waited for that long, and one armed under them for the longest
+    /// constant.
+    #[test]
+    fn the_wait_outlasts_every_watchdog_a_boot_runs_under() {
+        assert_eq!(toyos_tco::FIRMWARE_BOUND_MS, 60_000);
+        assert_eq!(toyos_tco::BOUND_MS, 9_600);
+        assert_eq!(toyos_tco::PANIC_BOUND_MS, 60_000);
+        assert_eq!(RETURN_ALLOWANCE_SECS, 300);
+        assert_eq!(return_secs(120_000), 420);
+        assert_eq!(return_secs(271_360), 572);
+        assert_eq!(return_secs(271_001), 572);
+        assert_eq!(return_secs(toyos_tco::STAGED_BOUND_MS), 360);
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
+    }
+
+    /// **A refusal must leave no file for the next run's judge to read as its
+    /// own**, and every refusal returns before `write_readback`.
+    #[test]
+    fn a_readback_directory_holds_nothing_the_last_run_left() {
+        let dir = toyos_tmpdir::TempDir::new("readback");
+        for name in READBACK_FILES {
+            std::fs::write(dir.join(name), b"the last run").expect("stage a stale file");
+        }
+        // A file no readback names is not this directory's to remove.
+        std::fs::write(dir.join("image.img"), b"the image").expect("stage the image");
+        clear_readback(&dir).expect("clearing a directory of readable files");
+        for name in READBACK_FILES {
+            assert!(!dir.join(name).exists(), "{name} survived the clear");
+        }
+        assert!(dir.join("image.img").exists(), "the image the driver flashes was removed");
+        // Idempotent: a first run has none of them and that is not a refusal.
+        clear_readback(&dir).expect("clearing an empty directory");
+    }
+
+    #[test]
+    fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
+        assert!(Refusal::Wedge { why: "x" }.about_the_boot());
+        assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
+        assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
+        assert!(!Refusal::Disk(Unfit::Node("/dev/nvme0n1p1".to_string())).about_the_boot());
+        assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
+        assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
+        assert!(!Refusal::NoHome.about_the_boot());
+    }
+
+    #[test]
+    fn dd_is_believed_only_where_it_states_a_count() {
+        let real = "44+0 records in\n44+0 records out\n\
+                    184549376 bytes (185 MB, 176 MiB) copied, 12.3169 s, 15.0 MB/s\n";
+        assert_eq!(dd_said(real), Some(DdSaid { bytes: 184_549_376, secs: 12.3169 }));
+        let short = "10+0 records in\n10+0 records out\n\
+                     41943040 bytes (42 MB, 40 MiB) copied, 3.1 s, 13.5 MB/s\n";
+        assert_eq!(dd_said(short), Some(DdSaid { bytes: 41_943_040, secs: 3.1 }));
+        assert_eq!(dd_said("44+0 records in\n44+0 records out\n"), None);
+        assert_eq!(dd_said(""), None);
+        assert_eq!(dd_said("41943040 bytes (42 MB, 40 MiB) copied\n"), None);
+    }
+
+    #[test]
+    fn the_lid_policy_is_systemds_effective_one() {
+        // The commented compile-time defaults `cat-config` prints first, then
+        // the drop-in that overrides them.
+        let ignored = "[Login]\n#HandleLidSwitch=suspend\n#HandleLidSwitchExternalPower=suspend\n\
+                       HandleLidSwitch=ignore\nHandleLidSwitchExternalPower=ignore\n\
+                       HandleLidSwitchDocked=ignore\n";
+        assert_eq!(lid_policy(ignored), Ok(()));
+        // The spacing systemd accepts and a hand-written parser rejects.
+        let spaced = "[Login]\nHandleLidSwitch = ignore\nHandleLidSwitchExternalPower = ignore \n\
+                      HandleLidSwitchDocked =ignore\n";
+        assert_eq!(lid_policy(spaced), Ok(()));
+        // A later drop-in overriding an earlier one, which is what reading one
+        // file instead of the merged configuration would miss.
+        let overridden = format!("{ignored}HandleLidSwitchDocked=suspend\n");
+        assert_eq!(
+            lid_policy(&overridden),
+            Err(Refusal::Lid { key: "HandleLidSwitchDocked", got: "suspend".to_string() })
+        );
+        assert!(matches!(lid_policy("[Login]\n"), Err(Refusal::Lid { .. })));
+    }
+
+    #[test]
+    fn the_arguments_name_the_t14_by_default() {
+        let args = Args::parse(&[]).unwrap();
+        assert_eq!(args.target.user, "t14");
+        assert_eq!(args.target.node.whole(), "/dev/sda");
+        assert!(!args.dry_run);
+
+        let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
+            .iter()
+            .map(|w| (*w).to_string())
+            .collect();
+        let args = Args::parse(&words).unwrap();
+        assert!(args.dry_run);
+        assert_eq!(args.target.node.whole(), "/dev/sdb");
+        assert_eq!(args.target.user, "runner");
+        assert_eq!(args.target.host, "box");
+
+        let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
+        assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
+        let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
+        assert_eq!(Args::parse(&part), Err(Refusal::Disk(Unfit::Node("/dev/nvme0n1p2".to_string()))));
+        assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
+        assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
+    }
+
+    /// A disk carrying `parts` in order, so `admit`'s refusals are exercised on
+    /// tables rather than on prose about tables.
+    fn disk(parts: &[(&str, toyos_gpt::Guid)]) -> Vec<u8> {
+        const TOTAL: u64 = 16 * 1024 * 1024;
+        const ALIGN: u64 = 2048;
+        let entries: Vec<toyos_build::gptwrite::Entry<'_>> = (1..)
+            .zip(parts)
+            .map(|(i, (name, kind))| toyos_build::gptwrite::Entry {
+                kind: *kind,
+                unique: toyos_build::gptwrite::random_guid(),
+                first_lba: i * ALIGN,
+                last_lba: i * ALIGN + 511,
+                name,
+            })
+            .collect();
+        let table = toyos_build::gptwrite::table(TOTAL / u64::from(LBA), toyos_build::gptwrite::random_guid(), &entries);
+        let mut out = vec![0u8; TOTAL as usize];
+        out[..table.primary.len()].copy_from_slice(&table.primary);
+        let back = out.len() - table.backup.len();
+        out[back..].copy_from_slice(&table.backup);
+        out
+    }
+
+    #[test]
+    fn an_image_admits_only_the_table_the_installed_rule_names() {
+        let dir = toyos_tmpdir::TempDir::new("metal");
+        let t = target();
+        let write = |name: &str, bytes: &[u8]| {
+            let at = dir.join(name);
+            std::fs::write(&at, bytes).expect("write");
+            at
+        };
+        let (esp, basic, root) = (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_ROOT);
+
+        assert_eq!(
+            admit(&write("ragged.img", &vec![0u8; 1000]), &t),
+            Err(Refusal::Disk(Unfit::Sectors { bytes: 1000 }))
+        );
+        assert_eq!(admit(&write("empty.img", &[]), &t), Err(Refusal::Disk(Unfit::Sectors { bytes: 0 })));
+        assert_eq!(
+            admit(&write("headless.img", &vec![0u8; 1024]), &t),
+            Err(Refusal::Disk(Unfit::BackupHeader { at: 512, saw: "\0\0\0\0\0\0\0\0".to_string() }))
+        );
+        // The signature in the *primary* header alone: the false pass a healthy
+        // front hides, which is why the check reads the final sector.
+        let mut front = vec![0u8; 1536];
+        front[512..520].copy_from_slice(b"EFI PART");
+        assert!(matches!(
+            admit(&write("front-only.img", &front), &t),
+            Err(Refusal::Disk(Unfit::BackupHeader { .. }))
+        ));
+
+        let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("root", root)]);
+        assert_eq!(
+            admit(&write("two-esps.img", &two), &t),
+            Err(Refusal::Partitions { what: "ESP", matched: 2 })
+        );
+        let no_log = disk(&[("esp", esp), ("root", root)]);
+        assert_eq!(
+            admit(&write("no-log.img", &no_log), &t),
+            Err(Refusal::Partitions { what: "TOYOS-LOG", matched: 0 })
+        );
+        // The log where the installed rule does not name it: p2, not p3.
+        let moved = disk(&[("esp", esp), ("log", basic), ("root", root)]);
+        assert_eq!(
+            admit(&write("moved-log.img", &moved), &t),
+            Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
+        );
+        // And the shape `build/image.rs` writes, which is the one admitted.
+        let built = disk(&[("esp", esp), ("root", root), ("log", basic)]);
+        let ok = admit(&write("built.img", &built), &t).expect("the built shape is admitted");
+        assert_eq!((ok.esp.index, ok.log.index), (1, 3));
+        assert_eq!(ok.bytes % u64::from(LBA), 0);
+        assert_ne!(ok.esp.guid, toyos_gpt::Guid::ZERO);
+    }
+    /// The lateness comes off the line the kernel writes, counted from the
+    /// record of arming the bound, and a boot that wrote none measures nothing
+    /// rather than zero.
+    #[test]
+    fn the_deadlines_lateness_is_counted_from_its_arm() {
+        let said = format!(
+            "| {}: a bound of 120000 ms, reached at 120064 ms, with this machine in `complete`. \
+             The tail of the log ring follows.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        let log = format!(
+            "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a \
+             WEDGED record and writes the reset register itself\n",
+            bootlog::DEADLINE_ARMED
+        );
+        assert_eq!(deadline_lateness_ms(&said, &log), Some(Ok(4)));
+        assert_eq!(deadline_lateness_ms("Previous boot's panic: nothing of the kind\n", &log), None);
+        // An expiry before its bound is a reading, not an absence.
+        let early = said.replace("reached at 120064", "reached at 119000");
+        assert_eq!(deadline_lateness_ms(&early, &log), Some(Ok(-1060)));
+        // An expiry with no arm to count from, or one not in the kernel's shape.
+        assert!(matches!(deadline_lateness_ms(&said, "nothing armed\n"), Some(Err(_))));
+        let unread = said.replace("reached at", "reached by");
+        assert!(matches!(deadline_lateness_ms(&unread, &log), Some(Err(_))));
+    }
+
+    /// The one boot judged by its sealed record and not by the shutdown's word:
+    /// both halves refuse, and the pass needs both.
+    #[test]
+    fn an_image_armed_to_stop_itself_owes_a_record_and_no_reboot() {
+        let sealed = format!(
+            "Previous boot's panic: the last boot read WEDGED\n| {}: a bound of 120000 ms, \
+             reached at 120153 ms, with this machine in `complete`.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        let booted = "[ 1.198 cpu0 kernel] Boot: complete (1198ms)\n";
+        assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
+
+        let done = format!(
+            "Black box: {}\n| {}[ 1.300 cpu0 kernel] {}\n",
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING
+        );
+        let why = wedged_boot(&done, booted).unwrap_err().to_string();
+        assert!(why.contains("nothing about it was wedged"), "{why}");
+
+        let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();
+        assert!(why.contains("reports neither of this kernel's bounds"), "{why}");
+
+        let why = wedged_boot(&sealed, "nothing at all\n").unwrap_err().to_string();
+        assert!(why.contains("no `Boot: complete`"), "{why}");
+    }
+
+    /// **The record's own first line is what says which bound ended the boot.**
+    /// Both of them seal `WEDGED` and either can reach a staged machine first,
+    /// so a judge that knew only one read the T14's `hard-lockup-probe` boot —
+    /// which the detector ended exactly as designed — as a failure.
+    #[test]
+    fn either_bounds_record_is_a_wedged_boots_pass() {
+        let booted = "[ 1.200 cpu0 kernel] Boot: complete (1200ms)\n";
+        let locked = format!(
+            "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
+             for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
+             |   pc=0xffff800060a5903f  <kernel::sync::Lock<..>>::lock+0x12f\n",
+            bootlog::LOCKED_UP
+        );
+        assert_eq!(wedged_boot(&locked, booted), Ok(1200));
+        assert_eq!(lockup_lateness_ms(&locked), Some(Ok(4)));
+        // Each bound's lateness is read off its own record and off no other.
+        assert_eq!(deadline_lateness_ms(&locked, booted), None);
+        let expired = format!(
+            "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        assert_eq!(lockup_lateness_ms(&expired), None);
+        // A sample that landed before the bound is a reading, not an absence.
+        let early = locked.replace("for 60004 ms", "for 59000 ms");
+        assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
+        let unread = locked.replace("Its bound is", "Its bound was");
+        assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
+    }
+
+    /// The foreign-record arm's pass after the reset: the hang it stages is its
+    /// verdict's premise, the record it cleared says the stop finished, and the
+    /// same pass under any other arm is the hang refusal.
+    #[test]
+    fn the_foreign_record_arm_reaches_its_judge_through_the_hang_it_stages() {
+        let loader = format!(
+            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
+             ToyOS Bootloader 1.0\n\
+             Black box: 0x8000000 held a DONE record another image left in this memory ([63, 12, \
+             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18], and this stick is [9c, 12, \
+             b3, 41, e8, dd, 26, 4a, b9, d6, e7, 17, 3a, 83, d6, 18]), armed at \
+             2026-09-29-103651. It has been cleared and this pass boots its kernel\n\
+             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
+             Boot attempts: the previous boot of this image never reported; the machine is \
+             handed back\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR
+        );
+        let log = "[2026-09-29 10:36:53  1.171 cpu0 kernel] Boot: complete (1171ms)\n\
+                   [2026-09-29 10:36:53  1.186 supervisor] supervisor: power: the machine stops, and logkeeper makes \
+                   the log whole first (Reboot)\n";
+        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
+        assert_eq!(
+            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &loader, log),
+            Ok(1171)
+        );
+        assert_eq!(
+            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
+            Err(Refusal::HungWithoutARecord)
+        );
+        // A stop that panicked or that a bound ended seals under the foreign
+        // identity too, and hands the machine back the same way.
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &ended, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+            // The pass before the handoff cleared a stale foreign `DONE`.
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert_eq!(
+                boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &stale, log),
+                Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+            );
+        }
+        // A chain that never went round has no pass after the reset to read.
+        let unreturned = format!(
+            "Black box: 0x8000000 held a DONE record another image left in this memory\n{}\n",
+            bootlog::LOADER_LAST_LINE
+        );
+        assert_eq!(
+            boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &unreturned, log),
+            Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
+        );
+    }
+}

@@ -9,7 +9,7 @@ opened: 2026-10-08
 netstack offers its card a frame only when the driver counts room for it, and
 where there is none it sleeps on the claim until `toyos_i219::I219::wake_on_room`'s
 cause arrives. On the I219 and the 82574 every reading of that path is the
-driver's own model (`toyos-i219/src/stub.rs`), which is Intel's documents
+driver's own model (`system/netstack/i219/src/stub.rs`), which is Intel's documents
 written down: no image gives netstack `pci:8086:15fc`, and the harness has no
 Intel card, so neither the T14 nor QEMU's `e1000e` has run it.
 

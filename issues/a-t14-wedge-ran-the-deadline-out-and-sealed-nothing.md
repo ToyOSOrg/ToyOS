@@ -6,7 +6,7 @@ opened: 2026-09-14
 
 # A T14 wedge ran the boot deadline out and left no WEDGED record, so the one instrument built for it reported nothing
 
-T14 run 48, `tests/metalcase` on `wt/toyos-quiesce` `3f8f7fd3`. The boot wedged
+T14 run 48, `tests/images/metalcase.toml` on `wt/toyos-quiesce` `3f8f7fd3`. The boot wedged
 and the stick came back readable — the case
 `issues/a-t14-boot-wedges-after-a-jobs-exit-and-nothing-said-why.md`
 has been waiting for — and **the deadline sealed nothing**, so its exit

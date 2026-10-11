@@ -16,7 +16,7 @@ bytes` (21 characters) follows its predecessor by 12 ms, each ~150-character
 
 Each line is two writes: ConOut's `OutputString`, and `loaderlog::line`'s
 `file.write` and `file.flush()` to `loader.log` on the stick's FAT
-(`bootloader/src/loaderlog.rs`). The file is the cost. A `Loader lines:` line that
+(`loader/src/loaderlog.rs`). The file is the cost. A `Loader lines:` line that
 summed each half's counter ticks, carried at `d373045ee` for this one reading
 and removed after it, read on the T14's `jobcase` boot at that commit: the
 43 lines above it took 129796443 counter ticks on the console (53.7 ms, 1.2 ms

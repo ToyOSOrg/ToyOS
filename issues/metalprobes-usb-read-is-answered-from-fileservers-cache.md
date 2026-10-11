@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # metalprobe's USB read is answered from fsd's cache, not the stick
 
-`userland/metalprobe/src/usb.rs`'s `read` writes its file to `/log`, closes it,
+`tests/guest/metalprobe/src/usb.rs`'s `read` writes its file to `/log`, closes it,
 and times reading it back as "a cache miss the stick has to answer" — true
 while the kernel's write-back dropped a closed file from its cache. `/log` is
 served by `/system/bin/fsd` now, whose block cache (`userland/fsd/src/cache.rs`)

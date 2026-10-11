@@ -19,7 +19,7 @@
 //! it in the record.
 //!
 //! Its own file, and not a module inside [`super`]: everything there is reached
-//! from an NMI and may write no log record, which `src/sourcegate.rs`'s
+//! from an NMI and may write no log record, which `build/sourcegate.rs`'s
 //! `nmi_does_not_log` holds it to. This runs in ordinary context and says what
 //! it staged, which is what makes the sealed record readable as a control's.
 
@@ -32,7 +32,7 @@ use crate::smp;
 /// record carries in its tail: a `WEDGED` page whose text does not hold this
 /// line is a machine ended for some other reason, which is what makes the
 /// control a control. Judged by the harness, so it is a constant
-/// (`src/bootlog.rs`).
+/// (`build/bootlog.rs`).
 pub const PROBE_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
 
 /// How much of the bound is left when the staged CPU stops waiting and starts

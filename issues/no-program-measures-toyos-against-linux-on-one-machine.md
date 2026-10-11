@@ -23,7 +23,7 @@ window compared, so a sibling that moved onto the initiator's CPU inside it
 passes. **Oracle**: Linux.
 
 What stands nearest is `counters_metal`'s `loaded` phase
-(`tests/toyos-rust-tests/src/bin/counters_metal.rs`), the one lateness reading
+(`tests/guest/rust-tests/src/bin/counters_metal.rs`), the one lateness reading
 the shipped kernel gives under load, and it is not this program's timer
 lateness: it reads how late each CPU's kick handler ran after a round's
 kicks, measured against the round's earliest stamp and so short by however

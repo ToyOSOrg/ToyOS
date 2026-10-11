@@ -8,7 +8,7 @@ opened: 2026-10-04
 
 Every line of the log opens with its time since the CPU's counter last started
 (`toyos_abi::log::Head`). The loader converts the counter at the rate CPUID
-leaves 15H/16H state (`bootloader/src/stamp.rs`, `toyos_tsc::stated_hz`), and
+leaves 15H/16H state (`loader/src/stamp.rs`, `toyos_tsc::stated_hz`), and
 the kernel does the same for its records until it has measured the TSC against
 the HPET (`kernel/src/clock.rs`'s `stamp`). A CPU that states neither leaf gets
 `--.---` (`toyos_abi::log::UNTIMED`) in place of the time on every loader line,

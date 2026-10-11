@@ -45,14 +45,14 @@ One `HandleEntry` — an object reference plus a `Rights` word — in one proces
 own table (`kernel/src/object/handle.rs:142`), reached only through a
 `RawHandle`, which "designates nothing outside that table: a number lifted out
 of another process's log, or counted up from zero, resolves to that process's
-own slot or to nothing at all" (`toyos-abi/src/handle.rs:1`). Nothing else in
+own slot or to nothing at all" (`sdk/abi/src/handle.rs:1`). Nothing else in
 the ABI bears authority: a `Koid` is "**Never an authority**: no syscall turns a
 koid into access to anything" (`kernel/src/object/mod.rs:74`), and an endowment
 label is "a *local name* in one process's own table and buys nothing to guess"
-(`toyos-abi/src/syscall.rs:315`). Every syscall states the right it needs at its
+(`sdk/abi/src/syscall.rs:315`). Every syscall states the right it needs at its
 own arm — `Rights::NONE` where the handle alone is the authority
 (`4a98107f^:kernel/src/arch/syscall.rs:309`, `:442`, `:1032`) — because "a right left
-unstated is a right each call site invents" (`toyos-abi/src/handle.rs:53`). The
+unstated is a right each call site invents" (`sdk/abi/src/handle.rs:53`). The
 qualification is question 5's ambient set.
 
 ## 2. Is every authority ultimately derived from a handle/capability? — RULED 2026-08-20, REVERSED 2026-09-24
@@ -92,7 +92,7 @@ closed.
 
 Identity-only. No arm takes a pid, and `SYS_GETPID` answers the caller's own
 (`4a98107f^:kernel/src/arch/syscall.rs:490`). `ProcessStats.pid` says so at the
-field: "Not authority — no syscall takes a pid" (`toyos-abi/src/syscall.rs`'s
+field: "Not authority — no syscall takes a pid" (`sdk/abi/src/syscall.rs`'s
 `ProcessStats`). Tids are process-local names:
 `SYS_THREAD_JOIN` resolves through `thread_sched(caller, tid)` and
 `collect_thread_zombie(table, tid, parent_pid)`, both keyed on the caller's own
@@ -101,8 +101,8 @@ pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, 
 ## 4. Can a process enumerate objects it lacks authority over? — RULED 2026-08-20, IMPLEMENTED 2026-08-22
 
 **No.** The owner ruled that `SYS_SYSINFO` demands a right, and it does:
-`Rights::ROSTER` on a `SysCap` (`toyos-abi/src/handle.rs`), spelled `roster` in
-`toyos_manifest`'s `SYSCAP_RIGHTS` (`toyos-manifest/src/lib.rs`), demanded by
+`Rights::ROSTER` on a `SysCap` (`sdk/abi/src/handle.rs`), spelled `roster` in
+`toyos_manifest`'s `SYSCAP_RIGHTS` (`lib/manifest/src/lib.rs`), demanded by
 `sys_sysinfo` before a single per-process entry is collected or written
 (`4a98107f^:kernel/src/arch/syscall.rs`), and endowed by `system.toml` to `toybox` —
 which is what `/system/bin/ps` is under another name — exactly as `logread` is endowed
@@ -168,7 +168,7 @@ the list minus them is what the tree now enforces.
 
 ## 6. Can rights ever increase after delegation? — COMMITTED
 
-**No, and the type has no widening primitive** (`toyos-abi/src/handle.rs:53`).
+**No, and the type has no widening primitive** (`sdk/abi/src/handle.rs:53`).
 Every path that puts an entry in a table was walked. The only rights-taking
 constructor a caller can reach is `HandleEntry::duplicate`, which refuses
 without `Rights::DUP` and refuses a set that is not `subset_of` the source's
@@ -194,7 +194,7 @@ delegation and not a widening.
 
 A child starts with an empty `HandleTable` and gets exactly two vectors:
 `slot_map` *duplicates* (the parent keeps its copy) and `endow` *moves*
-(`toyos-abi/src/syscall.rs:283`). Both are all-or-nothing and refuse by name — a
+(`sdk/abi/src/syscall.rs:283`). Both are all-or-nothing and refuse by name — a
 slot-map pair naming a handle the parent does not hold ends the parent
 (`kernel/src/loader/start.rs:308`), an endowed handle without `TRANSFER` refuses
 the spawn before anything leaves the table (`:206`), and the move is the last
@@ -213,7 +213,7 @@ and the kernel starts the child there or refuses the spawn — `InvalidArgument`
 for a path that is not absolute, `NotFound` for one naming no directory — with
 no default to the caller's (`spawn_cwd` in `kernel/src/syscall/fs.rs`).
 std states `Command::current_dir`, or the caller's own directory when there is
-none, and `tests/toyos-rust-tests/src/bin/spawn_cwd.rs` holds both routes to it.
+none, and `tests/guest/rust-tests/src/bin/spawn_cwd.rs` holds both routes to it.
 
 Beyond that a child holds nothing, plus question 5's ambient set, which every
 process has.
@@ -261,8 +261,8 @@ caller exists.
 ## 10. How is device authority delegated? — COMMITTED
 
 Four sites, and they cannot disagree. `system.toml` declares `devices` per
-program; `src/build.rs:1923` refuses a config where two programs name one class
-and `src/build.rs:1953` refuses a class the ABI does not have, so arbitration is
+program; `build/build.rs:1923` refuses a config where two programs name one class
+and `build/build.rs:1953` refuses a class the ABI does not have, so arbitration is
 a build-time fact rather than a runtime race. At boot the kernel mints one
 full-rights `SysCap` for `/system/bin/init` and nothing else can construct one
 (`kernel/src/loader/mod.rs:938`). init reads the manifest and calls
@@ -276,7 +276,7 @@ device-driving syscall then presents that handle and the kernel checks the
 setting the resolution than one holding nothing"
 (`4a98107f^:kernel/src/arch/syscall.rs:895`). `SYS_RT_ENTER` is the same shape
 on `Rights::RT` (`:1655`), narrowed per program by
-`toyos_manifest::syscap_rights` (`toyos-manifest/src/lib.rs:73`) — `system.toml`
+`toyos_manifest::syscap_rights` (`lib/manifest/src/lib.rs:73`) — `system.toml`
 grants exactly two, `logread` to `logd` and `rt` to `soundd`.
 
 One inconsistency, known and unobservable: three arms demand three different

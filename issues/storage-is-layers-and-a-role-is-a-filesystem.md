@@ -37,7 +37,7 @@ disk is the one-member case. Two filesystems claiming one unique role are
 refused rather than guessed, which `boot_partition_identity` already asserts
 for the boot volume. A blank volume joins the system by the designation stamp
 the bcachefs crate already carries (`DESIGNATION_MAGIC`,
-`bcachefs/src/superblock.rs`): the probe formats a designated volume and
+`lib/bcachefs/src/superblock.rs`): the probe formats a designated volume and
 refuses to reformat a used one (`issues/probe-mounts-on-a-checksum.md`
 is what that refusal still owes). Microsoft's basic-data type is a foreign
 volume, handed to whichever server recognises its superblock.

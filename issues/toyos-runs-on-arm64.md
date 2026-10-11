@@ -79,9 +79,9 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 ## The default architecture
 
 `cargo run` and the build pick x86-64 when no architecture is named, whatever
-the host (`src/build.rs`'s `arch_for`, the `None => Arch::X86_64` arm), and
+the host (`build/build.rs`'s `arch_for`, the `None => Arch::X86_64` arm), and
 the owner's word of 2026-10-09 makes the default the host's own, which
-`src/arch.rs`'s `Arch::HOST` already knows. It cannot be flipped without
+`build/arch.rs`'s `Arch::HOST` already knows. It cannot be flipped without
 taking the desktop away from an Apple-silicon host: the AArch64 image has no
 virtio devices and no userland servers yet (stages 6 and 7). The flip is an
 exit item of stage 7, and until then the default staying x86-64 on an ARM
@@ -106,7 +106,7 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 
 **x86-only pure code, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
 `kernel/pure/pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
-(PML4[0]/PML4[256], `toyos-bootmap/src/lib.rs:21-29`).
+(PML4[0]/PML4[256], `lib/bootmap/src/lib.rs:21-29`).
 
 **Inline assembly**, 834 lines by a paren-depth scan of
 `asm!`/`naked_asm!`/`global_asm!` bodies (undercounts: macro bodies like
@@ -115,7 +115,7 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 `sched/driver.rs:1019-1062`), `irq_census.rs` 19, `nmi_gate.rs` 16, `main.rs`
 13, `drivers/serial.rs` 13, `hw.rs` 10, `blackbox.rs` 6, `iommu/vtd/table.rs`
 6, `panic_console/mod.rs:1294` 1, `xhci/wait/mod.rs:36` 1. Userland plus
-`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). std's
+`toyos-abi`: 54 lines (`libc/memory.rs` 23, `sdk/abi/src/syscall.rs` 20). std's
 ToyOS backend has two naked-asm sites: `_start`
 (`sdk/std/sys/pal/mod.rs:44`) and `__tls_get_addr` reading
 `fs:[8]` (`sdk/std/sys/pal/tls.rs:43`).
@@ -129,7 +129,7 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
 
 - **Port I/O** (`cpu::inb/outb/inw/outw`): `rtc.rs:203-204`,
   `drivers/serial.rs` (16 sites), `drivers/i8042/mod.rs` (12 sites),
-  `drivers/watchdog.rs:84-158`, `bootloader/src/watchdog.rs:195,204`.
+  `drivers/watchdog.rs:84-158`, `loader/src/watchdog.rs:195,204`.
 - **APIC / IOAPIC / MSI.** `hw.rs:1-5`: "Everything here is x2APIC, TSC or a
   single instruction." The MSI doorbell `0xFEE0_0000` is hardcoded three
   times: `drivers/pci.rs:31`, `iommu/vtd/interrupt.rs:61`,
@@ -142,7 +142,7 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
 - **TSC.** 112 mentions in 11 non-arch files (`clock.rs`, `deadline.rs`,
   `hardlockup/`, `panic_reboot.rs`, `xhci/`). The bootloader
   calls `_rdtsc`/`__cpuid` and reads MSR 0x3B at
-  `bootloader/src/main.rs:583-598`.
+  `loader/src/main.rs:583-598`.
 - **CPU-state declaration.** `arch/control_regs.rs:1-6` is CR0/CR4/EFER;
   ARM's equivalent is SCTLR_EL1/TCR_EL1/MAIR_EL1/CPACR_EL1 (and HCR_EL2 when
   entered at EL2). CLAUDE.md's one-declaration rule transfers intact; the
@@ -156,9 +156,9 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
   default.
 - **Calling conventions.** `extern "sysv64"` at `main.rs:205`,
   `deadline.rs:194`, `sched/driver.rs:892`, `i8042/mod.rs:490`,
-  `bootloader/src/main.rs:785`.
+  `loader/src/main.rs:785`.
 - **Entropy.** `hasher.rs:37` asserts RDRAND; HVF exposes no RNDR.
-- **Boot protocol.** `toyos-abi/src/boot.rs:3-20` carries `rsdp_addr` and
+- **Boot protocol.** `sdk/abi/src/boot.rs:3-20` carries `rsdp_addr` and
   `boot_pml4_addr`, no DTB field.
 - **Memory ordering.** 980 explicit orderings in the kernel, 711 `Relaxed`,
   plus 17 `fence(` calls. `mm/mmio.rs:14` justifies `Sync` by saying volatile
@@ -173,10 +173,10 @@ across `src/` and `tests/`. The harness hardwires q35
 `cfg!(target_arch = "x86_64") && …` (`src/lib.rs:65`). The rust fork has only
 `x86_64_unknown_toyos.rs`; its base `base/toyos.rs` is arch-neutral.
 `toyos-elf`
-refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
+refuses anything but `EM_X86_64` (`lib/elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
-(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
+(`sdk/abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
 (8,099 lines) is pure behind `Machine`/`Hw`
 (`kernel/pure/sched/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
 `irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as
@@ -250,7 +250,7 @@ Each stage names its exit; "measured" means a number from a run.
 1. **`aarch64-unknown-toyos` in the rust fork.** A target spec:
    `aarch64-unknown-none-elf`, PIC, frame pointers. Std pal `_start` and TLS
    for variant I. **Exit**: `RUSTUP_TOOLCHAIN=<sysroot> cargo build --target
-   aarch64-unknown-toyos`, with `<sysroot>` as `src/CLAUDE.md`'s std
+   aarch64-unknown-toyos`, with `<sysroot>` as `build/CLAUDE.md`'s std
    type-check recipe names it, builds `std` plus a hello-world and the whole
    Rust userland.
 

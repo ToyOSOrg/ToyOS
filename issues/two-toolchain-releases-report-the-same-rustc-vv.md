@@ -6,7 +6,7 @@ opened: 2026-09-05
 
 # Two toolchain releases report the same `rustc -vV`, so a consumer's cargo keeps the old release's rlibs
 
-The generated `bootstrap.toml` (`src/toolchain.rs`) sets neither `channel`
+The generated `bootstrap.toml` (`build/toolchain.rs`) sets neither `channel`
 nor `description` under `[rust]`, so bootstrap's channel is `dev` and its
 default for that channel is `omit-git-hash = true`
 (`rust/src/bootstrap/src/core/config/config.rs`, the `omit_git_hash` line).

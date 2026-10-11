@@ -11,12 +11,12 @@ controller from SMM: the controller device's `_GLK` returns 1, and then every
 transaction is taken under the FACS global lock (ACPI 6.5 §6.5.7, §5.2.10.1).
 `/system/bin/acpiserver` evaluates `_GLK` only to leave the controller's
 space unattached to AML, and so read no battery, wherever it is not 0
-(`attach`, `userland/acpiserver/src/main.rs`), and takes no lock around its
+(`attach`, `system/acpiserver/src/main.rs`), and takes no lock around its
 own queries: on such a machine a query of the server's and one of the
 firmware's can interleave on the same two ports. The lock itself is there to
 take: the interpreter's host takes it for a Lock field or an Acquire of
 `\_GL`, waiting out the firmware's hold on its `GBL_STS`
-(`userland/acpiserver/src/host.rs`); nothing takes it around a controller
+(`system/acpiserver/src/host.rs`); nothing takes it around a controller
 transaction.
 
 On the T14 no table names a `_GLK` at all: a byte search of its DSDT and every

@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       # The driver's own target, and no step's: it says this job carries the
-      # host cache (src/cicache.rs).
+      # host cache (build/cicache.rs).
       CARGO_TARGET_DIR: target/ci-driver
       # The writer's: a unit built with other debuginfo is not the entry's.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only

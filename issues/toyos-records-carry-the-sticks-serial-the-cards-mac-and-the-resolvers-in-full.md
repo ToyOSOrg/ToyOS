@@ -13,11 +13,11 @@ public carries them unless whoever pastes it masks them by hand:
 
 - the USB stick's serial number: `kernel/src/drivers/xhci/wait/msc.rs:1407`,
   on every bind, and `:1415`, when a disk comes back;
-- the network card's MAC: `userland/netstack/src/main.rs`, `main`;
+- the network card's MAC: `system/netstack/src/main.rs`, `main`;
 - the resolvers the lease named, which on the bench are the provider's public
-  ones: `userland/netstack/src/main.rs`, `Leases::pass`.
+  ones: `system/netstack/src/main.rs`, `Leases::pass`.
 
-`src/sourcegate.rs` reads tracked files only. A pull request's body, a comment
+`build/sourcegate.rs` reads tracked files only. A pull request's body, a comment
 and a commit message are read by nothing before they are public.
 
 ## The question

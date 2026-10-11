@@ -25,7 +25,7 @@ ring. It is not. **The loader's log file stopped, mid-report.**
 | `loaderlog::ENDS_AT_CHAIN` — *"the last boot is accounted for, so this pass resets the machine"* | **absent from the file, and absent from all 35,651,584 bytes of the partition image** |
 | the same line on a healthy reporting pass (`toyos-usbreset`, `jobcase`, `DONE`) | present, and the file's last line |
 
-`bootloader/src/main.rs` prints the finding's lines and then calls
+`loader/src/main.rs` prints the finding's lines and then calls
 `end_this_pass`, whose first statement is that line. It is unconditional. A file
 that has the report's first 190 lines and not that line is a file the loader
 stopped writing to while it was still printing the report.
@@ -40,7 +40,7 @@ is neither. So the page held more than the file shows, and nothing in this run
 shows the snapshot dropping its newest records.
 
 The 190 printed record lines are byte-for-byte `kernel.log`'s lines 87..276
-(only the em-dash differs, which `bootloader/src/blackbox.rs`'s `Ascii` renders
+(only the em-dash differs, which `loader/src/blackbox.rs`'s `Ascii` renders
 as three dots by design). `kernel.log` itself is `logd`'s, ends at 2.208 s, and
 carries no `wedge: staged` — `logd` was wedged before it could write one.
 

@@ -14,7 +14,7 @@ against `rdtsc` from the timer interrupt entry — `kernel/src/arch/x86_64/idt/t
 seals the record and writes the reset register through `acpi::reset_now`.
 `start` arms the other half of the same parameter at `:182`,
 `crate::hardlockup::start(ms)`: a bound of `toyos_tco::hard_lockup_bound_ms`,
-`deadline_ms / 2` (`toyos-tco/src/lib.rs:154-156`), sampled by an NMI every
+`deadline_ms / 2` (`lib/tco/src/lib.rs:154-156`), sampled by an NMI every
 second on every CPU (`kernel/src/hardlockup/mod.rs:1-31`). The two share one
 seal (`claim_the_reset`, `deadline.rs:69-71`).
 
@@ -33,7 +33,7 @@ empty) — did not come back inside the loop's 420 s, and its own kernel log
 never reached the stick, so its print of the two lines is inferred from
 `start` and not read. Its `WEDGED` record was read by run 56's loader pass:
 a pass that printed the record and ended the chain without booting a kernel
-(`bootloader/src/blackbox.rs:149-154`, `bootloader/src/main.rs:857-860`), so
+(`loader/src/blackbox.rs:149-154`, `loader/src/main.rs:857-860`), so
 that the machine came back to Ubuntu after 100 s and the loop read the
 stick's `loader.log`, which reads, whole above the ring tail:
 
@@ -112,8 +112,8 @@ whichever process last died before it.
 
 ## The instrument that measures this already exists
 
-`src/metal.rs:1591-1597`'s `deadline_lateness_ms` computes exactly
-`reached − bound` out of the `DEADLINE_EXPIRED` line (`src/bootlog.rs:28`).
+`tests/metal/src/lib.rs`'s `deadline_lateness_ms` computes exactly
+`reached − bound` out of the `DEADLINE_EXPIRED` line (`build/bootlog.rs:28`).
 The arithmetic above is the instrument's own, done by hand because the run
 was `toyos-metal` invoked directly and not the harness. No second instrument
 is owed; a cause is.

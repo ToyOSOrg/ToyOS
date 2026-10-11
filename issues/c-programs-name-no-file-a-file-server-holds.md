@@ -9,8 +9,8 @@ opened: 2026-09-27
 `/apps`, `/config`, `/home`, `/state`, `/log` and `/boot` are served by
 `/system/bin/fsd` through directory capabilities in each program's namespace,
 and std reaches them through `toyos::fs` (`sdk/std/sys/fs.rs`).
-`userland/libc` does not: `open`, `stat`, `opendir` and every other path call
-in `userland/libc/src/posix_io.rs` and `userland/libc/src/stdio.rs` go to the
+`sdk/libc` does not: `open`, `stat`, `opendir` and every other path call
+in `sdk/libc/src/posix_io.rs` and `sdk/libc/src/stdio.rs` go to the
 kernel's `SYS_OPEN` family, and the kernel serves ROOT and `/tmp` only. So a C
 program — tinycc, doomgeneric, anything built with `toyos-cc` — is refused
 every path under those six directories with `ENOENT`, and a file it writes

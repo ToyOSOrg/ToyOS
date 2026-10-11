@@ -27,7 +27,7 @@ cannot:
 So a device those drivers decline to bind keeps bus mastering — the end
 state the virtio close removed, still reachable one device class over — and
 every MMIO-side parse in those drivers runs against a device that could
-already master the bus. `src/sourcegate.rs` pins the exact set of
+already master the bus. `build/sourcegate.rs` pins the exact set of
 `enable_bus_master` sites so the set cannot grow silently; making the pinned
 sites *right* is this issue.
 

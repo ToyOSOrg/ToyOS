@@ -34,15 +34,15 @@ The fix belongs where the owner is decided:
 - init names the owner itself, after the spawn and before the frame. That
   narrows the window and does not close it.
 - Or `Ring::push` treats an unowned ring as one in which every writer leaves
-  `CHILD_KEEP`, which closes it. That is `toyos/src`, the SDK.
+  `CHILD_KEEP`, which closes it. That is `sdk/toyos/src`, the SDK.
 
 **Exit**: a child writing before the ring's owner is named cannot take the
 slots the owner is kept, shown by a test that makes it write in that window.
 No test today covers that owner decision in `Ring::push`
-(`toyos/src/log/region.rs:202`) or logd's `ring.own(pid)`
+(`sdk/toyos/src/log/region.rs:202`) or logd's `ring.own(pid)`
 (`userland/logd/src/origin.rs:176`); `let keep = 0;` there, or deleting
 `ring.own(pid)`, passes every test in the tree, so the exit's test must turn
-both mutations red. Owner: `toyos/src/log/region.rs`'s `Ring::push`; held by
+both mutations red. Owner: `sdk/toyos/src/log/region.rs`'s `Ring::push`; held by
 the orchestrator.
 
 **Unrun since it was disabled**: PR #562 changed this test's verdict on the

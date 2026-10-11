@@ -11,7 +11,7 @@ over what libc gives `src/filesystem`: `setbuf`, `fseeko`, `ftello`,
 `truncate`, `pathconf`'s `_PC_PATH_MAX`, and `utimes`, which refuses
 `ENOSYS`, so `last_write_time` sets no time, and `remove_all` walks a
 directory by its path (`issues/remove-all-follows-a-link-swapped-in-mid-walk.md`).
-Each of libc's is read back by `tests/testcases/tinycc/207_libc_names.c`
+Each of libc's is read back by `tests/corpus/tinycc/207_libc_names.c`
 and `206_libc_refusals.c`; no C++ program in a guest uses any of it.
 
 Owner: `issues/toyos-builds-itself.md`, M2.

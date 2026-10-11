@@ -14,7 +14,7 @@ parameter and the signed header the loader read — so any process whose
 it. The test estate's `test-runner` holds `device`, and so would any row
 a config gives it to.
 
-`/system/bin/update` reaches it too. `slots::grant` (`toyos-update/src/slots.rs`)
+`/system/bin/update` reaches it too. `slots::grant` (`lib/update/src/slots.rs`)
 knows which volume is the running slot's only from the slot table, and
 `update` writes that table: one naming a decoy volume beside the running ROOT
 as slot A, and the running volume beside the idle ROOT as slot B, is granted

@@ -34,7 +34,7 @@
 //!
 //! Every path below runs on IST2 inside an NMI: no lock, no allocation, no
 //! `log!` — the interrupted context may hold the log ring's own shard, and
-//! `src/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
+//! `build/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
 //! also on every CPU every second of every boot, so it is atomics and one
 //! `rdtsc` and no division at all. The report divides, and only after the
 //! machine is already being ended.
@@ -70,7 +70,7 @@ pub mod probe;
 
 /// What a sealed record opens with, and so what the next boot's loader prints
 /// under `Previous boot's panic:`. A constant because the harness judges the
-/// line and nothing links the two crates (`src/bootlog.rs`).
+/// line and nothing links the two crates (`build/bootlog.rs`).
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
 /// Declared beside the bound it samples, so the host judging a lockup's
@@ -124,7 +124,7 @@ static SPIN_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 ///
 /// **Says nothing itself, and hands its caller the words.** Every other path in
 /// this file is reached from an NMI, where a log record would reenter the ring
-/// the interrupted context may be mid-publish of, and `src/sourcegate.rs`'s
+/// the interrupted context may be mid-publish of, and `build/sourcegate.rs`'s
 /// `nmi_does_not_log` holds the whole file to that. Its caller runs in ordinary
 /// context and writes the record.
 #[must_use]

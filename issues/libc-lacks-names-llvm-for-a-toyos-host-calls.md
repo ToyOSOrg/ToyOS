@@ -8,7 +8,7 @@ opened: 2026-10-01
 
 LLVM's tools built for `x86_64-unknown-toyos` call names libc neither
 declares nor defines. None is in the clang and `ld.lld` the build makes for
-ToyOS (`src/hostedclang.rs`), which compile and link without them; each
+ToyOS (`build/hostedclang.rs`), which compile and link without them; each
 stops a build of LLVM's other tools, bootstrap's among them
 (`issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`):
 

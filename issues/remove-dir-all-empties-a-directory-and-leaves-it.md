@@ -16,7 +16,7 @@ on this path.
 
 ## Reproduction
 
-Measured in `pkg_install_gbae`'s guest on 2026-09-05, before `userland/pkg`
+Measured in `pkg_install_gbae`'s guest on 2026-09-05, before `system/pkg`
 stopped using it. `pkg remove gbae` reported success and `pkg list` was empty —
 `/apps/gbae/manifest.toml` was gone, so init refused a launch out of it — and
 the next `pkg install` of the same archive answered
@@ -29,13 +29,13 @@ The kernel's own syscall census for that process is the shorter proof: four
     [kernel 1.004 cpu1] syscalls: pid=14 total=18 syscall_wall=11ms 0=1 1=2 6=1
     9=1 10=1 14=1 17=1 18=4 63=2 72=1 73=2 91=1
 
-`/system/bin/rm -r` is the other caller (`userland/toybox/src/rm.rs:30`) and has
+`/system/bin/rm -r` is the other caller (`system/toybox/src/rm.rs:30`) and has
 the same hole.
 
 ## Exit condition
 
 `remove_dir_all` removes the directory it was given and every directory under
-it. Closes when that lands and `userland/pkg`'s own `remove_tree`
+it. Closes when that lands and `system/pkg`'s own `remove_tree`
 is deleted with it — that walk exists only because this one does not finish.
 
 The fix is one `rmdir(path)` after the loop, and it is in a sysroot

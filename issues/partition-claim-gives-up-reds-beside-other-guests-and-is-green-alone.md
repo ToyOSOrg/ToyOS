@@ -25,7 +25,7 @@ wall-clock, not against the guest's own progress.
 
 Not the diff it was seen from: that branch touches `bcachefs/`,
 `kernel/src/bcachefs_adapter.rs`, `kernel/src/main.rs`'s DATA-volume arms,
-`src/image.rs`, `tests/common/storage.rs` and a new `home_absent` guest
+`build/image.rs`, `tests/common/storage.rs` and a new `home_absent` guest
 binary — nothing under `tests/common/partclaim.rs` or the kernel's `partclaim`
 module.
 

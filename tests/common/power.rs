@@ -193,7 +193,7 @@ pub fn machine_shutdown_wire_at_the_seal(test_config: &Path) -> Result<(), Strin
 pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     let short = qemu::build_toyos_bin(
         qemu::SUITE_ARCH,
-        &super::compile::repo_root().join("tests/toyos-rust-tests"),
+        &super::compile::repo_root().join("tests/guest/rust-tests"),
         "stop_short",
     );
     let options = BootOptions {
@@ -462,14 +462,14 @@ pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
     // **The account reaching the page is itself under test**: it is made a line
     // at a time from the reset path, under the reserve
     // `toyos_blackbox::ACCOUNT_BYTES` keeps for it.
-    after.must_say(toyos_build::metaldevices::QUIESCE_HEAD)?;
+    after.must_say(toyos_metal::devices::QUIESCE_HEAD)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     // **Reported and not judged.** Which state the reset found the controller
     // in is the open question this arm gathers answers to; a predicate over it
     // would be the suite deciding it. A reset that found no command open writes
     // no such line, and that is a fact about the boot rather than a failure of
     // it.
-    let endpoint = toyos_build::metaldevices::QUIESCE_ENDPOINT;
+    let endpoint = toyos_metal::devices::QUIESCE_ENDPOINT;
     match after.text().lines().find(|line| line.contains(endpoint)) {
         Some(said) => eprintln!("  [power] {}", said.trim()),
         None => eprintln!("  [power] the reset found no command open on the device"),
@@ -649,8 +649,8 @@ pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String
     let mut bad = Vec::new();
     for back in arms {
         let text = back.loader();
-        let head = toyos_build::metaldevices::QUIESCE_HEAD;
-        let Some(account) = toyos_build::metaldevices::quiesced(text.text()) else {
+        let head = toyos_metal::devices::QUIESCE_HEAD;
+        let Some(account) = toyos_metal::devices::quiesced(text.text()) else {
             bad.push(format!(
                 "{}: loader.log carries no readable {head:?} summary, so nothing stopped this \
                  machine's USB before it reset",
@@ -837,7 +837,7 @@ fn hex_after(line: &str, after: &str) -> Result<u64, String> {
 /// the Global Lock is served once the wait ends at its Acquire's timeout: the
 /// wait clears the press's enable once it finds its status latched, takes
 /// the SCI the press raised, and puts every enable back after, so the press's
-/// status raises the SCI again for `serve`. `tests/acpicase` with the test
+/// status raises the SCI again for `serve`. `tests/images/acpicase.toml` with the test
 /// kernel's actuator for the firmware's side of the lock, which
 /// `acpi_mediated`'s `held` arm stages owned before it hands the server the
 /// claim; the table QEMU adds waits as it loads for the press, sent once the
@@ -845,7 +845,7 @@ fn hex_after(line: &str, after: &str) -> Result<u64, String> {
 /// Then the press must power the machine off, after the Acquire said it timed
 /// out.
 pub fn acpi_press_across_a_lock_wait(probe: (String, Vec<u8>)) -> Result<(), String> {
-    let case = super::compile::repo_root().join("tests/acpicase");
+    let case = super::compile::repo_root().join("tests/images/acpicase.toml");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
         &[],

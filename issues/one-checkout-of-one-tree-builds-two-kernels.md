@@ -18,11 +18,11 @@ heads:
   patched, since restored; and
   `d0c3cbd81729d01f20c772c08203c0bd4a4818b5f3d77d789cc4193104c4dfdd` after
   eleven such builds in turn, each of a patch to one of `pio.rs`,
-  `toyos-userbound/src/port.rs`, `isa.rs`, `percpu.rs`, `panic_reboot.rs`,
+  `lib/userbound/src/port.rs`, `isa.rs`, `percpu.rs`, `panic_reboot.rs`,
   `idt/exceptions.rs` with `paging.rs`, and `object/ops.rs`, each restored
   before the next. Pull request #592 carries the patches and their order.
 - At `b00d9a589`, built into two empty target directories by the cargo line
-  `src/build.rs` runs for it: 3514808 bytes and sha256
+  `build/build.rs` runs for it: 3514808 bytes and sha256
   `cb95d0d34ac99148584083e21cbb09edc299e5a94168e8ca71a9d7ef3db8a37b` from
   each, where the kernel the worktree's own `kernel/target` had last built was
   still `2593c71c…`.

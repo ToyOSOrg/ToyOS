@@ -1,0 +1,243 @@
+# sshserver is deliberately not in `[boot] start`. It is built into the image and
+# started by hand (`detach /system/bin/sshserver`, so it outlives the shell) on a
+# machine that wants remote access: it listens on every interface, so carrying
+# it in every boot is a listening port nobody asked for.
+# `build/build.rs`'s `no_shipped_boot_config_starts_sshserver` is the gate.
+
+# `assets/soundfont.sf2` is in here and is doom's music: GeneralUser GS cut down
+# to the 37 melodic programs and 23 percussion keys `assets/DOOM1.WAD`'s own MUS
+# headers select, by `build/soundfont.rs`. `NOTICE` carries its licence, the
+# provenance caveat that comes with it, and the zero-byte OPL3 path that may one
+# day delete it.
+assets = ["assets"]
+
+# What `/system/bin/supervisor` starts at boot. Program keys, not paths, and the order means
+# nothing: every port exists before any server runs.
+[boot]
+# `filepicker` is a `serves` daemon like the three beside it: a machine-wide
+# port with one server, started where every other one is. It was called interim
+# while the compositor had no way to ask for a program's *declared* authority —
+# the launcher gives it one, and starting a service from `[boot] start` is not
+# the thing that needed fixing.
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver"]
+
+# What every program launched out of `/apps` holds, whatever its own directory
+# says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
+# a row read out of one would be a directory deciding what the machine hands
+# out; this is the image's answer, one for all of them. Connectors only —
+# `devices` and `syscap` have no spelling here, so nothing installed claims
+# hardware or enters the RT band — and no directory: a package sees its own
+# `/apps/<name>` read-only and its own `/home/toy/Apps/<name>`, its `HOME`.
+#
+# `folder` is the most of a folder of the session's home a package may be
+# granted (`/system/bin/grants`), and until a signed package entry carries a
+# package's own request it is what every package asks for: read-write, since
+# gbae saves beside the ROM it plays.
+[apps]
+receives = ["compositor", "soundserver", "filepicker"]
+folder = "read-write"
+
+# `service = true` makes a row a system service: the supervisor starts it with `HOME` at
+# its own `/state/<name>` and makes that directory first. Every other row runs
+# with the session user's home.
+[programs]
+proctest = {}
+# The installer. It holds nothing: it writes under `/apps` because `/apps` is
+# writable to it, and a row that gave it more would make that untrue.
+pkg = {}
+
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does. The kernel keeps the record ring and the console and writes no
+# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one. It claims no device, and
+# `log` is the port it answers `inspect` on.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+# The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
+# when it mints the `acpi` claim and back when the claim goes, so the SCI,
+# the power button and the embedded controller's events are this program's
+# while it runs and the firmware's otherwise. `power` is how a press stops
+# the machine: through the supervisor, which has `logkeeper` make the log whole.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+# `starts` is what the desktop's taskbar and launcher start. `login = true`
+# makes the local desktop a login session, so `swap` and `update` run from its
+# shell. `prompt` is the layer above every window, which `filepicker` alone
+# reaches: serving it makes the sessions its launches open the screen's, whose
+# packages may ask the person at it for a folder.
+[programs.compositor]
+service = true
+serves = ["compositor", "prompt"]
+receives = ["soundserver", "filepicker"]
+devices = ["framebuffer", "keyboard", "mouse"]
+starts = ["terminal", "files", "/apps"]
+login = true
+
+[programs.soundserver]
+service = true
+serves = ["soundserver"]
+devices = ["hda-audio", "pci:1af4:1059"]
+syscap = ["rt"]
+
+# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
+# window and the interrupt are its own, and the kernel keeps only the claim.
+# Named by vendor and device rather than by slot, so one row finds the card
+# wherever firmware put it.
+[programs.netstack]
+service = true
+serves = ["netstack"]
+devices = ["pci:1af4:1041"]
+
+# Every launch it makes is in a login session, the one `update` and `swap`
+# below start in: one it opens when it runs in the machine's session, and the
+# one it was launched in otherwise, as when a desktop shell starts it.
+[programs.sshserver]
+service = true
+receives = ["netstack"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+login = true
+
+# `swap` is the authority to replace a running service's binary; the build
+# refuses it to any other program (`build/build.rs`). `ssh <machine> swap netstack
+# <sha256> <length> < netstack` runs it for a login.
+[programs.swap]
+receives = ["swap"]
+
+# The idle slot: the slot table and the idle slot's two partitions, which the supervisor
+# claims against the ROOT the kernel holds. The build refuses it to any other
+# program; the owner's signature on the image is the authority to install it.
+# `ssh <machine> update < image` runs it for a login.
+[programs.update]
+slots = true
+
+# Which folder of the session's home an installed package is granted: the one
+# row the build lets receive `grants`, which the supervisor answers from a login
+# session alone. `grants add gbae /home/toy/Games` grants one from a shell.
+[programs.grants]
+receives = ["grants"]
+
+# A name's addresses, asked of netstack's resolver: `netstack` is the whole of what it
+# holds.
+[programs.host]
+receives = ["netstack"]
+
+# The reader of every owner's `inspect` answer: a connector to each owner's
+# port, `inventory` for the kernel's `dev.*`, and `counters` and `trace` for its
+# `kernel.*`, are the whole of what it can observe. `trace` makes it an admin
+# tool: every CPU's frequency and wake-ups are what time other programs.
+[programs.inspect]
+receives = ["netstack", "soundserver", "log", "compositor"]
+syscap = ["inventory", "counters", "trace"]
+
+# The kernel's diary: when every thread in the machine was woken, ran and
+# parked, which times every other program, so `trace` is all it holds and it
+# is an admin tool.
+[programs.trace]
+syscap = ["trace"]
+
+# Names a killed program's frames from the file and offset the kernel records:
+# it reads the files a record names and holds nothing else.
+[programs.symbolize]
+
+# The file picker, and the consent server: `consent` is the supervisor's
+# question before a package's launch, which no row receives, and `prompt` the
+# layer it asks it in, which no other row may hold (`build/build.rs`).
+[programs.filepicker]
+service = true
+serves = ["filepicker", "consent"]
+receives = ["compositor", "prompt"]
+
+[programs.terminal]
+provides = ["surface"]
+receives = ["compositor"]
+starts = ["shell"]
+
+[programs.shell]
+receives = ["surface"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+
+[programs.doom]
+receives = ["compositor", "soundserver"]
+
+[programs.snake]
+receives = ["compositor", "filepicker"]
+
+# calc opens a window and reads nothing off the disk, so a connector to the
+# compositor is the whole of its authority.
+[programs.calc]
+receives = ["compositor"]
+
+# toyfetch reads only what every process may: the machine's ambient header,
+# CPUID and `/system/etc/os-release`.
+[programs.toyfetch]
+
+[programs.editor]
+receives = ["compositor", "filepicker"]
+
+[programs.paint]
+receives = ["compositor", "filepicker"]
+
+[programs.files]
+receives = ["compositor", "filepicker"]
+
+# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s: the
+# connector to the supervisor's port, which has `logkeeper` make the log whole and then stops
+# the machine with a `SysCap` no program in the image holds. `roster` is
+# `/system/bin/ps`'s. Each of those is this binary under another name: the supervisor
+# resolves the symlink to this row, so the applets are endowed both and nothing
+# else in the image is. The row's granularity is the binary, so every other
+# applet is endowed both too — the same shape as `soundserver` reaching `ls`.
+#
+# `free` is the same syscall as `ps` and is named by neither: the machine header
+# is ambient and the process roster is not.
+[programs.toybox]
+receives = ["compositor", "soundserver", "surface", "power"]
+syscap = ["roster"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "/apps"]
+
+# Symlinks created on ROOT at build time.
+# Keys are ROOT-relative; targets are the guest paths they resolve to.
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/locale" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/net" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/screen" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
+"bin/spin" = "/system/bin/toybox"
+"bin/stats" = "/system/bin/toybox"
+"bin/tone" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

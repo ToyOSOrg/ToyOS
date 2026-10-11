@@ -4,9 +4,9 @@ kind: track
 opened: 2026-08-01
 ---
 
-# The `bcachefs/` crate does not implement bcachefs
+# The `lib/bcachefs/` crate does not implement bcachefs
 
-ToyOS's `bcachefs/` crate implements a ToyOS-native on-disk format written from scratch.
+ToyOS's `lib/bcachefs/` crate implements a ToyOS-native on-disk format written from scratch.
 It shares a name with Linux bcachefs and nothing else, and **the magics alone settle
 it**: ours is a four-byte `MAGIC = b"BCFS"` plus
 `DESIGNATION_MAGIC = b"TOYOS-FORMAT-ME\0"` (`superblock.rs:5,24`) and `NODE_MAGIC = b"BTND"`
@@ -26,7 +26,7 @@ it is the owner's call, not something to do in a docs pass.
 > *"bcachefs is the default filesystem for toyos. the crate must be an
 > implementation of the spec."*
 
-The resolution is neither a rename nor a deletion. **`bcachefs/` must become a
+The resolution is neither a rename nor a deletion. **`lib/bcachefs/` must become a
 real implementation of the bcachefs on-disk format, and that format is ToyOS's
 default filesystem.** The name stops being wrong by the crate growing into it.
 

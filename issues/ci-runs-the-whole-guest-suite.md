@@ -7,7 +7,7 @@ opened: 2026-10-10
 # CI runs the whole guest suite
 
 The owner's ruling: guest tests run on demand, and CI's small tier holds only the tests that must
-break when something important breaks. `guest.yml` runs `cargo run -- --ci guest` (`src/ci.rs`,
+break when something important breaks. `guest.yml` runs `cargo run -- --ci guest` (`build/ci.rs`,
 `guest`), which is every registration in `tests/toyos.rs`, on every ready pull request, in the
 merge queue (`ci.yml`) and nightly (`nightly.yml`); no tier is declared, so no review can keep a
 new guest test out of it.

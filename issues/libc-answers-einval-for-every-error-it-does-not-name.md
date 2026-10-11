@@ -6,7 +6,7 @@ opened: 2026-10-01
 
 # libc answers EINVAL for every error it does not name
 
-Read from the code, not run. `set_errno` (`userland/libc/src/posix_io.rs`)
+Read from the code, not run. `set_errno` (`sdk/libc/src/posix_io.rs`)
 sends `Unknown`, `BadAddress`, `ResourceExhausted` and `NotSupported` through
 `_ => EINVAL`, so each reaches a C caller as `EINVAL`, which POSIX spells
 "invalid argument". A full handle table (`kernel/src/object/handle.rs`)

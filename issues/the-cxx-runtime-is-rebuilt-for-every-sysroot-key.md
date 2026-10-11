@@ -11,8 +11,8 @@ targets into every new sysroot (`libcxx::build`), so every `toyos-abi` edit
 pays for them. Their inputs are the compiler's LLVM, `libcxx::OPTIONS` and the
 C sysroot they compile and link against: libc's headers and its staticlib. An
 ABI edit moves only the staticlib. Measured on the `wt/toyos-rebuild` branch,
-one item added to `toyos-abi/src/clock.rs`: 27 s and 38 s at load 41, 47 s and
+one item added to `sdk/abi/src/clock.rs`: 27 s and 38 s at load 41, 47 s and
 54 s at load 68.
 
-**Exit**: one item added to `toyos-abi/src/clock.rs` after a build, and the
+**Exit**: one item added to `sdk/abi/src/clock.rs` after a build, and the
 next `cargo run -- --build-only` prints no `Building the C++ runtime`.

@@ -7,7 +7,7 @@ opened: 2026-10-09
 # A guest's close after a refused handshake can leave its peer waiting
 
 `https_fetch` (`tests/toyos.rs`) runs `https_get` three times on one boot of
-`tests/netcase`, each a new process and one TCP connection through
+`tests/images/netcase.toml`, each a new process and one TCP connection through
 `/system/bin/netstack` to a `rustls` server on the host. The second and third
 runs refuse the server's certificate during the handshake, print their
 refusal, drop the connection and exit 2. On smoltcp, the stack `netstack` ran

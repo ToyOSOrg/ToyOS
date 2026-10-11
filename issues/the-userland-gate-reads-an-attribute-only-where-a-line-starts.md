@@ -6,7 +6,7 @@ opened: 2026-10-01
 
 # The userland gate reads an attribute only where a line starts, so a test after code on its line runs nowhere
 
-`src/userlandhost.rs`'s `scan` reads a line for attributes only if the line
+`build/userlandhost.rs`'s `scan` reads a line for attributes only if the line
 starts with one. `fn _hidden() {} #[test] fn runs_nowhere() { panic!("never run") }`
 is a test to rustc and none to the gate. Appended to a package `host` never
 builds, it runs in no `cargo test`, and `every_userland_test_is_in_the_gate`
@@ -19,7 +19,7 @@ and reverted:
 
 | appended to | form | gate |
 |---|---|---|
-| `userland/snake/src/main.rs` | the one line above | 0 |
+| `apps/snake/src/main.rs` | the one line above | 0 |
 
 **Exit:** the scan reads an attribute wherever on a line it starts, a comment
 still holds none, and the one-line form reds.

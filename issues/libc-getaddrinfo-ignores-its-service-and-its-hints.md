@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # libc's getaddrinfo ignores its service and its hints
 
-Read from the code, not run. `getaddrinfo` (`userland/libc/src/socket.rs`)
+Read from the code, not run. `getaddrinfo` (`sdk/libc/src/socket.rs`)
 names its second and third arguments `_service` and `_hints` and reads
 neither. Every answer's port is 0, so the usual C client,
 `getaddrinfo(host, "80", &hints, &res)` and `connect(fd, res->ai_addr,
@@ -24,4 +24,4 @@ name, and the hints' socket type, protocol and flags, each failure is the
 and port `getaddrinfo` answered.
 
 **Owner**: libc, under `issues/toyos-has-its-own-network-stack.md`: it
-touches only `userland/libc` and a guest C case on `tests/netcase`.
+touches only `sdk/libc` and a guest C case on `tests/images/netcase.toml`.

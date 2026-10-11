@@ -58,7 +58,7 @@ Until the kernel mints the server's claim the firmware has the machine in
 legacy mode, and what it does with a press there is its own. The kernel
 writes `ACPI_ENABLE` at the mint, and the server's start then clears every
 latched status, `PWRBTN_STS` among them, before it enables the button
-(`userland/acpiserver/src/main.rs`): a press between the enable and that
+(`system/acpiserver/src/main.rs`): a press between the enable and that
 clear is dropped. On the `8d7004d3b` boot the enable is logged at 14.361 s
 and the server's `armed:` line at 14.363 s. The host recorded no press's
 time, so whether that boot's lost press fell in either window is not known.

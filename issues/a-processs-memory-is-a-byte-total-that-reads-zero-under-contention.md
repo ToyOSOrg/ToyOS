@@ -37,7 +37,7 @@ taken and climbs forever. Exporting one field is the cheap fix that yields a
 number which never returns. `peak_memory` is a high-water mark, which means a
 *fix* is invisible in it: a leak that stops leaking leaves the peak where it was.
 
-`tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It
+`tests/guest/rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It
 runs raw `thread_spawn`/`thread_join` over an explicitly `mmap`ed stack, and its
 comment at `:57-59` names this exact leak as the reason it avoids
 `std::thread::spawn`. What it does not do is read a number.

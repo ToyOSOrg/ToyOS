@@ -8,7 +8,7 @@ opened: 2026-09-28
 
 `kernel/src/arch/x86_64/i8042/tally.rs` publishes an interrupt's count with a
 `Release` `fetch_add` in `record` and reads it with an `Acquire` load in `read`,
-so a reader that sees a count sees the bytes behind it. No row of `src/ci.rs`'s
+so a reader that sees a count sees the bytes behind it. No row of `build/ci.rs`'s
 `CONTROLS` weakens that pair, so nothing shows that
 `kernel-loom/tests/i8042_tally.rs` would catch its loss.
 

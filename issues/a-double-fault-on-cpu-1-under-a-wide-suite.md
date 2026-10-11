@@ -99,7 +99,7 @@ halted CPU, so input over the same socket destroys the evidence for it.
 
 **`pid=Some(Pid(2)) tid=Some(Tid(0))` is `/system/bin/logd`'s main thread.** Measured,
 not inferred — the boot console of a `console_line_atomicity` run on this tree,
-same config (`tests/testcases`) and same width (`smp: 2`):
+same config (`tests/images/testcases.toml`) and same width (`smp: 2`):
 
 ```
 [kernel 0.233 cpu0] spawn: /system/bin/init pid=0 tid=0 …

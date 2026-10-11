@@ -6,15 +6,15 @@ opened: 2026-10-10
 
 # soundserver's virtio-sound clock can take a period one notification early
 
-`Sound::played` (`userland/soundserver/virtio-sound/src/lib.rs`) reads the
+`Sound::played` (`system/soundserver/virtio-sound/src/lib.rs`) reads the
 transmit queue's used ring only with the claim's interrupt record in hand, and
-`Virtio::completion` (`userland/soundserver/src/virtio.rs`) hands the mix loop
+`Virtio::completion` (`system/soundserver/src/virtio.rs`) hands the mix loop
 that record's `last_nanos`. A record says when its notifications landed and
 nothing about which period each was for. So when the device has written a
 newer period's used element and its notification has not landed by the ring
 read, that period is counted in the mask and stamped with the older
 notification's time, and `dll.update(last_nanos, n)` in
-`userland/soundserver/src/mix.rs` takes an update whose newest period is
+`system/soundserver/src/mix.rs` takes an update whose newest period is
 clocked at least one period early: an error shaped like `n − 1` periods on
 that update. Its notification then lands into the next record, which comes
 back with no period.

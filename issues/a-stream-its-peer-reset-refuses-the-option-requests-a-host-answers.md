@@ -7,8 +7,8 @@ opened: 2026-10-08
 # A stream its peer reset refuses the option requests a host answers
 
 The node lets a stream go once it holds neither of its pipe ends
-(`userland/netstack/node/src/streams.rs`), and netstack's id for it goes with
-it (`userland/netstack/src/serve.rs`, `Sockets::settle`). A peer's reset ends
+(`system/netstack/node/src/streams.rs`), and netstack's id for it goes with
+it (`system/netstack/src/serve.rs`, `Sockets::settle`). A peer's reset ends
 both pipes once the client's pipe has taken the text received before it,
 so a client that still holds the stream names an id
 netstack no longer has, and `Sockets::set_option` answers it
@@ -26,7 +26,7 @@ after the read that reported the reset:
 So the write is refused as macOS refuses it, under another kind. The read asks
 netstack nothing: std answers from the value its `TcpStream` holds
 (`sdk/std/sys/net/connection.rs`) and libc's `getsockopt` from its socket's
-entry (`userland/libc/src/socket.rs`). Keeping the id until the client's close
+entry (`sdk/libc/src/socket.rs`). Keeping the id until the client's close
 request is not the fix: a client that dies sends none, and netstack, having
 closed its pipe ends, has nothing left that says the client is gone.
 
@@ -36,7 +36,7 @@ between netstack's answer and that request makes it fail `ENOTCONN`, with the
 connection closed, which no host's `connect` answers. Its `accept` asks
 nothing after its answer, which carries the connection's option.
 
-**Exit condition**: a guest test on `tests/netcase` whose peer resets a stream
+**Exit condition**: a guest test on `tests/images/netcase.toml` whose peer resets a stream
 the client still holds, and `nodelay()` on it answers `Ok`, with
 `netstack_socket_churn` still green; and the two compromises above ended: the
 option request on a stream its peer reset is answered by netstack, and a libc

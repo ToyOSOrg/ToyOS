@@ -42,7 +42,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "add qword ptr gs:[{irq_timer}], 1",
         // The caller-saved set, then the stack realigned for a `sysv64` call —
         // no target touches an `xmm`, since the kernel's own target has no
-        // hardware float (`src/build.rs`'s check).
+        // hardware float (`build/build.rs`'s check).
         "push rax", "push rcx", "push rdx",
         "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
         "push rbp",

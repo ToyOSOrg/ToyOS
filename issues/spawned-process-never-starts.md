@@ -26,7 +26,7 @@ finished and said so; the process then did nothing, forever.
 **Every other symptom is a consequence of that one.** A shell blocked in
 `waitpid` on a child that never dies is behaving correctly, and so is a
 terminal blocked in `child.wait()` on that shell
-(`userland/terminal/src/main.rs:186`). Pairing them off:
+(`system/terminal/src/main.rs:186`). Pairing them off:
 
 | terminal | shell | child it is waiting on |
 |---|---|---|
@@ -45,10 +45,10 @@ and `sys_waitpid` registering on the park lot before it reads the table
 **Refuted, and it was the first hypothesis because it was a same-day change**
 (#129, `85a8433`): a child that takes a surface grab and dies without releasing
 it does *not* leave the terminal mute. `surface::Host::poll` clears the grab on
-`RxStep::Eof` (`toyos/src/surface.rs:218-224`, `close` at `:322`), the terminal
-polls every client fd every pass (`userland/terminal/src/main.rs:73-75`,
+`RxStep::Eof` (`sdk/toyos/src/surface.rs:218-224`, `close` at `:322`), the terminal
+polls every client fd every pass (`system/terminal/src/main.rs:73-75`,
 `:107`), and **the only program in the tree that grabs is `locale detect`**
-(`userland/toybox/src/locale.rs:161`) — neither `ls` nor `snake` does.
+(`system/toybox/src/locale.rs:161`) — neither `ls` nor `snake` does.
 
 **Not reproduced, and here is exactly what was tried** so nobody repeats it. A
 guest binary modelled on the chain — a parent owning `tty_piped` stdio and
@@ -58,11 +58,11 @@ children in the shared boot (smp=2) and 120 more on a dedicated smp=8 boot,
 and every one of them started and exited.** The T14 has eight CPUs, so the
 CPU count was the first fidelity gap closed and it was not enough. The chain
 *under a live compositor and a real `/system/bin/terminal`* was the next fidelity step
-and was **not** taken: `tests/metalcase`'s ROOT carries no terminal, shell or
+and was **not** taken: `tests/images/metalcase.toml`'s ROOT carries no terminal, shell or
 toybox, and five other tests share that boot.
 
 **The measurement meant to decide it was `ps` — and `ps` is a victim.** The
-plan was to read the hung child's state column (`userland/toybox/src/ps.rs:72`)
+plan was to read the hung child's state column (`system/toybox/src/ps.rs:72`)
 and split three ways: `R` with no CPU is a task nothing ever picked up, `S`
 with no CPU is one that blocked before its first user instruction, and any CPU
 at all moves the fault into userland startup. The owner ran it on the T14
@@ -122,7 +122,7 @@ reverted (`kernel/sim/tests/policy.rs`,
 
 **Why a CPU stops reaching a pass at all.** Nothing in this work touched it and
 nothing in it explains it. In a guest, `info registers -a` over QMP
-(`src/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
+(`build/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
 injecting anything, since a keystroke revives a halted CPU. On metal, a CPU
 that has stopped taking interrupts is ended by `crate::hardlockup` on a boot
 armed with a deadline and a CPU that states a PMU, and its record in the black

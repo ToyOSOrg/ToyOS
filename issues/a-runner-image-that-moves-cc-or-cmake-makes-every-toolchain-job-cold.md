@@ -7,7 +7,7 @@ opened: 2026-10-02
 # A runner image that moves cc, c++ or CMake makes every toolchain job cold
 
 `llvm::key` reads the `cc`, `c++` and CMake that build an LLVM, each by its
-resolved path and all its `--version` says (`src/llvm.rs`), and
+resolved path and all its `--version` says (`build/llvm.rs`), and
 `toolchain.yml`'s `build` takes all three from `ubuntu-24.04`'s image
 (20260927.320.1 in job 110610545360). An image that moves one moves every LLVM
 key, and with it every compiler, freestanding and sysroot key. Every pull

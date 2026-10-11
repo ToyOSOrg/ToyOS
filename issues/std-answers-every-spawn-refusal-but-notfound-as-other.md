@@ -16,7 +16,7 @@ endowment, an exhausted table or a bad ELF, and `{e}` prints `other error`.
 `issues/a-spawn-of-echo-was-refused-with-an-error-nothing-names.md` is
 a failure this mapping already made unreadable.
 
-`tests/toyos-rust-tests/src/bin/spawn_cwd.rs` checks the relative and empty
+`tests/guest/rust-tests/src/bin/spawn_cwd.rs` checks the relative and empty
 refusals by name only on its raw `SYS_SPAWN` arm for this reason.
 
 **Exit**: every `SyscallError` `SYS_SPAWN` can answer has its own

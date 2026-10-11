@@ -6,7 +6,7 @@ opened: 2026-10-10
 
 # A suite that builds its own sysroot can wedge on its own locks
 
-`src/buildlock.rs` orders a sysroot key's lock before the worktree build lock,
+`build/buildlock.rs` orders a sysroot key's lock before the worktree build lock,
 and takes the key's lock with the worktree lock put down. One run of the guest
 suite (`cargo test --test toyos-build`, 12 wide) on a head whose sysroot no
 earlier build had made held both the other way round, inside one harness

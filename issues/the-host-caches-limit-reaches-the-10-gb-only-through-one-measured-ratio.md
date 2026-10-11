@@ -6,7 +6,7 @@ opened: 2026-10-01
 
 # The host cache's limit reaches the 10 GB only through one measured ratio
 
-`src/cicache.rs` refuses a tree whose `PATHS` hold more than `LIMIT`,
+`build/cicache.rs` refuses a tree whose `PATHS` hold more than `LIMIT`,
 8,000,000,000 B, uncompressed. The repository evicts its caches past 10 GB of
 what actions/cache stores, compressed, and two host entries must fit beside
 every toolchain layer a scope holds (2H + T): main's, each pull request's that
@@ -55,7 +55,7 @@ that run is red and saves nothing. Until an entry is sealed again, a pull
 request restores the last sealed one, or runs cold once the runner image has
 moved; either way its verdict is its steps'.
 
-Owner: the host cache (`src/cicache.rs`).
+Owner: the host cache (`build/cicache.rs`).
 
 **Exit condition.** Two gates that red:
 - after nightly's `host` saves, a step reads that entry's stored bytes and every

@@ -21,7 +21,7 @@ crate's doc-tests green:
 | `toyos_transport::Place`, three blocks | `E0080` | EXIT=0 |
 
 What does hold a case to its reason in this tree is the block beside it that
-compiles (`toyos-net-wire/src/lib.rs`, `mod compile_fail`). `Place`'s three
+compiles (`system/netstack/wire/src/lib.rs`, `mod compile_fail`). `Place`'s three
 have one; `DirectMapEnd`'s has none. The "compile-fail case" that Stages C and
 H of `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`
 exit on is held the same way and no other.

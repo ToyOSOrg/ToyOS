@@ -7,7 +7,7 @@ opened: 2026-10-09
 # `remove_all` follows a link swapped in mid-walk
 
 Every C++ program on ToyOS gets libc++'s `std::filesystem::remove_all` built
-with `-DREMOVE_ALL_USE_DIRECTORY_ITERATOR` (`src/libcxx.rs`): it walks a
+with `-DREMOVE_ALL_USE_DIRECTORY_ITERATOR` (`build/libcxx.rs`): it walks a
 directory by its path, and a directory swapped for a symbolic link between the
 walk's check and its descent sends the deletes wherever the link points,
 outside the tree it was asked to remove. libc++ says so of that walk
@@ -23,4 +23,4 @@ Owner: `issues/toyos-builds-itself.md`, M2, whose clang brought
 
 **Exit**: a directory opens as a handle that the kernel resolves names
 against, libc defines `openat`, `fdopendir` and `unlinkat` over it, and
-`src/libcxx.rs` passes no `REMOVE_ALL_USE_DIRECTORY_ITERATOR`.
+`build/libcxx.rs` passes no `REMOVE_ALL_USE_DIRECTORY_ITERATOR`.

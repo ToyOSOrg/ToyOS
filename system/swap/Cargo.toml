@@ -1,0 +1,14 @@
+[package]
+name = "swap"
+description = "swap <service> <sha256> <length>: a running service's binary replaced by the one on standard input, asked of the supervisor."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+# The words the supervisor says about a swap, and the digest it is held to.
+toyos-swap = { path = "../../lib/swap" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's running services: it replaces one's binary through the supervisor's `swap` port"

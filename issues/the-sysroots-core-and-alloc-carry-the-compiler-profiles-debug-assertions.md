@@ -6,7 +6,7 @@ opened: 2026-10-04
 
 # The sysroot's `core` and `alloc` carry the debug assertions of a profile written for compiler contributors
 
-`std_config` (`src/sysroot.rs`) writes `profile = "compiler"` into the
+`std_config` (`build/sysroot.rs`) writes `profile = "compiler"` into the
 bootstrap configuration every ToyOS library is built under: the kernel's and
 the loader's `core` and `alloc` (`Libraries::Freestanding`) as well as every
 program's `std`. In the `rust/` fork at `a0d44493`, that profile

@@ -15,8 +15,7 @@ this:
 
 - the fork knows where this repository keeps the backend, and the backend
   where the fork keeps two of its files, so moving `sdk/std`, `rust/` or
-  either of those two breaks every fork commit pinned before the move, as
-  `issues/std-names-the-sdk-crates-by-path.md` says of the two crates;
+  either of those two breaks every fork commit pinned before the move;
 - the fourteen lines are not upstream-mergeable as written
   (`.claude/agents/implementer.md`, "A fork");
 - a panic raised in the backend names its file through the arm that selected

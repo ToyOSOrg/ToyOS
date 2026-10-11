@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # toybox's `net` applet cannot reach netd
 
-`/bin/net` (`userland/toybox/src/net.rs`) fetches a URL with
+`/bin/net` (`system/toybox/src/net.rs`) fetches a URL with
 `TcpStream::connect`, but `[programs.toybox]` in `system.toml` receives
 `compositor`, `soundd` and `surface` and not `netd`. Every connect it makes is
 answered `NetdNotFound` by the SDK, so the applet can only ever print

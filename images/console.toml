@@ -1,0 +1,95 @@
+# The console boot: a shell on the panel of a machine with no serial port.
+#
+# `--diag-boot` is the other half of this and neither replaces the other. That
+# image contains nothing that can claim the framebuffer, so the kernel's last
+# boot checkpoint stays on the glass — which is the only thing that works on a
+# machine that wedges before userland, and is the answer to exactly one
+# question. This image answers the rest by being asked them: `/system/bin/console`
+# claims the screen, shows this boot's log as `logkeeper` serves it — the kernel's
+# records and every program's output — so nothing is lost with the checkpoint,
+# and puts a prompt underneath.
+#
+# Deliberately few programs. Every extra one is something that can fail
+# between the kernel and a prompt, on the machine where a failure costs a
+# reflash — and the one daemon here that a shell needs is the one its
+# `shutdown` needs.
+
+assets = ["assets"]
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "console", "acpiserver"]
+
+# `/system/bin/console` owns the screen and provides the surface its shell and the
+# shell's children inherit. No compositor here, so nothing receives one.
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does. The kernel keeps the record ring and the console and writes no
+# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one. It claims no device; it
+# reads the kernel's records with `logread`, which is `Rights::LOG |
+# Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+# The machine's ACPI fixed hardware, as `images/system.toml` serves it: `shutdown`
+# powers this machine off with the sleep type this program reads out of the
+# firmware's tables and hands the kernel, which refuses a power-off without
+# one.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+
+[programs.console]
+provides = ["surface"]
+receives = ["log"]
+starts = ["shell"]
+devices = ["framebuffer", "keyboard", "mouse"]
+
+[programs.shell]
+receives = ["surface"]
+starts = ["toybox", "shell"]
+
+# `power` because `bin/shutdown` below is this binary, and on the machine this
+# image exists for — no serial port, a prompt on the panel — there is no other
+# way to turn it off: it asks the supervisor, which has `logkeeper` make the log whole first.
+# `roster` because `bin/ps` is the same binary and this image exists to be
+# asked what the machine is doing.
+[programs.toybox]
+receives = ["surface", "power"]
+syscap = ["roster"]
+
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/locale" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
+"bin/stats" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

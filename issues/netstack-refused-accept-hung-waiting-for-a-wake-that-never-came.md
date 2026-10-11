@@ -10,7 +10,7 @@ Orchestrator Fast tier at PR #562's head `2a9c77ee`: `FAIL netd_refused_accept:
 timed out after 2341s, with the guest still talking 8s ago`. The guest's last
 line was `netd_refused_accept: waiting for a wake for the connection an accept
 refused for room left, once room returned` — the `wake()` call at
-`tests/toyos-rust-tests/src/bin/netd_refused_accept.rs:63`, blocked reading
+`tests/guest/rust-tests/src/bin/netd_refused_accept.rs:63`, blocked reading
 `listener.notify`. #562 changes nothing this test runs: the guest binary,
 netd, the netcase config and the harness function that drives it are
 identical to main.

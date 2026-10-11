@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # No T14 reading of `update`'s ROOT hash before and after SHA-NI
 
-`update`'s streamed ROOT hash (`userland/update/src/main.rs`, `stream_root`)
+`update`'s streamed ROOT hash (`system/update/src/main.rs`, `stream_root`)
 moved from `toyos-sha2`'s scalar compression to `toyos-sha2-hw`'s SHA-NI one,
 and no machine has timed it on either. `update` reports no hash time, and no
 metal row runs `update`.

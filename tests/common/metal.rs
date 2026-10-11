@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use toyos_build::bootlog;
-use toyos_build::metalimage;
-use toyos_build::metaltimings::{self, Machine, Reading, Record};
-use toyos_build::testargs::MetalMode;
+use toyos_metal::image;
+use toyos_metal::timings::{self, Machine, Reading, Record};
+use toyos_metal::testargs::MetalMode;
 
 use super::serial::Serial;
 
@@ -39,10 +39,10 @@ pub struct Arm {
     /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
     /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
-    /// The boot config's directory, relative to the repository root.
+    /// The image config, relative to the repository root.
     pub config: &'static str,
     /// What the image is armed with. Every name here is judged by the
-    /// pre-flash gate (`toyos_build::metal::FLASHABLE`) before it is written.
+    /// pre-flash gate (`toyos_metal::FLASHABLE`) before it is written.
     pub params: &'static [&'static str],
     /// Binary names and runner builtins this test needs in the job list, in the
     /// order it needs them. `reboot` is appended to every list by the
@@ -79,8 +79,8 @@ pub const fn once(
 
 /// One boot carrying members that are **discovered rather than registered**.
 ///
-/// The shared block's binaries are files under `tests/toyos-rust-tests/src/bin/`
-/// and its C cases are files under `tests/testcases/tinycc/`; no `&'static`
+/// The shared block's binaries are files under `tests/guest/rust-tests/src/bin/`
+/// and its C cases are files under `tests/corpus/tinycc/`; no `&'static`
 /// table can name them, and there is nothing to say about each one that is not
 /// said about all of them — every member is judged the same way, by the kernel's
 /// exit record for it. So they are a boot with a list rather than a row each,
@@ -212,7 +212,7 @@ pub struct Readback {
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// Where the loop's wall time went.
-    phases: toyos_build::metal::Phases,
+    phases: toyos_metal::Phases,
     /// What was measured on this boot and no owner has taken yet
     /// ([`Self::taken`]).
     numbers: RefCell<BTreeMap<String, u64>>,
@@ -223,11 +223,11 @@ impl Readback {
     /// `loader.log`, the `logkeeper` files as one text, and the boot file.
     pub fn new(label: &str, loader: String, log: String, boot: &str) -> Result<Self, String> {
         let kernel = bootlog::kernel_records(&log);
-        let back_secs = toyos_build::metal::back_secs(boot)
+        let back_secs = toyos_metal::back_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
-        let stick_secs = toyos_build::metal::stick_secs(boot)
+        let stick_secs = toyos_metal::stick_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
-        let phases = toyos_build::metal::phases(boot)
+        let phases = toyos_metal::phases(boot)
             .map_err(|why| format!("{label}'s boot file {why}: {boot:?}"))?;
         Ok(Readback {
             label: label.to_string(),
@@ -237,7 +237,7 @@ impl Readback {
             log,
             back_secs,
             stick_secs,
-            machine: toyos_build::metal::machine(boot)
+            machine: toyos_metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             phases,
             numbers: RefCell::new(BTreeMap::new()),
@@ -322,7 +322,7 @@ impl Readback {
     /// record the pass after the reset printed, because that is the only
     /// channel a wedged boot has.
     pub fn deadline_on_time(&self) -> Result<(), String> {
-        let Some(late) = toyos_build::metal::deadline_lateness_ms(&self.loader, &self.kernel)
+        let Some(late) = toyos_metal::deadline_lateness_ms(&self.loader, &self.kernel)
         else {
             return Ok(());
         };
@@ -346,7 +346,7 @@ impl Readback {
     /// within one of its sample periods past its bound. Read out of the same
     /// channel and for the same reason.
     pub fn lockup_on_time(&self) -> Result<(), String> {
-        let Some(late) = toyos_build::metal::lockup_lateness_ms(&self.loader) else {
+        let Some(late) = toyos_metal::lockup_lateness_ms(&self.loader) else {
             return Ok(());
         };
         within_one_period(late?, toyos_tco::HARD_LOCKUP_SAMPLE_NS)
@@ -356,7 +356,7 @@ impl Readback {
     /// The stop's own record, off the page its tail is sealed on: the stop
     /// writes it after `logkeeper` has stopped, so no file carries it.
     fn stop_record(&self) -> Option<toyos_quiesce::Record> {
-        toyos_build::metal::park(self.after_the_reset().ok()?.text())
+        toyos_metal::park(self.after_the_reset().ok()?.text())
     }
 
     pub fn stop_completed(&self) -> Result<(), String> {
@@ -564,7 +564,7 @@ impl Batch {
 
     /// The bound the kernel gives this whole boot, in milliseconds.
     pub fn deadline_ms(&self) -> u64 {
-        toyos_build::metal::bound_for(&self.params, self.bound_ms())
+        toyos_metal::bound_for(&self.params, self.bound_ms())
     }
 }
 
@@ -713,11 +713,11 @@ fn build(
     let home = at(dir, label);
     std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
 
-    let committed = root.join(batch.config).join("system.toml");
+    let committed = root.join(batch.config);
     let text = std::fs::read_to_string(&committed)
         .map_err(|e| format!("{}: {e}", committed.display()))?;
     let jobs: Vec<&str> = batch.jobs.iter().map(String::as_str).collect();
-    let derived = metalimage::derive(&text, batch.bound_ms(), &jobs, &batch.links)
+    let derived = image::derive(&text, batch.bound_ms(), &jobs, &batch.links)
         .map_err(|why| format!("{}: {why}", committed.display()))?;
     // **The job list is in the file name, not only in the file.**
     // `build_test_image` memoizes ROOT on the config's *path*, so two runs whose
@@ -734,7 +734,7 @@ fn build(
         let (_, data) = rust_bins
             .iter()
             .find(|(n, _)| n == name)
-            .ok_or_else(|| format!("the job {job:?} names no binary under tests/toyos-rust-tests"))?;
+            .ok_or_else(|| format!("the job {job:?} names no binary under tests/guest/rust-tests"))?;
         extra.push((format!("bin/{job}"), data.clone()));
     }
     extra.extend(batch.files.iter().cloned());
@@ -753,7 +753,7 @@ fn build(
     // of every Rust job on it. A binary named nowhere in that is one this boot
     // cannot reach.
     if !batch.jobs.is_empty() {
-        let bin = root.join("tests/toyos-rust-tests/src/bin");
+        let bin = root.join("tests/guest/rust-tests/src/bin");
         let mut reachable = batch.jobs.join(" ");
         for (from, to) in &batch.links {
             reachable.push(' ');
@@ -823,7 +823,7 @@ fn fingerprint(text: &str) -> u64 {
 pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> {
     let mut words = vec![
         "run".to_string(),
-        "--bin".to_string(),
+        "-p".to_string(),
         "toyos-metal".to_string(),
         "--".to_string(),
         "--image".to_string(),
@@ -863,7 +863,7 @@ fn drive(root: &Path, words: &[String]) -> Result<(), String> {
     if status.success() {
         return Ok(());
     }
-    Err(match toyos_build::metal::said_refusal(&said) {
+    Err(match toyos_metal::said_refusal(&said) {
         Some(refusal) => format!("toyos-metal exited {status}: {refusal}"),
         None => format!("toyos-metal exited {status} and said no refusal"),
     })
@@ -877,10 +877,10 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
             format!("{}: {e} — no readback for {label}; run the driver on its image first", at.display())
         })
     };
-    toyos_build::metal::loop_verdict(&read(toyos_build::metal::READBACK_VERDICT)?)
+    toyos_metal::loop_verdict(&read(toyos_metal::READBACK_VERDICT)?)
         .map_err(|why| format!("toyos-metal refused {label}: {why}"))?;
-    let loader = read(toyos_build::metal::READBACK_LOADER)?;
-    let log = read(toyos_build::metal::READBACK_KERNEL)?;
+    let loader = read(toyos_metal::READBACK_LOADER)?;
+    let log = read(toyos_metal::READBACK_KERNEL)?;
     // Before any row: a judge that reads a line reports a deleted one missing,
     // and a judge that asserts an absence passes over it.
     if let Some((first, last)) = bootlog::lost_parts(&log) {
@@ -888,7 +888,7 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
             "{label}'s own log is missing its parts {first} to {last}; no row is judged on it"
         ));
     }
-    let boot = read(toyos_build::metal::READBACK_BOOT)?;
+    let boot = read(toyos_metal::READBACK_BOOT)?;
     Readback::new(label, loader, log, &boot)
 }
 
@@ -972,7 +972,7 @@ pub fn run(
     // A directory holding a readback for every boot is a run the machine has
     // already answered, and the only thing left is the judging.
     let answered = batches.keys().all(|label| {
-        at(dir, label).join(toyos_build::metal::READBACK_KERNEL).is_file()
+        at(dir, label).join(toyos_metal::READBACK_KERNEL).is_file()
     });
     let judging = offline && answered;
 
@@ -1050,7 +1050,7 @@ pub fn run(
         };
         readbacks.insert(label.clone(), back);
     }
-    if judge_readbacks(&metaltimings::dir(), &readbacks, &runs, shared) {
+    if judge_readbacks(&timings::dir(), &readbacks, &runs, shared) {
         Verdict::Red
     } else {
         Verdict::Green
@@ -1094,7 +1094,7 @@ fn own(
 /// ([`Readback::one_clock`]). Neither is moved by another row or a shared
 /// member riding the same boot.
 ///
-/// `records` is where the machines' records are: [`metaltimings::dir`] but in
+/// `records` is where the machines' records are: [`timings::dir`] but in
 /// a check.
 pub fn judge_readbacks(
     records: &Path,
@@ -1262,7 +1262,7 @@ pub fn judge_readbacks(
     });
     match (machine, record) {
         (Ok(machine), Ok(record)) => {
-            let judged = metaltimings::judge(&machine, record, &measured);
+            let judged = timings::judge(&machine, record, &measured);
             if let Some(firmware) = &judged.firmware {
                 eprintln!("  FAIL {firmware}");
                 red = true;

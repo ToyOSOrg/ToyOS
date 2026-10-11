@@ -7,7 +7,7 @@ opened: 2026-10-08
 # The primary still holds the toolchain nothing reads any more
 
 Every LLVM, compiler and sysroot is a product of the host's store
-(`src/keystore.rs`), and nothing was migrated into it. What the layout before
+(`build/keystore.rs`), and nothing was migrated into it. What the layout before
 it left on a development host is read by nothing once the last worktree
 still on that layout has merged `main` or gone, and no code removes it,
 because no code knows whether such a worktree is still building:
@@ -37,7 +37,7 @@ the record to find its compiler, keeps its products in the stores under the
 primary's `rust/build` and takes its locks in `toyos-build-locks/`. So
 nothing here is safe to
 remove while `git worktree list` in the primary names a worktree whose
-`src/keystore.rs` has no `pub fn host`, and none while a build runs in the
+`build/keystore.rs` has no `pub fn host`, and none while a build runs in the
 primary. Removing `toyos-compiler` alone before that, to let the primary
 build a compiler, leaves each such worktree refused for want of the record
 until it merges. Then, in the primary:

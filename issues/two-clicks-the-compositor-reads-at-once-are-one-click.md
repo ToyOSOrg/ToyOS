@@ -22,7 +22,7 @@ now waits for the launcher on the panel before its second click.
 
 ## Owner
 
-The compositor's input decisions, `userland/compositor/desktop/src/input.rs`,
+The compositor's input decisions, `system/compositor/desktop/src/input.rs`,
 in the desktop track `issues/toyos-has-a-desktop.md`.
 
 ## Exit condition

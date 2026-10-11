@@ -1,0 +1,13 @@
+[package]
+name = "toyos-abi"
+version = "0.16.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The ToyOS kernel ABI: syscall numbers, struct layouts and typed syscall wrappers."
+repository = "https://github.com/ToyOSOrg/ToyOS"
+
+[features]
+rustc-dep-of-std = ["core"]
+
+[dependencies]
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }

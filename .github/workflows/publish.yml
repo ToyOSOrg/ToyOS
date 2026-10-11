@@ -1,7 +1,7 @@
 name: publish
 
 # A landing's SDK crates on crates.io, and the only workflow that may write
-# there: `cargo run -- --ci publish` (src/ci.rs) publishes what the index does
+# there: `cargo run -- --ci publish` (build/ci.rs) publishes what the index does
 # not hold, from main and nothing else.
 
 on:

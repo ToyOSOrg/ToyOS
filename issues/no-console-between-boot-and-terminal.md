@@ -41,7 +41,7 @@ milliseconds later, and no key pauses it.
 **The durable answer landed and is not this.** "A log sink that survives
 userland" is `/system/bin/logd`: the kernel keeps the record ring and the console and
 writes no file at all, logd owns `/log` and puts one file per boot there named
-for the wall clock, `src/build.rs`'s `every_boot_config_runs_logd` refuses a boot
+for the wall clock, `build/build.rs`'s `every_boot_config_runs_logd` refuses a boot
 config that omits it, and `9ca7631a^:kernel/src/log_file.rs` is deleted. Both ways of
 reading that file need what this window denies: pulling the stick takes the
 machine out of the session, and `cat /log/<newest>` from the desktop needs input,

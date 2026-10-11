@@ -7,12 +7,12 @@ opened: 2026-10-03
 # The metal loop speaks on stdout, and none of its lines says when
 
 Every statement the build system and the harness make goes through
-`src/printer.rs`'s `eprintln!` and opens with the UTC time of day it was made
+`build/printer.rs`'s `eprintln!` and opens with the UTC time of day it was made
 at. `toyos-metal` narrates a run with `println!` and `print!` instead, and
 stdout passes through no printer:
 
 ```
-rg -n '(^|[^e])print(ln)?!' src/metal.rs src/bin/toyos-metal.rs
+rg -n '(^|[^e])print(ln)?!' tests/metal/src/lib.rs tests/metal/src/main.rs
 ```
 
 Its progress is among them — `  run: <command>`, `machine <vendor> <product>,

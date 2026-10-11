@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # `acpi_hold` gives up at a time counted from boot, whatever its runner was given
 
-`tests/toyos-rust-tests/src/bin/acpi_hold.rs` holds `testcases` open until
+`tests/guest/rust-tests/src/bin/acpi_hold.rs` holds `testcases` open until
 `/system/bin/acpiserver` has logged its count, which `acpi_server_events`
 judges. Its wait ends at `UNTIL_MS`, `toyos_tco::JOB_BOUND_MS` less a tenth:
 54 000 ms, counted from the kernel's zero and not from the hold's own start.
@@ -30,7 +30,7 @@ left.
 
 ## Owner
 
-The harness: `tests/toyos-rust-tests/src/bin/acpi_hold.rs`, and
+The harness: `tests/guest/rust-tests/src/bin/acpi_hold.rs`, and
 `TESTCASES_HELD` in `tests/toyos.rs`, which places it.
 
 ## Exit

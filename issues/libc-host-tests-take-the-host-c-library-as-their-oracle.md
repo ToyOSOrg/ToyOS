@@ -7,7 +7,7 @@ opened: 2026-10-10
 # libc host tests take the host C library as their oracle
 
 `reviewer.md`'s **Tests**: another OS's output, recorded or live, is an oracle only when it is
-committed with its provenance and read hermetically. These `tests/libc-arch` tests call the
+committed with its provenance and read hermetically. These `sdk/libc/arch` tests call the
 host's C library at run time and hold libc's answer to it, so the oracle is whichever C library
 the host has, and the verdict differs between a Linux host and a macOS host:
 

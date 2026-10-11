@@ -1,0 +1,42 @@
+[package]
+name = "bootloader"
+description = "The UEFI bootloader, which loads the kernel and hands it the machine."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+toyos-abi = { path = "../sdk/abi" }
+# The ECAM window's address, and the TCO block the loader arms in it: the two
+# pure crates the kernel reads the same answers out of.
+toyos-acpi = { path = "../lib/acpi" }
+# Where the transient page tables put memory and the scanout, decided apart
+# from the pointers that write it and host-tested against machines this one is
+# not.
+toyos-bootmap = { path = "../lib/bootmap" }
+toyos-blackbox = { path = "../lib/blackbox" }
+toyos-wallclock = { path = "../lib/wallclock" }
+toyos-elf = { path = "../lib/elf" }
+# ROOT is picked off the boot disk with the kernel's own readers: the GPT, and
+# the superblock `Superblock::read` decides, which is the kernel's mount too.
+toyos-gpt = { path = "../lib/gpt" }
+# Which ROOT, how it is read in bounded chunks, and the handoff the kernel
+# checks: host-tested there.
+toyos-rootimage = { path = "../lib/rootimage" }
+bcachefs = { path = "../lib/bcachefs", default-features = false }
+toyos-tco = { path = "../lib/tco" }
+# What bytes are a seed: the judgment the kernel makes of what this hands it.
+toyos-random = { path = "../lib/random" }
+# The counter's rate each line's stamp is converted at, decoded as the kernel
+# decodes it.
+toyos-tsc = { path = "../lib/tsc" }
+# The signed image, the slot table and the anti-rollback floor: every decision
+# this loader makes about which slot to boot, host-tested there.
+toyos-update = { path = "../lib/update" }
+# Not hashed with here: `force-soft`, unified into the `sha2` that
+# `ed25519-dalek` takes its SHA-512 from inside a verification. This target is
+# soft-float, and the x86 backend reaches for SSE and SHA-NI registers a UEFI
+# application may not assume are its own.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

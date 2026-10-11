@@ -14,19 +14,19 @@ one stays queued on the `consent` acceptor, unseen, until the session ends.
 
 The supervisor holds that launch parked until the question is answered, which
 is right. But the compositor makes every launch on one thread, one at a time
-(`userland/compositor/src/session.rs`, `launcher()`), because a launch that
+(`system/compositor/src/session.rs`, `launcher()`), because a launch that
 asks waits as long as its question. So while the question waits unseen, no
 launch from the desktop is made at all, the terminal's chord included, until
 the person closes the picker, whose window gives no sign of why.
 
 **Evidence**: read from the code at the branch that made the question
-(`userland/filepicker/src/main.rs`, the `run_picker` call in `main`'s loop;
+(`system/filepicker/src/main.rs`, the `run_picker` call in `main`'s loop;
 the compositor's `launcher`). Not run: no test opens a picker and launches a
 package while it is open.
 
 ## Owner
 
-`userland/filepicker` and the compositor's launch path, in the desktop track
+`system/filepicker` and the compositor's launch path, in the desktop track
 `issues/toyos-has-a-desktop.md`.
 
 ## Exit condition

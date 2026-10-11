@@ -7,10 +7,10 @@ opened: 2026-09-26
 # Nothing reclaims what a stop leaves on a FAT volume
 
 `toyos-fat32` undoes or carries through every refused write before the next call
-proceeds, but that repair lives in memory (`toyos-fat32/src/repair.rs`). A
+proceeds, but that repair lives in memory (`lib/fat32/src/repair.rs`). A
 machine that stops while one is queued, or between two writes of any call,
 leaves what `a_stop_at_any_write_leaves_only_the_named_windows`
-(`toyos-fat32/tests/refused_writes.rs`) admits: orphaned clusters no more than
+(`lib/fat32/tests/refused_writes.rs`) admits: orphaned clusters no more than
 one call claims and frees, at most one FAT entry whose two copies differ, and at
 most one partial long-name run. `toyos-fat32-check` names each. Nothing in
 ToyOS repairs them: mounting writes nothing by design, the log partition has no

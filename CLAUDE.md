@@ -9,9 +9,9 @@ This file is what every agent needs before it knows which subsystem it is in. A 
 | | |
 |---|---|
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
-| `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
+| `system/CLAUDE.md` | the server doctrine, and the caveats that bite work on the system programs |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
-| `src/CLAUDE.md` | the caveats that bite build-system work |
+| `build/CLAUDE.md` | the caveats that bite build-system work |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
 | `.claude/agents/` | each role's prompt; `reviewer.md` is the bar a branch lands against |
 
@@ -28,7 +28,7 @@ There are no spec documents. A rule a reader can check lives in an agent's promp
 - **No kernel threads.** The kernel creates no thread but the per-CPU idle loop: kernel work runs, bounded, on the thread or interrupt that caused it and is charged to it; long-running work with no owner is a userland server's.
 - **Rust is first class.** Not POSIX, not C. Unrepresentable is best: compile-time safety over runtime checks over tests, and nothing a type refuses is tested.
 - **Existing Rust just works.** A program that builds for other operating systems builds and runs on ToyOS unchanged; the ecosystem gains ToyOS support through forks, never through ToyOS-specific replacement crates.
-- **Apps are portable.** An app builds and runs on Linux under Wayland (never X11, which is legacy), macOS and Windows from the same source as on ToyOS; a host build that fails is fixed in the app or its dependencies, never by making the app ToyOS-only. A program is ToyOS-only only when its job exists only on ToyOS — it owns ToyOS devices or kernel objects, or manages ToyOS itself — and its manifest's `exempt` says which, and why (`src/userlandhost.rs`).
+- **Apps are portable.** An app builds and runs on Linux under Wayland (never X11, which is legacy), macOS and Windows from the same source as on ToyOS; a host build that fails is fixed in the app or its dependencies, never by making the app ToyOS-only. A program is ToyOS-only only when its job exists only on ToyOS — it owns ToyOS devices or kernel objects, or manages ToyOS itself — and its manifest's `exempt` says which, and why (`build/userlandhost.rs`).
 - **Development ergonomics above all.** Iteration speed beats feature count.
 
 ## Architecture
@@ -41,7 +41,7 @@ There are no spec documents. A rule a reader can check lives in an agent's promp
 
 **The log is a userland file.** `/system/bin/logkeeper` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logkeeper's durability claim rests on it.
 
-**Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable. The cleanest, most sustainable ABI beats convenience; a removed number is free. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
+**Syscall ABI** — `sdk/abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable. The cleanest, most sustainable ABI beats convenience; a removed number is free. `sdk/toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
 
 **Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/supervisor` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **Isolation is non-negotiable, and the filesystem is inside it**: a process names only the paths in the view its parent built for it, the unit of isolation is the program, and a user is the part of the tree a session was handed. Not yet true of files: the kernel still resolves every path against one machine-wide tree until the storage track's per-program views land.
 
@@ -51,7 +51,7 @@ There are no spec documents. A rule a reader can check lives in an agent's promp
 
 **Input** — the kernel delivers key *transitions*, never what one types; a surface turns one into the other. Translation, layouts, dead keys and escape sequences live in userland, one translator per surface.
 
-**POSIX** — the kernel ABI and SDK are Rust-native and capability-shaped. POSIX lives in `userland/libc` (ours, not a fork) with explicitly relaxed rules. That layer may be ugly; the kernel may not.
+**POSIX** — the kernel ABI and SDK are Rust-native and capability-shaped. POSIX lives in `sdk/libc` (ours, not a fork) with explicitly relaxed rules. That layer may be ugly; the kernel may not.
 
 ## Dependencies
 
@@ -70,18 +70,18 @@ Vendor firmware a device or CPU verifies by its maker's signature may be shipped
 - **A red test is a defect**: it is fixed, or deleted with its issue recording the commit that restores it; a flaky test is deleted at once, never re-run. A red seen only under load is no flake: it is a defect, recorded with the host's load.
 - **A high-risk change names its checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: a negative control where a defect would otherwise land unseen — the *whole* change reverted onto the base the green arm was measured on — and an independent oracle where one exists: an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence.
 - **Never truncate command output.** No `| head`, `| tail`, `| grep` to reduce it: long output runs in the background and is read from its file — `[N characters truncated]` means data was lost.
-- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started and never another's process, killing only by PID and waiting out a build that holds a lock its own needs (a key's in the host's store or its worktree's, `src/buildlock.rs`), and removes the scratch output it made once it no longer needs it.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started and never another's process, killing only by PID and waiting out a build that holds a lock its own needs (a key's in the host's store or its worktree's, `build/buildlock.rs`), and removes the scratch output it made once it no longer needs it.
 
 ## Repository layout
 
-The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for every crate in the tree, and `src/hostws.rs` reds on one in neither; every package they name says what it is in its `description`.
+The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for every crate in the tree, and `build/hostws.rs` reds on one in neither; every package they name says what it is in its `description`.
 
 ## Working here
 
 - **Stay on the task.** What you find off it is filed in `issues/`, one file per issue, and not fixed on the way. If something blocks, stop and report it; never work around it. What ToyOS cannot do yet is filed, and work on it starts only on the owner's go.
 - **Never degrade audible or visual quality** — even temporarily, even for a big win elsewhere — without the owner's explicit sign-off.
 - **Always be empirical.** Read actual output; run the code; investigate root causes instead of guessing. Every written number comes from a command that was run; an estimate or datasheet bound says so.
-- **Never put the owner's email or any other personal data in a network request or its headers**; any `User-Agent` is `toyos-build (https://github.com/ToyOSOrg/ToyOS)`. Nothing that identifies his machines or network goes into the tree, a commit message or anything posted on GitHub, and one that has to be referred to there is named by where it stands and its kind, with no character of it; `src/sourcegate.rs` names the shapes.
+- **Never put the owner's email or any other personal data in a network request or its headers**; any `User-Agent` is `toyos-build (https://github.com/ToyOSOrg/ToyOS)`. Nothing that identifies his machines or network goes into the tree, a commit message or anything posted on GitHub, and one that has to be referred to there is named by where it stands and its kind, with no character of it; `build/sourcegate.rs` names the shapes.
 - **One agent, one worktree, one branch.** The primary checkout owns `rust/` and `main`, and is no workspace; `.claude/agents/implementer.md` makes a worktree and `orchestrator.md` removes it. Never make one with `git clone`, and never run `git submodule` in one: either fetches the fork's history again, and `git submodule` writes `core.worktree` into the fork's shared config, which breaks git in the primary's `rust/`.
 - **Commit freely on your branch.** `git commit -F <file>`, never `-m`. An agent does what it wants with the commits it made and has not pushed, in a fork clone too. A remote branch of this repository other than `main` that one implementer owns is that implementer's to amend, rebase and force-push; a fork's branches are append-only.
 - **Never touch `main`.** It moves only through a merged pull request, by its required merge queue, and is protected — no push, force-push, deletion or bypass. A pull request's title and body become the merge commit's: write them as `main`'s record. A branch lands after a review against `.claude/agents/reviewer.md`. A modify/delete conflict is resolved by accounting for every hunk of the modified side, never by checking its headings survived. A merge that deletes a document also deletes every citation to it outside `issues/` in the same merge, found by searching the bare name as well as the path. An ABI change lands with the work that needs it: every worktree builds the toolchain its own sources name, so branches that change the ABI run side by side. Every merge leaves `main`'s tip compiling.

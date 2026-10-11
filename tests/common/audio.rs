@@ -227,7 +227,7 @@ fn check_departures(serial: &str, expect: usize) -> Vec<String> {
     problems
 }
 
-/// soundserver's mix thread never waits on the log: `tests/logstallcase`'s `logkeeper`
+/// soundserver's mix thread never waits on the log: `tests/images/logstallcase.toml`'s `logkeeper`
 /// reads nothing of soundserver's until the job says the tone has played, and the
 /// job fills soundserver's ring with soundserver's own refusals before it plays. Judged
 /// off `/log`:

@@ -3,11 +3,11 @@
 
 use super::*;
 use metal::{Metal, Readback};
-use toyos_build::metal::{
+use toyos_metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
-use toyos_build::metaltimings::{Machine, Record, Stick};
+use toyos_metal::timings::{Machine, Record, Stick};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
@@ -55,14 +55,14 @@ pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
 pub fn the_bench_reaches_the_loop_as_its_host() {
     let suite: Vec<String> =
         ["--metal", "--metal-host", "dev@box"].iter().map(ToString::to_string).collect();
-    let host = toyos_build::testargs::parse(&suite).expect("a suite line").metal_host;
+    let host = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
     let (image, home) = (Path::new("/i.img"), Path::new("/h"));
     let words = metal::invocation(image, home, host);
     let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
     let tail = &words[after..];
     let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
     assert_eq!(tail[at + 1], "dev@box", "{words:?}");
-    toyos_build::metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
+    toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
     let t14 = metal::invocation(image, home, None);
     assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
 }
@@ -231,29 +231,29 @@ fn unqualified_and_fail(b: &[&Readback]) -> Result<(), String> {
 }
 
 static PASSING: Metal =
-    Metal { arms: &[metal::once("passing", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("passing", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static FAILING: Metal = Metal {
-    arms: &[metal::once("failing", "tests/jobcase", &[], &[])],
+    arms: &[metal::once("failing", "tests/images/jobcase.toml", &[], &[])],
     judge: span_and_fail,
 };
 static BESIDE: Metal = Metal {
-    arms: &[metal::once("failing", "tests/jobcase", &[], &[])],
+    arms: &[metal::once("failing", "tests/images/jobcase.toml", &[], &[])],
     judge: |b| b[0].measured("beside.failing.us", 9),
 };
 static REFUSED: Metal =
-    Metal { arms: &[metal::once("refused", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("refused", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static LATE: Metal =
-    Metal { arms: &[metal::once("late", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("late", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static SKEWED: Metal =
-    Metal { arms: &[metal::once("skewed", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("skewed", "tests/images/jobcase.toml", &[], &[])], judge: span };
 static ONE: Metal =
-    Metal { arms: &[metal::once("one", "tests/jobcase", &[], &[])], judge: unqualified };
+    Metal { arms: &[metal::once("one", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
 static ONE_FAILS: Metal = Metal {
-    arms: &[metal::once("one", "tests/jobcase", &[], &[])],
+    arms: &[metal::once("one", "tests/images/jobcase.toml", &[], &[])],
     judge: unqualified_and_fail,
 };
 static TWO: Metal =
-    Metal { arms: &[metal::once("two", "tests/jobcase", &[], &[])], judge: unqualified };
+    Metal { arms: &[metal::once("two", "tests/images/jobcase.toml", &[], &[])], judge: unqualified };
 
 /// **A number is recorded off its owner's verdict and nobody else's.** A row
 /// that fails keeps its own number out of the record, and neither its boot's
@@ -315,7 +315,7 @@ pub fn a_number_fails_with_its_owner_alone() {
 }
 
 static HOLED: Metal =
-    Metal { arms: &[metal::once("holed", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("holed", "tests/images/jobcase.toml", &[], &[])], judge: span };
 
 /// **A boot whose log is missing parts of itself is refused by name, and no
 /// row is judged on what is left**: `span` asserts no line, so it would pass
@@ -451,7 +451,7 @@ pub fn a_failing_shared_member_fails_itself_alone() {
     plant(&dir, "failing", PANEL, &exits(101), None);
     let shared = |boot: &str| metal::SharedBoot {
         boot: boot.to_string(),
-        config: "tests/testcases",
+        config: "tests/images/testcases.toml",
         params: &[],
         features: &[],
         members: jobs.iter().map(|job| member(job, toyos_tco::RUST_MEMBER_MS)).collect(),
@@ -482,12 +482,12 @@ pub fn a_failing_shared_member_fails_itself_alone() {
 /// a row after the one that ends the boot adds its job before the last, and
 /// two rows ending one boot on different jobs are refused by both names.
 pub fn a_boots_last_job_is_behind_every_other() {
-    const HELD: metal::Arm = metal::Arm { last: Some("hold"), ..metal::once("own", "tests/testcases", &[], &["early"]) };
+    const HELD: metal::Arm = metal::Arm { last: Some("hold"), ..metal::once("own", "tests/images/testcases.toml", &[], &["early"]) };
     static ENDS: Metal = Metal { arms: &[HELD], judge: |_| Ok(()) };
     static LATER: Metal =
-        Metal { arms: &[metal::once("own", "tests/testcases", &[], &["hold", "later"])], judge: |_| Ok(()) };
+        Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &["hold", "later"])], judge: |_| Ok(()) };
     static OTHER: Metal = Metal {
-        arms: &[metal::Arm { last: Some("later"), ..metal::once("own", "tests/testcases", &[], &[]) }],
+        arms: &[metal::Arm { last: Some("later"), ..metal::once("own", "tests/images/testcases.toml", &[], &[]) }],
         judge: |_| Ok(()),
     };
     let boots = metal::batches(&[("ends", &ENDS), ("later", &LATER)], &[]).expect("one last job");
@@ -507,21 +507,21 @@ pub fn a_boots_last_job_is_behind_every_other() {
 /// one name.
 pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     static EARLY: Metal =
-        Metal { arms: &[metal::once("shared", "tests/testcases", &[], &["tone", "cost"])], judge: |_| Ok(()) };
+        Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &["tone", "cost"])], judge: |_| Ok(()) };
     static HELD: Metal = Metal {
         arms: &[
-            metal::Arm { last: Some("hold"), ..metal::once("shared", "tests/testcases", &[], &["late"]) },
-            metal::once("own", "tests/testcases", &[], &["alone"]),
+            metal::Arm { last: Some("hold"), ..metal::once("shared", "tests/images/testcases.toml", &[], &["late"]) },
+            metal::once("own", "tests/images/testcases.toml", &[], &["alone"]),
         ],
         judge: |_| Ok(()),
     };
     static WEDGES: Metal = Metal {
-        arms: &[metal::once("wedge", "tests/jobcase", &[toyos_build::metal::WEDGE_ARM], &[])],
+        arms: &[metal::once("wedge", "tests/images/jobcase.toml", &[toyos_metal::WEDGE_ARM], &[])],
         judge: |_| Ok(()),
     };
     let members = |boot: &str, members: &[(&str, u64)]| metal::SharedBoot {
         boot: boot.to_string(),
-        config: "tests/testcases",
+        config: "tests/images/testcases.toml",
         params: &[],
         features: &[],
         members: members.iter().map(|(job, adds_ms)| member(job, *adds_ms)).collect(),
@@ -567,12 +567,12 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
 /// refused.
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
-        ("alpha_row", Metal { arms: &[metal::once("own", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
-        ("beta_row", Metal { arms: &[metal::once("shared", "tests/testcases", &[], &[])], judge: |_| Ok(()) }),
+        ("alpha_row", Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
+        ("beta_row", Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
     ];
     let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
         boot: boot.to_string(),
-        config: "tests/testcases",
+        config: "tests/images/testcases.toml",
         params: &[],
         features: &[],
         members: jobs.iter().map(|job| member(job, toyos_tco::RUST_MEMBER_MS)).collect(),

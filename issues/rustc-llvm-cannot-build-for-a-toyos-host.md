@@ -15,7 +15,7 @@ run, builds it for `x86_64-unknown-toyos` wrongly three ways:
 - It links no C library: a cross build asks `llvm-config` for no system
   libraries.
 - It finds a cross target's LLVM by replacing the host triple in the host
-  `llvm-config`'s paths, and the store's paths (`src/llvm.rs`) do not contain
+  `llvm-config`'s paths, and the store's paths (`build/llvm.rs`) do not contain
   it, so the replacement names the host's LLVM.
 
 The C++ runtime and the C library are ToyOS arms at existing dispatch sites,

@@ -8,7 +8,7 @@ opened: 2026-09-29
 
 `ToyOSOrg/target-lexicon` branch `toyos` is pinned at `45832ce6` by
 `rust/compiler/rustc_codegen_cranelift/Cargo.lock` and
-`tests/toyos-rust-tests/tls-cranelift/Cargo.lock`. Over v0.13.5 it adds
+`tests/guest/rust-tests/tls-cranelift/Cargo.lock`. Over v0.13.5 it adds
 `#![allow(unexpected_cfgs)]` to `build.rs` and `src/lib.rs`, which
 `add-toyos-os`, the branch of upstream pull request
 bytecodealliance/target-lexicon#134, does not carry. v0.13.5's own

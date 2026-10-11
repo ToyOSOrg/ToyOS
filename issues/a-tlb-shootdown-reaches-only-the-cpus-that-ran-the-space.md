@@ -12,7 +12,7 @@ whether or not it ever ran the address space. It waits on
 switches away keeps the space's entries: under PCID every CR3 load sets
 NOFLUSH (`kernel/src/arch/x86_64/paging.rs:295-306`), so a CPU leaves the
 target set only when those entries are gone, not when it stops running the
-space. The TCG model has no PCID (`src/arch.rs:169`), so only a machine with
+space. The TCG model has no PCID (`build/arch.rs:169`), so only a machine with
 PCID can show a switched-out CPU still holding them.
 
 **Exit**: on every proving machine and under TCG, a sibling pinned on another

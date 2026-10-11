@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 Every process that names a file under a served directory connects to that
 directory's server once and lends it a `toyos::fs::WINDOW_BYTES` region
-(`toyos/src/fs.rs`): 2 MiB of the process's memory per directory it has
+(`sdk/toyos/src/fs.rs`): 2 MiB of the process's memory per directory it has
 touched, held for the process's life, and mapped into the server too. A
 desktop process that touches `/home`, `/config`, `/state` and `/apps` holds
 8 MiB of windows; fsd maps up to `MAX_SERVED` of them. Whether the window's

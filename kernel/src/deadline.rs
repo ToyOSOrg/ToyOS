@@ -213,7 +213,7 @@ pub extern "C" fn poll_in_kernel(pc: u64) {
 }
 
 /// A line `  cpuN pc=<pc>  <symbol>+<offset>` for each online CPU, out of
-/// [`KERNEL_PC`]; the harness reads the symbol (`src/bootlog.rs`).
+/// [`KERNEL_PC`]; the harness reads the symbol (`build/bootlog.rs`).
 struct KernelPcs;
 
 impl core::fmt::Display for KernelPcs {
@@ -255,7 +255,7 @@ fn expire() -> ! {
 
 /// What a sealed record opens with, and so what the next boot's loader prints
 /// under `Previous boot's panic:`. A constant because the harness judges the
-/// line and nothing links the two crates (`src/bootlog.rs`).
+/// line and nothing links the two crates (`build/bootlog.rs`).
 pub const EXPIRED: &str = "the boot deadline expired";
 
 /// Wedge this machine on purpose, the way a defect does: the negative control
@@ -278,7 +278,7 @@ pub fn stage_a_wedge() -> ! {
 
 /// What a staged wedge says before it stops: a `WEDGED` page whose text does not
 /// hold this line is a machine the deadline ended for some other reason. Judged
-/// by the harness, so it is a constant (`src/bootlog.rs`).
+/// by the harness, so it is a constant (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
@@ -293,7 +293,7 @@ pub fn wedge_if_staged() {
 #[cfg(feature = "boot-actuators")]
 static STAGED: AtomicBool = AtomicBool::new(false);
 
-// Never inlined: the seal names the spin by this symbol (`src/bootlog.rs`).
+// Never inlined: the seal names the spin by this symbol (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 #[inline(never)]
 fn this_cpu() -> ! {
@@ -327,13 +327,13 @@ fn this_cpu() -> ! {
 
 /// What a CPU says that arrived with interrupts masked: the staging CPU, if the
 /// syscall gate left them masked, which the harness refuses
-/// (`src/bootlog.rs`).
+/// (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
 /// What every CPU says that arrived with them open, the staging CPU among them:
-/// the harness requires it of that CPU (`src/bootlog.rs`).
+/// the harness requires it of that CPU (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
 

@@ -10,7 +10,7 @@ The north star: ToyOS rebuilds its own sources inside ToyOS and reproduces the
 bytes the host built. A bootstrap from source with no binary seed is out of
 scope (owner, 2026-09-27). The compiler is LLVM throughout: rustc's, and clang
 with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
-library stays `userland/libc`, ours. Each stage lands on x86-64 first and on
+library stays `sdk/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/toyos-runs-on-arm64.md`'s track.
 
 - **M2 — clang and lld as a package inside ToyOS.** clang, lld
@@ -45,7 +45,7 @@ first, without waiting for packages over HTTPS, and links them statically:
 **To build** (2026-10-01), in an order that is open. Where a stage names
 libc's state it is `userland/libc` at `15625e0cb`.
 - **The `libc` crate gains a ToyOS module**, checked by `ctest` against
-  `userland/libc`'s headers. `libc` 0.2.189 has none (`rg -i toyos` over its
+  `sdk/libc`'s headers. `libc` 0.2.189 has none (`rg -i toyos` over its
   `src` matches nothing) and is empty for an OS it does not know
   (`src/lib.rs`), and `ToyOSOrg/libc` does not exist (GitHub's API answers
   404). cargo's `curl-sys`, `libssh2-sys` and `libgit2-sys` import its C types
@@ -90,7 +90,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   which awk.
 - **`pkg` installs a toolchain**: an archive past 256 MiB, and links. It
   inflates a whole archive in memory under `MAX_INFLATED`, 256 MiB, and refuses
-  every link (`userland/pkg/src/main.rs`, `archive.rs`). A toolchain's size is
+  every link (`system/pkg/src/main.rs`, `archive.rs`). A toolchain's size is
   measured on a proxy, the Linux-host release
   `toolchain-linux-x86_64-48dd24f826263d6c`: stripped with `llvm-objcopy
   --strip-all`, its `librustc_driver` is 184.7 MB, its clang 122.8 MB and its
@@ -127,7 +127,7 @@ commit that lands M2's compile-and-run test, which links inside the guest.
 
 **What stops M2: the driver's link and the install.** `cargo run --
 --hosted-clang` makes a clang and an `ld.lld` for `x86_64-unknown-toyos`,
-static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
+static PIEs that name no library (`build/hostedclang.rs`): 147.5 MB and
 85.6 MB, 121.9 MB and 70.9 MB stripped. Both run in a guest:
 `hosted_clang_hello` (`tests/common/hostedclang.rs`, run on demand) stages them
 on ROOT, compiles `hello.c` with `clang -c`, links it by running `ld.lld` on the

@@ -9,7 +9,7 @@ opened: 2026-09-23
 `make_name` (`kernel/src/loader/start.rs`) keeps a spawned file's name as the
 process-table name, and the kernel writes that name into records a judge parses
 by field: `exit: {name} pid=N code=N cpu=Nms` (`kernel/src/process.rs`) is the
-verdict channel `bootlog::EXIT` and `metaldevices::exit_of` read. A program
+verdict channel `bootlog::EXIT` and `devices::exit_of` read. A program
 that can write and spawn a file whose name holds a space and the record's own
 words — `test_rs_job pid=1 code=0`, inside `THREAD_NAME_LEN` — gets a kernel
 record that opens as the job's own: `exit: test_rs_job pid=1 code=0 pid=7

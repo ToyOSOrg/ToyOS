@@ -6,12 +6,12 @@ opened: 2026-10-04
 
 # No test runs the shipped `/system/bin/trace`
 
-`userland/trace` ships on the `trace` right `system.toml` grants it, and no
+`system/trace` ships on the `trace` right `system.toml` grants it, and no
 test runs it: not its lines, and none of its refusals, each exit 2 with a
 reason on stderr — no system capability, a capability without `trace`, a
 record that does not decode. `test_rs_trace_read` reaches the syscall and the
 decoder underneath it, not the program. A test of the program needs a boot
-whose image carries it, which `tests/virtsmpcase` does not (its jobs are the
+whose image carries it, which `tests/images/virtsmpcase.toml` does not (its jobs are the
 suite binaries the harness puts on ROOT).
 
 Owned by step 2 of

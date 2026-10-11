@@ -12,23 +12,23 @@ equal. `toyos-smmu` takes the stage 1 descriptors, the `MAIR` and `PXN` from
 `toyos-bootmap::aarch64` already; what is left is what `toyos-bootmap` does not
 declare.
 
-**The stage 1 descriptor.** `toyos-smmu/src/table.rs` declares `VALID` (bit
+**The stage 1 descriptor.** `kernel/smmu/src/table.rs` declares `VALID` (bit
 0), `TABLE_OR_PAGE` (bit 1), `AP_UNPRIVILEGED` (bit 6), `AP_READ_ONLY` (bit
 7), `NOT_GLOBAL` (bit 11) and the level index `at >> (39 - 9 * level) & 0x1FF`.
 `kernel/src/arch/aarch64/paging.rs` declares the same bits as `VALID`,
 `TABLE`, `AP_EL0`, `AP_READ_ONLY` and `NOT_GLOBAL`, and the same `index`. It
 also declares `INNER_SHAREABLE`, `OUTER_SHAREABLE`, `AF`, `PXN` and `UXN`,
-which `toyos-bootmap/src/aarch64.rs` holds: the kernel's own copy of that
+which `lib/bootmap/src/aarch64.rs` holds: the kernel's own copy of that
 crate's.
 
-**The redistributor.** `toyos-its/src/lpi.rs` declares `GICR_CTLR.EnableLPIs`,
+**The redistributor.** `kernel/its/src/lpi.rs` declares `GICR_CTLR.EnableLPIs`,
 `GICR_TYPER.PLPIS` and `GICR_TYPER.Processor_Number`. `GICR_TYPER`'s other
 fields (`VLPIS`, `Last`, the affinity) are `kernel/gicv3/src/lib.rs`'s, and
 the two registers' offsets are `kernel/src/arch/aarch64/irqchip.rs`'s: one
 register's fields have two crates. `toyos_its::TRANSLATION_FRAME` and
 `toyos_gicv3::FRAME` are both the GIC's 64 KiB frame.
 
-**The distributor.** `toyos-its/src/lpi.rs`'s `Layout::new` decodes
+**The distributor.** `kernel/its/src/lpi.rs`'s `Layout::new` decodes
 `GICD_TYPER`'s `LPIS`, `IDbits` and `num_LPIs`, and
 `kernel/src/arch/aarch64/irqchip.rs`'s `route_iommu_events` decodes its
 `ITLinesNumber`: one register's fields have two homes.
@@ -45,10 +45,10 @@ redistributor or distributor register's fields have one home:
 
 ```
 rg -n 'const (VALID|TABLE|TABLE_OR_PAGE|AP_\w+|NOT_GLOBAL|INNER_SHAREABLE|OUTER_SHAREABLE|AF|PXN|UXN): u64' \
-    kernel/src/arch/aarch64/paging.rs toyos-smmu/src/table.rs
-rg -n 'fn index' kernel/src/arch/aarch64/paging.rs toyos-smmu/src/table.rs
+    kernel/src/arch/aarch64/paging.rs kernel/smmu/src/table.rs
+rg -n 'fn index' kernel/src/arch/aarch64/paging.rs kernel/smmu/src/table.rs
 ```
 
 print nothing, `rg -l 'GICR_TYPER' toyos-its kernel/gicv3` names one
-directory, and `rg -l 'ITLinesNumber|IDbits|num_LPIs' toyos-its/src kernel/src
+directory, and `rg -l 'ITLinesNumber|IDbits|num_LPIs' kernel/its/src kernel/src
 kernel/gicv3/src` names files of one crate.

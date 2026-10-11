@@ -8,7 +8,7 @@ opened: 2026-10-01
 
 `process::spawn_thread` takes a thread's id from its process's
 `IdMap<Tid, ThreadEntry>` (`kernel/src/id_map.rs`), whose `insert` steps its
-counter with `Tid + Tid` (`toyos-abi/src/lib.rs`). The kernel builds with
+counter with `Tid + Tid` (`sdk/abi/src/lib.rs`). The kernel builds with
 `overflow-checks = true` (`kernel/Cargo.toml`), so the 2^32nd thread a single
 process starts panics the kernel, and it does so under `PROCESS_TABLE`, which
 hangs the machine instead of reporting. The thread before it is issued

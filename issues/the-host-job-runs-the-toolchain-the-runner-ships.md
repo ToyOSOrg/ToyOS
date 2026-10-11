@@ -80,9 +80,9 @@ engineering positions; this entry does not choose between them.
 Every host binary — `toyos-build`, the harness, every host test, every app's
 host build — is compiled by an upstream rustc whose LLVM has the
 ScalarEvolution fault the fork's no longer has (llvm/llvm-project#175729, open
-upstream; `src/miscompile.rs` holds its reproducers for the fork's compilers
+upstream; `build/miscompile.rs` holds its reproducers for the fork's compilers
 and for no host compiler). Measured for stable 1.99.0 on Apple silicon, whose
-`caller` of `src/miscompile/last_exit.rs` over `u16` and over `u128` is a
+`caller` of `build/miscompile/last_exit.rs` over `u16` and over `u128` is a
 branch to itself, and for 1.98.1 given the loop's shape by hand
 (`issues/the-nightlys-macos-job-pins-rustc-1-98-1-for-a-hang-its-test-no-longer-shows.md`).
 No version to pin is free of it, so a pin answers the lints above and not

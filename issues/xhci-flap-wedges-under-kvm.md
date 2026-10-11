@@ -69,4 +69,4 @@ else is a break this test did not stage`. That is the one member of this class
 that is still reproducible, and it is the one to take: it is not a ceiling, it is
 the driver reporting a second break nobody staged.
 
-**Taken, and it was the driver.** Closed: the Bulk-Only Reset raced the transfer it was recovering from — see `reset_recovery` in `kernel/src/drivers/xhci/wait/msc.rs` and `toyos-xhci/src/recovery.rs`.
+**Taken, and it was the driver.** Closed: the Bulk-Only Reset raced the transfer it was recovering from — see `reset_recovery` in `kernel/src/drivers/xhci/wait/msc.rs` and `lib/xhci/src/recovery.rs`.

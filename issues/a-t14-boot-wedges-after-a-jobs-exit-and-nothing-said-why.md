@@ -7,7 +7,7 @@ opened: 2026-09-07
 # A T14 boot wedges between a job's exit and the next spawn's record, three times in five boots
 
 Run 19 of the metal loop, `metal-suite` c4e1811a, images derived from
-`tests/testcases`. Three boots never came back inside `metal::return_secs` and
+`tests/images/testcases.toml`. Three boots never came back inside `metal::return_secs` and
 the owner cut power to each:
 
 | image | job list | hangs |

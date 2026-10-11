@@ -6,7 +6,7 @@
 # `cargo` builds, so a member's features never reach the kernel's or the
 # loader's build.
 #
-# `src/hostws.rs` reds on a `Cargo.toml` in this tree that is neither a member
+# `build/hostws.rs` reds on a `Cargo.toml` in this tree that is neither a member
 # nor excluded below with a reason, and says which members a host tests:
 # `cargo run -- --ci host` runs every one of those.
 #
@@ -15,121 +15,122 @@
 # Naming the whole workspace is the deliberate act.
 [workspace]
 members = [
-    "bcachefs",
-    "bootloader",
+    "apps/calc",
+    "apps/doom",
+    "apps/editor",
+    "apps/files",
+    "apps/paint",
+    "apps/snake",
+    "apps/toyfetch",
+    "build/ssh",
     "kernel",
+    "kernel/cpuvuln",
     "kernel/dma",
     "kernel/gicv3",
+    "kernel/its",
     "kernel/loom",
+    "kernel/microcode",
     "kernel/pci",
+    "kernel/phys",
     "kernel/ps2",
     "kernel/sim",
-    "tests/libc-arch",
-    "toyos",
-    "toyos-abi",
-    "toyos-acpi",
-    "toyos-blackbox",
-    "toyos-blockhold",
-    "toyos-blockring",
-    "toyos-blockring/transport",
-    "toyos-bootmap",
-    "toyos-cpuvuln",
-    "toyos-device-memory",
-    "toyos-dhcp",
-    "toyos-dns",
-    "toyos-elf",
-    "toyos-elide",
-    "toyos-fat32",
-    "toyos-fat32/check",
-    "toyos-gpt",
-    "toyos-hda",
-    "toyos-i219",
-    "toyos-inspect",
-    "toyos-its",
-    "toyos-keymap",
-    "toyos-logstream",
-    "toyos-manifest",
-    "toyos-microcode",
-    "toyos-net-ip",
-    "toyos-net-shard",
-    "toyos-net-shard/tcp",
-    "toyos-net-shard/testnet",
-    "toyos-net-udp",
-    "toyos-net-wire",
-    "toyos-osrelease",
-    "toyos-phys",
-    "toyos-quiesce",
-    "toyos-random",
-    "toyos-rootimage",
-    "toyos-sha2",
-    "toyos-sha2-hw",
-    "toyos-smmu",
-    "toyos-ssh",
-    "toyos-swap",
-    "toyos-symbols",
-    "toyos-tco",
-    "toyos-tmpdir",
-    "toyos-trace",
-    "toyos-tsc",
-    "toyos-untrusted",
-    "toyos-update",
-    "toyos-usbhid",
-    "toyos-userbound",
-    "toyos-virtio",
-    "toyos-wallclock",
-    "toyos-xhci",
-    "toyos-xhci/sim",
-    "userland/acpiserver",
-    "userland/acpiserver-api",
-    "userland/acpiserver/aml",
-    "userland/calc",
-    "userland/compositor",
-    "userland/compositor/desktop",
-    "userland/console",
-    "userland/diskserver",
-    "userland/doom",
-    "userland/editor",
-    "userland/filepicker",
-    "userland/filepicker-api",
-    "userland/grants",
-    "userland/files",
-    "userland/fileserver",
-    "userland/host",
-    "userland/inspect",
-    "userland/kernelprobe",
-    "userland/logkeeper",
-    "userland/logkeeper-api",
-    "userland/metalprobe",
-    "userland/netstack",
-    "userland/netstack/mdns",
-    "userland/netstack/node",
-    "userland/paint",
-    "userland/pkg",
-    "userland/proctest",
-    "userland/shell",
-    "userland/snake",
-    "userland/soundserver",
-    "userland/soundserver/mixer",
-    "userland/soundserver/virtio-sound",
-    "userland/sprite",
-    "userland/sshserver",
-    "userland/supervisor",
-    "userland/swap",
-    "userland/symbolize",
-    "userland/terminal",
-    "userland/test-runner",
-    "userland/toybox",
-    "userland/toyfetch",
-    "userland/toyos-font",
-    "userland/toyos-pci-claim",
-    "userland/toyos-window",
-    "userland/trace",
-    "userland/update",
-    "userland/usbd",
+    "kernel/smmu",
+    "kernel/usbhid",
+    "lib/acpi",
+    "lib/acpiserver-api",
+    "lib/bcachefs",
+    "lib/blackbox",
+    "lib/blockhold",
+    "lib/blockring",
+    "lib/blockring/transport",
+    "lib/bootmap",
+    "lib/device-memory",
+    "lib/elf",
+    "lib/elide",
+    "lib/fat32",
+    "lib/fat32/check",
+    "lib/gpt",
+    "lib/hda",
+    "lib/inspect",
+    "lib/logkeeper-api",
+    "lib/logstream",
+    "lib/manifest",
+    "lib/pci-claim",
+    "lib/quiesce",
+    "lib/random",
+    "lib/rootimage",
+    "lib/sha2",
+    "lib/sha2-hw",
+    "lib/swap",
+    "lib/symbols",
+    "lib/tco",
+    "lib/tmpdir",
+    "lib/trace",
+    "lib/tsc",
+    "lib/untrusted",
+    "lib/update",
+    "lib/userbound",
+    "lib/virtio",
+    "lib/wallclock",
+    "lib/xhci",
+    "lib/xhci/sim",
+    "loader",
+    "sdk/abi",
+    "sdk/filepicker",
+    "sdk/font",
+    "sdk/keymap",
+    "sdk/libc/arch",
+    "sdk/osrelease",
+    "sdk/toyos",
+    "sdk/window",
+    "system/acpiserver",
+    "system/acpiserver/aml",
+    "system/compositor",
+    "system/compositor/desktop",
+    "system/compositor/sprite",
+    "system/console",
+    "system/diskserver",
+    "system/filepicker",
+    "system/fileserver",
+    "system/grants",
+    "system/host",
+    "system/inspect",
+    "system/logkeeper",
+    "system/netstack",
+    "system/netstack/dhcp",
+    "system/netstack/dns",
+    "system/netstack/i219",
+    "system/netstack/ip",
+    "system/netstack/mdns",
+    "system/netstack/node",
+    "system/netstack/shard",
+    "system/netstack/shard/tcp",
+    "system/netstack/shard/testnet",
+    "system/netstack/udp",
+    "system/netstack/wire",
+    "system/pkg",
+    "system/shell",
+    "system/soundserver",
+    "system/soundserver/mixer",
+    "system/soundserver/virtio-sound",
+    "system/sshserver",
+    "system/supervisor",
+    "system/swap",
+    "system/symbolize",
+    "system/terminal",
+    "system/toybox",
+    "system/trace",
+    "system/update",
+    "system/usbd",
+    "tests/guest/kernelprobe",
+    "tests/guest/metalprobe",
+    "tests/guest/proctest",
+    "tests/guest/test-runner",
+    "tests/metal",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and
-# `src/hostws.rs` holds this list against the tree — an entry that stops naming
+# `build/hostws.rs` holds this list against the tree — an entry that stops naming
 # a directory with a `Cargo.toml` under it is a red, so a stale excuse cannot
 # outlive what it excused.
 exclude = [
@@ -138,19 +139,19 @@ exclude = [
     "rust",
     # The C library, built into a sysroot with `--release` and its own
     # `panic = "abort"` profile, which cargo ignores in a member; its lock is one
-    # of the sysroot key's inputs (`src/sysroot.rs`).
-    "userland/libc",
-    # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
+    # of the sysroot key's inputs (`build/sysroot.rs`).
+    "sdk/libc",
+    # Guest programs `build/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory but `tls-multi-crate/dep`, its parent's dependency: the
     # first patches memmap2 and `tls-cranelift` target-lexicon, and a `[patch]`
     # is the whole workspace's. Named, and not `tests/` whole, so the gate finds
     # a host test under `tests/` that joined neither list.
-    "tests/toyos-rust-tests",
-    "tests/toyos-rust-tests/tls-cranelift",
-    "tests/toyos-rust-tests/tls-dlopen-lib",
-    "tests/toyos-rust-tests/tls-lib",
-    "tests/toyos-rust-tests/tls-multi-crate",
-    "tests/toyos-rust-tests/tls-multi-crate/dep",
+    "tests/guest/rust-tests",
+    "tests/guest/rust-tests/tls-cranelift",
+    "tests/guest/rust-tests/tls-dlopen-lib",
+    "tests/guest/rust-tests/tls-lib",
+    "tests/guest/rust-tests/tls-multi-crate",
+    "tests/guest/rust-tests/tls-multi-crate/dep",
 ]
 
 [package]
@@ -159,9 +160,24 @@ description = "The build system: toolchain, kernel, bootloader, userland and ima
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-# `src/bin/toyos-metal.rs` and `src/bin/toyos-flash.rs` are binaries of this package too, so a bare
+# `toyos-flash` and `imgstat` are binaries of this package too, so a bare
 # `cargo run` would otherwise be ambiguous — and that command is the dev loop.
 default-run = "toyos-build"
+
+[lib]
+path = "build/lib.rs"
+
+[[bin]]
+name = "toyos-build"
+path = "build/main.rs"
+
+[[bin]]
+name = "toyos-flash"
+path = "build/bin/toyos-flash.rs"
+
+[[bin]]
+name = "imgstat"
+path = "build/bin/imgstat.rs"
 
 [dependencies]
 fontdue = "0.9"
@@ -169,40 +185,37 @@ libc = "0.2"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-bcachefs = { path = "bcachefs" }
-toyos-abi = { path = "toyos-abi" }
+bcachefs = { path = "lib/bcachefs" }
+toyos-abi = { path = "sdk/abi" }
 # What `build::syscall_entry_bytes` finds a staged kernel's entry with: its
 # segments, and its symbol table where the kernel's own backtrace finds it.
-toyos-elf = { path = "toyos-elf" }
-toyos-symbols = { path = "toyos-symbols" }
-toyos-fat32 = { path = "toyos-fat32" }
+toyos-elf = { path = "lib/elf" }
+toyos-symbols = { path = "lib/symbols" }
+toyos-fat32 = { path = "lib/fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
 # not published until they have both passed on it.
-toyos-fat32-check = { path = "toyos-fat32/check" }
-toyos-gpt = { path = "toyos-gpt" }
-toyos-keymap = { path = "toyos-keymap" }
+toyos-fat32-check = { path = "lib/fat32/check" }
+toyos-gpt = { path = "lib/gpt" }
+toyos-keymap = { path = "sdk/keymap" }
 # The form a program's line takes in a boot's log and the port `logkeeper` serves it
 # on, so the judges reading the log and `logkeeper` writing it read one declaration.
-toyos-logstream = { path = "toyos-logstream" }
-toyos-manifest = { path = "toyos-manifest" }
-toyos-osrelease = { path = "toyos-osrelease" }
-# The shutdown's stop record: the kernel renders it and this crate reads it back
-# off a stick, so one declaration is what both sides spell it with.
-toyos-quiesce = { path = "toyos-quiesce" }
+toyos-logstream = { path = "lib/logstream" }
+toyos-manifest = { path = "lib/manifest" }
+toyos-osrelease = { path = "sdk/osrelease" }
 # The swap port's name and the one program the image may give it to, so the
 # gate on every manifest reads what the supervisor reads.
-toyos-swap = { path = "toyos-swap" }
+toyos-swap = { path = "lib/swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
-toyos-tco = { path = "toyos-tco" }
+toyos-tco = { path = "lib/tco" }
 # The one scratch directory, under `$TMPDIR` or, for a socket, `/tmp`: the harness's run takes one, and so does
 # every test here; `--ci host` holds the host tests to leaving nothing behind.
-toyos-tmpdir = { path = "toyos-tmpdir" }
-toyos-blackbox = { path = "toyos-blackbox" }
-# The signed image, the slot table and the signer: `src/signing.rs` signs with
+toyos-tmpdir = { path = "lib/tmpdir" }
+toyos-blackbox = { path = "lib/blackbox" }
+# The signed image, the slot table and the signer: `build/signing.rs` signs with
 # the same crate the loader and `/system/bin/update` verify with.
-toyos-update = { path = "toyos-update", features = ["sign"] }
+toyos-update = { path = "lib/update", features = ["sign"] }
 # A throwaway key's seed and every GUID a partition table names, from the
 # operating system.
 getrandom = "0.3"
@@ -211,15 +224,15 @@ getrandom = "0.3"
 libm = "0.2.16"
 # The one `openssh-key-v1` reader and writer, shared with the SSH server's
 # host key, and the `SHA256:` fingerprint the owner's key is named by.
-toyos-ssh = { path = "toyos-ssh" }
+toyos-ssh = { path = "build/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
-toyos-wallclock = { path = "toyos-wallclock" }
+toyos-wallclock = { path = "lib/wallclock" }
 # Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
 # store key, a ROOT's name, a release asset's digest, and the harness's of a
 # body a guest fetches over TLS.
-toyos-sha2-hw = { path = "toyos-sha2-hw" }
-# The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
+toyos-sha2-hw = { path = "lib/sha2-hw" }
+# The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -234,29 +247,35 @@ webpki-root-certs = "1"
 pem = "4"
 
 [dev-dependencies]
-# The FAT implementation `src/fatformat.rs` is judged against, byte for byte.
+# The FAT implementation `build/fatformat.rs` is judged against, byte for byte.
 fatfs = "0.3.6"
-# The GPT writer `src/gptwrite.rs` is judged against, byte for byte.
+# The GPT writer `build/gptwrite.rs` is judged against, byte for byte.
 gpt = "3.1.0"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
-toyos-userbound = { path = "toyos-userbound" }
+toyos-userbound = { path = "lib/userbound" }
 # The scheduler's quantum and the windows' hold, so the harness judges a boot
 # against the constants the kernel schedules by.
 kernel = { path = "kernel" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
-toyos-xhci = { path = "toyos-xhci" }
+toyos-xhci = { path = "lib/xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
-acpiserver-api = { path = "userland/acpiserver-api" }
+acpiserver-api = { path = "lib/acpiserver-api" }
 # The desktop's geometry and the prompt's colour, so `consent_prompt` clicks
 # where the compositor draws and finds the prompt by what the compositor paints.
-toyos-desktop = { path = "userland/compositor/desktop" }
+toyos-desktop = { path = "system/compositor/desktop" }
 # `common::https`'s server, the peer a guest's HTTPS client is judged
 # against, and the authority and certificates it presents, made per run.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = "0.14"
+# The metal loop, the suite's command line, and what the metal profile
+# derives, times and reads off a boot.
+toyos-metal = { path = "tests/metal" }
+# The shutdown's stop record: the kernel renders it and the harness reads it
+# back off a log, so one declaration is what both sides spell it with.
+toyos-quiesce = { path = "lib/quiesce" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
@@ -264,10 +283,10 @@ loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
 # consumed as git dependencies (a path escaping the fork's own repo cannot
 # resolve once cargo checks it out alone). These redirects keep local builds
 # on the working tree.
-toyos-abi = { path = "toyos-abi" }
-toyos = { path = "toyos" }
-toyos-window = { path = "userland/toyos-window" }
-toyos-osrelease = { path = "toyos-osrelease" }
+toyos-abi = { path = "sdk/abi" }
+toyos = { path = "sdk/toyos" }
+toyos-window = { path = "sdk/window" }
+toyos-osrelease = { path = "sdk/osrelease" }
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
@@ -324,7 +343,7 @@ opt-level = 2
 # `LogRecord`s passing through them; at `opt-level = 0` the per-temporary copies
 # overflow one before the first assertion. Lowering the number here does not
 # make those models slower, it stops them running. A member's own `[profile]`
-# table cannot rescue it: cargo ignores one in a member, and `src/hostws.rs`
+# table cannot rescue it: cargo ignores one in a member, and `build/hostws.rs`
 # reds on it.
 [profile.dev]
 opt-level = 2

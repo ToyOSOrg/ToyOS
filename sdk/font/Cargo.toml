@@ -1,0 +1,14 @@
+[package]
+name = "toyos-font"
+version = "0.2.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pre-rasterized glyph bitmaps drawn into a pixel buffer, for ToyOS programs."
+repository = "https://github.com/ToyOSOrg/ToyOS"
+
+# `font` is taken on crates.io, so the package is `toyos-font`; the lib target
+# keeps the name every caller spells, which the sysroot's own `sdk/toyos/src`
+# citations are written in and no branch of this shape may edit.
+[lib]
+name = "font"
+doctest = false

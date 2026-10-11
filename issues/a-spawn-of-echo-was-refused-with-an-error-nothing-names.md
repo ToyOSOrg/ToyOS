@@ -15,7 +15,7 @@ FAIL log_nested_emit: --smp 1 ["log-nested-emit"]: the log gate exited 1
 log-gate: FAILED: the record-making child would not start: other error
 ```
 
-The child is `/system/bin/echo`, spawned by `userland/test-runner`'s
+The child is `/system/bin/echo`, spawned by `tests/guest/test-runner`'s
 `log_gate.rs` when the storm produced no poll completion, to make one kernel
 record from userland (`process.rs`'s `exit:` line). `std::process::Command::spawn`
 returned `Err`, and `{e}` printed **`other error`** — `io::ErrorKind::Other`,

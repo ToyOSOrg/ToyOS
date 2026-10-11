@@ -80,7 +80,7 @@ until that lands nothing verifies it.
    `issues/every-program-sees-only-the-files-it-was-given.md` stage 2.
    **Exit**: a launched app's `home_dir()` is its folder, it cannot name
    another app's folder, and the shell's history is still
-   `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `userland/shell`).
+   `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `system/shell`).
    Built for a package launched from `/apps` (`toyos_manifest::Program::view`,
    judged by the `app_view` metal row). Each desktop app in the image still
    runs with the session's `HOME` and the whole tree: its row declares no view

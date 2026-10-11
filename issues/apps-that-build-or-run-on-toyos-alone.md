@@ -21,7 +21,7 @@ each manifest's `[package.metadata.toyos.host] fails` names all three, so
 
 `editor`, `files`, `paint` and `filepicker` build on all three and run on none:
 `toyos-window` reaches no display but ToyOS's compositor, because
-`toyos-abi/src/syscall.rs` issues ToyOS's `syscall` on every OS. A program
+`sdk/abi/src/syscall.rs` issues ToyOS's `syscall` on every OS. A program
 reaches `filepicker` only through the `filepicker` port, which
 `filepicker-api` opens with `toyos::endow`, so off ToyOS a pick needs a
 transport the same source carries.

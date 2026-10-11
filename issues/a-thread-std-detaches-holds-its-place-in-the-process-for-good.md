@@ -16,7 +16,7 @@ detached: a program that detaches threads over its life has `thread::spawn`
 refused once those that exited and those still running are
 `MAX_THREADS - 1`, though not one of the exited ones runs. libc's
 `pthread_detach` joins the thread itself once it has exited
-(`userland/libc/src/pthread.rs`, `reap`); std has no such path.
+(`sdk/libc/src/pthread.rs`, `reap`); std has no such path.
 
 Owner: orchestrator. Exit: a thread std detaches is collected once it exits,
 and a test that spawns and drops more than `MAX_THREADS` handles, each thread

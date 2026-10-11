@@ -1,0 +1,26 @@
+[package]
+name = "diskserver"
+description = "One NVMe controller driven from userland, its partitions served as toyos-blockring sessions; the library is what a client of a block service links."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The library is what a client of the service needs — the session region as a
+# process sees it, and the session itself — so a program that opens a
+# partition links it and nothing of the driver.
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "diskserver"
+path = "src/main.rs"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-blockhold = { path = "../../lib/blockhold" }
+toyos-gpt = { path = "../../lib/gpt" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the NVMe controller ToyOS claims for it"

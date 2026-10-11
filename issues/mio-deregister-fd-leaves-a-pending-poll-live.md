@@ -32,7 +32,7 @@ notification for a resource it was promised was gone.
 
 ## Why there is nothing to cancel with
 
-There used to be an ABI op for this. `toyos-abi/src/inbox.rs` op code 2 was
+There used to be an ABI op for this. `sdk/abi/src/inbox.rs` op code 2 was
 `IORING_OP_POLL_REMOVE`, retired in PR #89 (`c41b831`,
 "abi: four names retired, and the number each one held") as caller-less:
 
@@ -60,7 +60,7 @@ correct.
 A kernel wait a kill ends is answered `Cancelled` (`kernel/src/watch.rs`).
 mio's selector is the userland mirror of that, and a `deregister` that cannot
 promise "no event after this point" is what it lacks: no ring op withdraws a
-watch (`toyos-abi/src/inbox.rs` has `OP_NOP`, `OP_WATCH` and `OP_ACCEPT`).
+watch (`sdk/abi/src/inbox.rs` has `OP_NOP`, `OP_WATCH` and `OP_ACCEPT`).
 Re-adding a cancel op (or otherwise making `deregister_fd` synchronous with
 the kernel's pending state — draining the SQ/CQ for that fd, or having the
 kernel answer a targeted query) is in scope for whoever fixes this; retiring

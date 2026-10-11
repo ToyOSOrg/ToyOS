@@ -7,7 +7,7 @@ opened: 2026-09-01
 # After a PS/2 queue overflow the console's input path can stop taking bytes for the rest of the boot
 
 Staged on the dev host, 2026-09-01, on the **shipping kernel** with no actuator
-armed: boot `console/system.toml`, wait for `console: ready`, then inject
+armed: boot `images/console.toml`, wait for `console: ready`, then inject
 `echo surface-up-zqjxk` — 21 unshifted characters, 42 set-1 bytes in three
 bursts, plus a 2-byte Enter — back to back with no guest-side wait, and repeat
 that ten times, sampling the decoded panel after each.

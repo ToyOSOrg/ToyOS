@@ -18,7 +18,7 @@ the walk's `_HID`, `_STA`, `_CRS` and `_GPE`, the embedded controller's
 method device, and the batteries' and AC adapters' `_STA`, `_BIX` or
 `_BIF`, `_BST` and `_PSR`. What else
 ToyOS takes from them it takes another way: the loader asks UEFI for the root
-bridges' windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing
+bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). Nothing
 reads `_CST`, which names a CPU's C-states.
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
@@ -64,7 +64,7 @@ button, and not to power the machine on again.
 - **"Local only; decode the 186 bytes"** (2026-10-04): "Full tables stay out
   of the repo (a copy you hold); the 186-byte fixture on main is replaced by
   decoded values, as 'Extracts only' says." The T14's root-bridge list is
-  `t14_root_bridge` in `toyos-acpi/tests/common/mod.rs`.
+  `t14_root_bridge` in `lib/acpi/tests/common/mod.rs`.
 - **"full clean room write with the spec"**: the AML interpreter is written
   from the ACPI specification.
 
@@ -134,7 +134,7 @@ interpreter reads the controller from the DSDT's own device. It is deleted:
 the server finds the PNP0C09 device in the namespace its load kept and takes
 its ports from `_CRS` and its GPE from `_GPE`, and reaches the ports through
 the kernel's mediated access, since no row names them
-(`userland/acpiserver/src/devices.rs`); the kernel reads no ECDT.
+(`system/acpiserver/src/devices.rs`); the kernel reads no ECDT.
 
 The design, not a ruling: a machine whose power button is a control method
 device is claimed too, and its button served by the Notify the controller's
@@ -146,12 +146,12 @@ over in ACPI mode is served whatever it has, since the mint writes nothing.
 
 **Stage: the interpreter** (the orchestrator's placement of "The AML stage
 closes it"). ToyOS's own AML interpreter, written from the specification, run
-by the ACPI server, the battery first: `userland/acpiserver/aml`, pure and
+by the ACPI server, the battery first: `system/acpiserver/aml`, pure and
 host-tested, beside the server, which loads the tables with it
-(`userland/acpiserver/src/aml.rs`). It owns
+(`system/acpiserver/src/aml.rs`). It owns
 `issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
 **Exit**: a host test loads QEMU 11.1.1's DSDT
-(`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
+(`lib/acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
 `SLP_TYPa` its boot logged, 0; and the T14's DSDT and SSDTs, read by a
 check run outside the tree, load and evaluate `\_S5`, its pull request
 recording the result; and on the T14 the server evaluates the method of each
@@ -171,7 +171,7 @@ otherwise pay to find again:
   of it. One SSDT reads a field below a bridge while it loads, and the
   interpreter refuses a PCI_Config region below a function that is no
   PCI-to-PCI bridge by its Header Type, or whose Secondary Bus Number is not
-  above its own bus (`pci`, `userland/acpiserver/aml/src/field.rs`). With
+  above its own bus (`pci`, `system/acpiserver/aml/src/field.rs`). With
   the bridges answering as present and numbered all 14 tables load; with
   them answering zero, as bridges at reset, or as absent, that SSDT is
   refused and 13 load. With every function answering its Header Type and
@@ -196,8 +196,8 @@ otherwise pay to find again:
   must hold anything new is refused; so is a String, Buffer or Package
   handed to the caller, `\_S5`'s among them, where the bound has no room
   for the caller's copy while it is built
-  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`;
-  `a_full_interpreter_reads_a_field_that_fits_an_integer`, `userland/acpiserver/aml/tests/heap.rs`).
+  (`what_is_held_live_is_bounded_in_sum`, `system/acpiserver/aml/tests/hostile.rs`;
+  `a_full_interpreter_reads_a_field_that_fits_an_integer`, `system/acpiserver/aml/tests/heap.rs`).
   Owner: this stage, which decides
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
@@ -205,13 +205,13 @@ otherwise pay to find again:
 - **The interpreter's 16 MiB bounds the heap it holds from one call to the
   next, not what one call holds while it runs.** The meter counts what an
   interpreter's allocations ask for (`object::Meter`,
-  `userland/acpiserver/aml/src/object.rs`), and under a counting allocator
+  `system/acpiserver/aml/src/object.rs`), and under a counting allocator
   an interpreter filled until it refuses holds at most `MAX_LIVE`, whatever
   fills it; a refused load leaves it holding the bytes it held before;
   ToString, Mid and Concatenate nested in themselves, and fields read
   through each other, hold one level's bytes past what the meter counts and
   not a level's each; and the value an evaluation hands its caller is held
-  to the bound while it is built (`userland/acpiserver/aml/tests/heap.rs`).
+  to the bound while it is built (`system/acpiserver/aml/tests/heap.rs`).
   That allocator counts every realloc as one that moves. While a load or an
   evaluation runs it still holds more, uncounted, and nothing measures the
   sum. Each part is bounded by the depth or the step bound, by reading and
@@ -243,7 +243,7 @@ otherwise pay to find again:
   it; and the arena's capacity after the real machine's last table is
   read, not derived.
 - **The T14's tables are not in name order.** The interpreter's walk of
-  the namespace (`Interpreter::walk`, `userland/acpiserver/aml/src/lib.rs`)
+  the namespace (`Interpreter::walk`, `system/acpiserver/aml/src/lib.rs`)
   reads siblings as their tables declared them. Of the 267 objects of the
   T14's tables that hold others, 217 declare them against the order their
   names sort in. What its initialisation needs of the order was read only
@@ -256,7 +256,7 @@ otherwise pay to find again:
   whether any hangs on a sibling's, nothing has read.
 - **An evaluation may ask to wait ten seconds, and no caller names another
   limit.** The limit counts the time asked of Sleep, Stall and Wait, a
-  load's too (`MAX_WAIT_US`, `userland/acpiserver/aml/src/lib.rs`), and
+  load's too (`MAX_WAIT_US`, `system/acpiserver/aml/src/lib.rs`), and
   `Interpreter::usage` says what a call asked, the request that was refused
   included. The T14's 14 tables asked for none while they loaded, and no
   method of them has been read refused at it. Owner: this stage. **Exit**:
@@ -269,7 +269,7 @@ mediated access, leaves open:
 
 - **The controller's `_REG(3, 1)` runs on a namespace no `_INI` has run in.**
   The server tells the controller its space is there as it attaches it to
-  AML (`attach`, `userland/acpiserver/src/main.rs`), before the battery's
+  AML (`attach`, `system/acpiserver/src/main.rs`), before the battery's
   read, and runs no `_INI`: the T14's controller `_INI` calls the firmware
   through `SMI_CMD`, which the host does not write. The scouts' dry run read that
   the T14's `_REG` takes another branch before its `_INI` than after it,
@@ -279,7 +279,7 @@ mediated access, leaves open:
 
 - **A take of the Global Lock that the AML sets no bound on ends the server
   where the firmware holds the lock past 1 s** (`RELEASE`,
-  `userland/acpiserver/src/host.rs`). The bound is this server's guess, not
+  `system/acpiserver/src/host.rs`). The bound is this server's guess, not
   a measurement. The firmware is meant to hold the lock for the run of one
   SMI handler, and no hold has been seen. On the T14 the load takes the
   lock 241 times, the namespace's `_HID` walk, the controller's `_GLK` and
@@ -331,7 +331,7 @@ mediated access, leaves open:
   power button the firmware reports through ACPI code), what should
   happen?": "Stay in ACPI mode, button dead". The host test
   `no_namespace_leaves_the_button_and_the_controller_unserved_and_keeps_the_claim`
-  (`userland/acpiserver/src/main.rs`) reads the server serving neither the
+  (`system/acpiserver/src/main.rs`) reads the server serving neither the
   button nor the controller and keeping the claim.
 
   Two more machines have no power-off, and that is the ruled state and no
@@ -367,7 +367,7 @@ What the firmware call, which the kernel makes for the server where its AML
 stores a byte to `SMI_CMD`, leaves open. No AML the server runs makes one
 now: its host asks the kernel for three port writes, and for the embedded
 controller's transactions where AML reaches its space, and denies every other
-write by name (`FORWARDED` in `userland/acpiserver/src/host.rs`), the
+write by name (`FORWARDED` in `system/acpiserver/src/host.rs`), the
 index registers 0x72 and 0xCD6, a byte each, and the POST port's word.
 Those are what an AMD laptop's AML wrote, measured outside the tree on its
 tables with nothing cleared between the load, the device search and all

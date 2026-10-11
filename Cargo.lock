@@ -1261,7 +1261,6 @@ dependencies = [
 name = "files"
 version = "0.1.0"
 dependencies = [
- "sprite",
  "toyos-font",
  "toyos-window",
 ]
@@ -4289,6 +4288,7 @@ dependencies = [
  "toyos-keymap",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-metal",
  "toyos-osrelease",
  "toyos-quiesce",
  "toyos-sha2-hw",
@@ -4433,6 +4433,20 @@ name = "toyos-mdns"
 version = "0.1.0"
 dependencies = [
  "toyos-dns",
+]
+
+[[package]]
+name = "toyos-metal"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "toyos-build",
+ "toyos-fat32-check",
+ "toyos-gpt",
+ "toyos-quiesce",
+ "toyos-tco",
+ "toyos-tmpdir",
 ]
 
 [[package]]

@@ -13,7 +13,7 @@ says how many threads there were and how long they took; it does not say
 
 ## What the machine measured
 
-Run 41, `tests/metalcase` on the T14, at `52c8a3f9` — before the sweep had a
+Run 41, `tests/images/metalcase.toml` on the T14, at `52c8a3f9` — before the sweep had a
 cadence, so the sweep count is that kernel's and not this one's:
 
 ```
@@ -21,7 +21,7 @@ cadence, so the sweep count is that kernel's and not this one's:
 in 129 ms over 67953 sweep(s), 0 block operation(s) still open
 ```
 
-The same kernel on the same machine, `tests/metaldevicecase`, one boot later:
+The same kernel on the same machine, `tests/images/metaldevicecase.toml`, one boot later:
 
 ```
 [20:39:43 13.896 cpu6] stop: 5 of 5 userland thread(s) stopped across 8 cpu(s)
@@ -41,8 +41,8 @@ What can be established from the log is only this:
   interrupts over 3.55 s), which is more than a kick-to-boundary costs.
 
 That points at a syscall rather than a spinning userland thread, and it is an
-inference and not a reading. `tests/metalcase` starts `sshd` and
-`tests/metaldevicecase` does not, which is the difference between the two boots
+inference and not a reading. `tests/images/metalcase.toml` starts `sshd` and
+`tests/images/metaldevicecase.toml` does not, which is the difference between the two boots
 above; `sshd` wrote no `exit:` record on run 41 at all, so it was alive and
 running when the stop found it. Which of the seven took the time is not in the
 file.
@@ -72,13 +72,13 @@ record this issue is about.
 ## Why it is not free to answer
 
 The record is a fixed line rendered by `toyos-quiesce` and read back by
-`src/metal.rs` and the harness.
+`tests/metal/src/lib.rs` and the harness.
 Naming a thread means the record carries a pid, a tid and the class of wait
 that thread was in — which the sweep does not collect today, because it counts
 rather than remembers.
 
 ## What would show it
 
-The record naming the last thread to stop, and a boot of `tests/metalcase`
+The record naming the last thread to stop, and a boot of `tests/images/metalcase.toml`
 whose stop time can then be attributed to it rather than inferred. Until the
 record names one, its `in N ms` explains nothing about itself.

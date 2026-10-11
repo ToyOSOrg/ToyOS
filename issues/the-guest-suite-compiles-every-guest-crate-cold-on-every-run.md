@@ -35,7 +35,7 @@ The `BUILT` lines behind `building`, A / B / C / D:
 - the test binaries and the small ROOTs together: 19 / 15 / 19 / 19
 
 Two of those costs were taken out after D, and are in none of the four. The
-metalcase line: the one guest test that booted it boots tests/panelcase, whose
+metalcase line: the one guest test that booted it boots tests/images/panelcase.toml, whose
 `BUILT` line read 8 s on the development machine where metalcase's read 53 s
 after the same builds. And the harness's build: in all four logs it compiles
 ring, rustls, rustls-webpki, ureq and the build system a second time, and
@@ -62,7 +62,7 @@ What stands in the way:
   size (`issues/the-host-caches-limit-reaches-the-10-gb-only-through-one-measured-ratio.md`).
 - Only main's scope is read by every ref, so the writer is a run on main, and
   no pull request can show the saving before the writer has landed.
-- A restored target is trusted by content or not at all: `src/cicache.rs` is
+- A restored target is trusted by content or not at all: `build/cicache.rs` is
   the tree's one reader that does.
 
 Not taken: `CARGO_INCREMENTAL=0` in the job. A cold
@@ -71,7 +71,7 @@ it, on the development machine under load. It also turns rustc's MIR inliner
 on (the root `Cargo.toml`, `[profile.toyos]`), so the job would boot other bytes
 than `cargo run` builds.
 
-Owner: the guest job (`src/ci.rs`'s `guest`, `.github/workflows/guest.yml`).
+Owner: the guest job (`build/ci.rs`'s `guest`, `.github/workflows/guest.yml`).
 
 **Exit**: `guest / suite` on a pull request that moves no guest source prints
 a `building` figure under 60 s.

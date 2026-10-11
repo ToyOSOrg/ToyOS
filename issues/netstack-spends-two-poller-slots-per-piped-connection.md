@@ -10,8 +10,8 @@ A stream registers both its pipes on every pass, for as long as the node holds
 them: its send pipe `READABLE` while the stack has room for its bytes and
 `OTHER_END_GONE` until the kernel has answered that, and its receive pipe
 `OTHER_END_GONE` and, while the stack holds bytes the pipe refused, `WRITABLE`
-(`userland/netstack/src/serve.rs`, `Sockets::watch`, from the node's
-`Node::watches`). `MAX_PLACES` (`userland/netstack/src/main.rs`) divides the
+(`system/netstack/src/serve.rs`, `Sockets::watch`, from the node's
+`Node::watches`). `MAX_PLACES` (`system/netstack/src/main.rs`) divides the
 batch one poller can carry (`Poller::MAX_HANDLES`, less the fixed
 registrations, the pending connections and the lookups' clients) by
 `serve::WATCHES_PER_PLACE = 2`, so the ceiling on the node's places is half

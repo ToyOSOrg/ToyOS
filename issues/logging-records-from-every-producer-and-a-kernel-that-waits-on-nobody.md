@@ -7,10 +7,10 @@ opened: 2026-09-26
 # Logging: records from every producer, and a kernel that waits on nobody
 
 What is built: every program init starts or launches writes records into a
-log ring of its own that init makes and names to `logd` (`toyos/src/log/`);
+log ring of its own that init makes and names to `logd` (`sdk/toyos/src/log/`);
 writing never waits, allocates or makes a syscall, a full ring is a count
 `logd` says, and soundd's mix thread writes a lane of its own wait-free. The
-clock is a page (`toyos-abi/src/clock.rs`). `klogd` is the console's one
+clock is a page (`sdk/abi/src/clock.rs`). `klogd` is the console's one
 writer, with interrupts on, and a program's line reaches the console only
 through `logd`, under its name. The kernel waits on `logd` neither at a
 panic, which halts the other CPUs first and seals its tail in the black box,
@@ -41,10 +41,10 @@ machine mid-boot finding the tail in the next boot's `/log`.
 **2. Verdicts that match on fields instead of English.** A record carries its
 severity and origin; the tests and metal verdicts this change touched match on
 them. The rest still search sentences: about 600 string literals in `tests/`
-and 33 sentence constants in `src/bootlog.rs`, where rewording a diagnostic
+and 33 sentence constants in `build/bootlog.rs`, where rewording a diagnostic
 breaks a verdict. Records grow a key the way journald's `MESSAGE_ID` does, and
 a verdict matches the key.
-*Exit:* no verdict in `tests/` or `src/metal*.rs` reads a record by its prose.
+*Exit:* no verdict in `tests/` or `tests/metal/src/*.rs` reads a record by its prose.
 
 **3. A machine whose `logd` ended says so.** Nothing restarts `logd` and
 nothing names its end: init holds no `Process` handle to it, so the rings fill,

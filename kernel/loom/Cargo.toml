@@ -175,7 +175,7 @@ sleeplock-acquire-off = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 device-irq-lossy = []
-# The negative control for a program's log ring, `toyos/src/log/ring.rs`. It
+# The negative control for a program's log ring, `sdk/toyos/src/log/ring.rs`. It
 # makes the store that publishes a record — the shared ring's `published` word
 # and a lane's `head` — `Relaxed`, so a reader can find the word with the body
 # behind it unwritten, and `log_ring.rs` must red with loom's own words,
@@ -297,7 +297,7 @@ fault-posted-before-it-is-set = []
 loom = "0.7"
 # The record layout the shard is a ring of. `no_std`, no atomics of its own,
 # so it compiles into the model unchanged.
-toyos-abi = { path = "../../toyos-abi" }
+toyos-abi = { path = "../../sdk/abi" }
 
 # **The models are compiled with optimisation, and that is a stack decision.**
 # `generator`, which loom's coroutines are built on, gives each one 32 KiB —
@@ -308,7 +308,7 @@ toyos-abi = { path = "../../toyos-abi" }
 # and the schedule exploration is loom's own. The optimisation comes from the
 # root workspace's `[profile.dev] opt-level = 2` (the `test` profile inherits
 # it; a member's own `[profile]` table is ignored by cargo and refused by
-# `src/hostws.rs`) — so lowering the root's opt-level does not slow these
+# `build/hostws.rs`) — so lowering the root's opt-level does not slow these
 # models, it overflows their stacks.
 
 [lib]

@@ -16,7 +16,7 @@ Five of the six apps cannot, because of how they find JetBrains Mono:
   `/system/share/fonts/JetBrainsMono-Regular-8x16.font` and `expect` it, so on
   a host they build and then panic at start; `files` reads the icons the build
   draws, `/system/share/icons/*.alpha`, the same way (`:62-63`, through
-  `userland/sprite`).
+  `system/compositor/sprite`).
 - `calc` (`build.rs:32`) and `snake` (`build.rs:7`) read
   `../../assets/JetBrainsMono-Regular.ttf` in their build scripts, a path
   into this tree.

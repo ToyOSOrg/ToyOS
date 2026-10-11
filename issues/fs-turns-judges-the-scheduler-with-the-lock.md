@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # `fs_turns` judges the scheduler with the lock
 
-`tests/toyos-rust-tests/src/bin/fs_turns.rs` asserts that every writer sharing
+`tests/guest/rust-tests/src/bin/fs_turns.rs` asserts that every writer sharing
 one directory's connection made more than one pass while the first made 32. A
 writer the scheduler — or the host, under TCG — keeps off-CPU between its reply
 and its next request holds no ticket in that time, and the others pass it with

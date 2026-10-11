@@ -1,0 +1,2942 @@
+// Syscall numbers (must match kernel dispatch table)
+pub const SYS_WRITE: u64 = 0;
+pub const SYS_READ: u64 = 1;
+pub const SYS_THREAD_EXIT: u64 = 5;
+pub const SYS_RANDOM: u64 = 6;
+pub const SYS_OPEN: u64 = 9;
+pub const SYS_CLOSE: u64 = 10;
+pub const SYS_SEEK: u64 = 13;
+pub const SYS_FSTAT: u64 = 14;
+pub const SYS_FSYNC: u64 = 15;
+/// What a path names, as a [`Stat`]: [`stat`].
+pub const SYS_STAT: u64 = 16;
+pub const SYS_READDIR: u64 = 17;
+pub const SYS_DELETE: u64 = 18;
+pub const SYS_SHUTDOWN: u64 = 19;
+pub const SYS_CHDIR: u64 = 20;
+pub const SYS_GETCWD: u64 = 21;
+pub const SYS_PIPE: u64 = 24;
+/// Start a program, endowing it exactly what the caller names. Answers a
+/// `Process` handle — see [`spawn`].
+pub const SYS_SPAWN: u64 = 25;
+pub const SYS_MARK_TTY: u64 = 28;
+pub const SYS_GPU_PRESENT: u64 = 35;
+pub const SYS_THREAD_SPAWN: u64 = 40;
+pub const SYS_THREAD_JOIN: u64 = 41;
+pub const SYS_CLOCK_REALTIME: u64 = 42;
+pub const SYS_GPU_SET_CURSOR: u64 = 43;
+pub const SYS_GPU_MOVE_CURSOR: u64 = 44;
+/// A header describing the machine, optionally followed by the roster of every
+/// live thread in it. See [`sysinfo`].
+///
+/// **Two answers under one number, and only the second is authority.** The
+/// header is a machine fact like [`SYS_CPU_COUNT`]; the entries name, size and
+/// time every process there is, so writing one demands [`Rights::ROSTER`] on a
+/// `SysCap`. Which of the two a call asks for is the buffer's own length: a
+/// buffer with no room for an entry asks for the header, and the capability is
+/// not consulted at all.
+///
+/// [`Rights::ROSTER`]: crate::handle::Rights::ROSTER
+pub const SYS_SYSINFO: u64 = 45;
+
+/// Bytes of machine header [`SYS_SYSINFO`] writes first: total memory, used
+/// memory, the CPU count, the entry count, the uptime, and the busy and
+/// available CPU nanoseconds a percentage is derived from.
+///
+/// **The one definition.** The kernel writes this layout and every reader
+/// decodes it, so a second spelling is a reader that walks off by a field.
+pub const SYSINFO_HEADER_SIZE: usize = 48;
+
+/// [`SYSINFO_HEADER_SIZE`] bytes, decoded once: the one spelling of the
+/// header's offsets, so a reader takes a field rather than an index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SysinfoHeader {
+    pub memory_total: u64,
+    pub memory_used: u64,
+    pub cpus: u32,
+    /// Live threads in the roster this same call would answer with
+    /// [`Rights::ROSTER`](crate::handle::Rights::ROSTER).
+    pub entries: u32,
+    pub uptime_ns: u64,
+    pub total_cpu_ns: u64,
+    pub total_available_ns: u64,
+}
+
+impl SysinfoHeader {
+    pub fn decode(header: &[u8; SYSINFO_HEADER_SIZE]) -> Self {
+        let u64_at = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("eight"));
+        let u32_at = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("four"));
+        Self {
+            memory_total: u64_at(0),
+            memory_used: u64_at(8),
+            cpus: u32_at(16),
+            entries: u32_at(20),
+            uptime_ns: u64_at(24),
+            total_cpu_ns: u64_at(32),
+            total_available_ns: u64_at(40),
+        }
+    }
+}
+
+/// Bytes per roster entry, after the header: pid, tid, scheduler state, whether
+/// it is a secondary thread, resident memory, CPU nanoseconds, and a 28-byte
+/// name.
+pub const SYSINFO_ENTRY_SIZE: usize = 64;
+pub const SYS_NANOSLEEP: u64 = 49;
+/// A second handle to the same object, carrying no more than the first. See
+/// [`dup`] and [`dup_narrowed`].
+pub const SYS_HANDLE_DUP: u64 = 50;
+pub const SYS_GETPID: u64 = 51;
+pub const SYS_RENAME: u64 = 52;
+pub const SYS_MKDIR: u64 = 53;
+pub const SYS_RMDIR: u64 = 54;
+pub const SYS_DLOPEN: u64 = 55;
+pub const SYS_DLSYM: u64 = 56;
+pub const SYS_DLCLOSE: u64 = 57;
+pub const SYS_FUTEX_WAIT: u64 = 58;
+pub const SYS_FUTEX_WAKE: u64 = 59;
+pub const SYS_FTRUNCATE: u64 = 60;
+pub const SYS_STACK_INFO: u64 = 61;
+pub const SYS_CPU_COUNT: u64 = 62;
+pub const SYS_MMAP: u64 = 63;
+pub const SYS_MUNMAP: u64 = 64;
+pub const SYS_READ_NONBLOCK: u64 = 66;
+pub const SYS_WRITE_NONBLOCK: u64 = 67;
+pub const SYS_EXIT: u64 = 72;
+pub const SYS_GET_ENV: u64 = 73;
+/// A second handle to the same object, at a slot the caller picks. See
+/// [`dup2`].
+pub const SYS_HANDLE_DUP_AT: u64 = 74;
+pub const SYS_CLOCK_EPOCH: u64 = 75;
+/// Join a pipe read end and a pipe write end into one duplex `Connection`.
+/// See [`connection_join`].
+pub const SYS_CONNECTION_JOIN: u64 = 76;
+pub const SYS_PIPE_MAP: u64 = 77;
+pub const SYS_SYMLINK: u64 = 81;
+pub const SYS_READLINK: u64 = 82;
+pub const SYS_GPU_SET_RESOLUTION: u64 = 83;
+/// Accept a queued connection from an [`Acceptor`] handle.
+///
+/// [`Acceptor`]: crate::handle::RawHandle
+pub const SYS_ACCEPT: u64 = 86;
+/// Allocate a TLS block for a dlopen'd module on the current thread.
+/// Arg0: module_id (1-based DTV index). Returns the block's virtual address,
+/// or a `SyscallError` word — see [`tls_alloc_block`].
+pub const SYS_TLS_ALLOC_BLOCK: u64 = 88;
+/// Create an [`inbox`](crate::inbox) and map its rings. See [`inbox_setup`].
+pub const SYS_INBOX_SETUP: u64 = 89;
+/// Hand queued submissions to the kernel and/or wait for completions. See
+/// [`inbox_submit`].
+pub const SYS_INBOX_SUBMIT: u64 = 90;
+pub const SYS_QUERY_MODULES: u64 = 91;
+/// Debug syscall. Arg0 selects the action:
+///   0 = kernel panic (triggers panic!() in syscall context)
+///   1 = kernel fault (null pointer deref in kernel context)
+pub const SYS_DEBUG: u64 = 92;
+pub const SYS_SCHED_INFO: u64 = 93;
+pub const SYS_PROCESS_STATS: u64 = 94;
+pub const SYS_SET_THREAD_NAME: u64 = 95;
+/// Read one register of a claimed device. See [`device_reg_read`].
+pub const SYS_DEVICE_REG_READ: u64 = 97;
+/// Write one register of a claimed device. See [`device_reg_write`].
+pub const SYS_DEVICE_REG_WRITE: u64 = 98;
+
+/// Read this process's endowment table back: the `(label, handle)` pairs its
+/// parent gave it at spawn, as an `[EndowEntry]` count followed by the entries
+/// and the label blob they index into. `buf_len == 0` asks how many bytes the
+/// answer needs. See [`endowments`].
+///
+/// The handles themselves are in the table whether or not this is ever called —
+/// the labels are *names* for them, not the authority.
+pub const SYS_ENDOWMENTS: u64 = 99;
+
+/// Make a port: one [`Acceptor`] for the server, one `Connector` for its
+/// clients, packed `(acceptor << 32) | connector`. See [`port_create`].
+///
+/// **The packing cannot be read as an error, and the reason is slot
+/// retirement.** A `SyscallError` encodes as `u64::MAX - code` for
+/// `code < 256`, so a pair could collide only if both halves could reach
+/// `0xFFFF_FFFF`. A slot at [`RawHandle::MAX_GENERATION`] is retired rather
+/// than reissued, so the largest handle any table hands out is `0xFFFF_EFFF`
+/// and the largest pair is `0xFFFF_EFFF_FFFF_EFFF` — four billion below the
+/// error range. The retirement rule and this packing are load-bearing for each
+/// other.
+///
+/// [`Acceptor`]: port_create
+pub const SYS_PORT_CREATE: u64 = 100;
+/// Build a namespace from a base and a set of `(name, connector)` additions.
+/// See [`NamespaceBuild`].
+pub const SYS_NAMESPACE_BUILD: u64 = 101;
+/// Open a connection to a name **in a namespace this process holds**. There is
+/// no other place to ask, and a name it was not given resolves to nothing.
+pub const SYS_NAMESPACE_OPEN: u64 = 102;
+
+/// Move handles to the peer of a connection. See [`handle_send`].
+///
+/// The batch is queued on the connection, not interleaved with its bytes, so
+/// **handles are sent before the frame that announces them** and a receiver
+/// that has the frame already has the handles.
+pub const SYS_HANDLE_SEND: u64 = 103;
+/// Take the oldest batch of handles the peer sent. See [`handle_recv`].
+pub const SYS_HANDLE_RECV: u64 = 104;
+/// Make a shared-memory region, sized up to whole 2 MiB pages.
+/// See [`shm_create`].
+pub const SYS_SHM_CREATE: u64 = 105;
+/// Map a region into the caller. Idempotent: a second call answers the first
+/// call's address. See [`shm_map`].
+pub const SYS_SHM_MAP: u64 = 106;
+
+/// Wait for the process a handle names and take its exit code, gated by
+/// [`Rights::WAIT`]. See [`process_wait`].
+///
+/// **An exit code is a property of the object, not of a table entry**, so this
+/// answers whether or not the process is still around: a spawner that waits a
+/// second time gets the same code, and one that waits for the first time long
+/// after the process is gone gets it too. There is nothing to reap and no
+/// window in which an exit is missed.
+///
+/// [`Rights::WAIT`]: crate::handle::Rights::WAIT
+pub const SYS_PROCESS_WAIT: u64 = 108;
+/// Kill the process a handle names, gated by [`Rights::MANAGE`].
+/// See [`process_kill`].
+///
+/// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
+pub const SYS_PROCESS_KILL: u64 = 109;
+
+/// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
+/// Only the supervisor holds such a cap, so the set of processes that can ever
+/// claim a device is exactly what the supervisor endowed. See [`device_claim`].
+///
+/// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
+pub const SYS_DEVICE_CLAIM: u64 = 111;
+/// Enter the real-time scheduling band, gated by [`Rights::RT`] on a `SysCap`.
+/// A claim is not a privilege; this is. See [`rt_enter`].
+///
+/// [`Rights::RT`]: crate::handle::Rights::RT
+pub const SYS_RT_ENTER: u64 = 112;
+
+/// Copy kernel log records into a caller's buffer, advancing a cursor the
+/// caller owns. Gated by [`Rights::LOG`] on a `SysCap`. See [`log_read`] and
+/// [`crate::log`].
+///
+/// **The kernel keeps no per-reader state**, so a second reader costs nothing
+/// and the stream is not consumed: `logkeeper` and a `log-follow` tool coexist
+/// with no coordination. Reading the whole machine's log is authority, which is
+/// why it rides a right rather than being ambient.
+///
+/// [`Rights::LOG`]: crate::handle::Rights::LOG
+pub const SYS_LOG_READ: u64 = 114;
+
+/// Return the machine to firmware, on the same `Rights::POWER` that powers it off. See [`reboot`].
+pub const SYS_REBOOT: u64 = 116;
+
+/// One memory BAR of a claimed PCI function, as an object to map. See
+/// [`device_bar_map`].
+pub const SYS_DEVICE_BAR_MAP: u64 = 117;
+
+/// Memory a claimed PCI function may reach, and nothing else may. See
+/// [`device_dma_alloc`].
+pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
+
+/// Read blocks of a claimed partition. See [`partition_read`].
+pub const SYS_PARTITION_READ: u64 = 119;
+
+/// Write blocks of a claimed partition. See [`partition_write`].
+pub const SYS_PARTITION_WRITE: u64 = 120;
+
+/// What the machine is made of, and who holds each part of it, as
+/// [`crate::inventory`] records. Gated by [`Rights::INVENTORY`] on a `SysCap`.
+/// See [`device_inventory`].
+///
+/// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
+pub const SYS_DEVICE_INVENTORY: u64 = 121;
+
+/// Put a region the caller holds into a claimed PCI function's address space
+/// at the unit, so the function reaches it as well as the caller's own grants.
+/// See [`device_dma_map`].
+pub const SYS_DEVICE_DMA_MAP: u64 = 122;
+
+/// Take a region [`SYS_DEVICE_DMA_MAP`] put there back out. See
+/// [`device_dma_unmap`].
+pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
+
+/// Every online CPU's counters, as [`crate::counters`] records. Gated by
+/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs and
+/// the power envelope by [`Rights::TRACE`] beside it. See [`counters`].
+///
+/// [`Rights::COUNTERS`]: crate::handle::Rights::COUNTERS
+/// [`Rights::TRACE`]: crate::handle::Rights::TRACE
+pub const SYS_COUNTERS: u64 = 124;
+
+/// Make a connector to a port the caller accepts on, every connection through
+/// which is stamped with the badge it carries. Gated by `READ` on the
+/// acceptor, the right accepting takes. See [`port_mint`].
+pub const SYS_PORT_MINT: u64 = 125;
+
+/// Read the badge a connection accepted from the caller's port was stamped
+/// with. See [`port_badge`].
+pub const SYS_PORT_BADGE: u64 = 126;
+
+/// The diary's records the caller's cursor has not seen, as
+/// [`crate::trace`] records. Gated by [`Rights::TRACE`] on a `SysCap`. See
+/// [`trace_read`].
+///
+/// [`Rights::TRACE`]: crate::handle::Rights::TRACE
+pub const SYS_TRACE_READ: u64 = 127;
+
+/// One operation on the `acpi` claim ([`crate::acpi::op`]): an access the
+/// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
+/// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
+pub const SYS_ACPI: u64 = 128;
+
+/// Bins in the per-process syscall profile — one for every number this ABI
+/// issues, and one at the end for every number it does not.
+///
+/// **The profile's parts sum to its total, and that is the whole requirement.**
+/// A bin array narrower than the ABI reaches drops calls out of the line while
+/// the total goes on counting them.
+pub const SYSCALL_PROFILE_BINS: usize = 130;
+
+/// Where a number this ABI does not issue is counted. Merging is a degradation
+/// a reader can see in the line; dropping is one nobody can.
+pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
+
+const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
+
+pub const WNOHANG: u64 = 1;
+
+crate::user_safe! {
+    /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
+    ///
+    /// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
+    /// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
+    /// duplicates first. That is what makes endowing a device claim work with no
+    /// special case: a claim carries no [`Rights::DUP`], so the move is the only
+    /// expressible form and the parent provably no longer holds it.
+    ///
+    /// [`Rights::DUP`]: crate::handle::Rights::DUP
+    #[derive(Clone, Copy)]
+    pub struct SpawnArgs {
+        /// The program: the file the kernel opens and pages the child from — its
+        /// libraries are found beside it — or, with an `image`, the path the caller
+        /// read that from. **Never `argv[0]`**, which is the child's first argument
+        /// and the name it goes by, and which nothing opens.
+        pub path_ptr: u64,
+        pub path_len: u64,
+        pub argv_ptr: u64,
+        pub argv_len: u64,
+        /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
+        /// child. Stdio and nothing else, in practice.
+        pub slot_map_ptr: u64,
+        pub slot_map_count: u64,
+        pub env_ptr: u64,
+        pub env_len: u64,
+        /// `[EndowEntry]`, moved out of the parent's table.
+        pub endow_ptr: u64,
+        pub endow_count: u64,
+        /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
+        pub labels_ptr: u64,
+        pub labels_len: u64,
+        /// The child's working directory, absolute, or the spawn is refused
+        /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+        /// must be a directory there or the spawn is `NotFound`; under any other
+        /// name it is a file server's directory, which the caller's client asked
+        /// that server about and the kernel cannot. **Always the caller's
+        /// statement**: the kernel never substitutes the caller's own.
+        pub cwd_ptr: u64,
+        pub cwd_len: u64,
+        /// The program's bytes, in a shared memory object the caller made and
+        /// read the program into: `image` is a handle to it carrying `MAP`, and
+        /// `image_len` how many of its first bytes the program is — or 0, for a
+        /// program the kernel opens at `path` itself. `PermissionDenied` for a
+        /// handle without `MAP`; `InvalidArgument` for a length the object does not
+        /// hold, or an object that is no memory the kernel allocated. The object
+        /// stays the caller's: what the kernel reads of it, and when, is
+        /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
+        /// nobody, and the libraries are found in `/system/lib` alone.
+        pub image: u64,
+        pub image_len: u64,
+        /// The process the child is placed under, whose end takes it down: a
+        /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
+        /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+        /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
+        /// for one to no process, since a place is a handle a peer sent;
+        /// `Gone` for a process being torn down, and `ResourceExhausted` for a
+        /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+        ///
+        /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+        pub place: u64,
+    }
+}
+
+/// One `(label, handle)` pair of a process's endowment table.
+///
+/// `label_off`/`label_len` index the label blob that travels beside the
+/// entries — in [`SpawnArgs`] going in, in [`endowments`]'s answer coming back.
+/// The label is a *local name* in one process's own table and buys nothing to
+/// guess: a name not in your table resolves to nothing.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EndowEntry {
+    pub label_off: u32,
+    pub label_len: u32,
+    pub handle: RawHandle,
+    /// Named, so nothing leaks kernel stack into it.
+    pub _pad: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
+
+/// The label the kernel puts on the supervisor's system capability, and the one
+/// the supervisor puts on the `RT`-only dup it endows a `realtime` program.
+///
+/// Here rather than in the SDK because the kernel writes it and userland reads
+/// it, and a label spelled twice is a label that can be spelled two ways.
+pub const SYSCAP_LABEL: &str = "syscap";
+/// The label for a program's namespace — what its manifest `receives` becomes.
+pub const SVC_LABEL: &str = "svc";
+/// The label every process starts holding a handle to itself under, carrying
+/// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
+/// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
+pub const SELF_LABEL: &str = "self";
+/// `serve:<name>`: the acceptor of a machine-wide port this program serves.
+pub const SERVE_PREFIX: &str = "serve:";
+/// `dev:<class>`: the claim for a device class this program was given.
+pub const DEV_PREFIX: &str = "dev:";
+/// `provide:<name>`: a connector a *launching client* transferred, beside the
+/// namespace entry the launcher made from it.
+///
+/// **Both, and the second is what makes the chain work.** A namespace answers
+/// with connections, not with connectors, so a process holding `surface` only
+/// in its namespace cannot hand `surface` to a child — and the terminal → shell
+/// → `locale` chain is exactly that. The connector arrives labelled as well, so
+/// the holder can pass it on and the child's own manifest row still decides
+/// everything else it gets.
+pub const PROVIDE_PREFIX: &str = "provide:";
+
+/// `(label, handle)` pairs one endowment table holds, the kernel's own
+/// [`SELF_LABEL`] among them. Policy on the primitive, refused by name, never
+/// truncated — the widest manifest row plus stdio.
+pub const MAX_ENDOWMENTS: usize = 32;
+/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
+pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
+/// `(child slot, parent handle)` pairs one spawn may carry.
+///
+/// **Derived rather than chosen.** A slot map installs into the child's table,
+/// which has [`RawHandle::MAX_SLOTS`] slots, so a longer one necessarily names
+/// a slot twice and the second pair says everything the first did. Without it
+/// the only bound is the 2 MiB window the arguments are read through, and every
+/// pair is a `duplicate_entry` under the parent's own lock — enough of them to
+/// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
+pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
+/// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
+pub const MAX_LABELS_LEN: usize = 4096;
+/// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
+pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
+
+use crate::handle::Rights;
+use crate::pci::{DmaGrant, DmaMapping};
+use crate::{Pid, RawHandle, HANDLE_INVALID};
+
+/// Syscall error with a specific code. Values occupy the top of the u64 range:
+/// error code N is encoded as `u64::MAX - N`. Any return value `>= u64::MAX - 255`
+/// is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum SyscallError {
+    Unknown = 0,
+    NotFound = 1,
+    PermissionDenied = 2,
+    AlreadyExists = 3,
+    InvalidArgument = 4,
+    BadAddress = 5,
+    WouldBlock = 6,
+    ResourceExhausted = 7,
+    NotSupported = 8,
+    /// The device did not do it.
+    ///
+    /// One word for a transfer that was issued and not completed, and for a
+    /// volume whose own structures do not decode: there is nothing a caller can
+    /// do differently about the two, and both are the opposite of `NotFound`.
+    /// The channel below it — `block::BlockDevice`, `FileBacking::read_page`,
+    /// `bcachefs::BlockIO`, `vfs::FileSystem` — is fallible the whole way so
+    /// that this is what arrives, rather than "no such file".
+    ///
+    /// It carries nothing. Which endpoint stalled, what the sense key was and
+    /// which block was asked for are in the kernel's own log line, where a
+    /// triage reads them; an enum here would be a vocabulary userland has no
+    /// use for and every new driver would have to guess an arm from.
+    Io = 9,
+    /// The object was there and its other end is not.
+    ///
+    /// **A different fact from `NotFound`, and the design does not work without
+    /// the difference.** "The name is not in the namespace this process was
+    /// given" is a statement about this process and the answer is "you have a
+    /// bug"; "the server exited" is a statement about the machine. The SDK sees
+    /// one `u64`, so if the kernel gives one word the SDK has one answer — and
+    /// the same rule the storage layer already obeys applies here: a dead peer
+    /// must not be indistinguishable from a handle that was never there.
+    Gone = 10,
+}
+
+impl SyscallError {
+    pub const fn to_u64(self) -> u64 {
+        u64::MAX - self as u64
+    }
+
+    pub fn from_u64(val: u64) -> Option<Self> {
+        if val < u64::MAX - 255 {
+            return None;
+        }
+        let code = u64::MAX - val;
+        match code {
+            0 => Some(Self::Unknown),
+            1 => Some(Self::NotFound),
+            2 => Some(Self::PermissionDenied),
+            3 => Some(Self::AlreadyExists),
+            4 => Some(Self::InvalidArgument),
+            5 => Some(Self::BadAddress),
+            6 => Some(Self::WouldBlock),
+            7 => Some(Self::ResourceExhausted),
+            8 => Some(Self::NotSupported),
+            9 => Some(Self::Io),
+            10 => Some(Self::Gone),
+            _ => Some(Self::Unknown),
+        }
+    }
+}
+
+impl core::fmt::Display for SyscallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("unknown error"),
+            Self::NotFound => f.write_str("not found"),
+            Self::PermissionDenied => f.write_str("permission denied"),
+            Self::AlreadyExists => f.write_str("already exists"),
+            Self::InvalidArgument => f.write_str("invalid argument"),
+            Self::BadAddress => f.write_str("bad address"),
+            Self::WouldBlock => f.write_str("would block"),
+            Self::ResourceExhausted => f.write_str("resource exhausted"),
+            Self::NotSupported => f.write_str("not supported"),
+            Self::Io => f.write_str("the device did not complete the transfer"),
+            Self::Gone => f.write_str("the other end is gone"),
+        }
+    }
+}
+
+/// Check a raw syscall return value: if it's an error, return Err; otherwise Ok(val).
+fn check(val: u64) -> Result<u64, SyscallError> {
+    match SyscallError::from_u64(val) {
+        Some(e) => Err(e),
+        None => Ok(val),
+    }
+}
+
+/// Check a raw syscall return for success (0) or error.
+fn check_unit(val: u64) -> Result<(), SyscallError> {
+    check(val).map(|_| ())
+}
+
+/// File type for file handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u64)]
+pub enum FileType {
+    #[default]
+    Unknown = 0,
+    File = 1,
+    Pipe = 2,
+    Keyboard = 3,
+    Serial = 4,
+    Framebuffer = 5,
+    Tty = 6,
+    Mouse = 7,
+    Socket = 8,
+    // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
+    // A claim on a PCI function reports `Unknown`: what it is, is the driver's
+    // to know, and this kernel does not know it.
+    /// A shared-memory region; `size` is its length. A program's stdout and
+    /// stderr are one when they are its log ring (`toyos::log`).
+    SharedMemory = 10,
+    /// A directory, which only [`stat`] answers.
+    Directory = 11,
+    /// A symbolic link, which only [`stat`] answers; `size` is its target's length.
+    Symlink = 12,
+}
+
+impl FileType {
+    pub fn from_u64(val: u64) -> Option<Self> {
+        match val {
+            0 => Some(Self::Unknown),
+            1 => Some(Self::File),
+            2 => Some(Self::Pipe),
+            3 => Some(Self::Keyboard),
+            4 => Some(Self::Serial),
+            5 => Some(Self::Framebuffer),
+            6 => Some(Self::Tty),
+            7 => Some(Self::Mouse),
+            8 => Some(Self::Socket),
+            10 => Some(Self::SharedMemory),
+            11 => Some(Self::Directory),
+            12 => Some(Self::Symlink),
+            _ => None,
+        }
+    }
+}
+
+/// Seek position for [`seek`].
+pub enum SeekFrom {
+    Start(u64),
+    Current(i64),
+    End(i64),
+}
+
+/// Flags for [`open`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenFlags(pub u64);
+
+impl OpenFlags {
+    pub const READ: Self = Self(1);
+    pub const WRITE: Self = Self(2);
+    pub const CREATE: Self = Self(4);
+    pub const TRUNCATE: Self = Self(8);
+    pub const APPEND: Self = Self(16);
+
+    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+}
+
+impl core::ops::BitOr for OpenFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
+impl core::ops::BitOrAssign for OpenFlags {
+    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+}
+
+/// Memory protection flags for [`mmap`].
+///
+/// The kernel maps 2 MiB pages and has no `mprotect`, so what a mapping is
+/// created with is what it stays. `NONE` reserves the address range and maps
+/// nothing at all: any access to it faults, which is the guard page a libc
+/// asks for. Anything without `WRITE` is mapped read-only, and a store to it
+/// is a protection violation that kills the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmapProt(pub u64);
+
+impl MmapProt {
+    pub const NONE: Self = Self(0);
+    pub const READ: Self = Self(1);
+    pub const WRITE: Self = Self(2);
+
+    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+}
+
+impl core::ops::BitOr for MmapProt {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
+/// Memory mapping flags for [`mmap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmapFlags(pub u64);
+
+impl MmapFlags {
+    pub const ANONYMOUS: Self = Self(1);
+    pub const PRIVATE: Self = Self(2);
+    pub const FIXED: Self = Self(4);
+
+    pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
+}
+
+impl core::ops::BitOr for MmapFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
+/// Result of [`pipe`]: the read and write ends.
+#[derive(Debug, Clone, Copy)]
+pub struct PipeEnds {
+    pub read: RawHandle,
+    pub write: RawHandle,
+}
+
+/// Wall-clock time from RTC.
+#[derive(Debug, Clone, Copy)]
+pub struct RealTime {
+    pub hours: u8,
+    pub minutes: u8,
+    pub seconds: u8,
+}
+
+/// File metadata returned by [`fstat`] and [`stat`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stat {
+    pub file_type: FileType,
+    pub size: u64,
+    /// When the file was last written: nanoseconds since the Unix epoch, UTC,
+    /// off the wall clock at the write, to the resolution its mount keeps —
+    /// the nanosecond on `/tmp` and DATA, two seconds at the flush on FAT. 0 is
+    /// undated: written on a machine whose RTC never answered, or shipped in
+    /// ROOT's reproducible image.
+    pub mtime: u64,
+    /// The volume the file is on; 0 for an object that is no file of any
+    /// volume. A kernel mount's is below 2^63, a file server's has bit 63 set
+    /// (`toyos::fs::SERVED_VOLUME`), so the two minters cannot collide.
+    pub volume: u64,
+    /// The file on that volume: the same through every path and handle that
+    /// reaches it, for as long as it exists and its volume stays mounted, and
+    /// no other file's while both exist. 0 exactly when `volume` is.
+    pub node: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn syscall(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let ret: u64;
+    // SAFETY: a plain register-to-register `syscall` instruction — every
+    // input is a `u64` value, not a pointer this function dereferences, so
+    // its soundness rests on the callee (the kernel's syscall dispatcher)
+    // and on every typed wrapper in this file passing `num`/`a1..a4` that
+    // match the syscall it names, not on anything checkable here.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rdi") num,
+            in("rsi") a1,
+            in("rdx") a2,
+            in("r8") a3,
+            in("r9") a4,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+        );
+    }
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn syscall(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let ret: u64;
+    // SAFETY: see the x86_64 `syscall` above — same shape, `svc #0` in place
+    // of `syscall`, same reasoning.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") num,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
+            lateout("x0") ret,
+        );
+    }
+    ret
+}
+
+/// Encode an optional timeout for the kernel ABI.
+/// `None` = wait forever (u64::MAX), `Some(n)` = timeout after `n` nanoseconds.
+fn encode_timeout(timeout: Option<u64>) -> u64 {
+    timeout.unwrap_or(u64::MAX)
+}
+
+/// Write bytes to a handle. Returns number of bytes written; a pipe or
+/// connection whose other end has closed is [`SyscallError::Gone`].
+pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_WRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
+/// Read bytes from a handle. Returns number of bytes read.
+pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
+/// Exit the current thread only. Does not return.
+/// Use `exit()` to exit the entire process (all threads).
+pub fn thread_exit(code: i32) -> ! {
+    loop { syscall(SYS_THREAD_EXIT, code as u64, 0, 0, 0); }
+}
+
+/// Exit the entire process (all threads) with `code`. Does not return.
+pub fn exit(code: i32) -> ! {
+    loop { syscall(SYS_EXIT, code as u64, 0, 0, 0); }
+}
+
+/// Ask the kernel to do one of the things [`SYS_DEBUG`] does. The actions are
+/// the `DEBUG_*` constants below, not bare numbers.
+pub fn debug(action: u64) -> u64 {
+    syscall(SYS_DEBUG, action, 0, 0, 0)
+}
+
+/// [`debug`] for the actions that take an argument.
+pub fn debug_with(action: u64, arg: u64) -> u64 {
+    syscall(SYS_DEBUG, action, arg, 0, 0)
+}
+
+/// What [`SYS_DEBUG`] can be asked to do.
+///
+/// **One declaration, because a number that means something is a constant.** An
+/// action's *reason* stays at the kernel arm, where the code it runs is; its
+/// number lives here once, where both sides read it.
+///
+/// **Every action here needs a kernel built with `test-actuators`, and a kernel
+/// without it has no `SYS_DEBUG` at all** — the number falls to the dispatch's
+/// default and answers `InvalidArgument`, which is what an unassigned number
+/// answers. So a constant below is a number a shipping kernel does not have,
+/// and the caller of one is a test that has to be given the kernel that does.
+pub mod debug_action {
+    /// Panic the kernel. Kills the caller's machine, deliberately.
+    pub const PANIC: u64 = 0;
+    /// Read, in Ring 0, the address the argument names.
+    pub const NULL_READ: u64 = 1;
+    /// Hold a kernel lock across a scheduler entry.
+    pub const LOCK_ACROSS_SWITCH: u64 = 2;
+    /// Halt every CPU.
+    pub const FATAL_HALT: u64 = 3;
+    /// Provoke a real #DF, to exercise the IST1 stack.
+    pub const DOUBLE_FAULT: u64 = 4;
+    /// Heap allocations either side of `MAX_HEAP_ALLOC`.
+    pub const HEAP_AT_CEILING: u64 = 5;
+    pub const HEAP_OVER_CEILING: u64 = 6;
+    pub const HEAP_AT_CEILING_PAGE_ALIGNED: u64 = 7;
+    /// Read the guard page below this CPU's idle stack.
+    pub const IDLE_GUARD_READ: u64 = 9;
+    /// The kernel canary's address, and whether it still holds what the kernel
+    /// wrote.
+    pub const CANARY_ADDR: u64 = 10;
+    pub const CANARY_CHANGED: u64 = 11;
+    /// Hold each other CPU's acknowledgement back for `arg` nanoseconds in
+    /// turn, one at a time, and answer the smallest wait any of them cost the
+    /// initiator — `0` on a machine with no other CPU to hold back. The
+    /// arming is then left standing against every other CPU until
+    /// `TLB_ACK_DELAY_DISARM` or the end of a fresh two-second window,
+    /// whichever comes first.
+    pub const TLB_ACK_DELAY_ARM: u64 = 12;
+    pub const TLB_ACK_DELAY_DISARM: u64 = 13;
+    /// How many kernel objects of one kind are alive right now. The argument is
+    /// an [`OBJECT_KINDS`](super::OBJECT_KINDS) index.
+    ///
+    /// **Per kind and not a total**: an object of one kind that is never
+    /// released is invisible behind ordinary churn in another.
+    pub const CENSUS_KIND: u64 = 16;
+    /// Put a count this guest can reach in `MAX_SYSINFO_THREADS`'s place, for
+    /// the rest of the boot. `SYS_SYSINFO`'s real bound is a thread count no
+    /// guest can make, so only the number can move and moving it runs the
+    /// shipped count, comparison and refusal.
+    pub const LOWER_SYSINFO_BOUND: u64 = 19;
+    /// Put one of the caller's own **free** handle slots at the last generation
+    /// it can be issued at, and answer the `RawHandle` its next install will
+    /// carry. The argument is a slot number; a slot out of range, one that still
+    /// holds a handle, and one that has already retired all answer
+    /// `InvalidArgument`.
+    ///
+    /// A slot has 1,048,575 lifecycles, so what a table does at the end of them
+    /// is reachable for real only by a test spending two syscalls on each one.
+    /// This stages the last lifecycle and nothing else: the generation is the
+    /// shipped field, and the install and the close that follow are the shipped
+    /// paths making the shipped decision (`kernel::object::handle`).
+    pub const SLOT_TO_LAST_GENERATION: u64 = 20;
+    /// Emit one patterned kernel log record, `logstorm t=0 i=<arg> …`, whose
+    /// text the reader regenerates from its two numbers.
+    pub const LOG_PATTERNED: u64 = 21;
+    /// Mark the caller's next spawn that reaches its commit: the kernel kills
+    /// the process it is placed under after the commit and before the child
+    /// lands. That window is the loader's own, so no caller can order a kill
+    /// inside it; the kill and the landing that follow are the shipped paths.
+    pub const KILL_PLACE_AS_SPAWN_LANDS: u64 = 22;
+    /// Mark the caller's next spawn whose child lands: its thread waits there,
+    /// before the spawn answers, until the child's exit is published. A child
+    /// ending inside the spawn that started it is a race no caller can order;
+    /// the landing and the exit either side of the wait are the shipped paths.
+    pub const HOLD_SPAWN_UNTIL_CHILD_ENDS: u64 = 23;
+    /// The CPU the argument names answers no [`SYS_COUNTERS`](super::SYS_COUNTERS)
+    /// round until [`COUNTERS_HEAR`]: a reader finds it as it finds a CPU
+    /// with its interrupts closed past the round's bound. A CPU out of range
+    /// answers `InvalidArgument`.
+    pub const COUNTERS_DEAF: u64 = 24;
+    /// Every CPU answers rounds again.
+    pub const COUNTERS_HEAR: u64 = 25;
+    /// Write the argument's count of [`Kind::Mark`](crate::trace::Kind::Mark)
+    /// records into the calling CPU's diary ring back to back, the `i`th with
+    /// `data` `i`, and answer the counter ticks the writes took with
+    /// interrupts closed. A count past [`TRACE_FLOOD_MOST`] answers
+    /// `InvalidArgument`.
+    pub const TRACE_FLOOD: u64 = 14;
+    /// The most records one [`TRACE_FLOOD`] writes.
+    pub const TRACE_FLOOD_MOST: u64 = 1 << 24;
+    /// Arm this CPU's timer to fire within 100 µs and wait inside the syscall
+    /// for the kernel's own fire. Answers [`RING0_FIRE_REARMED`] once it fired
+    /// and re-armed a quantum, [`RING0_FIRE_NEVER`] if none came within
+    /// 100 ms, and [`RING0_FIRE_OTHER_SPAN`] if it re-armed something else.
+    pub const RING0_TIMER_IN_SYSCALL: u64 = 26;
+    /// Play the firmware's side of the Global Lock (ACPI 6.5 §5.2.10.1) on the
+    /// FACS's lock word: [`FIRMWARE_OWNS`] takes it, as an SMI handler would,
+    /// [`FIRMWARE_ASKS`] sets the pending bit under an owner, as a handler that
+    /// found it taken would, and [`FIRMWARE_FREES`] clears both. Answers the
+    /// word as it was, or `NotSupported` on a machine with no FACS. No guest's
+    /// firmware touches the lock on demand; the take that finds it owned and
+    /// the release that owes a signal are the shipped paths.
+    pub const ACPI_FIRMWARE_LOCK: u64 = 27;
+    pub const FIRMWARE_FREES: u64 = 0;
+    pub const FIRMWARE_OWNS: u64 = 1;
+    pub const FIRMWARE_ASKS: u64 = 2;
+    pub const RING0_FIRE_REARMED: u64 = 0;
+    pub const RING0_FIRE_NEVER: u64 = 1;
+    pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
+}
+
+/// Every kind of kernel object, in the order the kernel's own `kobject!`
+/// declares them — so an index into this is the index
+/// [`debug_action::CENSUS_KIND`] takes.
+///
+/// In the ABI rather than in the kernel alone, because a census nobody can read
+/// per kind is a total. The kernel checks this list against its own declaration
+/// order when the action is called, so a row added to `kobject!` without a row
+/// here is a named refusal rather than an index that quietly names its
+/// neighbour.
+pub const OBJECT_KINDS: &[&str] = &[
+    "PipeRead",
+    "PipeWrite",
+    "Connection",
+    "Device",
+    "Acceptor",
+    "Inbox",
+    "SharedMem",
+    "Connector",
+    "Namespace",
+    "File",
+    "Console",
+    "SysCap",
+    "Process",
+];
+
+/// Create a pipe. Returns the read and write ends.
+///
+/// **Fallible, because `sys_pipe` is.** It answers `ResourceExhausted` on three
+/// paths — no pipe pages, and either handle install hitting the table cap — and
+/// a wrapper that cannot say so hands the caller a pair of handles that are an
+/// error word cut in half.
+///
+/// A packed pair can never be mistaken for an error word: no handle is ever
+/// `0xFFFF_FFFF`, because no slot is ever issued at `MAX_GENERATION` — one
+/// retires rather than stepping to it — and `SyscallError` occupies only the
+/// top 256 values.
+pub fn pipe() -> Result<PipeEnds, SyscallError> {
+    let raw = check(syscall(SYS_PIPE, 0, 0, 0, 0))?;
+    Ok(PipeEnds {
+        read: RawHandle((raw >> 32) as u32),
+        write: RawHandle((raw & 0xFFFF_FFFF) as u32),
+    })
+}
+
+/// Read the inherited environment variables into `buf`.
+/// Returns the number of bytes written, or the required size if buf is too small.
+pub fn get_env(buf: &mut [u8]) -> usize {
+    syscall(SYS_GET_ENV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
+}
+
+/// Spawn a new process.
+///
+/// Answers a `Process` handle carrying `WAIT|MANAGE|READ|DUP|TRANSFER`. A
+/// caller that wants nothing to do with the child closes it; a caller that
+/// wants to hand it on transfers it. There is no pid-addressed way back to a
+/// process, so this handle is the whole of what a spawn confers. Its slot is
+/// taken before an endowment moves: a caller whose table has none is refused
+/// `ResourceExhausted` with its table as it was, whatever its endowments
+/// would have freed.
+///
+/// # Safety
+/// The raw pointer fields in `SpawnArgs` must point to valid memory.
+pub unsafe fn spawn(args: &SpawnArgs) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SPAWN, args as *const SpawnArgs as u64, 0, 0, 0))
+        .map(|h| RawHandle(h as u32))
+}
+
+/// Read this process's endowment table into `buf`: an `[EndowEntry]` count and
+/// entries followed by the label blob. Returns the bytes written, or — when
+/// `buf` is empty — the bytes the answer needs.
+///
+/// The one place a name is resolved to a handle at all: there is no global
+/// registry, so a process learns what it holds only from its own table.
+pub fn endowments(buf: &mut [u8]) -> usize {
+    syscall(SYS_ENDOWMENTS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
+}
+
+/// Block until the process `proc` names has exited, and take its exit code.
+pub fn process_wait(proc: RawHandle) -> Result<i32, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(|code| code as i32)
+}
+
+/// The exit code if the process has already exited, `Err(WouldBlock)` if it has
+/// not.
+///
+/// [`WNOHANG`] rather than a syscall of its own: this is the same question with
+/// the wait taken out, and a caller that polls is asking about the same object.
+pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(|code| code as i32)
+}
+
+/// Kill the process `proc` names. Answers `Ok` for one already dead: the
+/// caller asked for it to be gone and it is.
+pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_PROCESS_KILL, proc.0 as u64, 0, 0, 0))
+}
+
+/// Copy records into `out`, oldest first and merged by `at_ns`, advancing
+/// `cursor`. Answers how many records were written, and `0` when there is
+/// nothing new.
+///
+/// **It never blocks.** A caller with nothing to read arms on a readiness
+/// source and parks; a syscall that waited would be a second blocking mechanism
+/// in a kernel that is converging on one.
+///
+/// `out` is whole [`crate::log::LogRecord`]s at a fixed stride, so the caller
+/// indexes by shift and the kernel does no length arithmetic. A buffer that
+/// cannot hold one record, or that cannot hold what the machine's shard count
+/// requires, is `InvalidArgument` — untrusted input that cannot be satisfied is
+/// refused, never truncated to fit. So is a `cursor` ahead of a shard
+/// ([`crate::log::LogCursor::next`]).
+pub fn log_read(
+    syscap: RawHandle,
+    cursor: &mut crate::log::LogCursor,
+    out: &mut [crate::log::LogRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_LOG_READ,
+        syscap.0 as u64,
+        cursor as *mut crate::log::LogCursor as u64,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Mark this handle as the controlling TTY for this process.
+pub fn mark_tty(handle: RawHandle) {
+    syscall(SYS_MARK_TTY, handle.0 as u64, 0, 0, 0);
+}
+
+/// Threads one process holds, its main thread and every exited one not yet
+/// joined among them; [`thread_spawn`] past it is `ResourceExhausted`.
+pub const MAX_THREADS: usize = 4096;
+
+/// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
+/// `stack_base` is the bottom of the user stack (for stack info queries). An
+/// `entry` outside the user half is `InvalidArgument`.
+///
+/// # Safety
+/// `entry` must be a valid function pointer and `stack`/`stack_base` must
+/// describe a valid, correctly-sized stack region.
+pub unsafe fn thread_spawn(entry: u64, stack: u64, arg: u64, stack_base: u64) -> u64 {
+    syscall(SYS_THREAD_SPAWN, entry, stack, arg, stack_base)
+}
+
+/// Wait for thread `tid` to exit.
+pub fn thread_join(tid: u64) -> u64 {
+    syscall(SYS_THREAD_JOIN, tid, 0, 0, 0)
+}
+
+/// Set the name of the calling thread (up to 28 bytes, truncated).
+pub fn set_thread_name(name: &[u8]) {
+    syscall(SYS_SET_THREAD_NAME, name.as_ptr() as u64, name.len() as u64, 0, 0);
+}
+
+/// The most links `SYS_OPEN` follows from the name it is given: the link a
+/// chain reaches past them is refused `InvalidArgument`.
+pub const MAX_LINKS: u32 = 10;
+
+/// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
+/// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
+pub const MAX_PATH: usize = 4096;
+
+/// Open a file.
+pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Close a handle.
+pub fn close(handle: RawHandle) {
+    syscall(SYS_CLOSE, handle.0 as u64, 0, 0, 0);
+}
+
+/// Seek within a file handle. Returns new offset.
+pub fn seek(handle: RawHandle, pos: SeekFrom) -> Result<u64, SyscallError> {
+    let (offset, whence) = match pos {
+        SeekFrom::Start(n) => (n as i64, 0u64),
+        SeekFrom::Current(n) => (n, 1u64),
+        SeekFrom::End(n) => (n, 2u64),
+    };
+    check(syscall(SYS_SEEK, handle.0 as u64, offset as u64, whence, 0))
+}
+
+/// Get file metadata for a file handle.
+pub fn fstat(handle: RawHandle) -> Result<Stat, SyscallError> {
+    let mut stat = Stat::default();
+    check_unit(syscall(SYS_FSTAT, handle.0 as u64, &mut stat as *mut Stat as u64, 0, 0))?;
+    Ok(stat)
+}
+
+/// What the kernel's `path` names: a file, a directory, or, unless `follow`
+/// follows it, a symlink, each with the identity [`fstat`] answers a file.
+pub fn stat(path: &[u8], follow: bool) -> Result<Stat, SyscallError> {
+    let mut stat = Stat::default();
+    let out = &mut stat as *mut Stat as u64;
+    check_unit(syscall(SYS_STAT, path.as_ptr() as u64, path.len() as u64, out, follow as u64))?;
+    Ok(stat)
+}
+
+/// Flush a file handle to disk, or a partition claim's writes out of its
+/// device's cache ([`crate::part`]): `Ok` is the device's own word that every
+/// write the claim returned from before this call is durable.
+pub fn fsync(handle: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_FSYNC, handle.0 as u64, 0, 0, 0))
+}
+
+/// Read directory entries. Returns the number of bytes the listing *needs*.
+///
+/// `Ok(n)` with `n <= buf.len()` means the entries are in `buf`; `n >
+/// buf.len()` means nothing was written and `n` is the size to retry with.
+/// The kernel never writes a partial listing — see `sys_readdir`.
+///
+/// The error is returned rather than folded into `0`: "the directory is too
+/// large to list" and "the directory is empty" are different answers and a
+/// caller has to be able to tell them apart.
+pub fn readdir(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
+    let n = syscall(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
+    match SyscallError::from_u64(n) {
+        Some(e) => Err(e),
+        None => Ok(n as usize),
+    }
+}
+
+/// The kind byte a [`readdir`] entry opens with: a file.
+pub const DIRENT_FILE: u8 = 1;
+/// The kind byte a [`readdir`] entry opens with: a directory.
+pub const DIRENT_DIR: u8 = 2;
+
+/// One entry of a [`readdir`] listing: its kind byte, its name, a NUL, and its
+/// node as eight bytes, little-endian: the [`Stat::node`] [`stat`] answers it.
+pub struct Dirent<'a> {
+    pub is_dir: bool,
+    pub name: &'a [u8],
+    pub node: u64,
+}
+
+/// The entry at `*at` in a whole [`readdir`] listing, with `*at` moved past
+/// it; `None` once `*at` is at its end. A listing of any other shape is a
+/// kernel that broke this ABI, and panics.
+pub fn dirent<'a>(listing: &'a [u8], at: &mut usize) -> Option<Dirent<'a>> {
+    let rest = listing.get(*at..).filter(|r| !r.is_empty())?;
+    let is_dir = match rest[0] {
+        DIRENT_FILE => false,
+        DIRENT_DIR => true,
+        kind => panic!("SYS_READDIR answered an entry of kind {kind}"),
+    };
+    let len = rest[1..].iter().position(|&b| b == 0).expect("SYS_READDIR answered a name with no NUL");
+    let node = rest
+        .get(len + 2..len + 10)
+        .expect("SYS_READDIR answered an entry with no node");
+    *at += len + 10;
+    Some(Dirent { is_dir, name: &rest[1..1 + len], node: u64::from_le_bytes(node.try_into().unwrap()) })
+}
+
+/// Delete a file or directory.
+pub fn delete(path: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DELETE, path.as_ptr() as u64, path.len() as u64, 0, 0))
+}
+
+/// Change current working directory.
+pub fn chdir(path: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_CHDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
+}
+
+/// Get the current working directory.
+///
+/// Returns the length the path *needs*, not the number of bytes written:
+/// `n <= buf.len()` means the path is in `buf[..n]`, and `n > buf.len()` means
+/// nothing was written and `n` is the size to allocate before retrying. Pass an
+/// empty buffer to ask the length alone. `0` is the error return.
+///
+/// The required length rather than a truncated count, because a count cannot
+/// distinguish an exact fit from a silent truncation — and a caller with a fixed
+/// buffer would take a valid-looking path to the wrong directory.
+pub fn getcwd(buf: &mut [u8]) -> usize {
+    let n = syscall(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
+}
+
+/// Fill `buf` with cryptographically secure random bytes.
+///
+/// `Err` is a source that had nothing to give, and `buf` then holds no
+/// randomness a caller may use: every caller decides what that failure is,
+/// because a value drawn from a refused source is a predictable one.
+pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
+}
+
+/// `None` is a machine that never said what time it is — an RTC that is absent,
+/// wedged, or answering with something that is not a date. It is `None` for the
+/// whole of such a boot rather than intermittently, because the kernel reads
+/// the clock once.
+pub fn clock_realtime() -> Option<RealTime> {
+    let raw = check(syscall(SYS_CLOCK_REALTIME, 0, 0, 0, 0)).ok()?;
+    Some(RealTime {
+        hours: ((raw >> 16) & 0xFF) as u8,
+        minutes: ((raw >> 8) & 0xFF) as u8,
+        seconds: (raw & 0xFF) as u8,
+    })
+}
+
+/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
+///
+/// `None` on the same machine and for the same reason as [`clock_realtime`].
+/// Cheap: the kernel serves it from an anchor it took at boot plus the
+/// monotonic clock, so this is a syscall and not a device access.
+pub fn clock_epoch() -> Option<u64> {
+    check(syscall(SYS_CLOCK_EPOCH, 0, 0, 0, 0)).ok()
+}
+
+/// Two `u32`s in one argument word.
+///
+/// The four device calls below take the claim handle that authorizes them, and
+/// `SYS_GPU_PRESENT`'s rectangle then does not fit in what is left. A pair is a
+/// wire encoding decoded at the kernel boundary and carried no further.
+const fn pair(hi: u32, lo: u32) -> u64 {
+    ((hi as u64) << 32) | lo as u64
+}
+
+/// Transfer a region of the framebuffer to the GPU and flush it, presenting the
+/// framebuffer claim. Pass (0, 0, 0, 0) to flush the full screen.
+///
+/// Fallible: the kernel refuses a handle that is not a live framebuffer claim.
+pub fn gpu_present(claim: RawHandle, x: u32, y: u32, w: u32, h: u32) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_GPU_PRESENT, claim.0 as u64, pair(x, y), pair(w, h), 0))
+}
+
+/// Upload the cursor image from backing and enable hardware cursor.
+pub fn gpu_set_cursor(claim: RawHandle, hot_x: u32, hot_y: u32) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_GPU_SET_CURSOR, claim.0 as u64, hot_x as u64, hot_y as u64, 0))
+}
+
+/// Move the hardware cursor to screen position (x, y).
+pub fn gpu_move_cursor(claim: RawHandle, x: u32, y: u32) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_GPU_MOVE_CURSOR, claim.0 as u64, x as u64, y as u64, 0))
+}
+
+/// Request a GPU resolution change. On success, writes the new
+/// [`FramebufferInfo`](crate::FramebufferInfo) to `info_out`.
+///
+/// # Safety
+/// `info_out` must point to a writable buffer of at least
+/// `size_of::<FramebufferInfo>()` bytes.
+pub unsafe fn gpu_set_resolution(
+    claim: RawHandle,
+    width: u32,
+    height: u32,
+    info_out: *mut u8,
+) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_GPU_SET_RESOLUTION,
+        claim.0 as u64,
+        pair(width, height),
+        info_out as u64,
+        0,
+    ))
+}
+
+/// Power the machine off, presenting a `SysCap` that carries
+/// [`Rights::POWER`](crate::handle::Rights::POWER).
+///
+/// **The only way this comes back is refused.** A shutdown that happened has no
+/// caller left to answer, so the return type is the refusal alone; the loop is
+/// what says so, asking again rather than reporting a success that did not happen.
+/// [`SyscallError::NotSupported`] is a machine whose `acpi` claim no holder
+/// has supplied the power-off's sleep type on ([`acpi_s5`]): nothing was
+/// stopped.
+pub fn shutdown(syscap: RawHandle) -> SyscallError {
+    loop {
+        if let Err(e) = check_unit(syscall(SYS_SHUTDOWN, syscap.0 as u64, 0, 0, 0)) {
+            return e;
+        }
+    }
+}
+
+/// [`shutdown`]'s sibling on the same right, refused the same way and looping for the same reason.
+pub fn reboot(syscap: RawHandle) -> SyscallError {
+    loop {
+        if let Err(e) = check_unit(syscall(SYS_REBOOT, syscap.0 as u64, 0, 0, 0)) {
+            return e;
+        }
+    }
+}
+
+/// The device classes, their wire numbers, and the name a `system.toml`
+/// `devices` entry and a `dev:` endowment label spell each one with.
+///
+/// **One row per class, so the four cannot disagree.** The build system checks
+/// a config against this table, the supervisor mints from it, and a claimant finds
+/// its own claim by it; a second spelling anywhere is a class a config can name
+/// and no program can find. The wire number is here too, because a class whose
+/// number and name came from different lists is the same defect one level down.
+macro_rules! device_classes {
+    ($($(#[$meta:meta])* $variant:ident = $num:literal => $name:literal),+ $(,)?) => {
+        #[repr(u64)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum DeviceType {
+            $($(#[$meta])* $variant = $num),+
+        }
+
+        impl DeviceType {
+            /// What a manifest calls this class.
+            pub fn class_name(self) -> &'static str {
+                match self { $(Self::$variant => $name),+ }
+            }
+
+            /// The class a config named, or `None` — a typo in a `devices`
+            /// list, refused where the image is built.
+            pub fn from_class_name(name: &str) -> Option<Self> {
+                match name { $($name => Some(Self::$variant),)+ _ => None }
+            }
+
+            /// The wire number a syscall carries, decoded once.
+            pub fn from_raw(raw: u64) -> Option<Self> {
+                match raw { $($num => Some(Self::$variant),)+ _ => None }
+            }
+
+            /// Every class, for a caller that must consider all of them.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+device_classes! {
+    Keyboard = 0 => "keyboard",
+    Mouse = 1 => "mouse",
+    Framebuffer = 2 => "framebuffer",
+    /// An Intel HDA controller the kernel has brought up but drives no policy
+    /// on.
+    HdaAudio = 5 => "hda-audio",
+    /// One PCI function, driven by whoever holds the claim: the kernel binds no
+    /// driver to it, keeps config space, puts it in an address space of its own
+    /// before it lets it master the bus, and programs its interrupt vector.
+    ///
+    /// The one class whose name is not the whole of what a config writes —
+    /// `pci:<vendor>:<device>` names which function, and [`DeviceRequest`] is
+    /// the one parser of that spelling.
+    PciFunction = 7 => "pci",
+    /// One GPT partition, named by its unique partition GUID: the holder reads
+    /// and writes its blocks and no other's ([`crate::part`]).
+    ///
+    /// Like `pci`, a class whose name is not the whole of the entry —
+    /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
+    Partition = 8 => "part",
+    /// One legacy ISA function, driven by whoever holds the claim: the process
+    /// that first reads the claim may `in` and `out` the function's ports for
+    /// the rest of its life and no other process may, and the function's lines
+    /// are answered as interrupt records on the claim ([`IsaId`]).
+    ///
+    /// Like `pci`, a class whose name is not the whole of the entry —
+    /// `isa:<port>,…:<irq>,…` — and [`DeviceRequest`] is the one parser.
+    Isa = 9 => "isa",
+    /// The machine's ACPI fixed hardware, served by whoever holds the claim
+    /// ([`crate::acpi`]): the kernel puts the machine in ACPI mode at the
+    /// mint, and the ports the firmware's tables name are the holder's.
+    Acpi = 10 => "acpi",
+}
+
+/// A PCI function named by what identifies the *card*, not the slot firmware
+/// put it in: the same card is `00:03.0` on one machine and `00:1f.6` on
+/// another, so a name that was a position would hand a program whatever was
+/// there. A machine holding two of one card has an ambiguous name, which
+/// [`device_claim`] refuses rather than resolving.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PciId {
+    pub vendor: u16,
+    pub device: u16,
+}
+
+impl PciId {
+    /// `"<vendor>:<device>"`, four lowercase hex digits each; one spelling per
+    /// function, so that comparing the strings compares the functions.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (vendor, device) = text.split_once(':')?;
+        Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
+    }
+
+    /// The selector word [`device_claim`] carries.
+    pub const fn wire(self) -> u64 {
+        ((self.vendor as u64) << 16) | self.device as u64
+    }
+
+    /// The selector word decoded; `None` for anything with bits above 32.
+    pub const fn from_wire(raw: u64) -> Option<Self> {
+        if raw > u32::MAX as u64 {
+            return None;
+        }
+        Some(Self { vendor: (raw >> 16) as u16, device: raw as u16 })
+    }
+}
+
+/// Exactly four lowercase hex digits and nothing else.
+///
+/// One spelling per function, because every reader of a `devices` entry
+/// compares the string: `1af4:41` and `1af4:0041`, or `1af4:1041` and
+/// `1AF4:1041`, would otherwise be two names for one card.
+fn hex16(text: &str) -> Option<u16> {
+    if text.len() != 4 {
+        return None;
+    }
+    let mut value = 0u16;
+    for byte in text.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | digit as u16;
+    }
+    Some(value)
+}
+
+/// A legacy ISA function named by everything it decodes and raises:
+/// `isa:0060,0064:1,12` is the i8042's two ports and its keyboard and aux
+/// lines.
+///
+/// **The name is the grant**, so it is exact: the kernel opens these ports and
+/// routes these lines, and a set that is not one function it can hand out
+/// whole is refused rather than trimmed to one it can. One spelling per set —
+/// ports as four lowercase hex digits, lines in decimal with no leading zero,
+/// each list strictly ascending — because every reader compares the string.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IsaId {
+    /// Ascending and nonzero, then zeros: port 0 is the DMA controller's and
+    /// never a function a process drives, which is what lets 0 mean no port.
+    ports: [u16; IsaId::MAX_PORTS],
+    /// One bit per ISA line.
+    irqs: u16,
+}
+
+impl IsaId {
+    pub const MAX_PORTS: usize = 4;
+    /// Bounded so the longest name fits [`DeviceRequest::MAX_NAME`].
+    pub const MAX_IRQS: usize = 4;
+    /// The ISA bus has sixteen lines.
+    const LINES: u8 = 16;
+
+    /// `None` for a set with no port or no line, a port 0, a line past 15, a
+    /// list longer than its bound, or a list not strictly ascending.
+    pub fn new(ports: &[u16], irqs: &[u8]) -> Option<Self> {
+        if ports.is_empty() || ports.len() > Self::MAX_PORTS || ports[0] == 0 || !ascending(ports) {
+            return None;
+        }
+        if irqs.is_empty() || irqs.len() > Self::MAX_IRQS || !ascending(irqs) {
+            return None;
+        }
+        let mut set = Self { ports: [0; Self::MAX_PORTS], irqs: 0 };
+        set.ports[..ports.len()].copy_from_slice(ports);
+        for &irq in irqs {
+            if irq >= Self::LINES {
+                return None;
+            }
+            set.irqs |= 1 << irq;
+        }
+        Some(set)
+    }
+
+    pub fn ports(&self) -> impl Iterator<Item = u16> + '_ {
+        self.ports.iter().copied().take_while(|&port| port != 0)
+    }
+
+    pub fn irqs(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..Self::LINES).filter(|line| self.irqs & (1 << line) != 0)
+    }
+
+    /// `"<port>,…:<irq>,…"`, the tail of an `isa:` entry.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (ports, irqs) = text.split_once(':')?;
+        let mut port_list = [0u16; Self::MAX_PORTS];
+        let mut n_ports = 0;
+        for port in ports.split(',') {
+            *port_list.get_mut(n_ports)? = hex16(port)?;
+            n_ports += 1;
+        }
+        let mut irq_list = [0u8; Self::MAX_IRQS];
+        let mut n_irqs = 0;
+        for irq in irqs.split(',') {
+            *irq_list.get_mut(n_irqs)? = decimal_line(irq)?;
+            n_irqs += 1;
+        }
+        Self::new(&port_list[..n_ports], &irq_list[..n_irqs])
+    }
+
+    /// The two selector words [`device_claim`] carries: the ports in 16-bit
+    /// lanes from the low end, and the lines as a mask.
+    pub fn wire(self) -> [u64; 2] {
+        let ports = self
+            .ports
+            .iter()
+            .enumerate()
+            .fold(0u64, |word, (lane, &port)| word | (port as u64) << (16 * lane));
+        [ports, self.irqs as u64]
+    }
+
+    /// The selector words decoded, refusing whatever [`Self::new`] refuses.
+    pub fn from_wire([ports, irqs]: [u64; 2]) -> Option<Self> {
+        let lanes: [u16; Self::MAX_PORTS] =
+            core::array::from_fn(|lane| (ports >> (16 * lane)) as u16);
+        let named = lanes.iter().take_while(|&&port| port != 0).count();
+        if lanes[named..].iter().any(|&port| port != 0) || irqs > u16::MAX as u64 {
+            return None;
+        }
+        let mut lines = [0u8; Self::LINES as usize];
+        let mut n = 0;
+        for line in 0..Self::LINES {
+            if irqs & (1 << line) != 0 {
+                lines[n] = line;
+                n += 1;
+            }
+        }
+        if n > Self::MAX_IRQS {
+            return None;
+        }
+        Self::new(&lanes[..named], &lines[..n])
+    }
+}
+
+fn ascending<T: PartialOrd>(list: &[T]) -> bool {
+    list.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+/// One ISA line in decimal, `0` to `15`, with no sign and no leading zero.
+fn decimal_line(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 2 || (bytes.len() == 2 && bytes[0] == b'0') {
+        return None;
+    }
+    let mut value = 0u8;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + (byte - b'0');
+    }
+    (value < IsaId::LINES).then_some(value)
+}
+
+/// What one `devices` entry asks for: a class, and for
+/// [`DeviceType::PciFunction`] which function, for a partition which
+/// partition, and for an ISA function which ports and lines.
+///
+/// One parser, because four places read the same spelling — the build system's
+/// gate, `/system/bin/supervisor`'s mint, the kernel's claim and the claimant's own
+/// lookup — and a second would be a name a config can write and a program
+/// cannot find.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceRequest {
+    Class(DeviceType),
+    Pci(PciId),
+    Partition(crate::part::PartGuid),
+    Isa(IsaId),
+}
+
+impl DeviceRequest {
+    /// The spelling that carries a function id after the class name.
+    pub const PCI_PREFIX: &'static str = "pci:";
+
+    /// The spelling that carries a unique partition GUID.
+    pub const PART_PREFIX: &'static str = "part:";
+
+    /// The spelling that carries an ISA function's ports and lines.
+    pub const ISA_PREFIX: &'static str = "isa:";
+
+    /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
+    /// `part:` and a GUID, rounded up to a multiple of eight.
+    pub const MAX_NAME: usize = 48;
+
+    pub fn parse(name: &str) -> Option<Self> {
+        if let Some(id) = name.strip_prefix(Self::PCI_PREFIX) {
+            return PciId::parse(id).map(Self::Pci);
+        }
+        if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
+            return crate::part::PartGuid::parse(guid).map(Self::Partition);
+        }
+        if let Some(set) = name.strip_prefix(Self::ISA_PREFIX) {
+            return IsaId::parse(set).map(Self::Isa);
+        }
+        let class = DeviceType::from_class_name(name)?;
+        match class {
+            // A bare `pci`, `part` or `isa` names no device, and would
+            // otherwise leave the selector at zero.
+            DeviceType::PciFunction | DeviceType::Partition | DeviceType::Isa => None,
+            _ => Some(Self::Class(class)),
+        }
+    }
+
+    pub const fn class(self) -> DeviceType {
+        match self {
+            Self::Class(class) => class,
+            Self::Pci(_) => DeviceType::PciFunction,
+            Self::Partition(_) => DeviceType::Partition,
+            Self::Isa(_) => DeviceType::Isa,
+        }
+    }
+
+    /// The two selector words [`device_claim`] carries; a class that names at
+    /// most one device on the machine carries none.
+    pub fn selector(self) -> [u64; 2] {
+        match self {
+            Self::Class(_) => [0, 0],
+            Self::Pci(id) => [id.wire(), 0],
+            Self::Partition(guid) => guid.wire(),
+            Self::Isa(set) => set.wire(),
+        }
+    }
+
+    /// This request's `devices` spelling written into `buf`, which
+    /// [`Self::MAX_NAME`] bounds. The name is also the tail of the `dev:` label
+    /// the claim arrives under, and it is composed here so the two cannot drift.
+    pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> &str {
+        use crate::part::GUID_TEXT_LEN;
+        let id = match self {
+            Self::Class(class) => {
+                let name = class.class_name();
+                buf[..name.len()].copy_from_slice(name.as_bytes());
+                return core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII");
+            }
+            Self::Partition(guid) => {
+                let at = Self::PART_PREFIX.len();
+                buf[..at].copy_from_slice(Self::PART_PREFIX.as_bytes());
+                let mut text = [0u8; GUID_TEXT_LEN];
+                guid.write_text(&mut text);
+                buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
+                return core::str::from_utf8(&buf[..at + GUID_TEXT_LEN])
+                    .expect("a prefix and a GUID's text are ASCII");
+            }
+            Self::Isa(set) => {
+                let mut at = Self::ISA_PREFIX.len();
+                buf[..at].copy_from_slice(Self::ISA_PREFIX.as_bytes());
+                for (i, port) in set.ports().enumerate() {
+                    if i > 0 {
+                        buf[at] = b',';
+                        at += 1;
+                    }
+                    for shift in [12, 8, 4, 0] {
+                        buf[at] = HEX[((port >> shift) & 0xF) as usize];
+                        at += 1;
+                    }
+                }
+                buf[at] = b':';
+                at += 1;
+                for (i, line) in set.irqs().enumerate() {
+                    if i > 0 {
+                        buf[at] = b',';
+                        at += 1;
+                    }
+                    if line >= 10 {
+                        buf[at] = b'1';
+                        at += 1;
+                    }
+                    buf[at] = b'0' + line % 10;
+                    at += 1;
+                }
+                return core::str::from_utf8(&buf[..at]).expect("hex, digits and separators are ASCII");
+            }
+            Self::Pci(id) => id,
+        };
+        let prefix = Self::PCI_PREFIX.as_bytes();
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut at = prefix.len();
+        for value in [id.vendor, id.device] {
+            if at != prefix.len() {
+                buf[at] = b':';
+                at += 1;
+            }
+            for shift in [12, 8, 4, 0] {
+                buf[at] = HEX[((value >> shift) & 0xF) as usize];
+                at += 1;
+            }
+        }
+        core::str::from_utf8(&buf[..at]).expect("hex digits and colons are ASCII")
+    }
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Mint a device claim for `request`, presenting a `SysCap` handle that carries
+/// [`Rights::DEVICE`]. `NotFound` for a class no driver registered, or a PCI
+/// function or partition this machine does not have — the supervisor endows what exists
+/// and logs what it did not. `AlreadyExists` names one already claimed, and
+/// `PermissionDenied` one the kernel drives itself — for a partition, one it
+/// has mounted. A request matching more than one function or partition answers
+/// `InvalidArgument`, because an ambiguous name is refused rather than resolved
+/// to the first match; so does a nonzero selector word the class does not read.
+///
+/// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
+/// which is what makes endowing one to a child a provable hand-off.
+///
+/// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
+/// [`Rights::DUP`]: crate::handle::Rights::DUP
+pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHandle, SyscallError> {
+    let [lo, hi] = request.selector();
+    check(syscall(SYS_DEVICE_CLAIM, syscap.0 as u64, request.class() as u64, lo, hi))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// Read `buf.len()` blocks of the partition `claim` holds, from its block
+/// `first` — the partition's own number, from 0.
+///
+/// `InvalidArgument` for a run that does not end inside the partition or is
+/// longer than [`crate::part::MAX_BLOCKS_PER_CALL`], `Io` for a device that
+/// did not do it, and `Gone` for a claim whose last handle has been let go.
+pub fn partition_read(
+    claim: RawHandle,
+    first: u64,
+    buf: &mut [crate::part::Block],
+) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_PARTITION_READ,
+        claim.0 as u64,
+        first,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    ))
+}
+
+/// Write `buf.len()` blocks to the partition `claim` holds, from its block
+/// `first`, refused as [`partition_read`] is.
+///
+/// `Ok` is the device having taken the blocks, and **not** their being
+/// durable: that is [`fsync`] on the claim, which a writer that must survive a
+/// power cut calls before it tells anyone the write happened.
+pub fn partition_write(
+    claim: RawHandle,
+    first: u64,
+    buf: &[crate::part::Block],
+) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_PARTITION_WRITE,
+        claim.0 as u64,
+        first,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+    ))
+}
+
+/// Enter the real-time scheduling band, presenting a `SysCap` handle that
+/// carries [`Rights::RT`]. The privilege a device claim was never enough to
+/// confer.
+///
+/// [`Rights::RT`]: crate::handle::Rights::RT
+pub fn rt_enter(syscap: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_RT_ENTER, syscap.0 as u64, 0, 0, 0))
+}
+
+/// How wide a register access is.
+///
+/// Not a convenience: a device's registers are 8, 16 and 32 bits and a 32-bit
+/// write to a 16-bit register is a write to its neighbour — HDA's `SDnCTL` and
+/// `SDnSTS` are adjacent bytes of one dword, and the second is the kernel's
+/// alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u64)]
+pub enum RegWidth {
+    U8 = 1,
+    U16 = 2,
+    U32 = 4,
+}
+
+impl RegWidth {
+    pub fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::U8),
+            2 => Some(Self::U16),
+            4 => Some(Self::U32),
+            _ => None,
+        }
+    }
+
+    pub const fn bytes(self) -> u64 {
+        self as u64
+    }
+
+    /// The widest value this access can carry. A caller handing a wider one is
+    /// naming bits the register does not have.
+    pub const fn max_value(self) -> u32 {
+        match self {
+            Self::U8 => u8::MAX as u32,
+            Self::U16 => u16::MAX as u32,
+            Self::U32 => u32::MAX,
+        }
+    }
+}
+
+/// Read one register of the device `handle` claims.
+///
+/// `offset` is a byte offset inside that device's register window. The kernel
+/// checks it against the device's read allow-list and refuses anything else by
+/// name; there is no way to name an address here and no way to reach a
+/// register the list does not carry.
+pub fn device_reg_read(
+    handle: RawHandle,
+    offset: u32,
+    width: RegWidth,
+) -> Result<u32, SyscallError> {
+    check(syscall(SYS_DEVICE_REG_READ, handle.0 as u64, offset as u64, width.bytes(), 0))
+        .map(|v| v as u32)
+}
+
+/// Write one register of the device `handle` claims.
+///
+/// The allow-list is positive and per-device: an entry is on it because its
+/// value is not an address and indexes nothing the kernel allocated. A missing
+/// entry costs a driver that cannot bring its stream up and says so, which is
+/// the failure mode a refusal list does not have.
+pub fn device_reg_write(
+    handle: RawHandle,
+    offset: u32,
+    width: RegWidth,
+    value: u32,
+) -> Result<(), SyscallError> {
+    check(syscall(
+        SYS_DEVICE_REG_WRITE,
+        handle.0 as u64,
+        offset as u64,
+        width.bytes(),
+        value as u64,
+    ))
+    .map(|_| ())
+}
+
+// Ports and namespaces
+
+/// Both ends of a fresh port.
+///
+/// Two types and not one object with a direction right: "accept the
+/// connections of a service you were only given access to" is a state that
+/// cannot be written, the same way a pipe's two ends are two types.
+pub struct Port {
+    pub acceptor: RawHandle,
+    pub connector: RawHandle,
+}
+
+/// Make a port. Needs no right and grants none — a port with no clients is not
+/// authority.
+pub fn port_create() -> Result<Port, SyscallError> {
+    let raw = syscall(SYS_PORT_CREATE, 0, 0, 0, 0);
+    if let Some(e) = SyscallError::from_u64(raw) {
+        return Err(e);
+    }
+    Ok(Port {
+        acceptor: RawHandle((raw >> 32) as u32),
+        connector: RawHandle((raw & 0xFFFF_FFFF) as u32),
+    })
+}
+
+/// One `(name, connector)` pair `SYS_NAMESPACE_BUILD` adds.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NamespaceEntry {
+    pub off: u32,
+    pub len: u32,
+    pub connector: RawHandle,
+    /// Named, so nothing leaks kernel stack into it.
+    pub _pad: u32,
+}
+
+/// One name carried over from the base namespace.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NameRef {
+    pub off: u32,
+    pub len: u32,
+}
+
+crate::user_safe! {
+    /// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
+    ///
+    /// A namespace is immutable once built: there is no insert, no remove and no
+    /// replace, so a narrower one is a *new* object built from this one and a
+    /// handle to a namespace is a handle to a fixed set.
+    #[derive(Clone, Copy)]
+    pub struct NamespaceBuild {
+        /// [`HANDLE_INVALID`] for an empty base.
+        ///
+        /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
+        pub base: RawHandle,
+        /// [`NAMESPACE_KEEP_ALL`], and nothing else.
+        pub flags: u32,
+        /// `[NameRef]` — the names to carry over from `base`.
+        pub keep_ptr: u64,
+        pub keep_n: u64,
+        /// `[NamespaceEntry]` — new bindings.
+        pub add_ptr: u64,
+        pub add_n: u64,
+        /// The blob every `off`/`len` above indexes into.
+        pub names_ptr: u64,
+        pub names_len: u64,
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<NamespaceEntry>() == 16);
+const _: () = assert!(core::mem::size_of::<NameRef>() == 8);
+
+/// Carry over every name `base` holds — no syscall enumerates a namespace, so
+/// no `keep` list can spell it. `keep_n` must be `0` beside it, and a name it
+/// carries that `add` also binds is `AlreadyExists`.
+pub const NAMESPACE_KEEP_ALL: u32 = 1 << 0;
+/// Every bit [`NamespaceBuild::flags`] defines. A caller that sets another is
+/// refused `InvalidArgument`, never served the request it did not make.
+pub const NAMESPACE_FLAGS_KNOWN: u32 = NAMESPACE_KEEP_ALL;
+
+/// Names one namespace may bind. Policy on the primitive; a caller asking for
+/// one more is refused by name and never truncated.
+pub const MAX_NAMESPACE_ENTRIES: usize = 64;
+/// Bytes in one service name.
+pub const MAX_SERVICE_NAME: usize = 64;
+
+/// # Safety
+/// Every pointer in `args` must name `args`'s stated length of readable memory.
+pub unsafe fn namespace_build(args: &NamespaceBuild) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_NAMESPACE_BUILD, args as *const _ as u64, 0, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// Open a connection to `name` in the namespace `ns` holds.
+///
+/// `NotFound` means the name is not in this namespace — a fact about this
+/// process. [`SyscallError::Gone`] means the server that held the acceptor has
+/// exited. There is no third answer, and in particular there is no "not yet":
+/// the port exists before either process runs.
+pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallError> {
+    check(syscall(
+        SYS_NAMESPACE_OPEN,
+        ns.0 as u64,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        0,
+    ))
+    .map(|v| RawHandle(v as u32))
+}
+
+/// Bytes one badge may carry. Policy on the primitive: a badge is kernel
+/// memory no process is charged for, so the bound is what its one reader, the
+/// supervisor's launch authority, needs.
+pub const MAX_BADGE: usize = 64;
+
+/// Mint a connector to the port `acceptor` accepts on, whose every connection
+/// is stamped with `badge`: 1 to [`MAX_BADGE`] bytes, anything else
+/// `InvalidArgument`.
+///
+/// **The kernel vouches for what was granted, never for who connects**: the
+/// connector is duplicated, moved and put in a namespace like any other, and
+/// every copy stamps the same bytes.
+pub fn port_mint(acceptor: RawHandle, badge: &[u8]) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PORT_MINT, acceptor.0 as u64, badge.as_ptr() as u64, badge.len() as u64, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// The badge `connection`, accepted from `acceptor`'s port, was stamped with,
+/// written to `out`; answers its length.
+///
+/// `NotFound` is a connection made through an unbadged connector,
+/// `PermissionDenied` one accepted from another port, and `InvalidArgument` a
+/// handle that is no port's accepted end.
+pub fn port_badge(
+    acceptor: RawHandle,
+    connection: RawHandle,
+    out: &mut [u8; MAX_BADGE],
+) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PORT_BADGE, acceptor.0 as u64, connection.0 as u64, out.as_mut_ptr() as u64, 0))
+        .map(|v| v as usize)
+}
+
+/// Accept a queued connection. Blocks until there is one.
+///
+/// **It answers with the connection and nothing else.** Who connected is not
+/// the kernel's to assert: a server that wants to name its client reads it out
+/// of the protocol's first frame, where it is already the client's own claim
+/// about itself and already distrusted.
+pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Join a pipe read end and a pipe write end into one duplex connection.
+///
+/// The two ends stay open and this takes references of its own, so the caller
+/// closes what it handed in. The result carries no handle-transfer queue: a
+/// connection made this way has no peer holding the other half, so
+/// [`handle_send`] on one answers [`SyscallError::Gone`].
+pub fn connection_join(rx: RawHandle, tx: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_CONNECTION_JOIN, rx.0 as u64, tx.0 as u64, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// Handles one [`handle_send`] may carry.
+///
+/// Policy on the primitive: a caller asking for one more is refused by name
+/// and never truncated to fit.
+pub const MAX_TRANSFER_HANDLES: usize = 8;
+
+/// Batches one direction of a connection may hold unreceived.
+pub const MAX_QUEUED_BATCHES: usize = 16;
+
+/// Move `handles` to the peer of `conn`.
+///
+/// Each handle must carry [`Rights::TRANSFER`], and so must `conn`. The move is
+/// all-or-nothing: a refusal leaves every handle where it was.
+///
+/// **Send the handles before the frame that announces them.** They travel in a
+/// queue of their own rather than interleaved with the connection's bytes, so a
+/// peer that has read the frame is guaranteed to find them only in that order.
+///
+/// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
+pub fn handle_send(conn: RawHandle, handles: &[RawHandle]) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_HANDLE_SEND,
+        conn.0 as u64,
+        handles.as_ptr() as u64,
+        handles.len() as u64,
+        0,
+    ))
+}
+
+/// Take the oldest batch the peer sent, into `out`. Answers how many it wrote.
+///
+/// Never blocks: zero means nothing is queued right now. A batch larger than
+/// `out` is `InvalidArgument` and stays queued — `out` should be
+/// [`MAX_TRANSFER_HANDLES`] long.
+pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_HANDLE_RECV,
+        conn.0 as u64,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Make a shared-memory region and answer a handle to it.
+///
+/// Fallible: a size the kernel cannot express in whole 2 MiB pages is
+/// `InvalidArgument` and memory it does not have is `ResourceExhausted`. A
+/// daemon reaches both through a client's request, so neither may be an
+/// assertion here.
+pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_SHM_CREATE, size as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// Map the region `shm` names into this process. Needs [`Rights::MAP`].
+///
+/// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
+/// when the region's last handle was closed under the call: nothing is mapped.
+///
+/// [`Rights::MAP`]: crate::handle::Rights::MAP
+///
+/// # Safety
+/// Caller must manage the returned pointer.
+pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
+        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
+}
+
+/// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process
+/// roster as `buf` has room for. Answers the number of bytes written.
+///
+/// **`syscap` is consulted only for the roster.** A `buf` shorter than
+/// `SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE` cannot hold an entry, so nothing
+/// is demanded and [`HANDLE_INVALID`] is what a header-only caller passes —
+/// which is what [`crate::handle::Rights::ROSTER`] leaves ambient. A longer
+/// `buf` is a request for the roster, and the ordinary handle rules apply to
+/// `syscap`: a capability without the bit is refused with a word, and a handle
+/// the caller does not hold ends it.
+///
+/// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
+pub fn sysinfo(syscap: RawHandle, buf: &mut [u8]) -> usize {
+    let n = syscall(
+        SYS_SYSINFO,
+        syscap.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    );
+    if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
+}
+
+/// Every [`crate::inventory`] record the machine has, into `buf`; answers how
+/// many were written.
+///
+/// **Whole or not at all.** A `buf` with room for fewer records than there
+/// are is refused with [`SyscallError::ResourceExhausted`] and nothing is
+/// written; an empty `buf` is the question "how many", answered without the
+/// records. Between the two calls the machine can change, so a caller sizes
+/// from the answer and asks again when refused.
+///
+/// `syscap` must carry [`crate::handle::Rights::INVENTORY`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn device_inventory(
+    syscap: RawHandle,
+    buf: &mut [crate::inventory::RawRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_DEVICE_INVENTORY,
+        syscap.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    ))
+    .map(|n| n as usize)
+}
+
+/// One [`crate::counters`] record per online CPU, into `buf`; answers how many
+/// were written. An empty `buf` asks how many CPUs there are and asks no CPU
+/// anything; one with room for fewer is refused with
+/// [`SyscallError::ResourceExhausted`], and one declared longer than the
+/// kernel's most CPUs with [`SyscallError::InvalidArgument`].
+///
+/// `syscap` must carry [`crate::handle::Rights::COUNTERS`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn counters(
+    syscap: RawHandle,
+    buf: &mut [crate::counters::RawRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(SYS_COUNTERS, syscap.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0))
+        .map(|n| n as usize)
+}
+
+/// Copy the diary's records `cursor` has not seen into `out`, oldest first and
+/// merged across CPUs by stamp, advancing `cursor`. Answers how many were
+/// written, and `0` when there is nothing new; it never blocks.
+///
+/// `out` is whole [`crate::trace::TraceRecord`]s. A buffer that cannot hold one
+/// record per CPU, and a `cursor` ahead of a CPU's ring, are
+/// [`SyscallError::InvalidArgument`]. `syscap` must carry
+/// [`crate::handle::Rights::TRACE`]: a capability without it is refused with
+/// a word, and a handle the caller does not hold ends it.
+pub fn trace_read(
+    syscap: RawHandle,
+    cursor: &mut crate::trace::TraceCursor,
+    out: &mut [crate::trace::TraceRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_TRACE_READ,
+        syscap.0 as u64,
+        cursor as *mut crate::trace::TraceCursor as u64,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+    ))
+    .map(|n| n as usize)
+}
+
+/// Have the kernel make one access on the `acpi` claim `claim`, or refuse it
+/// by name. `Ok` is what a read answered, and what a write wrote.
+///
+/// The claim must have been read once, which binds it to the caller: one that
+/// was not is refused [`SyscallError::PermissionDenied`], and an access that
+/// names no space or width [`SyscallError::InvalidArgument`].
+pub fn acpi_access(
+    claim: RawHandle,
+    access: &mut crate::acpi::Access,
+) -> Result<Result<u64, crate::acpi::Refused>, SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::ACCESS, access as *mut crate::acpi::Access as u64, 0))?;
+    Ok(match access.refused {
+        0 => Ok(access.value),
+        word => Err(crate::acpi::Refused::from_raw(word).expect("the kernel answers a refusal this ABI names")),
+    })
+}
+
+/// Try the firmware's Global Lock for the `acpi` claim's holder: `Ok(true)`
+/// where it is now held, `Ok(false)` where the firmware owns it and will raise
+/// `GBL_STS` on letting go. A lock the claim already holds is refused
+/// [`SyscallError::AlreadyExists`], and every take
+/// [`SyscallError::NotSupported`] on a machine whose FADT names a FACS the
+/// kernel exchanges no lock word in; one that names no FACS has no lock, and
+/// a take is answered taken.
+pub fn acpi_lock_take(claim: RawHandle) -> Result<bool, SyscallError> {
+    check(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_TAKE, 0, 0)).map(|word| word == crate::acpi::op::TAKEN)
+}
+
+/// Give the Global Lock back. One the claim does not hold is refused
+/// [`SyscallError::InvalidArgument`].
+pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::LOCK_RELEASE, 0, 0))
+}
+
+/// Supply the `SLP_TYPa` of the machine's `\_S5` for the kernel's power-off
+/// ([`crate::acpi::op::S5`]). One wider than the register's three bits is
+/// refused [`SyscallError::InvalidArgument`] and a second under one claim
+/// [`SyscallError::AlreadyExists`], and nothing is kept of either.
+pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
+}
+
+/// Sleep for the given number of nanoseconds.
+pub fn nanosleep(nanos: u64) {
+    syscall(SYS_NANOSLEEP, nanos, 0, 0, 0);
+}
+
+/// What [`SYS_HANDLE_DUP`]'s rights word carries when the caller wants the
+/// source's own set.
+///
+/// A wire encoding of `Option<Rights>`, decoded at the syscall boundary and
+/// never carried inward: `Rights::ALL` is twelve bits, so this value is not a
+/// rights set and never becomes one. The two wrappers below are the only
+/// writers, so no caller ever spells it.
+pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
+
+/// A second handle to the same object, carrying what the first carries.
+pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_HANDLE_DUP, handle.0 as u64, RIGHTS_UNCHANGED, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// A second handle to the same object, carrying **less**.
+///
+/// `PermissionDenied` for a set the source does not itself hold: rights only
+/// shrink, and asking to widen is a bug in the asker rather than a request to
+/// be quietly cut down to size. This is how the supervisor hands a program an `RT`-only
+/// `SysCap` while keeping the full one.
+pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_HANDLE_DUP, handle.0 as u64, rights.bits() as u64, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// A second handle to the same object, at a **slot** the caller picks.
+///
+/// A slot and not a handle: a handle carries a generation the caller has no
+/// business choosing, and the one this hands back is the slot's own — so the
+/// answer is not the number that went in. Whatever was at that slot is closed
+/// first.
+/// The rights are the source's: narrowing at a slot is [`dup_narrowed`]
+/// followed by this, and a third argument no caller writes would be a right
+/// nobody can request.
+pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_HANDLE_DUP_AT, handle.0 as u64, slot as u64, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// Get the current process ID.
+pub fn getpid() -> Pid {
+    Pid(syscall(SYS_GETPID, 0, 0, 0, 0) as u32)
+}
+
+/// Rename a file.
+pub fn rename(old: &[u8], new: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_RENAME, old.as_ptr() as u64, old.len() as u64, new.as_ptr() as u64, new.len() as u64))
+}
+
+/// Create a directory.
+pub fn mkdir(path: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
+}
+
+/// Remove a directory.
+pub fn rmdir(path: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0))
+}
+
+/// Create a symbolic link at `link` pointing to `target`.
+pub fn symlink(target: &[u8], link: &[u8]) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_SYMLINK, target.as_ptr() as u64, target.len() as u64, link.as_ptr() as u64, link.len() as u64))
+}
+
+/// Read the target of a symbolic link. Returns the number of bytes written to `buf`.
+pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
+}
+
+/// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
+/// name it does not hold past it is `ResourceExhausted`.
+pub const MAX_LIBRARIES: usize = 1024;
+
+/// Load a shared library (.so) into the current process.
+/// Runs .init_array constructors after loading.
+pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
+    let mut init_info: [u64; 2] = [0; 2];
+    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, 0))?;
+    // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
+    let init_array_ptr = init_info[0];
+    let init_count = init_info[1];
+    if init_array_ptr != 0 && init_count > 0 {
+        // SAFETY: `init_array_ptr`/`init_count` are not userland's to make
+        // up — `SYS_DLOPEN` wrote them, naming the `.init_array` table it
+        // just built from the loaded ELF's own section headers, so they name
+        // `init_count` valid `usize`-sized, `usize`-aligned entries.
+        let entries = unsafe { core::slice::from_raw_parts(init_array_ptr as *const usize, init_count as usize) };
+        for &entry in entries {
+            if entry != 0 {
+                // SAFETY: a non-zero `.init_array` entry is the address of a
+                // constructor the loader placed there — by the ELF `DT_INIT_ARRAY`
+                // contract every entry is a valid `extern "C" fn()`, never data.
+                let f: extern "C" fn() = unsafe { core::mem::transmute(entry) };
+                f();
+            }
+        }
+    }
+    Ok(handle)
+}
+
+/// Look up a symbol in a loaded shared library. Returns the address.
+///
+/// # Safety
+/// The returned address must only be transmuted to the correct function signature.
+pub unsafe fn dl_sym(handle: u64, name: &[u8]) -> Result<u64, SyscallError> {
+    check(syscall(SYS_DLSYM, handle, name.as_ptr() as u64, name.len() as u64, 0))
+}
+
+/// Close a loaded shared library handle.
+pub fn dl_close(handle: u64) -> u64 {
+    syscall(SYS_DLCLOSE, handle, 0, 0, 0)
+}
+
+/// Block if `*addr == expected`. Returns 0 on wake, 1 on timeout.
+/// `None` = wait forever, `Some(nanos)` = timeout.
+///
+/// # Safety
+/// `addr` must point to a valid, aligned `u32`.
+pub unsafe fn futex_wait(addr: *const u32, expected: u32, timeout: Option<u64>) -> u64 {
+    syscall(SYS_FUTEX_WAIT, addr as u64, expected as u64, encode_timeout(timeout), 0)
+}
+
+/// Wake up to `count` threads waiting on `addr`. Returns number of threads woken.
+///
+/// # Safety
+/// `addr` must point to a valid, aligned `u32`.
+pub unsafe fn futex_wake(addr: *const u32, count: u32) -> u64 {
+    syscall(SYS_FUTEX_WAKE, addr as u64, count as u64, 0, 0)
+}
+
+/// Truncate a file handle to `size` bytes.
+pub fn ftruncate(handle: RawHandle, size: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_FTRUNCATE, handle.0 as u64, size, 0, 0))
+}
+
+/// Get the current thread's stack base address and size.
+pub fn stack_info() -> Option<(u64, u64)> {
+    let mut base: u64 = 0;
+    let mut size: u64 = 0;
+    let r = syscall(SYS_STACK_INFO, &mut base as *mut u64 as u64, &mut size as *mut u64 as u64, 0, 0);
+    if SyscallError::from_u64(r).is_some() { None } else { Some((base, size)) }
+}
+
+/// Return the number of available CPUs.
+pub fn cpu_count() -> u32 {
+    syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
+}
+
+/// Regions one address space holds — every mapping, ELF segment, stack, TLS
+/// block and library image; a placement past it is `ResourceExhausted`.
+pub const MAX_REGIONS: usize = 32_768;
+
+/// Map anonymous memory. Returns pointer on success, null on failure.
+///
+/// If `addr` is null, the kernel chooses the address — and so it does for
+/// `MmapFlags::FIXED` with a null `addr`, which asks for a placement and names
+/// none. With `FIXED` and a non-null `addr` the mapping is placed at exactly
+/// that address, which must be 2 MiB-aligned and must name a range lying whole
+/// inside the region the kernel's own placement search allocates from.
+///
+/// **A placed mapping answers for the range it names**, because it takes the
+/// question `find_gap` answers by construction for every other mapping:
+///
+/// - Over free space it maps, and the call answers `addr`.
+/// - Over exactly one whole mapping this process's own `mmap` made — the same
+///   address and the same `size`, to the byte — it replaces it, and the address
+///   keeps its meaning while changing what it names. The old range leaves the
+///   address space and the process's mapping list before the new one enters
+///   either, its pages go back to the allocator, and the shootdown a sibling
+///   thread's stale translation owes is done before the call returns.
+/// - Anything else is refused with `InvalidArgument` having created, replaced
+///   or unmapped nothing: part of a region, several regions, a region that
+///   merely starts at `addr`, and any whole range this process's `mmap` did
+///   not make — an ELF segment, a library image, a stack, a shared window.
+///
+/// POSIX unmaps whatever is in the way and says nothing. This address crossed
+/// the trust boundary like any other syscall argument, and a kernel that
+/// silently took a range it was not offered would be taking it from the loader.
+///
+/// # Safety
+/// Caller is responsible for managing the returned memory region.
+pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags) -> *mut u8 {
+    let result = syscall(SYS_MMAP, addr as u64, size as u64, prot.0, flags.0);
+    if SyscallError::from_u64(result).is_some() { core::ptr::null_mut() } else {
+        core::ptr::with_exposed_provenance_mut(result as usize)
+    }
+}
+
+/// Unmap the whole mapping `mmap` returned at `addr`.
+///
+/// `size` is the `size` that `mmap` was passed, to the byte. No mapping
+/// starting at `addr` is `NotFound`; any other `size` — a prefix, more than
+/// the mapping, zero, a length that only rounds to the same pages — is
+/// `InvalidArgument` and unmaps nothing. A mapping has no part to give back.
+///
+/// # Safety
+/// Nothing reaches the mapping at `addr` after this answers `Ok`.
+pub unsafe fn munmap(addr: *mut u8, size: usize) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_MUNMAP, addr as u64, size as u64, 0, 0))
+}
+
+/// Non-blocking read. Returns bytes read, or `Err(WouldBlock)` if no data available.
+pub fn read_nonblock(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_READ_NONBLOCK, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
+/// Non-blocking write. Returns bytes written, `Err(WouldBlock)` if no space is
+/// available, or [`SyscallError::Gone`] if the other end has closed.
+pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
+/// Map a pipe's shared-memory ring buffer into this process's address space.
+/// Returns a pointer to the `RingHeader` at the start of the mapped region.
+///
+/// The mapping is writable, and the header is a publication: writing it tells
+/// the kernel nothing. Reads and writes still go through `SYS_READ`/`SYS_WRITE`.
+pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_PIPE_MAP, handle.0 as u64, 0, 0, 0)).map(|v| v as *mut u8)
+}
+
+/// Map one memory BAR of a claimed PCI function, as an object `SYS_SHM_MAP`
+/// maps read/write and uncacheable.
+///
+/// `InvalidArgument` for an index that names no memory BAR, and for the BAR
+/// holding this function's MSI-X table or PBA: the vector in that table is the
+/// kernel's, and a process that could write it could aim the device's interrupt
+/// at any address the LAPIC decodes.
+///
+/// Every call answers an object of its own over the same window, so a BAR
+/// whose handle was closed can be asked for again.
+///
+/// A window alone drives nothing: the function masters the bus from its first
+/// [`device_dma_alloc`] and not before.
+pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// A DMA buffer for a claimed PCI function: memory in this process's address
+/// space and in that function's own at the unit, and in no other's.
+///
+/// An address the caller invents instead of the one this answers is one the
+/// function's domain does not map, and the unit refuses the access. `bytes` is
+/// rounded up to whole 2 MiB pages.
+///
+/// **The function issues no bus transaction at all until this call returns
+/// once.** A claim is handed over with Bus Master Enable clear, because what
+/// comes back from a dead holder still holds device addresses of a domain that
+/// no longer maps them; the first grant is what starts it, after that grant is
+/// in the function's domain. An MSI-X message is a memory write, so a driver
+/// that maps its BAR and waits on its claim without ever calling this is never
+/// interrupted.
+pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
+    let mut grant =
+        DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
+    check_unit(syscall(
+        SYS_DEVICE_DMA_ALLOC,
+        claim.0 as u64,
+        bytes,
+        &mut grant as *mut DmaGrant as u64,
+        0,
+    ))?;
+    Ok(grant)
+}
+
+/// Put the region `shm` names into the address space of the function `claim`
+/// holds, and answer where the function reaches it: the region's whole length,
+/// read and write, and nothing on either side of it.
+///
+/// For a driver serving a client out of the client's own memory — the client
+/// sends the region, and the device moves data straight into it. The region
+/// stays alive for as long as it is mapped, whoever still holds a handle, and
+/// comes back out at [`device_dma_unmap`] or when the claim ends.
+///
+/// `InvalidArgument` for a region that is not ordinary memory this kernel
+/// allocated — a BAR window, firmware's framebuffer — and for one already
+/// mapped for this claim; `ResourceExhausted` past the claim's grant bound,
+/// which this shares with [`device_dma_alloc`], or with no room of the
+/// region's length left where the claim's lent regions go. Like a grant, the
+/// first mapping is what starts the function mastering the bus.
+pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
+    let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
+    check_unit(syscall(
+        SYS_DEVICE_DMA_MAP,
+        claim.0 as u64,
+        shm.0 as u64,
+        &mut mapping as *mut DmaMapping as u64,
+        0,
+    ))?;
+    Ok(mapping)
+}
+
+/// Take back a region [`device_dma_map`] put at `device_addr`. From the moment
+/// this returns the function reaches none of it: an access it still makes
+/// there is refused at the unit and recorded against the claim.
+///
+/// `NotFound` for an address no [`device_dma_map`] of this claim answered —
+/// a [`device_dma_alloc`] grant is the claim's for its whole life and is not
+/// taken back here.
+pub fn device_dma_unmap(claim: RawHandle, device_addr: u64) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_UNMAP, claim.0 as u64, device_addr, 0, 0))
+}
+
+/// Allocate a TLS block for a dlopen'd module on the current thread.
+///
+/// The block's *virtual* address, which is what the kernel writes into the DTV.
+/// `InvalidArgument` for a `module_id` of 0 or one outside the process's module
+/// list, `ResourceExhausted` past `DTV_INITIAL_CAPACITY` or when the mapping
+/// fails — and every user address is far below where `SyscallError` encodes, so
+/// no block is ever read as one.
+pub fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
+    check(syscall(SYS_TLS_ALLOC_BLOCK, module_id, 0, 0, 0))
+}
+
+crate::user_safe! {
+    /// An inbox and where its page of rings is mapped.
+    ///
+    /// **The inbox owns its page and the kernel maps it at setup**, so the mapping
+    /// has no lifetime of its own: it ends when the last handle to the inbox closes.
+    #[derive(Clone, Copy)]
+    pub struct InboxSetup {
+        pub handle: RawHandle,
+        pub _pad: u32,
+        pub vaddr: u64,
+    }
+}
+
+/// Create an [`inbox`](crate::inbox) with the given queue depth (a power of
+/// two, at most 256), and map its rings.
+///
+/// # Safety
+/// Caller must manage the returned pointer; it stops being mapped when the
+/// last handle to the inbox closes.
+pub unsafe fn inbox_setup(depth: u32) -> Result<(RawHandle, *mut u8), SyscallError> {
+    let mut out = InboxSetup { handle: HANDLE_INVALID, _pad: 0, vaddr: 0 };
+    check_unit(syscall(
+        SYS_INBOX_SETUP,
+        depth as u64,
+        &raw mut out as u64,
+        0,
+        0,
+    ))?;
+    Ok((out.handle, core::ptr::with_exposed_provenance_mut(out.vaddr as usize)))
+}
+
+/// Hand queued submissions to the kernel and/or wait for completions on an
+/// inbox.
+/// `to_submit`: number of submissions to consume from the submission ring.
+/// `min_complete`: block until at least this many completions are available
+/// (0 = don't block).
+/// `timeout_nanos`: 0 = non-blocking, u64::MAX = block forever, else timeout in nanos.
+/// Returns the number of completions available.
+pub fn inbox_submit(handle: RawHandle, to_submit: u32, min_complete: u32, timeout_nanos: u64) -> Result<u32, SyscallError> {
+    check(syscall(SYS_INBOX_SUBMIT, handle.0 as u64, to_submit as u64, min_complete as u64, timeout_nanos))
+        .map(|n| n as u32)
+}
+
+// Module info (for stack unwinding / backtraces)
+
+crate::user_safe! {
+    /// Information about a loaded module (executable or shared library).
+    ///
+    /// Buffer layout returned by `SYS_QUERY_MODULES`:
+    ///   `[ModuleInfo; count]` followed by packed path strings.
+    ///   Each `ModuleInfo::path_offset` is relative to the start of the buffer.
+    #[derive(Clone, Copy)]
+    pub struct ModuleInfo {
+        /// Load base address (bias) of this module.
+        pub base: u64,
+        /// End of the last mapped segment (base + vaddr_max).
+        pub text_end: u64,
+        /// Absolute virtual address of `.eh_frame_hdr` (0 if none).
+        pub eh_frame_hdr: u64,
+        /// Size of `.eh_frame_hdr` in bytes.
+        pub eh_frame_hdr_size: u64,
+        /// Absolute virtual address of the module's program header table: the
+        /// kernel loads no module whose table a `PT_LOAD` does not map.
+        pub phdr: u64,
+        /// Entries in that table, `e_phnum`: a `u64` so the record has no padding.
+        pub phnum: u64,
+        /// Byte offset of the module's path string within the buffer.
+        pub path_offset: u32,
+        /// Length of the path string in bytes.
+        pub path_len: u32,
+    }
+}
+
+/// Query all loaded modules (exe + dlopen'd libs) in the current process.
+///
+/// Returns the number of **bytes** the description needs, which is a count
+/// only of bytes: the records carry packed path strings, so a module count
+/// cannot size a retry. `n <= buf.len()` means the description is in the
+/// buffer; `n > buf.len()` means nothing was written and `n` is what to
+/// allocate. An empty buffer is therefore a size query.
+///
+/// The records occupy `buf[..records[0].path_offset]` — each module's path is
+/// written after the last record, so the first one's `path_offset` is where
+/// the array ends.
+pub fn query_modules(buf: &mut [u8]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_QUERY_MODULES, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0)).map(|n| n as usize)
+}
+
+/// Every record of one [`query_modules`] answer with its path, executable
+/// first: `answer` is the `n` bytes the call reported.
+///
+/// A record or path outside `answer` is a kernel that broke the layout above,
+/// and panics.
+pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
+    let size = core::mem::size_of::<ModuleInfo>();
+    let record = move |i: usize| {
+        let bytes = &answer[i * size..(i + 1) * size];
+        // SAFETY: `bytes` holds `size_of::<ModuleInfo>()` bytes, read without
+        // an alignment requirement, and every bit pattern of its integer
+        // fields is a `ModuleInfo`.
+        unsafe { (bytes.as_ptr() as *const ModuleInfo).read_unaligned() }
+    };
+    let count = if answer.is_empty() { 0 } else { record(0).path_offset as usize / size };
+    (0..count).map(move |i| {
+        let info = record(i);
+        let path = info.path_offset as usize;
+        (info, &answer[path..path + info.path_len as usize])
+    })
+}
+
+crate::user_safe! {
+    /// Scheduler info for the calling process.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SchedInfo {
+        /// Current vruntime of this process (nanoseconds of virtual CPU time).
+        pub vruntime: u64,
+        /// Global min_vruntime frontier (monotonic non-decreasing).
+        pub min_vruntime: u64,
+        /// Signed contract lag, frozen at the most recent runnable-state
+        /// transition. Positive = process was behind the frontier when it last
+        /// woke / blocked (entitled to catch up); negative = process ran ahead
+        /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
+        /// by construction. This is the scheduler's contract, not the live
+        /// `min_vruntime - vruntime` drift that accumulates while running on
+        /// multi-CPU systems — compute that at the call site if you need it.
+        pub lag: i64,
+    }
+}
+
+/// Get scheduler info for the calling process.
+pub fn sched_info() -> SchedInfo {
+    let mut info = SchedInfo { vruntime: 0, min_vruntime: 0, lag: 0 };
+    syscall(SYS_SCHED_INFO, &mut info as *mut SchedInfo as u64, 0, 0, 0);
+    info
+}
+
+crate::user_safe! {
+    /// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
+    #[derive(Clone, Copy, Default)]
+    pub struct ProcessStats {
+        pub wall_ns: u64,
+        pub cpu_ns: u64,
+        pub syscall_total: u64,
+        pub syscall_total_ns: u64,
+        pub fault_demand_count: u32,
+        pub fault_zero_count: u32,
+        pub fault_ns: u64,
+        pub io_read_ops: u32,
+        /// The process's own pid. Not authority — no syscall takes a pid — but it
+        /// is the name a diagnostic prints, and this is where a holder of a handle
+        /// reads it.
+        pub pid: u32,
+        pub io_read_bytes: u64,
+        pub blocked_io_ns: u64,
+        pub blocked_futex_ns: u64,
+        pub blocked_pipe_ns: u64,
+        pub blocked_ipc_ns: u64,
+        pub blocked_other_ns: u64,
+        pub runqueue_wait_ns: u64,
+        pub peak_memory: u64,
+        pub alloc_count: u64,
+    }
+}
+
+/// Read accounting for the process a `Process` handle names, alive or exited.
+///
+/// Repeatable: the numbers are the object's, so sampling one does not spend it.
+pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), SyscallError> {
+    check_unit(syscall(
+        SYS_PROCESS_STATS,
+        proc.0 as u64,
+        stats as *mut ProcessStats as u64,
+        core::mem::size_of::<ProcessStats>() as u64,
+        0,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The encoder is the wire, so the test decodes the wire.**
+    ///
+    /// Not `bytes(&info).len() == size_of::<ModuleInfo>()`, which a padded
+    /// struct passes: every field is read back out of the slice at the offset
+    /// `#[repr(C)]` puts it at.
+    #[test]
+    fn module_info_s_bytes_are_the_fields_and_nothing_between_them() {
+        let info = ModuleInfo {
+            base: 0x1122_3344_5566_7788,
+            text_end: 0x2233_4455_6677_8899,
+            eh_frame_hdr: 0x3344_5566_7788_99aa,
+            eh_frame_hdr_size: 0x44,
+            phdr: 0x5566_7788_99aa_bbcc,
+            phnum: 0x77,
+            path_offset: 0x55,
+            path_len: 0x66,
+        };
+        let b = crate::usersafe::bytes(&info);
+        assert_eq!(b.len(), 56);
+        assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), info.base);
+        assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), info.text_end);
+        assert_eq!(u64::from_ne_bytes(b[16..24].try_into().unwrap()), info.eh_frame_hdr);
+        assert_eq!(u64::from_ne_bytes(b[24..32].try_into().unwrap()), info.eh_frame_hdr_size);
+        assert_eq!(u64::from_ne_bytes(b[32..40].try_into().unwrap()), info.phdr);
+        assert_eq!(u64::from_ne_bytes(b[40..48].try_into().unwrap()), info.phnum);
+        assert_eq!(u32::from_ne_bytes(b[48..52].try_into().unwrap()), info.path_offset);
+        assert_eq!(u32::from_ne_bytes(b[52..56].try_into().unwrap()), info.path_len);
+    }
+
+    fn record(base: u64, path_offset: u32, path_len: u32) -> ModuleInfo {
+        ModuleInfo {
+            base,
+            text_end: base + 0x1000,
+            eh_frame_hdr: 0,
+            eh_frame_hdr_size: 0,
+            phdr: base + 0x40,
+            phnum: 3,
+            path_offset,
+            path_len,
+        }
+    }
+
+    /// An answer laid out as the kernel writes one — records, then the paths
+    /// packed in module order — decodes to those records and paths, in order,
+    /// at an offset whatever alignment the buffer has.
+    #[test]
+    fn modules_decodes_every_record_and_its_path() {
+        let size = core::mem::size_of::<ModuleInfo>() as u32;
+        let exe = record(0x100_0000_0000, 2 * size, 9);
+        let lib = record(0x200_0000_0000, 2 * size + 9, 13);
+        let mut answer = [0u8; 1 + 2 * 56 + 9 + 13];
+        let wire = &mut answer[1..];
+        wire[..56].copy_from_slice(crate::usersafe::bytes(&exe));
+        wire[56..112].copy_from_slice(crate::usersafe::bytes(&lib));
+        wire[112..121].copy_from_slice(b"/bin/prog");
+        wire[121..].copy_from_slice(b"/lib/libx.so\0");
+        let got: [(u64, u64, &[u8]); 2] = {
+            let mut it = modules(&answer[1..]).map(|(m, path)| (m.base, m.phdr, path));
+            let pair = [it.next().unwrap(), it.next().unwrap()];
+            assert!(it.next().is_none(), "two records, and no third read out of the paths");
+            pair
+        };
+        assert_eq!(got[0], (exe.base, exe.phdr, &b"/bin/prog"[..]));
+        assert_eq!(got[1], (lib.base, lib.phdr, &b"/lib/libx.so\0"[..]));
+        assert_eq!(modules(&[]).count(), 0);
+    }
+
+    /// A path the kernel says runs past its own answer is a broken layout,
+    /// not a shorter name.
+    #[test]
+    #[should_panic]
+    fn modules_refuses_a_path_past_the_answer() {
+        let size = core::mem::size_of::<ModuleInfo>() as u32;
+        let mut answer = [0u8; 56 + 4];
+        answer[..56].copy_from_slice(crate::usersafe::bytes(&record(0, size, 5)));
+        modules(&answer).for_each(drop);
+    }
+
+    /// Four lowercase hex digits each and nothing else, because two spellings
+    /// are two claims on one function: `1af4:41` beside `1af4:0041`, and
+    /// `1AF4:1041` beside `1af4:1041`.
+    #[test]
+    fn a_pci_id_is_four_lowercase_hex_digits_each_and_nothing_else() {
+        let want = PciId { vendor: 0x1af4, device: 0x1041 };
+        assert_eq!(PciId::parse("1af4:1041"), Some(want));
+        for bad in [
+            "1AF4:1041", "1Af4:1041", "1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041",
+            "1af4:104g",
+        ] {
+            assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
+        }
+    }
+
+    /// The four readers of a `devices` entry share this parser, so what it
+    /// accepts is what a config may say.
+    #[test]
+    fn a_devices_entry_is_a_class_or_one_named_function() {
+        let want = DeviceRequest::Pci(PciId { vendor: 0x1af4, device: 0x1041 });
+        assert_eq!(DeviceRequest::parse("pci:1af4:1041"), Some(want));
+        assert_eq!(want.class(), DeviceType::PciFunction);
+        assert_eq!(want.selector(), [0x1af4_1041, 0]);
+        assert_eq!(
+            DeviceRequest::parse("framebuffer"),
+            Some(DeviceRequest::Class(DeviceType::Framebuffer))
+        );
+        assert_eq!(DeviceRequest::Class(DeviceType::Framebuffer).selector(), [0, 0]);
+        // Every one of these is a name a config could plausibly write and the
+        // kernel must not resolve to a function.
+        for bad in [
+            "pci",  // the bare class name names no function at all
+            "pci:", // nor does the prefix on its own
+            "pci:1af4",
+            "gpu",  // a class name this table has never had
+            "part", // a bare partition class names no partition
+            "part:",
+            "part:c12a7328-f81f-11d2-ba4b-00a0c93ec93b", // one spelling: uppercase
+            // A partition is named by its unique GUID and nothing else.
+            "part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "isa", // a bare ISA class names no ports
+            "isa:",
+            "isa:0060,0064", // a function with no line
+            "isa:0060,0064:",
+            "isa::1",
+            "isa:60,64:1,12",     // one spelling: four hex digits
+            "isa:0064,0060:1,12", // and ascending
+            "isa:0060,0060:1",
+            "isa:0060:12,1",
+            "isa:0060:01",
+            "isa:0060:16", // the bus has sixteen lines
+            "isa:0000:1",  // port 0 means no port
+            "isa:0060,0061,0062,0063,0064:1", // more ports than a selector word holds
+            "isa:0060:1,2,3,4,5",
+            "isa:0060:+1",
+            "",
+        ] {
+            assert_eq!(DeviceRequest::parse(bad), None, "{bad:?} parsed");
+        }
+    }
+
+    /// A claim is found again by the label the supervisor wrote it under, and the label's
+    /// tail is this name: a round trip that lost a digit would be a claim its
+    /// holder cannot look up.
+    #[test]
+    fn a_request_writes_back_the_name_it_parsed() {
+        for name in [
+            "pci:1af4:1041",
+            "pci:8086:15fc",
+            "pci:0000:0000",
+            "hda-audio",
+            "mouse",
+            // The longest entry there is, which is what `MAX_NAME` is for.
+            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "isa:0060,0064:1,12",
+            "isa:0001:0",
+            // The longest an ISA entry can be.
+            "isa:fff0,fff1,fff2,fffe:12,13,14,15",
+        ] {
+            let request = DeviceRequest::parse(name).expect("a name this table has");
+            let mut buf = [0u8; DeviceRequest::MAX_NAME];
+            assert_eq!(request.write_name(&mut buf), name);
+        }
+    }
+
+    /// A `part:` entry is the partition class carrying its GUID's sixteen bytes
+    /// in both selector words.
+    #[test]
+    fn a_partition_entry_carries_its_guid_in_both_selector_words() {
+        use crate::part::PartGuid;
+        let guid = PartGuid::parse("0FC63DAF-8483-4772-8E79-3D69D8477DE4").expect("a GUID");
+        let request = DeviceRequest::parse("part:0FC63DAF-8483-4772-8E79-3D69D8477DE4");
+        assert_eq!(request, Some(DeviceRequest::Partition(guid)));
+        assert_eq!(request.map(DeviceRequest::class), Some(DeviceType::Partition));
+        assert_eq!(request.map(DeviceRequest::selector), Some(guid.wire()));
+    }
+
+    /// An `isa:` entry is its ports in the first selector word and its lines in
+    /// the second, and the kernel decodes nothing a config could not have
+    /// written: a port lane after a gap, or a line past the bus, is no set.
+    #[test]
+    fn an_isa_entry_survives_the_wire_and_nothing_else_decodes() {
+        let request = DeviceRequest::parse("isa:0060,0064:1,12").expect("the i8042's set");
+        let DeviceRequest::Isa(set) = request else { panic!("{request:?} is not an ISA set") };
+        assert_eq!(request.class(), DeviceType::Isa);
+        assert!(set.ports().eq([0x60, 0x64]));
+        assert!(set.irqs().eq([1, 12]));
+        assert_eq!(request.selector(), [0x0064_0060, (1 << 1) | (1 << 12)]);
+        assert_eq!(IsaId::from_wire(set.wire()), Some(set));
+        for bad in [
+            [0, 1 << 1],                  // no port
+            [0x0060, 0],                  // no line
+            [0x0060_0000, 1 << 1],        // a port after a gap
+            [0x0060_0064, 1 << 1],        // not ascending
+            [0x0060, 1 << 16],            // past the bus
+            [0x0060, 0b1_1111],           // more lines than a name holds
+            [0x0060_0060, 1 << 1],        // one port twice
+        ] {
+            assert_eq!(IsaId::from_wire(bad), None, "{bad:x?} decoded");
+        }
+    }
+
+    /// The selector is one word on the wire and the kernel decodes it back;
+    /// a vendor lost to a shift would claim a different card.
+    #[test]
+    fn the_selector_survives_the_wire() {
+        for id in [
+            PciId { vendor: 0x1af4, device: 0x1041 },
+            PciId { vendor: 0x8086, device: 0x15fc },
+            PciId { vendor: 0xffff, device: 0xffff },
+        ] {
+            assert_eq!(PciId::from_wire(id.wire()), Some(id));
+        }
+        assert_eq!(PciId::from_wire(1 << 32), None);
+    }
+
+    /// A listing of `entries`, each a name, whether it is a directory and a
+    /// node, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
+    fn listing(entries: &[(&str, bool, u64)]) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        for (name, is_dir, node) in entries {
+            out.push(if *is_dir { 2 } else { 1 });
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(&node.to_le_bytes());
+        }
+        out
+    }
+
+    fn read_listing(bytes: &[u8]) -> std::vec::Vec<(std::string::String, bool, u64)> {
+        let mut at = 0;
+        let mut out = std::vec::Vec::new();
+        while let Some(entry) = dirent(bytes, &mut at) {
+            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.node));
+        }
+        assert_eq!(at, bytes.len(), "the reader stopped short of the listing's end");
+        out
+    }
+
+    #[test]
+    fn every_dirent_is_read_back_whatever_its_node_holds() {
+        // Nodes whose bytes are NULs, kind bytes and letters: a reader that
+        // does not step over all eight takes them for names.
+        let entries = [
+            ("a", false, 0),
+            ("dir", true, 0x0201_0000_0000_0000),
+            ("b.txt", false, 0x6162_6300_0102_0304),
+            ("", false, u64::MAX),
+            ("last", true, 17),
+        ];
+        let want: std::vec::Vec<_> = entries.iter().map(|(n, d, s)| ((*n).into(), *d, *s)).collect();
+        assert_eq!(read_listing(&listing(&entries)), want);
+        assert!(read_listing(&[]).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "of kind 3")]
+    fn a_dirent_of_another_kind_is_a_broken_kernel() {
+        read_listing(&[3, b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "no node")]
+    fn a_short_dirent_is_a_broken_kernel() {
+        read_listing(&[1, b'x', 0, 0, 0]);
+    }
+}

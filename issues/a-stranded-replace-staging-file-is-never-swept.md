@@ -6,7 +6,7 @@ opened: 2026-09-01
 
 # A `.toyos-replaced-*.tmp` left by a failed rollback is never swept
 
-`Fat32::replace_rename` (`toyos-fat32/src/fs.rs`) stages an existing
+`Fat32::replace_rename` (`lib/fat32/src/fs.rs`) stages an existing
 destination under `.toyos-replaced-{sequence:08x}.tmp` and frees the staged
 entry only once the move commits. When the move *and* its rollback both fail
 the staging entry stays on the volume; `ReplaceFailed::stranded` now names it,

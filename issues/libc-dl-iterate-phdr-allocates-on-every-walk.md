@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # libc's `dl_iterate_phdr` allocates on every walk
 
-`userland/libc/src/link.rs` sizes and reads a whole `SYS_QUERY_MODULES`
+`sdk/libc/src/link.rs` sizes and reads a whole `SYS_QUERY_MODULES`
 answer into a heap `Vec`, and builds each module's NUL-terminated name in a
 second one: every walk allocates twice and makes at least two syscalls.
 libunwind calls `dl_iterate_phdr` to find a frame's unwind tables, so a C++

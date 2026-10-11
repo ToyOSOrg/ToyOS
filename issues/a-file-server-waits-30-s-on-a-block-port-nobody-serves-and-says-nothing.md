@@ -12,7 +12,7 @@ still for about thirty seconds after its three file servers are spawned, and
 no line of the boot says who is waiting or on what.
 
 Measured once, on `nvme_disk_keeps_log_and_home`'s machine with `diskserver`
-taken out of `tests/testcases/system.toml`'s `start` (host load 52 by
+taken out of `tests/images/testcases.toml`'s `start` (host load 52 by
 `uptime`'s one-minute mean); the guest's own stamps:
 
 ```
@@ -30,7 +30,7 @@ only on its own ceiling, `[qemu] Boot timed out waiting for ===READY===`.
 Not read: which call waits, and whose bound the thirty seconds are.
 `fileserver` reaches the port through `diskserver::list` and
 `diskserver::Session::open` on `toyos_blockring::PORT`
-(`userland/fileserver/src/main.rs`), and the supervisor starts `logkeeper`
+(`system/fileserver/src/main.rs`), and the supervisor starts `logkeeper`
 only after the file servers.
 
 Where `diskserver` runs and is refused its controller the same servers answer
@@ -44,4 +44,4 @@ guest test of an image with `fileserver` and no `diskserver` on a
 
 ## Owner
 
-`userland/fileserver` and `userland/supervisor`; unheld.
+`system/fileserver` and `system/supervisor`; unheld.

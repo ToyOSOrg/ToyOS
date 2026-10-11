@@ -10,7 +10,7 @@ opened: 2026-08-24
 only in libc jargon" (owner, 2026-08-19).
 `sdk/std/os/io.rs` re-exports `std::os::fd`, so
 `std::os::toyos::io::{AsRawFd, FromRawFd}` still speak POSIX.
-`tests/toyos-rust-tests/src/bin/std_fs.rs` is their one caller in this
+`tests/guest/rust-tests/src/bin/std_fs.rs` is their one caller in this
 repository.
 
 **Exit**: the next time the trait is touched, `AsRawFd` and

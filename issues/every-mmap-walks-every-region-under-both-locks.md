@@ -20,7 +20,7 @@ lock both taken:
 `toyos_abi::syscall::MAX_REGIONS` (32,768) bounds each walk, and so the cost;
 nothing makes it small. A fill to the bound is quadratic: one process mapping
 `PROT_NONE` until refused took 70 s of a TCG guest
-(`tests/toyos-rust-tests/src/bin/abuse_mmap_regions.rs`). And a sibling
+(`tests/guest/rust-tests/src/bin/abuse_mmap_regions.rs`). And a sibling
 thread's page fault spins on that address-space lock with interrupts off for
 as long as a walk holds it.
 

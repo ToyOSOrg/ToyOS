@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # `SharedMemory`'s safe slices rest on a size nobody checks
 
-`SharedMemory::as_slice`, `as_mut_slice` and `as_atomic` (`toyos/src/shm.rs`)
+`SharedMemory::as_slice`, `as_mut_slice` and `as_atomic` (`sdk/toyos/src/shm.rs`)
 are safe functions that make a slice of `size` bytes over the mapping. The type
 enforces neither premise that makes this sound:
 
@@ -17,7 +17,7 @@ enforces neither premise that makes this sound:
   `SharedMemory` values over one mapping in one process. `as_mut_slice` on one
   then aliases `as_slice` or `as_atomic` on the other.
 
-`#![forbid(unsafe_code)]` on the compositor (`userland/compositor/src/main.rs`)
+`#![forbid(unsafe_code)]` on the compositor (`system/compositor/src/main.rs`)
 leans on both. The compositor meets them, since it adopts only regions it
 created and the kernel's framebuffer and cursor, but the compiler does not know
 that.

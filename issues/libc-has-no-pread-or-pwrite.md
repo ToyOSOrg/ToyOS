@@ -7,7 +7,7 @@ opened: 2026-09-30
 # libc has no pread or pwrite
 
 libc defines neither `pread` nor `pwrite`. The ABI has no positional read or write
-(`toyos-abi/src/syscall.rs` has `seek`). With no header declaring `pread`,
+(`sdk/abi/src/syscall.rs` has `seek`). With no header declaring `pread`,
 LLVM's configure finds none, and LLVM reads a file slice with `lseek` and
 `read` instead (`llvm/lib/Support/Unix/Path.inc`, `readNativeFileSlice`), which
 moves an offset another thread shares just as they did.

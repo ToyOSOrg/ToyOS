@@ -62,7 +62,7 @@ Evidence, once: nightly dispatch `31900050723`, job `95049280131`
 harness controls differed, so it failed once and passed once. That is a rate
 and not a classification.` The sibling dispatch `31900045901` (`main` at
 `e064a96`) minutes earlier was green on this name, and the two trees differ
-only in `src/testargs.rs`, `tests/toyos.rs` and one deleted issue file — the
+only in `tests/metal/src/testargs.rs`, `tests/toyos.rs` and one deleted issue file — the
 kernel is the same kernel in the green run and the red one. A KVM shard runs
 one guest per machine at `--jobs 1`, so host contention is not available as an
 explanation either.

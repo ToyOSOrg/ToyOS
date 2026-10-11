@@ -5,8 +5,9 @@ opened: 2026-09-28
 ---
 # The compiler workspace resolves the published `toyos-abi` 0.1.0, not the tree's
 
-`rust/Cargo.toml` patches `toyos-abi` to `../toyos-abi`, but a `[patch]` only
-replaces a version the requirement accepts. The four forks `rust/Cargo.lock`
+Every bootstrap run is handed a `[patch]` of `toyos-abi` to the tree's
+(`sysroot::std_patch`), but a `[patch]` only replaces a version the
+requirement accepts. The four forks `rust/Cargo.lock`
 pins that name `toyos-abi` — getrandom `toyos-0.2` at 46592414 and `toyos-0.3`
 at d3045447, libloading `toyos` at fa0abe77, stacker `toyos` at c25842ac — each
 require `"0.1"`, and the tree's crate is 0.16.0. So every bootstrap run

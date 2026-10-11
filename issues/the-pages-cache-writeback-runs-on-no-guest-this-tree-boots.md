@@ -8,7 +8,7 @@ opened: 2026-09-07
 
 Every writer of the black-box page ends in `CLFLUSH` over it and an `SFENCE` --
 the kernel's seals (`kernel/src/blackbox.rs`) and the loader's arm and clear
-(`bootloader/src/blackbox.rs`) -- because a reset invalidates the caches without
+(`loader/src/blackbox.rs`) -- because a reset invalidates the caches without
 writing them back. A page written into write-back memory and then reset over is
 a page whose bytes never reached DRAM, and from the next boot that is
 indistinguishable from a write that never happened.

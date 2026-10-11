@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # The licence step re-locks the std workspace against the registry on every run, so `host` reds without the network and judges whatever the registry serves that day
 
-`licence::judge` (`src/licence.rs`) copies the fork's `library/Cargo.lock`
+`licence::judge` (`build/licence.rs`) copies the fork's `library/Cargo.lock`
 into `target/licence/` and runs `cargo metadata` over the std workspace with
 `resolver.lockfile-path` pointing at the copy, with neither `--locked` nor
 `--offline`. The copy is stale by design, since bootstrap re-locks it to this
@@ -25,4 +25,4 @@ reads.
 
 **Exit**: `the licences of what ships` passes with the network off, shown by a
 check that runs it so, and what it resolves for the std workspace is a
-function of the tree alone. Owner: the build system (`src/licence.rs`).
+function of the tree alone. Owner: the build system (`build/licence.rs`).

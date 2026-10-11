@@ -7,9 +7,9 @@ opened: 2026-09-25
 # ROOT in memory costs its whole filesystem, in RAM and in a read every boot
 
 The loader reads ROOT's filesystem whole, the extent its superblock states
-(`bootloader/src/rootimage.rs`), and the kernel keeps it for the machine's
+(`loader/src/rootimage.rs`), and the kernel keeps it for the machine's
 life. `Superblock::check` holds that extent equal to the partition, and
-`src/image.rs` builds the volume at the blocks its contents use, rounded up to
+`build/image.rs` builds the volume at the blocks its contents use, rounded up to
 the 1 MiB partition alignment, so what is read and kept is what ROOT carries.
 The cost is the payload.
 
@@ -18,7 +18,7 @@ The cost is the payload.
 audio run carries its one binary, and the shared list runs on boots of one lane
 in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 `qemu::carrying` adds what those binaries spawn or load. A boot that runs none
-carries `tests/testcases`'s own programs, 13 MiB (3328 blocks), where every test
+carries `tests/images/testcases.toml`'s own programs, 13 MiB (3328 blocks), where every test
 boot carried the whole 619 MiB catalogue before.
 
 **Every resident `/system` page is in RAM twice.** `ReadOnlyBacking::read_page`

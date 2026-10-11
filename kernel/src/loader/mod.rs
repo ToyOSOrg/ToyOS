@@ -428,7 +428,7 @@ pub fn spawn<H>(
     Ok((pid, held))
 }
 
-/// The one program the kernel starts. `src/build.rs` puts this binary in every
+/// The one program the kernel starts. `build/build.rs` puts this binary in every
 /// image, so a missing one is a bad build, not a different boot.
 pub const SUPERVISOR_PATH: &str = "/system/bin/supervisor";
 

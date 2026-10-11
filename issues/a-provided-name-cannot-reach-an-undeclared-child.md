@@ -14,8 +14,8 @@ caller transferred (`userland/init/src/main.rs`, `build_namespace`).
 The **direct** path still cannot, and the reason is no longer the ABI.
 
 **The ABI half is closed.** `NamespaceBuild::flags` carries
-`NAMESPACE_KEEP_ALL` (`toyos-abi/src/syscall.rs`), `Builder::keep_all` is its
-SDK spelling (`toyos/src/namespace.rs`), `sys_namespace_build` carries the
+`NAMESPACE_KEEP_ALL` (`sdk/abi/src/syscall.rs`), `Builder::keep_all` is its
+SDK spelling (`sdk/toyos/src/namespace.rs`), `sys_namespace_build` carries the
 base's whole entry set when the bit is set and refuses a bit it does not define
 (`kernel/src/syscall/ipc.rs`), and `endowment_denied`'s
 `the_base_plus_one_more_name` asserts both halves in a guest.
@@ -35,7 +35,7 @@ inherit `surface` because init merged it in. That is the kind of safety that
 ends the moment somebody adds a caller.
 
 **And one caller is already past it, masked rather than absent.**
-`build_command` (`userland/shell/src/main.rs:709`) calls `Command::provide` for
+`build_command` (`system/shell/src/main.rs:709`) calls `Command::provide` for
 *every* child the shell starts, and `test_rs_window_child` is a harness binary
 no `[programs]` row declares — so that spawn takes the direct path and the
 provided `surface` connector is dropped, exactly as described above. Nothing

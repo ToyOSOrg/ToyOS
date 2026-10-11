@@ -6,7 +6,7 @@ opened: 2026-09-05
 
 # `shell -c` discards the working directory its launch carried
 
-`userland/shell/src/main.rs:27` sets the working directory to `/` before it runs
+`system/shell/src/main.rs:27` sets the working directory to `/` before it runs
 the line:
 
 ```

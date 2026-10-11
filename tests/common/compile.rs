@@ -13,7 +13,7 @@ pub fn repo_root() -> PathBuf {
 
 /// Directory containing the TinyCC test cases.
 pub fn testcases_dir() -> PathBuf {
-    repo_root().join("tests/testcases/tinycc")
+    repo_root().join("tests/corpus/tinycc")
 }
 
 /// The C sysroot every C program here is built against, and the clang that

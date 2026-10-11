@@ -13,13 +13,13 @@ authority that one row grants —
 `issues/toybox-is-one-row-for-every-applet.md`.
 
 **One applet is already checked, and the shape it uses is the right one.**
-`tests/toyos-rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
+`tests/guest/rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
 endowed a duplicate with `Rights::ROSTER` and a duplicate without it, and its own
 comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
 and one forbidden operation for one authority class on one of them. The
 effective-authority side is a shipped syscall too — `SYS_ENDOWMENTS`
-(`toyos-abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
+(`sdk/abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
 endowment table back.
 
 **The enumeration exists now, and it reds on the image that boots.**
@@ -45,7 +45,7 @@ because `tone` needs one. That list is now `DECLARED_OVER_GRANTS`, so the size
 of the defect cannot grow without a red naming what grew.
 
 **What is still missing is the shipped image.** A guest test boots
-`tests/testcases/system.toml`, whose `toybox` row is `receives = ["soundd"]` and
+`tests/images/testcases.toml`, whose `toybox` row is `receives = ["soundd"]` and
 carries no `syscap` at all. The row this record opened on — `system.toml:112`,
 `syscap = ["power", "roster"]` across every link — is measured by nothing:
 the differential that would see `/system/bin/echo` holding `Rights::POWER` has to read
@@ -64,7 +64,7 @@ the same landing: a red after that fix is this checker's and not the fix's.
 the shape.** A checker that reimplements init's resolver agrees with init by
 construction. The two sides above come from different places — the links off the
 image, the rows off the rendered manifest, the policy from a table nothing in
-the build wrote. Nothing in `src/build.rs` does this either: its manifest gates
+the build wrote. Nothing in `build/build.rs` does this either: its manifest gates
 check the manifest's internal consistency and say nothing about per-applet
 effective authority.
 

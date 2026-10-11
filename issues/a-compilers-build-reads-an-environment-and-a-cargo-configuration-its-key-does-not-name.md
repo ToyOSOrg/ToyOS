@@ -27,7 +27,7 @@ Two inputs of `compiler::build_in_fork` are outside the fork checkout, and
   guest-target tables today, which a host-only build does not read.
 
 A compiler built under either is stored and served to every checkout naming
-its key. By reading (`src/toolchain.rs`, cargo's documented configuration
+its key. By reading (`build/toolchain.rs`, cargo's documented configuration
 search); no compiler was built under a differing environment or a
 `local.toml` to measure it. Both are `main`'s shape since worktrees built
 compilers of their own; the host's store widens who is served.

@@ -21,7 +21,7 @@ The same union is copied a third time into each guest arm's local `const KNOWN`,
 so a drift would take the test with it and the arm would still pass.
 
 **The fix is one line per word and the precedent is in the same file.**
-`NAMESPACE_FLAGS_KNOWN` (`toyos-abi/src/syscall.rs:1340`) is the mask that
+`NAMESPACE_FLAGS_KNOWN` (`sdk/abi/src/syscall.rs:1340`) is the mask that
 cannot drift, because it sits beside the constants it unions and every reader
 names it. Four more of those — for `MmapProt`, `MmapFlags`, `OpenFlags` and
 `WNOHANG` — delete this entry, the three copies in the kernel and the three in

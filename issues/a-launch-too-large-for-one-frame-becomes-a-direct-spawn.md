@@ -6,12 +6,12 @@ opened: 2026-10-02
 
 # A launch too large for one frame becomes a direct spawn
 
-`toyos::launch::launch` (`toyos/src/launch.rs`) answers `LaunchError::NotSent`
+`toyos::launch::launch` (`sdk/toyos/src/launch.rs`) answers `LaunchError::NotSent`
 when `Launch::encode` refuses the request, and std's `Command::launch`
 (`sdk/std/sys/process.rs`) answers `NotSent` with the direct
 spawn. `encode` refuses a request whose header, program, argv, environment,
 working directory and connector names do not fit `MAX_FRAME_LEN`
-(`toyos/src/ipc.rs`). Its other refusal, too many connectors or slots, std
+(`sdk/toyos/src/ipc.rs`). Its other refusal, too many connectors or slots, std
 never reaches: it refuses the connectors itself, and a launch carries stdio
 alone.
 
@@ -27,4 +27,4 @@ Exit: a launch `encode` refuses answers its caller an error and starts nothing,
 or the wire carries every argv and environment `SYS_SPAWN` takes; a test
 launching a declared program with an environment past one frame reads that
 error, or finds the child holding its row. Owner: the std lane, with
-`toyos/src/launch.rs`.
+`sdk/toyos/src/launch.rs`.

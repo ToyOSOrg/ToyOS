@@ -10,7 +10,7 @@ use std::path::Path;
 use super::qemu::{self, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
-/// The function `tests/netcase`'s netstack claims, as its `devices` row spells it.
+/// The function `tests/images/netcase.toml`'s netstack claims, as its `devices` row spells it.
 const NETSTACK_CLAIMS: &str = "1af4:1041";
 
 /// soundserver's feature line, the kernel's shape under soundserver's name.
@@ -21,7 +21,7 @@ const IN_MEMORY: &str = "are in memory and will not survive a reboot";
 
 /// The boot config that runs `netstack` with a virtio NIC in front of it.
 fn netcase() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/netcase.toml")
 }
 
 /// Whether this machine's virtio functions are behind the unit at all.
@@ -190,12 +190,12 @@ const DISKSERVER_REFUSED: &str =
 const FILESERVER_WITHOUT_DATA: &str =
     "fileserver: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot";
 
-/// The slot QEMU's `-device` order puts `tests/netcase`'s NVMe controller on,
+/// The slot QEMU's `-device` order puts `tests/images/netcase.toml`'s NVMe controller on,
 /// the one its diskserver row claims.
 const NVME_AT: &str = "00:02.0";
 
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
-/// `tests/netcase`'s soundserver row claims.
+/// `tests/images/netcase.toml`'s soundserver row claims.
 const SOUND_AT: &str = "00:04.0";
 
 /// Why a machine with no unit hands no function over, in the kernel's words.
@@ -427,7 +427,7 @@ fn class_function(log: &Serial, class: &str) -> Option<String> {
 }
 
 /// What the kernel says of the one unit QEMU's IVRS describes, as an 11h over
-/// a superseded 10h (`toyos-acpi/tests/ivrs.rs` decodes the same table).
+/// a superseded 10h (`lib/acpi/tests/ivrs.rs` decodes the same table).
 const AMDVI_UNIT: &str = "iommu: amdvi unit0 @0xfed80000 seg=0 dev=00:02.0 ivhd=0x11";
 const AMDVI_SUPERSEDED: &str = "iommu: IVRS IVHD 0x10 at +48 describes 00:02.0 again";
 /// The xHCI the boot stick is on, among the functions the unit serves.

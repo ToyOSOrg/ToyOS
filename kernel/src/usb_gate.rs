@@ -80,7 +80,7 @@ pub fn sweep_under_load() {
 
 /// What the load says when it starts, when it cannot, when the disk stopped
 /// answering it, and when it reached the end of its one pass. Judged by the
-/// harness, so all four are constants (`src/bootlog.rs`).
+/// harness, so all four are constants (`build/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
 #[cfg(feature = "boot-actuators")]

@@ -7,7 +7,7 @@ opened: 2026-10-07
 # `fstat`'s answer is declared twice, and nothing holds the two layouts together
 
 `SYS_FSTAT` copies out `kernel/src/object/ops.rs`'s `Stat`, three `u64`s, and
-`toyos_abi::syscall::fstat` reads the answer into `toyos-abi/src/syscall.rs`'s
+`toyos_abi::syscall::fstat` reads the answer into `sdk/abi/src/syscall.rs`'s
 `Stat`, whose first field is `FileType`, a `#[repr(u64)]` enum. The kernel's
 copy exists because a struct holding the enum is not valid for every bit
 pattern and so cannot be `UserSafe`; it is sound, since the kernel only
@@ -25,4 +25,4 @@ them that fails when the two differ in size or in any field's offset.
 
 ## Owner
 
-`toyos-abi/src/syscall.rs`, `kernel/src/object/ops.rs`. Nobody holds it.
+`sdk/abi/src/syscall.rs`, `kernel/src/object/ops.rs`. Nobody holds it.

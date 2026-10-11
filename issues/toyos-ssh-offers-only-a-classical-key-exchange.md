@@ -16,7 +16,7 @@ is not using a post-quantum key exchange algorithm.` (#817). `ring` 0.17.14 has
 no ML-KEM.
 
 The owner ruled "Write our own ML-KEM (Recommended)". The switch of
-`userland/sshserver` waits for it, so no shipped server downgrades
+`system/sshserver` waits for it, so no shipped server downgrades
 (`issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`, stages 2 and 3).
 
 **Owner**: `toyos-ssh`.

@@ -6,7 +6,7 @@ opened: 2026-08-19
 
 # The build system does not compile on Windows, and it is three subsystems rather than one call
 
-`src/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
+`build/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
 ## The judge needs no Windows host, and stops at a dependency's C before it reaches the build system
 
@@ -16,7 +16,7 @@ __CARGO_TESTS_ONLY_SRC_ROOT=<tree>/src/library CARGO_TARGET_DIR=<scratch-target>
   --target x86_64-pc-windows-msvc --offline -p toyos-build --all-targets
 ```
 
-`<tree>` and `<sysroot>` are `src/CLAUDE.md`'s std type-check recipe's, with
+`<tree>` and `<sysroot>` are `build/CLAUDE.md`'s std type-check recipe's, with
 no addition: the copied library is its own workspace, with its patches and
 its lockfile, and a manifest written above it does not resolve offline. The
 fork vendors `library/windows-sys` and `library/windows_link`, so a Windows
@@ -29,7 +29,7 @@ Run that way it builds `core`, `std` and `test` for Windows and exits 101 at
 the 37th crate, before any source of `toyos-build` is checked: `failed to run
 custom build command for ring v0.17.14`, whose build script compiles C for
 the target with the host's `cc` and finds no `assert.h`. The judge reaches
-`src/tether.rs` only with the target's C headers, the C runtime's and the
+`build/tether.rs` only with the target's C headers, the C runtime's and the
 Windows SDK's, which no host here has and which are a download; or once
 nothing `toyos-build` depends on compiles C for its target.
 

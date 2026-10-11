@@ -25,7 +25,7 @@ counter of its own …`, both at ~2.3 s — are not on the page. The header of
 last line — `Loader log: the last boot is accounted for, so this pass resets the
 machine`, which is how a reader tells a pass that ended the chain from one that
 returned to the boot manager — is not in the file; the file ends inside the
-tail. `bootloader/src/loaderlog.rs` writes and flushes line by line and disables
+tail. `loader/src/loaderlog.rs` writes and flushes line by line and disables
 its sink on a short write, reporting the refusal with `println!` — **to a console
 the T14 does not have**, so on this machine the file simply stops and nothing
 says why. Whether that pass reset the machine or returned to firmware is

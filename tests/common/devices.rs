@@ -1,4 +1,4 @@
-//! The device boot: what `tests/metaldevicecase` measures.
+//! The device boot: what `tests/images/metaldevicecase.toml` measures.
 
 /// Every job the config's runner list names that measures something, in that
 /// order. `reboot` is the list's last job and measures nothing.
@@ -6,7 +6,7 @@
 /// Held to the committed config by [`the_config_runs_exactly_these_jobs`].
 pub const JOBS: &[&str] = &["usbwrite", "usbread", "fbcheck", "fbfill", "fbread"];
 
-pub const CONFIG: &str = "tests/metaldevicecase";
+pub const CONFIG: &str = "tests/images/metaldevicecase.toml";
 pub const BOOT: &str = "metaldevicecase";
 
 /// The runner's job list is the one this file names, under the symlinks that
@@ -16,7 +16,7 @@ pub const BOOT: &str = "metaldevicecase";
 /// test binary is `harness = false`, so a `#[test]` here would be compiled and
 /// never run — which is a gate that cannot fail.
 pub fn the_config_runs_exactly_these_jobs() {
-    let at = super::compile::repo_root().join(CONFIG).join("system.toml");
+    let at = super::compile::repo_root().join(CONFIG);
     let config = std::fs::read_to_string(&at).expect("the device case's config");
     let args = config
         .lines()

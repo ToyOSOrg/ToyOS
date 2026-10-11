@@ -1,0 +1,19 @@
+[package]
+name = "toyos-window"
+version = "0.20.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Client library for ToyOS windows: create one, draw into it, read its events."
+repository = "https://github.com/ToyOSOrg/ToyOS"
+
+[dependencies]
+toyos-font = { path = "../font" }
+toyos-abi = { path = "../abi" }
+toyos-keymap = { path = "../keymap" }
+toyos = { path = "../toyos" }
+
+# `window` is taken on crates.io, so the package is `toyos-window`; the lib
+# target keeps the name every caller spells, `sdk/toyos/src`'s citations included.
+[lib]
+name = "window"
+doctest = false

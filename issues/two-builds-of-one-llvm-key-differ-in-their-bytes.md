@@ -6,7 +6,7 @@ opened: 2026-09-30
 
 # Two builds of one LLVM key differ in their bytes
 
-`src/llvm.rs` holds that an LLVM is a function of its key. Two builds of one
+`build/llvm.rs` holds that an LLVM is a function of its key. Two builds of one
 key by `build_in_fork`, in two fork checkouts, differ in two things the key
 does not name:
 

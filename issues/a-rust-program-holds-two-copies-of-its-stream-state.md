@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 `std` links the SDK as its own dependency (`rust/library/std/Cargo.toml`,
 `toyos` with `rustc-dep-of-std`), and a program that names `toyos` itself links
-a second instance of the same crate. `toyos/src/log/stdio.rs`'s statics — which
+a second instance of the same crate. `sdk/toyos/src/log/stdio.rs`'s statics — which
 slot each stream holds, the mapping of the log ring, the partial line each
 stream is assembling, the cached pid — exist once per instance.
 
@@ -20,7 +20,7 @@ What that costs, today:
 - A partial line is joined only within one instance. `print!("a")` followed by
   `toyos::log::stdio::write(Stream::Out, b"b\n")` is two records on two lines,
   and a process's exit ends only what `std`'s instance holds —
-  `tests/toyos-rust-tests/src/bin/console_line_atomicity.rs` writes its
+  `tests/guest/rust-tests/src/bin/console_line_atomicity.rs` writes its
   unended line through `std` for exactly that reason.
 
 Both records reach the one ring, so nothing is lost and no line is spliced; the

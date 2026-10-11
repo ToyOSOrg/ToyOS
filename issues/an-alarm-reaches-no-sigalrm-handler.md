@@ -6,7 +6,7 @@ opened: 2026-09-30
 
 # An alarm reaches no SIGALRM handler
 
-libc's `alarm` (`userland/libc/src/alarm.rs`) arms one alarm per process and
+libc's `alarm` (`sdk/libc/src/alarm.rs`) arms one alarm per process and
 answers the seconds the one it replaces had left, and when it is due a thread
 of libc's drops it if `SIGALRM` is ignored and otherwise ends the process with
 exit code 142, `SIGALRM`'s default action. POSIX keeps the process in two of
@@ -18,7 +18,7 @@ those cases:
   `Wait`).
 - **A mask.** `SIGALRM` blocked in every thread stays pending until a thread
   unblocks it, and libc ends the process at once. libc keeps each thread's
-  mask in that thread alone (`userland/libc/src/pthread.rs`, `MASK`), and a
+  mask in that thread alone (`sdk/libc/src/pthread.rs`, `MASK`), and a
   thread Rust's std starts is none of libc's, so nothing can read whether
   every thread blocks it.
 
@@ -28,7 +28,7 @@ pending on a mask, only through the signals libc imitates from stage 3 of
 both wait on that stage, its owner.
 
 What a due alarm does under each disposition is held on the host
-(`tests/libc-arch/src/alarm_requests.rs`); `207_libc_names.c` reads the
+(`sdk/libc/arch/src/alarm_requests.rs`); `207_libc_names.c` reads the
 action back whole and arms and disarms an alarm. No guest case lets one come
 due.
 

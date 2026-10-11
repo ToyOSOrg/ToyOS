@@ -21,7 +21,7 @@ their branches' toolchains under the nightly's write token:
 `toolchain-linux-x86_64-92f146618d6687d8` (run 36600425263). Every toolchain release is mutable (`immutable:
 false`).
 
-Owner: the release module (`src/release.rs`).
+Owner: the release module (`build/release.rs`).
 
 **Exit**: a consumer outside CI installs only the bytes main's publisher
 recorded, and its install refuses any other bytes by name. That holds when a

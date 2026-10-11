@@ -1237,7 +1237,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
 #[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
-    test_crate: &Path,
+    config: &Path,
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
     staged: &[(String, Vec<u8>)],
@@ -1307,15 +1307,10 @@ fn build_boot_image_with(
     }
     extra_files.extend(staged.iter().cloned());
 
-    let config_path = test_crate.join("system.toml");
-    assert!(
-        config_path.exists(),
-        "Test crate missing system.toml: {}",
-        config_path.display()
-    );
+    assert!(config.is_file(), "no image config at {}", config.display());
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let mut plan = toyos_build::build::Plan::new(arch, &config_path, kernel_features, kernel_params);
+    let mut plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
     plan.second = second_slot.map(|root_bytes| toyos_build::image::SecondSlot { root_bytes });
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
@@ -1365,7 +1360,7 @@ const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
     pub fn boot_with_options(
-        test_crate: &Path,
+        config: &Path,
         c_tests: &[(String, Vec<u8>)],
         rust_tests: &[(String, Vec<u8>)],
         options: BootOptions,
@@ -1391,7 +1386,7 @@ impl QemuInstance {
         let params: Vec<&str> = params.iter().map(String::as_str).collect();
         let image = build_boot_image_with(
             options.profile.arch(),
-            test_crate,
+            config,
             c_tests,
             rust_tests,
             &options.extra_root_files,
@@ -1911,7 +1906,7 @@ impl Drop for QemuInstance {
         let _ = self.child.wait();
         // **The 16550's log outlives the guest, because it is the one channel
         // that exists before the console does.** 1.4 KB on a
-        // healthy `tests/testcases` boot, measured, against the hundreds of
+        // healthy `tests/images/testcases.toml` boot, measured, against the hundreds of
         // megabytes of per-boot image beside it.
         //
         // Deleting it here is also why `ci.yml`'s "what a red run left" step had

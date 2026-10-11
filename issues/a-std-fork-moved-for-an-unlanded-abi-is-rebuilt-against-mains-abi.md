@@ -9,7 +9,7 @@ opened: 2026-09-25
 The primary's `rust/` was at `3f0bda14850` ("toyos: a spawned child starts in
 the directory the spawn states"), which is `wt/toyos-spawncwd`'s fork commit;
 main pins `71911815325`. A worktree whose `toyos-abi` and `toyos` are main's
-then ran `cargo run -- --build-only`. `src/toolchain.rs` found the recorded
+then ran `cargo run -- --build-only`. `build/toolchain.rs` found the recorded
 sysroot witness equal to its own and the std fork stale, and took the
 "rebuild std for a std fork that has moved" branch, whose header says it
 "takes nothing from any of them". It compiled that std against main's

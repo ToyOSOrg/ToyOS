@@ -40,7 +40,7 @@ name is a `#[test]` in the named crate or a `METAL` row, and reverting the behav
 - metal `kernel_args_layout_refused`: a loader of another `KernelArgs` layout is refused first;
   brings back `loader-writes-no-layout` in the loader as well as the kernel.
 - metal `boot_from_power_on`: the power-on spans are the loader's counts at the kernel's rate.
-- metal `shipped_config_boots`: the root `system.toml` boots to ready.
+- metal `shipped_config_boots`: `images/system.toml` boots to ready.
 - metal `diskless_boot`, `internal_disk_boot`: a boot with no NVMe, and one off the internal disk.
 - metal `update_boots_the_new_kernel`: an update over ssh is the kernel the next boot runs.
 - metal `update_falls_back_from_a_dying_kernel`, `update_hang_kills_an_unproven_image`: a slot
@@ -159,7 +159,7 @@ Host: `toyos-xhci` and its sim. Metal: the T14's controller and stick. Exit: as 
   `SWEEP_FLOOR` refuses by name and sweeps nothing; the T14's stick has the room. Exit: a host
   test over the sweep's span lifted out of `kernel/src/usb_gate.rs`, red when the floor goes.
 - metal `usb_reset_hands_devices_back`, the three resets its row does not reach, each judged on
-  the account in `loader.log` that `metaldevices::quiesced` reads. Its row judges two orderly
+  the account in `loader.log` that `devices::quiesced` reads. Its row judges two orderly
   reboots.
   - The test runner's job deadline, with `quiesce-late-word` on `tests/jobdeadlinecase`: the stop
     took the controller lock before the log volume's flush and completed. Exit: red when
@@ -226,7 +226,7 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 - host `lan_lease_report`: a link that goes down and comes back after a lease neither gives the
   lease up nor starts the client over. The T14 cannot flap its cable, and no T14 row reads a lease
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). Held on a host by the node's `a_link_that_returns_keeps_a_held_lease_and_announces_it` and
-  `a_link_that_returns_with_no_lease_starts_discovery_over_at_once` (`userland/netstack/node/tests/lease.rs`).
+  `a_link_that_returns_with_no_lease_starts_discovery_over_at_once` (`system/netstack/node/tests/lease.rs`).
 - metal `sshd_exec`, the arms `lan_talk`'s one command did not reach, each a step of that row's
   exchange red when its arm in `userland/sshd/src/main.rs` is reverted; the row and its exchange
   are deleted, and this waits on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`:

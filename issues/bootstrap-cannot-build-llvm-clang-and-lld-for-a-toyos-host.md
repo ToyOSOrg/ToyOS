@@ -8,7 +8,7 @@ opened: 2026-09-30
 
 The track holds one build of one fork (`issues/toyos-builds-itself.md`), and
 the tree builds LLVM for a ToyOS host by two paths. M2's clang and `ld.lld`
-come from a CMake configure and n2 build of their own (`src/hostedclang.rs`).
+come from a CMake configure and n2 build of their own (`build/hostedclang.rs`).
 M3's rustc carries an LLVM that bootstrap's `Llvm` step builds for
 `x86_64-unknown-toyos` (`issues/rustc-llvm-cannot-build-for-a-toyos-host.md`),
 and bootstrap's `Llvm` step, with `clang = true`, and its `Lld` step make that
@@ -38,5 +38,5 @@ Owner: `issues/toyos-builds-itself.md`, M3.
 
 **Exit**: ToyOS's build, with nothing supplied by hand, has bootstrap install
 a clang and an `ld.lld` for `x86_64-unknown-toyos`, `cargo run --
---hosted-clang` places those, and `src/hostedclang.rs`'s CMake configure and
+--hosted-clang` places those, and `build/hostedclang.rs`'s CMake configure and
 build are gone.

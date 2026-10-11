@@ -57,7 +57,7 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 - **Verification is by a signed repository** (owner ruling: `pkg install
   <url>` and the release's `SHA256SUMS` behind it are retired): a root pinned
   in the image, then a timestamp and a targets naming each archive by length
-  and SHA-256 (`toyos-update/src/repo.rs`, written by `src/publish.rs`).
+  and SHA-256 (`lib/update/src/repo.rs`, written by `build/publish.rs`).
   `pkg install <file>` stays for local and offline installs, checked against
   the `SHA256SUMS` beside it.
 - **Fetching is HTTPS.** GitHub serves releases only over TLS, so `pkg`
@@ -84,7 +84,7 @@ The storage track's users and mount-protocol stages do not block this one.
    binaries a launch starts and nothing else, so a writable `/apps` cannot name
    a device or a right. The stage-then-commit above amends it: `pkg` writes
    `/apps/<name>/` in place today, its `manifest.toml` last
-   (`userland/pkg/src/main.rs`).
+   (`system/pkg/src/main.rs`).
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the signed
    repository's files and the archives its targets names. This is the
    internet-client track's last
@@ -126,7 +126,7 @@ The storage track's users and mount-protocol stages do not block this one.
    **Doom goes at this stage too** (owner ruling, 2026-09-26): the `doom`
    crate with the doomgeneric C it compiles, `assets/DOOM1.WAD`, and
    `assets/soundfont.sf2`, which doom alone opens, leave the image as one
-   installable package. Until they do, `src/licence.rs` names each as an
+   installable package. Until they do, `build/licence.rs` names each as an
    exception pending this stage.
 
 ## Open with the owner

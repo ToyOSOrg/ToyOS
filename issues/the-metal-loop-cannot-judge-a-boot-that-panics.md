@@ -12,7 +12,7 @@ the T14, and the reason is the loop rather than the kernel.
 
 **Two walls, and a boot has to clear both.**
 
-1. `src/metal.rs`'s `drive` ends every round with
+1. `tests/metal/src/lib.rs`'s `drive` ends every round with
    `bootlog::verdict(&log).map_err(Refusal::Log)?`, which requires
    `Boot: complete (Nms)` *and* a trailing `Rebooting.`. A boot whose subject is
    a panic correctly writes neither the second word nor anything after it, so
@@ -23,7 +23,7 @@ the T14, and the reason is the loop rather than the kernel.
    `enter_idle_loop`, so `logd` has not run: that boot writes no `/log` file at
    all and `boot.<label>.complete_ms` has nothing to read. `metal-panic-probe`
    fires late enough — five seconds after a process claims the framebuffer — but
-   `src/metalimage.rs`'s `derive` appends `reboot` to every arm's job list
+   `tests/metal/src/image.rs`'s `derive` appends `reboot` to every arm's job list
    unconditionally, so the runner hands the machine back at about one second and
    the probe never comes due.
 

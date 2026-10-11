@@ -42,7 +42,7 @@ Two paths in the tree end the guest this way, and nothing captured tells
 them apart:
 
 - **The guest's own end rule, met by a misframed packet.**
-  `tests/toyos-rust-tests/src/bin/i8042_mouse.rs` exits 0 on the first event
+  `tests/guest/rust-tests/src/bin/i8042_mouse.rs` exits 0 on the first event
   without the right button after one with it. `toyos_ps2::mouse`'s decoder
   resets to a head on any gap between bytes longer than `PACKET_GAP_NS` (5 ms).
   Measured on the host by feeding the burst's bytes to `MouseDecoder`: one such

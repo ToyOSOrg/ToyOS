@@ -30,11 +30,11 @@ in the suite still says nothing about the display path a laptop takes.
 
 **Why it is its own landing.** `Profile::Headless` is what the suite's
 non-display profiles are, so giving the floor a display changes the boot config
-of every test at once — `tests/common/qemu.rs`'s profile table, `src/qemu.rs`'s
+of every test at once — `tests/common/qemu.rs`'s profile table, `build/qemu.rs`'s
 own, and every assertion that reads a console on a machine that then has a
 panel too.
 
-**The mode half, closed.** `bootloader/src/main.rs`'s `query_gop` reads
+**The mode half, closed.** `loader/src/main.rs`'s `query_gop` reads
 `Mode->Info` and never calls `SetMode`, so the kernel is handed the mode the
 firmware already set. A profile says what panel its display advertises over EDID
 (`Shape::panel`) and the firmware sets that mode: `Profile::Metal` advertises

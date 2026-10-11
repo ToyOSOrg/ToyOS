@@ -14,12 +14,13 @@ create `target/nvme.img`. `--boot-config` takes the second, the three modes
 take the first, and `Boot` carries a `case` flag to say which.
 
 While both exist, an image with two possible writers is an image whose contents
-depend on which command last ran, so `Boot::case` refuses the three mode
-directories by name and the flag cannot reach `target/bootable.img`,
+depend on which command last ran, so `Boot::case` refuses a case whose artifact
+is a mode's, and the flag cannot reach `target/bootable.img`,
 `target/bootable-diag.img` or `target/bootable-console.img`.
 
 **Exit condition**: one function builds every image, `Boot::case` and the
-`case` flag go, and `--boot-config .` builds the shipped config like any other.
+`case` flag go, and `--boot-config images/system.toml` builds the shipped config
+like any other.
 What has to be answered first is whether the memo is safe on the `cargo run`
 path — it is keyed per process, and a `cargo run` builds one image, so the
 question is only whether `create_sparse` for `nvme.img` belongs to the caller.

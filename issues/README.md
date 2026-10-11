@@ -113,6 +113,6 @@ delete — for the slug as well as the path.** The slug is the identity, and a p
 bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One in a comment
-under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
-(`src/identity.rs`), so it owes no version and builds no sysroot.
+under `sdk/abi/src`, `sdk/toyos/src` or a published crate changes no identity
+(`build/identity.rs`), so it owes no version and builds no sysroot.
 

@@ -209,7 +209,7 @@ pub struct Measured {
 /// **A window of known length is read back.** The kernel held both of one
 /// CPU's windows for the span its held line states: that CPU's reports from
 /// there to the load's start carry a window of each kind no shorter, and none
-/// past `metaltimings::ceiling` of it.
+/// past `timings::ceiling` of it.
 pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Measured, String> {
     let mut reports: Vec<(usize, Vec<Windows>)> = Vec::new();
     let mut open: Vec<Windows> = Vec::new();
@@ -273,7 +273,7 @@ pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Meas
     if held.0 < ns || held.1 < ns {
         return Err(format!("{read}: a window was reported shorter than it was held"));
     }
-    let ceiling = toyos_build::metaltimings::ceiling(ns);
+    let ceiling = toyos_metal::timings::ceiling(ns);
     if held.0 > ceiling || held.1 > ceiling {
         return Err(format!(
             "{read}, past the ceiling of {ceiling}: a window was reported at more than twice what was held"

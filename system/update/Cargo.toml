@@ -1,0 +1,21 @@
+[package]
+name = "update"
+description = "update: a signed image on standard input, verified and installed into the slot this machine is not running, and marked to boot next."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+# A slot's partitions, claimed on a disk the kernel drives or opened through
+# the block service.
+diskserver = { path = "../diskserver" }
+# The format, the verifier and the slot table the loader reads the same way.
+toyos-update = { path = "../../lib/update" }
+# A slot's volume is FAT, written with the driver the kernel mounts FAT with.
+toyos-fat32 = { path = "../../lib/fat32" }
+# ROOT is hashed as it streams onto its partition, never held whole.
+toyos-sha2-hw = { path = "../../lib/sha2-hw" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor grants it"

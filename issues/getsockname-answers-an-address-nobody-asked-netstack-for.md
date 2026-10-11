@@ -6,7 +6,7 @@ opened: 2026-09-08
 
 # `getsockname` answers an address nobody asked netd for
 
-`userland/libc/src/socket.rs`'s `getsockname()` fills the caller's `sockaddr`
+`sdk/libc/src/socket.rs`'s `getsockname()` fills the caller's `sockaddr`
 with `[10, 0, 2, 15]` and the socket's local port. The address is a literal in
 that function; netd is not asked, and the SDK has nothing to ask it with —
 `toyos::net` carries `tcp_connect`, `tcp_bind`, `tcp_accept`, the UDP calls and

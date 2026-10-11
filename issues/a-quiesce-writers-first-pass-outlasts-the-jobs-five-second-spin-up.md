@@ -66,7 +66,7 @@ The same test, with the same harness message and no `stop:` record:
 **Exit condition.** Restored when a reproduction names what holds a writer's
 first write-and-fsync pass for over 5 s while another writer passes in under a
 third of a second, and the fix is shown against it. Owner: the `/log` write and
-sync path `tests/toyos-rust-tests/src/bin/quiesce_writers.rs` drives; held by
+sync path `tests/guest/rust-tests/src/bin/quiesce_writers.rs` drives; held by
 the orchestrator.
 
 **Unrun since it was disabled**: PR #562 deleted the job's 5 s spin-up.

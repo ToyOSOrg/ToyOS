@@ -25,7 +25,7 @@ Run 36988155706, at `46af79d5d`, waited behind a dispatched nightly
 (#643, #664, #679, #659). The release this decision replaced read no tip: a
 landing that moved no SDK crate did not stop it.
 
-Owner: the release module (`src/release.rs`) and `nightly.yml`'s `release`.
+Owner: the release module (`build/release.rs`) and `nightly.yml`'s `release`.
 
 **Exit**: a landing during a nightly does not leave main's tip without its
 toolchain release and SDK alias: after a day on which every nightly was

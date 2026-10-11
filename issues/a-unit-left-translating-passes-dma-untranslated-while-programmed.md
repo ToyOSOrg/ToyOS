@@ -17,7 +17,7 @@ remap exactly as the ones being walked, which takes firmware's tables read and
 copied first, as Linux's kdump path does (`copy_translation_tables`,
 `drivers/iommu/intel/iommu.c`); Linux outside kdump switches `TE` off as this
 kernel does. Any copy has to read them before the pmm hands their memory out:
-it takes `EfiBootServicesData` as free (`toyos-bootmap/src/lib.rs`,
+it takes `EfiBootServicesData` as free (`lib/bootmap/src/lib.rs`,
 `is_usable_type`).
 
 Evidence: no machine here is handed a unit translating; the T14's four units

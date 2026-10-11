@@ -6,7 +6,7 @@ opened: 2026-09-05
 
 # `stats` does not resolve the command its user typed, so a relative one is refused
 
-`userland/toybox/src/stats.rs:12` spawns what it was given, unchanged:
+`system/toybox/src/stats.rs:12` spawns what it was given, unchanged:
 
 ```
     let mut child = Command::new(&args[0])
@@ -29,7 +29,7 @@ resolving: `/system/bin/shell` is the other, and does.
 ## The fix
 
 `toyos_manifest::package::launch_path(&args[0], &cwd)`, the same call
-`userland/shell/src/main.rs` makes, with `cwd` from `env::current_dir()` — a
+`system/shell/src/main.rs` makes, with `cwd` from `env::current_dir()` — a
 launch carries a working directory and init applies it, so `stats` has the one
 its caller gave it. `toybox` would take `toyos-manifest` as a dependency, which
 `shell` and `init` already do.
