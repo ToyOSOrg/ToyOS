@@ -123,4 +123,11 @@ pub fn log_cpuid(cpu_id: u32) {
         (edx1 >> 13) & 1,
         cpu::read_cr4(),
     );
+    #[cfg(feature = "scout-pcid-without-invpcid")]
+    if cpu_id == 0 {
+        match super::control_regs::pcid_active() {
+            true => log!("scout-twin: pcid-without-invpcid active: PCIDE declared, no INVPCID issued"),
+            false => log!("scout-twin: pcid-without-invpcid IMPOSSIBLE: this CPU has no PCID, so this boot is the baseline"),
+        }
+    }
 }

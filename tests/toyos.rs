@@ -683,7 +683,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         "scout_tlb_pcid_noinvpcid",
-        metal::Metal { arms: SCOUT_TLB_PCID_NOINVPCID, judge: |b| scout_tlb_said(b[0]) },
+        metal::Metal {
+            arms: SCOUT_TLB_PCID_NOINVPCID,
+            judge: |b| {
+                b[0].kernel().must_say("scout-twin: pcid-without-invpcid active")?;
+                scout_tlb_said(b[0])
+            },
+        },
     ),
     (
         "scout_wake_split",
