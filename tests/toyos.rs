@@ -6972,7 +6972,7 @@ fn main() {
 
     // A filter that takes nothing would be dropped in silence beside one that
     // takes something.
-    if let Some(dead) = filters.iter().find(|f| !declared().any(|name| name.contains(**f))) {
+    if let Some(dead) = filters.iter().find(|f| !declared().any(|name| kept(std::slice::from_ref(f), name))) {
         eprintln!("No test matches filter {dead:?}");
         run.exit(1);
     }
