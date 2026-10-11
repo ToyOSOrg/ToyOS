@@ -100,6 +100,12 @@ pub fn table(log: &str) -> String {
                     row(&mut out, 'M', &format!("netstack {name}"), v / mb, "/MB");
                 }
             }
+            // Round 3: the ACK spacing and stretch the sender sees, and the cadence's interval.
+            let acks = g(prof, "ack_gap_n");
+            row(&mut out, 'D', "ack gap, mean (ack-moving segments)", g(prof, "ack_gap_ns") / acks / 1e3, "us");
+            row(&mut out, 'D', "bytes acknowledged per ack-moving segment", g(prof, "ack_bytes") / (g(prof, "ack_segs") - g(prof, "ack_zero")), "B");
+            row(&mut out, 'D', "cadence asked, mean", g(prof, "pace_ns") / g(prof, "paces") / 1e3, "us");
+            row(&mut out, 'D', "ITR applied, mean", g(prof, "itr_units") * 256.0 / g(prof, "paces") / 1e3, "us");
             let kernel = busy_mcyc - app_mcyc - ns_ms * ghz;
             row(&mut out, 'D', "kernel outside both tasks (busy less app, netstack)", kernel, "Mcyc");
         } else {
