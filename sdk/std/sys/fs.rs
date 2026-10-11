@@ -122,8 +122,7 @@ pub struct FileAttr {
     size: u64,
     file_type: FileType,
     mtime: u64,
-    /// `toyos_abi::syscall::Stat`'s identity; 0 for what the kernel numbers
-    /// not — its directories and symlinks.
+    /// `toyos_abi::syscall::Stat`'s identity.
     volume: u64,
     node: u64,
 }
@@ -203,16 +202,11 @@ impl FileAttr {
     fn of_kernel(stat: syscall::Stat) -> FileAttr {
         FileAttr {
             size: stat.size,
-            file_type: opened_file_type(stat.file_type),
+            file_type: kernel_file_type(stat.file_type),
             mtime: stat.mtime,
             volume: stat.volume,
             node: stat.node,
         }
-    }
-
-    /// What the kernel answers of a name it opens not: its kind and size alone.
-    fn unopened(size: u64, file_type: FileType) -> FileAttr {
-        FileAttr { size, file_type, mtime: 0, volume: 0, node: 0 }
     }
 
     pub fn volume(&self) -> u64 {
@@ -291,7 +285,7 @@ impl DirEntry {
         self.name.clone()
     }
 
-    /// Asked of the entry, as Unix's is: a listing carries no identity.
+    /// Asked of the entry, as Unix's is.
     pub fn metadata(&self) -> io::Result<FileAttr> {
         lstat(&self.path())
     }
@@ -764,21 +758,13 @@ impl fmt::Debug for File {
     }
 }
 
-/// Whether the kernel's `path` names a directory, asked through `readdir`: a
-/// directory too large to list is still one, which is why
-/// `ResourceExhausted` is a yes.
-fn kernel_is_dir(path: &[u8]) -> bool {
-    let mut buf = [0u8; 1];
-    match syscall::readdir(path, &mut buf) {
-        Ok(_) | Err(SyscallError::ResourceExhausted) => true,
-        Err(_) => false,
+/// The type of something the kernel answered a `stat` or `fstat` of.
+fn kernel_file_type(ty: syscall::FileType) -> FileType {
+    FileType {
+        is_file: ty == syscall::FileType::File,
+        is_dir: ty == syscall::FileType::Directory,
+        is_symlink: ty == syscall::FileType::Symlink,
     }
-}
-
-/// The type of something the kernel's `open` accepted, which is never a
-/// directory.
-fn opened_file_type(ty: syscall::FileType) -> FileType {
-    FileType { is_file: ty == syscall::FileType::File, is_dir: false, is_symlink: false }
 }
 
 /// A listing too large for a first buffer is asked again at the size it
@@ -948,37 +934,16 @@ pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "no hard links on ToyOS"))
 }
 
-fn kernel_stat(abs: &str) -> io::Result<FileAttr> {
-    if let Ok(fd) = syscall::open(abs.as_bytes(), OpenFlags::READ) {
-        let result = syscall::fstat(fd);
-        syscall::close(fd);
-        return result.map(FileAttr::of_kernel).map_err(to_io_error);
-    }
-    if kernel_is_dir(abs.as_bytes()) {
-        return Ok(FileAttr::unopened(0, FileType { is_file: false, is_dir: true, is_symlink: false }));
-    }
-    Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
+fn kernel_stat(abs: &str, follow: bool) -> io::Result<FileAttr> {
+    syscall::stat(abs.as_bytes(), follow).map(FileAttr::of_kernel).map_err(to_io_error)
 }
 
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
-    on_path(path, kernel_stat, |_, dir, rel| dir.stat(rel, true).map(FileAttr::of))
+    on_path(path, |abs| kernel_stat(abs, true), |_, dir, rel| dir.stat(rel, true).map(FileAttr::of))
 }
 
 pub fn lstat(path: &Path) -> io::Result<FileAttr> {
-    on_path(
-        path,
-        |abs| {
-            let mut link_buf = [0u8; 4096];
-            if let Ok(n) = syscall::readlink(abs.as_bytes(), &mut link_buf) {
-                return Ok(FileAttr::unopened(
-                    n as u64,
-                    FileType { is_file: false, is_dir: false, is_symlink: true },
-                ));
-            }
-            kernel_stat(abs)
-        },
-        |_, dir, rel| dir.stat(rel, false).map(FileAttr::of),
-    )
+    on_path(path, |abs| kernel_stat(abs, false), |_, dir, rel| dir.stat(rel, false).map(FileAttr::of))
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {

@@ -87,6 +87,16 @@ pub fn create_file(evictable: bool, mtime: u64) -> FileId {
     id
 }
 
+/// A number from the count `FileId`s are drawn from, which no file will ever
+/// hold: a kernel volume's node for a name the cache keeps no file for, so no
+/// node on a kernel volume is another's (`vfs::FileSystem::node`).
+pub fn draw_node() -> u64 {
+    let mut cache = FILE_CACHE.lock();
+    let node = cache.next_id;
+    cache.next_id += 1;
+    node
+}
+
 /// Point a file at the store its evicted pages come back from; idempotent across opens of the same file.
 pub fn set_backing(file_id: FileId, backing: Arc<dyn FileBacking>) {
     let mut cache = FILE_CACHE.lock();

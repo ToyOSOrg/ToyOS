@@ -66,18 +66,48 @@ fn present<T>(op: &str, name: &str, result: Result<Option<T>, FsError>) -> Resul
 /// file cannot be served off bytes its filesystem does not occupy.
 pub struct ReadOnlyBcacheFsAdapter {
     fs: Mounted<MemoryImage, ReadOnly>,
-    name_to_id: BTreeMap<String, FileId>,
+    /// Every name's node once asked: a file's `FileId`, a symlink's a drawn
+    /// one. The volume never changes, so a name is one entry for the boot.
+    nodes: BTreeMap<String, u64>,
 }
 
 impl ReadOnlyBcacheFsAdapter {
     pub fn new(fs: Mounted<MemoryImage, ReadOnly>) -> Self {
-        Self { fs, name_to_id: BTreeMap::new() }
+        Self { fs, nodes: BTreeMap::new() }
+    }
+
+    /// The `FileId` of the file `name`, `size` bytes long, made with no
+    /// reference held when this is its first ask.
+    fn file_id(&mut self, name: &str, size: u64) -> FileId {
+        if let Some(&file_id) = self.nodes.get(name) {
+            return file_id;
+        }
+        // Its mtime is the volume's (`file_mtime`), never the cache's.
+        let file_id = file_cache::create_file(true, 0);
+        file_cache::set_size(file_id, size);
+        file_cache::release(file_id);
+        self.nodes.insert(String::from(name), file_id);
+        file_id
     }
 }
 
 impl FileSystem for ReadOnlyBcacheFsAdapter {
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError> {
+        let listed = mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))?;
+        Ok(listed.into_iter().map(|(name, _)| name).collect())
+    }
+
+    fn node(&mut self, name: &str) -> Result<u64, SyscallError> {
+        if let Some(&node) = self.nodes.get(name) {
+            return Ok(node);
+        }
+        if mapped("is_symlink", name, self.fs.is_symlink(name))? {
+            let node = file_cache::draw_node();
+            self.nodes.insert(String::from(name), node);
+            return Ok(node);
+        }
+        let (_, size) = present("node", name, self.fs.file_extents(name))?;
+        Ok(self.file_id(name, size))
     }
 
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError> {
@@ -94,18 +124,8 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         let (extents, size) = present("open", name, self.fs.file_extents(name))?;
-        if let Some(&file_id) = self.name_to_id.get(name) {
-            file_cache::open(file_id).commit();
-            let backing = Arc::new(ReadOnlyBacking::new(*self.fs.io(), extents, size));
-            return Ok((file_id, Some(backing)));
-        }
-
-        // Its mtime is the volume's (`file_mtime`), never the cache's.
-        let file_id = file_cache::create_file(true, 0);
-        file_cache::set_size(file_id, size);
-
-        self.name_to_id.insert(String::from(name), file_id);
-
+        let file_id = self.file_id(name, size);
+        file_cache::open(file_id).commit();
         let backing = Arc::new(ReadOnlyBacking::new(*self.fs.io(), extents, size));
         Ok((file_id, Some(backing)))
     }

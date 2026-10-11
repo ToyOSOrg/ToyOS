@@ -7,8 +7,7 @@ use crate::sys::AsInner;
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 pub trait MetadataExt {
     /// The volume the file is on (`toyos_abi::syscall::Stat::volume`), as
-    /// Unix's `dev`: 0 for what has none, a directory or symlink the kernel
-    /// serves among them.
+    /// Unix's `dev`: 0 for what has none.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn dev(&self) -> u64;
     /// The file on that volume (`toyos_abi::syscall::Stat::node`), as Unix's

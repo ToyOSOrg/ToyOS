@@ -38,6 +38,20 @@ pub(super) fn sys_open(path: &str, flags: OpenFlags) -> u64 {
     process::with_process_data(|data| ops::open(&mut data.handles, &resolved, flags))
 }
 
+/// What `path` names, a final symlink followed when `follow` says so.
+pub(super) fn sys_stat(path: &str, follow: bool) -> Result<ops::Stat, SyscallError> {
+    let cwd = process::with_process_data(|d| d.cwd.clone());
+    let mut vfs = vfs::lock();
+    let resolved = vfs.resolve_absolute(&cwd, path);
+    let vfs::Named { kind, volume, node } = vfs.stat(&resolved, follow)?;
+    let (file_type, size, mtime) = match kind {
+        vfs::NamedKind::File { mtime } => (FileType::File, crate::file_cache::size(node), mtime),
+        vfs::NamedKind::Symlink { len } => (FileType::Symlink, len, 0),
+        vfs::NamedKind::Directory => (FileType::Directory, 0, 0),
+    };
+    Ok(ops::Stat { file_type: file_type as u64, size, mtime, volume, node })
+}
+
 /// Returns the length needed; writes the listing only when it fits (`n <= out.len()`).
 pub(super) fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
@@ -54,7 +68,7 @@ pub(super) fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
     }
 
     let mut pos = 0;
-    for (name, size) in &entries {
+    for (name, node) in &entries {
         let is_dir = name.ends_with('/');
         let clean_name = if is_dir { &name[..name.len() - 1] } else { name.as_str() };
         out.write_at(pos, &[if is_dir { DIRENT_DIR } else { DIRENT_FILE }]);
@@ -63,7 +77,7 @@ pub(super) fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
         pos += clean_name.len();
         out.write_at(pos, &[0]);
         pos += 1;
-        out.write_at(pos, &size.to_le_bytes());
+        out.write_at(pos, &node.to_le_bytes());
         pos += 8;
     }
     debug_assert_eq!(pos, needed);

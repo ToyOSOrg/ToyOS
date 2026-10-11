@@ -145,31 +145,38 @@ pub unsafe extern "C" fn lseek(raw_fd: i32, offset: i64, whence: i32) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
-    match syscall::fstat(fd(raw_fd)) {
-        Ok(st) => {
-            if !buf.is_null() {
-                ptr::write_bytes(buf, 0, 1);
-                let s = &mut *buf;
-                s.st_dev = st.volume;
-                s.st_ino = st.node;
-                s.st_size = st.size as i64;
-                s.st_mtim = Timespec {
-                    tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
-                    tv_nsec: (st.mtime % NANOS_PER_SEC) as i64,
-                };
-                s.st_mode = match st.file_type {
-                    syscall::FileType::File => S_IFREG | 0o644,
-                    syscall::FileType::Pipe => S_IFIFO | 0o644,
-                    syscall::FileType::Tty => S_IFCHR | 0o644,
-                    syscall::FileType::Keyboard => S_IFCHR | 0o444,
-                    syscall::FileType::Serial => S_IFCHR | 0o644,
-                    _ => 0o644,
-                };
-            }
-            0
-        }
-        Err(e) => set_errno(e),
+    unsafe { answered(syscall::fstat(fd(raw_fd)), buf) }
+}
+
+/// `buf` filled from the kernel's `answer`, or `errno` from its refusal.
+unsafe fn answered(answer: Result<syscall::Stat, syscall::SyscallError>, buf: *mut Stat) -> i32 {
+    let st = match answer {
+        Ok(st) => st,
+        Err(e) => return set_errno(e),
+    };
+    if !buf.is_null() {
+        // SAFETY: C's caller hands one `struct stat` at `buf`.
+        unsafe { ptr::write_bytes(buf, 0, 1) };
+        let s = unsafe { &mut *buf };
+        s.st_dev = st.volume;
+        s.st_ino = st.node;
+        s.st_size = st.size as i64;
+        s.st_mtim = Timespec {
+            tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
+            tv_nsec: (st.mtime % NANOS_PER_SEC) as i64,
+        };
+        s.st_mode = match st.file_type {
+            syscall::FileType::File => S_IFREG | 0o644,
+            syscall::FileType::Directory => S_IFDIR | 0o755,
+            syscall::FileType::Symlink => S_IFLNK | 0o777,
+            syscall::FileType::Pipe => S_IFIFO | 0o644,
+            syscall::FileType::Tty => S_IFCHR | 0o644,
+            syscall::FileType::Keyboard => S_IFCHR | 0o444,
+            syscall::FileType::Serial => S_IFCHR | 0o644,
+            _ => 0o644,
+        };
     }
+    0
 }
 
 #[no_mangle]
@@ -300,56 +307,15 @@ pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
     }
 }
 
-/// Whether `path` names a directory, asked through `readdir`.
-///
-/// `open` refuses every directory, so this is the only way to tell. The buffer
-/// is deliberately tiny — only whether the kernel accepted the path matters,
-/// and a listing that does not fit is reported rather than written, so a
-/// directory too large to list is still a yes.
-unsafe fn is_dir(path_bytes: &[u8]) -> bool {
-    let mut probe = [0u8; 1];
-    matches!(
-        syscall::readdir(path_bytes, &mut probe),
-        Ok(_) | Err(syscall::SyscallError::ResourceExhausted)
-    )
-}
-
-/// Fill `buf` with what a directory looks like to `stat`: a mode and nothing
-/// else, because `readdir` answers existence and the kernel keeps no size or
-/// mtime for one.
-unsafe fn stat_a_directory(buf: *mut Stat) -> i32 {
-    if !buf.is_null() {
-        ptr::write_bytes(buf, 0, 1);
-        (*buf).st_mode = S_IFDIR | 0o755;
-    }
-    0
-}
-
-// stat by path: open + fstat + close, or readdir for what open refuses
 #[no_mangle]
 pub unsafe extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
-    stat_impl(path, buf)
+    unsafe { answered(syscall::stat(c_str_to_bytes(path), true), buf) }
 }
 
 /// `stat` that does not follow a final symbolic link.
-///
-/// `SYS_READLINK` is what distinguishes one, and it is asked first: it succeeds
-/// on a link and on nothing else, so a success is both the answer and the
-/// target length `st_size` reports. Everything else is [`stat`].
 #[no_mangle]
 pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
-    let path_bytes = c_str_to_bytes(path);
-    let mut target = [0u8; 4096];
-    if let Ok(n) = syscall::readlink(path_bytes, &mut target) {
-        if !buf.is_null() {
-            ptr::write_bytes(buf, 0, 1);
-            let s = &mut *buf;
-            s.st_mode = S_IFLNK | 0o777;
-            s.st_size = n as i64;
-        }
-        return 0;
-    }
-    stat_impl(path, buf)
+    unsafe { answered(syscall::stat(c_str_to_bytes(path), false), buf) }
 }
 
 /// `SYS_READLINK` answers `NotFound` for a path that is no link as for one
@@ -365,8 +331,8 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
     match syscall::readlink(c_str_to_bytes(path), target) {
         Ok(n) => n as isize,
         Err(syscall::SyscallError::NotFound) => {
-            // `stat_impl` sets `errno` for a path that names nothing.
-            if unsafe { stat_impl(path, ptr::null_mut()) } == 0 {
+            // `stat` sets `errno` for a path that names nothing.
+            if unsafe { stat(path, ptr::null_mut()) } == 0 {
                 crate::errno::set(EINVAL);
             }
             -1
@@ -375,29 +341,10 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
     }
 }
 
-unsafe fn stat_impl(path: *const u8, buf: *mut Stat) -> i32 {
-    let path_bytes = c_str_to_bytes(path);
-    // Try opening read-only
-    match syscall::open(path_bytes, OpenFlags::READ) {
-        Ok(f) => {
-            let result = fstat(f.0 as i32, buf);
-            syscall::close(f);
-            result
-        }
-        Err(_) if is_dir(path_bytes) => stat_a_directory(buf),
-        Err(e) => set_errno(e),
-    }
-}
-
+/// ToyOS has no permissions model: whether `path` names anything.
 #[no_mangle]
 pub unsafe extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
-    // ToyOS has no permissions model; just check existence
-    let path_bytes = c_str_to_bytes(path);
-    match syscall::open(path_bytes, OpenFlags::READ) {
-        Ok(f) => { syscall::close(f); 0 }
-        Err(_) if is_dir(path_bytes) => 0,
-        Err(e) => set_errno(e),
-    }
+    unsafe { stat(path, ptr::null_mut()) }
 }
 
 #[no_mangle]
@@ -482,7 +429,6 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
 pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     if dir.is_null() { return ptr::null_mut(); }
     let d = &mut *dir;
-    let start = d.at;
     let Some(entry) = syscall::dirent(&d.listing, &mut d.at) else { return ptr::null_mut() };
     let Some(d_name) = crate::listing::d_name(entry.name) else {
         crate::errno::set(crate::errno::EOVERFLOW);
@@ -492,7 +438,7 @@ pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     // Use a static buffer for the dirent (not thread-safe, matching POSIX convention)
     static mut DIRENT_BUF: dirent = dirent { d_ino: 0, d_type: 0, d_name: [0; crate::listing::D_NAME] };
     let ent = &raw mut DIRENT_BUF;
-    ent.write(dirent { d_ino: (start + 1) as u64, d_type: if entry.is_dir { DT_DIR } else { DT_UNKNOWN }, d_name });
+    ent.write(dirent { d_ino: entry.node, d_type: if entry.is_dir { DT_DIR } else { DT_UNKNOWN }, d_name });
     ent
 }
 
