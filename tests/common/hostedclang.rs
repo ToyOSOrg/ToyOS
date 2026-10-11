@@ -32,7 +32,7 @@ const HELLO: &str = "hello from a C program compiled and linked inside ToyOS";
 pub fn hosted_clang_hello() -> Result<(), String> {
     let hosted = toyos_build::hostedclang::ensure(&compile::repo_root());
     let c = compile::c_sysroot();
-    let (case, sources) = (compile::repo_root().join("tests/images/hostedclangcase.toml"), compile::repo_root().join("tests/hostedclangcase"));
+    let (case, sources) = (compile::repo_root().join("tests/images/hostedclangcase.toml"), compile::repo_root().join("tests/guest/c"));
 
     let scratch = super::lane::dir().join(JOB);
     fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
@@ -77,7 +77,7 @@ pub fn hosted_clang_hello() -> Result<(), String> {
     fs::remove_dir_all(&scratch).map_err(|e| format!("remove {}: {e}", scratch.display()))?;
 
     let options = BootOptions { extra_root_files: staged, ..Default::default() };
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
     let result = qemu.run_test(&format!("test_rs_{JOB} /system/{STAGED}"), Duration::from_secs(600));
     if let Some(why) = &result.error {

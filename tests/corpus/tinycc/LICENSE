@@ -1,8 +1,8 @@
 Licences and provenance of the C test corpus
 
-`tinycc/` is what the toolchain's clang and ToyOS's C library are tested
-against, compiled on the host and run as ToyOS processes. Most of it is not
-ours. This file says which, and carries the notices that have to
+This directory, `tinycc/`, is what the toolchain's clang and ToyOS's C
+library are tested against, compiled on the host and run as ToyOS processes.
+Most of it is not ours. This file says which, and carries the notices that have to
 travel with them; it is the attribution the corpus was missing until
 2026-08-08.
 
@@ -21,7 +21,7 @@ against tinycc upstream at 64552b3faa39ee7948a9ea21bfcc11045b90c70d
 (repo.or.cz/tinycc.git, 2026-08-05), allowing for the `-` → `_` renames this
 project made to some filenames.
 
-  tinycc/    330 files: 239 byte-identical to tinycc's `tests/tests2`,
+  tinycc/    330 files beside this one: 239 byte-identical to tinycc's `tests/tests2`,
                         17 tinycc files this project modified,
                         74 not upstream at all — 73 cases written here, plus
                         `fred.txt`, which is output `40_stdio.c` writes when it

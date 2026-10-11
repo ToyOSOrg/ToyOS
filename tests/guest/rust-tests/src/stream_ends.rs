@@ -3,7 +3,7 @@
 //! kernel's TCP, and the two reports are compared line for line.
 //!
 //! The peer is the harness's: a connection's first byte names what it does,
-//! and `tests/netcase/stream_ends.c` dials it with the same bytes. Every end it
+//! and `tests/guest/c/stream_ends.c` dials it with the same bytes. Every end it
 //! makes waits on something the client did, so no line depends on how long
 //! anything took.
 //!

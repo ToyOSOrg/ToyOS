@@ -2,7 +2,7 @@
    its own SHUT_WR, ECONNRESET on a reset mid-stream and after SHUT_WR, EPIPE
    for a send after SHUT_WR, and recv 0 after SHUT_RD. argv: the address and
    the port of the harness's peer, whose first byte read names how it ends the
-   stream (`tests/toyos-rust-tests/src/stream_ends.rs`). No stream is closed:
+   stream (`tests/guest/rust-tests/src/stream_ends.rs`). No stream is closed:
    libc's close of a socket ends the program
    (`issues/libc-close-of-a-socket-ends-the-process.md`), and the job's exit
    lets each go. */

@@ -79,8 +79,8 @@ pub const fn once(
 
 /// One boot carrying members that are **discovered rather than registered**.
 ///
-/// The shared block's binaries are files under `tests/toyos-rust-tests/src/bin/`
-/// and its C cases are files under `tests/testcases/tinycc/`; no `&'static`
+/// The shared block's binaries are files under `tests/guest/rust-tests/src/bin/`
+/// and its C cases are files under `tests/corpus/tinycc/`; no `&'static`
 /// table can name them, and there is nothing to say about each one that is not
 /// said about all of them — every member is judged the same way, by the kernel's
 /// exit record for it. So they are a boot with a list rather than a row each,
@@ -734,7 +734,7 @@ fn build(
         let (_, data) = rust_bins
             .iter()
             .find(|(n, _)| n == name)
-            .ok_or_else(|| format!("the job {job:?} names no binary under tests/toyos-rust-tests"))?;
+            .ok_or_else(|| format!("the job {job:?} names no binary under tests/guest/rust-tests"))?;
         extra.push((format!("bin/{job}"), data.clone()));
     }
     extra.extend(batch.files.iter().cloned());
@@ -753,7 +753,7 @@ fn build(
     // of every Rust job on it. A binary named nowhere in that is one this boot
     // cannot reach.
     if !batch.jobs.is_empty() {
-        let bin = root.join("tests/toyos-rust-tests/src/bin");
+        let bin = root.join("tests/guest/rust-tests/src/bin");
         let mut reachable = batch.jobs.join(" ");
         for (from, to) in &batch.links {
             reachable.push(' ');

@@ -164,8 +164,6 @@ const GUEST_CODE: &[&str] = &[
     "sdk/window",
     "sdk/filepicker",
     "sdk/libc/src",
-    "tests/toyos-rust-tests",
-    "tests/testcases",
 ];
 
 /// The host files that may name `temp_dir()` in code, and how many times.

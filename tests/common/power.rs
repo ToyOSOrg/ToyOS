@@ -193,7 +193,7 @@ pub fn machine_shutdown_wire_at_the_seal(test_config: &Path) -> Result<(), Strin
 pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
     let short = qemu::build_toyos_bin(
         qemu::SUITE_ARCH,
-        &super::compile::repo_root().join("tests/toyos-rust-tests"),
+        &super::compile::repo_root().join("tests/guest/rust-tests"),
         "stop_short",
     );
     let options = BootOptions {

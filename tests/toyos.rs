@@ -2,7 +2,7 @@
 extern crate toyos_build;
 
 mod common;
-#[path = "toyos-rust-tests/src/stream_ends.rs"]
+#[path = "guest/rust-tests/src/stream_ends.rs"]
 mod stream_ends;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1481,7 +1481,7 @@ const NOT_RUN: &[NotRun] = &[
     },
 ];
 
-/// Discover C tests by scanning tests/testcases/tinycc/*.c.
+/// Discover C tests by scanning tests/corpus/tinycc/*.c.
 /// Skips companion files (contain '+') and everything in [`NOT_RUN`].
 fn discover_c_tests() -> Vec<String> {
     let dir = compile::testcases_dir();
@@ -1507,10 +1507,10 @@ fn discover_c_tests() -> Vec<String> {
 /// and the [`LAST_MEMBERS`], which [`shared_metal`] places itself.
 ///
 /// **A name that arrives this way is registered by nothing but its file.**
-/// `tests/toyos-rust-tests/src/bin/<name>.rs` is the whole declaration — no row
+/// `tests/guest/rust-tests/src/bin/<name>.rs` is the whole declaration — no row
 /// here names it.
 fn discover_rust_tests() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests/src/bin");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests/src/bin");
     let mut names: Vec<String> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .filter_map(|e| {
@@ -1775,22 +1775,22 @@ fn inked(dump: &screen::Ppm, needle: &str, want: [u8; 3], why: &str) -> Result<(
     }
 }
 
-/// `tests/toyos-rust-tests`' binary that `tests/images/virtjobcase.toml` runs as its job
+/// `tests/guest/rust-tests`' binary that `tests/images/virtjobcase.toml` runs as its job
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
 /// The same for its job `test_rs_ring0_timer_in_syscall`.
 const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
 
-/// `tests/toyos-rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
+/// `tests/guest/rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
 
-/// `tests/toyos-rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
+/// `tests/guest/rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
 /// `test_rs_trace_read`.
 const VIRT_TRACE_READ: &str = "trace_read";
 
-/// `tests/toyos-rust-tests`' binary `name` built for `arch`, once a run, as a
+/// `tests/guest/rust-tests`' binary `name` built for `arch`, once a run, as a
 /// file a case's job list names on ROOT.
 fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<u8>) {
     type Built = Vec<(toyos_build::arch::Arch, &'static str, Vec<u8>)>;
@@ -1799,7 +1799,7 @@ fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<
     let bytes = match built.iter().find(|(a, n, _)| *a == arch && *n == name) {
         Some((.., bytes)) => bytes.clone(),
         None => {
-            let bytes = qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/toyos-rust-tests"), name);
+            let bytes = qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/guest/rust-tests"), name);
             built.push((arch, name, bytes.clone()));
             bytes
         }
@@ -2796,7 +2796,7 @@ fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String
 /// fatal.
 fn virt_fatal_halts_the_others_first(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/images/virtpaniccase.toml");
-    let fatal = qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), "panic_halts_first");
+    let fatal = qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/guest/rust-tests"), "panic_halts_first");
     let qemu = QemuInstance::boot_with_options(
         &config,
         &[],
@@ -3459,7 +3459,7 @@ fn netstack_socket_churn() -> Result<(), String> {
     thread::spawn(move || server.incoming().for_each(drop));
     let (holding, answering) = (holding_server()?, answering_server()?);
 
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
     let result = qemu
         .run_test(&format!("test_rs_netstack_socket_churn {port} {holding} {answering}"), Duration::from_secs(120));
@@ -3519,7 +3519,7 @@ fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
         }
     });
 
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let options = BootOptions { qmp: true, profile, ..Default::default() };
     let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], options)?;
     let [to_listener] = forwards_into(&qemu, [LISTENER])?;
@@ -3741,12 +3741,12 @@ fn libc_sockets() -> Result<(), String> {
         return Err(format!("this host's TCP reports\n{}\nand not\n{}", host.join("\n"), stream_ends::EXPECTED.join("\n")));
     }
 
-    let sources = compile::repo_root().join("tests/netcase");
+    let sources = compile::repo_root().join("tests/guest/c");
     let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound", "stream_ends"]
         .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&sources, name), name)))
         .into();
     let rust_bins: Vec<(String, Vec<u8>)> = RUST_JOBS
-        .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), job)))
+        .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), job)))
         .into();
     let mut qemu = boot_netcase(&c_bins, &rust_bins, BootOptions { qmp: true, ..Default::default() })?;
     let [held, clear, std_port, pipe_port] = LISTENERS;
@@ -3839,7 +3839,7 @@ fn https_fetch() -> Result<(), String> {
     const ROOTS: &str = "etc/ssl/harness-cert.pem";
     let mut roots = toyos_build::build::trust_roots();
     roots.extend_from_slice(trusted.pem().as_bytes());
-    let crate_path = compile::repo_root().join("tests/toyos-rust-tests");
+    let crate_path = compile::repo_root().join("tests/guest/rust-tests");
     let bins = [JOB, KAT].map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, name)));
     let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
     let mut qemu = boot_netcase(&[], &bins, options)?;
@@ -3969,7 +3969,7 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
 }
 
 /// `consent`'s steps, driven through the desktop's own keyboard and tablet
-/// (`tests/toyos-rust-tests/src/bin/consent.rs`), and each held to what the
+/// (`tests/guest/rust-tests/src/bin/consent.rs`), and each held to what the
 /// panel, the supervisor and the package said.
 ///
 /// **Every step is the guest's line and the host's answer to it**: the job
@@ -4420,7 +4420,7 @@ const GRANTS_SAID: [&str; 5] = [
 /// diskserver itself and mints each grant, and diskserver names each refusal.
 fn block_grants_reach_their_partitions() -> Result<(), String> {
     const JOB: &str = "partition_grant";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let case = compile::repo_root().join("tests/images/blockgrantcase.toml");
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
@@ -4490,7 +4490,7 @@ fn staged_update() -> StagedUpdate {
 fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String> {
     const JOB: &str = "update_idle_slot";
     let staged = staged_update();
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let case = compile::repo_root().join("tests/images/slotscase.toml");
     let options = BootOptions {
         profile: qemu::Profile::HeadlessNoUsb,
@@ -4584,7 +4584,7 @@ const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interr
 fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let options = BootOptions {
         profile: qemu::Profile::HeadlessUsbSpare,
         kernel_params: &["xhci-leave=1b36:000d"],
@@ -4727,7 +4727,7 @@ fn usb_keyboard_rollover(test_config: &Path) -> Result<(), String> {
 /// own.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu =
         QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
     serial::Serial::boot(&qemu).must_be_clean()?;
@@ -5587,7 +5587,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
-/// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
+/// (`tests/metal/t14-linux/hwp-request.txt`), and its power envelope in every read
 /// the one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
@@ -5603,7 +5603,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback"); and every CPU's busy frequency reached the lowest
 /// Linux's turbostat read under one `yes` per CPU on the same machine over the
-/// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
+/// same span of load (`tests/metal/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
 /// fraction, which an SMI in the idle second raises on every CPU alike by the
@@ -5655,8 +5655,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !inside.is_empty() {
         return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
-    let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
-        .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;
+    let linux_request = u64::from_str_radix(include_str!("metal/t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
+        .map_err(|e| format!("metal/t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -5757,12 +5757,12 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         eprintln!("  [counters] {}", said.split("counters_metal ").nth(1).unwrap_or(said).trim());
     }
     let range = |values: &[f64]| values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    let idle = range(&linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?);
-    let loaded_rows = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let idle = range(&linux(include_str!("metal/t14-linux/turbostat-idle.txt"), "Busy%")?);
+    let loaded_rows = linux(include_str!("metal/t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
     let loaded = range(&loaded_rows);
     // The floor is Linux's clock over the spin's own span of load, not after
     // the package settles: the intervals that open within it, the first 2 s
-    // into Linux's load and each 10 s long (`tests/t14-linux/SOURCE`).
+    // into Linux's load and each 10 s long (`tests/metal/t14-linux/SOURCE`).
     let spin_ns = at2 - at1;
     let opened = loaded_rows.iter().enumerate().take_while(|&(k, _)| 2_000_000_000 + k as u64 * 10_000_000_000 < spin_ns);
     let floor = opened.map(|(_, &mhz)| mhz).fold(f64::MAX, f64::min);
@@ -6370,7 +6370,7 @@ type Binaries = Vec<(String, Vec<u8>)>;
 /// and the C corpus, compiled once its declared cases have been attempted to
 /// their stages.
 fn build_shared_bins() -> (Binaries, Binaries) {
-    let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
+    let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     let c_names = discover_c_tests();
     eprintln!(

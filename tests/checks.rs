@@ -585,7 +585,7 @@ mod checks {
     /// nothing, which is the erosion this split exists to stop.
     #[test]
     fn suite_split() -> Result<(), String> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests/src/bin");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests/src/bin");
         let mut sources: Vec<(String, String)> = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
             let path = entry.map_err(|e| e.to_string())?.path();

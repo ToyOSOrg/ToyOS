@@ -78,9 +78,9 @@ if it meets the bar above; otherwise it is a NOTE.
   A third-party action `main` does not use is refused, every `uses:` pins a 40-hex commit with
   its tag in a trailing comment or names a local path that resolves, and every `runs-on:` names a
   GitHub-hosted runner: a self-hosted label queues until it times out rather than failing.
-  A file added to or deleted from `tests/testcases/tinycc/` moves the count
-  `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
-  else is tracked under `tests/testcases/` but that `LICENSE` and `system.toml`.
+  A file added to or deleted from `tests/corpus/tinycc/` moves the count its `LICENSE` states in
+  the same diff, and `46_grep.c` never comes back. Nothing is tracked under `tests/corpus/` but
+  that corpus and its `LICENSE`.
 - **What no gate reads.** A BLOCKER each: a workspace member's `Cargo.toml` declaring `[profile]`
   or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
   saying what it is; a new cargo feature or `cfg` arm of one, or an arm a changed `src/clippy.rs`

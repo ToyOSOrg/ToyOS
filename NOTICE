@@ -216,8 +216,8 @@ and forbids selling them by themselves. The licence reserves no font name, and
 none of these files is modified.
 
 
-tests/testcases/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
----------------------------------------------------------------------
+tests/corpus/tinycc/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
+-------------------------------------------------------------------------
 
     SPDX-License-Identifier: LGPL-2.1-or-later AND BSD-3-Clause AND (MIT OR Apache-2.0)
 
@@ -225,11 +225,11 @@ The C cases the toolchain's clang and the C library are tested against are
 mostly TinyCC's `tests/tests2`. They are compiler *input* — data, not linked
 code — so their terms do not reach this repository's own code, but they must
 still be attributed.
-`tests/testcases/LICENSE` is the attribution, and it says file by file what is
+`tests/corpus/tinycc/LICENSE` is the attribution, and it says file by file what is
 whose, with the counts it was established from.
 
 One case was deleted on 2026-08-08 rather than attributed:
-`tests/testcases/tinycc/46_grep.c`, "Copyright (C) 1980, DECUS", granting
+`tests/corpus/tinycc/46_grep.c`, "Copyright (C) 1980, DECUS", granting
 permission to copy or modify "but not for profit". That is not a free licence
 and it was never TinyCC's to relicense. Do not re-import it.
 

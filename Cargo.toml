@@ -146,12 +146,12 @@ exclude = [
     # first patches memmap2 and `tls-cranelift` target-lexicon, and a `[patch]`
     # is the whole workspace's. Named, and not `tests/` whole, so the gate finds
     # a host test under `tests/` that joined neither list.
-    "tests/toyos-rust-tests",
-    "tests/toyos-rust-tests/tls-cranelift",
-    "tests/toyos-rust-tests/tls-dlopen-lib",
-    "tests/toyos-rust-tests/tls-lib",
-    "tests/toyos-rust-tests/tls-multi-crate",
-    "tests/toyos-rust-tests/tls-multi-crate/dep",
+    "tests/guest/rust-tests",
+    "tests/guest/rust-tests/tls-cranelift",
+    "tests/guest/rust-tests/tls-dlopen-lib",
+    "tests/guest/rust-tests/tls-lib",
+    "tests/guest/rust-tests/tls-multi-crate",
+    "tests/guest/rust-tests/tls-multi-crate/dep",
 ]
 
 [package]
