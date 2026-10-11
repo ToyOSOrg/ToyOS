@@ -21,8 +21,8 @@
 //!
 //! **A committed file is judged by its [`COMMITTED_FILES`] row**,
 //! whose [`Terms`] column is its licence. A file ships when it is under a
-//! shipped asset directory or a shipped path package's directory, or when such
-//! a package [`embeds`] it. Every file under a shipped asset directory must have
+//! shipped asset directory, when the deepest package directory holding it is a
+//! shipped path package's, or when such a package [`embeds`] it. Every file under a shipped asset directory must have
 //! a row.
 //!
 //! **A `NOTICE` section covers what no row can name**: each carries one
@@ -1073,6 +1073,9 @@ struct Shipping {
     assets: BTreeSet<String>,
     /// The shipped path packages' directories.
     packages: BTreeSet<String>,
+    /// Every other package directory in the tree: a package nested in a shipped
+    /// one's directory owns its files, as cargo's own packaging has it.
+    unshipped: BTreeSet<String>,
     /// Every file name a shipped path package [`embeds`].
     named: BTreeSet<String>,
 }
@@ -1087,7 +1090,18 @@ fn file_name(path: &str) -> &str {
 
 impl Shipping {
     fn ships(&self, file: &str) -> bool {
-        under(&self.assets, file) || under(&self.packages, file) || self.named.contains(file_name(file))
+        under(&self.assets, file) || self.in_package(file) || self.named.contains(file_name(file))
+    }
+
+    /// Whether the deepest package directory holding `file` is a shipped one.
+    fn in_package(&self, file: &str) -> bool {
+        let deepest = |dirs: &BTreeSet<String>| {
+            dirs.iter().filter(|d| file.starts_with(&format!("{d}/"))).map(String::len).max()
+        };
+        match (deepest(&self.packages), deepest(&self.unshipped)) {
+            (Some(shipped), Some(other)) => shipped > other,
+            (shipped, _) => shipped.is_some(),
+        }
     }
 }
 
@@ -1412,22 +1426,33 @@ pub fn judge(root: &Path) -> Result<String, String> {
     }
 
     let relative = |dir: &Path| dir.strip_prefix(root).ok().map(|d| d.display().to_string());
+    let tracked = crate::sysroot::tracked_files(root, &[])?;
+    let packages: BTreeSet<String> =
+        local.dirs.iter().filter_map(|d| relative(d)).filter(|d| !d.is_empty()).collect();
+    let unshipped = tracked
+        .iter()
+        .filter_map(|f| f.strip_suffix("/Cargo.toml"))
+        .filter(|d| !packages.contains(*d))
+        .map(String::from)
+        .collect();
     let mut shipping = Shipping {
         assets: shipped.assets.iter().filter_map(|d| relative(d)).collect(),
-        packages: local.dirs.iter().filter_map(|d| relative(d)).filter(|d| !d.is_empty()).collect(),
+        packages,
+        unshipped,
         named: BTreeSet::new(),
     };
-    let tracked = crate::sysroot::tracked_files(root, &[])?;
     let names: BTreeSet<&str> = COMMITTED_FILES.iter().map(|(p, ..)| file_name(p)).collect();
-    let sources = tracked.iter().filter(|f| under(&shipping.packages, f) && f.ends_with(".rs"));
+    let sources = tracked.iter().filter(|f| shipping.in_package(f) && f.ends_with(".rs"));
     let read = sources
         .map(|f| (root.join(f), false))
         .chain(local.scripts.iter().map(|s| (s.clone(), true)));
+    let mut named = BTreeSet::new();
     for (file, script) in read {
         let text = std::fs::read_to_string(&file)
             .map_err(|e| format!("read {}: {e}", file.display()))?;
-        shipping.named.extend(embeds(&text, script, &names).into_iter().map(String::from));
+        named.extend(embeds(&text, script, &names).into_iter().map(String::from));
     }
+    shipping.named = named;
     judge_files(COMMITTED_FILES, &tracked, &shipping, &mut report);
 
     let notice =
@@ -1877,6 +1902,7 @@ ub_checks"#;
         Shipping {
             assets: BTreeSet::from(["assets".to_string()]),
             packages: BTreeSet::from(["kernel".to_string(), "userland/app".to_string()]),
+            unshipped: BTreeSet::new(),
             named: BTreeSet::from(["embedded.otf".to_string()]),
         }
     }
@@ -1908,6 +1934,18 @@ ub_checks"#;
             report.findings
         );
         assert!(report.findings[0].why.contains("no COMMITTED_FILES row"));
+    }
+
+    /// A package nested in a shipped one's directory owns its files: they ship
+    /// with it, and not with the package around it.
+    #[test]
+    fn a_nested_package_s_files_ship_only_with_it() {
+        let mut shipping = shipping();
+        shipping.unshipped.insert("kernel/staged".to_string());
+        assert!(!shipping.ships("kernel/staged/blob.bin"));
+        assert!(shipping.ships("kernel/raster.bin"));
+        shipping.packages.insert("kernel/staged/inner".to_string());
+        assert!(shipping.ships("kernel/staged/inner/blob.bin"));
     }
 
     /// A build script embeds what it names; other Rust source only what an
