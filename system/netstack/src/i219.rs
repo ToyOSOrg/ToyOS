@@ -243,6 +243,11 @@ impl Nic {
         self.driver.borrow().pass_due_in()
     }
 
+    /// MEASUREMENT ONLY.
+    pub fn rdt_writes(&self) -> u32 {
+        self.driver.borrow().counters().rdt_writes
+    }
+
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
         self.driver.borrow_mut().poll_rx()
     }
@@ -275,6 +280,10 @@ impl Nic {
     /// Hold the part's interrupts at least `nanos` apart.
     pub fn throttle(&self, nanos: u64) {
         self.driver.borrow_mut().throttle(nanos);
+        // MEASUREMENT ONLY: what was asked, and what `ITR` holds.
+        crate::prof::add(crate::prof::Slot::Paces, 1);
+        crate::prof::add(crate::prof::Slot::PaceNs, nanos);
+        crate::prof::add(crate::prof::Slot::ItrUnits, u64::from(self.driver.borrow().throttled()));
     }
 
     /// How many frames the transmit ring takes now.

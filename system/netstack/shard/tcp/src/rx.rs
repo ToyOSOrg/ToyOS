@@ -97,6 +97,8 @@ pub struct Rx {
     rcv_mss: u32,
     short: u32,
     mss_bounds: (u32, u32),
+    /// MEASUREMENT ONLY: when the ack point last moved on a segment sent.
+    pub last_ack_at: core::cell::Cell<Option<Instant>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,11 +143,16 @@ impl Rx {
             rcv_mss: floor,
             short: 0,
             mss_bounds: (floor, mss.saturating_sub(options)),
+            last_ack_at: core::cell::Cell::new(None),
         }
     }
 
+    /// MEASUREMENT ONLY: a D-SACK rides on the next segment.
+    pub fn has_dsack(&self) -> bool {
+        self.dsack.is_some()
+    }
+
     /// The most the peer may have unread and in flight to us: the receive buffer's present size.
-    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.buf.capacity()
     }
@@ -153,6 +160,11 @@ impl Rx {
     /// The receiver's round-trip estimate, once one has been sampled.
     pub const fn rtt(&self) -> Option<Duration> {
         self.rtt
+    }
+
+    /// MEASUREMENT ONLY.
+    pub const fn rcv_mss(&self) -> u32 {
+        self.rcv_mss
     }
 
     /// After in-order text of `len` bytes arrived at `now`, with its TSecr and that echo's age
@@ -268,7 +280,11 @@ impl Rx {
         self.ranges.splice(lo..hi, [merged]);
         if merged.start != self.next {
             self.trigger = Some(seq);
+            toyos_net_wire::prof::add(toyos_net_wire::prof::Slot::OooSegs, 1);
             return Placed::OutOfOrder;
+        }
+        if holes {
+            toyos_net_wire::prof::add(toyos_net_wire::prof::Slot::HoleFilled, 1);
         }
         self.ranges.remove(lo);
         self.buf.commit(usize::try_from(merged.end.since(self.next)).unwrap_or(0));

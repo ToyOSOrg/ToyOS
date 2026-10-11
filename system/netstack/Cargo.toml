@@ -19,9 +19,9 @@ toyos-inspect = { path = "../../lib/inspect" }
 toyos-net-node = { path = "node" }
 toyos-net-ip = { path = "ip" }
 toyos-net-shard = { path = "shard" }
-toyos-net-tcp = { path = "shard/tcp" }
+toyos-net-tcp = { path = "shard/tcp", features = ["prof"] }
 toyos-net-udp = { path = "udp" }
-toyos-net-wire = { path = "wire" }
+toyos-net-wire = { path = "wire", features = ["prof"] }
 
 [dev-dependencies]
 toyos-pci-claim = { path = "../../lib/pci-claim", features = ["host-grant"] }

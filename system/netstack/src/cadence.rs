@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Acknowledgments a round trip, at the least, and the inverse of the most the interval
 /// lengthens a round trip by.
-pub const K: u32 = 16;
+pub static K: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
 
 /// The least interval: an estimate of one wake's cost — the kernel's delivery of the interrupt
 /// and netstack's pass around its batch — on the hardware ToyOS targets.
@@ -48,7 +48,7 @@ pub struct Ring {
 /// How long the card holds its interrupt after a pass whose batch moved streams with
 /// `least_rtt` as their least round trip, on `ring`.
 pub fn cadence(least_rtt: Option<Duration>, ring: Ring) -> Duration {
-    let clock = least_rtt.map_or(FLOOR, |rtt| (rtt / K).max(FLOOR));
+    let clock = least_rtt.map_or(FLOOR, |rtt| (rtt / K.load(std::sync::atomic::Ordering::Relaxed)).max(FLOOR));
     let frames = ring.free.saturating_sub(ring.reserve) as u64;
     let ring_nanos = frames * WIRE_FRAME_BITS * 1000 / u64::from(ring.mbps.get()) / 2;
     clock.min(Duration::from_nanos(ring_nanos))
