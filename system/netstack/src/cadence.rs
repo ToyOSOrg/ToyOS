@@ -14,7 +14,9 @@
 //!   estimate has no clock to keep.
 //! - **The stretch**: [`STRETCH`] full-sized frames at the link's rate. A sender that does not pace
 //!   answers an acknowledgment with a burst of what it acknowledges, and a queue on the path has
-//!   to hold that burst or lose its tail; this bounds it whatever the round trip.
+//!   to hold that burst or lose its tail; this bounds it whatever the round trip, at a rate slow
+//!   enough that the stretch is longer than the floor. At a gigabit it is shorter, and the floor
+//!   holds.
 //! - **The ring**: the descriptors the device holds empty above the count it reports itself short
 //!   at must take one interval and one interval of lateness of full-sized frames at the link's
 //!   rate.
@@ -29,9 +31,9 @@ use std::time::Duration;
 /// lengthens a round trip by.
 pub const K: u32 = 32;
 
-/// The most full-sized frames a batch holds at the link's rate, and so the most an
-/// acknowledgment releases from a sender that does not pace.
-pub const STRETCH: u64 = 16;
+/// The most full-sized frames a batch holds at the link's rate above [`FLOOR`], and so the most
+/// an acknowledgment releases from a sender that does not pace.
+pub const STRETCH: u64 = 8;
 
 /// The least interval. A wake — the kernel's delivery of the interrupt and netstack's pass around
 /// its batch — costs about 30 µs on the hardware ToyOS targets, so wakes this far apart take under
@@ -68,6 +70,7 @@ mod tests {
     use super::*;
 
     const GIGABIT: NonZeroU32 = NonZeroU32::new(1000).unwrap();
+    const HUNDRED_MBPS: NonZeroU32 = NonZeroU32::new(100).unwrap();
 
     /// The rates an I219 links at.
     const I219_RATES: [u32; 3] = [10, 100, 1000];
@@ -83,6 +86,7 @@ mod tests {
 
     /// 1,538 bytes on the wire for a 1,500-byte packet, 12,304 ns of a gigabit link.
     const GIGABIT_FRAME: Duration = Duration::from_nanos(12_304);
+    const HUNDRED_MBPS_FRAME: Duration = Duration::from_nanos(123_040);
 
     #[test]
     fn a_full_sized_frame_takes_12_304_ns_at_a_gigabit() {
@@ -125,11 +129,11 @@ mod tests {
     }
 
     /// A batch that moved no stream with a round trip is held to the stretch, and to the floor
-    /// where the stretch is shorter.
+    /// where the stretch is shorter: at a gigabit, `STRETCH` frames are.
     #[test]
     fn a_batch_with_no_round_trip_is_held_to_the_stretch_above_the_floor() {
-        assert_eq!(cadence(None, ring(GIGABIT)), GIGABIT_FRAME * STRETCH as u32);
-        assert_eq!(cadence(None, ring(NonZeroU32::new(10_000).unwrap())), FLOOR);
+        assert_eq!(cadence(None, ring(HUNDRED_MBPS)), HUNDRED_MBPS_FRAME * STRETCH as u32);
+        assert_eq!(cadence(None, ring(GIGABIT)), FLOOR);
     }
 
     /// The bound is a `K`th of the least round trip between the floor and the stretch: a round
@@ -141,7 +145,7 @@ mod tests {
         assert_eq!(cadence(Some(ms(16)), ten_mbps), Duration::from_micros(500));
         assert_eq!(cadence(Some(ms(15)), ten_mbps), Duration::from_nanos(468_750));
         assert_eq!(cadence(Some(FLOOR * K - Duration::from_nanos(K.into())), ten_mbps), FLOOR);
-        assert_eq!(cadence(Some(ms(15)), ring(GIGABIT)), GIGABIT_FRAME * STRETCH as u32);
+        assert_eq!(cadence(Some(ms(40)), ring(HUNDRED_MBPS)), HUNDRED_MBPS_FRAME * STRETCH as u32);
     }
 
     /// A short path's stream beside a long path's sets the interval: the batch reports its least
