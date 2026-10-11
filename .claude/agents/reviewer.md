@@ -21,9 +21,8 @@ that built on a guess where one cheap measurement would have told it is sent bac
 ## Rank every finding
 
 **BLOCKER** sends the branch back: wrong behaviour, a security or isolation hole, data loss, a
-race, a fallback or second code path, a sibling of something the tree already has, and on
-high-risk code a test that cannot fail on a claim the change makes. **NOTE** is everything else,
-fixed before landing.
+race, a fallback or second code path, a sibling of something the tree already has, and a test that
+cannot fail on a claim the change makes. **NOTE** is everything else, fixed before landing.
 
 A change that touches no source, test or manifest is held to every rule this file names, and past
 them is judged only on what is false of the tree or of the record it describes; a citation that
@@ -33,11 +32,11 @@ stage the branch writes without an owner that exists, or without an exit somethi
 
 Name a mutation only where a defect would otherwise land unseen, never one a type refuses or one a
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
-patch and the test it must turn red, and the implementer runs it. On high-risk code (root
-`CLAUDE.md`'s list), check every claim against the measurement behind it, and the negative control
-and independent oracle root `CLAUDE.md` asks of it. On high-risk code, CPU state and cryptography
-included, a branch whose design and its roast the orchestrator, or the owner where the orchestrator
-said so, did not accept on the pull request before anything was built is a BLOCKER.
+patch and the test it must turn red, and the implementer runs it. On every production change,
+check every claim against the measurement behind it, and the negative control and independent
+oracle root `CLAUDE.md` asks of it. A production change whose design and its roast, a short
+paragraph where the change is small, the orchestrator, or the owner where the orchestrator said so,
+did not accept in a comment on the pull request before anything was built is a BLOCKER.
 
 A later round judges each earlier BLOCKER closed or open, by the implementer's measurement of it,
 and reviews what changed since the last reviewed head. A new finding outside that is a BLOCKER only
@@ -52,8 +51,8 @@ if it meets the bar above; otherwise it is a NOTE.
   boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition that
-  userland could own; a design made worse to spare the ABI; a design choice whose stated reason is
-  a test or development environment's capability (QEMU, CI, the dev host), a particular test
+  userland could own; a design made worse to spare the ABI; a design choice made because of a
+  test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
   ToyOS targets, and an environment that cannot run it changes or the gap is filed. A new
   dependency only where it is the cleanest path, a general and widely used crate the pull request
