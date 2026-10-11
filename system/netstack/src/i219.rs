@@ -244,6 +244,11 @@ impl Nic {
     }
 
     /// MEASUREMENT ONLY.
+    pub fn missed(&self) -> u64 {
+        self.driver.borrow_mut().missed()
+    }
+
+    /// MEASUREMENT ONLY.
     pub fn rdt_writes(&self) -> u32 {
         self.driver.borrow().counters().rdt_writes
     }

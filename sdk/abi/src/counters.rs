@@ -73,10 +73,16 @@ pub enum Counter {
     PipeLockHoldCycles,
     /// Bytes pipe reads and writes copied.
     PipeCopyBytes,
+    /// MEASUREMENT ONLY: instructions this CPU retired, both rings
+    /// (`IA32_FIXED_CTR0`).
+    Instructions,
+    /// MEASUREMENT ONLY: its package's energy (`MSR_PKG_ENERGY_STATUS`), in
+    /// microjoules, carried past the register's 32-bit wrap.
+    PkgEnergyUj,
 }
 
 impl Counter {
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 23;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -99,6 +105,8 @@ impl Counter {
         Self::PipeLockSpinCycles,
         Self::PipeLockHoldCycles,
         Self::PipeCopyBytes,
+        Self::Instructions,
+        Self::PkgEnergyUj,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -124,6 +132,8 @@ impl Counter {
             Self::PipeLockSpinCycles => "pipe_lock_spin_cycles",
             Self::PipeLockHoldCycles => "pipe_lock_hold_cycles",
             Self::PipeCopyBytes => "pipe_copy_bytes",
+            Self::Instructions => "instructions",
+            Self::PkgEnergyUj => "pkg_energy_uj",
         }
     }
 
@@ -147,7 +157,9 @@ impl Counter {
             | Self::InboxRearms
             | Self::PipeLockSpinCycles
             | Self::PipeLockHoldCycles
-            | Self::PipeCopyBytes => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::PipeCopyBytes
+            | Self::Instructions
+            | Self::PkgEnergyUj => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }

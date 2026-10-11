@@ -481,6 +481,57 @@ pub mod prof {
         Paces = "paces",
         PaceNs = "pace_ns",
         ItrUnits = "itr_units",
+        // Round 4: each duplicate a D-SACK reports, by what this end had said of it, and how old;
+        // and each run of segments lost below a new out-of-order range.
+        DsOld = "ds_old",
+        DsOldAcked = "ds_old_acked",
+        DsOldUnacked = "ds_old_unacked",
+        DsInRange = "ds_in_range",
+        DsInRangeUntold = "ds_in_range_untold",
+        DaLt500us = "ds_first_lt500us",
+        Da500us2ms = "ds_first_500us_2ms",
+        Da2_8ms = "ds_first_2_8ms",
+        Da8_32ms = "ds_first_8_32ms",
+        DaGe32ms = "ds_first_ge32ms",
+        DkLt500us = "ds_acked_lt500us",
+        Dk500us2ms = "ds_acked_500us_2ms",
+        Dk2_8ms = "ds_acked_2_8ms",
+        Dk8_32ms = "ds_acked_8_32ms",
+        DkGe32ms = "ds_acked_ge32ms",
+        L1 = "lost_run_1",
+        L2_4 = "lost_run_2_4",
+        L5_16 = "lost_run_5_16",
+        L17_64 = "lost_run_17_64",
+        L65 = "lost_run_ge65",
+    }
+
+    /// Round 4: a duplicate `ns` after the text it duplicates first arrived, or, `acked`, after
+    /// the acknowledgment that covered it left.
+    pub fn age(acked: bool, ns: u64) {
+        let bucket = match ns {
+            0..500_000 => 0,
+            500_000..2_000_000 => 1,
+            2_000_000..8_000_000 => 2,
+            8_000_000..32_000_000 => 3,
+            _ => 4,
+        };
+        let first = [Slot::DaLt500us, Slot::Da500us2ms, Slot::Da2_8ms, Slot::Da8_32ms, Slot::DaGe32ms];
+        let since_ack = [Slot::DkLt500us, Slot::Dk500us2ms, Slot::Dk2_8ms, Slot::Dk8_32ms, Slot::DkGe32ms];
+        add(if acked { since_ack[bucket] } else { first[bucket] }, 1);
+    }
+
+    /// Round 4: a new out-of-order range with `segs` full-sized segments missing below it.
+    pub fn run(segs: u64) {
+        add(
+            match segs {
+                0..=1 => Slot::L1,
+                2..=4 => Slot::L2_4,
+                5..=16 => Slot::L5_16,
+                17..=64 => Slot::L17_64,
+                _ => Slot::L65,
+            },
+            1,
+        );
     }
 
     /// Round 3: the gap between two acknowledgments that moved the ack point, in ns.

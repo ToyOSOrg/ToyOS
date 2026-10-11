@@ -51,6 +51,9 @@ pub struct Hardware {
     pub mperf: Option<u64>,
     pub envelope: Option<Envelope>,
     pub firmware: Option<Firmware>,
+    /// MEASUREMENT ONLY.
+    pub instructions: Option<u64>,
+    pub pkg_energy_uj: Option<u64>,
 }
 
 /// The commands this CPU wrote to the firmware, where it is the one that
@@ -134,6 +137,8 @@ fn sample(me: usize) -> [u64; WORDS] {
             | Counter::PipeLockSpinCycles
             | Counter::PipeLockHoldCycles
             | Counter::PipeCopyBytes => Some(soft::get(me, counter)),
+            Counter::Instructions => hardware.instructions,
+            Counter::PkgEnergyUj => hardware.pkg_energy_uj,
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

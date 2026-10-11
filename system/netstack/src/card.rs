@@ -159,6 +159,14 @@ impl Card {
         true
     }
 
+    /// MEASUREMENT ONLY, round 4: frames the MAC had no room for so far; virtio counts none.
+    pub fn missed(&self) -> u64 {
+        match self {
+            Self::Virtio(_) => 0,
+            Self::Intel(nic) => nic.missed(),
+        }
+    }
+
     /// MEASUREMENT ONLY: the card's `RDT` writes so far; virtio has none.
     pub fn rdt_writes(&self) -> u64 {
         match self {
