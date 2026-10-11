@@ -533,7 +533,7 @@ const LAPS: u64 = 100_000;
 /// span at least two cores, so at least two of every lap's hops cross one.
 const RING: u64 = 4;
 /// MEASUREMENT ONLY: the hang ceiling on the ring's laps.
-const RING_CEILING: Duration = Duration::from_secs(10);
+const RING_CEILING: Duration = Duration::from_secs(3);
 
 /// MEASUREMENT ONLY: the HITM counters' positive control. A token goes round
 /// a ring of [`RING`] spinning threads [`LAPS`] times; each holder reads the
