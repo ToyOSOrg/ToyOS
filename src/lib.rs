@@ -14,6 +14,7 @@ pub mod clippy;
 pub mod compiler;
 pub mod fatformat;
 pub mod firmware;
+pub mod flash;
 #[cfg(test)]
 pub mod gitfixture;
 pub mod gptwrite;
