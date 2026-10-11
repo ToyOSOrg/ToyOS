@@ -4,7 +4,7 @@ kind: tooling
 opened: 2026-10-11
 ---
 
-# A test in a guest-built crate outside `userland/` runs nowhere
+# A test in a guest-built crate no step reads runs nowhere
 
 `build/hostws.rs`'s `guest_built` takes a member out of the host members, so
 `--ci host`'s workspace `cargo test` and clippy's workspace shapes skip it.
@@ -14,7 +14,7 @@ Each such member is then tested by a step of its own, or not at all:
 - every program directly under `system/`, `apps/` and `tests/guest/`
   (`build::PROGRAM_ROOTS`) is read by `build/userlandhost.rs`'s survey, which
   runs a program's tests once it holds one;
-- `bootloader`, `sdk/window`, `sdk/font`, `sdk/filepicker`, `lib/logkeeper-api`,
+- `loader`, `sdk/window`, `sdk/font`, `sdk/filepicker`, `lib/logkeeper-api`,
   `lib/pci-claim` and `system/compositor/sprite` have neither.
 
 A `#[test]` added to one of those seven runs in no `--ci host` step, and
@@ -31,6 +31,6 @@ filepicker-api --all-targets` with the adopted lints and `-D warnings`
 exited 101 with 14 errors in `toyos`'s own source, measured just before the
 move.
 
-**Owner:** the orchestrator, with stage 7 of the track above.
+**Owner:** the orchestrator.
 **Exit:** a `#[test]` added to any `guest_built` member either runs in a
 `--ci host` step or reds it, and a fixture shows both for one of the seven.

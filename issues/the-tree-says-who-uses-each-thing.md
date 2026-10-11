@@ -202,8 +202,13 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
 4. **std off repository paths.** Landed with stages 5-9, in one pull
    request. **Exit:** std names both by version; the build supplies them by
    one `[patch]`; a clean toolchain build passes; the userland targets'
-   `libstd`/`libtoyos` are identical before and after; the keys move once,
-   through the fork's `library/`.
+   `libstd`/`libtoyos` have identical `.rlib` members and byte-identical
+   `.rmeta` and `.so` before and after, each object member's name aside,
+   which carries rustc's per-invocation token; the keys move once, in the
+   commit that names both by version, through the fork's `library/`,
+   `Cargo.toml` and `Cargo.lock` and the keyed std text. The closed
+   `std-names-the-sdk-crates-by-path.md`'s exit, "the sysroot key is
+   unchanged by the switch", is not met: every key moved.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker, osrelease and libc (with
    `tests/libc-arch` as `sdk/libc/arch/`). The moves landed with stage 4, in
    one pull request, with a clean toolchain build and the guest suite green.
@@ -221,7 +226,8 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `kernel/microcode`, the net family and `toyos-dns` into
    `system/netstack/`. Landed with stage 4, in one pull request. **Exit:** no
    `toyos-*` or `bcachefs` directory is left at the root; `git diff -M`
-   reports every change a rename; `--ci host` and the guest suite green.
+   reports no file added or deleted by the move; `--ci host` and the guest
+   suite green.
 7. **`userland/` splits into `system/`, `apps/` and `tests/guest/`;**
    programs resolve by name; `userland/CLAUDE.md` becomes `system/CLAUDE.md`;
    `files` drops `sprite` and `sprite` moves into the compositor. Landed with

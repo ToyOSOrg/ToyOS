@@ -26,7 +26,7 @@ userland survey gated it nowhere. So that the move left nothing less
 checked than before, `build/hostws.rs`'s `guest_built` names
 `system/compositor/sprite`, which keeps it out of the host members.
 
-**Owner:** the compositor.
+**Owner:** the track `issues/toyos-has-a-desktop.md`, whose compositor draws through `sprite`.
 **Exit:** `draw` writes only through a destination that carries its own
 bounds, `system/compositor/sprite` leaves `guest_built`'s list, and the
 workspace's clippy shapes pass it.

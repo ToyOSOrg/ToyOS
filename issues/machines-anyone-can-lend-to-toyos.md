@@ -53,4 +53,4 @@ through this loop with no hand on it.
 runs a filtered metal suite and returns its result with no identifier in it,
 with no person touching either end.
 
-**Owner:** not started. Nothing is built for this until the owner says go.
+**Owner:** the owner (Jan) decides when it starts.
