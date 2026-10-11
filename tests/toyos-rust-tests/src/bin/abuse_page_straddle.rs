@@ -188,7 +188,7 @@ fn main() {
         err(ret).is_none(),
         "process_stats refused a ProcessStats that fits: {ret:#x}",
     );
-    let wall_ns = unsafe { (base as *const u64).read_volatile() };
+    let wall_ns = unsafe { ((base as usize + core::mem::offset_of!(ProcessStats, wall_ns)) as *const u64).read_volatile() };
     assert!(wall_ns > 0, "process_stats wrote a snapshot with no wall time in it");
 
     unsafe { syscall::munmap(region, 2 * PAGE_2M as usize) }.expect("munmap");
