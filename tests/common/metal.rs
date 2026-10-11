@@ -818,8 +818,10 @@ fn fingerprint(text: &str) -> u64 {
     h.finish()
 }
 
-fn invocation(image: &Path, home: &Path) -> Vec<String> {
-    vec![
+/// `cargo`'s words for one `toyos-metal` run, on the bench `host` names or the
+/// T14.
+pub fn invocation(image: &Path, home: &Path, host: Option<&str>) -> Vec<String> {
+    let mut words = vec![
         "run".to_string(),
         "--bin".to_string(),
         "toyos-metal".to_string(),
@@ -833,7 +835,11 @@ fn invocation(image: &Path, home: &Path) -> Vec<String> {
         // `/log` has no reader of those bytes that is not the family of code
         // that wrote them.
         "--fat32-check".to_string(),
-    ]
+    ];
+    if let Some(host) = host {
+        words.extend(["--host".to_string(), host.to_string()]);
+    }
+    words
 }
 
 /// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
@@ -923,6 +929,7 @@ pub enum Verdict {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     mode: MetalMode,
+    host: Option<&str>,
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
     rust_bins: &[(String, Vec<u8>)],
@@ -1001,7 +1008,7 @@ pub fn run(
             request.push_str(&format!(
                 "\n{label}\n  image: {}\n  cargo {}\n",
                 image.display(),
-                invocation(image, &at(dir, label)).join(" ")
+                invocation(image, &at(dir, label), host).join(" ")
             ));
         }
         let path = dir.join("request.txt");
@@ -1026,7 +1033,7 @@ pub fn run(
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if !offline {
         for (label, image) in &images {
-            let words = invocation(image, &at(dir, label));
+            let words = invocation(image, &at(dir, label), host);
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             if let Err(why) = drive(&root, &words) {
                 refused.insert(label, why);
@@ -1043,7 +1050,7 @@ pub fn run(
         };
         readbacks.insert(label.clone(), back);
     }
-    if judge_readbacks(&root, &readbacks, &runs, shared) {
+    if judge_readbacks(&metaltimings::dir(), &readbacks, &runs, shared) {
         Verdict::Red
     } else {
         Verdict::Green
@@ -1086,8 +1093,11 @@ fn own(
 /// that judge, and with the clocks of every boot it rode agreeing
 /// ([`Readback::one_clock`]). Neither is moved by another row or a shared
 /// member riding the same boot.
+///
+/// `records` is where the machines' records are: [`metaltimings::dir`] but in
+/// a check.
 pub fn judge_readbacks(
-    root: &Path,
+    records: &Path,
     readbacks: &BTreeMap<String, Result<Readback, String>>,
     runs: &[&(&str, &'static Metal)],
     shared: &[SharedBoot],
@@ -1244,8 +1254,12 @@ pub fn judge_readbacks(
 
     eprintln!("\n[metal] the timings");
     let machine = one_machine(readbacks);
-    let record =
-        machine.as_ref().map_err(Clone::clone).and_then(|machine| Record::load(root, machine));
+    // `toyos-metal` boots no machine without a record, so readbacks of one
+    // that has none were not this tree's loop's.
+    let record = machine.as_ref().map_err(Clone::clone).and_then(|machine| {
+        Record::load(records, machine)?
+            .ok_or_else(|| format!("{} is no record", records.join(machine.file()).display()))
+    });
     match (machine, record) {
         (Ok(machine), Ok(record)) => {
             let judged = metaltimings::judge(&machine, record, &measured);
@@ -1274,9 +1288,9 @@ pub fn judge_readbacks(
                 measured.values().filter(|reading| !reading.passed).count()
             );
             if judged.changed {
-                match judged.record.save(root) {
+                match judged.record.save(records) {
                     Ok(at) => eprintln!(
-                        "  {} now records {} number(s) for this machine: commit it",
+                        "  {} now records {} number(s) for this machine",
                         at.display(),
                         judged.record.measured.len()
                     ),

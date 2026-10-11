@@ -22,6 +22,9 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
+    /// The bench those images boot on, as `<user>@<machine>`: `toyos-metal`'s
+    /// own `--host`, handed to every run of it. The T14 without it.
+    pub METAL_HOST = "--metal-host", Next;
 });
 
 /// How a filter word names one of the metal profile's boots whole, ahead of
@@ -37,6 +40,8 @@ pub struct Parsed<'a> {
     /// The [`BOOT`] words, without it: boots `--metal` takes whole.
     pub boots: Vec<&'a str>,
     pub metal: Option<MetalMode>,
+    /// [`METAL_HOST`]'s value, checked as `toyos-metal` checks its `--host`.
+    pub metal_host: Option<&'a str>,
 }
 
 /// Validate the harness's argv and return the run's filters and metal mode.
@@ -86,6 +91,15 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                 .to_string(),
         );
     }
+    if has(&METAL_HOST) && !has(&METAL) {
+        return Err("--metal-host names the bench the metal profile boots on and decides nothing \
+                    on its own; add --metal"
+            .to_string());
+    }
+    let metal_host = SUITE.value(args, &METAL_HOST);
+    if let Some(host) = metal_host {
+        crate::metal::host_of(host).map_err(|refusal| format!("--metal-host: {refusal}"))?;
+    }
     if has(&METAL) {
         for flag in [&JOBS, &JOBS_SHORT] {
             if has(flag) {
@@ -109,10 +123,14 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                 ));
             }
         }
-        if has(&LIST) && has(&METAL_READBACK) {
-            return Err("--metal --list prints the plan and reads no readback directory, so \
-                        --metal-readback would be dropped in silence"
-                .to_string());
+        for flag in [&METAL_READBACK, &METAL_HOST] {
+            if has(&LIST) && has(flag) {
+                return Err(format!(
+                    "--metal --list prints the plan and reaches no machine and no readback \
+                     directory, so {} would be dropped in silence",
+                    flag.name
+                ));
+            }
         }
         if SUITE.value(args, &METAL_READBACK).is_some_and(|dir| dir.starts_with('-')) {
             return Err(
@@ -134,7 +152,7 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         }
     });
 
-    Ok(Parsed { filters, boots, metal })
+    Ok(Parsed { filters, boots, metal, metal_host })
 }
 
 /// What `--metal`'s own flags resolve a run to.
@@ -265,6 +283,7 @@ mod tests {
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
+            vec!["--metal", "--metal-readback", "target/metal", "--metal-host", "dev@box"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
@@ -337,6 +356,29 @@ mod tests {
             metal_owned(&["--metal", "--metal-readback", "target/metal"]).unwrap(),
             Some(MetalMode::Offline(PathBuf::from("target/metal")))
         );
+    }
+
+    /// The bench is a value of `--metal`'s and nothing else's, refused where
+    /// it would be dropped and where `toyos-metal` would refuse it after the
+    /// images were built.
+    #[test]
+    fn a_metal_host_is_metals_and_is_checked_before_any_build() {
+        let parsed = |argv: &[&str]| parse(&owned(argv)).map(|p| p.metal_host.map(str::to_string));
+        assert_eq!(parsed(&["--metal"]), Ok(None));
+        for argv in [
+            &["--metal", "--metal-host", "dev@box"][..],
+            &["--metal", "--metal-readback", "x", "--metal-host", "dev@box"],
+        ] {
+            assert_eq!(parsed(argv), Ok(Some("dev@box".to_string())), "{argv:?}");
+        }
+        let refusal = parsed(&["--metal-host", "dev@box"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        let refusal = parsed(&["--metal", "--list", "--metal-host", "dev@box"]).unwrap_err();
+        assert!(refusal.contains("--metal-host would be dropped in silence"), "{refusal}");
+        for host in ["box", "-oProxyCommand=x@box", "dev@a b"] {
+            let refusal = parsed(&["--metal", "--metal-host", host]).unwrap_err();
+            assert!(refusal.starts_with("--metal-host: "), "{host}: {refusal}");
+        }
     }
 
     #[test]

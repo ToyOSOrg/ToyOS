@@ -27,4 +27,4 @@ product and type 0's BIOS version from the UEFI configuration table before
 `ExitBootServices` and writes them as one `loader.log` line, the judge reads
 the machine from the readback's `loader.log`, the ssh read, `Refusal::Machine`,
 the three keys and `metal::machine` are deleted, and every record under
-`tests/metal/` names its machine in the loader's own strings.
+`metaltimings::dir()` names its machine in the loader's own strings.

@@ -8,9 +8,8 @@ opened: 2026-09-29
 
 The full metal run of `wt/toyos-metaltimings` at `db5e59bc4` failed
 `test_rs_mutual_kill` in the `shared-2` boot; the run of the same branch at
-`09fe6121e` passed it. `git diff --stat 09fe6121e db5e59bc4` names one file,
-`tests/metal/lenovo-20w0003amz.toml`, which the host harness reads and no image
-carries. Unexplained: nothing below says why.
+`09fe6121e` passed it. `git diff --stat 09fe6121e db5e59bc4` names one file, the
+T14's record, which the host harness reads and no image carries. Unexplained: nothing below says why.
 
 ## What the log shows
 
