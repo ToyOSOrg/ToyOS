@@ -427,6 +427,7 @@ pub mod tests {
     use common::{device, field, if_, index, int, lequal, method, op_region, package, ret, scope, skip, store, string, unit as field_unit};
 
     /// The controller's space as the fixture's fields lay it out.
+    const CONNECTED: u8 = 0x03;
     const STATE: u8 = 0x38;
     const AC: u8 = 0x46;
     const PAGE: u8 = 0x81;
@@ -435,14 +436,17 @@ pub mod tests {
 
     /// A laptop's namespace as §10.2.2, §10.3, §6.5.4 and §12.11 have one: an
     /// embedded controller at [`EC_DATA`] and [`EC_COMMAND`] whose `_REG`
-    /// records that its space is there; a battery below it whose `_STA` says
+    /// records that its space is there, in itself and, as the T14's writes
+    /// offset 0x03, in the controller; a battery below it whose `_STA` says
     /// it is present only once `_REG` has run, whose `_BIX` is constant and
     /// whose `_BST` selects a page of the controller's space with a write and
     /// then reads it; and an adapter whose `_PSR` reads the controller.
     /// `glk` is the controller's `_GLK`, where it has one.
     fn laptop(glk: Option<u64>) -> Vec<u8> {
         let fields = [
-            skip(8 * usize::from(STATE)),
+            skip(8 * usize::from(CONNECTED)),
+            field_unit("REGS", 8),
+            skip(8 * usize::from(STATE - CONNECTED - 1)),
             field_unit("BSTA", 8),
             skip(8 * usize::from(AC - STATE - 1)),
             field_unit("ACST", 8),
@@ -491,7 +495,7 @@ pub mod tests {
                 op_region("ECOR", 0x03, &int(0), &int(0x100)),
                 field("ECOR", 0x01, &fields),
                 common::def_name("ECOK", &int(0)),
-                method("_REG", 2, &if_(&lequal(&[0x68], &int(3)), &store(&[0x69], b"ECOK"))),
+                method("_REG", 2, &if_(&lequal(&[0x68], &int(3)), &[store(&[0x69], b"ECOK"), store(&[0x69], b"REGS")].concat())),
                 glk.map_or(Vec::new(), |glk| common::def_name("_GLK", &int(glk))),
                 battery,
             ]
@@ -555,8 +559,9 @@ pub mod tests {
     const RD: u8 = 0x80;
     const WR: u8 = 0x81;
 
-    /// The controller is told its space is there before the battery is asked
-    /// whether it is present, which here it says only after; its information
+    /// The controller is attached before its `_REG` runs, which writes it,
+    /// and told its space is there before the battery is asked whether it
+    /// is present, which here it says only after; its information
     /// is read once and the battery read with it, through the controller's
     /// transactions alone, each through the kernel: the adapter's byte, then
     /// the page `_BST` selects, written before its fields are read, a byte at
@@ -576,6 +581,7 @@ pub mod tests {
         assert_eq!(
             done(&kernel),
             [
+                (WR, CONNECTED, 1),
                 (RD, AC, 0),
                 (WR, PAGE, 1),
                 (RD, STATE, 0),
