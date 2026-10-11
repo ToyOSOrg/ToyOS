@@ -13,11 +13,11 @@ that one spelling stops at the header. `SYSINFO_ENTRY_SIZE`
 only, and every reader of an entry hand-spells its offsets instead of calling
 a decoder:
 
-- `tests/toyos-rust-tests/src/bin/kill_ends_every_wait.rs:140-141` —
+- `tests/guest/rust-tests/src/bin/kill_ends_every_wait.rs:140-141` —
   `entry[9] == 0`, `entry[8]`.
-- `tests/toyos-rust-tests/src/bin/process_lifecycle.rs:258` —
+- `tests/guest/rust-tests/src/bin/process_lifecycle.rs:258` —
   `buf[pos + 9] != 0, buf[pos + 8]`.
-- `tests/toyos-rust-tests/src/bin/abuse_thread_name.rs:62` — `entry[9]`.
+- `tests/guest/rust-tests/src/bin/abuse_thread_name.rs:62` — `entry[9]`.
 - `system/toybox/src/ps.rs:64-65` — `buf[pos + 8]`, `buf[pos + 9] != 0`.
 
 Four readers, each free to walk off by a field the way the header's own doc

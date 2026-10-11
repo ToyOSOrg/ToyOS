@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # No harness path boots `console/`, so its `shutdown` rests on a row of its config that nothing reads
 
-`console/system.toml` starts `acpiserver` because its shell's `shutdown` is
+`images/console.toml` starts `acpiserver` because its shell's `shutdown` is
 the only way to turn that machine off, and the kernel refuses a power-off
 until the `acpi` claim's holder has handed it `\_S5`'s sleep type. No guest
 test and no metal row boots that config: deleting `acpiserver` from its
@@ -24,7 +24,7 @@ development machine, which the owner forbids: no such boot is made again
 until a headless harness path exists, so until then nothing but the build
 holds this image. Its `shutdown` was never typed: the shell is on the
 framebuffer. The rest of the path, from a `shutdown` asked to QEMU's
-`guest-shutdown`, is `machine_shutdown`'s on `tests/testcases`.
+`guest-shutdown`, is `machine_shutdown`'s on `tests/images/testcases.toml`.
 
 ## Owner
 

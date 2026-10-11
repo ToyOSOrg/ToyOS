@@ -12,7 +12,7 @@ still for about thirty seconds after its three file servers are spawned, and
 no line of the boot says who is waiting or on what.
 
 Measured once, on `nvme_disk_keeps_log_and_home`'s machine with `diskserver`
-taken out of `tests/testcases/system.toml`'s `start` (host load 52 by
+taken out of `tests/images/testcases.toml`'s `start` (host load 52 by
 `uptime`'s one-minute mean); the guest's own stamps:
 
 ```

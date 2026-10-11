@@ -26,7 +26,7 @@ Measurements as `METAL` rows in `tests/toyos.rs`:
   across CPUs, nothing refused, and the AML reads. The count's oracle is the same issue's.
 - `timer_calibration`: both clocks calibrated, and the TSC within 1% of CPUID.
 
-Guest binaries in `tests/toyos-rust-tests/src/bin/` that make several claims:
+Guest binaries in `tests/guest/rust-tests/src/bin/` that make several claims:
 
 - `allocator_stress.rs`: twelve checks.
 - `std_process.rs`: eight std process behaviours.

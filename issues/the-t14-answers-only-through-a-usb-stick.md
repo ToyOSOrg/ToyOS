@@ -51,5 +51,5 @@ Constraints a reader would otherwise pay to re-derive:
   the Mac's reader are deleted
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`); a boot
   that dies before netd leases needed the stick either way.
-- The metal loop is `toyos-metal` (`src/metal.rs`), and the T14 is run by the
+- The metal loop is `toyos-metal` (`tests/metal/src/lib.rs`), and the T14 is run by the
   orchestrator alone.

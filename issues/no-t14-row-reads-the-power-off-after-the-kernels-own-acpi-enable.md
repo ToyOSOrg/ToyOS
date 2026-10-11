@@ -12,7 +12,7 @@ events and writes `SLP_EN` on a machine this kernel itself put in ACPI mode
 (`kernel/src/arch/x86_64/acpi_mode.rs`, `power::off`). A write the platform
 does not act on is `power::off`'s panic. Nothing reads that path on the T14:
 a power-off that takes leaves the machine in S5, and nothing in the metal
-loop powers it on again. `ride_the_reboot` (`src/metal.rs`) waits
+loop powers it on again. `ride_the_reboot` (`tests/metal/src/lib.rs`) waits
 `return_secs()` for Ubuntu's ssh and refuses before `read_log`, so the boot
 leaves no readback.
 
@@ -39,13 +39,13 @@ shipped for it: on QEMU 11.1.1's q35 under OVMF and TCG, `PM1a_CNT` at 0x604
 read 0x0001 as the firmware left it, 0x0000 after the monitor wrote
 `ACPI_DISABLE` (3) to 0xb2, and 0x0001 again after it wrote `ACPI_ENABLE`
 (2). No test does this: the write has to land before the claim is minted, and
-the one config whose claim a job mints, `tests/acpicase`, runs its job list
+the one config whose claim a job mints, `tests/images/acpicase.toml`, runs its job list
 unprompted. Such a test reads QEMU's model of the ICH9 and never the T14's
 firmware.
 
 **The mint refuses q35 in legacy mode**, so the test this exit names cannot
 be built yet. Measured on QEMU 11.1.1's q35 under OVMF and TCG, on
-`tests/acpicase` with the monitor's `o /b 0xb2 3` sent before the job
+`tests/images/acpicase.toml` with the monitor's `o /b 0xb2 3` sent before the job
 claimed: the kernel logged `acpi: this machine stays in legacy mode — its
 firmware serves an embedded controller no holder could (the ECDT is unusable:
 Absent)` and the claim answered `NotSupported`. q35 has no ECDT, and
@@ -53,7 +53,7 @@ Absent)` and the claim answered `NotSupported`. q35 has no ECDT, and
 controller the ECDT names, the stopgap
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`
 records. That write also landed by a race, between the kernel's ACPI row line
-and the job's claim: `tests/acpicase` still runs its job list unprompted.
+and the job's claim: `tests/images/acpicase.toml` still runs its job list unprompted.
 
 Owned by the stage "the interpreter" of
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose

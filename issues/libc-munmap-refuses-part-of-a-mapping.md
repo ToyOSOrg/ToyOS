@@ -37,7 +37,7 @@ the kernel's `FIXED` arm taking only the length the mapping was asked for.
 
 ## Evidence
 
-`tests/testcases/tinycc/206_libc_refusals.c` maps two pages and reads the
+`tests/corpus/tinycc/206_libc_refusals.c` maps two pages and reads the
 answer, `errno` and both pages for the first page alone, the second alone,
 no bytes and a byte past both; its `.expect` holds `-1, EINVAL` for each and
 both pages' bytes after them. Before those it maps the first page fixed, and

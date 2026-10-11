@@ -34,7 +34,7 @@ The orchestrator takes this Linux as the one independent oracle for the T14's
 hardware counters (`issues/toyos-explains-itself.md`). Read as
 root under Ubuntu's `6.8.0-142-generic` from 16:22:37 UTC, one after the
 other, and committed whole with their commands in the `SOURCE` beside them:
-turbostat idle and under one `yes` per CPU in `tests/t14-linux/`, which
+turbostat idle and under one `yes` per CPU in `tests/metal/t14-linux/`, which
 `counters_on_metal` prints ToyOS's reading beside, and `perf stat` over the
 msr PMU in `kernel/cpuvuln/fixtures/t14/perf-msr.txt`, which
 `the_t14_has_what_linux_counted_on_it` holds the T14's counter verdict to.

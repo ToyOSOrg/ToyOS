@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 `tests/common/faults.rs`'s `idle_stack_guard` reds with *the page below the idle
 stack is still mapped* when its capture contains `debug syscall returned`. The
-only guest it drives, `tests/toyos-rust-tests/src/bin/test_panic_child.rs`,
+only guest it drives, `tests/guest/rust-tests/src/bin/test_panic_child.rs`,
 writes `SYS_DEBUG {action} returned {rc:#x}` when the syscall comes back. The
 arm can never fire: a guard page that is still mapped reaches the drain's
 ceiling and reds instead on the missing `#PF UNHANDLED` line, naming the wrong

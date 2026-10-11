@@ -52,7 +52,7 @@ needs one. `DECLARED_OVER_GRANTS` is that list, so the over-grant cannot grow
 without a red naming what grew, and it shrinks when the row is split.
 
 The shipped image is not that image and is still unmeasured: a guest boots
-`tests/testcases/system.toml`, whose `toybox` row carries no `syscap` at all, so
+`tests/images/testcases.toml`, whose `toybox` row carries no `syscap` at all, so
 nothing yet sees `/system/bin/echo` holding `Rights::POWER`.
 `issues/one-manifest-row-grants-every-applet-and-one-is-compared.md`
 carries what closing that costs.

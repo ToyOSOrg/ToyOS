@@ -18,7 +18,7 @@ The cost is the payload.
 audio run carries its one binary, and the shared list runs on boots of one lane
 in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 `qemu::carrying` adds what those binaries spawn or load. A boot that runs none
-carries `tests/testcases`'s own programs, 13 MiB (3328 blocks), where every test
+carries `tests/images/testcases.toml`'s own programs, 13 MiB (3328 blocks), where every test
 boot carried the whole 619 MiB catalogue before.
 
 **Every resident `/system` page is in RAM twice.** `ReadOnlyBacking::read_page`

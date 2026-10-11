@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # The tone client waits a flat 200 ms for its tail, and for its end with no bound
 
-`tests/toyos-rust-tests/src/tone.rs`'s `play_tone` is what `test_rs_audio_tone`
+`tests/guest/rust-tests/src/tone.rs`'s `play_tone` is what `test_rs_audio_tone`
 and `test_rs_soundd_log_stall` play, so the `hda_tone` and `soundd_log_stall`
 T14 rows ride it. It sleeps 50 ms at a time until its callback has written the
 tone's last sample, with no bound of its own, and then sleeps a flat 200 ms for

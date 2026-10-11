@@ -27,7 +27,7 @@ other two, on any other CPU, can take a batch out from under the syscall that
 filled it. That syscall then reaches its own drain site, is told the queue is
 empty, and returns to userland with its objects still unreleased.
 
-**Measured 2026-08-19 on `wt/toyos-fdleak` at `8e9f851`**, `tests/testcases`,
+**Measured 2026-08-19 on `wt/toyos-fdleak` at `8e9f851`**, `tests/images/testcases.toml`,
 two CPUs, TCG, one binary in the guest. `handle_lifetime`'s holder makes eight
 io_uring rings (16 MiB) and is killed; the killer reads `SYS_SYSINFO` eight
 times back to back straight after `wait` returns. The deficit against the
@@ -88,7 +88,7 @@ recorded mechanism through the census instrument on the hosted shard — the
 first sighting of this class off the dev host.
 
 **A witness, PR #564 at `4919fbd7`.** `handle_basic` red at
-`tests/toyos-rust-tests/src/bin/handle_basic.rs:305` — sixteen more rounds of
+`tests/guest/rust-tests/src/bin/handle_basic.rs:305` — sixteen more rounds of
 handle churn left one extra live `PipeWrite` behind (`[("PipeWrite", 5, 6)]`),
 `PipeRead` unchanged. CI run 33266767478, job 99138099030 reds the same
 assertion on `wt/toyos-wv-fs` at `b10c4daf`, green when run alone. `PipeWrite`
@@ -294,7 +294,7 @@ process's end only once its deferred releases have run — and `CLAIM_RETURN`
 is deleted with it.
 
 **A second loop waits the same release out.**
-`tests/toyos-rust-tests/src/isa_row.rs`'s `claim_after` asks for the `isa` row
+`tests/guest/rust-tests/src/isa_row.rs`'s `claim_after` asks for the `isa` row
 again while the claim is refused as `AlreadyExists`, for at most five seconds,
 wherever `isa_grant` or `isa_lines` claims the row after a holder has exited.
 No run was red without it: it rests on the `Device` release measured in this
@@ -304,7 +304,7 @@ deferred, a claim refused after its holder's exit is a defect that loop would
 hide for five seconds.
 
 **A third loop waits the same release out.**
-`tests/toyos-rust-tests/src/bin/usbd_spare.rs` asks for the xHCI controller's
+`tests/guest/rust-tests/src/bin/usbd_spare.rs` asks for the xHCI controller's
 claim again after killing usbd while it is refused as `AlreadyExists`, for at
 most `CLAIM_RETURN`, one millisecond apart, `system/supervisor`'s copied. Owner:
 usbd's author. Exit condition: the same, and that loop is deleted with

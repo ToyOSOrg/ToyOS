@@ -28,7 +28,7 @@ afterwards, and an accept's answer says what its connection holds
 (`system/netstack/src/serve.rs`, `system/netstack/node/src/listeners.rs`),
 and the `libc_sockets` guest test reads it: `nodelay_accepted` by `toyos::net`, for a connection that
 waited when the option was set, its wake read first, and for the next one
-dialled; `tests/netcase/nodelay_kept.c` by libc's `setsockopt` and
+dialled; `tests/guest/c/nodelay_kept.c` by libc's `setsockopt` and
 `getsockopt`, for a listener's set before `bind`, its set and its clear after,
 and the connections dialled after each. What no program reads yet:
 

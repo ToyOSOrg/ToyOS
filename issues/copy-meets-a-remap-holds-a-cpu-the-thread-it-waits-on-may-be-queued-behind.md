@@ -43,7 +43,7 @@ than with this panic. Then this file is deleted.
 
 ## Owner
 
-`kernel/src/user_ptr.rs` `remap_race`, `tests/toyos-rust-tests/src/bin/copy_out_races_munmap.rs`. Nobody holds it.
+`kernel/src/user_ptr.rs` `remap_race`, `tests/guest/rust-tests/src/bin/copy_out_races_munmap.rs`. Nobody holds it.
 
 **Its test and its staging are deleted**: `7ea6be15d` took
 `user_copy_races_munmap` out, and `2f366a930` `copy-meets-a-remap` with

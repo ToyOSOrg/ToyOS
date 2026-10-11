@@ -12,7 +12,7 @@ architecture's own module: `kernel/src/arch/<arch>/`, the bootloader's
 `bootloader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. The kernel and
 the loader now hold none outside those; what is left:
 
-- Guest probes in `tests/toyos-rust-tests/src/bin/`, whose subject
+- Guest probes in `tests/guest/rust-tests/src/bin/`, whose subject
   is an x86 instruction (`rdgsbase`, `fxsave64`, `int1`, x87 control words)
   or the raw `syscall` gate with arguments no SDK call will pass. They run in
   the x86-64 suite, which is the only suite until the harness gains its arch

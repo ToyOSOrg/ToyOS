@@ -36,7 +36,7 @@ are logged; eleven of q35's 34 are MMIO and two are logged.
 
 The fix is `/system/bin/console`'s, at `system/console/src/main.rs:277-286`,
 and nobody is holding it. What pays for it is `toyos-metal`'s readback of
-`loader.log` (`src/metal.rs:1849`): a machine whose aperture is in neither
+`loader.log` (`tests/metal/src/lib.rs`): a machine whose aperture is in neither
 channel cannot have that premise checked against it afterwards.
 
 **Exit condition.** `/system/bin/console`'s seed takes only the files

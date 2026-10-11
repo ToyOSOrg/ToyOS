@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # `hda_client_stall` prints a stream error and passes
 
-`tests/toyos-rust-tests/src/bin/hda_client_stall.rs` hands cpal an error
+`tests/guest/rust-tests/src/bin/hda_client_stall.rs` hands cpal an error
 callback that prints `audio error: …` and does nothing else. The fork reports
 two things through it: a stream whose signal pipe went away, and a dropped
 stream soundd did not let go of within its fade and a ring of periods. Either

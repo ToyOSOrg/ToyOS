@@ -7,7 +7,7 @@ opened: 2026-09-30
 # The shipped image carries two test programs
 
 "Nothing ships for tests alone" (`.claude/agents/reviewer.md`, Fit) is untrue
-of the shipped `system.toml` in two rows:
+of the shipped `images/system.toml` in two rows:
 
 - `proctest = {}`: `tests/guest/proctest/README.md` calls it a test harness, and
   nothing in the tree runs `/system/bin/proctest` but `proctest` itself.
@@ -19,5 +19,5 @@ of the shipped `system.toml` in two rows:
 Found by `git grep -n -w -e proctest` and
 `git grep -n -w -e spin -- system.toml tests userland issues/build`.
 
-**Exit condition**: the shipped `system.toml` names neither, and a test that
+**Exit condition**: the shipped `images/system.toml` names neither, and a test that
 needs one carries it in its own image alone.

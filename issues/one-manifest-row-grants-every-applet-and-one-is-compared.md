@@ -13,7 +13,7 @@ authority that one row grants —
 `issues/toybox-is-one-row-for-every-applet.md`.
 
 **One applet is already checked, and the shape it uses is the right one.**
-`tests/toyos-rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
+`tests/guest/rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
 endowed a duplicate with `Rights::ROSTER` and a duplicate without it, and its own
 comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
@@ -45,7 +45,7 @@ because `tone` needs one. That list is now `DECLARED_OVER_GRANTS`, so the size
 of the defect cannot grow without a red naming what grew.
 
 **What is still missing is the shipped image.** A guest test boots
-`tests/testcases/system.toml`, whose `toybox` row is `receives = ["soundd"]` and
+`tests/images/testcases.toml`, whose `toybox` row is `receives = ["soundd"]` and
 carries no `syscap` at all. The row this record opened on — `system.toml:112`,
 `syscap = ["power", "roster"]` across every link — is measured by nothing:
 the differential that would see `/system/bin/echo` holding `Rights::POWER` has to read

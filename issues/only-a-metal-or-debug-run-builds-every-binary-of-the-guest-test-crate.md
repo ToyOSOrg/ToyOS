@@ -7,7 +7,7 @@ opened: 2026-10-03
 # Only a metal or debug run builds every binary of the guest test crate
 
 `build_toyos_bins` (`src/build.rs`) is the one build of every binary under
-`tests/toyos-rust-tests/src/bin`. It is reached only through
+`tests/guest/rust-tests/src/bin`. It is reached only through
 `build_shared_bins` (`tests/toyos.rs`), which runs only under `--metal` and
 `--debug`, and no workflow passes either flag. The guest suite builds two of the crate's binaries, each
 alone with `build_toyos_bin`'s `--bin`: `abuse_readonly_copyout` and
@@ -23,5 +23,5 @@ whole guest suite each exited 0.
 Owner: the orchestrator.
 
 **Exit**: a check the merge queue runs builds every binary of
-`tests/toyos-rust-tests` for x86_64-unknown-toyos, and is red with
+`tests/guest/rust-tests` for x86_64-unknown-toyos, and is red with
 `toyos-window` dropped from the crate's manifest.

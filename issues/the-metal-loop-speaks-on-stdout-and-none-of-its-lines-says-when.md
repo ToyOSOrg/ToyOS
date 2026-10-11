@@ -12,7 +12,7 @@ at. `toyos-metal` narrates a run with `println!` and `print!` instead, and
 stdout passes through no printer:
 
 ```
-rg -n '(^|[^e])print(ln)?!' src/metal.rs src/bin/toyos-metal.rs
+rg -n '(^|[^e])print(ln)?!' tests/metal/src/lib.rs tests/metal/src/main.rs
 ```
 
 Its progress is among them — `  run: <command>`, `machine <vendor> <product>,

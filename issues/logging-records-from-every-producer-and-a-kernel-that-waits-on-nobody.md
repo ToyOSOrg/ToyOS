@@ -44,7 +44,7 @@ them. The rest still search sentences: about 600 string literals in `tests/`
 and 33 sentence constants in `src/bootlog.rs`, where rewording a diagnostic
 breaks a verdict. Records grow a key the way journald's `MESSAGE_ID` does, and
 a verdict matches the key.
-*Exit:* no verdict in `tests/` or `src/metal*.rs` reads a record by its prose.
+*Exit:* no verdict in `tests/` or `tests/metal/src/*.rs` reads a record by its prose.
 
 **3. A machine whose `logd` ended says so.** Nothing restarts `logd` and
 nothing names its end: init holds no `Process` handle to it, so the rings fill,

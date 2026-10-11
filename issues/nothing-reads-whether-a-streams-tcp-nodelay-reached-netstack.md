@@ -14,7 +14,7 @@ side stored. So a setter of a stream's option that stores the value and sends
 nothing is seen by no test. Measured on libc's `connect`, which hands over a
 `TCP_NODELAY` set before the connection existed: with the hand-over deleted,
 the guest case that sets the option before `connect` and reads it after
-(`tests/netcase/nodelay_kept.c`, the `libc_sockets` test) stays green. The
+(`tests/guest/c/nodelay_kept.c`, the `libc_sockets` test) stays green. The
 only effect of the option is when a small write leaves the machine, which a
 QEMU test may not time.
 

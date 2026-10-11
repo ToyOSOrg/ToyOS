@@ -13,7 +13,7 @@ could boot ToyOS for the suite with no one standing next to it.
 **What exists.**
 - `--metal-host` targets any bench.
 - `--install-sudoers` captures a machine and its stick into the host store
-  (`metaltimings::dir()`), never into the tree.
+  (`timings::dir()`), never into the tree.
 - The loop wipes and writes the stick over `ssh` and sets a one-shot `BootNext`.
 - The machine comes back to its own OS, and the loop reads the log partition
   back.

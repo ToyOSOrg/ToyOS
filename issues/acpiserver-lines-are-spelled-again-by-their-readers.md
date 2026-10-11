@@ -18,7 +18,7 @@ guest test, or on the T14 as a wait that runs to its bound.
 - `tests/toyos.rs`, `acpi_events_on_metal` and `acpi_tables_on_metal`: the
   armed line, `taken for the first time`, `tables loaded in`, the tables'
   read counts, `refused`.
-- `tests/toyos-rust-tests/src/bin/counters_metal.rs`, `acpi_said`:
+- `tests/guest/rust-tests/src/bin/counters_metal.rs`, `acpi_said`:
   `acpiserver: armed: `, `embedded controller none`, the first-query line.
 
 Owner: `system/acpiserver`.

@@ -15,7 +15,7 @@ that menu reaches no ROM anywhere. The package track records the opposite:
 "It lists a directory itself and reads the ROM the user picks out of it"
 (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`).
 
-Evidence, in a QEMU guest on `tests/proctreecase`, a package launched from
+Evidence, in a QEMU guest on `tests/images/proctreecase.toml`, a package launched from
 `/apps` running gbae's `list_directory` verbatim and its loads, with ROMs at
 `/home/toy/Downloads` and in the package's own `Data` folder:
 

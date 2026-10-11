@@ -19,7 +19,7 @@ dispatched at `kernel/src/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
 `MAX_HEAP_ALLOC` with 4096-byte alignment, which the page source cannot back;
 `kernel/src/syscall/debug.rs:25-27` reports the null as
 `ResourceExhausted` rather than unwrapping it, and
-`tests/toyos-rust-tests/src/bin/heap_ceiling.rs:131` asserts exactly that. So a
+`tests/guest/rust-tests/src/bin/heap_ceiling.rs:131` asserts exactly that. So a
 test-only actuator does exist, a shipped test does read it, and the claim that
 nothing here can be made to fail on purpose is false. `early_alloc` has a second
 null return of its own (`kernel/src/mm/alloc.rs:568-569`) before the allocator

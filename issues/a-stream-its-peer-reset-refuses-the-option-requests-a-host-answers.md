@@ -36,7 +36,7 @@ between netstack's answer and that request makes it fail `ENOTCONN`, with the
 connection closed, which no host's `connect` answers. Its `accept` asks
 nothing after its answer, which carries the connection's option.
 
-**Exit condition**: a guest test on `tests/netcase` whose peer resets a stream
+**Exit condition**: a guest test on `tests/images/netcase.toml` whose peer resets a stream
 the client still holds, and `nodelay()` on it answers `Ok`, with
 `netstack_socket_churn` still green; and the two compromises above ended: the
 option request on a stream its peer reset is answered by netstack, and a libc

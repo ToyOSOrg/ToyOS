@@ -6,7 +6,7 @@ opened: 2026-10-04
 
 # A boot's readback is lost to one ssh that times out
 
-`src/metal.rs`'s `read_mounted` reads each log file off the T14's stick by
+`tests/metal/src/lib.rs`'s `read_mounted` reads each log file off the T14's stick by
 one `ssh … cat` (`Driver::cat`), and `Driver::ssh` runs it once: a dial that
 times out after the boot came back fails the boot's readback whole. Nothing
 retries it, and nothing keeps the stick's copy anywhere else, so the next

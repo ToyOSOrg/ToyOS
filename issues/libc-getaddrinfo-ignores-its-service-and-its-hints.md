@@ -24,4 +24,4 @@ name, and the hints' socket type, protocol and flags, each failure is the
 and port `getaddrinfo` answered.
 
 **Owner**: libc, under `issues/toyos-has-its-own-network-stack.md`: it
-touches only `sdk/libc` and a guest C case on `tests/netcase`.
+touches only `sdk/libc` and a guest C case on `tests/images/netcase.toml`.

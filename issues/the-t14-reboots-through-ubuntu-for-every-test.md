@@ -46,7 +46,7 @@ blocked on `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`.
 
 **Next: two sessions in place of three boots.** `testcases`, which every
 shipping-kernel member rides, `testcases-mkdir` and `testcases-readdir` share
-a config, a parameter line and the shipping kernel. The session image is `tests/testcases`
+a config, a parameter line and the shipping kernel. The session image is `tests/images/testcases.toml`
 with the netd, sshd and streaming `logd` of `tests/lantalkcase`, which is
 deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
 under a `boot-deadline=` derived as a metal boot's is: twice its list's bound

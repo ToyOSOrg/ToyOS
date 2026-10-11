@@ -28,7 +28,7 @@ leaves to the scheduler or does not read:
   kick or from a spin.
 - **The enable's arrangement has a window.** The job's claiming thread reads
   its x2APIC id and then enters the kernel
-  (`tests/toyos-rust-tests/src/bin/acpi_release.rs`,
+  (`tests/guest/rust-tests/src/bin/acpi_release.rs`,
   `claim_off_the_boot_processor`). The kernel moves no running thread, so the
   asker is the CPU the thread read, unless a preemption between that read and
   the kernel's lock in `smi_cmd::write` queues the thread behind another and

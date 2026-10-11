@@ -322,7 +322,7 @@ Each stage lands on its own, in this order.
      an image switch costs that write and a reset: ToyOS has written this
      stick at 0.2 s to 9.5 s per MiB.
    - It is built from #539's pieces that stage 6 takes above, and the bench
-     path of `src/metal.rs`. `--via-ubuntu` stays as the old path.
+     path of `tests/metal/src/lib.rs`. `--via-ubuntu` stays as the old path.
    - Every T14 image is signed with the bench key the T14 trusts, and a loader
      reaches the T14 as an image does: ToyOS receives it over ssh and writes it
      to the stick, and the running loader tries it once and keeps the old one
@@ -373,7 +373,7 @@ Each stage lands on its own, in this order.
      and `issues/the-t14-stopped-answering-ssh-between-two-lan-boots.md`
      close here, each only as far as it is true of what lands.
 
-   **Exit**: no path in `src/metal*.rs` reaches Ubuntu. On the T14, a panic's
+   **Exit**: no path in `tests/metal/src/*.rs` reaches Ubuntu. On the T14, a panic's
    reset reaches the loader with no `BootNext` set.
 
 8. **The kernel arms the TCO before anything unbounded.** The loader's arm is

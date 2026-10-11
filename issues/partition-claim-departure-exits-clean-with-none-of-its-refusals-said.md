@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 Seen on 2026-09-27 in the nightly run 36336701867, job `guest (5)`, on PR
 #541's head `1c0f0c753fb2c4c2d01caf51dc67b7f92ca4cd8e` — a diff that touches
-none of `tests/common/partclaim.rs`, `tests/toyos-rust-tests/src/bin/partition_claimant.rs`
+none of `tests/common/partclaim.rs`, `tests/guest/rust-tests/src/bin/partition_claimant.rs`
 or the kernel's partition-claim code:
 
 ```

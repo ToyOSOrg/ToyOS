@@ -15,7 +15,7 @@ that is not there.
 Evidence: the T14's `proctreecase` boot at 1e9cb8c77. The kernel recorded
 `spawn: refused under pid 79 at depth 65, more than 64 below init`, and the
 shell at that depth printed `/system/bin/test_rs_process_tree: not found`.
-`process_tree`'s chain (`tests/toyos-rust-tests/src/bin/process_tree.rs`)
+`process_tree`'s chain (`tests/guest/rust-tests/src/bin/process_tree.rs`)
 accepts that line as its stop, and the row's judge reads the kernel's record
 for the depth.
 

@@ -20,7 +20,7 @@ there is no yield syscall, which is a separate decision and not this one.
 What it costs: any Rust program that sizes a thread pool, a work-stealing queue
 or a shard count from `available_parallelism` runs single-threaded on an eight-
 core machine and nothing says so. It bit a test that needed one thread per CPU
-(`tests/toyos-rust-tests/src/bin/demand_window_race.rs`, which calls
+(`tests/guest/rust-tests/src/bin/demand_window_race.rs`, which calls
 `syscall::cpu_count` and says why); a test that had *not* noticed would have
 gone quietly single-threaded and passed while staging nothing.
 

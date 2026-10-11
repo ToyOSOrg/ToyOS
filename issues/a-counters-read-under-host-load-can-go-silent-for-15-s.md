@@ -6,7 +6,7 @@ opened: 2026-10-04
 
 # A counters read under host load can go silent for 15 s on an 8-CPU `virt` guest
 
-`test_rs_counters_read` in `tests/virtsmpcase` normally ends about 0.2 s of
+`test_rs_counters_read` in `tests/images/virtsmpcase.toml` normally ends about 0.2 s of
 guest clock after `unmap_touch` does (median 0.17-0.20 s over 570 guests, max
 1.46 s). Under host load it sometimes takes seconds, and it has gone silent
 long enough for the harness's 15 s quiet bound to call the guest stalled: each
@@ -66,7 +66,7 @@ line of the wait and none the guest runs.
 The third and fourth silent ones, two guests of one run: `virt_el1_smp` and
 `virt_mask_windows`, in the whole suite on `wt/toyos-libc-sockets` at
 `68cf1f870`, whose diff touches no line of either wait and nothing these
-guests start: `tests/virtsmpcase` runs no C program, opens no socket and
+guests start: `tests/images/virtsmpcase.toml` runs no C program, opens no socket and
 starts no netstack.
 
 - **The lines.** `FAIL virt_el1_smp: STALLED: waiting for the job
@@ -162,7 +162,7 @@ the three guests failed together.
 
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
 `src/miscompile.rs` now refuses a sysroot for) is not their cause.
-`tests/virtsmpcase`'s image was built and `virt_el1_smp` run by the compiler
+`tests/images/virtsmpcase.toml`'s image was built and `virt_el1_smp` run by the compiler
 before the fix and by the fixed one, each with the sysroot it built, and every
 function of the image's 124 crates compared in object code as the image build
 makes it. The two differ in six functions of `rustc_demangle`'s `v0` printer,
@@ -193,7 +193,7 @@ nothing these guests run before the stop begins.
   rising to 78.28, passed 46 of 46.
 - **Not compared.** These two ran the kernel of `wt/toyos-lastword` at
   `aa7448db0`, built by the compiler before the ScalarEvolution fix. The
-  comparison across the fix above was of `main`'s `tests/virtsmpcase` image;
+  comparison across the fix above was of `main`'s `tests/images/virtsmpcase.toml` image;
   theirs was not compared, so whether the fault reaches them is not known.
 
 The slow ones, with registers: a probe that captured `info registers -a` over

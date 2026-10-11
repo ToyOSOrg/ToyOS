@@ -24,7 +24,7 @@ weaknesses").
 
 The parts are sized against what was measured, not against a share's need:
 every boot of the guest suite, the shipping desktop booted under QEMU, and
-every shipping Rust job run one after another in one `tests/testcases` boot
+every shipping Rust job run one after another in one `tests/images/testcases.toml` boot
 never had one start past 3 served connections, 1 waiting on its hello or 0
 streams, nor more than 5 of DATA's connections served at once. A parallel
 build (cargo with rustc as its direct children) is the unmeasured load.
@@ -47,7 +47,7 @@ detached from a desktop shell and runs in that shell's login session. Its
 one share with each other and with the terminal that started the server: one
 login at its parts has every other's next connection or stream on that server
 refused, and that terminal's. Only where a boot config starts sshserver as a
-service (`tests/metalcase`) does each launch it makes
+service (`tests/images/metalcase.toml`) does each launch it makes
 open a session of its own.
 
 **Ruled** (owner, 2026-10-07):

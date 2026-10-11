@@ -65,7 +65,7 @@ its own artifact. The image is the evidence and the checker is the instrument.
 What is owed first is a reproduction that says which side leaks: the free-chain
 walk of the unlink, or the allocation the create takes out of it. The suite's
 own alone/loaded arms are the instrument, and
-`tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs` plus
+`tests/guest/rust-tests/src/bin/fat_backing_revoked.rs` plus
 `tests/common/volumes.rs` are where the scenario and the checker call live.
 
 Found by the comment sweep on `wt/toyos-sw3`, whose diff is comments and

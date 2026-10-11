@@ -14,7 +14,7 @@ every other unknown type is accepted and silently discarded.
 
 `compositor_stall`'s streaming case depends on it: its window sends
 `UNKNOWN_MSG` on every pass as load with nothing to draw
-(`tests/toyos-rust-tests/src/bin/compositor_stall.rs`). A refusal there would
+(`tests/guest/rust-tests/src/bin/compositor_stall.rs`). A refusal there would
 drop the window after its first frame and leave the case passing with no load.
 
 Owner: `Session::dispatch` in `system/compositor/src/session.rs`.

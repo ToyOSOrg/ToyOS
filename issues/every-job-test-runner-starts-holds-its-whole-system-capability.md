@@ -10,16 +10,16 @@ opened: 2026-09-29
 capability (`tests/guest/test-runner/src/main.rs:248-250`), and a duplicate
 carries every right the original does (`sdk/toyos/src/syscap.rs:63-70`). The job
 also inherits test-runner's whole namespace
-(`tests/guest/test-runner/src/main.rs:62-68`). On `tests/testcases` the row grants
+(`tests/guest/test-runner/src/main.rs:62-68`). On `tests/images/testcases.toml` the row grants
 `device`, `dup`, `logread`, `power` and `roster`
-(`tests/testcases/system.toml:41`), so every test binary may mint a device
+(`tests/images/testcases.toml:41`), so every test binary may mint a device
 claim, read every kernel record, reset or power off the machine, list every
 process, and hand all of it to a child of its own. A right or a name added to
 that row reaches every job the same way.
 
 The binaries have no `[programs]` rows, so nothing declares what any of them
 needs: `test_rs_audio_idle_suspend` reads `roster` off the duplicate
-(`tests/toyos-rust-tests/src/bin/audio_idle_suspend.rs:7-11`), and
+(`tests/guest/rust-tests/src/bin/audio_idle_suspend.rs:7-11`), and
 `endowment_denied` narrows `power` away from it.
 
 **Exit**: a job holds only the rights and names its test is declared to need,

@@ -112,7 +112,7 @@ whichever process last died before it.
 
 ## The instrument that measures this already exists
 
-`src/metal.rs:1591-1597`'s `deadline_lateness_ms` computes exactly
+`tests/metal/src/lib.rs`'s `deadline_lateness_ms` computes exactly
 `reached − bound` out of the `DEADLINE_EXPIRED` line (`src/bootlog.rs:28`).
 The arithmetic above is the instrument's own, done by hand because the run
 was `toyos-metal` invoked directly and not the harness. No second instrument

@@ -16,7 +16,7 @@ toyos-metal: target/metal-delivery/usbbreak-run69/log-partition.img: No such fil
 EXIT=2
 ```
 
-`src/metal.rs`'s `run` writes `READBACK_VOLUME` under `--fat32-check` before it
+`tests/metal/src/lib.rs`'s `run` writes `READBACK_VOLUME` under `--fat32-check` before it
 reaches `write_readback`, and `write_readback` is where `create_dir_all` is.
 `clear_readback`, which runs before the flash, takes a missing directory for an
 empty one. So the one refusal this path can make is made after the machine has

@@ -48,7 +48,7 @@ nothing.
      letter only where it starts with a capital `I` (so `spawn_init`,
      `struct Init`, `SpawnInit`, `TimerInit`, `InitPort` and "asks init" all
      hit). A match goes where it names the program and stays otherwise;
-     third-party text (`tests/testcases/tinycc/`, the C ports) stays.
+     third-party text (`tests/corpus/tinycc/`, the C ports) stays.
 2. **Decisions in a pure crate.** The supervisor's decisions live in
    `toyos-supervisor`, with host tests; `system/supervisor` keeps only
    handles, spawns and the loop. The decisions: namespace and claim selection

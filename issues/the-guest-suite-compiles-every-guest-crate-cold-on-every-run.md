@@ -35,7 +35,7 @@ The `BUILT` lines behind `building`, A / B / C / D:
 - the test binaries and the small ROOTs together: 19 / 15 / 19 / 19
 
 Two of those costs were taken out after D, and are in none of the four. The
-metalcase line: the one guest test that booted it boots tests/panelcase, whose
+metalcase line: the one guest test that booted it boots tests/images/panelcase.toml, whose
 `BUILT` line read 8 s on the development machine where metalcase's read 53 s
 after the same builds. And the harness's build: in all four logs it compiles
 ring, rustls, rustls-webpki, ureq and the build system a second time, and

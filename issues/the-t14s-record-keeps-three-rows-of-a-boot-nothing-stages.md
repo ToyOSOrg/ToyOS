@@ -6,7 +6,7 @@ opened: 2026-10-07
 
 # The T14's record keeps three rows of a boot nothing stages
 
-The T14's record, in the host's store under `metaltimings::dir()`, records
+The T14's record, in the host's store under `timings::dir()`, records
 `boot.testcases-window.complete_ms`, `.panel_max_us` and `.panel_us`, and no
 registration names a `testcases-window` boot: `grep testcases-window` on that
 record finds those three lines, and `git grep testcases-window` finds nothing
@@ -15,9 +15,9 @@ stays green ("3 recorded number(s) this run measured nothing for"), so a row
 whose boot is gone is never removed, and the same line would not red on a boot
 that silently stopped being staged.
 
-Owner: the metal suite (`tests/common/metal.rs`, `src/metaltimings.rs`).
+Owner: the metal suite (`tests/common/metal.rs`, `tests/metal/src/timings.rs`).
 
 **Exit:** the three rows are deleted from the T14's record under
-`metaltimings::dir()`, and a whole run of the profile that
+`timings::dir()`, and a whole run of the profile that
 measures nothing for a recorded number is red by name; a filtered run, which
 stages a part of the profile, still is not.
