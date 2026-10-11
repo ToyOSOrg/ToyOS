@@ -11,18 +11,24 @@
 //! **`XSAVEOPT`'s invariant.** `XSAVEOPT` skips a component unmodified since
 //! the last `XRSTOR` from the same address, so between the `XRSTOR` that
 //! returns a thread to Ring 3 and that thread's next save on the same CPU
-//! nothing may write the area. It holds because every restore is followed
-//! only by pops and `iretq`/`sysretq` with `IF` clear; the area lies on the
-//! thread's own kernel stack below the frame every Ring 3 entry builds; and
-//! the IST stacks that save (`#DF`, `#MC`) never return to Ring 3. A save and
-//! restore nested in Ring 0 is undone by the outer restore before Ring 3 runs.
+//! nothing may write the area. The area lies just below the frame, where a
+//! handler's own frames go, and an arrival whose frame is as deep saves at
+//! the same address; so every arrival from Ring 3 on the thread's kernel
+//! stack saves after its own pushes and before anything else writes below
+//! them, whether or not its handler can reach another task. Every
+//! restore is followed only by pops and `iretq`/`sysretq` with `IF` clear,
+//! and the IST stacks that save (`#DF`, `#MC`) never return to Ring 3. A save
+//! and restore nested in Ring 0 is undone by the outer restore before Ring 3
+//! runs.
 
-/// A gate whose handler can reach another task before returning to Ring 3,
-/// and therefore brackets the user machine state.
+/// A gate that brackets the user machine state on a Ring 3 arrival: its
+/// handler can reach another task, or runs on the interrupted thread's kernel
+/// stack, which `XSAVEOPT`'s invariant lets nothing write before the save.
 #[derive(Clone, Copy)]
 pub struct Ring3Entry(unsafe extern "sysv64" fn());
 
-/// A gate whose handler cannot reach another task, so it saves nothing.
+/// A gate that saves nothing: it never returns, or takes its frame on an IST
+/// stack, so it writes no kernel stack a Ring 3 thread returns to.
 #[derive(Clone, Copy)]
 pub struct Ring0Entry(unsafe extern "sysv64" fn());
 
@@ -46,8 +52,8 @@ impl Ring0Entry {
     }
 }
 
-/// `naked_asm!` for an entry that can reach another task: supplies the save
-/// area's size, and prepends `cld`. The body must end with a trailing comma.
+/// `naked_asm!` for a [`Ring3Entry`]: supplies the save area's size, and
+/// prepends `cld`. The body must end with a trailing comma.
 #[cfg(not(feature = "entry-df-unclean"))]
 macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {

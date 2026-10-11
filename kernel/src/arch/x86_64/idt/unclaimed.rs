@@ -12,6 +12,7 @@ use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::apic;
+use crate::arch::entry::{restore_user_state, save_user_state};
 
 /// One bit per vector taken through this gate; [`log_vectors`] reads it back.
 static TAKEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -34,8 +35,18 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         "push r11",
         "push rbp",
         "mov rbp, rsp",
+        "test dword ptr [rbp + 88], 3",
+        "jz 2f",
+        // `took` reaches no task, but its frames land where the last restore
+        // read: `XSAVEOPT`'s invariant (`arch::entry`).
+        save_user_state!(),
+        "2:",
         "and rsp, -16",
         "call {took}",
+        "test dword ptr [rbp + 88], 3",
+        "jz 1f",
+        restore_user_state!(),
+        "1:",
         "mov rsp, rbp",
         "pop rbp",
         "pop r11",
@@ -50,6 +61,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         // #VC/#SX (0x1D/0x1E) iretq into their unpopped error code — unreachable without SEV-ES.
         "iretq",
         took = sym took,
+        fp_area = sym crate::arch::fpu::AREA_BYTES,
     );
 }
 
