@@ -70,13 +70,9 @@ impl Form {
     }
 }
 
-/// What a CPU reports about itself and its extended state.
+/// What a CPU reports about its extended state.
 #[derive(Clone, Copy, Debug)]
 pub struct Facts {
-    /// `CPUID.0`'s EBX, EDX and ECX bytes, in that order.
-    pub vendor: [u8; 12],
-    /// `CPUID.01H:EAX`: family, model and stepping.
-    pub cpuid_1_eax: u32,
     /// `CPUID.01H:ECX`: bit 26 is `XSAVE`.
     pub cpuid_1_ecx: u32,
     /// `CPUID.(0DH,0):EAX` and `EDX`: the `XCR0` bits this CPU supports, low
@@ -153,55 +149,21 @@ pub fn xcr0(facts: &Facts) -> Result<u64, Refusal> {
     }
 }
 
-/// The save this CPU takes. `microcode` answers the CPU's microcode revision,
-/// and is asked only on a part whose erratum a revision fixes.
-pub fn form(facts: &Facts, microcode: impl FnOnce() -> u32) -> Result<Form, Refusal> {
+/// The save this CPU takes. `erratum_1386` is `toyos_cpuvuln::erratum_1386`'s
+/// verdict on it: a CPU it names saves with `XSAVEC`, which saves what
+/// `XSAVES` would while `IA32_XSS` is 0.
+pub fn form(facts: &Facts, erratum_1386: bool) -> Result<Form, Refusal> {
     let d1 = facts.cpuid_d1_eax;
     if d1 & D1_XSAVEOPT == 0 {
         return Err(Refusal::NoXsaveopt);
     }
-    Ok(if d1 & D1_XSAVES != 0 && !erratum_1386(facts, microcode) {
+    Ok(if d1 & D1_XSAVES != 0 && !erratum_1386 {
         Form::Xsaves
     } else if d1 & D1_XSAVEC != 0 {
         Form::Xsavec
     } else {
         Form::Xsaveopt
     })
-}
-
-/// Family 17h models Linux files under Zen1 or Zen2, every one of which runs
-/// `fix_erratum_1386` (`arch/x86/kernel/cpu/amd.c` at 87db7795, `bsp_init_amd`).
-const ERRATUM_1386_MODELS: [(u32, u32); 6] =
-    [(0x00, 0x2f), (0x50, 0x5f), (0x30, 0x4f), (0x60, 0x7f), (0x90, 0x91), (0xa0, 0xaf)];
-
-/// `(model, stepping, first fixed microcode revision)` of family 17h
-/// (`erratum_1386_microcode`, same file).
-const ERRATUM_1386_FIXED: [(u32, u32, u32); 2] = [(0x01, 0x2, 0x0800_126e), (0x31, 0x0, 0x0830_1052)];
-
-/// AMD erratum 1386, "XSAVES Instruction May Fail to Save XMM Registers to the
-/// Provided State Save Area", on the parts Linux names and its microcode has
-/// not fixed. Those parts have no supervisor component, so `XSAVEC` saves what
-/// `XSAVES` would.
-fn erratum_1386(facts: &Facts, microcode: impl FnOnce() -> u32) -> bool {
-    let (family, model, stepping) = signature(facts.cpuid_1_eax);
-    if &facts.vendor != b"AuthenticAMD"
-        || family != 0x17
-        || !ERRATUM_1386_MODELS.iter().any(|&(first, last)| (first..=last).contains(&model))
-    {
-        return false;
-    }
-    match ERRATUM_1386_FIXED.iter().find(|&&(m, s, _)| (m, s) == (model, stepping)) {
-        Some(&(_, _, fixed)) => microcode() < fixed,
-        None => true,
-    }
-}
-
-/// Family, model and stepping as SDM Vol. 2A `CPUID` derives them.
-fn signature(eax: u32) -> (u32, u32, u32) {
-    let base = (eax >> 8) & 0xf;
-    let family = if base == 0xf { base + ((eax >> 20) & 0xff) } else { base };
-    let model = if base == 0x6 || base == 0xf { ((eax >> 16) & 0xf) << 4 | (eax >> 4) & 0xf } else { (eax >> 4) & 0xf };
-    (family, model, eax & 0xf)
 }
 
 /// The bytes one standard-form save writes, from `CPUID.(0DH,0):EBX` read once
@@ -254,10 +216,7 @@ mod tests {
     }
 
     fn t14_facts() -> Facts {
-        let [_, ebx, ecx, edx] = t14(0, 0);
         Facts {
-            vendor: core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]),
-            cpuid_1_eax: t14(1, 0)[0],
             cpuid_1_ecx: t14(1, 0)[2],
             cpuid_d0_eax: t14(0xd, 0)[0],
             cpuid_d0_edx: t14(0xd, 0)[3],
@@ -265,42 +224,16 @@ mod tests {
         }
     }
 
-    /// The AMD bench, a Ryzen 7 4800U: family 17h model 60h as its Linux
-    /// reports it, at `stepping`, which its recorded words do not carry; leaf
-    /// 0DH as this kernel logged it there (`cpuid.d.0=(0x207,…)`,
-    /// `cpuid.d.1.eax=0xf`).
-    fn amd_bench(stepping: u32) -> Facts {
-        Facts {
-            vendor: *b"AuthenticAMD",
-            cpuid_1_eax: 0x0086_0f00 | stepping,
-            cpuid_1_ecx: 1 << 26,
-            cpuid_d0_eax: 0x207,
-            cpuid_d0_edx: 0,
-            cpuid_d1_eax: 0xf,
-        }
+    /// The AMD bench, a Ryzen 7 4800U: leaf 0DH as this kernel logged it
+    /// there (`cpuid.d.0=(0x207,…)`, `cpuid.d.1.eax=0xf`).
+    fn amd_bench() -> Facts {
+        Facts { cpuid_1_ecx: 1 << 26, cpuid_d0_eax: 0x207, cpuid_d0_edx: 0, cpuid_d1_eax: 0xf }
     }
 
-    /// TCG's `qemu64` with `Arch::cpu`'s flags: `AuthenticAMD` family 0xF model
-    /// 0x6B stepping 1 (`kernel/cpuvuln/fixtures/tcg`), leaf 0DH as this kernel
+    /// TCG's `qemu64` with `Arch::cpu`'s flags: leaf 0DH as this kernel
     /// logged it there (`cpuid.d.0=(0x7,…)`, `cpuid.d.1.eax=0x1`).
     fn tcg() -> Facts {
-        Facts {
-            vendor: *b"AuthenticAMD",
-            cpuid_1_eax: 0x0006_0fb1,
-            cpuid_1_ecx: 1 << 26,
-            cpuid_d0_eax: 0x7,
-            cpuid_d0_edx: 0,
-            cpuid_d1_eax: 0x1,
-        }
-    }
-
-    /// A family 17h part at `model` and `stepping` with every save form.
-    fn zen(model: u32, stepping: u32) -> Facts {
-        Facts { cpuid_1_eax: 0x0080_0f00 | (model >> 4) << 16 | (model & 0xf) << 4 | stepping, ..amd_bench(0) }
-    }
-
-    fn unread() -> u32 {
-        panic!("the microcode revision was read where no fixed revision exists")
+        Facts { cpuid_1_ecx: 1 << 26, cpuid_d0_eax: 0x7, cpuid_d0_edx: 0, cpuid_d1_eax: 0x1 }
     }
 
     #[test]
@@ -312,25 +245,25 @@ mod tests {
 
     #[test]
     fn the_amd_bench_and_tcg_declare_avx() {
-        assert_eq!(xcr0(&amd_bench(0)), Ok(0x7));
+        assert_eq!(xcr0(&amd_bench()), Ok(0x7));
         assert_eq!(xcr0(&tcg()), Ok(0x7));
     }
 
     #[test]
     fn the_t14_saves_with_xsaves() {
-        assert_eq!(form(&t14_facts(), unread), Ok(Form::Xsaves));
+        assert_eq!(form(&t14_facts(), false), Ok(Form::Xsaves));
     }
 
+    /// Its CPUID enumerates `XSAVES`; the erratum is what moves it.
     #[test]
-    fn the_amd_bench_saves_with_xsavec_at_every_stepping() {
-        for stepping in 0..16 {
-            assert_eq!(form(&amd_bench(stepping), unread), Ok(Form::Xsavec), "stepping {stepping}");
-        }
+    fn the_amd_bench_named_by_the_erratum_saves_with_xsavec() {
+        assert_eq!(amd_bench().cpuid_d1_eax & D1_XSAVES, D1_XSAVES);
+        assert_eq!(form(&amd_bench(), true), Ok(Form::Xsavec));
     }
 
     #[test]
     fn tcg_saves_with_xsaveopt() {
-        assert_eq!(form(&tcg(), unread), Ok(Form::Xsaveopt));
+        assert_eq!(form(&tcg(), false), Ok(Form::Xsaveopt));
     }
 
     #[test]
@@ -342,67 +275,25 @@ mod tests {
     #[test]
     fn a_cpu_without_xsaveopt_is_refused_whatever_else_it_offers() {
         let facts = Facts { cpuid_d1_eax: D1_XSAVES | D1_XSAVEC, ..t14_facts() };
-        assert_eq!(form(&facts, unread), Err(Refusal::NoXsaveopt));
+        assert_eq!(form(&facts, false), Err(Refusal::NoXsaveopt));
     }
 
     #[test]
-    fn every_zen1_and_zen2_model_without_a_fixed_revision_saves_with_xsavec() {
-        for (first, last) in ERRATUM_1386_MODELS {
-            for model in first..=last {
-                for stepping in 0..16 {
-                    if ERRATUM_1386_FIXED.iter().any(|&(m, s, _)| (m, s) == (model, stepping)) {
-                        continue;
-                    }
-                    assert_eq!(form(&zen(model, stepping), unread), Ok(Form::Xsavec), "{model:#x}/{stepping}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_fixed_revision_lifts_the_erratum_from_its_own_part_alone() {
-        for (model, stepping, fixed) in ERRATUM_1386_FIXED {
-            let part = zen(model, stepping);
-            assert_eq!(form(&part, || fixed - 1), Ok(Form::Xsavec), "{model:#x} below its fix");
-            assert_eq!(form(&part, || fixed), Ok(Form::Xsaves), "{model:#x} at its fix");
-            // The same model at another stepping is not the fixed part.
-            assert_eq!(form(&zen(model, stepping ^ 1), unread), Ok(Form::Xsavec), "{model:#x} elsewhere");
-        }
-    }
-
-    #[test]
-    fn family_17h_models_linux_does_not_file_as_zen1_or_zen2_keep_xsaves() {
-        for model in [0x80, 0x8f, 0x92, 0x9f, 0xb0, 0xff] {
-            assert_eq!(form(&zen(model, 0), unread), Ok(Form::Xsaves), "{model:#x}");
-        }
-    }
-
-    #[test]
-    fn the_erratum_names_amd_family_17h_alone() {
-        let hygon = Facts { vendor: *b"HygonGenuine", cpuid_1_eax: 0x0090_0f00, ..amd_bench(0) };
-        let zen3 = Facts { cpuid_1_eax: 0x00a0_0f10, ..amd_bench(0) };
-        let intel_as_17h = Facts { vendor: *b"GenuineIntel", ..amd_bench(0) };
-        for facts in [hygon, zen3, intel_as_17h] {
-            assert_eq!(form(&facts, unread), Ok(Form::Xsaves), "{:#x}", facts.cpuid_1_eax);
-        }
-    }
-
-    #[test]
-    fn an_erratum_part_without_xsavec_saves_with_xsaveopt() {
-        let facts = Facts { cpuid_d1_eax: D1_XSAVEOPT | D1_XSAVES, ..amd_bench(1) };
-        assert_eq!(form(&facts, unread), Ok(Form::Xsaveopt));
+    fn a_part_the_erratum_names_without_xsavec_saves_with_xsaveopt() {
+        let facts = Facts { cpuid_d1_eax: D1_XSAVEOPT | D1_XSAVES, ..amd_bench() };
+        assert_eq!(form(&facts, true), Ok(Form::Xsaveopt));
     }
 
     #[test]
     fn a_cpu_without_avx_state_is_refused() {
-        let facts = Facts { cpuid_d0_eax: 0x3, ..amd_bench(0) };
+        let facts = Facts { cpuid_d0_eax: 0x3, ..amd_bench() };
         assert_eq!(xcr0(&facts), Err(Refusal::Missing(AVX)));
     }
 
     #[test]
     fn part_of_the_avx512_group_is_refused() {
         for partial in [OPMASK, ZMM_HI256, HI16_ZMM, OPMASK | HI16_ZMM, ZMM_HI256 | HI16_ZMM] {
-            let facts = Facts { cpuid_d0_eax: 0x7 | partial as u32, ..amd_bench(0) };
+            let facts = Facts { cpuid_d0_eax: 0x7 | partial as u32, ..amd_bench() };
             assert_eq!(xcr0(&facts), Err(Refusal::PartialAvx512(partial)), "{partial:#x}");
         }
     }

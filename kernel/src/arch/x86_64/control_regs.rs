@@ -47,10 +47,6 @@ mod xss {
 /// `IA32_XSS` on every CPU that has it: no supervisor component.
 const XSS: u64 = 0;
 
-/// AMD's microcode patch level, which `kernel::xsave::form` asks for on the
-/// parts of erratum 1386 a revision fixes: APM Vol. 2 (24593) §A.1.
-const AMD_PATCH_LEVEL: u32 = 0x8B;
-
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
     pub const PE: u64 = 1 << 0;
@@ -443,10 +439,7 @@ fn declaration(cpu_id: u32) -> u64 {
 fn xsave_declaration(cpu_id: u32) -> (u64, kernel::xsave::Form) {
     let (eax1, _, ecx1, _) = cpu::cpuid(1, 0);
     let (d0_eax, _, _, d0_edx) = cpu::leaf_d(0);
-    let (_, vendor_ebx, vendor_ecx, vendor_edx) = cpu::cpuid(0, 0);
     let facts = kernel::xsave::Facts {
-        vendor: core::array::from_fn(|i| [vendor_ebx, vendor_edx, vendor_ecx][i / 4].to_le_bytes()[i % 4]),
-        cpuid_1_eax: eax1,
         cpuid_1_ecx: ecx1,
         cpuid_d0_eax: d0_eax,
         cpuid_d0_edx: d0_edx,
@@ -456,8 +449,8 @@ fn xsave_declaration(cpu_id: u32) -> (u64, kernel::xsave::Form) {
         panic!("control_regs: cpu{cpu_id} cannot run user state: {} ({refusal:?})", refusal.reason())
     };
     let declared = kernel::xsave::xcr0(&facts).unwrap_or_else(|r| refused(r));
-    // Asked only on an AMD part erratum 1386 names, where the MSR exists.
-    let form = kernel::xsave::form(&facts, || cpu::rdmsr(AMD_PATCH_LEVEL) as u32).unwrap_or_else(|r| refused(r));
+    let form = kernel::xsave::form(&facts, toyos_cpuvuln::erratum_1386(cpu::vendor(), eax1))
+        .unwrap_or_else(|r| refused(r));
     match DECLARED_XCR0.compare_exchange(0, declared, Ordering::Release, Ordering::Acquire) {
         Ok(_) => (declared, form),
         Err(published) => {

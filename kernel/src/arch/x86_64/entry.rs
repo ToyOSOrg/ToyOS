@@ -99,8 +99,8 @@ macro_rules! ring3_trampoline_asm {
 }
 
 // The numbers `FORM` is compared against are `kernel::xsave::Form`'s
-// discriminants, which `fpu` asserts: 1 `XSAVES`, 2 `XSAVEC`, 3 `XSAVEOPT`.
-// The local labels are 7x, which no stub uses for its own.
+// discriminants, which `fpu` asserts: 1 `XSAVES`, 2 `XSAVEC`, 3 `XSAVEOPT`;
+// any other is `ud2`. The local labels are 7x, which no stub uses for its own.
 
 /// The state a task that has never been in Ring 3 starts from: every
 /// component `XCR0` enables, so no upper half of a register is left from the
@@ -114,13 +114,17 @@ macro_rules! initial_user_state {
             "je 71f\n",
             "cmp byte ptr [rip + {fp_form}], 2\n",
             "je 72f\n",
-            "xrstor64 [rip + {fp_standard}]\n",
-            "jmp 73f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
             "71:\n",
             "xrstors64 [rip + {fp_compacted}]\n",
             "jmp 73f\n",
             "72:\n",
             "xrstor64 [rip + {fp_compacted}]\n",
+            "jmp 73f\n",
+            "79:\n",
+            "xrstor64 [rip + {fp_standard}]\n",
             "73:\n",
         )
     };
@@ -156,13 +160,17 @@ macro_rules! save_user_state {
             "je 74f\n",
             "cmp byte ptr [rip + {fp_form}], 2\n",
             "je 75f\n",
-            "xsaveopt64 [rsp + 64]\n",
-            "jmp 76f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
             "74:\n",
             "xsaves64 [rsp + 64]\n",
             "jmp 76f\n",
             "75:\n",
             "xsavec64 [rsp + 64]\n",
+            "jmp 76f\n",
+            "79:\n",
+            "xsaveopt64 [rsp + 64]\n",
             "76:\n",
         )
     };
@@ -176,10 +184,16 @@ macro_rules! restore_user_state {
             "mov edx, -1\n",
             "cmp byte ptr [rip + {fp_form}], 1\n",
             "je 77f\n",
-            "xrstor64 [rsp + 64]\n",
-            "jmp 78f\n",
+            "cmp byte ptr [rip + {fp_form}], 2\n",
+            "je 79f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
             "77:\n",
             "xrstors64 [rsp + 64]\n",
+            "jmp 78f\n",
+            "79:\n",
+            "xrstor64 [rsp + 64]\n",
             "78:\n",
             "mov rsp, [rsp]\n",
         )
