@@ -208,9 +208,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    (`src/metal*.rs` and `tests/t14-linux/` as package
    `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
    `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
-   `bootable-<stem>.img`. Blocked on
-   `issues/the-owners-flash-script-runs-diskutil.md`, which owns
-   `diag/flash.sh`. **Exit:** no `tests/*case/`, `console/` or `diag/`
+   `bootable-<stem>.img`. **Exit:** no `tests/*case/`, `console/` or `diag/`
    directory and no root `system.toml` remains, and `--diag-boot`,
    `--console-boot` and a `--metal-readback` build green.
 9. **`src/` becomes `build/`, `bootloader/` becomes `loader/`,** and

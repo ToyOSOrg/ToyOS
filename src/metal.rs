@@ -346,13 +346,13 @@ impl fmt::Display for Refusal {
 /// A partition is spelled from one and never passed as one, so no job can be
 /// aimed at a partition of a disk it was not given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Node {
+pub(crate) enum Node {
     Scsi(u8),
     Nvme { controller: u8, namespace: u8 },
 }
 
 impl Node {
-    fn parse(path: &str) -> Result<Self, Refusal> {
+    pub(crate) fn parse(path: &str) -> Result<Self, Refusal> {
         let scsi = path.strip_prefix("/dev/sd").and_then(|rest| {
             let [byte] = rest.as_bytes() else { return None };
             byte.is_ascii_lowercase().then_some(Node::Scsi(*byte))
@@ -366,7 +366,7 @@ impl Node {
     }
 
     /// The disk's own name, as `/dev` and `/sys/class/block` spell it.
-    fn name(&self) -> String {
+    pub(crate) fn name(&self) -> String {
         match *self {
             Node::Scsi(letter) => format!("sd{}", letter as char),
             Node::Nvme { controller, namespace } => format!("nvme{}n{}", controller as char, namespace as char),
@@ -391,7 +391,7 @@ impl Node {
     }
 
     /// Where `/sys` answers for the disk, and for one of its partitions.
-    fn sysfs(&self) -> String {
+    pub(crate) fn sysfs(&self) -> String {
         format!("/sys/class/block/{}", self.name())
     }
 
@@ -403,17 +403,17 @@ impl Node {
 /// What `/sys/class/block/<disk>/` answered, in the order [`Target::identity`]
 /// asks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Identity {
-    sectors: u64,
-    vendor: String,
-    model: String,
-    removable: bool,
+pub(crate) struct Identity {
+    pub(crate) sectors: u64,
+    pub(crate) vendor: String,
+    pub(crate) model: String,
+    pub(crate) removable: bool,
 }
 
 impl Identity {
     /// The four `sysfs` files as `cat` concatenates them. The trailing padding
     /// is the SCSI inquiry's own: vendor and model are fixed-width fields.
-    fn parse(text: &str) -> Result<Self, Refusal> {
+    pub(crate) fn parse(text: &str) -> Result<Self, Refusal> {
         let fields: Vec<&str> = text.lines().map(str::trim).collect();
         let [size, vendor, model, removable] = fields[..] else {
             return Err(Refusal::Identity {
@@ -972,9 +972,9 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     }
 }
 
-/// Whole sectors, `EFI PART` in the *final* one, and exactly one partition of
-/// each of the three types at the numbers the installed rule names.
-fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
+/// A whole disk's image, opened: whole sectors, `EFI PART` in the *final*
+/// one, and its length in bytes.
+pub fn whole_disk(path: &Path) -> Result<(std::fs::File, u64), Refusal> {
     let sector = u64::from(LBA);
     let unreadable = |why: String| Refusal::File { path: path.display().to_string(), why };
     let mut file = std::fs::File::open(path).map_err(|e| unreadable(e.to_string()))?;
@@ -991,7 +991,13 @@ fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
         let saw = String::from_utf8_lossy(&last[..8]).to_string();
         return Err(Refusal::BackupHeader { at, saw });
     }
+    Ok((file, bytes))
+}
 
+/// [`whole_disk`], and exactly one partition of each of the three types at the
+/// numbers the installed rule names.
+fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
+    let (mut file, bytes) = whole_disk(path)?;
     let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
     let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
     one_partition(&mut file, toyos_gpt::Guid::TOYOS_ROOT, "TOYOS-ROOT")?;

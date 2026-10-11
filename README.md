@@ -279,26 +279,18 @@ the boot configuration differs.
 
 ### Writing it to a USB stick
 
-The image is a whole disk, not a filesystem — write it to the device, not to a
-partition on it. **Check the device name twice.** This destroys whatever is
-already there.
-
-macOS:
-
-```
-diskutil list                              # find the stick
-diskutil unmountDisk /dev/diskN
-sudo dd if=target/bootable.img of=/dev/rdiskN bs=4m
-diskutil eject /dev/diskN
-```
-
-Linux:
+The image is a whole disk, and `toyos-flash` writes it over the whole stick,
+on macOS and Linux. It finds the stick itself: it writes only an external USB
+disk, and `--disk <name>` chooses one when more than one is plugged in. It
+shows the disk it chose, and writes it only when run as root and answered `y`.
+**What was on the stick is destroyed.**
 
 ```
-lsblk                                      # find the stick
-sudo dd if=target/bootable.img of=/dev/sdX bs=4M status=progress conv=fsync
-sync
+cargo run --bin toyos-flash                # shows the stick and the sudo line that writes it
+sudo target/debug/toyos-flash --disk <name>
 ```
+
+`--diag-boot` or `--console-boot` on both lines flashes that image instead.
 
 Then boot the machine from it. Secure Boot has to be off — ToyOS's bootloader
 is signed by nobody.

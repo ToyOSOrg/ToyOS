@@ -7,7 +7,7 @@ opened: 2026-09-29
 # The build runs host tools outside Rust and QEMU
 
 Every tool `main`'s build, tests, workflows and metal loop run outside Rust and
-QEMU, and every one `diag/flash.sh` and the README's flashing steps run by hand,
+QEMU, and every one the README's flashing steps run by hand,
 with the verdict of `CLAUDE.md`'s Dependencies on each; a refused row is a
 standing failure. A workflow's package manager, `apt-get` or `brew`, is how a row
 arrives and is not one. M4 and M5 are stages of `issues/toyos-builds-itself.md`.
@@ -32,14 +32,8 @@ arrives and is not one. M4 and M5 are stages of `issues/toyos-builds-itself.md`.
 | `tar` and `zstd` | `actions/cache` packs and unpacks every cache entry with them, on CI runners; `guest.yml`'s `deps` installs `zstd`, without which the guest's restore names no entry the toolchain job saved | admitted: GitHub's cache action runs them, and CI keeps no store between runs without it | CI keeps no store between runs |
 | `ssh` | `src/metal.rs` reaches the T14's Ubuntu with it, only in the metal loop | refused: a Rust tool does it, russh, which sshserver is built on; the harness's own russh client was built and is deleted (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`) | `src/metal.rs` drives a russh client, or Ubuntu leaves the loop |
 | `cc`, `c++`, `ar` and `xcrun` on a macOS host, Apple's Command Line Tools | what the Linux row's tools do, and rustc asks `xcrun` for the SDK on every host link that names no `SDKROOT` (`rust/compiler/rustc_codegen_ssa/src/back/apple.rs`), as `src/llvm.rs` does for the LLVM's key | refused: one host OS alone | M5: no host in the loop |
-| `diag/flash.sh` | the owner's flash of a stick by hand: `bash`, and the `stat`, `seq`, `tr`, `grep`, `cut` and `sync` it strings together | refused: shell of our own | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `diskutil` and `plutil` | `diag/flash.sh`, and `diskutil` in the README's flashing steps | refused: one host OS alone | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `shasum`, a Perl script on macOS | `diag/flash.sh` hashes the image with it | refused: a Rust tool does it, `toyos-sha2-hw`, which `src/release.rs` hashes with | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `lsblk` | the README's Linux flashing steps find the stick with it | refused: one host OS alone | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `dd` | `diag/flash.sh` and the README's flashing steps write the stick with it | refused: a Rust tool does it, the build system can write the image itself | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `sync` | the README's Linux flashing steps flush the stick with it | refused: a Rust tool does it, the build system can flush what it writes | `issues/the-owners-flash-script-runs-diskutil.md` |
-| `sudo` on macOS | `diag/flash.sh` and the README's macOS flashing steps run `dd` under it | admitted: no Rust tool raises a process to root on macOS; sudo-rs "is targeted for FreeBSD and Linux-based operating systems only" (its README at `89bae8a`) | goes with both flashes by hand |
-| `sudo` on Linux | the README's Linux flashing steps run `dd` under it | refused: a Rust tool does it, sudo-rs | the README's Linux steps run sudo-rs |
+| `sudo` on macOS | the README's flashing steps run `toyos-flash` under it | admitted: no Rust tool raises a process to root on macOS; sudo-rs "is targeted for FreeBSD and Linux-based operating systems only" (its README at `89bae8a`) | M5: no host in the loop |
+| `sudo` on Linux | the README's flashing steps run `toyos-flash` under it | refused: a Rust tool does it, sudo-rs | the README's Linux steps run sudo-rs |
 | `sh` running rustup's `rustup-init.sh` | CI's rustup installs, fetched with `curl` | refused: a Rust tool does it, rustup's own `rustup-init` binary | a job installs rustup without it |
 | `guest.yml`, step `deps` | the snapshot archive read out of `debian.sources` with `sed`, checked with `test` and written back with `echo` and `rm`, a three-attempt `apt-get` loop with `sleep` and `cat`, `git config`, and rustup through `curl`, `sh` and `echo` | refused: shell of our own | each step is one command |
 | `nightly.yml`, job `portability-linux`, step "deps" | the same loop, `git config`, and rustup the same way | refused: shell of our own | each step is one command |

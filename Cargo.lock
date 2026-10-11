@@ -4272,6 +4272,8 @@ dependencies = [
  "kernel",
  "libc",
  "libm",
+ "objc2-core-foundation",
+ "objc2-io-kit",
  "pem",
  "rcgen",
  "rustls",
