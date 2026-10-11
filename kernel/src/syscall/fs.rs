@@ -43,13 +43,7 @@ pub(super) fn sys_stat(path: &str, follow: bool) -> Result<ops::Stat, SyscallErr
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let mut vfs = vfs::lock();
     let resolved = vfs.resolve_absolute(&cwd, path);
-    let vfs::Named { kind, volume, node } = vfs.stat(&resolved, follow)?;
-    let (file_type, size, mtime) = match kind {
-        vfs::NamedKind::File { mtime } => (FileType::File, crate::file_cache::size(node), mtime),
-        vfs::NamedKind::Symlink { len } => (FileType::Symlink, len, 0),
-        vfs::NamedKind::Directory => (FileType::Directory, 0, 0),
-    };
-    Ok(ops::Stat { file_type: file_type as u64, size, mtime, volume, node })
+    vfs.stat(&resolved, follow)
 }
 
 /// Returns the length needed; writes the listing only when it fits (`n <= out.len()`).

@@ -5,13 +5,19 @@
 //! share, or a name `mkdir` left in the VFS. So the VFS numbers each by its
 //! absolute path, drawing the number on the first ask, and forgets it once a
 //! removal beneath the path leaves no directory there: a number is never
-//! another directory's while both exist, and what this holds is bounded by the
-//! directories that exist and were asked about.
+//! another directory's while both exist. The paths are userland's choice, so
+//! what this holds is bounded: [`MAX_DIRECTORIES`] keys of at most
+//! [`MAX_PATH`] bytes, a directory past either refused by name.
 
 #![forbid(unsafe_code)]
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use toyos_abi::syscall::{SyscallError, MAX_PATH};
+
+/// The most directories numbered at once: past it a directory not yet
+/// numbered is refused `ResourceExhausted` until one that is ends.
+pub const MAX_DIRECTORIES: usize = 16_384;
 
 #[derive(Default)]
 pub struct Directories {
@@ -25,20 +31,37 @@ impl Directories {
 
     /// The number of the directory at `path`, drawn by `draw` when this does
     /// not hold one; `draw` answers a number nothing else on its volume holds.
-    pub fn of(&mut self, path: &str, draw: impl FnOnce() -> u64) -> u64 {
+    /// A path longer than [`MAX_PATH`] is refused `InvalidArgument`, as `cd`
+    /// and `mkdir` refuse it, and a new one past [`MAX_DIRECTORIES`]
+    /// `ResourceExhausted`.
+    pub fn of(&mut self, path: &str, draw: impl FnOnce() -> u64) -> Result<u64, SyscallError> {
         if let Some(&number) = self.of.get(path) {
-            return number;
+            return Ok(number);
+        }
+        if path.len() > MAX_PATH {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if self.of.len() >= MAX_DIRECTORIES {
+            return Err(SyscallError::ResourceExhausted);
         }
         let number = draw();
         self.of.insert(String::from(path), number);
-        number
+        Ok(number)
     }
 
     /// A name at `path` was removed or moved away: `path` and every directory
     /// above it whose number this holds and that `exists` no longer answers for
-    /// is forgotten, so a directory made there later is drawn a new one.
+    /// is forgotten, so a directory made there later is drawn a new one. The
+    /// walk begins at the longest of them within [`MAX_PATH`], since nothing
+    /// longer is held, so its length is bounded whatever `path`'s is.
     pub fn removed(&mut self, path: &str, mut exists: impl FnMut(&str) -> bool) {
         let mut at = path;
+        if at.len() > MAX_PATH {
+            match at.as_bytes()[..=MAX_PATH].iter().rposition(|&b| b == b'/') {
+                Some(0) | None => return,
+                Some(slash) => at = &at[..slash],
+            }
+        }
         loop {
             if self.of.contains_key(at) && !exists(at) {
                 self.of.remove(at);
@@ -54,6 +77,7 @@ impl Directories {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use std::cell::Cell;
     use std::vec::Vec;
 
@@ -66,15 +90,19 @@ mod tests {
         }
     }
 
+    fn never() -> u64 {
+        panic!("a held number is never drawn again, and a refused one never drawn")
+    }
+
     /// Asked twice, a directory answers one number; two directories answer two.
     #[test]
     fn a_directory_is_one_number_and_two_are_two() {
         let mut draw = counter();
         let mut dirs = Directories::new();
-        let a = dirs.of("/tmp/a", &mut draw);
-        let b = dirs.of("/tmp/b", &mut draw);
+        let a = dirs.of("/tmp/a", &mut draw).unwrap();
+        let b = dirs.of("/tmp/b", &mut draw).unwrap();
         assert_ne!(a, b);
-        assert_eq!(dirs.of("/tmp/a", || panic!("a held number is never drawn again")), a);
+        assert_eq!(dirs.of("/tmp/a", never), Ok(a));
     }
 
     /// A removal that leaves the directory standing keeps its number; one that
@@ -83,13 +111,13 @@ mod tests {
     fn a_number_lasts_exactly_as_long_as_its_directory() {
         let mut draw = counter();
         let mut dirs = Directories::new();
-        let a = dirs.of("/tmp/a", &mut draw);
+        let a = dirs.of("/tmp/a", &mut draw).unwrap();
 
         dirs.removed("/tmp/a/f", |_| true);
-        assert_eq!(dirs.of("/tmp/a", || panic!("a directory that stands kept its number")), a);
+        assert_eq!(dirs.of("/tmp/a", never), Ok(a));
 
         dirs.removed("/tmp/a/f", |dir| dir != "/tmp/a");
-        let again = dirs.of("/tmp/a", &mut draw);
+        let again = dirs.of("/tmp/a", &mut draw).unwrap();
         assert_ne!(again, a, "a directory made again where one was removed is another directory");
     }
 
@@ -99,15 +127,15 @@ mod tests {
     fn a_removal_forgets_every_directory_it_ended_and_no_other() {
         let mut draw = counter();
         let mut dirs = Directories::new();
-        let tmp = dirs.of("/tmp", &mut draw);
-        let a = dirs.of("/tmp/a", &mut draw);
-        let b = dirs.of("/tmp/a/b", &mut draw);
-        let sibling = dirs.of("/tmp/ab", &mut draw);
+        let tmp = dirs.of("/tmp", &mut draw).unwrap();
+        let a = dirs.of("/tmp/a", &mut draw).unwrap();
+        let b = dirs.of("/tmp/a/b", &mut draw).unwrap();
+        let sibling = dirs.of("/tmp/ab", &mut draw).unwrap();
 
         dirs.removed("/tmp/a/b/f", |dir| dir == "/tmp" || dir == "/tmp/ab");
-        assert_eq!(dirs.of("/tmp", || panic!("/tmp stands")), tmp);
-        assert_eq!(dirs.of("/tmp/ab", || panic!("a name sharing the prefix is not above the removal")), sibling);
-        let (a2, b2) = (dirs.of("/tmp/a", &mut draw), dirs.of("/tmp/a/b", &mut draw));
+        assert_eq!(dirs.of("/tmp", never), Ok(tmp));
+        assert_eq!(dirs.of("/tmp/ab", never), Ok(sibling));
+        let (a2, b2) = (dirs.of("/tmp/a", &mut draw).unwrap(), dirs.of("/tmp/a/b", &mut draw).unwrap());
         assert!(![tmp, a, b, sibling].contains(&a2) && ![tmp, a, b, sibling, a2].contains(&b2));
     }
 
@@ -116,7 +144,7 @@ mod tests {
     #[test]
     fn only_a_held_number_is_judged() {
         let mut dirs = Directories::new();
-        dirs.of("/tmp/a", || 7);
+        dirs.of("/tmp/a", || 7).unwrap();
         let asked = Cell::new(Vec::new());
         dirs.removed("/tmp/a/b/c/f", |dir| {
             let mut seen = asked.take();
@@ -125,5 +153,51 @@ mod tests {
             true
         });
         assert_eq!(asked.take(), [String::from("/tmp/a")]);
+    }
+
+    /// A path of `MAX_PATH` bytes is numbered; one byte more is refused by
+    /// name, and nothing is drawn or held for it.
+    #[test]
+    fn a_path_past_max_path_is_refused_invalid() {
+        let mut draw = counter();
+        let mut dirs = Directories::new();
+        let longest = format!("/{}", "a".repeat(MAX_PATH - 1));
+        assert!(dirs.of(&longest, &mut draw).is_ok());
+        let past = format!("{longest}a");
+        assert_eq!(dirs.of(&past, never), Err(SyscallError::InvalidArgument));
+        assert_eq!(dirs.of.len(), 1);
+    }
+
+    /// Full, a new directory is refused by name while a numbered one still
+    /// answers; once one ends, a new one is numbered again.
+    #[test]
+    fn past_max_directories_a_new_directory_is_refused_exhausted() {
+        let mut draw = counter();
+        let mut dirs = Directories::new();
+        for i in 0..MAX_DIRECTORIES {
+            dirs.of(&format!("/tmp/{i}"), &mut draw).unwrap();
+        }
+        assert_eq!(dirs.of("/tmp/new", never), Err(SyscallError::ResourceExhausted));
+        assert_eq!(dirs.of("/tmp/0", never), Ok(1));
+
+        dirs.removed("/tmp/0/f", |dir| dir != "/tmp/0");
+        assert!(dirs.of("/tmp/new", &mut draw).is_ok());
+        assert_eq!(dirs.of("/tmp/0", never), Err(SyscallError::ResourceExhausted));
+    }
+
+    /// A removal beneath a path longer than `MAX_PATH` still judges every
+    /// numbered directory above it.
+    #[test]
+    fn a_removal_past_max_path_judges_the_numbered_above_it() {
+        let mut draw = counter();
+        let mut dirs = Directories::new();
+        let near = format!("/tmp/{}", "a".repeat(MAX_PATH - 5));
+        assert_eq!(near.len(), MAX_PATH);
+        let top = dirs.of("/tmp", &mut draw).unwrap();
+        dirs.of(&near, &mut draw).unwrap();
+        let deep = format!("{near}{}/f", "/b".repeat(MAX_PATH));
+        dirs.removed(&deep, |dir| dir == "/tmp");
+        assert_eq!(dirs.of("/tmp", never), Ok(top));
+        assert_ne!(dirs.of(&near, &mut draw), Ok(2), "the directory MAX_PATH long ended and kept its number");
     }
 }

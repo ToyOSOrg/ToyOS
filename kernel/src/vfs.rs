@@ -5,8 +5,9 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{FileType, SyscallError};
 use crate::file_cache::{self, FileId};
+use crate::object::ops::Stat;
 use crate::sync::{Lock, LockGuard};
 use kernel::dirnodes::Directories;
 
@@ -134,21 +135,6 @@ const ROOT_NODE: u64 = 1;
 /// The node on [`NAMESPACE_VOLUME`] of the [`ROOT_ENTRIES`] name at `slot`.
 fn namespace_node(slot: usize) -> u64 {
     ROOT_NODE + 1 + slot as u64
-}
-
-/// What [`Vfs::stat`] found at a name, on `volume` as `node`.
-pub struct Named {
-    pub kind: NamedKind,
-    pub volume: u64,
-    pub node: u64,
-}
-
-pub enum NamedKind {
-    /// Its `node` is its `FileId`.
-    File { mtime: u64 },
-    /// `len` is its target's length.
-    Symlink { len: u64 },
-    Directory,
 }
 
 /// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
@@ -332,8 +318,9 @@ impl Vfs {
     }
 
     /// The node of the mounted directory at the absolute `path`
-    /// ([`Directories`]), which the caller found is one.
-    fn dir_node(&mut self, path: &str) -> u64 {
+    /// ([`Directories`]), which the caller found is one; refused past
+    /// [`Directories`]'s bounds.
+    fn dir_node(&mut self, path: &str) -> Result<u64, SyscallError> {
         self.dirs.of(path, file_cache::draw_node)
     }
 
@@ -361,17 +348,15 @@ impl Vfs {
         };
 
         if mount.is_empty() {
-            return Ok(ROOT_ENTRIES
-                .iter()
-                .enumerate()
-                .map(|(slot, name)| {
-                    let node = match self.point(name) {
-                        Some(_) => self.dir_node(&format!("/{name}")),
-                        None => namespace_node(slot),
-                    };
-                    (format!("{name}/"), node)
-                })
-                .collect());
+            let mut entries = Vec::with_capacity(ROOT_ENTRIES.len());
+            for (slot, name) in ROOT_ENTRIES.iter().enumerate() {
+                let node = match self.point(name) {
+                    Some(_) => self.dir_node(&format!("/{name}"))?,
+                    None => namespace_node(slot),
+                };
+                entries.push((format!("{name}/"), node));
+            }
+            return Ok(entries);
         }
 
         let Some(point) = self.point(&mount) else {
@@ -413,7 +398,7 @@ impl Vfs {
             if let Some(slash_pos) = rest.find('/') {
                 let child = &rest[..slash_pos];
                 if seen_dirs.insert(format!("{child}/")) {
-                    let node = self.dir_node(&format!("{listed}/{child}"));
+                    let node = self.dir_node(&format!("{listed}/{child}"))?;
                     result.push((format!("{child}/"), node));
                 }
             } else {
@@ -433,7 +418,7 @@ impl Vfs {
                     if result.len() == MAX_LIST_ENTRIES {
                         return Err(SyscallError::ResourceExhausted);
                     }
-                    result.push((dir_name, self.dirs.of(&format!("{parent}{child}"), file_cache::draw_node)));
+                    result.push((dir_name, self.dirs.of(&format!("{parent}{child}"), file_cache::draw_node)?));
                 }
             }
         }
@@ -488,15 +473,19 @@ impl Vfs {
 
     /// What the absolute `path` names, a final symlink followed when `follow`
     /// says so, as `toyos_abi::syscall::Stat` describes it.
-    pub fn stat(&mut self, path: &str, follow: bool) -> Result<Named, SyscallError> {
+    pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, SyscallError> {
         let (mount, file) = if follow { self.followed(path)? } else { self.resolve_path("/", path) };
-        let namespace = |node| Named { kind: NamedKind::Directory, volume: NAMESPACE_VOLUME, node };
+        let named = |file_type: FileType, size, mtime, volume, node| {
+            Stat { file_type: file_type as u64, size, mtime, volume, node }
+        };
         if mount.is_empty() {
-            return Ok(namespace(ROOT_NODE));
+            return Ok(named(FileType::Directory, 0, 0, NAMESPACE_VOLUME, ROOT_NODE));
         }
         let Some(point) = self.point(&mount) else {
             return match Self::entry(&mount) {
-                Some(slot) if file.is_empty() => Ok(namespace(namespace_node(slot))),
+                Some(slot) if file.is_empty() => {
+                    Ok(named(FileType::Directory, 0, 0, NAMESPACE_VOLUME, namespace_node(slot)))
+                }
                 _ => Err(SyscallError::NotFound),
             };
         };
@@ -505,11 +494,14 @@ impl Vfs {
             let fs_path = point.path(&file);
             let fs = &mut self.mounts[point.fs].fs;
             if let Some(target) = fs.read_link(&fs_path)? {
-                let kind = NamedKind::Symlink { len: target.len() as u64 };
-                return Ok(Named { kind, volume, node: fs.node(&fs_path)? });
+                return Ok(named(FileType::Symlink, target.len() as u64, 0, volume, fs.node(&fs_path)?));
             }
             match fs.file_mtime(&fs_path) {
-                Ok(mtime) => return Ok(Named { kind: NamedKind::File { mtime }, volume, node: fs.node(&fs_path)? }),
+                Ok(mtime) => {
+                    // A file's node is its `FileId`.
+                    let node = fs.node(&fs_path)?;
+                    return Ok(named(FileType::File, file_cache::size(node), mtime, volume, node));
+                }
                 Err(SyscallError::NotFound) => {}
                 Err(e) => return Err(e),
             }
@@ -517,7 +509,7 @@ impl Vfs {
         if !self.is_mounted_dir(&mount, &file)? {
             return Err(SyscallError::NotFound);
         }
-        Ok(Named { kind: NamedKind::Directory, volume, node: self.dir_node(&directory(&mount, &file)) })
+        Ok(named(FileType::Directory, 0, 0, volume, self.dir_node(&directory(&mount, &file))?))
     }
 
     /// `target`'s filesystem, its path there, and its volume ([`MountPoint::volume`]).

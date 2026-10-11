@@ -3,8 +3,9 @@
 //! one `(dev, ino)` through every path, a symlink, its open handle, its
 //! directory's listing and a rename; two files are two, as are two
 //! directories; a symlink is one of its own, across a rename; a kernel
-//! directory that ends gives its number up; and the three are three volumes,
-//! each served one with `toyos::fs::SERVED_VOLUME` set.
+//! directory that ends gives its number up, and one that stands keeps it; and
+//! the three are three volumes, each served one with
+//! `toyos::fs::SERVED_VOLUME` set.
 
 use std::fs::{self, File, Metadata};
 use std::os::toyos::fs::{symlink, MetadataExt};
@@ -105,8 +106,34 @@ fn an_ended_directory_is_forgotten() {
     fs::remove_file(FILE).unwrap();
 }
 
+/// On a kernel mount a directory that still stands after a removal beneath it
+/// keeps its number, as `/tmp` above it does: one a second file still makes a
+/// directory, and one `mkdir` made whose only file goes.
+fn a_standing_directory_keeps_its_number() {
+    const DIR: &str = "/tmp/stat-identity-stands";
+    const ONE: &str = "/tmp/stat-identity-stands/one";
+    const TWO: &str = "/tmp/stat-identity-stands/two";
+    let tmp = of("/tmp");
+
+    write(ONE);
+    write(TWO);
+    let before = of(DIR);
+    fs::remove_file(ONE).unwrap();
+    assert_eq!(of(DIR), before, "an unlink beside a second file renumbered {DIR}");
+    assert_eq!(of("/tmp"), tmp, "an unlink beneath it renumbered /tmp");
+    fs::remove_file(TWO).unwrap();
+
+    fs::create_dir(DIR).unwrap();
+    write(ONE);
+    let before = of(DIR);
+    fs::remove_file(ONE).unwrap();
+    assert_eq!(of(DIR), before, "an unlink of its only file renumbered the made {DIR}");
+    fs::remove_dir(DIR).unwrap();
+}
+
 fn main() {
     an_ended_directory_is_forgotten();
+    a_standing_directory_keeps_its_number();
     let tmp = judge("/tmp", "/tmp/../tmp/./stat-identity-a", true);
     let home = judge("/home", "/home/./stat-identity-a", true);
     // FAT names one entry by either case, and has no symlinks.
