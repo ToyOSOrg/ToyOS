@@ -74,7 +74,13 @@ pub fn arm(period: u64) -> bool {
     write_msr(IA32_PERF_GLOBAL_OVF_CTRL, GLOBAL_FIXED_CTR2);
     reload(period);
     apic::arm_perf_nmi();
+    #[cfg(not(feature = "scout-pmc"))]
     write_msr(IA32_PERF_GLOBAL_CTRL, GLOBAL_FIXED_CTR2);
+    #[cfg(feature = "scout-pmc")]
+    write_msr(
+        IA32_PERF_GLOBAL_CTRL,
+        GLOBAL_FIXED_CTR2 | if super::scout_pmc::wants_pce() { super::scout_pmc::INTEL_GLOBAL_GP } else { 0 },
+    );
     true
 }
 

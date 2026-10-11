@@ -195,6 +195,9 @@ impl Owed {
     /// entries only for its loaded CR3, so nothing is owed unless `target`
     /// is that CR3.
     fn discharge(self, target: Cr3) {
+        #[cfg(feature = "scout-pcid-without-invpcid")]
+        return scout_flush::discharge(self, target);
+        #[cfg_attr(feature = "scout-pcid-without-invpcid", allow(unreachable_code))]
         match self {
             Self::Nothing => {}
             Self::Address { va, .. } => {
@@ -256,8 +259,47 @@ pub fn pcid_active() -> Option<PcidActive> {
     crate::arch::control_regs::PcidActive::ask()
 }
 
+/// The scout twin with `PCIDE` and no `INVPCID`: every flush `INVPCID` did,
+/// done with what every PCID-capable CPU has. An address in the loaded PCID is
+/// `INVLPG`; the loaded PCID's whole context is a `CR3` write without
+/// `NOFLUSH`; anything naming another PCID is a `CR4.PGE` toggle, which
+/// invalidates every entry of every PCID (SDM Vol. 3A §4.10.4.1, APM Vol. 2
+/// §5.5.3) — an over-flush, never an under-one.
+#[cfg(feature = "scout-pcid-without-invpcid")]
+mod scout_flush {
+    use super::{Cr3, Owed};
+
+    pub(super) fn discharge(owed: Owed, target: Cr3) {
+        let loaded = Cr3::current();
+        let is_loaded = loaded.phys() == target.phys() && loaded.pcid() == target.pcid();
+        match owed {
+            Owed::Nothing => {}
+            Owed::Address { va, .. } if is_loaded => crate::arch::cpu::invlpg(va),
+            // SAFETY: the loaded root, rewritten without NOFLUSH: drops only
+            // this PCID's non-global entries.
+            Owed::Context if is_loaded => unsafe { crate::arch::cpu::write_cr3(loaded.0 & !super::CR3_NOFLUSH) },
+            Owed::Address { .. } | Owed::Context => all_pcids(),
+        }
+    }
+
+    /// Every entry of every PCID on this CPU.
+    pub(super) fn all_pcids() {
+        let _closed = crate::arch::IrqGuard::close();
+        let cr4 = crate::arch::cpu::read_cr4();
+        // SAFETY: `PGE` is defined on every x86-64 CPU; set then restored, so
+        // the declaration's value is back before interrupts reopen.
+        unsafe {
+            crate::arch::cpu::write_cr4(cr4 ^ crate::arch::control_regs::scout_pge());
+            crate::arch::cpu::write_cr4(cr4);
+        }
+    }
+}
+
 /// Flush all TLB entries on this CPU, all PCIDs.
 pub fn flush_tlb_all() {
+    #[cfg(feature = "scout-pcid-without-invpcid")]
+    return scout_flush::all_pcids();
+    #[cfg_attr(feature = "scout-pcid-without-invpcid", allow(unreachable_code))]
     if let Some(have) = pcid_active() {
         crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0);
     } else {

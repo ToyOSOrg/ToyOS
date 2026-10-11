@@ -81,6 +81,8 @@ impl Machine for KernelHw {
         #[cfg(feature = "mask-windows")]
         crate::windows::halting();
         self.halt();
+        #[cfg(feature = "scout-wake-marks")]
+        crate::trace::scout::mark(crate::trace::scout::HALT_RETURN, 0);
         #[cfg(feature = "mask-windows")]
         crate::windows::woken();
         // **A CPU that is executing has a one-shot armed, and this is where

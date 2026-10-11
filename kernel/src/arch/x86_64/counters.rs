@@ -31,6 +31,11 @@ pub fn bring_up() {
     });
     let bits = if verdict.smi { SMI } else { 0 } | if verdict.aperf_mperf { APERF_MPERF } else { 0 };
     ADMITTED[percpu::cpu_id() as usize].store(bits, Relaxed);
+    #[cfg(feature = "scout-pmc")]
+    {
+        super::scout_pmc::log_cpuid(percpu::cpu_id());
+        super::scout_pmc::arm(percpu::cpu_id());
+    }
 }
 
 /// This CPU's admitted counters.

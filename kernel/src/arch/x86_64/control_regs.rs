@@ -52,6 +52,10 @@ mod cr4 {
     pub const DE: u64 = 1 << 3;
     pub const PAE: u64 = 1 << 5;
     pub const MCE: u64 = 1 << 6;
+    #[cfg(feature = "scout-pcid-without-invpcid")]
+    pub const PGE: u64 = 1 << 7;
+    #[cfg(feature = "scout-pmc")]
+    pub const PCE: u64 = 1 << 8;
     pub const OSFXSR: u64 = 1 << 9;
     pub const OSXMMEXCPT: u64 = 1 << 10;
     pub const LA57: u64 = 1 << 12;
@@ -131,7 +135,10 @@ const CR4_REQUIRED: u64 =
     cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
+#[cfg(not(feature = "scout-pmc"))]
 const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
+#[cfg(feature = "scout-pmc")]
+const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP | cr4::PCE;
 
 /// The `CR4` bit no shipping CPU may hold: `FSGSBASE` gives Ring 3 `WRGSBASE`,
 /// and `GS.base` aims the first memory access of every kernel entry
@@ -345,6 +352,12 @@ pub fn pcid_active() -> bool {
     DECLARED_CR4.load(Ordering::Acquire) & cr4::PCIDE != 0
 }
 
+/// `CR4.PGE`, which the scout twin toggles to flush every PCID and never declares.
+#[cfg(feature = "scout-pcid-without-invpcid")]
+pub fn scout_pge() -> u64 {
+    cr4::PGE
+}
+
 /// Proof that this machine's declaration carries `PCIDE`, so `INVPCID` is
 /// not `#UD` here. Zero-sized: an `Option<PcidActive>` costs nothing extra.
 /// Never stales: `PCIDE`, once declared, is never cleared.
@@ -437,8 +450,25 @@ fn supported() -> u64 {
         }
     }
     // PCID without INVPCID is not worth having: nothing could flush by ASID.
+    #[cfg(not(any(feature = "scout-no-pcid", feature = "scout-pcid-without-invpcid")))]
     if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 {
         have |= cr4::PCIDE;
+    }
+    #[cfg(feature = "scout-pcid-without-invpcid")]
+    {
+        assert!(
+            ecx1 & (1 << 17) != 0,
+            "scout-pcid-without-invpcid: CPUID.01H:ECX[17] (PCID) is clear on this CPU, so the \
+             twin cannot exist here"
+        );
+        let _ = ebx7;
+        have |= cr4::PCIDE;
+    }
+    #[cfg(feature = "scout-no-pcid")]
+    let _ = (ecx1, ebx7);
+    #[cfg(feature = "scout-pmc")]
+    if super::scout_pmc::wants_pce() {
+        have |= cr4::PCE;
     }
     have
 }

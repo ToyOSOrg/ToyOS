@@ -49,6 +49,33 @@ pub fn trace(kind: Kind, data: u32) {
     push(kind, None, data);
 }
 
+/// Measurement scout, never landed: [`Kind::Mark`] records splitting an idle
+/// wake, `data` = code << 24 | argument. `scout_wake` decodes the same codes.
+#[cfg(feature = "scout-wake-marks")]
+pub mod scout {
+    /// Two back-to-back marks: what one record costs, in place.
+    pub const CAL_A: u32 = 1;
+    pub const CAL_B: u32 = 2;
+    /// Around the kick's ICR write; the argument is the target CPU.
+    pub const KICK_BEGIN: u32 = 3;
+    pub const KICK_END: u32 = 4;
+    /// The kick handler's first statement.
+    pub const ARRIVE: u32 = 5;
+    /// The instruction after `hlt` in the idle wait.
+    pub const HALT_RETURN: u32 = 6;
+    /// `arm_one_shot`'s first statement; its `TimerArm` record closes it.
+    pub const ARM_BEGIN: u32 = 7;
+    /// `stop_timer`'s first statement; its `TimerStop` record closes it.
+    pub const STOP_BEGIN: u32 = 8;
+    /// A pass's `execute` returned, on whichever context resumed.
+    pub const RESUMED: u32 = 9;
+
+    #[inline]
+    pub fn mark(code: u32, arg: u32) {
+        super::trace(super::Kind::Mark, code << 24 | (arg & 0x00FF_FFFF));
+    }
+}
+
 /// Reserve, stamp and publish under one guard, on the ring of the CPU the guard holds us to.
 #[inline]
 fn push(kind: Kind, task: Option<(u32, u32)>, data: u32) {
