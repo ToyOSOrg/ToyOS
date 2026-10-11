@@ -1107,7 +1107,7 @@ fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
     const DOWNLOAD_SHA256: &str = "1a9ee8caaa18a3e433fef93cea8a55dc1ebd478ed761b2fef69d4565f9d00e7f";
     const SAID: &str = "https_download: ";
     let log = back.log();
-    let said = log.text().lines().find_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim()));
+    let said = log.text().lines().filter_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim())).find(|s| s.starts_with("whole ") || s.starts_with("cut "));
     // MEASUREMENT ONLY: every run's line, and what netstack said of each connection it closed.
     for line in log.text().lines() {
         if let Some(at) = line.find(SAID) {
