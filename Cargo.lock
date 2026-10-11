@@ -1246,6 +1246,7 @@ dependencies = [
  "filepicker-api",
  "toyos",
  "toyos-font",
+ "toyos-manifest",
  "toyos-window",
 ]
 
@@ -1541,6 +1542,14 @@ dependencies = [
  "crc",
  "log",
  "uuid",
+]
+
+[[package]]
+name = "grants"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-manifest",
 ]
 
 [[package]]
@@ -4272,6 +4281,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-desktop",
  "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",

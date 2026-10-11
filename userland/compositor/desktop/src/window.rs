@@ -4,6 +4,20 @@ use crate::input::CursorStyle;
 use crate::layout::Chrome;
 use crate::rect::Rect;
 
+/// Which layer of the stack a window sits in: every window of a higher level
+/// is above every window of a lower one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Level {
+    Ordinary,
+    /// Its client asked to stay on top: a dialog over the application that
+    /// opened it.
+    Topmost,
+    /// Made through the prompt port, which one program alone holds: above the
+    /// taskbar and every other window, at most one at a time, and the one
+    /// window with any input while it is up.
+    Prompt,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WindowMode {
     Normal,
@@ -51,7 +65,7 @@ pub struct Window<C> {
     pub buf_h: i32,
     pub title: String,
     pub minimized: bool,
-    pub topmost: bool,
+    pub level: Level,
     pub mode: WindowMode,
     /// Where a maximized or snapped window goes back to.
     pub saved: Rect,
@@ -65,7 +79,7 @@ impl<C> Window<C> {
         client: C,
         content: Rect,
         title: String,
-        topmost: bool,
+        level: Level,
         cursor_style: CursorStyle,
     ) -> Self {
         Self {
@@ -76,7 +90,7 @@ impl<C> Window<C> {
             buf_h: content.h(),
             title,
             minimized: false,
-            topmost,
+            level,
             mode: WindowMode::Normal,
             saved: Rect::EMPTY,
             presented: false,
@@ -134,7 +148,7 @@ mod tests {
     use alloc::string::ToString;
 
     fn win(content: Rect) -> Window<()> {
-        Window::new((), content, "t".to_string(), false, CursorStyle::Default)
+        Window::new((), content, "t".to_string(), Level::Ordinary, CursorStyle::Default)
     }
 
     #[test]

@@ -50,9 +50,17 @@ pub trait CommandExt {
     /// for a caller whose spawning thread may not wait on one, as
     /// `/system/bin/supervisor`'s loop may not wait on the file servers it starts
     /// again. A later [`current_dir`](crate::process::Command::current_dir)
-    /// undoes it.
+    /// undoes it but for the program read, which a prepare after it keeps and
+    /// a later [`image_from`](CommandExt::image_from) does not.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn prepare(&mut self) -> crate::io::Result<&mut Self>;
+
+    /// The bytes a prepared spawn starts, as [`prepare`](CommandExt::prepare)
+    /// read them off a file server: what a caller holds a program to before it
+    /// runs, with no second read between the two. `None` before a prepare and
+    /// for a program the kernel opens itself.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn prepared_image(&self) -> Option<&[u8]>;
 
     /// Run the program at `path` rather than the one the command names, which
     /// stays the child's `argv[0]`: the kernel opens `path`, or the spawn reads
@@ -107,6 +115,10 @@ impl CommandExt for crate::process::Command {
     fn prepare(&mut self) -> crate::io::Result<&mut Self> {
         self.as_inner_mut().prepare()?;
         Ok(self)
+    }
+
+    fn prepared_image(&self) -> Option<&[u8]> {
+        self.as_inner().prepared_image()
     }
 
     fn image_from(&mut self, path: &crate::path::Path) -> &mut Self {

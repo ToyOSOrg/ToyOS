@@ -20,6 +20,16 @@
 //!
 //! Every arm runs, so one run names each one that is red. The job then holds
 //! the package to what it installed.
+//!
+//! Then it grants the package a folder of the home, `/home/toy/Games` holding
+//! a ROM, through `/system/bin/grants`: refused in this job's own session,
+//! which is the machine's, and refused `Apps/appview` by name, from the login
+//! session a shell opens. Granted it there, the package run as `game` browses
+//! its working directory with gbae's own `list_directory` and saves beside
+//! the ROM as gbae does: it starts in the folder, lists the ROM and writes
+//! `test.sav`. The same package with one byte more is another binary and
+//! holds no folder; restored, it holds it again; revoked, its next launch
+//! lists no ROM and writes nothing.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -47,10 +57,18 @@ const OTHER_PACKAGE_FILE: &str = "/apps/other/kept";
 const OTHER_FOLDER_FILE: &str = "/home/toy/Apps/other/Data/kept";
 const KEPT: &[u8] = b"what the app wrote in its own folder";
 const APP: &str = "app";
+const GAME: &str = "game";
+const GAMES: &str = "/home/toy/Games";
+const ROM: &str = "/home/toy/Games/test.gba";
+const SAVE: &str = "/home/toy/Games/test.sav";
+const SAVED: &[u8] = b"what gbae writes beside the ROM";
+/// What the package says it saw as `game`, on one line the job reads.
+const SAW: &str = "GAME ";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(APP) => app(),
+        Some(GAME) => game(),
         _ => job(),
     }
 }
@@ -113,7 +131,8 @@ fn job() {
         Ok(bytes) if bytes == KEPT => println!("  the app's write is in {HOME}/Data"),
         other => red.push(format!("what the app wrote is not in {HOME}/Data/kept: {other:?}")),
     }
-    for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME] {
+    granted(&mut red);
+    for dir in [PACKAGE, ROW_PACKAGE, "/apps/other", "/home/toy/Apps/other", HOME, GAMES] {
         let _ = fs::remove_dir_all(dir);
     }
     if !red.is_empty() {
@@ -230,4 +249,152 @@ fn app() {
         std::process::exit(1);
     }
     println!("  every arm held");
+}
+
+/// `line` run by a shell this job launches, whose `login` row opens a login
+/// session for what it launches: the session `grants` is answered in.
+fn in_login(line: &str) -> std::process::Output {
+    Command::new("/system/bin/shell").args(["-c", line]).current_dir("/").output().expect("launch a shell")
+}
+
+/// What the package saw as `game`: its working directory, the ROMs gbae's
+/// menu lists there, and whether its save beside the first was written.
+fn played(red: &mut Vec<String>, when: &str) -> Option<String> {
+    let ran = Command::new(PROGRAM).arg(GAME).current_dir("/").output().expect("launch the package through the launcher");
+    let out = String::from_utf8_lossy(&ran.stdout).into_owned();
+    print!("{out}");
+    match out.lines().find_map(|l| l.strip_prefix(SAW)) {
+        Some(saw) if ran.status.code() == Some(0) => Some(saw.to_string()),
+        _ => {
+            red.push(format!("{when}: the package said nothing it saw: {ran:?}"));
+            None
+        }
+    }
+}
+
+fn granted(red: &mut Vec<String>) {
+    let _ = in_login("/system/bin/grants revoke appview");
+    let _ = fs::remove_dir_all(GAMES);
+    fs::create_dir_all(GAMES).expect("make the folder the package is granted");
+    fs::write(ROM, b"a ROM's bytes").expect("put a ROM in it");
+
+    match Command::new("/system/bin/grants").args(["add", "appview", GAMES]).output() {
+        Ok(out) if out.status.code() == Some(1)
+            && String::from_utf8_lossy(&out.stdout).contains("only a login session may ask for grants") =>
+        {
+            println!("  grants in the machine's session: refused")
+        }
+        other => red.push(format!("grants in the machine's session was answered {other:?}")),
+    }
+    let apps = in_login(&format!("/system/bin/grants add appview {HOME}"));
+    match String::from_utf8_lossy(&apps.stdout) {
+        said if said.contains("where every app keeps its own folder") => println!("  {HOME} as a grant: refused"),
+        _ => red.push(format!("{HOME} as a grant was answered {apps:?}")),
+    }
+    let added = in_login(&format!("/system/bin/grants add appview {GAMES}"));
+    if !String::from_utf8_lossy(&added.stdout).contains("appview is granted /home/toy/Games read-write") {
+        red.push(format!("the grant was answered {added:?}"));
+    }
+    let listed = in_login("/system/bin/grants list");
+    if !String::from_utf8_lossy(&listed.stdout).contains("appview read-write /home/toy/Games\n") {
+        red.push(format!("grants list answered {listed:?}"));
+    }
+
+    let rom = format!("cwd={GAMES} roms=[\"test.gba\"] saved=Ok");
+    match played(red, "granted") {
+        Some(saw) if saw == rom => println!("  granted: {saw}"),
+        Some(saw) => red.push(format!("granted, it saw {saw}, not {rom}")),
+        None => {}
+    }
+    match fs::read(SAVE) {
+        Ok(bytes) if bytes == SAVED => println!("  its save is beside the ROM"),
+        other => red.push(format!("{SAVE} holds {other:?}")),
+    }
+    let _ = fs::remove_file(SAVE);
+
+    // One byte more is another binary, which holds no grant.
+    let mut longer = fs::read(SELF).expect("read this binary");
+    longer.push(0);
+    fs::write(PROGRAM, &longer).expect("install a binary one byte longer");
+    let none = "cwd=/ roms=[] saved=Err";
+    match played(red, "another binary") {
+        Some(saw) if saw == none => println!("  another binary: {saw}"),
+        Some(saw) => red.push(format!("another binary saw {saw}, not {none}")),
+        None => {}
+    }
+    fs::copy(SELF, PROGRAM).expect("install this binary again");
+    match played(red, "the granted binary again") {
+        Some(saw) if saw == rom => println!("  the granted binary again: {saw}"),
+        Some(saw) => red.push(format!("the granted binary again saw {saw}, not {rom}")),
+        None => {}
+    }
+    let _ = fs::remove_file(SAVE);
+
+    let revoked = in_login("/system/bin/grants revoke appview");
+    if !String::from_utf8_lossy(&revoked.stdout).contains("appview's grant is revoked") {
+        red.push(format!("the revoke was answered {revoked:?}"));
+    }
+    match played(red, "revoked") {
+        Some(saw) if saw == none => println!("  revoked: {saw}"),
+        Some(saw) => red.push(format!("revoked, it saw {saw}, not {none}")),
+        None => {}
+    }
+    if fs::metadata(SAVE).is_ok() {
+        red.push(format!("revoked, {SAVE} was written"));
+    }
+}
+
+/// As gbae, started with no ROM: its menu on the working directory, by its
+/// own `list_directory`, and a save beside the first ROM it lists, where gbae
+/// puts one, or where the granted folder's would be with none listed.
+fn game() {
+    let cwd = std::env::current_dir().expect("a working directory");
+    let entries = list_directory(&cwd);
+    let roms: Vec<String> = entries.iter().filter(|e| !e.is_directory).map(|e| e.name.clone()).collect();
+    let saved = match entries.iter().find(|e| !e.is_directory) {
+        Some(rom) => {
+            let rom = rom.path.canonicalize().unwrap_or_else(|_| rom.path.clone());
+            fs::write(rom.with_extension("sav"), SAVED)
+        }
+        None => fs::write(SAVE, SAVED),
+    };
+    let saved = if saved.is_ok() { "Ok" } else { "Err" };
+    println!("{SAW}cwd={} roms={roms:?} saved={saved}", cwd.display());
+}
+
+struct FileEntry {
+    name: String,
+    path: std::path::PathBuf,
+    is_directory: bool,
+}
+
+/// gbae's own, verbatim (`Japabu/gbae` at `bfe8dab`, `src/menu.rs`).
+fn list_directory(directory: &std::path::Path) -> Vec<FileEntry> {
+    let mut directories = Vec::new();
+    let mut roms = Vec::new();
+    for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            directories.push(FileEntry {
+                name: format!("{}/", name),
+                path,
+                is_directory: true,
+            });
+        } else if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gba")) {
+            roms.push(FileEntry { name, path, is_directory: false });
+        }
+    }
+    let by_name = |a: &FileEntry, b: &FileEntry| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+    directories.sort_by(by_name);
+    roms.sort_by(by_name);
+    let parent = directory.parent().map(|parent| FileEntry {
+        name: "../".to_string(),
+        path: parent.to_path_buf(),
+        is_directory: true,
+    });
+    parent.into_iter().chain(directories).chain(roms).collect()
 }

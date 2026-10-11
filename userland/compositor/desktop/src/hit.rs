@@ -10,6 +10,8 @@ use crate::window::WindowMode;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     Desktop,
+    /// A prompt is up and the pointer is not over its content: nothing is hit.
+    Blocked,
     TitleBar(usize),
     MinimizeButton(usize),
     MaximizeButton(usize),
@@ -29,6 +31,15 @@ pub enum Hit {
 /// the hit test used an open-coded half-open half-unbounded expression, which
 /// made the frame's border pixel beside the button close the window too.
 pub fn hit_test<C>(desk: &Desk, stack: &Stack<C>, p: Point, launcher_open: bool) -> Hit {
+    // While a prompt is up its content is the one thing the pointer reaches:
+    // not the taskbar, the launcher, another window, nor its own chrome, so it
+    // is not moved, minimized or closed but by its own answer.
+    if let Some(prompt) = stack.prompt() {
+        return match stack[prompt].content.contains_point(p) {
+            true => Hit::Content(prompt),
+            false => Hit::Blocked,
+        };
+    }
     let bar = desk.taskbar(stack.len());
 
     if launcher_open && bar.launcher().contains_point(p) {
@@ -90,7 +101,7 @@ mod tests {
     use crate::input::CursorStyle;
     use crate::layout::Chrome;
     use crate::rect::Rect;
-    use crate::window::Window;
+    use crate::window::{Level, Window};
     use alloc::string::ToString;
 
     const DESK: Desk = Desk {
@@ -106,7 +117,7 @@ mod tests {
 
     fn one_window(content: Rect) -> Stack<u32> {
         let mut s = Stack::default();
-        s.insert(Window::new(0, content, "w".to_string(), false, CursorStyle::Default));
+        s.insert(Window::new(0, content, "w".to_string(), Level::Ordinary, CursorStyle::Default));
         s
     }
 
@@ -150,7 +161,7 @@ mod tests {
     #[test]
     fn the_front_window_wins_an_overlap_and_a_minimized_one_never_does() {
         let mut s = one_window(Rect::new(100, 100, 400, 300));
-        s.insert(Window::new(1, Rect::new(150, 150, 400, 300), "b".to_string(), false, CursorStyle::Default));
+        s.insert(Window::new(1, Rect::new(150, 150, 400, 300), "b".to_string(), Level::Ordinary, CursorStyle::Default));
         let p = at(200, 200);
         assert_eq!(hit_test(&DESK, &s, p, false), Hit::Content(1));
         s[1].minimized = true;
@@ -191,5 +202,36 @@ mod tests {
         let p = at(item.x0 + 4, item.y0 + 4);
         assert_eq!(hit_test(&DESK, &s, p, false), Hit::Content(0));
         assert_eq!(hit_test(&DESK, &s, p, true), Hit::LauncherItem(0));
+    }
+
+    /// **While a prompt is up a press reaches its content and nothing else**:
+    /// not a fullscreen topmost window around it, the taskbar, the open
+    /// launcher, nor the prompt's own close button or title bar.
+    #[test]
+    fn a_hit_outside_the_prompt_s_content_is_swallowed() {
+        let mut s: Stack<u32> = Stack::default();
+        s.insert(Window::new(0, DESK.work_area(), "hostile".to_string(), Level::Topmost, CursorStyle::Default));
+        let ask = Rect::new(700, 400, 400, 200);
+        s.insert(Window::new(1, ask, "ask".to_string(), Level::Prompt, CursorStyle::Default));
+        let bar = DESK.taskbar(s.len());
+        let frame = DESK.chrome.frame(ask);
+        let [close, maximize, _] = DESK.chrome.buttons(frame);
+        for p in [
+            at(10, 10),
+            at(bar.new_button().x0 + 2, bar.new_button().y0 + 2),
+            at(bar.tab(0).x0 + 2, bar.tab(0).y0 + 2),
+            at(bar.launcher_item(0).x0 + 4, bar.launcher_item(0).y0 + 4),
+            at(close.x0 + 2, close.y0 + 2),
+            at(maximize.x0 + 2, maximize.y0 + 2),
+            at(frame.x0 + 40, frame.y0 + 4),
+            at(ask.x1, ask.y1),
+        ] {
+            for launcher in [false, true] {
+                assert_eq!(hit_test(&DESK, &s, p, launcher), Hit::Blocked, "{p:?}, launcher open {launcher}");
+            }
+        }
+        for p in [at(ask.x0, ask.y0), at(ask.x1 - 1, ask.y1 - 1), at(900, 500)] {
+            assert_eq!(hit_test(&DESK, &s, p, true), Hit::Content(1), "{p:?}");
+        }
     }
 }

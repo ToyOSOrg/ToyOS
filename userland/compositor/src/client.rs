@@ -82,6 +82,8 @@ pub struct ClientFrame {
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
     pub copy: Option<CopyRegion>,
+    /// The connection's [`PendingConn::prompt`].
+    pub prompt: bool,
 }
 
 impl ClientFrame {
@@ -93,6 +95,7 @@ impl ClientFrame {
             payload_len: 0,
             conn: None,
             copy: None,
+            prompt: false,
         }
     }
 
@@ -115,6 +118,9 @@ pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
     pub since: Instant,
+    /// It came in on the prompt port, whose one holder's window goes above every
+    /// other: its first frame may only ask for that window.
+    pub prompt: bool,
     /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
     /// one may send `MSG_COPY_COMMIT` and nothing else, within
     /// [`HANDSHAKE_TIMEOUT`] of `since`.

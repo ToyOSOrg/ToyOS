@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
+# The desktop's furniture, for `consent`'s fullscreen window.
+toyos-desktop = { path = "../../userland/compositor/desktop" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-inspect = { path = "../../toyos-inspect" }
 # The log as logkeeper serves it, and the asking for it, for `counters_metal`'s
