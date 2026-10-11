@@ -1,0 +1,19 @@
+[package]
+name = "soundserver"
+description = "The audio server: ToyOS's audio devices claimed from the kernel, and every client's stream mixed onto them."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-hda = { path = "../../lib/hda" }
+toyos-mixer = { path = "mixer" }
+toyos-virtio-sound = { path = "virtio-sound" }
+toyos-virtio = { path = "../../lib/virtio" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-inspect = { path = "../../lib/inspect" }
+rubato = { version = "0.16", default-features = false }
+
+[package.metadata.toyos.host]
+exempt.owns = "ToyOS's audio devices, claimed from the kernel"

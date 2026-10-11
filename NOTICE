@@ -105,14 +105,14 @@ this decision that cannot be undone. When that happens, delete this section
 rather than softening it.
 
 
-userland/doom — GPL-2.0
------------------------
+apps/doom — GPL-2.0
+-------------------
 
     Licence text: licenses/GPL-2.0-doomgeneric.txt
     SPDX-License-Identifier: GPL-2.0-or-later
 
 `/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
-committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
+committed: `apps/doom/build.rs` fetches upstream commit `fc60163` into a
 gitignored directory and the toolchain's clang compiles it.
 
 The licence text is carried here because the fetch does not bring it: the

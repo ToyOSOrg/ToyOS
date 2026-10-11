@@ -3687,7 +3687,7 @@ fn boot_netcase(
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
     const LEASED: &str = "netstack: DHCP: lease ";
-    /// `userland/netstack/src/serve.rs`'s line for a probing no host answered.
+    /// `system/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/netcase");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
@@ -5914,7 +5914,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// and at least one reading of it with the adapter's state; every method
 /// answered. The census's Global Lock counts are printed and held to
 /// nothing: an evaluation gives back the lock it still holds as it ends
-/// (`finish`, `userland/acpiserver/aml/src/exec.rs`), and the real lock
+/// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
 /// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
 /// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
 /// the same machine are compared against, by whoever holds both.

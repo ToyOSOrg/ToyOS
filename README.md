@@ -228,8 +228,8 @@ clone needs one, and so does every toolchain change. And that bootstrap builds
 LLVM and clang from source with CMake, whenever the LLVM commit
 `rust/` names has not been built on the machine before.
 
-Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
-`userland/` all link with the toolchain's `rust-lld`, and no image contains a C
+Nothing in the OS goes near any of them. `bootloader/`, `kernel/`, `system/`,
+`apps/` and `tests/guest/` all link with the toolchain's `rust-lld`, and no image contains a C
 toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
 Line Tools, and CMake comes from Homebrew (`brew install cmake`); on Debian and
 Ubuntu they are `build-essential`, `python3` and `cmake`.
@@ -327,7 +327,7 @@ Licensed under either of
 at your option.
 
 Some of what the repository carries is not ours and is under other terms:
-`userland/doom` is GPL-2.0, `assets/` holds a font, a set of icons
+`apps/doom` is GPL-2.0, `assets/` holds a font, a set of icons
 and id Software's Doom shareware IWAD,
 and `tests/testcases/` holds TinyCC's test corpus. Third-party crates keep
 their own upstream licenses. **[NOTICE](NOTICE) is the list**, item by item,

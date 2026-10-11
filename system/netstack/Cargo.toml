@@ -1,0 +1,30 @@
+[package]
+name = "netstack"
+description = "The network server: one Ethernet device claimed from the kernel, ToyOS's own stack over it (toyos-net-node), its DHCP lease, resolver and mDNS name, served to programs over IPC."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-device-memory = { path = "../../lib/device-memory" }
+toyos-i219 = { path = "i219" }
+toyos-virtio = { path = "../../lib/virtio" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-tco = { path = "../../lib/tco" }
+toyos-mdns = { path = "mdns" }
+toyos-dns = { path = "dns" }
+toyos-dhcp = { path = "dhcp" }
+toyos-inspect = { path = "../../lib/inspect" }
+toyos-net-node = { path = "node" }
+toyos-net-ip = { path = "ip" }
+toyos-net-shard = { path = "shard" }
+toyos-net-tcp = { path = "shard/tcp" }
+toyos-net-udp = { path = "udp" }
+toyos-net-wire = { path = "wire" }
+
+[dev-dependencies]
+toyos-pci-claim = { path = "../../lib/pci-claim", features = ["host-grant"] }
+
+[package.metadata.toyos.host]
+exempt.owns = "the NIC ToyOS claims for it"

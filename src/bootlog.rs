@@ -21,7 +21,7 @@ pub const REBOOTING: &str = "Rebooting.";
 /// nothing after it waits for the file.
 pub const STOPPING: &str = toyos_logstream::STOPPING;
 
-/// What `userland/test-runner` says when its job list runs past
+/// What `tests/guest/test-runner` says when its job list runs past
 /// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word.
 /// **Console only**: a userland write reaches the serial backend and never a
 /// log record, so no stick carries it.

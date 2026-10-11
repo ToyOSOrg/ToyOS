@@ -197,7 +197,7 @@ const NOT_OURS: &str = "rust";
 ///
 /// Cargo's default is `build.rs` and the key overrides it, so a build script
 /// under another name runs on this host and is reached by no walk keyed on the
-/// filename. `userland/doom/Cargo.toml` sets the key today.
+/// filename. `apps/doom/Cargo.toml` sets the key today.
 #[cfg(test)]
 fn declared_build_scripts() -> std::collections::BTreeSet<String> {
     fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {

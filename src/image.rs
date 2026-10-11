@@ -445,7 +445,7 @@ fn round_up_sectors(n: usize) -> usize {
 ///
 /// A correctness requirement rather than tidiness. Every block service
 /// transfers whole 4 KiB blocks and each file server keeps its own cached
-/// copies of the blocks it has touched (`userland/fileserver`); two partitions
+/// copies of the blocks it has touched (`system/fileserver`); two partitions
 /// sharing one device block would make each other's copies stale with
 /// nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
 /// because that is what every partitioner uses and what an erase block wants.

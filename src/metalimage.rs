@@ -23,7 +23,7 @@ use toml::Value;
 const RUNNER: &str = "test-runner";
 const REBOOT: &str = "reboot";
 /// The runner's own word for what its whole list gets, in milliseconds
-/// (`userland/test-runner`), and its first argument.
+/// (`tests/guest/test-runner`), and its first argument.
 const BOUND: &str = "--bound-ms=";
 const TOYBOX: &str = "toybox";
 const REBOOT_LINK: &str = "bin/reboot";

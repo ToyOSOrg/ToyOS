@@ -196,7 +196,7 @@ struct ProgramConfig {
 /// The directories a program's crate sits directly under, by who uses it:
 /// the system, the user, the tests. The one list program resolution, the
 /// userland test survey, the host workspace and the source gate read.
-pub const PROGRAM_ROOTS: &[&str] = &["userland"];
+pub const PROGRAM_ROOTS: &[&str] = &["system", "apps", "tests/guest"];
 
 /// The crate directory of the program `name`: `<root>/<name>` for the one
 /// [`PROGRAM_ROOTS`] entry that holds it. A config is the repository's own, so
@@ -2260,8 +2260,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let shipped = shipped(root);
         for (dir, features) in [
-            ("userland/console", Features::Default),
-            ("userland/supervisor", Features::Default),
+            ("system/console", Features::Default),
+            ("system/supervisor", Features::Default),
             ("kernel", Features::AnyDeclared),
             ("bootloader", Features::Default),
         ] {

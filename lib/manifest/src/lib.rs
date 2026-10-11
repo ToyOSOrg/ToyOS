@@ -655,7 +655,7 @@ mod tests {
         assert!(m.program("sshserver").unwrap().service);
         assert!(!m.program("shell").unwrap().service);
         // The shell keeps its history under the session's home, in its own
-        // `Apps/shell` (`OWN_FOLDER` in `userland/shell`).
+        // `Apps/shell` (`OWN_FOLDER` in `system/shell`).
         assert_eq!(m.program("shell").unwrap().home(), "/home/toy");
     }
 

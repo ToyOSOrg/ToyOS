@@ -85,13 +85,26 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 
 /// Whether the member at `member` is built for a guest: the kernel, whose
 /// library alone a host tests, and the SDK, each from a step of its own; the
-/// loader; the SDK's window, font and file-picker clients; and every program,
-/// a crate directly under a [`crate::build::PROGRAM_ROOTS`] entry, which
-/// `src/userlandhost.rs` surveys. A crate nested in a program, as in the
+/// loader; the SDK's window, font and file-picker clients and the two shared
+/// crates that link the SDK, whose `toyos` is not clippy-clean on a host;
+/// `sprite`, whose blit no clippy shape passes
+/// (`issues/sprite-dereferences-a-raw-pointer-behind-a-safe-fn.md`); and every
+/// program, a crate directly under a [`crate::build::PROGRAM_ROOTS`] entry,
+/// which `src/userlandhost.rs` surveys. A crate nested in a program, as in the
 /// kernel, is a host member.
 fn guest_built(member: &str) -> bool {
-    [crate::ci::KERNEL_DIR, crate::ci::SDK_DIR, "bootloader", "sdk/window", "sdk/font", "sdk/filepicker"]
-        .contains(&member)
+    [
+        crate::ci::KERNEL_DIR,
+        crate::ci::SDK_DIR,
+        "bootloader",
+        "sdk/window",
+        "sdk/font",
+        "sdk/filepicker",
+        "lib/logkeeper-api",
+        "lib/pci-claim",
+        "system/compositor/sprite",
+    ]
+    .contains(&member)
         || crate::build::PROGRAM_ROOTS.iter().any(|r| {
             member.strip_prefix(r).and_then(|m| m.strip_prefix('/')).is_some_and(|name| !name.contains('/'))
         })
@@ -436,12 +449,12 @@ mod tests {
             ["toyos-abi/target"],
         );
         // A directory that holds members and is none.
-        assert!(dead_member_target_paths(&members, "userland/target").is_empty());
-        let with_userland: BTreeSet<String> =
-            members.union(&["userland/sshserver".to_string()].into()).cloned().collect();
+        assert!(dead_member_target_paths(&members, "system/target").is_empty());
+        let with_program: BTreeSet<String> =
+            members.union(&["system/sshserver".to_string()].into()).cloned().collect();
         assert_eq!(
-            dead_member_target_paths(&with_userland, "            userland/sshserver/target\n"),
-            ["userland/sshserver/target"],
+            dead_member_target_paths(&with_program, "            system/sshserver/target\n"),
+            ["system/sshserver/target"],
         );
         // And the root's own `target` is where members build *to*.
         assert!(dead_member_target_paths(&members, "root.join(\"target\")").is_empty());

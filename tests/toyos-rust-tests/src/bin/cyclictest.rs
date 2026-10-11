@@ -24,7 +24,7 @@
 //! So the headline number leaves through the exit code: a non-negative code is
 //! a measured p99 in microseconds; a negative one is a [`Refusal`] and no
 //! number in that run means anything.
-//! `userland/metalprobe` spells the same contract for the device suite, and the
+//! `tests/guest/metalprobe` spells the same contract for the device suite, and the
 //! sign is what separates the two halves of it there as here. Every percentile
 //! is on stdout as well, for the host that has a console to read it on.
 //!

@@ -190,7 +190,7 @@ pub const EXCEPTIONS: &[Exception] = &[
          it leaves the image as a package at the stage where the apps leave this repository",
     ),
     pending(
-        Subject::Notice("userland/doom"),
+        Subject::Notice("apps/doom"),
         "GPL-2.0-or-later",
         DOOM_LEAVES,
         "doomgeneric, the C half of the doom crate, fetched at build time and compiled into it; \
@@ -1892,7 +1892,7 @@ ub_checks"#;
             "tests/fixture.bin",
             "tests/corpus/x.c",
             "elsewhere/embedded.otf",
-            "userland/app/src/main.rs",
+            "apps/app/src/main.rs",
         ]
         .map(String::from)
         .to_vec()
@@ -1901,7 +1901,7 @@ ub_checks"#;
     fn shipping() -> Shipping {
         Shipping {
             assets: BTreeSet::from(["assets".to_string()]),
-            packages: BTreeSet::from(["kernel".to_string(), "userland/app".to_string()]),
+            packages: BTreeSet::from(["kernel".to_string(), "apps/app".to_string()]),
             unshipped: BTreeSet::new(),
             named: BTreeSet::from(["embedded.otf".to_string()]),
         }
@@ -1994,8 +1994,8 @@ tests/corpus/ — test input
 
     SPDX-License-Identifier: LGPL-2.1-or-later
 
-userland/app — vendored C
--------------------------
+apps/app — vendored C
+---------------------
 
     SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -2010,7 +2010,7 @@ prose.
             ("assets/font.ttf".to_string(), vec!["assets/font.ttf".to_string()]),
             ("assets/game.wad".to_string(), vec!["assets/game.wad".to_string()]),
             ("tests/corpus/".to_string(), vec!["tests/corpus/x.c".to_string()]),
-            ("userland/app".to_string(), vec!["userland/app/src/main.rs".to_string()]),
+            ("apps/app".to_string(), vec!["apps/app/src/main.rs".to_string()]),
         ]);
         let mut report = Report::default();
         judge_notice(&sections(text), &files, LEDGER, &shipping(), &mut report);
@@ -2024,7 +2024,7 @@ prose.
         let report = notice(NOTICE);
         assert_eq!(
             keys(&report),
-            [("userland/app", "GPL-2.0-or-later")],
+            [("apps/app", "GPL-2.0-or-later")],
             "{:?}",
             report.findings
         );
@@ -2066,17 +2066,17 @@ prose.
             report
                 .findings
                 .iter()
-                .any(|f| f.key == "userland/app" && f.why.contains("0 `SPDX")),
+                .any(|f| f.key == "apps/app" && f.why.contains("0 `SPDX")),
             "{:?}",
             report.findings
         );
-        let stale = NOTICE.replace("userland/app — vendored C", "userland/gone — vendored");
+        let stale = NOTICE.replace("apps/app — vendored C", "apps/gone — vendored");
         let report = notice(&stale);
         assert!(
             report
                 .findings
                 .iter()
-                .any(|f| f.key == "userland/gone" && f.why.contains("names no file")),
+                .any(|f| f.key == "apps/gone" && f.why.contains("names no file")),
             "{:?}",
             report.findings
         );

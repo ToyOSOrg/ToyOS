@@ -9,7 +9,7 @@ This file is what every agent needs before it knows which subsystem it is in. A 
 | | |
 |---|---|
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
-| `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
+| `system/CLAUDE.md` | the server doctrine, and the caveats that bite work on the system programs |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
 | `src/CLAUDE.md` | the caveats that bite build-system work |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |

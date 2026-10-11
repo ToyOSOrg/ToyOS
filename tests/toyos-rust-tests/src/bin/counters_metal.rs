@@ -60,7 +60,7 @@ const SPIN: u64 = 4_000_000_000;
 const LOADED: Duration = Duration::from_secs(20);
 
 /// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
-/// at its write budget (`userland/logkeeper/src/policy.rs`, 5 s).
+/// at its write budget (`system/logkeeper/src/policy.rs`, 5 s).
 const SETTLE_BOUND: Duration = Duration::from_secs(10);
 
 /// How long [`acpi_said`] waits for the server to say its controller and the
