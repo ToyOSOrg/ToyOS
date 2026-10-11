@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Acknowledgments a round trip, at the least, and the inverse of the most the interval
 /// lengthens a round trip by.
-pub const K: u32 = 16;
+pub const K: u32 = 32;
 
 /// The least interval: an estimate of one wake's cost — the kernel's delivery of the interrupt
 /// and netstack's pass around its batch — on the hardware ToyOS targets.
@@ -108,8 +108,8 @@ mod tests {
     /// under the floor gets the floor.
     #[test]
     fn the_least_round_trip_over_k_is_the_interval_above_the_floor() {
-        assert_eq!(cadence(Some(ms(16)), ring(GIGABIT)), ms(1));
-        assert_eq!(cadence(Some(ms(15)), ring(GIGABIT)), Duration::from_micros(937) + Duration::from_nanos(500));
+        assert_eq!(cadence(Some(ms(16)), ring(GIGABIT)), Duration::from_micros(500));
+        assert_eq!(cadence(Some(ms(15)), ring(GIGABIT)), Duration::from_nanos(468_750));
         assert_eq!(cadence(Some(FLOOR * K - Duration::from_nanos(K.into())), ring(GIGABIT)), FLOOR);
     }
 
@@ -117,7 +117,7 @@ mod tests {
     /// round trip, and that is what bounds it. A long path alone is bounded by the ring.
     #[test]
     fn a_short_round_trip_bounds_the_interval_and_a_long_one_meets_the_ring() {
-        assert_eq!(cadence(Some(ms(2)), ring(GIGABIT)), Duration::from_micros(125));
+        assert_eq!(cadence(Some(ms(2)), ring(GIGABIT)), Duration::from_nanos(62_500));
         assert_eq!(cadence(Some(ms(300)), ring(GIGABIT)), GIGABIT_RING);
         assert!(GIGABIT_RING < ms(300) / K);
     }
@@ -125,10 +125,10 @@ mod tests {
     /// The interval lengthens the round trip the receiver measures by up to itself, and the
     /// next interval is taken from that estimate. From the path's own round trip and from an
     /// estimate far above it alike, the estimate moves only toward `rtt · K / (K − 1)` and
-    /// settles there: it never ratchets past it.
+    /// settles there: it never ratchets past it. The shortest path's `K`th clears the floor.
     #[test]
     fn under_its_own_feedback_the_round_trip_settles_and_does_not_ratchet() {
-        for path in [Duration::from_micros(500), ms(15), ms(40)] {
+        for path in [ms(1), ms(15), ms(40)] {
             let settled = path * K / (K - 1);
             for start in [path, ms(10_000)] {
                 let mut estimate = start;
