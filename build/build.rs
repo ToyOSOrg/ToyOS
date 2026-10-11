@@ -1375,8 +1375,8 @@ const KERNEL_CARRIES: &[&str] = &["loom", "protocol-port"];
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 3] =
-    ["", "boot-actuators,test-actuators", MASK_WINDOWS_KERNEL[0]];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 7] =
+    ["", "boot-actuators,test-actuators", MASK_WINDOWS_KERNEL[0], "scout-nofp", "scout-nolock", "scout-nofp,scout-nolock", "scout-wake"];
 
 /// The shipping kernel with the windows' instrument and nothing else, for
 /// [`SCHED_CHECK_KERNEL`]'s reason: one spelling, so one build.

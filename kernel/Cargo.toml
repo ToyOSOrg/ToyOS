@@ -257,6 +257,14 @@ sched-check = []
 # count crossing zero, on every entry and exit: a kernel being measured for
 # anything else must not carry it.
 mask-windows = []
+# Measurement scout, never landed: the null syscall's entry without its
+# `fxsave64`/`fxrstor64` (the save moved to `context_switch`, so a build is
+# still correct), and without the `lock` prefix on the preempt count.
+scout-nofp = []
+scout-nolock = []
+# Measurement scout, never landed: post-to-dispatch latency of an ordinary
+# wake, split by the target CPU's state, read out through `SYS_DEBUG`.
+scout-wake = []
 # The stray-write tripwire on the per-CPU `CpuSched` record: a shadow copy of its
 # bytes, taken when the driver's exclusive region is left and compared when it is
 # next entered, so a word that changed while nothing was allowed to change it is

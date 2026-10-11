@@ -33,9 +33,39 @@ macro_rules! switch_restore {
 }
 
 /// Callee-saved register save/restore.
-#[cfg(not(feature = "switch-witness"))]
+#[cfg(not(any(feature = "switch-witness", feature = "scout-nofp")))]
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+    naked_asm!(switch_save!(), switch_restore!());
+}
+
+/// Scout twin: the syscall entry saves no user FP state, so the switch does.
+/// The user state is still in the registers here (the kernel is soft-float),
+/// a resumed context comes back through the `call` and restores its own, and
+/// a fresh one returns into its trampoline, which loads the initial image.
+#[cfg(feature = "scout-nofp")]
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {
+    naked_asm!(
+        "mov r11, rsp",
+        "sub rsp, {fp_bytes}",
+        "sub rsp, {fp_align}",
+        "and rsp, -{fp_align}",
+        "mov [rsp + {fp_bytes}], r11",
+        "fxsave64 [rsp]",
+        "call {inner}",
+        "fxrstor64 [rsp]",
+        "mov rsp, [rsp + {fp_bytes}]",
+        "ret",
+        inner = sym context_switch_inner,
+        fp_bytes = const core::mem::size_of::<super::fpu::UserFpState>(),
+        fp_align = const core::mem::align_of::<super::fpu::UserFpState>(),
+    );
+}
+
+#[cfg(feature = "scout-nofp")]
+#[unsafe(naked)]
+unsafe extern "C" fn context_switch_inner(old_rsp: *mut u64, new_rsp: u64) {
     naked_asm!(switch_save!(), switch_restore!());
 }
 

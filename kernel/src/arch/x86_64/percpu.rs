@@ -301,7 +301,10 @@ pub(crate) mod gs {
     pub fn lock_inc_u32<const OFF: u32>() {
         // SAFETY: `write_u32`'s argument; no `preserves_flags` — `lock add` writes OF/SF/ZF/AF/CF/PF.
         unsafe {
+            #[cfg(not(feature = "scout-nolock"))]
             asm!("lock add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
+            #[cfg(feature = "scout-nolock")]
+            asm!("add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
     }
 
@@ -310,7 +313,10 @@ pub(crate) mod gs {
     pub fn lock_dec_u32<const OFF: u32>() {
         // SAFETY: `lock_inc_u32`'s argument exactly.
         unsafe {
+            #[cfg(not(feature = "scout-nolock"))]
             asm!("lock sub dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
+            #[cfg(feature = "scout-nolock")]
+            asm!("sub dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
     }
 }

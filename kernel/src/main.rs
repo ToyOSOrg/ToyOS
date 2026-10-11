@@ -78,6 +78,8 @@ mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;
 mod irq_ring;
+#[cfg(feature = "scout-wake")]
+mod scout_wake;
 mod trace;
 mod time;
 mod clock;

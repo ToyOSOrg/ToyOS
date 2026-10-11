@@ -3,7 +3,9 @@
 //! `STAR` names the selectors, `LSTAR` is the one address `syscall` can reach, and `FMASK` masks the `RFLAGS` bits a Ring 3 thread may not hand the kernel; [`crate::syscall::dispatch`] is the first code that interprets the syscall number.
 
 use crate::arch::cpu;
-use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state, Ring3Entry};
+#[cfg(not(feature = "scout-nofp"))]
+use crate::arch::entry::{restore_user_state, save_user_state};
+use crate::arch::entry::{ring3_naked_asm, Ring3Entry};
 use crate::arch::percpu;
 
 use crate::syscall::dispatch::syscall_dispatch;
@@ -58,13 +60,32 @@ extern "sysv64" fn syscall_entry() {
         "push r9",
         "push r10",
 
+        #[cfg(not(feature = "scout-nofp"))]
         save_user_state!(),
+        // Scout twin: `save_user_state!` less its `fxsave64`, so the twins
+        // differ from the base by that instruction alone.
+        #[cfg(feature = "scout-nofp")]
+        "mov r11, rsp",
+        #[cfg(feature = "scout-nofp")]
+        "sub rsp, {fp_bytes}",
+        #[cfg(feature = "scout-nofp")]
+        "sub rsp, {fp_align}",
+        #[cfg(feature = "scout-nofp")]
+        "and rsp, -{fp_align}",
+        #[cfg(feature = "scout-nofp")]
+        "mov [rsp + {fp_bytes}], r11",
 
+        #[cfg(not(feature = "scout-nolock"))]
         "lock add dword ptr gs:[{preempt_count}], 1",
+        #[cfg(feature = "scout-nolock")]
+        "add dword ptr gs:[{preempt_count}], 1",
 
         "call {handler}",
 
+        #[cfg(not(feature = "scout-nolock"))]
         "lock sub dword ptr gs:[{preempt_count}], 1",
+        #[cfg(feature = "scout-nolock")]
+        "sub dword ptr gs:[{preempt_count}], 1",
         // The helper called before `pop rsp`/`sysretq` (`exit_to_user`) preserves `IF=0` across its return.
         // Runs before GPR restore: the sysv64 call would otherwise clobber rcx/r11 (sysretq's RIP/RFLAGS) and the restored args.
         // The 16 bytes both park the syscall return value and keep `rsp` aligned for the `call`.
@@ -74,7 +95,10 @@ extern "sysv64" fn syscall_entry() {
         "mov rax, [rsp]",
         "add rsp, 16",
 
+        #[cfg(not(feature = "scout-nofp"))]
         restore_user_state!(),
+        #[cfg(feature = "scout-nofp")]
+        "mov rsp, [rsp + {fp_bytes}]",
 
         "pop r10",
         "pop r9",

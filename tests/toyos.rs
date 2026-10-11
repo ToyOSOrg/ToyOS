@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Scout, never landed: needs the `scout-wake` kernel; the `scout_wake`
+    // metal row runs it.
+    "scout_wake",
     // Its product is how long a spawn of `toybox` takes to its exit, which a
     // guest's host sets: the `spawn_cost` metal row runs it.
     "spawn_cost",
@@ -436,6 +439,9 @@ const MACHINE_TESTS: &[&str] = &[
     // the T14 boots from a stick, so no disk diskserver drives holds a
     // partition the loader named.
     "block_grants_reach_their_partitions",
+    // Scout, never landed: each scout kernel boots and runs its job clean
+    // before a T14 boot is spent on it.
+    "scout_smoke",
     // The supervisor reading the slot table through a block session and
     // minting `update` the idle slot's partitions, which `update` writes and
     // marks through diskserver: the supervisor, the launcher and diskserver
@@ -666,6 +672,23 @@ const METAL: &[(&str, metal::Metal)] = &[
                 b[0].log().must_say(" cycles/syscall over ")?;
                 Ok(())
             },
+        },
+    ),
+    (
+        // Scout, never landed: the null syscall on the shipping entry and on
+        // its three twins, one boot each; the lines are the product.
+        "scout_syscall",
+        metal::Metal { arms: SCOUT_SYSCALL, judge: |b| scout_said(b, "test_rs_syscall_cost", "scout-sys: ") },
+    ),
+    (
+        // Scout, never landed: an ordinary wake's latency by its target's state.
+        "scout_wake",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: &["scout-wake"],
+                ..metal::once("scout-wake", "tests/images/testcases.toml", &[], &["test_rs_scout_wake"])
+            }],
+            judge: |b| scout_said(b, "test_rs_scout_wake", "scout-wake: "),
         },
     ),
     (
@@ -1103,6 +1126,39 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         claims::RECLAIM,
     ],
 )];
+
+/// Scout, never landed: `syscall_cost` on the shipping kernel and its twins.
+const SCOUT_SYSCALL: &[metal::Arm] = &[
+    metal::once("scout-base", "tests/images/testcases.toml", &[], &["test_rs_syscall_cost"]),
+    metal::Arm {
+        features: &["scout-nofp"],
+        ..metal::once("scout-nofp", "tests/images/testcases.toml", &[], &["test_rs_syscall_cost"])
+    },
+    metal::Arm {
+        features: &["scout-nolock"],
+        ..metal::once("scout-nolock", "tests/images/testcases.toml", &[], &["test_rs_syscall_cost"])
+    },
+    metal::Arm {
+        features: &["scout-nofp", "scout-nolock"],
+        ..metal::once("scout-both", "tests/images/testcases.toml", &[], &["test_rs_syscall_cost"])
+    },
+];
+
+/// Scout: every boot ran `job` clean; its lines carrying `prefix`, printed.
+fn scout_said(b: &[&metal::Readback], job: &str, prefix: &str) -> Result<(), String> {
+    for back in b {
+        back.job_passed(job)?;
+        let log = back.log();
+        let lines: Vec<&str> = log.text().lines().filter(|l| l.contains(prefix)).collect();
+        if lines.is_empty() {
+            return Err(format!("{}: {job} said no {prefix:?} line", back.label));
+        }
+        for line in lines {
+            eprintln!("  [{}] {line}", back.label);
+        }
+    }
+    Ok(())
+}
 
 /// The same boot, its rows ended on the hold: the count it waits for comes
 /// thirty seconds after the server arms, and a row's job behind it would wait
@@ -3920,6 +3976,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
+        "scout_smoke" => scout_smoke(test_config),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
@@ -4403,6 +4460,34 @@ fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
         return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
     };
     eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
+    Ok(())
+}
+
+/// Scout, never landed: every scout kernel boots `tests/images/testcases.toml`
+/// and its job ends clean, each line it printed shown.
+fn scout_smoke(test_config: &Path) -> Result<(), String> {
+    let rust = compile::repo_root().join("tests/guest/rust-tests");
+    let cases: [(&'static [&'static str], &str); 4] = [
+        (&["scout-nofp"], "syscall_cost"),
+        (&["scout-nolock"], "syscall_cost"),
+        (&["scout-nofp", "scout-nolock"], "syscall_cost"),
+        (&["scout-wake"], "scout_wake"),
+    ];
+    for (features, job) in cases {
+        let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust, job);
+        let options = BootOptions { kernel_features: features, ..Default::default() };
+        let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(job.to_string(), bin)], options);
+        let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(120));
+        for line in result.serial.lines().filter(|l| l.contains("scout-")) {
+            eprintln!("  [{features:?}] {line}");
+        }
+        if let Some(why) = &result.error {
+            return Err(format!("{features:?}: {why}\n{}", result.serial));
+        }
+        if result.exit_code != Some(0) {
+            return Err(format!("{features:?}: the job ended {:?}:\n{}", result.exit_code, result.serial));
+        }
+    }
     Ok(())
 }
 
