@@ -3,7 +3,8 @@
 
 use core::ptr;
 
-use crate::errno::{self, ENOSYS};
+use crate::errcode::ENOSYS;
+use crate::errno;
 
 fn refuse() -> i32 {
     errno::set(ENOSYS);

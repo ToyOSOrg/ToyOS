@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_LINKS};
 use crate::file_cache::FileId;
 use crate::sync::{Lock, LockGuard};
 
@@ -388,7 +388,7 @@ impl Vfs {
     }
 
     fn resolve_for_open_depth(&mut self, path: &str, depth: u32) -> Result<OpenTarget, SyscallError> {
-        if depth > 10 { return Err(SyscallError::InvalidArgument); }
+        if depth > MAX_LINKS { return Err(SyscallError::InvalidArgument); }
         let (mount, file) = self.resolve_path("/", path);
         // A mount point is a directory, never a file to open.
         if file.is_empty() { return Err(SyscallError::NotFound); }

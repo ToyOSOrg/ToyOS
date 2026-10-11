@@ -7,7 +7,8 @@ use core::fmt::{self, Write};
 
 use toyos_abi::syscall::{self, OpenFlags};
 
-use crate::errno::{self, EIO};
+use crate::errcode::EIO;
+use crate::errno;
 
 #[repr(C)]
 pub struct Utsname {

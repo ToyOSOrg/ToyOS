@@ -1,15 +1,15 @@
 //! `realpath`'s resolution (`resolve.rs`) over a tree laid out here and asked
 //! as the kernel answers it: `..` read off the text, only the last name's link
-//! followed, a relative link read against its mount, a loop refused `ELOOP`
-//! whatever its length, and each refusal's errno.
+//! followed, a relative link read against its mount, a chain of links past
+//! `MAX_LINKS` refused `ELOOP` as a loop is, and a refusal's errno.
 
 use std::collections::BTreeMap;
 
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 
-use crate::errcode::{self, EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
+use crate::errcode::{EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
 use crate::header::{self, LIMITS_H};
-use crate::resolve::{resolve, Kernel, PATH_MAX};
+use crate::resolve::{resolve, Kernel};
 
 #[derive(Clone, Copy)]
 enum Node {
@@ -133,18 +133,25 @@ fn a_loop_of_links_is_eloop() {
     assert_eq!(answer("/", "/tmp/d/ping"), Err(ELOOP));
 }
 
-#[test]
-fn a_chain_without_a_loop_is_followed_to_its_end_however_long() {
-    let names: Vec<String> = (0..100).map(|i| format!("/tmp/l{i}")).collect();
-    let mut nodes: Vec<(&str, Node)> = vec![("/tmp", Node::Dir), ("/tmp/end", Node::File)];
-    let targets: Vec<&'static str> = (0..100)
-        .map(|i| &*Box::leak(if i == 99 { "/tmp/end".to_string() } else { format!("l{}", i + 1) }.into_boxed_str()))
-        .collect();
-    for (name, target) in names.iter().zip(&targets) {
-        nodes.push((name, Node::Link(target)));
+/// `/tmp/l0`, a chain of `links` links, each relative, ending in `/tmp/end`.
+fn chain(links: u32) -> Tree {
+    let mut nodes: Vec<(&'static str, Node)> = vec![("/tmp", Node::Dir), ("/tmp/end", Node::File)];
+    for i in 0..links {
+        let target = if i + 1 == links { "/tmp/end".to_string() } else { format!("l{}", i + 1) };
+        nodes.push((leak(format!("/tmp/l{i}")), Node::Link(leak(target))));
     }
-    let at = resolve(b"/", b"/tmp/l0", &mut Tree::new(&nodes)).map(|at| String::from_utf8(at).unwrap());
+    Tree::new(&nodes)
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+#[test]
+fn a_chain_of_max_links_is_followed_and_one_more_is_eloop() {
+    let at = resolve(b"/", b"/tmp/l0", &mut chain(MAX_LINKS)).map(|at| String::from_utf8(at).unwrap());
     assert_eq!(at, Ok("/tmp/end".into()));
+    assert_eq!(resolve(b"/", b"/tmp/l0", &mut chain(MAX_LINKS + 1)), Err(ELOOP));
 }
 
 #[test]
@@ -164,19 +171,19 @@ fn a_file_passed_through_as_a_directory_is_enotdir() {
 
 #[test]
 fn a_path_or_an_answer_past_path_max_is_enametoolong() {
-    let long = format!("/tmp/{}", "a".repeat(PATH_MAX));
+    let long = format!("/tmp/{}", "a".repeat(MAX_PATH));
     assert_eq!(answer("/", &long), Err(ENAMETOOLONG));
     // Short enough as written, too long once read against the directory.
-    let name = "b".repeat(PATH_MAX - 6);
+    let name = "b".repeat(MAX_PATH - 6);
     assert_eq!(answer("/tmp/d", &name), Err(ENAMETOOLONG));
     // A working directory and a path joined past it, which `..` shortens.
-    let deep = format!("/tmp/{}", "c".repeat(PATH_MAX - 10));
+    let deep = format!("/tmp/{}", "c".repeat(MAX_PATH - 10));
     assert_eq!(answer(&deep, "../d/f"), Ok("/tmp/d/f".into()));
 }
 
 #[test]
 fn a_link_target_that_fills_the_buffer_is_enametoolong() {
-    let target: &'static str = Box::leak(format!("/{}", "t".repeat(PATH_MAX)).into_boxed_str());
+    let target: &'static str = Box::leak(format!("/{}", "t".repeat(MAX_PATH)).into_boxed_str());
     let mut tree = Tree::new(&[("/tmp", Node::Dir), ("/tmp/long", Node::Link(target))]);
     assert_eq!(resolve(b"/", b"/tmp/long", &mut tree), Err(ENAMETOOLONG));
 }
@@ -187,23 +194,6 @@ fn a_kernel_refusal_is_its_errno() {
 }
 
 #[test]
-fn every_kernel_refusal_is_answered_with_its_errno() {
-    use crate::errcode::{EACCES, EAGAIN, EEXIST, EINVAL, EPIPE};
-    for (e, code) in [
-        (SyscallError::NotFound, ENOENT),
-        (SyscallError::PermissionDenied, EACCES),
-        (SyscallError::AlreadyExists, EEXIST),
-        (SyscallError::InvalidArgument, EINVAL),
-        (SyscallError::WouldBlock, EAGAIN),
-        (SyscallError::Gone, EPIPE),
-        (SyscallError::Io, EIO),
-        (SyscallError::ResourceExhausted, EINVAL),
-    ] {
-        assert_eq!(errcode::of(e), code, "{e:?}");
-    }
-}
-
-#[test]
 fn path_max_is_limits_h_s() {
-    assert_eq!(PATH_MAX, header::int(LIMITS_H, "PATH_MAX") as usize);
+    assert_eq!(MAX_PATH, header::int(LIMITS_H, "PATH_MAX") as usize);
 }

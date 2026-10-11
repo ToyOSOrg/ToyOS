@@ -8,7 +8,8 @@ use core::ffi::VaList;
 use core::ptr;
 
 use crate::arch::WChar;
-use crate::errno::{self, EILSEQ};
+use crate::errcode::EILSEQ;
+use crate::errno;
 use crate::locale::Locale;
 use crate::strtonum;
 use crate::utf8::{Byte, MbState};

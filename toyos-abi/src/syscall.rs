@@ -1034,6 +1034,14 @@ pub fn set_thread_name(name: &[u8]) {
     syscall(SYS_SET_THREAD_NAME, name.as_ptr() as u64, name.len() as u64, 0, 0);
 }
 
+/// The most links `SYS_OPEN` follows from the name it is given: the link a
+/// chain reaches past them is refused `InvalidArgument`.
+pub const MAX_LINKS: u32 = 10;
+
+/// The longest path a file server's wire carries (`toyos/src/fs.rs`), and
+/// libc's `PATH_MAX` (`userland/libc/include/limits.h`).
+pub const MAX_PATH: usize = 4096;
+
 /// Open a file.
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, flags.0, 0)).map(|v| RawHandle(v as u32))

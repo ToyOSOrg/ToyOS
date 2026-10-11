@@ -4,24 +4,22 @@
 //! asks the kernel only through [`Kernel`], so the host tests it
 //! (`toyos-libc-copies`).
 //!
-//! The rules are not POSIX's: `..` is read off the text before any name is
-//! looked up, only the last name's link is followed, and a relative link is
-//! read against the mount it is on, the first name of its path. The kernel
+//! The rules are not POSIX's (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`):
+//! `..` is read off the text before any name is looked up, only the last
+//! name's link is followed, at most [`MAX_LINKS`] of them, and a relative link
+//! is read against the mount it is on, the first name of its path. The kernel
 //! follows no other name as a link, so a path through one names nothing, and
 //! an answer holds none.
 
 use alloc::vec::Vec;
 
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 
 use crate::errcode::{self, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
 
-/// `limits.h`'s `PATH_MAX`: the longest path, counting its NUL.
-pub(crate) const PATH_MAX: usize = 4096;
-
 /// The three calls resolution asks the kernel, each of an absolute path.
 pub(crate) trait Kernel {
-    /// `SYS_READLINK` into `target`, [`PATH_MAX`] bytes: the length it wrote.
+    /// `SYS_READLINK` into `target`, [`MAX_PATH`] bytes: the length it wrote.
     fn read_link(&mut self, at: &[u8], target: &mut [u8]) -> Result<usize, SyscallError>;
     /// Whether `SYS_OPEN` opens `at` to read; what it opened is closed.
     fn open(&mut self, at: &[u8]) -> Result<(), SyscallError>;
@@ -36,8 +34,8 @@ pub(crate) fn resolve(cwd: &[u8], path: &[u8], kernel: &mut impl Kernel) -> Resu
         return Err(ENOENT);
     }
     let mut at = joined(cwd, path)?;
-    let mut followed: Vec<Vec<u8>> = Vec::new();
-    let mut target = alloc::vec![0u8; PATH_MAX];
+    let mut followed = 0;
+    let mut target = alloc::vec![0u8; MAX_PATH];
     loop {
         let len = match kernel.read_link(&at, &mut target) {
             Ok(len) => len,
@@ -45,16 +43,15 @@ pub(crate) fn resolve(cwd: &[u8], path: &[u8], kernel: &mut impl Kernel) -> Resu
             Err(SyscallError::NotFound) => break,
             Err(e) => return Err(errcode::of(e)),
         };
-        // A cycle, not a count: any chain without one ends in a name.
-        if followed.contains(&at) {
+        if followed == MAX_LINKS {
             return Err(ELOOP);
         }
+        followed += 1;
         let mount = at.split(|&b| b == b'/').nth(1).expect("an absolute path's first name");
         let mut base = Vec::with_capacity(1 + mount.len());
         base.push(b'/');
         base.extend_from_slice(mount);
-        let next = joined(&base, &target[..len])?;
-        followed.push(core::mem::replace(&mut at, next));
+        at = joined(&base, &target[..len])?;
     }
     match kind(&at, kernel)? {
         Kind::File | Kind::Dir => Ok(at),
@@ -81,10 +78,10 @@ fn kind(at: &[u8], kernel: &mut impl Kernel) -> Result<Kind, i32> {
 }
 
 /// `rel` read against the absolute `base`, `.` and `..` taken off the text,
-/// or `ENAMETOOLONG` where it or the answer reaches [`PATH_MAX`]: a link
+/// or `ENAMETOOLONG` where it or the answer reaches [`MAX_PATH`]: a link
 /// target that fills the buffer may have been cut short.
 fn joined(base: &[u8], rel: &[u8]) -> Result<Vec<u8>, i32> {
-    if rel.len() >= PATH_MAX {
+    if rel.len() >= MAX_PATH {
         return Err(ENAMETOOLONG);
     }
     let text = if rel.first() == Some(&b'/') { &[][..] } else { base };
@@ -106,7 +103,7 @@ fn joined(base: &[u8], rel: &[u8]) -> Result<Vec<u8>, i32> {
     if out.is_empty() {
         out.push(b'/');
     }
-    if out.len() >= PATH_MAX {
+    if out.len() >= MAX_PATH {
         return Err(ENAMETOOLONG);
     }
     Ok(out)

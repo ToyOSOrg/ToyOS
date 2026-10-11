@@ -17,4 +17,3 @@ pub(crate) fn set(code: i32) {
     ERRNO.set(code);
 }
 
-pub(crate) use crate::errcode::*;
