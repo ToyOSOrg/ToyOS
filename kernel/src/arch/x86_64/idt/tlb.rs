@@ -20,7 +20,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "test dword ptr [rbp + 88], 3",
         "jz 2f",
         // Before `flush`'s frames, which land where the last restore read:
-        // `XSAVEOPT`'s invariant (`arch::entry`).
+        // the modified optimisation's invariant (`arch::entry`).
         save_user_state!(),
         "2:",
         "and rsp, -16",

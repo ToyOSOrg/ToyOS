@@ -510,7 +510,7 @@ pub fn init_bsp(lapic_id: u32) {
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
     // INVARIANT: the control registers precede the IDT. Every entry stub saves
-    // by `XCR0` into the area `control_regs::init` declares, and `xsaveopt`
+    // by `XCR0` into the area `control_regs::init` declares, and every `XSAVE` form
     // without `CR4.OSXSAVE` is `#UD`, so a fault taken between the two would
     // fault again inside its own handler.
     super::control_regs::init(0);

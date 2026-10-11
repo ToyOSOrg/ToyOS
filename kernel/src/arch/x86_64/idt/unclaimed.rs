@@ -38,7 +38,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         "test dword ptr [rbp + 88], 3",
         "jz 2f",
         // `took` reaches no task, but its frames land where the last restore
-        // read: `XSAVEOPT`'s invariant (`arch::entry`).
+        // read: the modified optimisation's invariant (`arch::entry`).
         save_user_state!(),
         "2:",
         "and rsp, -16",
@@ -62,6 +62,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         "iretq",
         took = sym took,
         fp_area = sym crate::arch::fpu::AREA_BYTES,
+        fp_form = sym crate::arch::fpu::FORM,
     );
 }
 

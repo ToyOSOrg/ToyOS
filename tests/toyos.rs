@@ -5522,6 +5522,9 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     const XCR0_AVX512: &[(u32, &str)] = &[(5, "opmask"), (6, "ZMM_Hi256"), (7, "Hi16_ZMM")];
 
     let mut seen: Vec<(u32, u64, u64, u64)> = Vec::new();
+    // The save form each CPU names, which says which path this machine runs;
+    // the kernel asserts they agree.
+    let mut forms: BTreeSet<&str> = BTreeSet::new();
     for line in log.lines() {
         let Some(rest) = line.split("control_regs: cpu").nth(1) else { continue };
         let Some((id, rest)) = rest.split_once(" cr0=0x") else { continue };
@@ -5531,15 +5534,17 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
                 .find_map(|w| w.strip_prefix(key))
                 .and_then(|v| u64::from_str_radix(v, 16).ok())
         };
-        let (Ok(id), Ok(cr0), Ok(cr4), Some(xcr0)) = (
+        let (Ok(id), Ok(cr0), Ok(cr4), Some(xcr0), Some(form)) = (
             id.parse::<u32>(),
             u64::from_str_radix(cr0, 16),
             u64::from_str_radix(rest.split_whitespace().next().unwrap_or(""), 16),
             word("xcr0=0x"),
+            rest.split_whitespace().find_map(|w| w.strip_prefix("save=")),
         ) else {
             return Err(format!("unreadable control-register line: {line:?}"));
         };
         seen.push((id, cr0, cr4, xcr0));
+        forms.insert(form);
     }
 
     // Which CPUs answered, not how many lines were printed: a boot where one AP
@@ -5604,7 +5609,7 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         ));
     }
 
-    eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x}");
+    eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} save={forms:?}");
     Ok(())
 }
 

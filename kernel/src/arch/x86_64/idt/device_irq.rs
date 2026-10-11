@@ -29,7 +29,7 @@ macro_rules! device_irq_entry {
                 "test dword ptr [rbp + 88], 3", // CS = 10 GPRs + RIP above
                 "jz 2f",
                 // Before the handler's frames, which land where the last
-                // restore read: `XSAVEOPT`'s invariant (`arch::entry`).
+                // restore read: the modified optimisation's invariant (`arch::entry`).
                 $crate::arch::entry::save_user_state!(),
                 "2:",
                 // Ring 0 entry has unknown rsp alignment; the save left it aligned.

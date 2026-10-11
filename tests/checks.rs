@@ -351,7 +351,7 @@ mod checks {
                 .map(|(i, (cr0, cr4, xcr0))| {
                     format!(
                         "[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x} \
-                         efer=0xd01 xcr0={xcr0:#x} smep nx\n"
+                         efer=0xd01 xcr0={xcr0:#x} save=xsaveopt smep nx\n"
                     )
                 })
                 .collect()
