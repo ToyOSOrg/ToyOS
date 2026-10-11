@@ -145,9 +145,18 @@ impl Rx {
     }
 
     /// The most the peer may have unread and in flight to us: the receive buffer's present size.
-    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.buf.capacity()
+    }
+
+    /// MEASUREMENT ONLY.
+    pub const fn rtt(&self) -> Option<Duration> {
+        self.rtt
+    }
+
+    /// MEASUREMENT ONLY.
+    pub const fn rcv_mss(&self) -> u32 {
+        self.rcv_mss
     }
 
     /// After in-order text of `len` bytes arrived at `now`, with its TSecr and that echo's age

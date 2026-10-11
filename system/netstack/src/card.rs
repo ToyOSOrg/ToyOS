@@ -133,19 +133,38 @@ impl Card {
     /// Hands the next received frame to `take` and gives its buffer back to
     /// the card once `take` returns; `false` when none waits.
     pub fn rx(&self, take: impl FnOnce(&[u8])) -> bool {
+        use crate::prof::{Slot, add, now, since};
+        let t0 = now();
         match self {
             Self::Virtio(nic) => {
-                let Some((index, len)) = nic.poll_rx() else { return false };
+                let polled = nic.poll_rx();
+                since(Slot::CyPollRx, t0);
+                let Some((index, len)) = polled else { return false };
                 take(nic.rx_frame(index, len));
+                let t0 = now();
                 nic.rx_done(index);
+                since(Slot::CyRxDone, t0);
             }
             Self::Intel(nic) => {
-                let Some(frame) = nic.poll_rx() else { return false };
+                let polled = nic.poll_rx();
+                since(Slot::CyPollRx, t0);
+                let Some(frame) = polled else { return false };
                 take(nic.rx_frame(&frame));
+                let t0 = now();
                 nic.rx_done(frame);
+                since(Slot::CyRxDone, t0);
             }
         }
+        add(Slot::RxDone, 1);
         true
+    }
+
+    /// MEASUREMENT ONLY: the card's `RDT` writes so far; virtio has none.
+    pub fn rdt_writes(&self) -> u64 {
+        match self {
+            Self::Virtio(_) => 0,
+            Self::Intel(nic) => u64::from(nic.rdt_writes()),
+        }
     }
 
     /// How many frames the card takes now. [`Self::tx`] is for a caller this
