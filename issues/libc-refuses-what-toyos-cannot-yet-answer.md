@@ -14,6 +14,7 @@ These answer failure in their POSIX form and do nothing
 - `symlink`, `ENOSYS`: `SYS_SYMLINK` displaces what its name held
   (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`).
 - `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
+- `utimes`, `ENOSYS`: no call sets a file's times.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
   free space.
 - `getrlimit` and `setrlimit`, `ENOSYS`: no call answers a process's limits.

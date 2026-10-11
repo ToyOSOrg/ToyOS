@@ -44,6 +44,15 @@ impl Rng {
         b[0] |= 1;
         Guid(b)
     }
+
+    /// A name field: up to 36 units of any non-zero value, the rest zero.
+    pub fn name(&mut self) -> [u16; 36] {
+        let mut name = [0; 36];
+        for unit in name.iter_mut().take(self.below(37) as usize) {
+            *unit = self.range(1, 0xFFFF) as u16;
+        }
+        name
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +62,8 @@ pub struct RawEntry {
     pub unique: Guid,
     pub first: u64,
     pub last: u64,
+    /// The name field whole, as UTF-16 units.
+    pub name: [u16; 36],
 }
 
 /// One copy of the table, every field as the image will state it.
@@ -136,7 +147,7 @@ pub fn valid(rng: &mut Rng, shape: &Shape<'_>) -> Layout {
             break;
         }
         floor = last + 1;
-        entries.push(RawEntry { index, type_guid: rng.pick(shape.types), unique: rng.guid(), first, last });
+        entries.push(RawEntry { index, type_guid: rng.pick(shape.types), unique: rng.guid(), first, last, name: rng.name() });
     }
 
     let primary = Table {
@@ -218,7 +229,7 @@ fn mutate_entry(rng: &mut Rng, t: &mut Table, lba_count: u64) {
         let index = rng.below(u64::from(t.entry_count.clamp(1, 256))) as u32;
         t.entries.retain(|e| e.index != index);
         let (first, last) = (edge(rng, t, lba_count), edge(rng, t, lba_count));
-        t.entries.push(RawEntry { index, type_guid: Guid::EFI_SYSTEM, unique: rng.guid(), first, last });
+        t.entries.push(RawEntry { index, type_guid: Guid::EFI_SYSTEM, unique: rng.guid(), first, last, name: rng.name() });
         return;
     }
     let k = rng.below(t.entries.len() as u64) as usize;
@@ -280,6 +291,14 @@ pub fn image(layout: &Layout) -> Image {
             slot[16..32].copy_from_slice(&e.unique.0);
             slot[32..40].copy_from_slice(&e.first.to_le_bytes());
             slot[40..48].copy_from_slice(&e.last.to_le_bytes());
+            // A nameless entry writes its first 48 bytes alone, so an array laid
+            // over LBA 0 leaves the MBR's records as they are.
+            let name = at.and_then(|at| disk.get_mut(at + 56..at + 128));
+            if let Some(name) = name.filter(|_| e.name != [0; 36]) {
+                for (pair, unit) in name.as_chunks_mut::<2>().0.iter_mut().zip(e.name) {
+                    *pair = unit.to_le_bytes();
+                }
+            }
         }
     }
     for &(header_lba, t) in &copies {
@@ -393,6 +412,9 @@ impl OnDisk {
                 unique: Guid(e[16..32].try_into().expect("16")),
                 first: u64_at(e, 32),
                 last: u64_at(e, 40),
+                name: e.get(56..128).map_or([0; 36], |field| {
+                    std::array::from_fn(|i| u16::from_le_bytes([field[2 * i], field[2 * i + 1]]))
+                }),
             })
             .filter(|e| !e.type_guid.is_zero())
             .collect();

@@ -19,13 +19,13 @@
 use core::ffi::c_void;
 
 use toyos_abi::boot::RootBridgeWindow;
-use uefi::prelude::*;
-use uefi::{guid, Guid};
+use crate::efi::{Guid, Status, SystemTable};
 
 const HEAD: &str = "GCD:";
 
 /// The configuration table entry carrying [`DxeServices`] (PI 1.8 Vol. 2 §7.1).
-const DXE_SERVICES_TABLE_GUID: Guid = guid!("05ad34ba-6f02-4214-952e-4da0398e2bb9");
+const DXE_SERVICES_TABLE_GUID: Guid =
+    Guid::new(0x05ad34ba, 0x6f02, 0x4214, [0x95, 0x2e, 0x4d, 0xa0, 0x39, 0x8e, 0x2b, 0xb9]);
 
 /// `EFI_DXE_SERVICES_TABLE_SIGNATURE`: the eight bytes `DXE_SERV`, read as a
 /// little-endian word. Checked because a configuration table entry is a pointer
@@ -106,7 +106,7 @@ const GRANULE: u64 = 2 * 1024 * 1024;
 
 /// Append every memory-mapped range this platform declared and nothing owns to
 /// `out`, and answer how many were added.
-pub fn free_mmio(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -> usize {
+pub fn free_mmio(system_table: &SystemTable, out: &mut [RootBridgeWindow]) -> usize {
     let Some(entry) =
         system_table.config_table().iter().find(|e| e.guid == DXE_SERVICES_TABLE_GUID)
     else {

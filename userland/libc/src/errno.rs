@@ -33,6 +33,7 @@ pub(crate) const ENODEV: i32 = 19;
 pub(crate) const EINVAL: i32 = 22;
 pub(crate) const ENOSPC: i32 = 28;
 pub(crate) const EPIPE: i32 = 32;
+pub(crate) const EDOM: i32 = 33;
 pub(crate) const ERANGE: i32 = 34;
 pub(crate) const EDEADLK: i32 = 35;
 pub(crate) const ENOSYS: i32 = 38;

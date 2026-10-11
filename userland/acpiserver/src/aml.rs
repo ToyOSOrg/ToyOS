@@ -23,7 +23,9 @@
 //! not hold — and that is said once, loudly ([`NO_S5_HANDED`]); the server
 //! goes on serving. **A namespace whose DSDT loaded is kept** ([`Aml`]),
 //! with the host that answered its load, for what the server evaluates in it
-//! after ([`crate::battery`]); no embedded-controller query's method is run.
+//! after: the devices it serves ([`crate::devices`]), the power sources
+//! ([`crate::battery`]), and, where the power button is a control method
+//! device, each embedded-controller query's method.
 //!
 //! A table's line says its place, whether it is the DSDT or an SSDT, and a
 //! refusal by its kind; what the firmware chose — a name, an offset, an
@@ -34,19 +36,14 @@ use std::time::Instant;
 use toyos_acpi::TableError;
 use toyos_aml::{Error, Host, Interpreter, Value};
 
-use crate::host::{Controller, Firmware, Kernel, Refusal, Stopping, OWN};
+use crate::host::{Firmware, Kernel, Refusal, Stopping, OWN};
 use crate::tables::Tables;
 
 /// A machine's namespace, and the host every evaluation in it is answered by.
-pub struct Aml<'k, K, C> {
+pub struct Aml<'k, K> {
     pub interpreter: Interpreter,
-    pub host: Firmware<'k, K, C>,
+    pub host: Firmware<'k, K>,
 }
-
-/// An embedded-controller query, taken off the controller, run once the
-/// drain that took it has ended: a query's method may itself talk to the
-/// controller.
-pub fn query(_q: u8) {}
 
 /// What became of the machine's definition blocks: the load's verdict, which
 /// its lines say. Whoever evaluates a method after the load asks `blocks`
@@ -104,17 +101,16 @@ pub const NO_S5_HANDED: &str =
     "acpiserver: no \\_S5 was handed to the kernel, which powers off only on one an ACPI server supplied and refuses a shutdown without one";
 
 /// Load the machine's definition blocks from the RSDP at `rsdp`, and
-/// evaluate `\_S5`; the namespace, where its DSDT loaded, is kept with `ec`,
-/// the controller the machine's row names.
-pub fn load<'k, K: Kernel, C: Controller>(kernel: &'k K, ec: Option<C>, rsdp: u64) -> (Loaded, Option<Aml<'k, K, C>>) {
-    let mut host = Firmware::new(kernel, ec);
+/// evaluate `\_S5`; the namespace, where its DSDT loaded, is kept.
+pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> (Loaded, Option<Aml<'_, K>>) {
+    let mut host = Firmware::new(kernel);
     let mut interpreter = Interpreter::new();
     let loaded = load_into(kernel, &mut interpreter, &mut host, rsdp);
     let kept = loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) && !host.stopping;
     (loaded, kept.then_some(Aml { interpreter, host }))
 }
 
-fn load_into<K: Kernel, C: Controller>(kernel: &K, interpreter: &mut Interpreter, host: &mut Firmware<'_, K, C>, rsdp: u64) -> Loaded {
+fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Firmware<'_, K>, rsdp: u64) -> Loaded {
     let began = Instant::now();
     let mut loaded = Loaded::default();
     let tables = Tables::new(kernel);
@@ -249,19 +245,18 @@ fn s5(interpreter: &mut Interpreter, host: &mut dyn Host) -> Result<(u64, u64), 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::ec::tests::Emulated;
     use crate::host::tests::Scripted;
     use crate::host::Take;
 
     fn load_only<K: Kernel>(kernel: &K, rsdp: u64) -> Loaded {
-        load(kernel, None::<Emulated>, rsdp).0
+        load(kernel, rsdp).0
     }
 
     /// QEMU's own tables where its guest held them
     /// (`toyos-acpi/fixtures/qemu-11.1.1/SOURCE`), as ACPI reclaim memory.
-    pub const RSDP: u64 = 0x7fb7_e014;
+    const RSDP: u64 = 0x7fb7_e014;
     const DSDT: u64 = 0x7fb7_a000;
-    pub const QEMU: &[(u64, &[u8])] = &[
+    const QEMU: &[(u64, &[u8])] = &[
         (RSDP, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/rsdp.bin")),
         (0x7fb7_d0e8, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/xsdt.bin")),
         (0x7fb7_9000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/facp.bin")),
@@ -273,17 +268,24 @@ pub mod tests {
         (DSDT, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin")),
     ];
 
-    pub fn machine(tables: &[(u64, &[u8])]) -> Scripted {
+    fn machine(tables: &[(u64, &[u8])]) -> Scripted {
         Scripted { memory: tables.iter().map(|&(at, bytes)| (at, 9, bytes.to_vec())).collect(), ..Default::default() }
     }
 
     /// What every guest boot does, against the kernel's stand-in: QEMU's
     /// DSDT is fetched, loads asking the machine for nothing, and its `\_S5`
-    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of.
+    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of;
+    /// its namespace names no embedded controller, and no control-method
+    /// button where one is looked for.
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
         let kernel = machine(QEMU);
-        assert_eq!(load_only(&kernel, RSDP), Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let (loaded, kept) = load(&kernel, RSDP);
+        assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
+        let Aml { mut interpreter, mut host } = kept.expect("QEMU's DSDT loads");
+        for control_method in [false, true] {
+            assert_eq!(crate::devices::find(&mut interpreter, &mut host, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());
+        }
         assert!(kernel.asked.borrow().iter().all(|access| access.write == 0 && access.space == 0));
         assert!(!kernel.held.get());
         assert_eq!(kernel.handed.get(), Some(0));
@@ -302,17 +304,17 @@ pub mod tests {
         table
     }
 
-    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+    pub fn cat(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
     }
 
     /// `Name (<name>, <value>)` for a four-character name and a byte.
-    fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
+    pub fn name(name: &[u8; 4], value: u8) -> Vec<u8> {
         cat(&[&[0x08], name, &[0x0A, value]])
     }
 
     /// `Name (_S5_, Package (2) { a, b })`.
-    fn s5_package(a: u8, b: u8) -> Vec<u8> {
+    pub fn s5_package(a: u8, b: u8) -> Vec<u8> {
         cat(&[&[0x08], b"_S5_", &[0x12, 0x06, 0x02, 0x0A, a, 0x0A, b]])
     }
 
@@ -373,25 +375,6 @@ pub mod tests {
         assert_eq!(loaded.blocks.len(), 1, "an SSDT was loaded onto no DSDT: {loaded:?}");
         assert!(matches!(&loaded.blocks[0], Err(kind) if kind.starts_with("malformed AML: ")), "{loaded:?}");
         assert_eq!(loaded.s5, None);
-    }
-
-    /// The namespace is kept where the DSDT loaded, an SSDT refused or not,
-    /// and nowhere else: not where the DSDT was refused, the tables were
-    /// not read, or the machine stopped during the load.
-    #[test]
-    fn a_namespace_is_kept_only_where_its_dsdt_loaded() {
-        let kept = |kernel: &Scripted, rsdp| load(kernel, None::<Emulated>, rsdp).1.is_some();
-        let dsdt = sealed(b"DSDT", &cat(&[&name(b"AAAA", 1), &s5_package(5, 7)]));
-        let collides = sealed(b"SSDT", &name(b"AAAA", 2));
-        assert!(kept(&crafted(&dsdt, &[&collides]), CRAFTED_RSDP));
-        assert!(kept(&machine(QEMU), RSDP));
-        assert!(!kept(&crafted(&sealed(b"DSDT", &[0x08, b'A']), &[]), CRAFTED_RSDP));
-        assert!(!kept(&machine(QEMU), 0x1000));
-        for answered in [3, 40] {
-            let kernel = machine(QEMU);
-            kernel.stops_after.set(Some(answered));
-            assert!(!kept(&kernel, RSDP), "after {answered} reads");
-        }
     }
 
     #[test]

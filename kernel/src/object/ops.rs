@@ -121,19 +121,19 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Ok(()) | Err(SyscallError::NotFound) => {}
                 Err(e) => return e.to_u64(),
             }
-            vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
+            vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
         } else {
             // `mtime_target` takes no reference, so it runs first and the reference-taking
             // `open_target` runs last — a refusal cannot strand a reference. `CREATE` acts on `NotFound` only.
             match vfs.mtime_target(&target) {
-                Ok(mtime) => vfs.open_target(&target).map(|file_id| {
+                Ok(mtime) => vfs.open_target(&target).map(|(file_id, volume)| {
                     let position =
                         if append { file_cache::size(file_id) as usize } else { 0 };
-                    (file_id, mtime, position)
+                    (file_id, volume, mtime, position)
                 }),
                 Err(SyscallError::NotFound) if create => {
                     let mtime = crate::clock::mtime_now();
-                    vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
+                    vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
                 }
                 Err(e) => Err(e),
             }
@@ -141,12 +141,13 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         built
     };
 
-    let (file_id, mtime, position) = match opened {
+    let (file_id, volume, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
         file_id,
+        volume,
         position,
         mtime,
     }));
@@ -642,17 +643,22 @@ toyos_abi::user_safe! {
         pub file_type: u64,
         pub size: u64,
         pub mtime: u64,
+        pub volume: u64,
+        pub node: u64,
     }
 }
 
-/// What kind of thing this is, and how big.
+/// What kind of thing this is, how big, and which file: a file's node is its
+/// `FileId`, one per file for as long as it exists (`vfs::FileSystem::open_file`).
 pub fn fstat(object: &KObjectRef) -> Stat {
-    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0 };
+    let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0, volume: 0, node: 0 };
     match object {
         KObjectRef::File(f) => f.with(|state| Stat {
             file_type: FileType::File as u64,
             size: file_cache::size(state.file_id),
             mtime: state.mtime,
+            volume: state.volume,
+            node: state.file_id,
         }),
         KObjectRef::PipeRead(r) => {
             plain(if r.is_tty() { FileType::Tty } else { FileType::Pipe })
@@ -667,6 +673,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             file_type: FileType::SharedMemory as u64,
             size: m.size(),
             mtime: 0,
+            volume: 0,
+            node: 0,
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)

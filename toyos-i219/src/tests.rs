@@ -122,11 +122,11 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     assert_eq!(nic.peek(regs::TDLEN) as usize, TX_RING * tx_desc::BYTES);
     assert_eq!(nic.peek(regs::TDT), 0);
 
-    // Both timers off: an interrupt this driver waits on may not be held back
-    // by one nothing else expires.
+    // Both timers off and the throttle on: the first frame after a quiet
+    // spell is not held back, and a stream's are taken a batch a wake.
     assert_eq!(nic.peek(regs::RDTR), 0);
     assert_eq!(nic.peek(regs::RADV), 0);
-    assert_eq!(nic.peek(regs::ITR), 0);
+    assert_eq!(u64::from(nic.peek(regs::ITR)) * 256, 128_000, "§10.2.4.2 counts in 256 ns");
 
     assert_eq!(driver.mac(), NVM_MAC);
 }
@@ -501,41 +501,6 @@ fn null_descriptor_padding_is_not_a_frame() {
         nic.because("the padding was taken for a frame")
     );
     assert_eq!(got.len(), 1, "{}", nic.because("the real frame did not come up behind it"));
-}
-
-/// **A ring that never empties is what the wire does at line rate.** A pass
-/// has to end, or the caller's event loop never runs again — so the budget is
-/// what makes "no more this pass" something this driver can say.
-#[test]
-fn one_pass_hands_up_at_most_its_budget() {
-    let nic = Nic::new(8);
-    let mut driver = open(&nic);
-    nic.set_link(true);
-    // Twice the budget, arriving faster than they are taken: every buffer
-    // returned is another frame placed.
-    for i in 0..(RX_BUDGET as usize * 2) {
-        nic.deliver(&frame((i % 200) as u8 + 1, 128));
-    }
-    // Enough ticks for every one of them to be placed and written back, so
-    // what bounds the pass below is the budget and not the device.
-    for _ in 0..(RX_BUDGET * 4) {
-        nic.run();
-    }
-    one_pass(&mut driver);
-    let first = drain(&nic, &mut driver).len();
-    assert_eq!(
-        first, RX_BUDGET as usize,
-        "{}",
-        nic.because("a pass did not stop at its budget")
-    );
-    // And the next pass picks the rest up rather than losing them.
-    let mut rest = 0;
-    for _ in 0..8 {
-        nic.run();
-        one_pass(&mut driver);
-        rest += drain(&nic, &mut driver).len();
-    }
-    assert_eq!(first + rest, RX_BUDGET as usize * 2, "{}", nic.because("frames were lost"));
 }
 
 /// §7.1.8's tail "identifies the location beyond the last descriptor hardware

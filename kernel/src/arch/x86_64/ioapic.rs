@@ -258,10 +258,9 @@ pub fn route(
     // pin with no entry of its own is refused rather than written in a form
     // the unit blocks.
     let (index, high) = if !super::vtd::interrupt::is_armed() {
-        if dest_apic_id >= 0xFF {
-            return Err(RouteError::DestTooWide(dest_apic_id));
-        }
-        (0, dest_apic_id << 24)
+        let dest = super::apic::narrow_destination(dest_apic_id)
+            .map_err(|_| RouteError::DestTooWide(dest_apic_id))?;
+        (0, u32::from(dest) << 24)
     } else {
         match super::vtd::interrupt::pin(unit.id, vector, dest_apic_id, level) {
             Ok(pin) => (pin.low, pin.high),

@@ -1,5 +1,32 @@
+use crate::fs::Metadata;
 use crate::io;
 use crate::path::Path;
+use crate::sys::AsInner;
+
+/// ToyOS's answers about a file beyond the portable ones.
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+pub trait MetadataExt {
+    /// The volume the file is on (`toyos_abi::syscall::Stat::volume`), as
+    /// Unix's `dev`: 0 for what has none, a directory or symlink the kernel
+    /// serves among them.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn dev(&self) -> u64;
+    /// The file on that volume (`toyos_abi::syscall::Stat::node`), as Unix's
+    /// `ino`: with [`dev`](Self::dev), the same through every path and handle
+    /// that reaches the file and no other existing file's.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn ino(&self) -> u64;
+}
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl MetadataExt for Metadata {
+    fn dev(&self) -> u64 {
+        self.as_inner().volume()
+    }
+    fn ino(&self) -> u64 {
+        self.as_inner().node()
+    }
+}
 
 /// Creates a new symbolic link on the filesystem.
 ///

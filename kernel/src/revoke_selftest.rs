@@ -20,7 +20,7 @@ fn fail(path: &str, step: &str) {
 fn probe(path: &str) {
     let mtime = crate::clock::mtime_now();
     let id = match vfs::lock().create_file(path, mtime) {
-        Ok(id) => id,
+        Ok((id, _)) => id,
         Err(e) => return fail(path, &alloc::format!("create: {e:?}")),
     };
     if file_cache::write_page(id, 0, 0, &[FILL; 64][..]).is_err() {

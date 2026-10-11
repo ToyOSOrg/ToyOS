@@ -7,9 +7,7 @@
 
 use alloc::string::String;
 use toyos_update::record::{self, Record};
-use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode};
-use uefi::prelude::*;
-use uefi::{cstr16, CStr16};
+use crate::efi::{cstr16, CStr16, File, Mode, Status, SystemTable};
 
 use crate::loaderlog;
 
@@ -25,12 +23,12 @@ const NAME: &CStr16 = cstr16!("attempts");
 /// **`Err` is not zero.** A volume this cannot read is one the bound is off on,
 /// and the caller says so rather than treating an unreadable stick as a first
 /// attempt — which would be a bound that silently never fires.
-pub fn read(system_table: &SystemTable<Boot>, guid: &[u8; 16]) -> Result<Record, String> {
+pub fn read(system_table: &SystemTable, guid: &[u8; 16]) -> Result<Record, String> {
     loaderlog::with_volume(system_table, guid, |root| {
-        let file = match root.open(NAME, FileMode::Read, FileAttribute::empty()) {
+        let file = match root.open(NAME, Mode::Read) {
             Ok(file) => file,
             // No file is a first attempt, which is every freshly flashed image.
-            Err(e) if e.status() == Status::NOT_FOUND => return Ok(Record::default()),
+            Err(Status::NOT_FOUND) => return Ok(Record::default()),
             Err(e) => return Err(alloc::format!("{NAME} would not open ({e})")),
         };
         let Some(mut file) = file.into_regular_file() else {
@@ -50,7 +48,7 @@ pub fn read(system_table: &SystemTable<Boot>, guid: &[u8; 16]) -> Result<Record,
 ///
 /// Written **before the kernel is handed the machine**, because a count written
 /// after it is a count a hang never gets to.
-pub fn write(system_table: &SystemTable<Boot>, guid: &[u8; 16], record: &Record) -> Result<(), String> {
+pub fn write(system_table: &SystemTable, guid: &[u8; 16], record: &Record) -> Result<(), String> {
     loaderlog::with_volume(system_table, guid, |root| put(root, guid, record)).and_then(|inner| inner)
 }
 
@@ -60,25 +58,25 @@ pub fn write_chosen(guid: &[u8; 16], record: &Record) -> Result<(), String> {
     loaderlog::with_open_volume(|root| put(root, guid, record)).and_then(|inner| inner)
 }
 
-fn put(root: &mut Directory, guid: &[u8; 16], record: &Record) -> Result<(), String> {
+fn put(root: &mut File, guid: &[u8; 16], record: &Record) -> Result<(), String> {
     // Deleted and recreated rather than rewound: a fixed-width record is
     // still a record a shorter write would leave the tail of.
-    match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
+    match root.open(NAME, Mode::ReadWrite) {
         Ok(stale) => {
             if let Err(e) = stale.delete() {
                 return Err(alloc::format!("{NAME} would not delete ({e})"));
             }
         }
-        Err(e) if e.status() == Status::NOT_FOUND => {}
+        Err(Status::NOT_FOUND) => {}
         Err(e) => return Err(alloc::format!("{NAME} would not open ({e})")),
     }
     let file = root
-        .open(NAME, FileMode::CreateReadWrite, FileAttribute::empty())
+        .open(NAME, Mode::CreateReadWrite)
         .map_err(|e| alloc::format!("{NAME} would not be created ({e})"))?;
     let Some(mut file) = file.into_regular_file() else {
         return Err(alloc::format!("{NAME} on the log partition is a directory"));
     };
-    file.write(&record.encode(guid)).map_err(|e| alloc::format!("{NAME} would not write ({e})"))?;
+    file.write(&record.encode(guid)).map_err(|(e, _)| alloc::format!("{NAME} would not write ({e})"))?;
     // **Flushed here and not at the handoff.** What this file exists to
     // survive is a power cut, and a byte in a cache survives nothing.
     file.flush().map_err(|e| alloc::format!("{NAME} would not flush ({e})"))?;

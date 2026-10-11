@@ -58,10 +58,6 @@ pub const FIXED_POLL_HANDLES: u32 = 3;
 /// binds.
 pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PENDING_CONNS;
 
-/// Edge of the cursor sprites, in pixels — the size they are rasterized at and
-/// the size the software cursor damages.
-pub const CURSOR_PX: u32 = 20;
-
 /// What the launcher offers before `/apps` is read: the label it shows and the
 /// program it starts.
 pub const BUILT_IN_APPS: &[(&str, &str)] =

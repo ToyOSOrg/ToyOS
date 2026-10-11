@@ -1,6 +1,8 @@
 //! Reset and power-off through the FADT: its reset register, and S5 soft-off
 //! through the PM1a control block with the `SLP_TYPa` the holder of the `acpi`
-//! claim supplied.
+//! claim supplied. The reset register is declared with `SMI_CMD`, the other
+//! port the FADT has a write command, since the two may be one port
+//! ([`init_reset`]).
 //!
 //! **This kernel reads no AML, so it knows no sleep type of its own.** `\_S5`
 //! is the firmware's AML to evaluate, and the claim's holder does
@@ -16,7 +18,7 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use toyos_acpi::Reset;
+use toyos_acpi::{Facs, FacsRefused, Reset};
 use toyos_userbound::firmware::SleepType;
 use toyos_userbound::{Mediated, Ports};
 
@@ -40,31 +42,64 @@ const UNSUPPLIED: u8 = u8::MAX;
 static RESET: Slot = Slot::empty();
 static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
 
-/// Record the FADT's reset register, or say by name why this machine has none.
+/// Declare the FADT's two ports a write commands, `SMI_CMD` and the reset
+/// register, and record the reset register; or say by name why this machine
+/// has either not. The FACS the FADT names is read here once, and handed to
+/// `acpi_mode::init`: `None` where the FADT is unusable.
+///
+/// **One port may be both** (an AMD laptop's 0xb0 is): it is declared once,
+/// as `SMI_CMD`, whose kept bytes then hold the reset's value too
+/// (`SmiCmd::named`), and the reset register is that declaration.
 ///
 /// Before `percpu::init_bsp` loads the IDT: from then on every panic can be
 /// reported, and a panic that can be reported but not ended is a machine that
 /// still needs a hand. Walking these tables inside the panic handler instead is
 /// refused — a table walk on a machine that has already failed once is how a
 /// panic becomes a triple fault.
-pub fn init_reset(rsdp_addr: u64) {
-    let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_RESET) {
+pub fn init_reset(rsdp_addr: u64) -> Option<Result<Facs, FacsRefused>> {
+    let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE) {
         Ok(table) => table,
         Err(e) => {
-            log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel");
-            return;
+            log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel, and no SMI_CMD");
+            return None;
         }
     };
-    match toyos_acpi::reset_register(&fadt) {
-        Reset::Port { port, value } => match pio::declare("the reset register", Ports::one(port), Mediated::Kept) {
-            Ok(declared) => {
-                RESET_VALUE.store(value, Ordering::Relaxed);
-                RESET.set(declared);
-                log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}");
-            }
-            Err(why) => log!("ACPI: reset register {port:#x} not declared ({why:?}) — no reboot"),
-        },
-        other => log!("ACPI: no reset register this kernel writes ({other:?}) — no reboot"),
+    let facs = toyos_acpi::facs(fadt.phys(), &fadt);
+    declare(&fadt, facs);
+    Some(facs)
+}
+
+fn declare<P: toyos_acpi::Phys>(fadt: &toyos_acpi::Table<P>, facs: Result<Facs, FacsRefused>) {
+    let reset = toyos_acpi::reset_register(fadt);
+    // Fixed hardware this kernel does not serve has no ACPI row, and so no use for `SMI_CMD`.
+    let smi_cmd = toyos_acpi::fixed_hardware(fadt).ok().and_then(|fixed| fixed.smi_cmd);
+    if let Some(named) = smi_cmd {
+        // A FACS this kernel cannot read leaves `S4BIOS_F` unread, and the byte kept.
+        let s4bios = match facs {
+            Ok(facs) => facs.s4bios,
+            Err(FacsRefused::Absent) => false,
+            Err(_) => true,
+        };
+        if let Err(why) = super::smi_cmd::declare(named.port, named.named(s4bios, reset)) {
+            log!("ACPI: SMI_CMD {:#x} not declared ({why:?}) — no ACPI row", named.port);
+        }
+    }
+    let Reset::Port { port, value } = reset else {
+        return log!("ACPI: no reset register this kernel writes ({reset:?}) — no reboot");
+    };
+    let shared = smi_cmd.is_some_and(|named| named.port == port);
+    let declared = if shared {
+        super::smi_cmd::declared().ok_or_else(|| "SMI_CMD, which it is, was not declared".into())
+    } else {
+        pio::declare("the reset register", Ports::one(port), Mediated::Kept).map_err(|why| alloc::format!("{why:?}"))
+    };
+    match declared {
+        Ok(declared) => {
+            RESET_VALUE.store(value, Ordering::Relaxed);
+            RESET.set(declared);
+            log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}{}", if shared { ", which is SMI_CMD too" } else { "" });
+        }
+        Err(why) => log!("ACPI: reset register {port:#x} not declared ({why}) — no reboot"),
     }
 }
 
@@ -116,7 +151,10 @@ pub fn pm1a_control() -> Option<Declared> {
 }
 
 /// Write the reset register and nothing else: no lock, nothing but the port
-/// the FADT named. A machine with no reset register halts.
+/// the FADT named. A machine with no reset register halts. Where the register
+/// is `SMI_CMD` this `out` is no write of `smi_cmd`'s: Table 5.9 asks the boot
+/// processor of a command to `SMI_CMD` and nothing of the reset, which is
+/// made from whichever CPU ends the machine.
 // No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
 pub fn reset() -> ! {
     if let Some(reset) = RESET.get() {

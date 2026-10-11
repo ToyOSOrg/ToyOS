@@ -150,6 +150,8 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
             if !buf.is_null() {
                 ptr::write_bytes(buf, 0, 1);
                 let s = &mut *buf;
+                s.st_dev = st.volume;
+                s.st_ino = st.node;
                 s.st_size = st.size as i64;
                 s.st_mtim = Timespec {
                     tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
@@ -175,6 +177,34 @@ pub unsafe extern "C" fn ftruncate(raw_fd: i32, length: i64) -> i32 {
     match syscall::ftruncate(fd(raw_fd), length as u64) {
         Ok(()) => 0,
         Err(e) => set_errno(e),
+    }
+}
+
+/// [`ftruncate`] of `path` opened for writing.
+#[no_mangle]
+pub unsafe extern "C" fn truncate(path: *const u8, length: i64) -> i32 {
+    let fd = unsafe { open(path, O_WRONLY, 0) };
+    if fd < 0 {
+        return -1;
+    }
+    let truncated = unsafe { ftruncate(fd, length) };
+    unsafe { close(fd) };
+    truncated
+}
+
+/// `_PC_PATH_MAX`, `unistd.h`'s.
+const PC_PATH_MAX: i32 = 4;
+
+/// The longest path the kernel resolves, for every path; no other limit is
+/// answered.
+#[no_mangle]
+pub unsafe extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
+    match name {
+        PC_PATH_MAX => toyos::fs::MAX_PATH as i64,
+        _ => {
+            crate::errno::set(EINVAL);
+            -1
+        }
     }
 }
 

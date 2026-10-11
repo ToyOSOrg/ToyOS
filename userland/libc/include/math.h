@@ -61,6 +61,7 @@ double sinh(double x);
 double cosh(double x);
 double tanh(double x);
 double round(double x);
+long lround(double x);
 double trunc(double x);
 double modf(double x, double *iptr);
 double logb(double x);

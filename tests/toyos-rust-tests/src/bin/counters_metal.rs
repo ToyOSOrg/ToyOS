@@ -12,7 +12,7 @@
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
 //! **`idle0` waits for the ACPI server's first lines** ([`acpi_said`]):
-//! `acpiserver` logs its arming, and a query number the first time the
+//! `acpiserver` logs whether it serves an embedded controller, and a query number the first time the
 //! embedded controller raises it, and the kernel the claim's first interrupt,
 //! at times the machine chooses. A query number first raised later, on a quiet
 //! machine, is the `counters` row's to refuse.
@@ -63,8 +63,8 @@ const LOADED: Duration = Duration::from_secs(20);
 /// at its write budget (`userland/logkeeper/src/policy.rs`, 5 s).
 const SETTLE_BOUND: Duration = Duration::from_secs(10);
 
-/// How long [`acpi_said`] waits for the server to arm and the controller's
-/// first query and SCI to come.
+/// How long [`acpi_said`] waits for the server to say its controller and the
+/// controller's first query and SCI to come.
 const ACPI_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
@@ -168,16 +168,19 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
-/// Wait until `acpiserver` has armed and, where it serves an embedded
-/// controller, the kernel has logged the claim's first interrupt and the server
-/// its first query.
+/// Wait until `acpiserver` has said whether it serves an embedded controller
+/// and, where it does, the kernel has logged the claim's first interrupt and
+/// the server its first query.
 fn acpi_said(log: &mut Log) {
     let mut armed: Option<bool> = None;
     let (mut interrupt, mut query) = (false, false);
-    log.until("the ACPI server armed, and its controller's first SCI and query", ACPI_BOUND, |line| {
+    log.until("the ACPI server's controller, and its first SCI and query", ACPI_BOUND, |line| {
         if let Some(said) = program_line(line).filter(|said| said.tag == "acpiserver") {
-            if let Some(rest) = said.text.strip_prefix("acpiserver: armed: ") {
-                armed = Some(!rest.ends_with("embedded controller none"));
+            if said.text.starts_with(acpiserver_api::CONTROLLER_SERVED) {
+                armed = Some(true);
+            }
+            if said.text.starts_with(acpiserver_api::CONTROLLER_NONE) {
+                armed = Some(false);
             }
             query |= said.text.starts_with("acpiserver: embedded controller query ")
                 && said.text.contains(" taken for the first time");

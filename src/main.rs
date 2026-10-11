@@ -107,6 +107,11 @@ fn main() {
         toyos_build::clippy::dispatch(&root);
         return;
     }
+    // Builds no image, and runs no guest.
+    if asked(&flags::HOSTED_CLANG) {
+        toyos_build::hostedclang::dispatch(&root);
+        return;
+    }
     // Writes one file outside the checkout and builds nothing.
     if asked(&flags::SIGNING_KEY_NEW) {
         match toyos_build::signing::mint_owner_key() {
@@ -211,11 +216,6 @@ fn main() {
 
     if asked(&flags::REGEN_FONT) {
         toyos_build::assets::regen_panic_font(&root);
-        return;
-    }
-
-    if asked(&flags::REGEN_WALLPAPER) {
-        toyos_build::wallpaper::regen(&root);
         return;
     }
 

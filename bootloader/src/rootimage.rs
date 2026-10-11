@@ -24,11 +24,7 @@ use core::num::NonZeroU64;
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
-use uefi::prelude::*;
-use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
-use uefi::proto::loaded_image::LoadedImage;
-use uefi::proto::media::block::{BlockIO, BlockIoProtocol};
-use uefi::table::boot::{AllocateType, MemoryType, ScopedProtocol};
+use crate::efi::{AllocateType, BlockIo, BootServices, DevicePath, Handle, HardDrive, LoadedImage, Scoped, Status};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
 /// here is allocated at.
@@ -43,10 +39,6 @@ const BLOCK: usize = 4096;
 /// any bounce buffer a driver maps for DMA at that size rather than ROOT's; and
 /// a read that fails is named to within 1 MiB.
 const CHUNK_BOUND: usize = 1 << 20;
-
-/// UEFI 2.11 §13.9's `EFI_BLOCK_IO_PROTOCOL_REVISION3`, the first whose media
-/// carries `OptimalTransferLengthGranularity`.
-const BLOCK_IO_REVISION3: u64 = 0x0002_001F;
 
 /// The line a read ROOT is reported on, with where it went and what it cost.
 pub const READ_AT: &str = "ROOT: read into memory at";
@@ -92,31 +84,30 @@ impl RootImage {
 /// image from: the one handle whose device path is the partition's without
 /// its last node, the HARDDRIVE one.
 pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
-    let image = crate::protocol::exclusive::<LoadedImage>(bs, handle)
+    let image = bs
+        .exclusive::<LoadedImage>(handle)
         .map_err(|e| alloc::format!("this image's LoadedImage: {e:?}"))?;
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
-    let path = crate::protocol::get::<DevicePath>(bs, device)
-        .map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
-    let nodes: alloc::vec::Vec<&DevicePathNode> = path.node_iter().collect();
+    let path = bs.get::<DevicePath>(device).map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
+    let nodes: alloc::vec::Vec<&[u8]> = path.nodes().collect();
     let Some((last, disk_nodes)) = nodes.split_last() else {
         return Err("the boot device's path is empty".into());
     };
-    if last.full_type() != (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE) {
+    if (last[0], last[1]) != HardDrive::TYPE {
         return Err("the boot device is not a partition, so there is no disk to find the slots on".into());
     }
 
-    let handles = bs
-        .find_handles::<BlockIO>()
-        .map_err(|e| alloc::format!("firmware lists no block devices: {e:?}"))?;
+    let handles = bs.handles::<BlockIo>().map_err(|e| alloc::format!("firmware lists no block devices: {e:?}"))?;
     let disks: alloc::vec::Vec<Handle> = handles
-        .into_iter()
+        .iter()
+        .copied()
         // Not the partition itself, whose path is held open above: a second
         // open by this agent is closed along with the first, and the second
         // close then fails.
         .filter(|&candidate| candidate != device)
         .filter(|&candidate| {
-            let Ok(path) = crate::protocol::get::<DevicePath>(bs, candidate) else { return false };
-            path.node_iter().eq(disk_nodes.iter().copied())
+            let Ok(path) = bs.get::<DevicePath>(candidate) else { return false };
+            path.nodes().eq(disk_nodes.iter().copied())
         })
         .collect();
     match disks[..] {
@@ -127,7 +118,7 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
 
 /// The boot disk, read through the firmware's block I/O.
 pub struct Disk<'a> {
-    io: ScopedProtocol<'a, BlockIO>,
+    io: Scoped<'a, BlockIo>,
     media_id: u32,
     lba_bytes: u32,
     lba_count: u64,
@@ -138,21 +129,21 @@ pub struct Disk<'a> {
 
 impl<'a> Disk<'a> {
     pub fn open(bs: &'a BootServices, handle: Handle) -> Result<Self, String> {
-        let io = crate::protocol::get::<BlockIO>(bs, handle).map_err(|e| alloc::format!("the boot disk's block I/O: {e:?}"))?;
+        let io = bs.get::<BlockIo>(handle).map_err(|e| alloc::format!("the boot disk's block I/O: {e:?}"))?;
         let media = io.media();
         if !media.is_media_present() {
             return Err("the boot disk reports no media".into());
         }
-        let lba_bytes = media.block_size();
+        let lba_bytes = media.block_size;
         // UEFI 2.11 §13.9: `IoAlign` is 0 or 1 for none, else a power of two.
-        let align = media.io_align().max(1) as usize;
+        let align = media.io_align.max(1) as usize;
         if !align.is_power_of_two() || align > BLOCK {
             return Err(alloc::format!("the boot disk wants buffers aligned to {align} bytes"));
         }
         if lba_bytes == 0 || !BLOCK.is_multiple_of(lba_bytes as usize) {
             return Err(alloc::format!("the boot disk's {lba_bytes}-byte block does not divide {BLOCK}"));
         }
-        let (media_id, lba_count) = (media.media_id(), media.last_block() + 1);
+        let (media_id, lba_count) = (media.media_id, media.last_block + 1);
         Ok(Disk { media_id, lba_bytes, lba_count, io, scratch: aligned(BLOCK) })
     }
 
@@ -185,7 +176,7 @@ impl<'a> Disk<'a> {
             let at = part.first_lba() + i as u64 * lbas;
             self.io
                 .read_blocks(self.media_id, at, self.scratch)
-                .map_err(|e| alloc::format!("the slot table's copy {i} would not read: {:?}", e.status()))?;
+                .map_err(|e| alloc::format!("the slot table's copy {i} would not read: {e:?}"))?;
             copy.copy_from_slice(self.scratch);
         }
         slots::current([&copies[0], &copies[1]])
@@ -212,7 +203,7 @@ impl<'a> Disk<'a> {
         // `LoaderData`, as the black box's page is, for the reason its module
         // header gives.
         let at = bs
-            .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+            .allocate_pages(AllocateType::AnyPages, pages)
             .map_err(|e| alloc::format!("firmware would not give {len} bytes for ROOT: {e:?}"))?;
         // SAFETY: the `pages` pages at `at` were just allocated to this loader,
         // are identity-mapped while boot services live, and nothing else holds them.
@@ -231,7 +222,7 @@ impl<'a> Disk<'a> {
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
                 failed.blocks,
                 failed.lba,
-                failed.error.status(),
+                failed.error,
                 failed.read
             );
             image.free(bs);
@@ -253,27 +244,19 @@ impl<'a> Disk<'a> {
     /// `OptimalTransferLengthGranularity`, where the media is revision 3 or
     /// later and so carries the field, and reports a non-zero one.
     fn granularity_lbas(&self) -> Option<u32> {
-        let io: &BlockIO = &self.io;
-        // SAFETY: uefi 0.26 declares `BlockIO` `repr(transparent)` over
-        // `BlockIoProtocol`, so the one is the other's layout; `revision` is
-        // the field the crate does not expose.
-        let revision = unsafe { &*core::ptr::from_ref(io).cast::<BlockIoProtocol>() }.revision;
-        if revision < BLOCK_IO_REVISION3 {
-            return None;
-        }
-        Some(self.io.media().optimal_transfer_length_granularity()).filter(|&lbas| lbas != 0)
+        self.io.optimal_transfer_length_granularity().filter(|&lbas| lbas != 0)
     }
 }
 
 /// The boot disk as [`chunk::read`] asks for it.
-struct Firmware<'a> {
-    io: &'a BlockIO,
+struct Firmware<'a, 'b> {
+    io: &'a Scoped<'b, BlockIo>,
     media_id: u32,
 }
 
-impl chunk::Blocks for Firmware<'_> {
-    type Error = uefi::Error;
-    fn read(&mut self, lba: u64, into: &mut [u8]) -> uefi::Result {
+impl chunk::Blocks for Firmware<'_, '_> {
+    type Error = Status;
+    fn read(&mut self, lba: u64, into: &mut [u8]) -> Result<(), Status> {
         self.io.read_blocks(self.media_id, lba, into)
     }
 }

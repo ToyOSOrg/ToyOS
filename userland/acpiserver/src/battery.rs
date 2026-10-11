@@ -1,17 +1,12 @@
 //! The machine's batteries and AC adapters, as its AML reports them (ACPI 6.5
 //! §10.2, §10.3), read in the namespace the load kept ([`crate::aml::Aml`]).
 //!
-//! **Once, after the load** ([`Power::find`]). Where the machine's row names
-//! an embedded controller, each controller device (`PNP0C09`) is asked its
-//! `_GLK` (§6.5.7) and then told by its `_REG` that its space is there
-//! (§6.5.4, `_REG(3, 1)`), before anything reads that space: firmware
-//! commonly chooses between the controller and another path by what its
-//! `_REG` stored. A controller whose `_GLK` asks for the Global Lock has no
-//! battery read at all: this server takes the lock around no transaction
-//! yet. Then every device whose `_HID` names a control-method battery
-//! (`PNP0C0A`) or an AC adapter (`ACPI0003`) is found by a walk, a battery
-//! is kept where its `_STA` says one is present (§6.3.7, bit 4; a device
-//! with no `_STA` has none), and its static information is read once, from
+//! **Once, after the embedded controller is armed** ([`Power::find`]): the
+//! batteries (`PNP0C0A`) and adapters (`ACPI0003`) are the ones
+//! [`crate::devices::find`] named, and their methods read the controller's
+//! space only once the server has attached it and run its `_REG`. A battery
+//! is kept where its `_STA` says one is present (§6.3.7, bit 4; a device with
+//! no `_STA` has none), and its static information is read once, from
 //! `_BIX` where it has one and `_BIF` where it has not (§10.2.2).
 //!
 //! **Every [`POLL`]** each battery's `_BST` and each adapter's `_PSR` are
@@ -29,10 +24,10 @@
 use std::fmt;
 use std::time::Duration;
 
-use toyos_aml::{Error, Kind, Value};
+use toyos_aml::{Error, Value};
 
 use crate::aml::{kind, Aml};
-use crate::host::{Controller, Kernel, OWN};
+use crate::host::{Kernel, OWN};
 use crate::ledger::Ledger;
 
 /// How often each battery and adapter is read.
@@ -41,11 +36,6 @@ pub const POLL: Duration = Duration::from_secs(10);
 /// What opens the line of an evaluation this module asked for and the
 /// interpreter or the host refused.
 pub const REFUSED: &str = "acpiserver: a method read for the power sources refused: ";
-
-/// §5.6.7 / §6.1.5 identifiers, compared in their text form.
-const CONTROLLER: &str = "PNP0C09";
-const BATTERY: &str = "PNP0C0A";
-const ADAPTER: &str = "ACPI0003";
 
 /// §10.2.2: a capacity, rate or voltage the battery does not know.
 const UNKNOWN: u64 = 0xFFFF_FFFF;
@@ -258,24 +248,6 @@ pub fn said_status(info: &Info, status: &Status) -> String {
     )
 }
 
-/// An `_HID`'s text: a string as it is, an integer as the EISA ID it
-/// compresses (§6.1.5): three letters of five bits each and four hex digits,
-/// stored in the byte order of their text.
-fn hid(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => String::from_utf8(text.clone()).ok(),
-        &Value::Integer(id) => {
-            let id = u32::try_from(id).ok()?.swap_bytes();
-            if id >> 31 != 0 {
-                return None;
-            }
-            let letter = |at: u32| char::from(b'@' + ((id >> at) & 0x1F) as u8);
-            Some(format!("{}{}{}{:04X}", letter(26), letter(21), letter(16), id & 0xFFFF))
-        }
-        _ => None,
-    }
-}
-
 struct Battery {
     path: String,
     info: Info,
@@ -295,10 +267,9 @@ pub struct Power {
 }
 
 impl Power {
-    /// An evaluation of `path` with `args`: `Ok(None)` where nothing is
-    /// named there.
-    fn evaluate<K: Kernel, C: Controller>(&mut self, aml: &mut Aml<'_, K, C>, path: &str, args: &[Value]) -> Result<Option<Value>, Error> {
-        let answer = match aml.interpreter.evaluate(&mut aml.host, path, args) {
+    /// An evaluation of `path`: `Ok(None)` where nothing is named there.
+    fn evaluate<K: Kernel>(&mut self, aml: &mut Aml<'_, K>, path: &str) -> Result<Option<Value>, Error> {
+        let answer = match aml.interpreter.evaluate(&mut aml.host, path, &[]) {
             Err(Error::NotFound(named)) if named == path => Ok(None),
             answer => answer.map(Some),
         };
@@ -319,73 +290,15 @@ impl Power {
         }
     }
 
-    /// Find the machine's batteries and adapters in `aml`, telling its
-    /// controller its space is there first, and read each battery's
-    /// information; `None` where there is nothing to read.
-    pub fn find<K: Kernel, C: Controller>(aml: &mut Aml<'_, K, C>, controller: bool) -> Option<Power> {
-        let mut power = Power { batteries: Vec::new(), adapters: Vec::new(), ac_said: None, refused: Ledger::default(), stopping: false };
+    /// Keep each of `batteries` present, read its information and first
+    /// reading, with `adapters`' (the devices [`crate::devices::find`] named
+    /// by path); `None` where there is no battery to read.
+    pub fn find<K: Kernel>(aml: &mut Aml<'_, K>, batteries: Vec<String>, adapters: Vec<String>) -> Option<Power> {
+        let mut power = Power { batteries: Vec::new(), adapters, ac_said: None, refused: Ledger::default(), stopping: false };
         let (takes, contended, given_back) = (aml.host.takes, aml.host.contended, aml.host.given_back);
-        let hids: Vec<String> = match aml.interpreter.walk() {
-            Ok(mut walk) => {
-                let mut found = Vec::new();
-                while let Some(entry) = walk.next() {
-                    if entry.name == *b"_HID" && entry.kind != Kind::Device {
-                        found.push(walk.path().to_owned());
-                    }
-                }
-                found
-            }
-            Err(why) => {
-                println!("acpiserver: {}the namespace's walk was refused: {}", acpiserver_api::NO_BATTERY, kind(&why));
-                return None;
-            }
-        };
-        let mut controllers = Vec::new();
-        let mut batteries = Vec::new();
-        for path in hids {
-            let device = path.strip_suffix("._HID").expect("the walk's path of a `_HID` ends in it").to_owned();
-            let id = match power.evaluate(aml, &path, &[]) {
-                Ok(value) => value.as_ref().and_then(hid),
-                Err(why) => {
-                    power.refused(&device, "_HID", &kind(&why));
-                    None
-                }
-            };
-            match id.as_deref() {
-                Some(CONTROLLER) => controllers.push(device),
-                Some(BATTERY) => batteries.push(device),
-                Some(ADAPTER) => power.adapters.push(device),
-                _ => {}
-            }
-        }
-        if power.stopping {
-            return None;
-        }
-
-        if controller {
-            for device in &controllers {
-                match power.evaluate(aml, &format!("{device}._GLK"), &[]) {
-                    Ok(None | Some(Value::Integer(0))) => {}
-                    Ok(Some(_)) => {
-                        println!(
-                            "acpiserver: {}the embedded controller's _GLK asks for the Global Lock around its transactions, which this server takes around none yet",
-                            acpiserver_api::NO_BATTERY
-                        );
-                        println!("{OWN}that was {device}._GLK");
-                        return None;
-                    }
-                    Err(why) => power.refused(device, "_GLK", &kind(&why)),
-                }
-                // §6.5.4: Arg0 the EmbeddedControl space, Arg1 1 for "connect".
-                if let Err(why) = power.evaluate(aml, &format!("{device}._REG"), &[Value::Integer(3), Value::Integer(1)]) {
-                    power.refused(device, "_REG", &kind(&why));
-                }
-            }
-        }
-
         let count = batteries.len();
         for device in batteries {
-            let sta = match power.evaluate(aml, &format!("{device}._STA"), &[]) {
+            let sta = match power.evaluate(aml, &format!("{device}._STA")) {
                 Ok(None) => 0x0F,
                 Ok(Some(Value::Integer(sta))) => sta,
                 Ok(Some(_)) => {
@@ -401,8 +314,8 @@ impl Power {
                 println!("{OWN}{device} says no battery is present: _STA {sta:#x}");
                 continue;
             }
-            let info = match power.evaluate(aml, &format!("{device}._BIX"), &[]) {
-                Ok(None) => match power.evaluate(aml, &format!("{device}._BIF"), &[]) {
+            let info = match power.evaluate(aml, &format!("{device}._BIX")) {
+                Ok(None) => match power.evaluate(aml, &format!("{device}._BIF")) {
                     Ok(None) => Err(("_BIF", "the device has neither _BIX nor _BIF".to_owned())),
                     Ok(Some(value)) => bif(&value).map_err(|why| ("_BIF", why)),
                     Err(why) => Err(("_BIF", kind(&why))),
@@ -430,9 +343,9 @@ impl Power {
             }
         }
         let found = format!(
-            "{present} of {count} control-method batteries present, {} AC adapter(s), {} embedded controller device(s) told their space is there; the Global Lock taken {} times on the way and given back {} times, the firmware found holding it by {} of the takes",
+            "{present} of {count} control-method batteries present, {} AC adapter(s), with {} embedded controller attached; the Global Lock taken {} times on the way and given back {} times, the firmware found holding it by {} of the takes",
             power.adapters.len(),
-            if controller { controllers.len() } else { 0 },
+            if aml.host.ec.is_some() { "an" } else { "no" },
             aml.host.takes - takes,
             aml.host.given_back - given_back,
             aml.host.contended - contended,
@@ -447,12 +360,12 @@ impl Power {
 
     /// Read every battery and adapter: the line of each battery whose
     /// reading moved, for its caller to say.
-    pub fn read<K: Kernel, C: Controller>(&mut self, aml: &mut Aml<'_, K, C>) -> Vec<String> {
+    pub fn read<K: Kernel>(&mut self, aml: &mut Aml<'_, K>) -> Vec<String> {
         let mut lines = Vec::new();
         let mut ac = None;
         for at in 0..self.adapters.len() {
             let device = self.adapters[at].clone();
-            match self.evaluate(aml, &format!("{device}._PSR"), &[]) {
+            match self.evaluate(aml, &format!("{device}._PSR")) {
                 Ok(Some(Value::Integer(online))) => ac = Some(ac.unwrap_or(false) || online != 0),
                 Ok(Some(_)) => self.refused(&device, "_PSR", "no Integer"),
                 Ok(None) => self.refused(&device, "_PSR", "the adapter has no _PSR"),
@@ -471,7 +384,7 @@ impl Power {
         let count = self.batteries.len();
         for n in 0..count {
             let device = self.batteries[n].path.clone();
-            let status = match self.evaluate(aml, &format!("{device}._BST"), &[]) {
+            let status = match self.evaluate(aml, &format!("{device}._BST")) {
                 Ok(Some(value)) => bst(&value),
                 Ok(None) => Err("the battery has no _BST".into()),
                 Err(_) if self.stopping => return lines,
@@ -502,11 +415,13 @@ impl Power {
 mod common;
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
-    use crate::aml::tests::{crafted, machine, sealed, CRAFTED_RSDP, QEMU, RSDP};
+    use crate::aml::tests::{crafted, sealed, CRAFTED_RSDP};
+    use crate::devices::tests::{byte, crs, GPE0};
+    use crate::devices::{self, Found};
     use crate::ec::tests::Emulated;
-    use crate::host::tests::Scripted;
+    use crate::host::tests::{Scripted, EC_COMMAND, EC_DATA};
 
     use super::common;
     use common::{device, field, if_, index, int, lequal, method, op_region, package, ret, scope, skip, store, string, unit as field_unit};
@@ -518,13 +433,13 @@ mod tests {
     const RATE: u8 = 0xA0;
     const VOLTAGE: u8 = 0xA8;
 
-    /// A laptop's namespace as §10.2.2, §10.3 and §6.5.4 have one: an
-    /// embedded controller whose `_REG` records that its space is there; a
-    /// battery below it whose `_STA` says it is present only once `_REG` has
-    /// run, whose `_BIX` is constant and whose `_BST` selects a page of the
-    /// controller's space with a write and then reads it; and an adapter whose
-    /// `_PSR` reads the controller. `glk` is the controller's `_GLK`, where
-    /// it has one.
+    /// A laptop's namespace as §10.2.2, §10.3, §6.5.4 and §12.11 have one: an
+    /// embedded controller at [`EC_DATA`] and [`EC_COMMAND`] whose `_REG`
+    /// records that its space is there; a battery below it whose `_STA` says
+    /// it is present only once `_REG` has run, whose `_BIX` is constant and
+    /// whose `_BST` selects a page of the controller's space with a write and
+    /// then reads it; and an adapter whose `_PSR` reads the controller.
+    /// `glk` is the controller's `_GLK`, where it has one.
     fn laptop(glk: Option<u64>) -> Vec<u8> {
         let fields = [
             skip(8 * usize::from(STATE)),
@@ -569,6 +484,8 @@ mod tests {
             "EC0",
             &[
                 common::def_name("_HID", &int(0x090C_D041)),
+                crs(&[EC_DATA as u16, EC_COMMAND as u16]),
+                byte(b"_GPE", 3),
                 op_region("NVSR", 0x00, &int(NVS), &int(1)),
                 field("NVSR", 0x01, &[field_unit("NVSB", 8)]),
                 op_region("ECOR", 0x03, &int(0), &int(0x100)),
@@ -601,19 +518,38 @@ mod tests {
     /// NVS.
     const NVS: u64 = 0x7700_0000;
 
-    fn laptop_machine(glk: Option<u64>) -> Scripted {
+    /// The fixture's machine, its controller answering at its two ports.
+    pub fn laptop_machine(glk: Option<u64>) -> Scripted {
         let mut kernel = crafted(&laptop(glk), &[]);
         kernel.memory.push((NVS, 10, vec![0]));
+        *kernel.controller.borrow_mut() = Some(Emulated::new(space()));
         kernel
     }
 
-    fn loaded(kernel: &Scripted, ec: Option<Emulated>) -> Aml<'_, Scripted, Emulated> {
-        let (_, aml) = crate::aml::load(kernel, ec, CRAFTED_RSDP);
-        aml.expect("the fixture's DSDT loads")
+    /// The fixture loaded and its controller found and attached, as the
+    /// server arms it ([`crate::attach`]).
+    fn armed(kernel: &Scripted) -> (Aml<'_, Scripted>, Found) {
+        let (_, aml) = crate::aml::load(kernel, CRAFTED_RSDP);
+        let mut aml = aml.expect("the fixture's DSDT loads");
+        let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, false);
+        crate::attach(&mut aml, found.ec.as_ref().expect("the fixture's controller")).expect("no port of it refused");
+        (aml, found)
     }
 
-    fn done(aml: &Aml<'_, Scripted, Emulated>) -> Vec<(u8, u8, u8)> {
-        aml.host.ec.as_ref().expect("a controller").done.clone()
+    fn found(kernel: &Scripted) -> (Aml<'_, Scripted>, Option<Power>) {
+        let (mut aml, found) = armed(kernel);
+        let power = Power::find(&mut aml, found.batteries, found.adapters);
+        (aml, power)
+    }
+
+    fn done(kernel: &Scripted) -> Vec<(u8, u8, u8)> {
+        kernel.controller.borrow().as_ref().expect("a controller").done.clone()
+    }
+
+    fn poke(kernel: &Scripted, at: u8, bytes: &[u8]) {
+        let mut controller = kernel.controller.borrow_mut();
+        let ec = controller.as_mut().expect("a controller");
+        ec.space[usize::from(at)..usize::from(at) + bytes.len()].copy_from_slice(bytes);
     }
 
     const RD: u8 = 0x80;
@@ -622,14 +558,15 @@ mod tests {
     /// The controller is told its space is there before the battery is asked
     /// whether it is present, which here it says only after; its information
     /// is read once and the battery read with it, through the controller's
-    /// transactions alone: the adapter's byte, then the page `_BST` selects,
-    /// written before its fields are read, a byte at a time.
+    /// transactions alone, each through the kernel: the adapter's byte, then
+    /// the page `_BST` selects, written before its fields are read, a byte at
+    /// a time.
     #[test]
     fn a_laptops_battery_is_found_after_reg_and_read_through_the_controller() {
         let kernel = laptop_machine(None);
-        let mut aml = loaded(&kernel, Some(Emulated::new(space())));
-        let power = Power::find(&mut aml, true).expect("a battery");
-        assert_eq!(power.adapters.len(), 1);
+        let (aml, power) = found(&kernel);
+        let power = power.expect("a battery");
+        assert_eq!(power.adapters, ["\\_SB_.AC__"]);
         assert_eq!(power.batteries.len(), 1);
         assert_eq!(power.batteries[0].path, "\\_SB_.EC0_.BAT0");
         assert_eq!(
@@ -637,7 +574,7 @@ mod tests {
             Info { from: "_BIX", unit: Unit::Power, design: Some(57000), full: Some(50000), design_voltage: Some(11520), cycles: Some(312) }
         );
         assert_eq!(
-            done(&aml),
+            done(&kernel),
             [
                 (RD, AC, 0),
                 (WR, PAGE, 1),
@@ -653,7 +590,8 @@ mod tests {
         assert_eq!(power.batteries[0].said, Some((Some(87), DISCHARGING)));
         assert_eq!(power.ac_said, Some(Some(false)));
         assert!(power.refused.is_empty() && aml.host.refused.is_empty());
-        assert!(kernel.asked.borrow().iter().all(|access| access.write == 0), "the kernel was asked for a write");
+        let asked = kernel.asked.borrow();
+        assert!(asked.iter().all(|access| access.write == 0 || [EC_DATA, EC_COMMAND].contains(&access.address)), "the kernel was asked for a write but the controller's");
     }
 
     /// A line is said only where what it says moved: the percent, the state
@@ -661,27 +599,23 @@ mod tests {
     #[test]
     fn a_reading_is_said_only_where_its_percent_its_state_or_the_adapter_moves() {
         let kernel = laptop_machine(None);
-        let mut aml = loaded(&kernel, Some(Emulated::new(space())));
-        let mut power = Power::find(&mut aml, true).expect("a battery");
-        let poke = |aml: &mut Aml<'_, Scripted, Emulated>, at: u8, bytes: &[u8]| {
-            let ec = aml.host.ec.as_mut().expect("a controller");
-            ec.space[usize::from(at)..usize::from(at) + bytes.len()].copy_from_slice(bytes);
-        };
+        let (mut aml, power) = found(&kernel);
+        let mut power = power.expect("a battery");
         assert_eq!(power.read(&mut aml), Vec::<String>::new(), "nothing moved since find's reading");
-        poke(&mut aml, RATE, &7000u16.to_le_bytes());
-        poke(&mut aml, RATE + 2, &43600u16.to_le_bytes());
+        poke(&kernel, RATE, &7000u16.to_le_bytes());
+        poke(&kernel, RATE + 2, &43600u16.to_le_bytes());
         assert_eq!(power.read(&mut aml), Vec::<String>::new(), "87% discharging at another rate is no new line");
-        poke(&mut aml, RATE + 2, &43000u16.to_le_bytes());
+        poke(&kernel, RATE + 2, &43000u16.to_le_bytes());
         assert_eq!(
             power.read(&mut aml),
             ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, discharging, rate 7000 mW, 12312 mV, moving 7000 mW; AC offline"]
         );
-        poke(&mut aml, AC, &[1]);
+        poke(&kernel, AC, &[1]);
         assert_eq!(
             power.read(&mut aml),
             ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, discharging, rate 7000 mW, 12312 mV, moving 7000 mW; AC online"]
         );
-        poke(&mut aml, STATE, &[CHARGING as u8]);
+        poke(&kernel, STATE, &[CHARGING as u8]);
         assert_eq!(
             power.read(&mut aml),
             ["acpiserver: battery read: battery 1 of 1: 86%, 43000 mWh of 50000 mWh, charging, rate 7000 mW, 12312 mV, moving 7000 mW; AC online"]
@@ -689,42 +623,21 @@ mod tests {
         assert_eq!(power.read(&mut aml), Vec::<String>::new());
     }
 
-    /// No controller in the machine's row: `_REG` is not run, the battery
-    /// says it is absent, and the controller's space is never reached.
-    #[test]
-    fn a_row_with_no_controller_runs_no_reg_and_reads_no_battery() {
-        let kernel = laptop_machine(None);
-        let mut aml = loaded(&kernel, None);
-        assert!(Power::find(&mut aml, false).is_none());
-        let ecok = aml.interpreter.evaluate(&mut aml.host, "\\_SB_.EC0_.ECOK", &[]);
-        assert_eq!(ecok, Ok(Value::Integer(0)), "_REG ran for a controller the row does not name");
-        assert!(aml.host.refused.is_empty());
-    }
-
     /// §6.5.7: a controller whose `_GLK` is 1 wants the Global Lock around
-    /// each transaction, which this server does not take: no battery is
-    /// read, and the controller is not even told its space is there.
+    /// each transaction, which this server does not take: its space is not
+    /// attached to AML, its `_REG` is not run, and the battery, which says
+    /// it is present only after, is not read, nor is the controller reached.
     #[test]
-    fn a_controller_that_wants_the_global_lock_has_no_battery_read() {
-        for (glk, read) in [(Some(1), false), (Some(0), true), (None, true)] {
+    fn a_controller_that_wants_the_global_lock_is_not_attached_and_no_battery_is_read() {
+        for (glk, attached) in [(Some(1), false), (Some(0), true), (None, true)] {
             let kernel = laptop_machine(glk);
-            let mut aml = loaded(&kernel, Some(Emulated::new(space())));
-            assert_eq!(Power::find(&mut aml, true).is_some(), read, "_GLK {glk:?}");
+            let (mut aml, power) = found(&kernel);
+            assert_eq!(power.is_some(), attached, "_GLK {glk:?}");
+            assert_eq!(aml.host.ec.is_some(), attached, "_GLK {glk:?}");
             let ecok = aml.interpreter.evaluate(&mut aml.host, "\\_SB_.EC0_.ECOK", &[]);
-            assert_eq!(ecok, Ok(Value::Integer(u64::from(read))), "_GLK {glk:?}");
-            assert_eq!(done(&aml).is_empty(), !read, "_GLK {glk:?}: {:x?}", done(&aml));
+            assert_eq!(ecok, Ok(Value::Integer(u64::from(attached))), "_GLK {glk:?}");
+            assert_eq!(done(&kernel).is_empty(), !attached, "_GLK {glk:?}: {:x?}", done(&kernel));
         }
-    }
-
-    /// QEMU's q35 has neither a battery nor an adapter, and its row no
-    /// controller.
-    #[test]
-    fn qemus_namespace_has_no_battery() {
-        let kernel = machine(QEMU);
-        let (_, aml) = crate::aml::load(&kernel, None::<Emulated>, RSDP);
-        let mut aml = aml.expect("QEMU's DSDT loads");
-        assert!(Power::find(&mut aml, false).is_none());
-        assert!(aml.host.refused.is_empty());
     }
 
     /// A `_BST` that is no package of four is said once and counted, and the
@@ -732,11 +645,10 @@ mod tests {
     #[test]
     fn a_refused_reading_is_said_once_and_counted() {
         let kernel = laptop_machine(None);
-        let mut aml = loaded(&kernel, Some(Emulated::new(space())));
-        let mut power = Power::find(&mut aml, true).expect("a battery");
-        power.read(&mut aml);
+        let (mut aml, power) = found(&kernel);
+        let mut power = power.expect("a battery");
         let said = power.batteries[0].said;
-        aml.host.ec.as_mut().expect("a controller").space[usize::from(STATE)] = (CHARGING | DISCHARGING) as u8;
+        poke(&kernel, STATE, &[(CHARGING | DISCHARGING) as u8]);
         for _ in 0..3 {
             power.read(&mut aml);
         }
@@ -749,9 +661,8 @@ mod tests {
     #[test]
     fn a_machine_that_stops_mid_read_refuses_nothing() {
         let kernel = laptop_machine(None);
-        let mut aml = loaded(&kernel, Some(Emulated::new(space())));
-        let mut power = Power::find(&mut aml, true).expect("a battery");
-        power.read(&mut aml);
+        let (mut aml, power) = found(&kernel);
+        let mut power = power.expect("a battery");
         let said = power.batteries[0].said;
         kernel.stops_after.set(Some(0));
         power.read(&mut aml);
@@ -870,17 +781,5 @@ mod tests {
         let Value::Package(mut short) = bix_of(0, [0; 8], 20) else { unreachable!() };
         short.pop();
         assert_eq!(bix(&Value::Package(short)), Err("a package of 19 elements, where §10.2.2 has at least 20".into()));
-    }
-
-    /// §6.1.5's compressed EISA ID, as `EISAID ("PNP0C0A")` compiles it, and
-    /// a string `_HID` as it is.
-    #[test]
-    fn an_hid_is_read_as_its_text_whether_compressed_or_a_string() {
-        assert_eq!(hid(&Value::Integer(0x0A0C_D041)).as_deref(), Some("PNP0C0A"));
-        assert_eq!(hid(&Value::Integer(0x090C_D041)).as_deref(), Some("PNP0C09"));
-        assert_eq!(hid(&Value::String(b"ACPI0003".to_vec())).as_deref(), Some("ACPI0003"));
-        assert_eq!(hid(&Value::Integer(0x8000_0000_u32.swap_bytes().into())), None, "the reserved top bit set");
-        assert_eq!(hid(&Value::Integer(1 << 32)), None);
-        assert_eq!(hid(&Value::Buffer(b"PNP0C0A".to_vec())), None);
     }
 }

@@ -59,6 +59,15 @@ impl Volume for Absent {
         Err(SyscallError::NotFound)
     }
 
+    /// The volume's root 1, each served directory its place after it.
+    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+        if path.is_empty() {
+            return Ok(1);
+        }
+        let at = self.roots.iter().position(|r| r == path).ok_or(SyscallError::NotFound)?;
+        Ok(at as u64 + 2)
+    }
+
     fn read(&mut self, _node: Node, _offset: u64, _out: &mut dyn Out) -> Result<usize, SyscallError> {
         Err(SyscallError::NotFound)
     }

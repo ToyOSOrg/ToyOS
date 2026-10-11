@@ -8,8 +8,14 @@
 /// each query number with how often it was taken.
 pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 
-/// A present battery's static information, once after the tables' load:
-/// `battery <n> of <count>`, then its numbers.
+/// The server's word on the embedded controller, once, after the tables'
+/// load: [`CONTROLLER_SERVED`] and its GPE and ports where it serves one,
+/// [`CONTROLLER_NONE`] and why where it serves none.
+pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
+pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
+
+/// A present battery's static information, once after the controller is
+/// armed: `battery <n> of <count>`, then its numbers.
 pub const BATTERY_INFO: &str = "battery information: ";
 
 /// A battery's reading, on its first and wherever its whole percent or state
