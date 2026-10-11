@@ -16,10 +16,10 @@ caps netstack at 8 lookups a second, and every lookup past that is refused
 The second cost this issue recorded, one neighbour request a second for the
 whole interface, left with smoltcp: [ip] asks for each next hop on its own
 (`rfc_4861_7_2_2_a_silent_next_hop_holds_up_no_other`,
-`toyos-net-ip/tests/nud.rs`), and a query whose resolver's link address [ip]
+`system/netstack/ip/tests/nud.rs`), and a query whose resolver's link address [ip]
 gives up is let go at once
 (`a_query_for_a_resolver_ip_has_given_up_ends_its_lookup_in_the_opportunity_that_would_have_carried_it`,
-`userland/netstack/node/tests/resolve.rs`). The first cost is read from the
+`system/netstack/node/tests/resolve.rs`). The first cost is read from the
 constants and not measured on the node: [ip] gives a silent next hop up after
 3 s, past the lookup's own wait, so a silent primary still costs each lookup
 one `WAIT_MS`.

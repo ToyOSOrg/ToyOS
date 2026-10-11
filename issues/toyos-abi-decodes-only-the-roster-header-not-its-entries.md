@@ -18,7 +18,7 @@ a decoder:
 - `tests/toyos-rust-tests/src/bin/process_lifecycle.rs:258` —
   `buf[pos + 9] != 0, buf[pos + 8]`.
 - `tests/toyos-rust-tests/src/bin/abuse_thread_name.rs:62` — `entry[9]`.
-- `userland/toybox/src/ps.rs:64-65` — `buf[pos + 8]`, `buf[pos + 9] != 0`.
+- `system/toybox/src/ps.rs:64-65` — `buf[pos + 8]`, `buf[pos + 9] != 0`.
 
 Four readers, each free to walk off by a field the way the header's own doc
 comment warns against. `kernel/src/syscall/machine.rs:309-310` is the one

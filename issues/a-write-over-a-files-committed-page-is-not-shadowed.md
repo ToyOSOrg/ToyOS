@@ -8,7 +8,7 @@ opened: 2026-10-09
 
 DATA's commit (`lib/bcachefs/src/fs.rs`, the read-write block's header) holds
 every name, and each entry's length and extents, to one sync or the other,
-and not a file's bytes. Fileserver's `write` (`userland/fileserver/src/data.rs`)
+and not a file's bytes. Fileserver's `write` (`system/fileserver/src/data.rs`)
 resolves a page the file's extents already reach to the block they name
 (`Mounted::resolve_or_alloc_block`) and writes the page there, through the
 cache, which may write the block out before the next sync. So a kill can leave

@@ -6,12 +6,12 @@ opened: 2026-10-09
 
 # A link that goes and returns inside one pass of the Intel driver is reported as no change
 
-`toyos-i219`'s `begin_pass` (`toyos-i219/src/lib.rs`) reads the link only on
+`toyos-i219`'s `begin_pass` (`system/netstack/i219/src/lib.rs`) reads the link only on
 a pass that acknowledged `LSC`, and answers `link_changed: self.link !=
 before`: the state after the pass compared with the state before it. `LSC` is
 one bit, so a link that went down and came back at the same speed and duplex
 before one pass acknowledged it is read as the link it was, and the pass
-answers no change. `Nic::begin_pass` (`userland/netstack/src/i219.rs`) hands
+answers no change. `Nic::begin_pass` (`system/netstack/src/i219.rs`) hands
 netstack a link only where that is true, so `main`'s `link_up` stays true and
 no pass tells the name's responder it had no link.
 

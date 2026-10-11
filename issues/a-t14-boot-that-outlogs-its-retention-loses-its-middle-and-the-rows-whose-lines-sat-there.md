@@ -7,7 +7,7 @@ opened: 2026-10-08
 # A T14 boot that outlogs its retention loses its middle, and the rows whose lines sat there
 
 `logkeeper` keeps sixteen files of a megabyte each (`MAX_LOG_FILES`,
-`userland/logkeeper/src/store.rs`) and deletes the writing boot's own middle
+`system/logkeeper/src/store.rs`) and deletes the writing boot's own middle
 past that, by design: one boot's flood costs its own middle and nobody's
 start. A metal judge reads what came back, so a line a flooding boot wrote in
 its middle is a line the judge reports missing, and a judge that asserts an

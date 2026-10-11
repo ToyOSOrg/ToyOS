@@ -10,9 +10,9 @@ opened: 2026-10-09
 netstack. netstack ends by name, "this NIC cannot be driven on", wherever a
 card stops being one it can drive: a claim that refuses its interrupt read, an
 Intel part that kept stranded descriptors past the driver's deadline
-(`Card::begin_pass`, `userland/netstack/src/card.rs`), and a virtio device
+(`Card::begin_pass`, `system/netstack/src/card.rs`), and a virtio device
 whose used ring is not believed (`finished`,
-`userland/netstack/src/virtio_net.rs`), which is any of a head past the table,
+`system/netstack/src/virtio_net.rs`), which is any of a head past the table,
 a head with no chain in flight, a length past a chain's writable bytes and a
 used index past the available one. After any of them the machine has no
 network until it boots again, and every program holding the `netstack` port

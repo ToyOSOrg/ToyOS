@@ -50,7 +50,7 @@ nothing.
      hit). A match goes where it names the program and stays otherwise;
      third-party text (`tests/testcases/tinycc/`, the C ports) stays.
 2. **Decisions in a pure crate.** The supervisor's decisions live in
-   `toyos-supervisor`, with host tests; `userland/supervisor` keeps only
+   `toyos-supervisor`, with host tests; `system/supervisor` keeps only
    handles, spawns and the loop. The decisions: namespace and claim selection
    from a manifest row; the claims a restart is owed; `SysCap` narrowing;
    launch resolution and every launcher refusal; the swap ladder and
@@ -60,7 +60,7 @@ nothing.
    `cargo test --workspace --exclude toyos-build`; a host test refuses a
    manifest whose dependencies form an undeclared cycle; each refusal and
    each decision above has a mutation that reds a host test, named in the PR;
-   and the stage deletes each decision from `userland/supervisor`, which calls
+   and the stage deletes each decision from `system/supervisor`, which calls
    the crate for it, named per decision in the PR; `toyos_manifest::launch`,
    who may start what and the launcher's badge codec, moves into the crate
    and out of `toyos-manifest`. No decision exists in two places.

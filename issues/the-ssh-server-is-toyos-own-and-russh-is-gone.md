@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # The SSH server is ToyOS's own, and russh is gone
 
-`userland/sshserver` serves SSH on the `russh` fork over `tokio`. The root
+`system/sshserver` serves SSH on the `russh` fork over `tokio`. The root
 `[patch.crates-io]` carries `russh`, `russh-cryptovec` and `tokio` for it, and
 `Cargo.lock` carries the closure they bring: `rsa` (RUSTSEC-2023-0071, the
 Marvin attack), `pageant` and `internal-russh-num-bigint` among it. This track
@@ -14,7 +14,7 @@ puts the server on `toyos-ssh`, ToyOS's own sans-IO server core on `ring`,
 under a `std` driver, and deletes the russh closure in the landing that
 switches.
 
-**Owner**: `toyos-ssh` and `userland/sshserver`.
+**Owner**: `toyos-ssh` and `system/sshserver`.
 
 The owner's rulings:
 
@@ -42,7 +42,7 @@ Compromises of `toyos-ssh` recorded on their own:
    recordings replayed byte for byte, RFC vectors and a structured fuzz, under
    `cargo run -- --ci host`. Landed by #817. Nothing but its tests calls
    `Server` or the connection layer until stage 2.
-2. **The switch and the deletion.** `userland/sshserver` is rewritten on
+2. **The switch and the deletion.** `system/sshserver` is rewritten on
    `toyos-ssh` with `std` threads, keeping what it serves today: a shell over
    pipes, `subsystem sftp` over the existing `sftp.rs`, and `exec` through
    `command.rs`. It adds an `authorized_keys` reader, several channels on one
@@ -54,7 +54,7 @@ Compromises of `toyos-ssh` recorded on their own:
    `ring` to link for both ToyOS targets
    (`issues/the-internet-clients-work-unchanged.md`, stage 3).
    **Exit**:
-   - `userland/sshserver/Cargo.toml` names `toyos-ssh`, and names neither
+   - `system/sshserver/Cargo.toml` names `toyos-ssh`, and names neither
      `russh` nor `tokio`.
    - The root `[patch.crates-io]` has no `russh`, `russh-cryptovec` or `tokio`
      entry.
@@ -72,7 +72,7 @@ Compromises of `toyos-ssh` recorded on their own:
    - `issues/toyos-ssh-offers-only-a-classical-key-exchange.md` is closed.
 4. **The forks retire.** After stage 2, tokio has no consumer in the
    workspace, and mio and socket2 remain only as host dev-dependencies of
-   `userland/netstack/node`.
+   `system/netstack/node`.
    **Exit**:
    - The root `[patch.crates-io]` names none of `ToyOSOrg/tokio`,
      `ToyOSOrg/mio` and `ToyOSOrg/socket2`.

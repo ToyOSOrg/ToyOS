@@ -6,7 +6,7 @@ opened: 2026-10-10
 
 # A second poller on a window's handle stalled the prompt, and why is unknown
 
-Filepicker's prompt (`userland/filepicker/src/consent.rs`, `ask`) waits on
+Filepicker's prompt (`system/filepicker/src/consent.rs`, `ask`) waits on
 one `Poller` watching both its window's connection and the supervisor's.
 While the branch that made it was built, a version that also drained the
 window with `Window::poll_event(0)` after each wake, which watches the same

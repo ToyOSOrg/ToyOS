@@ -36,7 +36,7 @@ metal rows.
   `issues/deferred-release-outlives-its-syscall.md` closes; until then a
   member that mints one runs last in its session, as `endowment_denied` does.
 - **A stuck test** is killed at the bound the host's `run` names, as
-  `--bound-ms=` names the job list's (`userland/test-runner/src/main.rs:78-83`):
+  `--bound-ms=` names the job list's (`tests/guest/test-runner/src/main.rs:78-83`):
   14.1 s, twice `mutual_kill`'s 7.041 s. It reds by name and the next member
   runs. QEMU's harness names no bound and sends no `list`; its own ceiling ends
   the guest.

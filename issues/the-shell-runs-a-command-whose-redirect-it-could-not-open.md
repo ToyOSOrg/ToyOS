@@ -6,7 +6,7 @@ opened: 2026-10-07
 
 # The shell runs a command whose redirect it could not open
 
-`apply_redirect` (`userland/shell/src/main.rs`) answers a redirect target it
+`apply_redirect` (`system/shell/src/main.rs`) answers a redirect target it
 could not open by printing `cannot open: <path>` and returning, and its
 callers spawn the command all the same, with the shell's own output in place
 of the file. `echo secret > /somewhere/refused` therefore writes `secret` to

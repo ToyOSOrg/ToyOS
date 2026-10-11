@@ -84,7 +84,7 @@ The storage track's users and mount-protocol stages do not block this one.
    binaries a launch starts and nothing else, so a writable `/apps` cannot name
    a device or a right. The stage-then-commit above amends it: `pkg` writes
    `/apps/<name>/` in place today, its `manifest.toml` last
-   (`userland/pkg/src/main.rs`).
+   (`system/pkg/src/main.rs`).
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the signed
    repository's files and the archives its targets names. This is the
    internet-client track's last

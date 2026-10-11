@@ -7,8 +7,8 @@ opened: 2026-10-08
 # A stream its peer reset refuses the option requests a host answers
 
 The node lets a stream go once it holds neither of its pipe ends
-(`userland/netstack/node/src/streams.rs`), and netstack's id for it goes with
-it (`userland/netstack/src/serve.rs`, `Sockets::settle`). A peer's reset ends
+(`system/netstack/node/src/streams.rs`), and netstack's id for it goes with
+it (`system/netstack/src/serve.rs`, `Sockets::settle`). A peer's reset ends
 both pipes once the client's pipe has taken the text received before it,
 so a client that still holds the stream names an id
 netstack no longer has, and `Sockets::set_option` answers it

@@ -30,7 +30,7 @@ only on its own ceiling, `[qemu] Boot timed out waiting for ===READY===`.
 Not read: which call waits, and whose bound the thirty seconds are.
 `fileserver` reaches the port through `diskserver::list` and
 `diskserver::Session::open` on `toyos_blockring::PORT`
-(`userland/fileserver/src/main.rs`), and the supervisor starts `logkeeper`
+(`system/fileserver/src/main.rs`), and the supervisor starts `logkeeper`
 only after the file servers.
 
 Where `diskserver` runs and is refused its controller the same servers answer
@@ -44,4 +44,4 @@ guest test of an image with `fileserver` and no `diskserver` on a
 
 ## Owner
 
-`userland/fileserver` and `userland/supervisor`; unheld.
+`system/fileserver` and `system/supervisor`; unheld.

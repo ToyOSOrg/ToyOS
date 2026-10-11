@@ -40,7 +40,7 @@ killer, so a compositor's own working set is bounded by nothing but its code.
 ## Promoted 2026-08-25
 
 Still reproduces (verified 2026-08-25): `paint`, `files`, `editor` and
-`filepicker` still present their whole window — only `userland/terminal` composes
+`filepicker` still present their whole window — only `system/terminal` composes
 through `window::Screen`. A real, scoped fix is named per client. Owed to
 whoever next touches those clients' present path.
 
@@ -57,7 +57,7 @@ things were missing and two of them ship today.
 `present_damage(Rect { x: 0, y: 0, w: width, h: height })`
 (`sdk/window/src/lib.rs:601-603`), and the compositor's `MSG_PRESENT` arm
 adds whatever rect the client named with no pixel comparison of its own
-(`userland/compositor/src/session.rs:731`). So a client that presents twice with
+(`system/compositor/src/session.rs:731`). So a client that presents twice with
 nothing drawn between makes the compositor recompose and re-blit the same
 pixels — which is the "reference capture" half of a pixel-identity check, with
 no new mechanism at all.
@@ -71,7 +71,7 @@ damage from *above*, so it catches a converted client that gave up and named
 everything.
 
 **The panel does not move once a second.** `tick_taskbar` damages the status
-readout alone (`userland/compositor/src/session.rs:1062-1065`), and the comment
+readout alone (`system/compositor/src/session.rs:1062-1065`), and the comment
 on that line says a whole-bar repaint there was the defect that got fixed.
 
 **What is actually missing is a sub-region compare.** `Ppm::identical_to`
@@ -92,6 +92,6 @@ everywhere. Neither the size gate nor a whole-image compare shows it.
 So the shape is: the sub-region compare on `Ppm`, then one client at a time onto
 the terminal's pattern (compose into a `Framebuffer`, blit through a
 `window::Screen`, hand `take_damage` to `present_damage` —
-`sdk/window/src/framebuffer.rs:85` and `userland/terminal/src/main.rs:36-37`
+`sdk/window/src/framebuffer.rs:85` and `system/terminal/src/main.rs:36-37`
 are the two ends of it), each landing with its own pixel-identity capture pair.
 `paint` is 1122 lines, `files` 370, `editor` 1909, `filepicker` 599.

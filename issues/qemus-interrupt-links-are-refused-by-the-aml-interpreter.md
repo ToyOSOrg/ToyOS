@@ -6,7 +6,7 @@ opened: 2026-10-07
 
 # QEMU's interrupt links are refused by the AML interpreter
 
-`userland/acpiserver/aml/src/field.rs`'s `pci` finds the host bridge a
+`system/acpiserver/aml/src/field.rs`'s `pci` finds the host bridge a
 PCI_Config region is below as the nearest Device that names a `_BBN`. QEMU
 11.1.1's DSDT (`lib/acpi/fixtures/qemu-11.1.1/dsdt.bin`) names none: its
 `\_SB.PCI0` is a host bridge by its `_HID` and `_CID` alone, on bus 0. So a
@@ -22,6 +22,6 @@ host bridge names a `_BBN`, and none of its methods is refused this way.
 Nothing uses the interrupt links yet; whoever routes a PCI interrupt through
 the interpreter on QEMU does.
 
-**Exit condition**: a host test in `userland/acpiserver/aml/tests/` evaluates
+**Exit condition**: a host test in `system/acpiserver/aml/tests/` evaluates
 `\_SB.LNKA._CRS` on that fixture to a buffer, the host bridge found by what
 the specification names one by (§6.1.5 `_HID`, §6.1.2 `_CID`).

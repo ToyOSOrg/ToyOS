@@ -9,9 +9,9 @@ opened: 2026-09-30
 "Nothing ships for tests alone" (`.claude/agents/reviewer.md`, Fit) is untrue
 of the shipped `system.toml` in two rows:
 
-- `proctest = {}`: `userland/proctest/README.md` calls it a test harness, and
+- `proctest = {}`: `tests/guest/proctest/README.md` calls it a test harness, and
   nothing in the tree runs `/system/bin/proctest` but `proctest` itself.
-- `"bin/spin" = "/system/bin/toybox"`: `userland/toybox/src/spin.rs` loops
+- `"bin/spin" = "/system/bin/toybox"`: `system/toybox/src/spin.rs` loops
   forever, and nothing in the tree runs it; its one named use is a test, the
   metal `sshd_exec` row
   `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` owes.

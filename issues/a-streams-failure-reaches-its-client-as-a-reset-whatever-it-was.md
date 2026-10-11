@@ -7,7 +7,7 @@ opened: 2026-10-09
 # A stream's failure reaches its client as a reset, whatever it was
 
 The pipe ABI tells a stream's client how the stream ended by the order its two
-pipes end in (`userland/netstack/node/src/streams.rs`'s header), which carries
+pipes end in (`system/netstack/node/src/streams.rs`'s header), which carries
 one bit: the peer's FIN, or a failure. The node knows which failure
 (`toyos_net_tcp::Failure`: a reset, R2's timeout, an ICMP error), and std
 answers every one `ConnectionReset`, where Linux answers a connection [tcp]

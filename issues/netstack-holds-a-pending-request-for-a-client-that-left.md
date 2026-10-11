@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 A UDP receive with no datagram yet and a connect waiting for its handshake keep
 their client's connection in `Sockets::receiving` and `Sockets::connecting`
-(`userland/netstack/src/serve.rs`) until what they wait for happens. Neither
+(`system/netstack/src/serve.rs`) until what they wait for happens. Neither
 watches the connection, so a client that hangs up is noticed only when netstack
 writes its answer: a receive on a socket nothing sends to holds its entry for
 the life of the socket, and a connect with no timeout holds its stream and its

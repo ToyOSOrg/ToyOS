@@ -7,10 +7,10 @@ opened: 2026-09-29
 # Every job test-runner starts holds test-runner's whole system capability
 
 `run_one` endows each job it spawns a `SysCap::duplicate` of test-runner's own
-capability (`userland/test-runner/src/main.rs:248-250`), and a duplicate
+capability (`tests/guest/test-runner/src/main.rs:248-250`), and a duplicate
 carries every right the original does (`sdk/toyos/src/syscap.rs:63-70`). The job
 also inherits test-runner's whole namespace
-(`userland/test-runner/src/main.rs:62-68`). On `tests/testcases` the row grants
+(`tests/guest/test-runner/src/main.rs:62-68`). On `tests/testcases` the row grants
 `device`, `dup`, `logread`, `power` and `roster`
 (`tests/testcases/system.toml:41`), so every test binary may mint a device
 claim, read every kernel record, reset or power off the machine, list every

@@ -19,7 +19,7 @@ and reverted:
 
 | appended to | form | gate |
 |---|---|---|
-| `userland/snake/src/main.rs` | the one line above | 0 |
+| `apps/snake/src/main.rs` | the one line above | 0 |
 
 **Exit:** the scan reads an attribute wherever on a line it starts, a comment
 still holds none, and the one-line form reds.

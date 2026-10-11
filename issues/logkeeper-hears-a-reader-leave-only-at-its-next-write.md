@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # logkeeper hears a reader leave only at its next write
 
-A log reader's thread (`userland/logkeeper/src/serve.rs`, `feed`) waits on
+A log reader's thread (`system/logkeeper/src/serve.rs`, `feed`) waits on
 `shared.grew` once it has caught up, and learns its reader is gone only when a
 write to the sink fails. A reader that leaves while the log is quiet keeps its
 thread and its place in `MAX_READERS` until the next record lands.

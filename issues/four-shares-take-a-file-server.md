@@ -6,7 +6,7 @@ opened: 2026-10-07
 
 # Four shares take a file server
 
-`userland/fileserver/src/main.rs` gives each share a grant names a quarter of
+`system/fileserver/src/main.rs` gives each share a grant names a quarter of
 each machine-wide bound: 32 of `MAX_SERVED`'s 128 served connections, 8 of
 `MAX_HANDSHAKES`' 32 waiting on their hello, 16 of `MAX_STREAMS`' 64 streams.
 So four shares at their parts take each bound whole, and a fifth's first

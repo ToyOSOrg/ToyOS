@@ -108,7 +108,7 @@ a millisecond, ten thousand times; eight holds that storm to eight calls a
 second and refuses the rest, and whether it refuses a call a healthy machine
 needs is unread. No call but the kernel's own enable and disable has been
 made on the T14: the server passes no write its AML asks for to the kernel
-yet (`userland/acpiserver/src/host.rs`), so nothing there asks for one. On QEMU's q35 the chipset model keeps the byte and its
+yet (`system/acpiserver/src/host.rs`), so nothing there asks for one. On QEMU's q35 the chipset model keeps the byte and its
 `SMI_EN` reads 0, so no guest's call interrupts a firmware, and what a guest
 reads of one is that it was written, where, and how often.
 

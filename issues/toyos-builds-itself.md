@@ -90,7 +90,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   which awk.
 - **`pkg` installs a toolchain**: an archive past 256 MiB, and links. It
   inflates a whole archive in memory under `MAX_INFLATED`, 256 MiB, and refuses
-  every link (`userland/pkg/src/main.rs`, `archive.rs`). A toolchain's size is
+  every link (`system/pkg/src/main.rs`, `archive.rs`). A toolchain's size is
   measured on a proxy, the Linux-host release
   `toolchain-linux-x86_64-48dd24f826263d6c`: stripped with `llvm-objcopy
   --strip-all`, its `librustc_driver` is 184.7 MB, its clang 122.8 MB and its

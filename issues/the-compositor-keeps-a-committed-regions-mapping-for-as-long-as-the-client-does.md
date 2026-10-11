@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # The compositor keeps a committed region's mapping for as long as the client does
 
-`CopyRegion::take` (`userland/compositor/src/client.rs`) drops the
+`CopyRegion::take` (`system/compositor/src/client.rs`) drops the
 compositor's own `SharedMemory`, closing its handle to the region. That does
 not unmap it: `SharedMemObject::on_zero_handles` (`kernel/src/object/shm.rs`)
 tears down every process's mapping together, only once every handle to the

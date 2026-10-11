@@ -8,7 +8,7 @@ opened: 2026-09-28
 
 `logread` in a `[programs.test-runner]` row is authority for the builtins that
 read the log inside test-runner (`log-gate`, `log-storm`, `log-close`,
-`userland/test-runner/src/main.rs`'s `BUILTINS`). Every boot that runs one is a
+`tests/guest/test-runner/src/main.rs`'s `BUILTINS`). Every boot that runs one is a
 `tests/testcases` boot (`tests/common/logread.rs` boots the machine tests' config;
 `tests/toyos.rs`'s one job list naming `log-close` is `tests/testcases`). Seven
 other manifests grant it anyway: `tests/partclaimcase`, `tests/blockdcase`,

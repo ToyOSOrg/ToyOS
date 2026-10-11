@@ -17,7 +17,7 @@ five services, and a DATA volume that outlives that change:
 - answers ssh with a host key `sshserver` mints afresh under
   `/state/sshserver`, which a client that pinned the old key refuses;
 - no longer authorizes a key that lived only in `/state/sshd/authorized_keys`:
-  `userland/sshserver/src/main.rs`'s `authorized_keys` reads
+  `system/sshserver/src/main.rs`'s `authorized_keys` reads
   `/state/sshserver/authorized_keys`, so
   a machine updated over ssh whose owner's key was only there refuses its owner
   afterwards.

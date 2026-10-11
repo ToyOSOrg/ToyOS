@@ -6,7 +6,7 @@ opened: 2026-10-02
 
 # The shell says "not found" for every spawn error
 
-`execute_simple` and `execute_pipeline` (`userland/shell/src/main.rs`) match
+`execute_simple` and `execute_pipeline` (`system/shell/src/main.rs`) match
 the error of `Command::spawn` and `Command::status` as `Err(_)` and print
 `<program>: not found`. A spawn refused for its depth, one under a place being
 torn down and one refused `PermissionDenied` all read to the user as a program

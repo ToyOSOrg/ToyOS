@@ -14,6 +14,6 @@ could derive from `clock_epoch()` instead, with no information
 
 Exit condition: `SYS_CLOCK_REALTIME`, its kernel handler and `toyos_abi::syscall::clock_realtime` are
 deleted, `toyos::system::clock_realtime` and both its callers
-(`userland/compositor/src/render.rs`,
+(`system/compositor/src/render.rs`,
 `tests/toyos-rust-tests/src/bin/wall_clock_now.rs`) move to `clock_epoch`, all
 in a PR of their own, and this file is deleted in that PR's merge.

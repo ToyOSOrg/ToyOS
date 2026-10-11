@@ -26,8 +26,8 @@ waiter on the holder's CPU keeps a fair holder off that CPU while it spins:
 priority inversion. How long such a spin lasts, and whether it ends before the
 holder is run elsewhere, is unmeasured, and so is whether two threads ever meet
 on this lock: `thread::spawn` allocates, and several programs allocate from more
-than one thread, among them `userland/sshserver`, `userland/supervisor` and
-`userland/soundserver`.
+than one thread, among them `system/sshserver`, `system/supervisor` and
+`system/soundserver`.
 
 The futex both need is there: libc's `futex_lock` and `futex_unlock`
 (`sdk/libc/src/pthread.rs`, lines 116–131), and std's `sync::Mutex`, which

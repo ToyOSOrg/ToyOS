@@ -306,7 +306,7 @@ hide for five seconds.
 **A third loop waits the same release out.**
 `tests/toyos-rust-tests/src/bin/usbd_spare.rs` asks for the xHCI controller's
 claim again after killing usbd while it is refused as `AlreadyExists`, for at
-most `CLAIM_RETURN`, one millisecond apart, `userland/supervisor`'s copied. Owner:
+most `CLAIM_RETURN`, one millisecond apart, `system/supervisor`'s copied. Owner:
 usbd's author. Exit condition: the same, and that loop is deleted with
 `CLAIM_RETURN`.
 

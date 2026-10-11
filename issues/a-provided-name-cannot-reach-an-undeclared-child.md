@@ -35,7 +35,7 @@ inherit `surface` because init merged it in. That is the kind of safety that
 ends the moment somebody adds a caller.
 
 **And one caller is already past it, masked rather than absent.**
-`build_command` (`userland/shell/src/main.rs:709`) calls `Command::provide` for
+`build_command` (`system/shell/src/main.rs:709`) calls `Command::provide` for
 *every* child the shell starts, and `test_rs_window_child` is a harness binary
 no `[programs]` row declares — so that spawn takes the direct path and the
 provided `surface` connector is dropped, exactly as described above. Nothing

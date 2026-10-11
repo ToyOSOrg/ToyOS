@@ -7,7 +7,7 @@ opened: 2026-10-04
 # A supervisor panic before logkeeper starts reaches no console
 
 `/system/bin/supervisor` makes its own lines records in its log ring first thing
-(`Log::open` in `userland/supervisor/src/main.rs`), and only `logkeeper`
+(`Log::open` in `system/supervisor/src/main.rs`), and only `logkeeper`
 drains a ring. So a panic before `logkeeper` runs leaves its message in a
 ring nobody reads. The refusals of a ROOT without
 `/system/etc/os-release`, or without a readable `/system/etc/system.manifest`,

@@ -17,7 +17,7 @@ enforces neither premise that makes this sound:
   `SharedMemory` values over one mapping in one process. `as_mut_slice` on one
   then aliases `as_slice` or `as_atomic` on the other.
 
-`#![forbid(unsafe_code)]` on the compositor (`userland/compositor/src/main.rs`)
+`#![forbid(unsafe_code)]` on the compositor (`system/compositor/src/main.rs`)
 leans on both. The compositor meets them, since it adopts only regions it
 created and the kernel's framebuffer and cursor, but the compiler does not know
 that.

@@ -6,11 +6,11 @@ opened: 2026-10-08
 
 # `acpiserver`'s lines are spelled again by their readers
 
-`userland/acpiserver-api` holds one of the server's lines, its count of the
+`lib/acpiserver-api` holds one of the server's lines, its count of the
 embedded controller's queries, and the server, `acpi_hold` and the
 `acpi_server_events` judge read it there. Every other line of the server's
 that a reader matches is still a second spelling, held to the server's by
-nothing: a change of wording in `userland/acpiserver/src` is found as a red
+nothing: a change of wording in `system/acpiserver/src` is found as a red
 guest test, or on the T14 as a wait that runs to its bound.
 
 - `tests/common/power.rs`: `ACPI_ARMED`, `ACPI_PRESSED`, `ACPI_TABLE`,
@@ -21,7 +21,7 @@ guest test, or on the T14 as a wait that runs to its bound.
 - `tests/toyos-rust-tests/src/bin/counters_metal.rs`, `acpi_said`:
   `acpiserver: armed: `, `embedded controller none`, the first-query line.
 
-Owner: `userland/acpiserver`.
+Owner: `system/acpiserver`.
 
 ## Exit condition
 

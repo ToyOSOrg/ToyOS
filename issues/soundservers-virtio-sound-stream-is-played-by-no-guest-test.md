@@ -7,8 +7,8 @@ opened: 2026-10-10
 # soundserver's virtio-sound stream is played by no guest test
 
 No guest test plays a stream through soundserver's own virtio-sound driver
-(`userland/soundserver/src/virtio.rs`, driven by the device loop in
-`userland/soundserver/src/mix.rs`). `iommu_virtio_platform` reaches its
+(`system/soundserver/src/virtio.rs`, driven by the device loop in
+`system/soundserver/src/mix.rs`). `iommu_virtio_platform` reaches its
 bring-up and stops there; `toyos-virtio-sound`'s host tests reach the driver
 crate, not the interrupt-driven loop. Three behaviours of that path go unseen:
 

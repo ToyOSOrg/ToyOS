@@ -28,7 +28,7 @@ and what a storm of these pushes out is the middle of everybody else's.
 contract, and `kernel/src/process.rs`'s that nothing a process writes is
 rate-limited. The kernel holds no limiter: its one user, a thread's end, was
 deleted with the record it limited. `logkeeper` limits what a program writes
-through its own ring (`userland/logkeeper/src/origin.rs`), and these are the
+through its own ring (`system/logkeeper/src/origin.rs`), and these are the
 kernel's records, which that limit does not reach.
 
 Not measured: no test loops a refused call and reads what the log grew by.

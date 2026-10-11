@@ -8,7 +8,7 @@ opened: 2026-10-10
 
 On a disk the kernel drives — the boot stick, until usbd serves it — the
 supervisor endows the boot volume's file server a partition claim on the
-running slot's volume (`storage_endowment`, `userland/supervisor/src/main.rs`).
+running slot's volume (`storage_endowment`, `system/supervisor/src/main.rs`).
 A claim carries `Rights::WRITE` and no `DUP` (`initial_rights`,
 `kernel/src/object/ops.rs`), so nothing can hand that server a duplicate
 narrowed to reading: the volume the loader reads the kernel from stays

@@ -7,7 +7,7 @@ opened: 2026-09-14
 # The panel seeds the loader's own file, so the GCD map is logged nowhere
 
 `/system/bin/console` seeds the screen from every `*.log` file in `/log`, newest
-two, oldest first (`userland/console/src/main.rs:277-286`). `/log` is the root of
+two, oldest first (`system/console/src/main.rs:277-286`). `/log` is the root of
 the log partition and the bootloader writes `loader.log` there
 (`userland/logd/src/store.rs:8-9`, `bootloader/src/loaderlog.rs:51`), so
 `loader.log` passes the extension filter. A line the loader writes to its file costs a row of the
@@ -34,7 +34,7 @@ that file's module header be checked against a real machine — reach no console
 and no file. Eighteen of the ThinkPad T14's 75 descriptors are MMIO and five
 are logged; eleven of q35's 34 are MMIO and two are logged.
 
-The fix is `/system/bin/console`'s, at `userland/console/src/main.rs:277-286`,
+The fix is `/system/bin/console`'s, at `system/console/src/main.rs:277-286`,
 and nobody is holding it. What pays for it is `toyos-metal`'s readback of
 `loader.log` (`src/metal.rs:1849`): a machine whose aperture is in neither
 channel cannot have that premise checked against it afterwards.
