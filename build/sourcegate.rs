@@ -150,7 +150,8 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
 ];
 
 /// Directories whose Rust is compiled for the guest, by repository-relative
-/// prefix, beside every [`crate::build::PROGRAM_ROOTS`] entry. **A crate's
+/// prefix, beside the guest-built crates under a [`crate::build::PROGRAM_ROOTS`]
+/// entry. **A crate's
 /// build script is host code and is walked**, whatever prefix it is under.
 /// Both spellings --- the `build.rs` default and whatever a `build = "…"` key
 /// names --- because the key overrides the name.
@@ -232,13 +233,19 @@ fn declared_build_scripts() -> std::collections::BTreeSet<String> {
 }
 
 /// Every `.rs` file under the repository that runs on the host: every one
-/// outside [`GUEST_CODE`], plus each crate's build script inside it.
+/// outside [`GUEST_CODE`] and outside the guest-built crates under a
+/// [`crate::build::PROGRAM_ROOTS`] entry, plus each crate's build script inside
+/// either. Under a program root a file belongs to the innermost workspace
+/// member holding it, and is host code when `build/hostws.rs` tests that member
+/// on the host: a crate nested in a program is walked.
 #[cfg(test)]
 fn host_files() -> Vec<PathBuf> {
     fn walk(
         root: &Path,
         dir: &Path,
         scripts: &std::collections::BTreeSet<String>,
+        members: &std::collections::BTreeSet<String>,
+        host: &std::collections::BTreeSet<String>,
         out: &mut Vec<PathBuf>,
     ) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -254,16 +261,20 @@ fn host_files() -> Vec<PathBuf> {
                 continue;
             }
             if path.is_dir() {
-                walk(root, &path, scripts, out);
+                walk(root, &path, scripts, members, host, out);
                 continue;
             }
             if !path.extension().is_some_and(|e| e == "rs") {
                 continue;
             }
-            let guest = GUEST_CODE
-                .iter()
-                .chain(crate::build::PROGRAM_ROOTS)
-                .any(|skip| at == *skip || at.starts_with(&format!("{skip}/")));
+            let under = |dir: &str| at.starts_with(&format!("{dir}/"));
+            let guest = GUEST_CODE.iter().any(|dir| under(dir))
+                || crate::build::PROGRAM_ROOTS.iter().any(|dir| under(dir))
+                    && !members
+                        .iter()
+                        .filter(|m| under(m))
+                        .max_by_key(|m| m.len())
+                        .is_some_and(|owner| host.contains(owner));
             if !guest || name == "build.rs" || scripts.contains(&at) {
                 out.push(path);
             }
@@ -271,8 +282,10 @@ fn host_files() -> Vec<PathBuf> {
     }
     let root = repo_root();
     let scripts = declared_build_scripts();
+    let members = crate::hostws::members(&root);
+    let host = crate::hostws::host_members(&root);
     let mut out = Vec::new();
-    walk(&root, &root, &scripts, &mut out);
+    walk(&root, &root, &scripts, &members, &host, &mut out);
     out
 }
 
