@@ -25,6 +25,12 @@ ran after it.
 minute later, load average 64.47, scaled its ceilings 5.84x and was green.
 The log is on https://github.com/ToyOSOrg/ToyOS/pull/859.
 
+Neither 20 s wait that went red is one of those ceilings. The launcher's
+wait and the per-key wait on the prompt are each a fixed
+`Duration::from_secs(20)` (`tests/toyos.rs`, `Consent::begin` and
+`Consent::prompt_up`), never passed through `qemu::budget_smp`, so the
+harness does not scale them for the host's speed or the guest's width.
+
 Owner: the desktop track, `issues/toyos-has-a-desktop.md`.
 
 **Exit**: why the prompt's connection and the hostile window ended under
