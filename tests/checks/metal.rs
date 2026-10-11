@@ -7,7 +7,7 @@ use toyos_build::metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
-use toyos_build::metaltimings::{Machine, Record};
+use toyos_build::metaltimings::{Machine, Record, Stick};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
@@ -18,6 +18,53 @@ fn t14() -> Machine {
         product: "20W0003AMZ".to_string(),
         bios: "N34ET71W (1.71 )".to_string(),
     }
+}
+
+fn stick() -> Stick {
+    Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() }
+}
+
+/// A root holding the T14's record as `toyos-metal --install-sudoers` writes
+/// one, its stick and no number: what every run the loop made had.
+fn recorded() -> toyos_tmpdir::TempDir {
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    Record::new(&t14(), stick()).save(&root).expect("a recorded machine");
+    root
+}
+
+/// **The loop boots no machine without a record**, so readbacks naming one
+/// are judged red, and the judge writes no record for it.
+pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
+    let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+    let root = toyos_tmpdir::TempDir::new("metal-records");
+    plant(&dir, "passing", PANEL, BOOTED, None);
+    let tests = [("passes", &PASSING)];
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
+    assert!(
+        metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]),
+        "readbacks of an unrecorded machine judged green"
+    );
+    assert_eq!(Record::load(&root, &t14()), Ok(None));
+    // The same readbacks against the record the loop needed are green.
+    assert!(!metal::judge_readbacks(&recorded(), &read(&dir, &["passing"]), &runs, &[]));
+}
+
+/// **`--metal-host` reaches `toyos-metal` as its own `--host`**, in the words
+/// a driven run spawns and a staged run's `request.txt` lists, and the loop's
+/// own parser takes them; without it the words name no host, which is the T14.
+pub fn the_bench_reaches_the_loop_as_its_host() {
+    let suite: Vec<String> =
+        ["--metal", "--metal-host", "dev@box"].iter().map(ToString::to_string).collect();
+    let host = toyos_build::testargs::parse(&suite).expect("a suite line").metal_host;
+    let (image, home) = (Path::new("/i.img"), Path::new("/h"));
+    let words = metal::invocation(image, home, host);
+    let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
+    let tail = &words[after..];
+    let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
+    assert_eq!(tail[at + 1], "dev@box", "{words:?}");
+    toyos_build::metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
+    let t14 = metal::invocation(image, home, None);
+    assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
 }
 
 /// A `loader.log` whose pass after the reset reads `page`.
@@ -216,7 +263,7 @@ static TWO: Metal =
 /// the loop refused measured nothing.
 pub fn a_number_fails_with_its_owner_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-    let root = toyos_tmpdir::TempDir::new("metal-records");
+    let root = recorded();
     plant(&dir, "passing", PANEL, BOOTED, None);
     plant(&dir, "failing", PANEL, BOOTED, None);
     plant(&dir, "refused", PANEL, BOOTED, Some(&Refusal::HungWithoutARecord));
@@ -260,7 +307,7 @@ pub fn a_number_fails_with_its_owner_alone() {
     // The row's own failure is red with nothing else beside it.
     let alone = [("fails", &FAILING)];
     let runs: Vec<&(&str, &'static Metal)> = alone.iter().collect();
-    let root = toyos_tmpdir::TempDir::new("metal-records");
+    let root = recorded();
     assert!(
         metal::judge_readbacks(&root, &read(&dir, &["failing"]), &runs, &[]),
         "a failing row judged green"
@@ -286,7 +333,7 @@ pub fn a_boot_that_lost_parts_of_its_log_judges_no_row() {
         )
     };
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-    let root = toyos_tmpdir::TempDir::new("metal-records");
+    let root = recorded();
     // Parts 1, 4 and 5 came back, and no line says where 2 and 3 went.
     plant(&dir, "holed", PANEL, &format!("{BOOTED}{opened}{}{}", continued(4), continued(5)), None);
     plant(&dir, "passing", PANEL, &format!("{BOOTED}{opened}{}{}", continued(2), continued(3)), None);
@@ -312,7 +359,7 @@ pub fn a_name_two_owners_measured_is_refused() {
     plant(&dir, "two", PANEL, BOOTED, None);
     let readbacks = read(&dir, &["one", "two"]);
     for first in [&ONE, &ONE_FAILS] {
-        let root = toyos_tmpdir::TempDir::new("metal-records");
+        let root = recorded();
         let tests = [("one", first), ("two", &TWO)];
         let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
         assert!(metal::judge_readbacks(&root, &readbacks, &runs, &[]), "one name twice judged green");
@@ -324,12 +371,13 @@ pub fn a_name_two_owners_measured_is_refused() {
 
 /// `passing`'s four rows under `bios`: its planted readings, with `complete_ms`
 /// as given.
-fn committed(bios: &str, complete_ms: u64) -> Record {
+fn kept(bios: &str, complete_ms: u64) -> Record {
     let machine = t14();
     Record {
         vendor: machine.vendor,
         product: machine.product,
         bios: bios.to_string(),
+        stick: stick(),
         measured: [
             ("boot.passing.complete_ms", complete_ms),
             ("boot.passing.panel_max_us", 3851),
@@ -342,13 +390,13 @@ fn committed(bios: &str, complete_ms: u64) -> Record {
     }
 }
 
-/// `passing`'s readback judged against `record`, committed first: whether the
+/// `passing`'s readback judged against `record`, saved first: whether the
 /// run was red, and the record it left.
 fn judged_against(record: &Record) -> (bool, Record) {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
     let root = toyos_tmpdir::TempDir::new("metal-records");
     plant(&dir, "passing", PANEL, BOOTED, None);
-    record.save(&root).expect("a committed record");
+    record.save(&root).expect("a saved record");
     let tests = [("passes", &PASSING)];
     let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     let red = metal::judge_readbacks(&root, &read(&dir, &["passing"]), &runs, &[]);
@@ -359,10 +407,10 @@ fn judged_against(record: &Record) -> (bool, Record) {
 /// green against a record it meets and red against one it is past.
 pub fn a_reading_past_its_record_fails_and_moves_nothing() {
     let bios = t14().bios;
-    let met = committed(&bios, 1165);
+    let met = kept(&bios, 1165);
     assert_eq!(judged_against(&met), (false, met));
     // 1165 ms against a ceiling of 1164.
-    let past = committed(&bios, 582);
+    let past = kept(&bios, 582);
     assert_eq!(judged_against(&past), (true, past));
 }
 
@@ -371,14 +419,14 @@ pub fn a_reading_past_its_record_fails_and_moves_nothing() {
 /// gains the row it lacks.
 pub fn a_run_under_another_bios_fails_and_records_nothing() {
     let lacking = |bios: &str| {
-        let mut record = committed(bios, 1165);
+        let mut record = kept(bios, 1165);
         record.measured.remove("span.passing.us");
         record
     };
     let older = lacking("N34ET50W (1.50 )");
     assert_eq!(judged_against(&older), (true, older));
     let bios = t14().bios;
-    assert_eq!(judged_against(&lacking(&bios)), (false, committed(&bios, 1165)));
+    assert_eq!(judged_against(&lacking(&bios)), (false, kept(&bios, 1165)));
 }
 
 fn member(job: &str, adds_ms: u64) -> metal::Member {
@@ -390,7 +438,7 @@ fn member(job: &str, adds_ms: u64) -> metal::Member {
 /// does.
 pub fn a_failing_shared_member_fails_itself_alone() {
     let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-    let root = toyos_tmpdir::TempDir::new("metal-records");
+    let root = recorded();
     let jobs = ["test_rs_std_tls_multi_crate", "test_rs_fs_large_file"];
     let exits = |code: i32| {
         format!(
@@ -593,7 +641,7 @@ pub fn a_cleared_page_owes_no_panel() {
     // the reset.
     let judged = |before: &str, page: &str| {
         let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
-        let root = toyos_tmpdir::TempDir::new("metal-records");
+        let root = recorded();
         plant(&dir, "foreignrecord", page, BOOTED, None);
         let at = metal::at(&dir, "foreignrecord").join(READBACK_LOADER);
         let handoff = bootlog::LOADER_LAST_LINE;
@@ -601,14 +649,14 @@ pub fn a_cleared_page_owes_no_panel() {
         fs::write(&at, loader.replacen(handoff, &format!("{before}{handoff}"), 1))
             .expect("a planted loader.log");
         let red = metal::judge_readbacks(&root, &read(&dir, &["foreignrecord"]), &[], &[]);
-        let record = Record::load(&root, &t14()).expect("a readable record");
-        (red, record.map(|record| record.measured.into_keys().collect::<Vec<_>>()))
+        let record = Record::load(&root, &t14()).expect("a readable record").expect("a record");
+        (red, record.measured.into_keys().collect::<Vec<_>>())
     };
     assert_eq!(
         judged("", &format!("{cleared}{hung}")),
-        (false, Some(vec!["boot.foreignrecord.complete_ms".to_string()]))
+        (false, vec!["boot.foreignrecord.complete_ms".to_string()])
     );
-    assert_eq!(judged(&cleared, &hung), (true, None));
+    assert_eq!(judged(&cleared, &hung), (true, Vec::new()));
 }
 
 /// **The loader's lines, the kernel's records and a program's lines count

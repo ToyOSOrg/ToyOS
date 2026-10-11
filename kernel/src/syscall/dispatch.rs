@@ -29,7 +29,7 @@ use super::device::{
 };
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
-    sys_rename, sys_rmdir, sys_symlink,
+    sys_rename, sys_rmdir, sys_stat, sys_symlink,
 };
 use super::handles::{sys_close, sys_dup2, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
@@ -136,6 +136,22 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             match with_object_ref(RawHandle(a1 as u32), Rights::WRITE, KObjectRef::clone) {
                 Ok(object) => ops::fsync(&object),
                 Err(e) => e.refuse(),
+            }
+        }
+        SYS_STAT => {
+            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
+            let follow = match a4 {
+                0 => false,
+                1 => true,
+                _ => return SyscallError::InvalidArgument.to_u64(),
+            };
+            let stat = match sys_stat(&path, follow) {
+                Ok(stat) => stat,
+                Err(e) => return e.to_u64(),
+            };
+            match ctx.copy_out(UserAddr::new(a3), &stat) {
+                Ok(()) => 0,
+                Err(e) => e.to_u64(),
             }
         }
         SYS_READDIR => {

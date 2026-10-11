@@ -20,11 +20,8 @@ pub(super) extern "sysv64" fn timer_entry() {
 
         save_user_state!(),
 
-        // Re-arm before Rust runs so the timer survives even if the handler path panics before scheduler::do_preempt → arm_one_shot.
-        "mov ecx, 0x838",
-        "mov eax, dword ptr gs:[{armed_ticks}]",
-        "xor edx, edx",
-        "wrmsr",
+        // Re-arm before the handler runs so the timer survives even if the handler path panics before scheduler::do_preempt → arm_one_shot.
+        "call {rearm_last}",
 
         "call {handler}",
 
@@ -41,36 +38,23 @@ pub(super) extern "sysv64" fn timer_entry() {
         "iretq",
 
         "2:",
-        // No Rust half on this branch, so this `add` inlines what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
+        // This `add` inlines what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
         "add qword ptr gs:[{irq_timer}], 1",
-        "push rax",
-        "push rcx",
-        "push rdx",
-        "mov ecx, 0x80B",       // X2APIC_EOI
-        "xor eax, eax",
-        "xor edx, edx",
-        "wrmsr",
-        "mov ecx, 0x838",       // X2APIC_TIMER_INIT
-        "mov eax, dword ptr gs:[{armed_ticks}]",
-        "test eax, eax",
-        "jz 3f",                // 0: stopped, and written back as stopped.
-        "mov eax, dword ptr [rip + {quantum_ticks}]",
-        "3:",
-        "xor edx, edx",
-        "wrmsr",
+        // The caller-saved set, then the stack realigned for a `sysv64` call —
+        // no target touches an `xmm`, since the kernel's own target has no
+        // hardware float (`src/build.rs`'s check).
+        "push rax", "push rcx", "push rdx",
+        "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
+        "push rbp",
+        "mov rbp, rsp",
+        "and rsp, -16",
+        "call {ring0_fire}",
         "mov byte ptr gs:[{need_resched}], 1",
         // No lock on the fire count: single writer, IF=0.
         "inc dword ptr gs:[{ring0_fires}]",
         // The boot deadline, from the one branch that runs while a lock is
         // held: a CPU spinning on a ticket still takes this interrupt, and that
         // is the whole reason the poll is here and not only in the Rust half.
-        // The rest of the caller-saved set, then the stack realigned for a
-        // `sysv64` call — the target touches no `xmm`, since the kernel's own
-        // target has no hardware float (`src/build.rs`'s check).
-        "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
-        "push rbp",
-        "mov rbp, rsp",
-        "and rsp, -16",
         // The interrupted `rip`, above the ten registers pushed on this branch.
         "mov rdi, [rbp + 80]",
         "call {deadline}",
@@ -87,8 +71,8 @@ pub(super) extern "sysv64" fn timer_entry() {
         deadline = sym ring0_tick,
         handler = sym timer_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
-        armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
-        quantum_ticks = sym crate::arch::apic::TIMER_TICKS,
+        rearm_last = sym crate::arch::apic::rearm_last,
+        ring0_fire = sym crate::arch::apic::ring0_fire,
         need_resched = const crate::arch::percpu::OFF_NEED_RESCHED,
         ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
         irq_timer = const crate::arch::percpu::irq_slot_offset(crate::irq_census::Source::Timer as usize),

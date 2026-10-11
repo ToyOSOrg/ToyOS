@@ -7,7 +7,8 @@ use core::cell::Cell;
 use core::ffi::{c_char, CStr};
 use core::ptr;
 
-use crate::errno::{self, EINVAL, ENOENT};
+use crate::errcode::{EINVAL, ENOENT};
+use crate::errno;
 
 /// `locale_t` points at this, and only ever at the one there is.
 #[repr(C)]

@@ -4,7 +4,7 @@
 //! task-blind surface (clock, one-shot timer, interrupt gate, halt, trace);
 //! [`Hw`] adds the two operations that carry a task — the context switch and
 //! the finalize sink. The kernel implements them with LAPIC one-shot,
-//! targeted x2APIC ICR, TSC and the asm switch; the simulator over a virtual
+//! targeted ICR, TSC and the asm switch; the simulator over a virtual
 //! clock and vcpu bookkeeping. No scheduling decision, state transition or
 //! ordering-sensitive code may live behind them.
 

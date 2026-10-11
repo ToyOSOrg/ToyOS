@@ -8,8 +8,7 @@ opened: 2026-10-04
 
 One T14 boot of `lantalkcase`, at `43cbe73d4` (pull request #710's head, run
 on 2026-10-04), wrote `panel: paints=10 px=8513536 us=25527 max_us=8194`. The
-machine's record for that boot was `boot.lantalkcase.panel_max_us = 3919`
-(`tests/metal/lenovo-20w0003amz.toml`), and the judge's ceiling 7838, so the
+machine's record for that boot was `boot.lantalkcase.panel_max_us = 3919`, and the judge's ceiling 7838, so the
 judge exited 1. The same kernel's four other boots of that run read `max_us`
 3921, 3802, 3878 and 3870, and the negative control's four 3837, 3883, 3927
 and 3853.

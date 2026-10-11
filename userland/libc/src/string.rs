@@ -194,7 +194,7 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) ->
     let text = strerror(errnum);
     let len = strlen(text);
     if len >= buflen {
-        return crate::errno::ERANGE;
+        return crate::errcode::ERANGE;
     }
     ptr::copy_nonoverlapping(text, buf, len + 1);
     0

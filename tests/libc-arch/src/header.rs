@@ -3,6 +3,7 @@
 
 pub(crate) const ERRNO_H: &str = include_str!("../../../userland/libc/include/errno.h");
 pub(crate) const FCNTL_H: &str = include_str!("../../../userland/libc/include/fcntl.h");
+pub(crate) const LIMITS_H: &str = include_str!("../../../userland/libc/include/limits.h");
 pub(crate) const SIGNAL_H: &str = include_str!("../../../userland/libc/include/signal.h");
 
 /// Each integer `#define` in `header`, in its order.

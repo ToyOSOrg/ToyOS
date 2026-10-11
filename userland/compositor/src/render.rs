@@ -10,7 +10,7 @@
 //! to what, which pixels of a client's buffer reach the screen — is
 //! `toyos_desktop`'s and host-tested there. What is left here is the drawing.
 
-use toyos_desktop::{content_blit, plan, Desk, Layer, Rect, Stack};
+use toyos_desktop::{content_blit, plan, Desk, Layer, Level, Rect, Stack, PROMPT_FRAME};
 use window::{Color, Framebuffer};
 
 use crate::client::Client;
@@ -32,6 +32,10 @@ pub const TASKBAR_MINIMIZED_COLOR: Color = Color { r: 0x20, g: 0x20, b: 0x30 };
 pub const TASKBAR_MINIMIZED_TEXT: Color = Color { r: 0x50, g: 0x50, b: 0x60 };
 pub const LAUNCHER_BG: Color = Color { r: 0x20, g: 0x20, b: 0x30 };
 pub const LAUNCHER_TEXT: Color = Color { r: 0xe0, g: 0xe0, b: 0xe8 };
+pub const PROMPT_TITLE_TEXT: Color = Color { r: 0x1e, g: 0x1e, b: 0x2e };
+
+/// What a prompt's title bar says, whatever its client asked for.
+const PROMPT_TITLE: &str = "ToyOS is asking";
 
 /// Glyph cell height of the prebuilt font, which every vertical centring uses.
 const GLYPH_H: i32 = 16;
@@ -127,9 +131,15 @@ fn draw_window(
     clip: Rect,
 ) {
     let chrome = &desk.chrome;
-    let border_color = if focused { FOCUSED_BORDER_COLOR } else { UNFOCUSED_BORDER_COLOR };
-    let title_color = if focused { FOCUSED_TITLE_COLOR } else { UNFOCUSED_TITLE_COLOR };
-    let text_color = if focused { FOCUSED_TITLE_TEXT } else { UNFOCUSED_TITLE_TEXT };
+    // A prompt's frame is the compositor's own: its colour, its title and no
+    // buttons, since nothing but its answer takes it down.
+    let prompt = win.level == Level::Prompt;
+    let [r, g, b] = PROMPT_FRAME;
+    let (border_color, title_color, text_color) = match (prompt, focused) {
+        (true, _) => (Color { r, g, b }, Color { r, g, b }, PROMPT_TITLE_TEXT),
+        (false, true) => (FOCUSED_BORDER_COLOR, FOCUSED_TITLE_COLOR, FOCUSED_TITLE_TEXT),
+        (false, false) => (UNFOCUSED_BORDER_COLOR, UNFOCUSED_TITLE_COLOR, UNFOCUSED_TITLE_TEXT),
+    };
 
     let frame = win.frame(chrome);
     let strip = chrome.title_strip(frame);
@@ -146,7 +156,11 @@ fn draw_window(
         );
         fill(surface, bar, title_color);
 
-        let title = if win.title.is_empty() { "Window" } else { &win.title };
+        let title = match (prompt, win.title.is_empty()) {
+            (true, _) => PROMPT_TITLE,
+            (false, true) => "Window",
+            (false, false) => &win.title,
+        };
         assets.font.draw_string(
             surface,
             (bar.x0 + 8) as usize,
@@ -158,11 +172,12 @@ fn draw_window(
 
         let [close, maximize, minimize] = chrome.buttons(frame);
         let close_bg = if focused { CLOSE_BUTTON_BG } else { title_color };
-        for (rect, bg, icon) in [
+        let buttons = [
             (close, close_bg, &assets.icons.close),
             (maximize, title_color, &assets.icons.maximize),
             (minimize, title_color, &assets.icons.minimize),
-        ] {
+        ];
+        for (rect, bg, icon) in buttons.into_iter().filter(|_| !prompt) {
             fill(surface, rect, bg);
             draw_icon_centered(surface, icon, rect);
         }

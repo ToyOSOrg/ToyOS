@@ -642,6 +642,11 @@ pub fn set_last_armed_ticks(ticks: u32) {
     gs::write_u32::<OFF_LAST_ARMED_TICKS>(ticks);
 }
 
+/// The one-shot count this CPU last armed; zero is a stopped timer.
+pub fn last_armed_ticks() -> u32 {
+    gs::read_u32::<OFF_LAST_ARMED_TICKS>()
+}
+
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {

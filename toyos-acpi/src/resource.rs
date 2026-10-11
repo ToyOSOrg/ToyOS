@@ -1,5 +1,6 @@
 //! ACPI resource descriptors, decoded into the memory windows a PCI root
-//! bridge decodes.
+//! bridge decodes, and into the I/O ports a device names its registers by
+//! ([`io_ports`]).
 //!
 //! The bytes are the ones ACPI 6.5 §6.4.3.5 defines and firmware emits in two
 //! places for the same bridge: `_CRS` in the DSDT, which is what Linux reads,
@@ -71,8 +72,13 @@ pub enum ResourceError {
     /// A memory range the bridge consumes rather than forwards — its own
     /// registers, not a range anything behind it decodes.
     Consumed { min: u64 },
-    /// More memory windows than the caller has room for.
+    /// More memory windows, or I/O runs, than the caller has room for.
     TooMany { room: usize },
+    /// An I/O Port Descriptor naming a range of bases the OS chooses among,
+    /// not one fixed run.
+    Relocatable { min: u16, max: u16 },
+    /// An I/O run of no ports.
+    NoPorts { port: u16 },
 }
 
 impl core::fmt::Display for ResourceError {
@@ -97,8 +103,10 @@ impl core::fmt::Display for ResourceError {
                 write!(f, "the range at {min:#x} is consumed by the bridge, not forwarded")
             }
             Self::TooMany { room } => {
-                write!(f, "more memory windows than the {room} there is room for")
+                write!(f, "more memory windows or I/O runs than the {room} there is room for")
             }
+            Self::Relocatable { min, max } => write!(f, "the I/O run is relocatable between {min:#x} and {max:#x}"),
+            Self::NoPorts { port } => write!(f, "the I/O run at {port:#x} is no ports long"),
         }
     }
 }
@@ -206,5 +214,58 @@ pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -
             }
         }
         offset = through;
+    }
+}
+
+/// ACPI 6.5 §6.4.2.5: the I/O Port Descriptor, a small item of seven bytes:
+/// its decode, its range's minimum and maximum base, alignment and length.
+const IO_PORT: u8 = 0x47;
+/// ACPI 6.5 §6.4.2.6: the Fixed Location I/O Port Descriptor, a small item of
+/// three bytes: a 10-bit base and a length.
+const FIXED_IO_PORT: u8 = 0x4B;
+
+/// The first port of each I/O run the list at `at` names, in its order,
+/// written into `out`, and how many: what a device that names its own
+/// registers by `_CRS` and by nothing else names them with (ACPI 6.5 §12.11,
+/// the embedded controller's).
+///
+/// **Only a run firmware fixed is a port**: an I/O Port Descriptor whose
+/// minimum and maximum base differ names a range the OS chooses within, and
+/// is refused, as is a run of no ports and any descriptor but these two.
+pub fn io_ports<P: Phys>(phys: P, at: u64, out: &mut [u16]) -> Result<usize, ResourceError> {
+    let mut offset = 0usize;
+    let mut found = 0usize;
+    loop {
+        if offset >= MAX_LIST_BYTES {
+            return Err(ResourceError::Unterminated);
+        }
+        let item = item(phys, at, offset)?;
+        let head = at + offset as u64;
+        let byte = |i: u64| phys.byte(head + i);
+        let (min, max, length) = match item.tag {
+            END_TAG => return Ok(found),
+            IO_PORT => {
+                let base = |i| u16::from(byte(i)) | u16::from(byte(i + 1)) << 8;
+                (base(2), base(4), byte(7))
+            }
+            FIXED_IO_PORT => {
+                let base = (u16::from(byte(1)) | u16::from(byte(2)) << 8) & 0x3FF;
+                (base, base, byte(3))
+            }
+            tag => return Err(ResourceError::UnknownTag { tag }),
+        };
+        if min != max {
+            return Err(ResourceError::Relocatable { min, max });
+        }
+        if length == 0 {
+            return Err(ResourceError::NoPorts { port: min });
+        }
+        let room = out.len();
+        match out.get_mut(found) {
+            Some(slot) => *slot = min,
+            None => return Err(ResourceError::TooMany { room }),
+        }
+        found += 1;
+        offset += item.len;
     }
 }

@@ -388,6 +388,14 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(a_loc == b_loc)
     }
 
+    /// Where on the device the entry naming `path` lies: [`Self::same_entry`]'s
+    /// identity, so every spelling of one name answers it and no other entry
+    /// shares it while that one exists. 0 for the root, which has no entry and
+    /// whose offset no entry can have.
+    pub fn entry_offset(&mut self, path: &str) -> Result<u64, Error> {
+        Ok(self.resolve(path)?.loc.map_or(0, |loc| loc.entry_offset))
+    }
+
     /// Every entry of one directory, refusing above `limit`.
     ///
     /// Refuses rather than truncating: a listing short of the truth is worse

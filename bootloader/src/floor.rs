@@ -12,20 +12,17 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use toyos_update::floor::{self, Read, Scope, Stored};
-use uefi::prelude::*;
-use uefi::table::runtime::{VariableAttributes, VariableVendor};
-use uefi::{guid, CString16};
+use crate::efi::{CString16, Guid, SystemTable, VariableAttributes};
 
 /// Whose images this loader's floor holds, as its build decided.
 const SCOPE: Scope = Scope::from_word(env!("TOYOS_IMAGE_FLOOR"));
 
 /// The vendor every floor is under: `33BE3D4A-30E6-49F5-8050-F169D93A20FB`,
 /// minted for this and used for nothing else.
-const VENDOR: VariableVendor = VariableVendor(guid!("33be3d4a-30e6-49f5-8050-f169d93a20fb"));
+const VENDOR: Guid = Guid::new(0x33be3d4a, 0x30e6, 0x49f5, [0x80, 0x50, 0xf1, 0x69, 0xd9, 0x3a, 0x20, 0xfb]);
 
 /// The only attributes the floor is written with.
-const ATTRIBUTES: VariableAttributes =
-    VariableAttributes::NON_VOLATILE.union(VariableAttributes::BOOTSERVICE_ACCESS);
+const ATTRIBUTES: u32 = VariableAttributes::NON_VOLATILE | VariableAttributes::BOOTSERVICE_ACCESS;
 
 /// The head of every line this module writes.
 const HEAD: &str = "Anti-rollback floor:";
@@ -40,15 +37,14 @@ pub struct Floor {
 /// and the lines to say once the log is open; or why the stored floor is
 /// refused, which boots nothing. Read before the log opens, because the
 /// slots' record written then needs it.
-pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Floor, Vec<String>), String> {
+pub fn read(system_table: &SystemTable, log_guid: &[u8; 16]) -> Result<(Floor, Vec<String>), String> {
     let rt = system_table.runtime_services();
     let own = floor::name(SCOPE, &crate::slot::KEY, log_guid);
-    let name = CString16::try_from(own.as_str()).expect("a floor's name is ASCII");
+    let name = CString16::new(own.as_str()).expect("a floor's name is ASCII");
     let mut notes = Vec::new();
     match rt.variable_keys() {
         Ok(keys) => {
-            for key in keys.iter().filter(|key| key.vendor == VENDOR) {
-                let Ok(other) = key.name() else { continue };
+            for (other, _) in keys.iter().filter(|(_, vendor)| *vendor == VENDOR) {
                 let text = alloc::format!("{other}");
                 if floor::stale(SCOPE, &own, &text) {
                     let deleted = match rt.delete_variable(other, &VENDOR) {
@@ -61,16 +57,14 @@ pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Fl
         }
         Err(e) => notes.push(alloc::format!("{HEAD} firmware would not list its variables ({e}), so no stale floor is deleted")),
     }
-    let got = rt.get_variable_boxed(&name, &VENDOR);
-    let stored = Stored::answered(
-        got.as_ref().map(|(value, attributes)| (&value[..], attributes.bits())).map_err(|e| e.status().0),
-    );
+    let got = rt.get_variable(&name, &VENDOR);
+    let stored = Stored::answered(got.as_ref().map(|(value, attributes)| (&value[..], *attributes)).map_err(|e| e.0));
     let refused = |why: floor::Refused| {
         alloc::format!(
             "{HEAD} {name}: {why}, so nothing this loader wrote is there, and it is refused rather than read as no \
              floor. Nothing boots until the variable {name} under vendor {} is deleted, from the firmware's setup or \
              a UEFI shell",
-            VENDOR.0
+            VENDOR
         )
     };
     match floor::judge(stored) {
@@ -79,7 +73,7 @@ pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Fl
             Ok((Floor { name, value }, notes))
         }
         Ok(Read::RuntimeMade { attributes, len }) => {
-            let value = floor::deleted(attributes, rt.delete_variable(&name, &VENDOR).map_err(|e| e.status().0))
+            let value = floor::deleted(attributes, rt.delete_variable(&name, &VENDOR).map_err(|e| e.0))
                 .map_err(refused)?;
             notes.push(alloc::format!(
                 "{HEAD} {name} carries runtime access ({attributes:#x}, {len} bytes), so it was made after a \
@@ -92,7 +86,7 @@ pub fn read(system_table: &SystemTable<Boot>, log_guid: &[u8; 16]) -> Result<(Fl
 }
 
 /// Raise `floor` to `to`, and say so.
-pub fn raise(system_table: &SystemTable<Boot>, floor: &mut Floor, to: u64) {
+pub fn raise(system_table: &SystemTable, floor: &mut Floor, to: u64) {
     if to <= floor.value {
         println!("{HEAD} stays {}, which is at or above {to}", floor.value);
         return;

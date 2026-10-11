@@ -712,6 +712,17 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// [`Profile::Metal`]'s machine with a USB keyboard and an absolute USB
+    /// tablet beside its i8042, on a smaller panel: the desktop driven as a
+    /// person at QEMU's window drives it, so a test injects keys and a pointer
+    /// position through the compositor's own devices and reads the panel back.
+    /// The i8042 stays; QEMU activates one input handler per device class, so
+    /// every injected keystroke and position goes to the USB device.
+    Desktop,
+    /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
+    /// whatever the host, so its local APICs run in xAPIC mode: the machine
+    /// an AMD laptop without x2APIC is.
+    MetalNoX2apic,
     /// [`Profile::Metal`] with QEMU's AMD unit in place of VT-d: the boot
     /// stick's controller behind an AMD-Vi unit, which the kernel finds by the
     /// IVRS and switches off.
@@ -750,10 +761,6 @@ pub enum Profile {
     /// buses: q35's is as long as firmware programs `PCIEXBAR`, which OVMF
     /// sets to 256 MiB and QEMU offers no option to change.
     VirtLowEcam,
-    /// [`Profile::Virt`] with its SMMUv3, QEMU's emulated GICv3 and its ITS,
-    /// QEMU's `edu`, a function that sends an MSI when told to, and an
-    /// `e1000e` the IORT routes past the SMMUv3.
-    VirtIts,
 }
 
 impl Profile {
@@ -766,8 +773,7 @@ impl Profile {
             | Self::VirtEl2NoVhe
             | Self::VirtTcg
             | Self::VirtSmmu
-            | Self::VirtLowEcam
-            | Self::VirtIts => {
+            | Self::VirtLowEcam => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -777,6 +783,8 @@ impl Profile {
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::Metal
+            | Self::Desktop
+            | Self::MetalNoX2apic
             | Self::MetalAmdVi => Arch::X86_64,
         }
     }
@@ -784,17 +792,24 @@ impl Profile {
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::MetalNoX2apic => Accel::Tcg,
             _ => self.arch().accel(),
         }
     }
 
     /// The CPU this machine has.
-    fn cpu(self) -> &'static str {
+    fn cpu(self) -> String {
         match self {
-            Self::VirtEl2NoVhe => "cortex-a72",
-            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72",
-            _ => self.arch().cpu(self.accel()),
+            Self::VirtEl2NoVhe => "cortex-a72".to_string(),
+            Self::VirtNoRng if !self.accel().is_hardware() => "cortex-a72".to_string(),
+            // The one declaration's CPU with its x2APIC taken away, refused by
+            // name the day that declaration stops offering one.
+            Self::MetalNoX2apic => {
+                let offered = self.arch().cpu(self.accel());
+                assert!(offered.contains(",+x2apic"), "{offered:?} offers no x2APIC to take away");
+                offered.replace(",+x2apic", ",-x2apic")
+            }
+            _ => self.arch().cpu(self.accel()).to_string(),
         }
     }
 }
@@ -936,12 +951,6 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
-    /// With the ITS behind it, which needs QEMU's own GIC: HVF's refuses one.
-    /// With it comes one `edu`, whose message is the only one a guest of
-    /// this suite can raise on demand, and an `e1000e` behind a root port of
-    /// a `pxb-pcie` with `bypass_iommu=on`, which QEMU's IORT routes straight
-    /// to the ITS: a plain root port's buses it routes through the unit.
-    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -989,7 +998,6 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
-            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -1036,6 +1044,12 @@ impl Profile {
                 rng: false,
                 virtio_gpu: false,
             },
+            Self::Desktop => Shape {
+                panel: Some((1280, 800)),
+                usb: &["usb-kbd,bus=xhci.0", "usb-tablet,bus=xhci.0"],
+                ..Self::Metal.shape()
+            },
+            Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi), ..Self::Metal.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
@@ -1102,6 +1116,10 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
+    /// Whole ACPI tables, header and checksum included, that QEMU lists
+    /// beside its own (`-acpitable`): firmware AML a guest's own tables do
+    /// not carry. q35's alone.
+    pub acpi_tables: Vec<Vec<u8>>,
     /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
     /// it, and the host's own UTC with `None`.
     pub rtc_base: Option<&'static str>,
@@ -1143,6 +1161,7 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
+            acpi_tables: Vec::new(),
             rtc_base: None,
         }
     }
@@ -1426,6 +1445,9 @@ impl QemuInstance {
         };
 
         let sockets = Sockets::new(&options);
+        for (i, table) in options.acpi_tables.iter().enumerate() {
+            fs::write(acpi_table(&sockets.dir, i), table).expect("[qemu] write an added ACPI table");
+        }
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: a screen test waits on this
@@ -1528,7 +1550,6 @@ impl QemuInstance {
     pub fn screendump(&mut self) -> super::screen::Ppm {
         let socket = self.sockets.qmp.clone().expect("screendump needs BootOptions { qmp: true }");
         let out = self.screendump.clone();
-        let _ = fs::remove_file(&out);
 
         // A guest that triple-faults exits QEMU (`-no-reboot`), and the
         // socket then refuses every connect. Without this the retry loop
@@ -1543,13 +1564,13 @@ impl QemuInstance {
                 panic!("[qemu] QEMU died before the screendump (status: {status})");
             }
         });
-        qmp.execute(&format!(
-            "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}",
-            out.display()
-        ));
+        dump(&mut qmp, &out)
+    }
 
-        let bytes = fs::read(&out).expect("screendump: QEMU wrote no file");
-        super::screen::Ppm::parse(&bytes)
+    /// Where [`Self::screendump`] has QEMU write the scanout, for a
+    /// [`QmpInput::screendump`] made from inside a paced step.
+    pub fn screendump_file(&self) -> PathBuf {
+        self.screendump.clone()
     }
 
     /// Screendump until the decoded screen carries `needle`, or the timeout.
@@ -2090,6 +2111,17 @@ impl QmpMonitor {
     }
 }
 
+/// The scanout, written by QEMU to `out` and read back.
+fn dump(qmp: &mut Qmp, out: &Path) -> super::screen::Ppm {
+    let _ = fs::remove_file(out);
+    qmp.execute(&format!(
+        "{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{}\"}}}}",
+        out.display()
+    ));
+    let bytes = fs::read(out).expect("screendump: QEMU wrote no file");
+    super::screen::Ppm::parse(&bytes)
+}
+
 /// An open QMP connection for injecting input.
 ///
 /// One connection rather than one per event, because QEMU delivers each
@@ -2126,7 +2158,39 @@ impl QmpInput {
             .collect();
         self.send(&body);
     }
+
+    /// The pointer to pixel `at` of a `screen`-sized panel, by an absolute
+    /// tablet position, which the compositor maps back to the pixel
+    /// (`toyos_desktop::cursor_from_abs`): the least position at or past it.
+    pub fn point(&mut self, at: (i32, i32), screen: (usize, usize)) {
+        let abs = |pixel: i32, size: usize| {
+            let size = size as i64;
+            ((i64::from(pixel) * ABS_RANGE + size - 1) / size).min(ABS_RANGE - 1)
+        };
+        let (x, y) = (abs(at.0, screen.0), abs(at.1, screen.1));
+        self.send(&[
+            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"x\",\"value\":{x}}}}}"),
+            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"y\",\"value\":{y}}}}}"),
+        ]);
+    }
+
+    /// The left button pressed at `at`, then released, each its own report.
+    pub fn click(&mut self, at: (i32, i32), screen: (usize, usize)) {
+        self.point(at, screen);
+        for down in [true, false] {
+            self.send(&[format!("{{\"type\":\"btn\",\"data\":{{\"down\":{down},\"button\":\"left\"}}}}")]);
+        }
+    }
+
+    /// [`QemuInstance::screendump`] on this connection, into `out`, for a
+    /// step that holds no instance.
+    pub fn screendump(&mut self, out: &Path) -> super::screen::Ppm {
+        dump(&mut self.0, out)
+    }
 }
+
+/// The span of QEMU's absolute axes, which the USB tablet reports unscaled.
+const ABS_RANGE: i64 = 32768;
 
 /// The argv `options` would launch QEMU with, built against placeholder
 /// paths. A profile's claim about which devices exist is a claim about this
@@ -2202,7 +2266,6 @@ fn qemu_command(
             match shape.smmu {
                 Smmu::Absent => machine,
                 Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
-                Smmu::WithIts => format!("{machine},iommu=smmuv3,its=on,kernel-irqchip=off"),
             }
         }
     };
@@ -2348,13 +2411,6 @@ fn qemu_command(
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
     }
-    if shape.smmu == Smmu::WithIts {
-        qemu.arg("-device").arg("edu");
-        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
-        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
-        // No option ROM: firmware has no use for the NIC.
-        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
-    }
 
     // The NIC before the virtio block, so a profile that has one and not the
     // other still creates it after the unit and before everything else.
@@ -2409,6 +2465,10 @@ fn qemu_command(
     if options.gdb_stub {
         qemu.arg("-s");
     }
+    assert!(options.acpi_tables.is_empty() || arch == Arch::X86_64, "an added ACPI table is q35's");
+    for i in 0..options.acpi_tables.len() {
+        qemu.arg("-acpitable").arg(format!("file={}", acpi_table(socket_dir, i).display()));
+    }
     if let Some(socket) = qmp_socket {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
@@ -2438,6 +2498,11 @@ impl Sockets {
         let qmp = qmp_socket(&dir, options);
         Sockets { dir, qmp }
     }
+}
+
+/// The `i`th of [`BootOptions::acpi_tables`], as a file in a boot's own `dir`.
+fn acpi_table(dir: &Path, i: usize) -> PathBuf {
+    dir.join(format!("acpi-{i}.aml"))
 }
 
 /// The QMP socket `options` asks for, named in `dir`.

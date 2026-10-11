@@ -52,7 +52,8 @@ fn retire(id: FileId, alive: &AtomicBool) {
 /// each see a different namespace.
 pub(crate) enum Entry {
     File { id: FileId, alive: Arc<AtomicBool> },
-    Symlink { target: String },
+    /// `node` is drawn at the link's making and moves with its entry.
+    Symlink { target: String, node: u64 },
 }
 
 /// In-memory filesystem: file data lives in the file cache.
@@ -100,20 +101,28 @@ impl ReplaceRename for TmpFs {
 
 impl FileSystem for TmpFs {
     // Nothing else caps file count here.
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError> {
         let mut out = Vec::new();
         for (name, entry) in &self.entries {
-            if let Entry::File { id, .. } = entry {
+            if let Entry::File { .. } = entry {
                 if !crate::vfs::under_directory(name, dir) {
                     continue;
                 }
                 if out.len() == limit {
                     return Err(SyscallError::ResourceExhausted);
                 }
-                out.push((name.clone(), file_cache::size(*id)));
+                out.push(name.clone());
             }
         }
         Ok(out)
+    }
+
+    fn node(&mut self, name: &str) -> Result<u64, SyscallError> {
+        match self.entries.get(name) {
+            Some(Entry::File { id, .. }) => Ok(*id),
+            Some(Entry::Symlink { node, .. }) => Ok(*node),
+            None => Err(SyscallError::NotFound),
+        }
     }
 
     /// The first name at or after `dir/` in key order is the only one that can
@@ -137,7 +146,7 @@ impl FileSystem for TmpFs {
 
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError> {
         Ok(match self.entries.get(name) {
-            Some(Entry::Symlink { target }) => Some(target.clone()),
+            Some(Entry::Symlink { target, .. }) => Some(target.clone()),
             _ => None,
         })
     }
@@ -189,8 +198,8 @@ impl FileSystem for TmpFs {
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
         // Displaces whatever answered to this name: one name, one entry.
-        if let Some(Entry::File { id, alive, .. }) =
-            self.entries.insert(String::from(name), Entry::Symlink { target: String::from(target) })
+        let link = Entry::Symlink { target: String::from(target), node: file_cache::draw_node() };
+        if let Some(Entry::File { id, alive, .. }) = self.entries.insert(String::from(name), link)
         {
             retire(id, &alive);
         }

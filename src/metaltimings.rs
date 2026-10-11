@@ -1,14 +1,18 @@
-//! Every number the metal suite measures, recorded per machine and judged only
-//! against the record of the machine that measured it.
+//! Each metal bench's record: the boot stick its loop may write, and every
+//! number the metal suite measures there, judged only against the record of
+//! the machine that measured it.
 //!
-//! One file per machine under [`DIR`], named for its SMBIOS vendor and product,
-//! written by a run and committed by whoever ran it. A run on a machine with no
-//! record is recorded and not judged; a name the record lacks is added and not
-//! judged, and only where its owner passed, the boot or the row that measured
-//! it; a recorded value is never moved by a run, so a slow run cannot become
-//! the baseline the next is judged by. A run under a BIOS other than the record's is judged against it,
-//! fails naming both, and records nothing. Deleting a row is how a number is
-//! re-recorded, and deleting the file is how a machine is, firmware and all.
+//! One file per machine under [`dir`], named for its SMBIOS vendor and product:
+//! `metal/` in the host's store, outside every checkout, so every worktree on
+//! the host reads one record and none commits it.
+//! `toyos-metal --install-sudoers` writes it once, with the stick and no
+//! number, and the loop refuses a machine that has none. A name the record
+//! lacks is added by a run and not judged, and only where its owner passed, the
+//! boot or the row that measured it; a recorded value is never moved by a run,
+//! so a slow run cannot become the baseline the next is judged by. A run under
+//! a BIOS other than the record's is judged against it, fails naming both, and
+//! records nothing. Deleting a row is how a number is re-recorded, and deleting
+//! the file is how a machine is, firmware, stick and all.
 //!
 //! [`ceiling`] is the one rule.
 
@@ -19,8 +23,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Where the records live, relative to the repository root.
-pub const DIR: &str = "tests/metal";
+/// Where every machine's record lives, and the one place either reader looks.
+pub fn dir() -> PathBuf {
+    crate::keystore::host().join("metal")
+}
 
 /// Past this a reading is a red: twice what the machine recorded, and a record
 /// of zero counts as one unit, the resolution the number was read at.
@@ -63,13 +69,13 @@ impl Machine {
         }
     }
 
-    /// Where this machine's record lives, relative to the repository root.
-    pub fn path(&self) -> PathBuf {
-        path(&self.vendor, &self.product)
+    /// This machine's record's file name under [`dir`].
+    pub fn file(&self) -> String {
+        file(&self.vendor, &self.product)
     }
 }
 
-fn path(vendor: &str, product: &str) -> PathBuf {
+fn file(vendor: &str, product: &str) -> String {
     let mut slug = String::new();
     for c in format!("{vendor} {product}").chars() {
         if c.is_ascii_alphanumeric() {
@@ -78,7 +84,17 @@ fn path(vendor: &str, product: &str) -> PathBuf {
             slug.push('-');
         }
     }
-    Path::new(DIR).join(format!("{}.toml", slug.trim_end_matches('-')))
+    format!("{}.toml", slug.trim_end_matches('-'))
+}
+
+/// The one disk the loop may write on a machine, as its
+/// `/sys/class/block/<disk>` answered when the machine was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stick {
+    pub sectors: u64,
+    pub vendor: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,13 +103,25 @@ pub struct Record {
     pub vendor: String,
     pub product: String,
     pub bios: String,
+    pub stick: Stick,
     pub measured: BTreeMap<String, u64>,
 }
 
 impl Record {
-    /// `machine`'s record under `root`, `None` where it has none.
-    pub fn load(root: &Path, machine: &Machine) -> Result<Option<Self>, String> {
-        let at = root.join(machine.path());
+    /// `machine` with `stick`, before any run has measured it.
+    pub fn new(machine: &Machine, stick: Stick) -> Self {
+        Self {
+            vendor: machine.vendor.clone(),
+            product: machine.product.clone(),
+            bios: machine.bios.clone(),
+            stick,
+            measured: BTreeMap::new(),
+        }
+    }
+
+    /// `machine`'s record in `dir`, `None` where it has none.
+    pub fn load(dir: &Path, machine: &Machine) -> Result<Option<Self>, String> {
+        let at = dir.join(machine.file());
         let record = match Self::read(&at) {
             Ok(record) => record,
             Err(Unread::Missing) => return Ok(None),
@@ -122,10 +150,10 @@ impl Record {
         toml::from_str(&text).map_err(|e| Unread::Refused(format!("{}: {e}", at.display())))
     }
 
-    pub fn save(&self, root: &Path) -> Result<PathBuf, String> {
-        let at = root.join(path(&self.vendor, &self.product));
+    pub fn save(&self, dir: &Path) -> Result<PathBuf, String> {
+        let at = dir.join(file(&self.vendor, &self.product));
         let text = toml::to_string(self).map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(root.join(DIR)).map_err(|e| format!("{DIR}: {e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::write(&at, text).map_err(|e| format!("{}: {e}", at.display()))?;
         Ok(at)
     }
@@ -195,17 +223,7 @@ pub struct Judged {
     pub changed: bool,
 }
 
-pub fn judge(
-    machine: &Machine,
-    record: Option<Record>,
-    measured: &BTreeMap<String, Reading>,
-) -> Judged {
-    let mut record = record.unwrap_or_else(|| Record {
-        vendor: machine.vendor.clone(),
-        product: machine.product.clone(),
-        bios: machine.bios.clone(),
-        measured: BTreeMap::new(),
-    });
+pub fn judge(machine: &Machine, mut record: Record, measured: &BTreeMap<String, Reading>) -> Judged {
     let firmware = (record.bios != machine.bios)
         .then(|| Firmware { recorded: record.bios.clone(), ran: machine.bios.clone() });
     let unmeasured =
@@ -263,8 +281,13 @@ mod tests {
         pairs.iter().map(|(name, value)| ((*name).to_string(), *value)).collect()
     }
 
+    fn fresh(machine: &Machine) -> Record {
+        let stick = Stick { sectors: 60_062_500, vendor: "SanDisk".to_string(), model: "Ultra".to_string() };
+        Record::new(machine, stick)
+    }
+
     fn recorded(machine: &Machine, pairs: &[(&str, u64)]) -> Record {
-        judge(machine, None, &readings(pairs)).record
+        judge(machine, fresh(machine), &readings(pairs)).record
     }
 
     #[test]
@@ -276,7 +299,7 @@ mod tests {
         );
         let judged = judge(
             &machine,
-            Some(record.clone()),
+            record.clone(),
             &readings(&[("boot.a.complete_ms", 2332), ("boot.a.panel_max_us", 2)]),
         );
         assert_eq!(judged.over, Vec::new());
@@ -294,7 +317,7 @@ mod tests {
         );
         let judged = judge(
             &machine,
-            Some(record.clone()),
+            record.clone(),
             &readings(&[("boot.a.complete_ms", 2333), ("boot.a.panel_max_us", 3)]),
         );
         assert_eq!(
@@ -319,11 +342,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_machine_is_recorded_and_not_judged() {
+    fn a_machine_recorded_with_no_number_is_recorded_and_not_judged() {
         let machine = t14(BIOS);
         let judged = judge(
             &machine,
-            None,
+            fresh(&machine),
             &readings(&[("boot.a.complete_ms", u64::MAX)]),
         );
         assert_eq!(judged.over, Vec::new());
@@ -346,7 +369,7 @@ mod tests {
         );
         let judged = judge(
             &t14(BIOS),
-            Some(old.clone()),
+            old.clone(),
             &readings(&[("boot.a.complete_ms", 9000), ("boot.a.new_ms", 1)]),
         );
         assert_eq!(
@@ -369,7 +392,7 @@ mod tests {
         let record = recorded(&machine, &[("boot.a.complete_ms", 1166)]);
         let judged = judge(
             &machine,
-            Some(record),
+            record,
             &readings(&[
                 ("boot.a.complete_ms", 1166),
                 ("boot.usbload.panel_us", 21012),
@@ -399,7 +422,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let judged = judge(&machine, Some(record), &measured);
+        let judged = judge(&machine, record, &measured);
         assert_eq!(
             judged.over,
             vec![Over { name: "boot.a.complete_ms".to_string(), value: 2001, recorded: 1000 }]
@@ -414,7 +437,7 @@ mod tests {
     fn a_recorded_name_nothing_measured_is_named() {
         let machine = t14(BIOS);
         let record = recorded(&machine, &[("boot.a.complete_ms", 1), ("boot.b.complete_ms", 1)]);
-        let judged = judge(&machine, Some(record), &readings(&[("boot.a.complete_ms", 1)]));
+        let judged = judge(&machine, record, &readings(&[("boot.a.complete_ms", 1)]));
         assert_eq!(judged.unmeasured, vec!["boot.b.complete_ms".to_string()]);
     }
 
@@ -428,7 +451,7 @@ mod tests {
             &[("boot.a.complete_ms", 1166), ("tlb.a.p50_ns", 2258)],
         );
         let at = record.save(&root).expect("save");
-        assert_eq!(at, root.join("tests/metal/lenovo-20w0003amz.toml"));
+        assert_eq!(at, root.join("lenovo-20w0003amz.toml"));
         assert_eq!(Record::load(&root, &machine), Ok(Some(record)));
     }
 
@@ -452,33 +475,6 @@ mod tests {
         std::fs::write(&at, format!("{text}\n\"boot.a.complete_ms\" = 2\n")).expect("write");
         let why = Record::load(&root, &machine).expect_err("a second value under one name");
         assert!(why.contains("duplicate"), "{why}");
-    }
-
-    /// **Every committed record, as the next run will read it.** A hand edit
-    /// that breaks a file, or a file not at the path its own machine derives,
-    /// is red here rather than at the end of a run on the machine.
-    #[test]
-    fn every_committed_record_loads_from_its_own_path() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut read = 0;
-        for entry in std::fs::read_dir(root.join(DIR)).expect(DIR) {
-            let at = entry.expect(DIR).path();
-            let named = at.strip_prefix(root).expect("under the root").to_path_buf();
-            let record = match Record::read(&at) {
-                Ok(record) => record,
-                Err(Unread::Missing) => panic!("{} went while this read it", named.display()),
-                Err(Unread::Refused(why)) => panic!("{why}"),
-            };
-            let machine = Machine {
-                vendor: record.vendor.clone(),
-                product: record.product.clone(),
-                bios: record.bios.clone(),
-            };
-            assert_eq!(machine.path(), named, "a record is not at its machine's path");
-            assert_eq!(Record::load(root, &machine), Ok(Some(record)));
-            read += 1;
-        }
-        assert!(read > 0, "{DIR} holds no record, so this read nothing");
     }
 
     #[test]

@@ -7,6 +7,8 @@
 //! node whose file was unlinked or renamed over answers `Gone` from then on:
 //! its blocks may be another file's.
 
+use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::OnceLock;
 
 use toyos_abi::clock::nanos_since_boot;
@@ -101,6 +103,12 @@ pub trait Volume {
 
     fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError>;
 
+    /// The number of the file `path` names, without following it
+    /// (`toyos_abi::syscall::Stat::node`): the same through every path that
+    /// names it and across its renames, for as long as it exists, and never
+    /// another existing file's.
+    fn identity(&mut self, path: &str) -> Result<u64, SyscallError>;
+
     /// Up to `out.len()` bytes at `offset`, from the start of `out`; 0 at or
     /// past the end.
     fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError>;
@@ -129,6 +137,73 @@ pub trait Volume {
 
     /// One line of what the volume and its cache have done, for a log.
     fn describe(&self) -> String;
+}
+
+/// A volume's [`Volume::identity`] numbers: one per key the volume names a
+/// file by, minted on first ask from a count that never goes back, so a number
+/// is never another file's while both exist. The volume tells it every move
+/// and removal; what it holds is bounded by the files that exist.
+pub struct Identities<K> {
+    of: BTreeMap<K, u64>,
+    next: u64,
+}
+
+impl<K: Ord> Identities<K> {
+    pub fn new() -> Self {
+        // 0 is `Stat::node`'s "no file".
+        Self { of: BTreeMap::new(), next: 1 }
+    }
+
+    pub fn of(&mut self, key: K) -> u64 {
+        *self.of.entry(key).or_insert_with(|| {
+            let number = self.next;
+            self.next += 1;
+            number
+        })
+    }
+
+    /// The file at `from` is now at `to`, and whatever was at `to` is gone.
+    pub fn moved(&mut self, from: &K, to: K) {
+        let number = self.of.remove(from);
+        self.of.remove(&to);
+        if let Some(number) = number {
+            self.of.insert(to, number);
+        }
+    }
+
+    pub fn forget(&mut self, key: &K) {
+        self.of.remove(key);
+    }
+}
+
+impl<K: Ord> Default for Identities<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Identities<String> {
+    /// The directory at `from` is now at `to`, with everything beneath it.
+    pub fn moved_tree(&mut self, from: &str, to: &str) {
+        for key in self.tree(to) {
+            self.of.remove(&key);
+        }
+        for key in self.tree(from) {
+            let number = self.of.remove(&key).expect("listed by tree");
+            self.of.insert(format!("{to}{}", &key[from.len()..]), number);
+        }
+    }
+
+    /// `dir`'s key and every key beneath it.
+    fn tree(&self, dir: &str) -> Vec<String> {
+        self.of
+            .range::<str, _>((Bound::Included(dir), Bound::Unbounded))
+            .map(|(key, _)| key)
+            .take_while(|key| key.starts_with(dir))
+            .filter(|key| key.len() == dir.len() || key.as_bytes()[dir.len()] == b'/')
+            .cloned()
+            .collect()
+    }
 }
 
 /// The parent of `path`, `""` for a name at the root.
@@ -204,6 +279,51 @@ mod tests {
         assert_eq!(calls.next(), None, "the straddled call was asked again");
 
         assert_eq!(anchor(|| (1, None, 2)), None);
+    }
+
+    /// One number per key, kept across a move, never given to another key —
+    /// not after a removal, not to what a move displaced.
+    #[test]
+    fn a_number_follows_its_file_and_is_never_another_files() {
+        let mut ids = Identities::new();
+        let a = ids.of(10u64);
+        let b = ids.of(20);
+        assert_ne!(a, 0);
+        assert_ne!(a, b);
+        assert_eq!(ids.of(10), a, "asked again");
+
+        ids.moved(&10, 30);
+        assert_eq!(ids.of(30), a, "the file moved, its number with it");
+        assert_ne!(ids.of(10), a, "what is at the old key now is another file");
+
+        ids.moved(&30, 20);
+        assert_eq!(ids.of(20), a, "a move over another file takes the key");
+        ids.forget(&20);
+        let fresh = ids.of(20);
+        assert!(fresh != a && fresh != b, "a removed file's number, {fresh}, is never handed out again");
+
+        let unseen = ids.of(40);
+        ids.moved(&50, 40);
+        assert_ne!(ids.of(40), unseen, "a move from a key never asked displaces the target all the same");
+    }
+
+    /// A directory's move carries every key beneath it and nothing that only
+    /// shares its prefix, and drops what was beneath its new name.
+    #[test]
+    fn a_directory_moves_with_everything_beneath_it() {
+        let mut ids: Identities<String> = Identities::new();
+        let of = |ids: &mut Identities<String>, k: &str| ids.of(k.to_string());
+        let dir = of(&mut ids, "a");
+        let inner = of(&mut ids, "a/x/y");
+        let sibling = of(&mut ids, "a-b");
+        let stale = of(&mut ids, "c/old");
+
+        ids.moved_tree("a", "c");
+        assert_eq!(of(&mut ids, "c"), dir);
+        assert_eq!(of(&mut ids, "c/x/y"), inner);
+        assert_eq!(of(&mut ids, "a-b"), sibling, "a name that only shares the prefix stays");
+        assert!(![dir, inner, sibling, stale].contains(&of(&mut ids, "a/x/y")), "the old path is no file of before");
+        assert!(![dir, inner, sibling, stale].contains(&of(&mut ids, "c/old")), "what was under the new name went");
     }
 
     #[test]

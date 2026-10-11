@@ -453,7 +453,7 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
     }
 
     if w.refused {
-        crate::errno::set(crate::errno::EILSEQ);
+        crate::errno::set(crate::errcode::EILSEQ);
         return -1;
     }
     w.pos as i32

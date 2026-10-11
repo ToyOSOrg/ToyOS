@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use toyos_abi::syscall;
 
 use crate::alarmreq::SIGALRM;
-use crate::errno::{ECHILD, ENOSYS};
+use crate::errcode::{ECHILD, ENOSYS};
 use crate::strtonum;
 
 // Environment variables
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
             0
         }
         None => {
-            crate::errno::set(crate::errno::EINVAL);
+            crate::errno::set(crate::errcode::EINVAL);
             -1
         }
     }
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
         // and the `getpw*_r` lookups, is one ToyOS does not have.
         _SC_ARG_MAX | _SC_GETPW_R_SIZE_MAX => -1,
         _ => {
-            crate::errno::set(crate::errno::EINVAL);
+            crate::errno::set(crate::errcode::EINVAL);
             -1
         }
     }
@@ -396,8 +396,8 @@ pub unsafe extern "C" fn bsearch(
 /// refusal in `errno`.
 pub(crate) unsafe fn answer<U, T>(s: *const U, read: strtonum::Read<T>, endptr: *mut *mut U) -> T {
     match read.refused {
-        Some(strtonum::Refusal::Base) => crate::errno::set(crate::errno::EINVAL),
-        Some(strtonum::Refusal::Range) => crate::errno::set(crate::errno::ERANGE),
+        Some(strtonum::Refusal::Base) => crate::errno::set(crate::errcode::EINVAL),
+        Some(strtonum::Refusal::Range) => crate::errno::set(crate::errcode::ERANGE),
         None => {}
     }
     if !endptr.is_null() {
@@ -572,7 +572,7 @@ pub unsafe extern "C" fn dlerror() -> *const u8 {
 #[no_mangle]
 pub unsafe extern "C" fn getentropy(buffer: *mut u8, length: usize) -> i32 {
     if length > 256 {
-        crate::errno::set(crate::errno::EINVAL);
+        crate::errno::set(crate::errcode::EINVAL);
         return -1;
     }
     // Before the slice: `buffer` may be null when there is nothing to fill.
@@ -583,7 +583,7 @@ pub unsafe extern "C" fn getentropy(buffer: *mut u8, length: usize) -> i32 {
     match syscall::random(buf) {
         Ok(()) => 0,
         Err(_) => {
-            crate::errno::set(crate::errno::EIO);
+            crate::errno::set(crate::errcode::EIO);
             -1
         }
     }

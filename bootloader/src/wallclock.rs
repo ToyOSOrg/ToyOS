@@ -7,11 +7,11 @@
 use core::fmt;
 
 use toyos_wallclock::Civil;
-use uefi::prelude::*;
+use crate::efi::{Status, SystemTable};
 
 /// Why firmware gave no time.
 pub enum Refusal {
-    Failed(uefi::Status),
+    Failed(Status),
     NotADate(Civil),
 }
 
@@ -25,16 +25,16 @@ impl fmt::Display for Refusal {
 }
 
 /// Firmware's time, and [`crate::arch::counter`] as it answered.
-pub fn now(system_table: &SystemTable<Boot>) -> Result<(Civil, u64), Refusal> {
-    let time = system_table.runtime_services().get_time().map_err(|e| Refusal::Failed(e.status()))?;
+pub fn now(system_table: &SystemTable) -> Result<(Civil, u64), Refusal> {
+    let time = system_table.runtime_services().get_time().map_err(Refusal::Failed)?;
     let counter = crate::arch::counter();
     let civil = Civil {
-        year: u64::from(time.year()),
-        month: u64::from(time.month()),
-        day: u64::from(time.day()),
-        hour: u64::from(time.hour()),
-        min: u64::from(time.minute()),
-        sec: u64::from(time.second()),
+        year: u64::from(time.year),
+        month: u64::from(time.month),
+        day: u64::from(time.day),
+        hour: u64::from(time.hour),
+        min: u64::from(time.minute),
+        sec: u64::from(time.second),
     };
     if !civil.is_valid() {
         return Err(Refusal::NotADate(civil));

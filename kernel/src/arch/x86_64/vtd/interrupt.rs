@@ -35,7 +35,7 @@
 use crate::log;
 use alloc::vec::Vec;
 
-use super::super::apic::MSG_DEST;
+use super::super::apic::{narrow_destination, MSG_DEST, MSG_DEST_NARROW};
 use super::super::idt::DriverIrq;
 use crate::iommu::StreamId;
 use crate::sync::Lock;
@@ -61,9 +61,8 @@ const VECTOR_SHIFT: u64 = 16;
 const DESTINATION_SHIFT: u64 = 32;
 /// `SVT=01b` over `SQ=00b`: a message reaching this entry carries `SID` in all sixteen bits or is refused.
 const VERIFY_SOURCE_ID: u64 = 1 << 18;
-/// Without `EIME`, `DST` 47:40 holds eight bits and `0xFF` there is broadcast, not a CPU.
+/// Without `EIME`, `DST` 47:40 holds what [`narrow_destination`] makes of an id.
 const NARROW_DESTINATION_SHIFT: u64 = 8;
-const NARROW_DESTINATIONS: u32 = 0xFF;
 
 const MESSAGE_REMAPPABLE: u32 = 1 << 4;
 const MESSAGE_SUBHANDLE_VALID: u32 = 1 << 3;
@@ -123,10 +122,6 @@ static REMAP: Lock<Remap> =
 const CLAIMS: u16 = crate::pcidev::MAX_FUNCTIONS as u16;
 const _: () = assert!(crate::pcidev::MAX_FUNCTIONS < ENTRIES as usize);
 
-/// A claimed function's message reaches [`MSG_DEST`], which an entry holds with
-/// or without `EIME`, so writing a claim slot's entry is never refused.
-const _: () = assert!(MSG_DEST < NARROW_DESTINATIONS);
-
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
 }
@@ -153,11 +148,21 @@ pub fn is_armed() -> bool {
     REMAP.lock().table.is_some()
 }
 
+/// The destination an entry encodes: the whole id under `EIME`, and without it
+/// only the eight bits [`narrow_destination`] produced.
+enum Destination {
+    Extended(u32),
+    Narrow(u8),
+}
+
 /// The entry that delivers `vector` to `dest` for `source` alone: delivery mode
 /// 000b, destination mode physical and no redirection hint, which is what the
 /// compatibility message it replaces said.
-fn entry(extended: bool, source: StreamId, vector: u8, dest: u32, level: bool) -> (u64, u64) {
-    let destination = if extended { dest as u64 } else { (dest as u64) << NARROW_DESTINATION_SHIFT };
+fn entry(source: StreamId, vector: u8, dest: Destination, level: bool) -> (u64, u64) {
+    let destination = match dest {
+        Destination::Extended(id) => id as u64,
+        Destination::Narrow(id) => (id as u64) << NARROW_DESTINATION_SHIFT,
+    };
     (
         PRESENT
             | if level { TRIGGER_LEVEL } else { 0 }
@@ -196,21 +201,28 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
         let Some(table) = remap.table else {
             return Err(Refused::TableFull);
         };
-        if !remap.extended && dest >= NARROW_DESTINATIONS {
-            Err(Refused::DestinationTooWide(dest))
-        } else if remap.used == ENTRIES {
-            Err(Refused::TableFull)
+        let destination = if remap.extended {
+            Ok(Destination::Extended(dest))
         } else {
-            let index = remap.used;
-            remap.used += 1;
-            let (lo, hi) = entry(remap.extended, source, vector, dest, level);
-            table.write_pair(index as usize, lo, hi);
-            // Under the same lock as the write, so no other entry can be
-            // written between an entry and the invalidation that publishes it.
-            // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
-            // entry a fault was taken on.
-            super::invalidate_interrupt_entries();
-            Ok((index, table.read_pair(index as usize)))
+            narrow_destination(dest)
+                .map(Destination::Narrow)
+                .map_err(|_| Refused::DestinationTooWide(dest))
+        };
+        match destination {
+            Err(why) => Err(why),
+            Ok(_) if remap.used == ENTRIES => Err(Refused::TableFull),
+            Ok(destination) => {
+                let index = remap.used;
+                remap.used += 1;
+                let (lo, hi) = entry(source, vector, destination, level);
+                table.write_pair(index as usize, lo, hi);
+                // Under the same lock as the write, so no other entry can be
+                // written between an entry and the invalidation that publishes it.
+                // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
+                // entry a fault was taken on.
+                super::invalidate_interrupt_entries();
+                Ok((index, table.read_pair(index as usize)))
+            }
         }
     };
     match written {
@@ -269,7 +281,12 @@ pub fn claim(slot: usize, source: StreamId) -> Result<Msi, Refused> {
             table.read_pair(slot).0 & PRESENT == 0,
             "iommu: claim slot {slot}'s entry is still present"
         );
-        let (lo, hi) = entry(remap.extended, source, vector, MSG_DEST, false);
+        let destination = if remap.extended {
+            Destination::Extended(MSG_DEST)
+        } else {
+            Destination::Narrow(MSG_DEST_NARROW)
+        };
+        let (lo, hi) = entry(source, vector, destination, false);
         table.write_pair(slot, lo, hi);
         super::invalidate_interrupt_entries();
         (index, table.read_pair(slot))

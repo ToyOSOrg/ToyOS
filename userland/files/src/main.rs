@@ -13,7 +13,6 @@ const PATH_COLOR: Color = Color { r: 0x80, g: 0x80, b: 0x90 };
 const SCROLLBAR_TRACK: Color = Color { r: 0x25, g: 0x25, b: 0x35 };
 const SCROLLBAR_THUMB: Color = Color { r: 0x55, g: 0x55, b: 0x65 };
 
-const ICON_SIZE: usize = 32;
 const ITEM_WIDTH: usize = 80;
 const ITEM_HEIGHT: usize = 64;
 const PADDING: usize = 8;
@@ -60,10 +59,8 @@ impl FileBrowser {
         let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
         let font = font::Font::from_prebuilt(&font_data);
 
-        let folder_svg = fs::read("/system/share/icons/folder-bold.svg").expect("failed to read folder icon");
-        let file_svg = fs::read("/system/share/icons/file-bold.svg").expect("failed to read file icon");
-        let folder_icon = Sprite::from_svg_colored(&folder_svg, ICON_SIZE as u32, [0xf0, 0xc8, 0x50]);
-        let file_icon = Sprite::from_svg_colored(&file_svg, ICON_SIZE as u32, [0xd0, 0xd0, 0xd8]);
+        let folder_icon = Sprite::icon("folder-bold", [0xf0, 0xc8, 0x50]);
+        let file_icon = Sprite::icon("file-bold", [0xd0, 0xd0, 0xd8]);
 
         let current_dir = std::env::home_dir().expect("files: the supervisor starts every program with HOME");
 
@@ -167,13 +164,9 @@ impl FileBrowser {
                 self.fb.fill_rect(x, clip_y, ITEM_WIDTH, clip_h, SELECTED_BG);
             }
 
-            if y >= content_top && y + ICON_SIZE <= content_bottom {
-                let icon_x = x + (ITEM_WIDTH - ICON_SIZE) / 2;
-                let icon = if entry.is_dir {
-                    &self.folder_icon
-                } else {
-                    &self.file_icon
-                };
+            let icon = if entry.is_dir { &self.folder_icon } else { &self.file_icon };
+            if y >= content_top && y + icon.height() <= content_bottom {
+                let icon_x = x + (ITEM_WIDTH - icon.width()) / 2;
                 icon.draw(
                     self.fb.ptr(),
                     self.fb.stride(),
@@ -190,7 +183,7 @@ impl FileBrowser {
             let max_chars = ITEM_WIDTH / self.font.width();
             let name: String = entry.name.chars().take(max_chars).collect();
             let text_x = x + (ITEM_WIDTH.saturating_sub(name.len() * self.font.width())) / 2;
-            let text_y = y + ICON_SIZE + 2;
+            let text_y = y + icon.height() + 2;
             if text_y >= content_top && text_y + self.font.height() <= content_bottom {
                 self.font.draw_string(&self.fb, text_x, text_y, &name, TEXT_COLOR, text_bg);
             }

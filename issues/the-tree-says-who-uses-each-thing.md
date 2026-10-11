@@ -121,7 +121,7 @@ Cargo.toml Cargo.lock clippy.toml .cargo/config.toml             rule step 1: on
 loader/   the UEFI loader (today bootloader/)
 kernel/   CLAUDE.md; src/ pure/ loom/ sim/ pci/ gicv3/ ps2/ dma/ cpuvuln/ microcode/ (+ intel-ucode, licence)
 system/   CLAUDE.md (the server doctrine); one directory per /system/bin name:
-          supervisor compositor (desktop/ sprite/ wallpaper.jpg)
+          supervisor compositor (desktop/ sprite/)
           netstack (mdns/ dns/ and the net family) soundserver (mixer/) console diskserver
           fileserver logkeeper filepicker pkg update swap sshserver shell terminal toybox inspect host
 apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windows)
@@ -205,7 +205,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `userland/` is gone; no `apps/` package depends on a path outside `sdk/`;
    `--build-only` and the guest suite green.
 8. **Tests and images:** `images/`, `tests/images/`, `tests/machines/t14/`
-   (`src/metal*.rs`, `tests/metal/` and `tests/t14-linux/` as package
+   (`src/metal*.rs` and `tests/t14-linux/` as package
    `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
    `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
    `bootable-<stem>.img`. Blocked on

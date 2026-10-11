@@ -5,9 +5,11 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::SyscallError;
-use crate::file_cache::FileId;
+use toyos_abi::syscall::{FileType, SyscallError, MAX_LINKS, MAX_PATH};
+use crate::file_cache::{self, FileId};
+use crate::object::ops::Stat;
 use crate::sync::{Lock, LockGuard};
+use kernel::dirnodes::Directories;
 
 static VFS: Lock<Option<Vfs>> = Lock::new(None);
 
@@ -34,7 +36,13 @@ pub fn lock() -> VfsGuard {
 pub trait FileSystem: Send {
     /// Every name [`under_directory`] puts at or under `dir` (`""` is the mount
     /// root), or `ResourceExhausted` above `limit`, which counts only those.
-    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<String>, SyscallError>;
+
+    /// The number of the file or symlink `name`, not followed, as
+    /// `toyos_abi::syscall::Stat::node` says: a file's is the `FileId`
+    /// [`open_file`](Self::open_file) answers, a symlink's one drawn by
+    /// `file_cache::draw_node`; `NotFound` for anything else.
+    fn node(&mut self, name: &str) -> Result<u64, SyscallError>;
 
     /// Whether `dir` (`""` is the mount root) is a directory: a working
     /// directory is judged by this, on every spawn and `SYS_CHDIR`, under the
@@ -107,6 +115,26 @@ impl MountPoint {
             (false, false) => format!("{}/{}", self.prefix, file),
         }
     }
+
+    /// The volume its files are on, as `toyos_abi::syscall::Stat::volume`
+    /// says: its filesystem's index plus one, so 0 stays "no volume" and every
+    /// kernel mount is below a file server's bit 63.
+    fn volume(&self) -> u64 {
+        self.fs as u64 + 1
+    }
+}
+
+/// The volume `/` and every [`ROOT_ENTRIES`] name nothing is mounted at are
+/// on: the directories the VFS makes itself, below a file server's bit 63 and
+/// above every [`MountPoint::volume`].
+const NAMESPACE_VOLUME: u64 = (1 << 63) - 1;
+
+/// The node of `/` on [`NAMESPACE_VOLUME`].
+const ROOT_NODE: u64 = 1;
+
+/// The node on [`NAMESPACE_VOLUME`] of the [`ROOT_ENTRIES`] name at `slot`.
+fn namespace_node(slot: usize) -> u64 {
+    ROOT_NODE + 1 + slot as u64
 }
 
 /// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
@@ -131,10 +159,9 @@ pub struct Vfs {
     /// Each mounted filesystem once, however many names reach it.
     mounts: Vec<Mount>,
     created_dirs: BTreeSet<String>,
+    /// Every mounted directory's node, by absolute path.
+    dirs: Directories,
 }
-
-/// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
-pub const MAX_PATH: usize = 4096;
 
 /// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
@@ -184,6 +211,7 @@ impl Vfs {
             at: [const { None }; ROOT_ENTRIES.len()],
             mounts: Vec::new(),
             created_dirs: BTreeSet::new(),
+            dirs: Directories::new(),
         }
     }
 
@@ -267,21 +295,47 @@ impl Vfs {
             return Err(SyscallError::InvalidArgument);
         }
 
-        if self.created_dirs.contains(&abs) {
-            return Ok(abs);
-        }
-
         // A mount point exists whether or not anything is mounted on it; and
         // under one this kernel mounts nothing at, the directory is a file
         // server's, which the caller's client asked and this kernel cannot.
-        if Self::entry(&mount).is_some() && (subdir.is_empty() || self.point(&mount).is_none()) {
+        if Self::entry(&mount).is_some() && self.point(&mount).is_none() {
             return Ok(abs);
         }
 
-        let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
-        if fs.is_dir(&fs_path)? { Ok(abs) } else { Err(SyscallError::NotFound) }
+        if self.is_mounted_dir(&mount, &subdir)? { Ok(abs) } else { Err(SyscallError::NotFound) }
     }
 
+    /// Whether `/mount/subdir` is a directory of what is mounted at `mount`:
+    /// its root, one `mkdir` left in `created_dirs`, or one the filesystem holds.
+    fn is_mounted_dir(&mut self, mount: &str, subdir: &str) -> Result<bool, SyscallError> {
+        let Some(point) = self.point(mount) else { return Ok(false) };
+        Ok(subdir.is_empty()
+            || self.created_dirs.contains(&directory(mount, subdir))
+            || self.mounts[point.fs].fs.is_dir(&point.path(subdir))?)
+    }
+
+    /// The node of the mounted directory at the absolute `path`
+    /// ([`Directories`]), which the caller found is one; refused past
+    /// [`Directories`]'s bounds.
+    fn dir_node(&mut self, path: &str) -> Result<u64, SyscallError> {
+        self.dirs.of(path, file_cache::draw_node)
+    }
+
+    /// A name at the absolute `path` was removed or moved away: every
+    /// directory that ended with it loses its node. A mount that cannot answer
+    /// keeps the node, since forgetting a directory that stands renumbers it.
+    fn forget_ended_dirs(&mut self, path: &str) {
+        let mut dirs = core::mem::take(&mut self.dirs);
+        dirs.removed(path, |dir| {
+            let (mount, subdir) = self.resolve_path("/", dir);
+            self.is_mounted_dir(&mount, &subdir).unwrap_or(true)
+        });
+        self.dirs = dirs;
+    }
+
+    /// Each entry of the directory, a directory's name ending in `/`, and its
+    /// node, as [`Self::stat`] answers it.
+    ///
     /// `list` refuses above [`MAX_LIST_ENTRIES`] rather than truncating because a short listing is a confidently wrong answer to a caller checking existence or deleting a tree.
     pub fn list(&mut self, cwd: &str, path: &str) -> Result<Vec<(String, u64)>, SyscallError> {
         let (mount, subdir) = if path.is_empty() {
@@ -291,10 +345,18 @@ impl Vfs {
         };
 
         if mount.is_empty() {
-            return Ok(ROOT_ENTRIES.iter().map(|name| (format!("{name}/"), 0)).collect());
+            let mut entries = Vec::with_capacity(ROOT_ENTRIES.len());
+            for (slot, name) in ROOT_ENTRIES.iter().enumerate() {
+                let node = match self.point(name) {
+                    Some(_) => self.dir_node(&format!("/{name}"))?,
+                    None => namespace_node(slot),
+                };
+                entries.push((format!("{name}/"), node));
+            }
+            return Ok(entries);
         }
 
-        let Some((fs, fs_path)) = self.resolve_fs(&mount, &subdir) else {
+        let Some(point) = self.point(&mount) else {
             // A mount point with nothing mounted on it is an empty directory;
             // anything under it, and any other name, is not there at all.
             return match Self::entry(&mount) {
@@ -302,7 +364,9 @@ impl Vfs {
                 _ => Err(SyscallError::NotFound),
             };
         };
-        let all_files = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
+        let fs_path = point.path(&subdir);
+        let all_files = self.mounts[point.fs].fs.list(&fs_path, MAX_LIST_ENTRIES)?;
+        let listed = directory(&mount, &subdir);
 
         let prefix = if fs_path.is_empty() {
             String::new()
@@ -315,12 +379,12 @@ impl Vfs {
         }
 
         // Dedup only removes entries, so `matching` is a true upper bound on the final result count.
-        let matching = all_files.iter().filter(|(n, _)| under_prefix(n, &prefix).is_some()).count();
+        let matching = all_files.iter().filter(|n| under_prefix(n, &prefix).is_some()).count();
         let mut result = Vec::with_capacity(matching);
         let mut seen_dirs = BTreeSet::new();
         let mut saw_self = false;
 
-        for (name, size) in &all_files {
+        for name in &all_files {
             let Some(rest) = under_prefix(name, &prefix) else { continue };
 
             // The listed directory's own entry: proof it exists, not a child.
@@ -329,18 +393,19 @@ impl Vfs {
                 continue;
             }
             if let Some(slash_pos) = rest.find('/') {
-                let dir_name = format!("{}/", &rest[..slash_pos]);
-                if seen_dirs.insert(dir_name.clone()) {
-                    result.push((dir_name, 0));
+                let child = &rest[..slash_pos];
+                if seen_dirs.insert(format!("{child}/")) {
+                    let node = self.dir_node(&format!("{listed}/{child}"))?;
+                    result.push((format!("{child}/"), node));
                 }
             } else {
-                result.push((String::from(rest), *size));
+                result.push((String::from(rest), self.mounts[point.fs].fs.node(name)?));
             }
         }
 
         // A directory the VFS carries is its parent's entry whether or not a
         // file is under it yet.
-        let parent = format!("{}/", directory(&mount, &subdir));
+        let parent = format!("{listed}/");
         for dir in self.created_dirs.range(parent.clone()..) {
             let Some(rest) = dir.strip_prefix(parent.as_str()) else { break };
             let child = rest.split('/').next().unwrap_or(rest);
@@ -350,7 +415,7 @@ impl Vfs {
                     if result.len() == MAX_LIST_ENTRIES {
                         return Err(SyscallError::ResourceExhausted);
                     }
-                    result.push((dir_name, 0));
+                    result.push((dir_name, self.dirs.of(&format!("{parent}{child}"), file_cache::draw_node)?));
                 }
             }
         }
@@ -373,61 +438,111 @@ impl Vfs {
         if intent == ResolveIntent::UserModify && !self.user_may_modify(path) {
             return Err(SyscallError::PermissionDenied);
         }
-        let target = self.resolve_for_open_depth(path, 0)?;
+        let (mount, file) = self.followed(path)?;
+        // A mount point is a directory, never a file to open.
+        if file.is_empty() || self.point(&mount).is_none() {
+            return Err(SyscallError::NotFound);
+        }
+        let target = OpenTarget(format!("/{mount}/{file}"));
         if intent == ResolveIntent::UserModify && !self.user_may_modify(target.as_str()) {
             return Err(SyscallError::PermissionDenied);
         }
         Ok(target)
     }
 
-    fn resolve_for_open_depth(&mut self, path: &str, depth: u32) -> Result<OpenTarget, SyscallError> {
-        if depth > 10 { return Err(SyscallError::InvalidArgument); }
-        let (mount, file) = self.resolve_path("/", path);
-        // A mount point is a directory, never a file to open.
-        if file.is_empty() { return Err(SyscallError::NotFound); }
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if let Some(target) = fs.read_link(&fs_path)? {
+    /// The mount and the path under it that the absolute `path` names once
+    /// every symlink it ends in is followed, [`MAX_LINKS`] at most.
+    fn followed(&mut self, path: &str) -> Result<(String, String), SyscallError> {
+        let (mut mount, mut file) = self.resolve_path("/", path);
+        for _ in 0..=MAX_LINKS {
+            let link = match self.resolve_fs(&mount, &file) {
+                Some((fs, fs_path)) if !file.is_empty() => fs.read_link(&fs_path)?,
+                _ => None,
+            };
+            let Some(target) = link else { return Ok((mount, file)) };
             // An absolute target names the whole hierarchy; a relative one is
             // read against the mount the link is on.
-            let next = if target.starts_with('/') {
-                target
-            } else {
-                format!("/{}/{}", mount, target)
-            };
-            return self.resolve_for_open_depth(&next, depth + 1);
+            let next = if target.starts_with('/') { target } else { format!("/{mount}/{target}") };
+            (mount, file) = self.resolve_path("/", &next);
         }
-        Ok(OpenTarget(format!("/{mount}/{file}")))
+        Err(SyscallError::InvalidArgument)
     }
 
-    fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String), SyscallError> {
+    /// What the absolute `path` names, a final symlink followed when `follow`
+    /// says so, as `toyos_abi::syscall::Stat` describes it.
+    pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, SyscallError> {
+        let (mount, file) = if follow { self.followed(path)? } else { self.resolve_path("/", path) };
+        let named = |file_type: FileType, size, mtime, volume, node| {
+            Stat { file_type: file_type as u64, size, mtime, volume, node }
+        };
+        if mount.is_empty() {
+            return Ok(named(FileType::Directory, 0, 0, NAMESPACE_VOLUME, ROOT_NODE));
+        }
+        let Some(point) = self.point(&mount) else {
+            return match Self::entry(&mount) {
+                Some(slot) if file.is_empty() => {
+                    Ok(named(FileType::Directory, 0, 0, NAMESPACE_VOLUME, namespace_node(slot)))
+                }
+                _ => Err(SyscallError::NotFound),
+            };
+        };
+        let volume = point.volume();
+        if !file.is_empty() {
+            let fs_path = point.path(&file);
+            let fs = &mut self.mounts[point.fs].fs;
+            if let Some(target) = fs.read_link(&fs_path)? {
+                return Ok(named(FileType::Symlink, target.len() as u64, 0, volume, fs.node(&fs_path)?));
+            }
+            match fs.file_mtime(&fs_path) {
+                Ok(mtime) => {
+                    // A file's node is its `FileId`.
+                    let node = fs.node(&fs_path)?;
+                    return Ok(named(FileType::File, file_cache::size(node), mtime, volume, node));
+                }
+                Err(SyscallError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !self.is_mounted_dir(&mount, &file)? {
+            return Err(SyscallError::NotFound);
+        }
+        Ok(named(FileType::Directory, 0, 0, volume, self.dir_node(&directory(&mount, &file))?))
+    }
+
+    /// `target`'s filesystem, its path there, and its volume ([`MountPoint::volume`]).
+    fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String, u64), SyscallError> {
         let (mount, file) = self.resolve_path("/", target.as_str());
         if file.is_empty() { return Err(SyscallError::NotFound); }
-        self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
+        Ok((self.mounts[point.fs].fs.as_mut(), point.path(&file), point.volume()))
     }
 
-    pub fn open_target(&mut self, target: &OpenTarget) -> Result<FileId, SyscallError> {
-        let (fs, fs_path) = self.fs_for_target(target)?;
+    /// The file `target` names, and the volume it is on.
+    pub fn open_target(&mut self, target: &OpenTarget) -> Result<(FileId, u64), SyscallError> {
+        let (fs, fs_path, volume) = self.fs_for_target(target)?;
         let (file_id, backing) = fs.open_file(&fs_path)?;
         if let Some(backing) = backing {
             crate::file_cache::set_backing(file_id, backing);
         }
-        Ok(file_id)
+        Ok((file_id, volume))
     }
 
     pub fn mtime_target(&mut self, target: &OpenTarget) -> Result<u64, SyscallError> {
-        let (fs, fs_path) = self.fs_for_target(target)?;
+        let (fs, fs_path, _) = self.fs_for_target(target)?;
         fs.file_mtime(&fs_path)
     }
 
-    /// Create a new empty file. Returns FileId.
-    pub fn create_file(&mut self, path: &str, mtime: u64) -> Result<FileId, SyscallError> {
+    /// Create a new empty file: it, and the volume it is on.
+    pub fn create_file(&mut self, path: &str, mtime: u64) -> Result<(FileId, u64), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
         if file.is_empty() { return Err(SyscallError::InvalidArgument); }
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        fs.create(&fs_path, mtime)
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
+        let file_id = self.mounts[point.fs].fs.create(&point.path(&file), mtime)?;
+        Ok((file_id, point.volume()))
     }
 
-    /// Unlink `path` on its mount.
+    /// Unlink `path` on its mount, every directory keeping its node: for a
+    /// caller that puts a file back at once (`ops::open`'s truncate).
     pub fn delete_file(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
         if file.is_empty() { return Err(SyscallError::InvalidArgument); }
@@ -442,7 +557,9 @@ impl Vfs {
         if old_mount != new_mount { return Err(SyscallError::NotSupported); }
         let point = self.point(&old_mount).ok_or(SyscallError::NotFound)?;
         let (old_fs_path, new_fs_path) = (point.path(&old_file), point.path(&new_file));
-        self.mounts[point.fs].fs.rename(&old_fs_path, &new_fs_path)
+        self.mounts[point.fs].fs.rename(&old_fs_path, &new_fs_path)?;
+        self.forget_ended_dirs(&directory(&old_mount, &old_file));
+        Ok(())
     }
 
     /// The `Result` is as much the point as the bound: a caller that discards it and reports success anyway turns the bound into a silent failure.
@@ -474,6 +591,12 @@ impl Vfs {
     /// the point, as in [`Self::create_dir`]. A mount root, a missing name, a
     /// file, and a non-empty directory are each refused, not reported as removed.
     pub fn remove_dir(&mut self, path: &str) -> Result<(), SyscallError> {
+        self.remove_empty_dir(path)?;
+        self.forget_ended_dirs(&normalize(path));
+        Ok(())
+    }
+
+    fn remove_empty_dir(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, subdir) = self.resolve_path("/", path);
         // A mount point (and `/`) is not a directory a caller may remove.
         if subdir.is_empty() {
@@ -499,10 +622,10 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
         let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
         let child_prefix = format!("{fs_path}/");
-        let is_file = names.iter().any(|(n, _)| *n == fs_path);
+        let is_file = names.contains(&fs_path);
         // A listing mount's own `name/` self-entry is not a child, or every empty directory reads non-empty.
         let has_file_child =
-            names.iter().any(|(n, _)| n.starts_with(&child_prefix) && *n != child_prefix);
+            names.iter().any(|n| n.starts_with(&child_prefix) && *n != child_prefix);
 
         // The name resolves to a file, not a directory.
         if is_file {
@@ -539,8 +662,11 @@ impl Vfs {
         fs.read_link(&fs_path)
     }
 
+    /// Unlink `path`, and forget the node of every directory that ended with it.
     pub fn delete(&mut self, path: &str) -> Result<(), SyscallError> {
-        self.delete_file(path)
+        self.delete_file(path)?;
+        self.forget_ended_dirs(&normalize(path));
+        Ok(())
     }
 
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
@@ -554,7 +680,7 @@ impl Vfs {
         path: &str,
     ) -> Result<(alloc::sync::Arc<dyn crate::file_backing::FileBacking>, BackingId), SyscallError> {
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
-        let (fs, fs_path) = self.fs_for_target(&target)?;
+        let (fs, fs_path, _) = self.fs_for_target(&target)?;
         let mtime = fs.file_mtime(&fs_path)?;
         let backing = fs.open_backing(&fs_path)?;
         let id = BackingId { size: backing.file_size(), mtime };

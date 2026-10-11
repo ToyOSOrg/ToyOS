@@ -12,46 +12,13 @@
 //! the reason [`toyos_abi::boot::KernelArgs::root_bridge_windows`] states: a
 //! list missing one window is worse than no list.
 
-use core::ffi::c_void;
 use core::ptr::read_volatile;
 
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{memory_windows, Phys, MAX_LIST_BYTES};
-use uefi::prelude::*;
-use uefi::proto::unsafe_protocol;
+use crate::efi::{PciRootBridgeIo, Status, SystemTable};
 
 const HEAD: &str = "Root bridge:";
-
-/// UEFI 2.10 §14.2.2, in the spec's own field order.
-#[repr(C)]
-#[unsafe_protocol("2f707ebb-4a1a-11d4-9a38-0090273fc14d")]
-struct PciRootBridgeIo {
-    parent_handle: *mut c_void,
-    poll_mem: *mut c_void,
-    poll_io: *mut c_void,
-    mem_read: *mut c_void,
-    mem_write: *mut c_void,
-    io_read: *mut c_void,
-    io_write: *mut c_void,
-    pci_read: *mut c_void,
-    pci_write: *mut c_void,
-    copy_mem: *mut c_void,
-    map: *mut c_void,
-    unmap: *mut c_void,
-    allocate_buffer: *mut c_void,
-    free_buffer: *mut c_void,
-    flush: *mut c_void,
-    get_attributes: *mut c_void,
-    set_attributes: *mut c_void,
-    configuration:
-        unsafe extern "efiapi" fn(this: *const PciRootBridgeIo, resources: *mut *const c_void)
-            -> Status,
-    segment_number: u32,
-}
-
-/// A field added or dropped above moves `configuration`, and the symptom is
-/// firmware calling something else.
-const _: () = assert!(core::mem::size_of::<PciRootBridgeIo>() == 18 * 8 + 8);
 
 /// The descriptor list firmware answered with.
 ///
@@ -79,9 +46,9 @@ impl Phys for List {
 
 /// Every memory window this machine's root bridges decode, written into `out`;
 /// the count, or zero on a machine that would not say.
-pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -> usize {
+pub fn windows(system_table: &SystemTable, out: &mut [RootBridgeWindow]) -> usize {
     let bs = system_table.boot_services();
-    let handles = match bs.find_handles::<PciRootBridgeIo>() {
+    let handles = match bs.handles::<PciRootBridgeIo>() {
         Ok(handles) => handles,
         Err(e) => {
             println!("{HEAD} no handle carries the PCI Root Bridge I/O protocol ({e}), so the kernel is handed no window");
@@ -91,7 +58,7 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
 
     let mut found = 0usize;
     for (index, handle) in handles.iter().enumerate() {
-        let bridge = match crate::protocol::get::<PciRootBridgeIo>(bs, *handle) {
+        let bridge = match bs.get::<PciRootBridgeIo>(*handle) {
             Ok(bridge) => bridge,
             Err(e) => {
                 println!("{HEAD} handle {index} would not open ({e}), so the kernel is handed no window");
@@ -99,19 +66,15 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
             }
         };
 
-        let mut resources: *const c_void = core::ptr::null();
-        let this: *const PciRootBridgeIo = &*bridge;
-        // SAFETY: `this` is the protocol firmware installed on this handle and
-        // the call is the spec's — one out parameter, which firmware fills with
-        // a pointer it owns and this loader only reads.
-        let status = unsafe { (bridge.configuration)(this, &mut resources) };
-        if !status.is_success() || resources.is_null() {
+        let answer = bridge.configuration();
+        let Some(&resources) = answer.as_ref().ok().filter(|resources| !resources.is_null()) else {
             println!(
-                "{HEAD} {index} (segment {}) answered {status:?} to Configuration(), so the kernel is handed no window",
-                bridge.segment_number
+                "{HEAD} {index} (segment {}) answered {:?} to Configuration(), so the kernel is handed no window",
+                bridge.segment_number,
+                answer.err().unwrap_or(Status::SUCCESS),
             );
             return 0;
-        }
+        };
 
         let list = List { at: resources as u64 };
         match memory_windows(list, list.at, &mut out[found..]) {
