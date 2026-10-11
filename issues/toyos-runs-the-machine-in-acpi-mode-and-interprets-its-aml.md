@@ -18,7 +18,7 @@ the walk's `_HID`, `_STA`, `_CRS` and `_GPE`, the embedded controller's
 method device, and the batteries' and AC adapters' `_STA`, `_BIX` or
 `_BIF`, `_BST` and `_PSR`. What else
 ToyOS takes from them it takes another way: the loader asks UEFI for the root
-bridges' windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing
+bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). Nothing
 reads `_CST`, which names a CPU's C-states.
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the

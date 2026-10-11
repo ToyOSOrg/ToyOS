@@ -17,7 +17,7 @@ Five stages each owe a gate over `kernel.elf`'s instructions:
 The five share one x86-64 decoder, in Rust in the tree and run by the host
 gate, with no external disassembler: it lands before any of them, and each adds
 its own check over it rather than a decoder of its own. It takes its functions
-from `toyos_symbols::locate` over `toyos_elf` (`src/build.rs:1575-1598`), not
+from `toyos_symbols::locate` over `toyos_elf` (`build/build.rs:1575-1598`), not
 from a second ELF reader. `global_asm!` emits no `.type` or `.size`, so code
 such as the AP trampoline (`kernel/src/arch/x86_64/smp.rs:396`), in `.text`
 with a `jmp far [mem]` and a `retf`, is covered by no sized function.

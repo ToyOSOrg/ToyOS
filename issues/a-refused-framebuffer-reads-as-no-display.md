@@ -26,7 +26,7 @@ GOP: 1280x800 stride=1280 format=1 fb=0xc0000000 size=4096000
 
 The first two kernel lines are identical. The only thing that separates them is
 the bootloader's line above the second — printed by `query_gop`
-(`bootloader/src/main.rs`) on whatever console firmware left behind, which a
+(`loader/src/main.rs`) on whatever console firmware left behind, which a
 metal-sim boot with `mute: true` and the T14 itself do not have. Nothing reaches
 the kernel, so nothing reaches `/log`, the panel, or a crash report.
 

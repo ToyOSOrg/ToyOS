@@ -7,7 +7,7 @@ opened: 2026-09-07
 # The word a metal verdict turns on is spelled twice, and neither speller reads the other
 
 `kernel/src/syscall/machine.rs:86` writes `quiesce("Rebooting.")` and
-`src/bootlog.rs:15` declares `REBOOTING: &str = "Rebooting."` as the last line a
+`build/bootlog.rs:15` declares `REBOOTING: &str = "Rebooting."` as the last line a
 passing boot must leave. Two literals, no shared declaration: reword the
 kernel's and every metal run refuses with `the log's last line is … and not
 "Rebooting."` while the kernel is behaving exactly as intended.
@@ -18,5 +18,5 @@ the same cause: the only crate a `no_std` kernel and a host build crate both
 read is `toyos-abi`.
 
 **Exit condition**: the word declared once in `toyos-abi` and named by both
-`quiesce` and `src/bootlog.rs`, so `git grep '"Rebooting\.'` returns the one
+`quiesce` and `build/bootlog.rs`, so `git grep '"Rebooting\.'` returns the one
 declaration. It is an ABI change and lands on its own single-commit branch.

@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # A compiler fixture's git commit could not create a temporary file
 
-`src/compiler.rs`'s `estate` fixture, which
+`build/compiler.rs`'s `estate` fixture, which
 `one_compiler_per_key_whichever_checkout_names_it` and every other compiler
 and LLVM test build on, failed under a test since deleted in 1 of 200 full
 runs of the toyos-build lib test binary at `e3a1cdc8`. Those runs went beside a `cargo test --workspace --exclude

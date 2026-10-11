@@ -17,7 +17,7 @@ public carries them unless whoever pastes it masks them by hand:
 - the resolvers the lease named, which on the bench are the provider's public
   ones: `system/netstack/src/main.rs`, `Leases::pass`.
 
-`src/sourcegate.rs` reads tracked files only. A pull request's body, a comment
+`build/sourcegate.rs` reads tracked files only. A pull request's body, a comment
 and a commit message are read by nothing before they are public.
 
 ## The question

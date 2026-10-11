@@ -17,7 +17,7 @@ Tiers 2 to 4 are programs, not crates: a tier holds every crate of this tree
 its programs link, and a crate in two tiers is held to the stricter. The loader
 is tier 2. A system service is a program any shipped mode's config marks
 `service = true`, as `build::shipped` reads the modes, or whose manifest
-declares `exempt.owns`, as `src/userlandhost.rs` reads it. Every other shipped
+declares `exempt.owns`, as `build/userlandhost.rs` reads it. Every other shipped
 program is an app, `toybox`, `terminal` and the `exempt.manages` tools included.
 
 **The set**, all `clippy::`: `indexing_slicing`, `string_slice`,
@@ -43,8 +43,8 @@ amount, `pow`, `abs`, a standard function it does not name or a callee's panic.
    `cargo run -- --ci host` whose host build refuses to link an entry point
    with a panicking path, or a `rejected` issue with the measurement.
 3. The kernel and the loader, one module at a time. The stage ends when
-   `kernel/src/main.rs`, `bootloader/src/main.rs` and every crate of this tree
-   `kernel/Cargo.toml` or `bootloader/Cargo.toml` links, unless stage 1
+   `kernel/src/main.rs`, `loader/src/main.rs` and every crate of this tree
+   `kernel/Cargo.toml` or `loader/Cargo.toml` links, unless stage 1
    already forbids the set in it, deny the set and forbid
    `clippy::allow_attributes` and `clippy::allow_attributes_without_reason`
    under `--clippy`, and a step of `--ci host` refuses an inner `#![allow]`
@@ -53,7 +53,7 @@ amount, `pow`, `abs`, a standard function it does not name or a callee's panic.
    operators it nests: `x * x + y * y - 1` is one finding, so one `#[expect]`
    covers its four overflows.
 4. The system services, once `issues/userland-programs-are-never-linted.md`
-   has put userland in `src/clippy.rs`. The stage ends when every crate of this
+   has put userland in `build/clippy.rs`. The stage ends when every crate of this
    tree a service links by a normal edge, whatever its `cfg`, its own and
    `toyos` included, unless stage 1 already forbids the set in it, is linted
    by `--clippy` under stage 3's attributes and passes stage 3's step, and the

@@ -11,7 +11,7 @@ own.
 
 The `rust` gitlink becomes a pinned commit in a file, and a worktree that does
 not edit the fork holds no checkout of it. The host's store
-(`src/keystore.rs`) and every compiler in it came first; a worktree still
+(`build/keystore.rs`) and every compiler in it came first; a worktree still
 makes a fork checkout, 61,627 files and 399 MB as an export, to read its keys from, and still builds std in
 it.
 

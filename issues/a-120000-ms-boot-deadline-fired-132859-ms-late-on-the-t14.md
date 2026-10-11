@@ -33,7 +33,7 @@ empty) — did not come back inside the loop's 420 s, and its own kernel log
 never reached the stick, so its print of the two lines is inferred from
 `start` and not read. Its `WEDGED` record was read by run 56's loader pass:
 a pass that printed the record and ended the chain without booting a kernel
-(`bootloader/src/blackbox.rs:149-154`, `bootloader/src/main.rs:857-860`), so
+(`loader/src/blackbox.rs:149-154`, `loader/src/main.rs:857-860`), so
 that the machine came back to Ubuntu after 100 s and the loop read the
 stick's `loader.log`, which reads, whole above the ring tail:
 
@@ -113,7 +113,7 @@ whichever process last died before it.
 ## The instrument that measures this already exists
 
 `tests/metal/src/lib.rs`'s `deadline_lateness_ms` computes exactly
-`reached − bound` out of the `DEADLINE_EXPIRED` line (`src/bootlog.rs:28`).
+`reached − bound` out of the `DEADLINE_EXPIRED` line (`build/bootlog.rs:28`).
 The arithmetic above is the instrument's own, done by hand because the run
 was `toyos-metal` invoked directly and not the harness. No second instrument
 is owed; a cause is.

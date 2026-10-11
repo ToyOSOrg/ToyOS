@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # A userland test in a `src/` file no module reaches runs nowhere and still reads as gated
 
-`src/userlandhost.rs` gates a userland crate by reading its `src/` and `tests/`
+`build/userlandhost.rs` gates a userland crate by reading its `src/` and `tests/`
 for test attributes. A file under `src/` that no `mod` declaration reaches is
 never compiled, so a test in it runs in no `cargo test`, and the survey
 counts its crate as gated all the same. The merge gate is green over a test

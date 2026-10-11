@@ -22,7 +22,7 @@ heads:
   `idt/exceptions.rs` with `paging.rs`, and `object/ops.rs`, each restored
   before the next. Pull request #592 carries the patches and their order.
 - At `b00d9a589`, built into two empty target directories by the cargo line
-  `src/build.rs` runs for it: 3514808 bytes and sha256
+  `build/build.rs` runs for it: 3514808 bytes and sha256
   `cb95d0d34ac99148584083e21cbb09edc299e5a94168e8ca71a9d7ef3db8a37b` from
   each, where the kernel the worktree's own `kernel/target` had last built was
   still `2593c71c…`.

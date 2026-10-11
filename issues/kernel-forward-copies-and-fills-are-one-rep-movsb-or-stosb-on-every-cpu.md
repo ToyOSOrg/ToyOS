@@ -14,8 +14,8 @@ or `rep stosb` only when built with the `ermsb` target feature
 either way. The kernel links the sysroot's `compiler_builtins`, which no kernel
 build flag recompiles: the feature is `rustflags = ["-Ctarget-feature=+ermsb"]`
 under `[target.x86_64-unknown-none]` in the std build's `bootstrap.toml`
-(`std_config`, `src/sysroot.rs:522`; bootstrap's `core/config/toml/target.rs:41`),
-and it moves the sysroot key (`RECIPE`, `src/sysroot.rs:65`). One path on every
+(`std_config`, `build/sysroot.rs:522`; bootstrap's `core/config/toml/target.rs:41`),
+and it moves the sysroot key (`RECIPE`, `build/sysroot.rs:65`). One path on every
 CPU: `rep movsb` is correct without ERMS, CPUID.(7,0):EBX bit 9, and no CPU is
 refused. Zen 2 lacks ERMS (a Ryzen 9 PRO 3900, family 0x17, reads EBX
 0x219C91A9: InstLatx64 ddff8a92,

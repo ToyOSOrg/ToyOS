@@ -8,7 +8,7 @@ opened: 2026-09-29
 
 The direct map sits at the constant `PHYS_OFFSET`
 (`kernel/src/mm/mod.rs:33`) and the kernel image in it at the physical
-address firmware allocated (`bootloader/src/arch/x86_64.rs:90`), so nothing
+address firmware allocated (`loader/src/arch/x86_64.rs:90`), so nothing
 but firmware moves the kernel's layout. Linux at `Ubuntu-6.8.0-142.142` builds
 with `RANDOMIZE_BASE` and `RANDOMIZE_MEMORY`
 (`debian.master/config/annotations:10674,10677`): at most 9 bits of text slot,

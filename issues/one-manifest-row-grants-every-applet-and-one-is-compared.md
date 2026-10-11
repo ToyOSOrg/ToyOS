@@ -64,7 +64,7 @@ the same landing: a red after that fix is this checker's and not the fix's.
 the shape.** A checker that reimplements init's resolver agrees with init by
 construction. The two sides above come from different places — the links off the
 image, the rows off the rendered manifest, the policy from a table nothing in
-the build wrote. Nothing in `src/build.rs` does this either: its manifest gates
+the build wrote. Nothing in `build/build.rs` does this either: its manifest gates
 check the manifest's internal consistency and say nothing about per-applet
 effective authority.
 

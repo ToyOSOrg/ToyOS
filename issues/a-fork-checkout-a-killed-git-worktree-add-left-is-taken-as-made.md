@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # A fork checkout a killed `git worktree add` left is taken as made
 
-`sysroot::fork_checkout` (`src/sysroot.rs`) takes a linked worktree's `rust/` as
+`sysroot::fork_checkout` (`build/sysroot.rs`) takes a linked worktree's `rust/` as
 made where `rust/.git` exists and `HEAD` is the pinned commit or ahead of it. A
 `git worktree add` killed while it writes its files leaves both, so every build
 after it is handed a checkout with files missing. Git records the state itself:
@@ -33,7 +33,7 @@ lock, and `git worktree remove --force --force` exits 255 on
 
 ## Read, not measured
 
-Both measurements kill git. The kill `src/buildlock.rs`'s header calls routine
+Both measurements kill git. The kill `build/buildlock.rs`'s header calls routine
 is the builder's alone. Then the kernel frees the worktree's lock at once, and
 `git worktree add` goes on writing: it is the builder's child and holds no
 descriptor of the lock, `git_run` being `Command::status` and the lock file

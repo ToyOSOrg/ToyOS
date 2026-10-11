@@ -6,13 +6,13 @@ opened: 2026-10-03
 
 # The kernel's libc test reads the host compiler's `cfg`, not the fork's that builds the kernel
 
-`build::tests::the_kernel_resolves_no_libc_for_either_target` (`src/build.rs`)
+`build::tests::the_kernel_resolves_no_libc_for_either_target` (`build/build.rs`)
 runs `cargo tree --target <t>` for each kernel target with whatever `cargo`
 and `rustc` the host gate runs: the host's default, stable on CI, whose host
-job installs no ToyOS toolchain (`src/ci.rs`'s `host`). Cargo decides each
+job installs no ToyOS toolchain (`build/ci.rs`'s `host`). Cargo decides each
 target-gated edge against that compiler's `rustc --print cfg`. The kernel
 builds with the fork, whose `cfg` for the kernel targets only
-`assert_kernel_is_softfloat` (`src/build.rs`) asks.
+`assert_kernel_is_softfloat` (`build/build.rs`) asks.
 
 The two answers differ. `rustc --print cfg --target <t>`, stable `1.98.1`
 against the fork's `1.99.0-dev`, every run exiting 0: on both

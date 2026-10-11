@@ -261,8 +261,8 @@ caller exists.
 ## 10. How is device authority delegated? — COMMITTED
 
 Four sites, and they cannot disagree. `system.toml` declares `devices` per
-program; `src/build.rs:1923` refuses a config where two programs name one class
-and `src/build.rs:1953` refuses a class the ABI does not have, so arbitration is
+program; `build/build.rs:1923` refuses a config where two programs name one class
+and `build/build.rs:1953` refuses a class the ABI does not have, so arbitration is
 a build-time fact rather than a runtime race. At boot the kernel mints one
 full-rights `SysCap` for `/system/bin/init` and nothing else can construct one
 (`kernel/src/loader/mod.rs:938`). init reads the manifest and calls

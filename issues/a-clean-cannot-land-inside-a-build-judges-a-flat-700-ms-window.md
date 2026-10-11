@@ -6,7 +6,7 @@ opened: 2026-10-01
 
 # `a_clean_cannot_land_inside_a_build` judges a flat 700 ms window
 
-`src/buildlock.rs`'s `clean_racing_a_build` touches `builder-mid` and then
+`build/buildlock.rs`'s `clean_racing_a_build` touches `builder-mid` and then
 reads whether the cleaner child wrote `cleaner-done` within a flat 700 ms
 (`appeared(&root.join("cleaner-done"), Duration::from_millis(700))`).
 

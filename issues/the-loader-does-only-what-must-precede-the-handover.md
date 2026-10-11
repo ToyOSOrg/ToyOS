@@ -22,8 +22,8 @@ PR #539 does not land. Its pieces:
 - stage 2 takes `toyos_update::entry::partition` and its two host tests;
 - stage 5 takes the rest of `toyos_update::entry` and its host tests;
   `slots::Request` with its once slot and its boot-order word;
-  `bootloader/src/request.rs`, which takes a request off the table before
-  acting on it; `bootloader/src/bootvars.rs`' own entry and `BootOrder`
+  `loader/src/request.rs`, which takes a request off the table before
+  acting on it; `loader/src/bootvars.rs`' own entry and `BootOrder`
   write, with `arch::REMOVABLE_PATH`, the file that entry names;
   `update --boot-first`, `update --once` and
   `update_boot_first_puts_the_loader_first`, which also takes
@@ -32,11 +32,11 @@ PR #539 does not land. Its pieces:
   rewritten for priorities;
 - stage 6 takes the bench: `src/metalbench.rs`, `tests/common/bench.rs`,
   `tests/bench*case`, `--bench-image` with `build::bench_image`,
-  `src/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
+  `build/image.rs`' `update_of`, `tests/common/metal.rs`' `Reach`, `stage` and
   bench `invocation`, `--metal-via-ubuntu`, toybox `date`, `Ssh::probe` and
   `Ssh::fetch` with the ssh client's `probe` and `fetch` (the client is
   deleted, `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`),
-  `build::AUTHORIZED_ON_ROOT`, and `src/bootlog.rs`' `LOADER_PREVIOUS_LOG`,
+  `build::AUTHORIZED_ON_ROOT`, and `build/bootlog.rs`' `LOADER_PREVIOUS_LOG`,
   `MOUNTED_FROM_MEMORY` and `BOOT_PARAMETER`;
 - deleted: `update --boot-next <esp>` with `slots::Next::Esp`, `Guid::parse`,
   `bootvars.rs`' `BootNext` and entry-after-its-own writes, and
@@ -72,7 +72,7 @@ Each stage lands on its own, in this order.
    - The loader's TCO arm stays until stage 8.
    - This stage is an ABI change.
 
-   **Exit**: the loader applies no zone, and `bootloader/src` holds no
+   **Exit**: the loader applies no zone, and `loader/src` holds no
    `counter_origin`. `wall_clock_utc` stages a firmware zone of −120 minutes
    in PcRtc's `RTC` variable. It judges the log file's name, its FAT stamp,
    the probe's `realtime=` and `SYS_CLOCK_EPOCH` against the `-rtc base=`
@@ -93,13 +93,13 @@ Each stage lands on its own, in this order.
      partition and the attempts file on it) is found on the boot disk, where
      exactly one match is taken. `loaderlog::volume_handle`'s machine-wide
      first match goes. Every stick written from one image carries the same
-     unique GUIDs: `src/image.rs`'s `create_boot_image` draws them once per
+     unique GUIDs: `build/image.rs`'s `create_boot_image` draws them once per
      image.
    - A pass asks firmware once: one `LoadedImage` open, one device-path walk,
      one `Disk::open` and slot-table read, and one file reader.
      `load_file_bytes`, `MAX_ESP_FILE` and the unsound `alloc_uninit` go.
 
-   **Exit**: `rg 'fn gpt_signature|fn parse' bootloader/src/{bootnext.rs,efi/proto.rs}`
+   **Exit**: `rg 'fn gpt_signature|fn parse' loader/src/{bootnext.rs,efi/proto.rs}`
    finds nothing. `a_path_names_the_partition_of_its_one_hard_drive_node` and
    `a_partitions_disk_is_the_path_before_its_hard_drive_node` pass on the host,
    and fail under two mutations: cutting the disk before the path's last node,
@@ -188,9 +188,9 @@ Each stage lands on its own, in this order.
    - `toyos-update`'s slot table takes `toyos-gpt`'s CRC32 and loses its own.
 
    **Exit**: `loader_panic_powers_off` plants this key's floor in 9 bytes. It finds the
-   handler's `loader: panicked at bootloader/src/` line in `loader.log`, which
+   handler's `loader: panicked at loader/src/` line in `loader.log`, which
    no other code writes, and QEMU reports `guest-shutdown`. It fails under
-   the handler `bootloader/src/efi/mod.rs` holds before this stage, which
+   the handler `loader/src/efi/mod.rs` holds before this stage, which
    writes no `loader.log`.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
@@ -364,7 +364,7 @@ Each stage lands on its own, in this order.
    old one booting.
 
 7. **Ubuntu leaves the loop.** Delete `toyos-metal`'s `--via-ubuntu` path,
-   `--metal-via-ubuntu`, `bootloader/src/bootnext.rs` and test-runner's
+   `--metal-via-ubuntu`, `loader/src/bootnext.rs` and test-runner's
    job-list mode. After a reset the firmware comes back to the loader because
    ToyOS's entry is first (stage 5).
    - `issues/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
@@ -382,7 +382,7 @@ Each stage lands on its own, in this order.
    through `mm::init`, ACPI, interrupts, HPET calibration, the RTC read, PCI
    enumeration, `pcidev::publish` and `iommu::init`.
    - The kernel arms as its first act, before `mm::init`: `toyos_acpi::ecam_base`
-     and the bus-0 scan `bootloader/src/watchdog.rs` does, through a boot map
+     and the bus-0 scan `loader/src/watchdog.rs` does, through a boot map
      that maps bus 0's ECAM window. What stays unbounded is the loader's code
      from `ExitBootServices` to the jump.
    - The first feed comes a whole early boot after the arm. The kernel logs
@@ -393,13 +393,13 @@ Each stage lands on its own, in this order.
      `TCO_RLD` at the arm and at the first feed (the counting read, with no
      stall), `TCO1_STS`, and `no_reboot`, `tco_lock` and `timeout`. That issue's
      exit reads the kernel's log in place of `loader.log`.
-   - Deleted: `bootloader/src/watchdog.rs`, `arch::pio`, the kernel's
+   - Deleted: `loader/src/watchdog.rs`, `arch::pio`, the kernel's
      on-arrival read with `ARMED_ON_ARRIVAL` and `UNARMED_ON_ARRIVAL`, and
      `tests/common/power.rs`' `loader_armed`, `armed_on_arrival` and
      `watchdog_quiet`'s loader half. `watchdog_armed` judges the kernel's
      read-back, and `loader_watchdog_arms` becomes the kernel's row.
 
-   **Exit**: `bootloader/src` holds no TCO access. On the T14, `watchdog_armed`
+   **Exit**: `loader/src` holds no TCO access. On the T14, `watchdog_armed`
    passes on the kernel's lines (counting, `no_reboot=0`, `timeout=0`). Once
    the reading of
    `issues/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` has
@@ -416,7 +416,7 @@ Each stage lands on its own, in this order.
      `DROPPED_OPENS_WITH`'s count.
    - The report pass goes, taking with it `end_this_pass`, the chain
      constants, `loaderlog`'s chain lines, `armed_at`'s `GetTime`, everything
-     else in `bootloader/src/blackbox.rs` except the claim and the arm.
+     else in `loader/src/blackbox.rs` except the claim and the arm.
    - `ENDS_AT_CHAIN` goes, so this stage rewrites the exit of
      `issues/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`:
      a `deadlinewedge` rerun whose `/log` carries the `WEDGED` report with its

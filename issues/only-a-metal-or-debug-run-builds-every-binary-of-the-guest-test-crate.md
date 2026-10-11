@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # Only a metal or debug run builds every binary of the guest test crate
 
-`build_toyos_bins` (`src/build.rs`) is the one build of every binary under
+`build_toyos_bins` (`build/build.rs`) is the one build of every binary under
 `tests/guest/rust-tests/src/bin`. It is reached only through
 `build_shared_bins` (`tests/toyos.rs`), which runs only under `--metal` and
 `--debug`, and no workflow passes either flag. The guest suite builds two of the crate's binaries, each

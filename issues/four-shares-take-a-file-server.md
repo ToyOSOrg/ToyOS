@@ -40,7 +40,7 @@ that does exactly that.
 
 ## Every remote login shares the session of the shell that started sshserver
 
-No shipped image starts sshserver at boot (`src/build.rs`,
+No shipped image starts sshserver at boot (`build/build.rs`,
 `no_shipped_boot_config_starts_sshserver`), so on a shipped machine it is
 detached from a desktop shell and runs in that shell's login session. Its
 `login` row opens no session there, so every remote login's programs spend

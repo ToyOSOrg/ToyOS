@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # The committed-binary gate skips a tracked path it cannot read
 
-`src/sourcegate.rs`'s `every_committed_binary_file_is_declared` takes every
+`build/sourcegate.rs`'s `every_committed_binary_file_is_declared` takes every
 path `git ls-files` names and skips one that will not read, at `:747`:
 `let Ok(bytes) = std::fs::read(root.join(name)) else { continue }`. Its claim
 is that every committed file somebody had to judge is judged, and a path it

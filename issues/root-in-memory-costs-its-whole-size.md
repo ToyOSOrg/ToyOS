@@ -7,9 +7,9 @@ opened: 2026-09-25
 # ROOT in memory costs its whole filesystem, in RAM and in a read every boot
 
 The loader reads ROOT's filesystem whole, the extent its superblock states
-(`bootloader/src/rootimage.rs`), and the kernel keeps it for the machine's
+(`loader/src/rootimage.rs`), and the kernel keeps it for the machine's
 life. `Superblock::check` holds that extent equal to the partition, and
-`src/image.rs` builds the volume at the blocks its contents use, rounded up to
+`build/image.rs` builds the volume at the blocks its contents use, rounded up to
 the 1 MiB partition alignment, so what is read and kept is what ROOT carries.
 The cost is the payload.
 

@@ -6,8 +6,8 @@ opened: 2026-10-07
 
 # The SDK is linted by no clippy run
 
-`toyos` is a workspace member that no shape in `src/clippy.rs` builds:
-`src/hostws.rs` counts it among the members built for a guest, so the
+`toyos` is a workspace member that no shape in `build/clippy.rs` builds:
+`build/hostws.rs` counts it among the members built for a guest, so the
 workspace shapes exclude it, and it has no shape of its own. `--ci host`
 tests it and lints none of it.
 
@@ -19,6 +19,6 @@ disallowed `core::mem::forget`, and one byte-string literal in a test.
 
 Each fix edits `sdk/toyos/src`, which is one of a sysroot's sources.
 
-Owner: the build system (`src/clippy.rs`, `src/hostws.rs`).
+Owner: the build system (`build/clippy.rs`, `build/hostws.rs`).
 
 Exit: a shape lints `toyos` for the host, and it is clean.

@@ -14,8 +14,8 @@ and the gates that held them go.
   reading cannot (runtime behaviour, bytes, measurements), moved into a prompt
   where a reviewer can read it, or deleted. Exit: each one's verdict is applied.
 - The toolchain is content-addressed by the four trees that produce it, one
-  directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
-  and `src/keystore.rs` go. The locks are made unnecessary rather than written
+  directory per hash, never mutated; then the sysroot claim, `build/buildlock.rs`
+  and `build/keystore.rs` go. The locks are made unnecessary rather than written
   down: every store is published by an atomic rename and never rewritten, and
   the build system `cargo clean`s no crate target, so cargo's own lock is the
   only one.
@@ -27,10 +27,10 @@ and the gates that held them go.
     stable cargo ignores it silently.
   - The build system and the worktree config invoke the shipped cargo and no
     other.
-  - `kernel/`, `bootloader/` and `userland/` inherit a redirected
+  - `kernel/`, `loader/` and `userland/` inherit a redirected
     `build.target-dir` unless their `.cargo/config.toml` sets
     `target-dir = "target"`.
-  - `stage_artifact` in `src/build.rs` writes `root/target/…` whatever
+  - `stage_artifact` in `build/build.rs` writes `root/target/…` whatever
     `build.target-dir` redirects.
   - `cargo clean` follows a shared target dir.
   - Artifact size, bootstrap delta and CI cache keys are unmeasured.

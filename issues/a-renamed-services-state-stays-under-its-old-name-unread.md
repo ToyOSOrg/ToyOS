@@ -27,9 +27,9 @@ for `soundd` and `netd`, which no row endows, so it finds no sound or network
 server until it is reinstalled.
 
 A DATA outlives an image only where one was made to: the boot image carries
-none (`src/image.rs`'s `create_boot_image`), and the build stamps the
+none (`build/image.rs`'s `create_boot_image`), and the build stamps the
 designation the kernel formats only into a scratch file it has just created
-(`src/build.rs`'s `create_sparse`). Every checkout's `target/nvme.img`, which
+(`build/build.rs`'s `create_sparse`). Every checkout's `target/nvme.img`, which
 `cargo run` keeps across runs, is one; a machine holds one only where a stamped
 TOYOS-DATA partition was put by hand, and whether any of the owner's does is
 not known here.

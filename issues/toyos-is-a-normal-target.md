@@ -11,7 +11,7 @@ dependencies on Linux or macOS, because cargo resolves every platform's
 dependencies and the ToyOS crates the forks name — `toyos-abi`, `toyos`,
 `toyos-window`, `toyos-osrelease` — are on no registry. A git dependency on the
 monorepo is not the answer: it clones the `rust` submodule. So the SDK crates,
-`src/sdkversion.rs` `PUBLISHED`, go on crates.io and stay there. The ABI they carry is unstable by owner ruling: a built program
+`build/sdkversion.rs` `PUBLISHED`, go on crates.io and stay there. The ABI they carry is unstable by owner ruling: a built program
 that breaks, breaks.
 
 Stages, in order:

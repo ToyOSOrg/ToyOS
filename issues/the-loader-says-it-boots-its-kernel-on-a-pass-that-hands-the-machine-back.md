@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # The loader says it boots its kernel on a pass that then hands the machine back
 
-`bootloader/src/blackbox.rs`'s foreign-record branch composes `It has been
+`loader/src/blackbox.rs`'s foreign-record branch composes `It has been
 cleared and this pass boots its kernel` in `harvest`, which `main` calls
 before `attempt::read`.
 When the foreign record was the only word of this image's last boot, the same

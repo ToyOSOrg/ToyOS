@@ -127,7 +127,7 @@ commit that lands M2's compile-and-run test, which links inside the guest.
 
 **What stops M2: the driver's link and the install.** `cargo run --
 --hosted-clang` makes a clang and an `ld.lld` for `x86_64-unknown-toyos`,
-static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
+static PIEs that name no library (`build/hostedclang.rs`): 147.5 MB and
 85.6 MB, 121.9 MB and 70.9 MB stripped. Both run in a guest:
 `hosted_clang_hello` (`tests/common/hostedclang.rs`, run on demand) stages them
 on ROOT, compiles `hello.c` with `clang -c`, links it by running `ld.lld` on the

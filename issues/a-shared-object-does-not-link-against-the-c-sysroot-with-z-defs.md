@@ -13,7 +13,7 @@ lld refuses the executable that links it for that name. LLVM built whole for
 `x86_64-unknown-toyos`, as M3's rustc needs it
 (`issues/rustc-llvm-cannot-build-for-a-toyos-host.md`), builds `libLTO`,
 `libRemarks`, `libclang` and `libclang-cpp`, linked `-shared -z defs`, none
-of which the ToyOS-hosted clang and LLD (`src/hostedclang.rs`) need, and
+of which the ToyOS-hosted clang and LLD (`build/hostedclang.rs`) need, and
 each stops on what the sysroot's archives were built for, an executable:
 
 - `main`, undefined: `libtoyos_c.a`'s entry point, `start_c`, sits in an

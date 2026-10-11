@@ -18,7 +18,7 @@ went on and succeeded:
 | 21:12:19 to 21:12:29Z | `21:12:05 Building bootstrap`, the second, after LLVM was built and installed | 9 | `Symbol not found: __ZN4llvm18format_object_base4homeEv`, expected in a `libLLVM.dylib` |
 
 rustc strips a Darwin binary by running `rust-objcopy`
-(`src/toolchain.rs`, above `a_compiler_build_finds_the_llvm_s_objcopy_where_rustc_strips_with_it`).
+(`build/toolchain.rs`, above `a_compiler_build_finds_the_llvm_s_objcopy_where_rustc_strips_with_it`).
 Both moments are the downloaded beta compiler building bootstrap itself. In
 the first nothing it finds as `rust-objcopy` has an LLVM library to load; in
 the second it finds one that loads a `libLLVM.dylib` without a symbol it
@@ -38,7 +38,7 @@ whether anything reads the difference; and whether #769, which moved the
 toolchain into a store and landed on 8 October, changed it.
 
 Nobody holds it. It is in how a compiler build finds `rust-objcopy`
-(`src/toolchain.rs`).
+(`build/toolchain.rs`).
 
 **Exit**: a compiler built from nothing by `cargo run -- --build-only` on an
 Apple host, at a tree that has #769, that leaves no `rust-objcopy` report.

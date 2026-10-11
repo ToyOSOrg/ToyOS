@@ -135,7 +135,7 @@ signature exactly as before; a green run of this test proves what it always
 proved, which is nothing.
 
 What a stopped CPU is doing has still never been read off one: in a guest,
-`info registers -a` over QMP (`src/qemu.rs`) gives every vCPU's `RIP`, `RFL`
+`info registers -a` over QMP (`build/qemu.rs`) gives every vCPU's `RIP`, `RFL`
 and `HLT`, and is taken before injecting anything, since a keystroke revives a
 halted CPU.
 

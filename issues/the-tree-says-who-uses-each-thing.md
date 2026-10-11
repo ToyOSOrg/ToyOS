@@ -118,7 +118,7 @@ README.md CLAUDE.md NOTICE LICENSE-APACHE LICENSE-MIT            rule step 1
 Cargo.toml Cargo.lock clippy.toml .cargo/config.toml             rule step 1: one workspace, one lock,
                                                                  one [target.<triple>] table per guest triple
 .github/ .claude/ .gitignore .gitmodules                         rule step 1
-loader/   the UEFI loader (today bootloader/)
+loader/   the UEFI loader, package bootloader
 kernel/   CLAUDE.md; src/ pure/ loom/ sim/ pci/ gicv3/ ps2/ dma/ cpuvuln/ microcode/ (+ intel-ucode, licence)
 system/   CLAUDE.md (the server doctrine); one directory per /system/bin name:
           supervisor compositor (desktop/ sprite/)
@@ -129,16 +129,17 @@ apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windo
           toyfetch when built
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
           abi/ toyos/ std/ keymap/ font/ window/ filepicker/ osrelease/ libc/ (arch/)
-lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda i219 inspect
+lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda inspect
           logstream manifest quiesce rootimage swap symbols tco tmpdir tsc untrusted
           update userbound wallclock xhci
 share/    mirrors /system/share: fonts/ (+ OFL) icons/ (+ MIT)
 images/   system.toml console.toml diag.toml
-build/    CLAUDE.md; the root package's library and binaries (today src/); ci/qemu-version
+build/    CLAUDE.md; the root package's library and binaries (bin/ toyos-flash imgstat); ci/qemu-version;
+          ssh/ (package toyos-ssh)
 tests/    CLAUDE.md; toyos.rs checks.rs common/ checks/ (the root package's test targets)
           guest/ (proctest kernelprobe metalprobe test-runner rust-tests/) images/ (one .toml per boot case)
-          machines/t14/ (package toyos-metal: the loop, the descriptor, the Linux timings)
-          judges/ssh/ corpus/tinycc/
+          metal/ (package toyos-metal: the loop, and t14-linux/, the Linux readings)
+          corpus/tinycc/ cavp/
 ports/    <name>/recipe.toml and patches/, empty until the first
 issues/   <slug>.md
 rust/     the submodule
@@ -164,6 +165,19 @@ Where this differs from the tree the owner adopted:
 - `sdk/std/` is std's ToyOS backend, which left the `rust` fork after the
   design (the owner: "MOVE IT"); the fork's `library/std`, outside this
   repository, compiles it by `#[path]` (rule step 3).
+- `toyos-i219` is `system/netstack/i219`: the harness stopped using it in
+  93719bc03, after the design, which leaves netstack its one user (rule
+  step 4).
+- `toyos-pci-claim`, `acpiserver-api` and `logkeeper-api` are in `lib/`:
+  each has two users (rule step 5).
+- `toyos-ssh` is `build/ssh`: its one user is `build/signing.rs`, and
+  sshserver serves on russh (rule step 4).
+- `tests/metal/` is the metal loop. A machine's records are in the host's
+  store since #852, so there is no `tests/machines/t14/` and no descriptor.
+- `tests/cavp/` stays: `lib/sha2`'s SHAVS driver reads it and `lib/sha2-hw`'s
+  tests include that driver. The orchestrator ruled it shared test data,
+  which inside `lib/sha2` the licence gate would count as shipping.
+- There is no `tests/judges/ssh/`: no SSH judge is in the tree.
 
 ## Stages
 
@@ -191,35 +205,45 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `libstd`/`libtoyos` are identical before and after; the keys move once,
    through the fork's `library/`.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker, osrelease and libc (with
-   `tests/libc-arch` as `sdk/libc/arch/`); `src/sysroot.rs`,
-   `src/sdkversion.rs` and `src/release.rs` read the directory instead of a
-   list. A branch that bumps the `rust` gitlink merges the fork change with
-   it. **Exit:** `PUBLISHED` and `SYSROOT_SOURCES` are gone or derived from
-   `sdk/`; a release dry run, a clean toolchain build and the guest suite
-   green.
+   `tests/libc-arch` as `sdk/libc/arch/`). The moves landed with stage 4, in
+   one pull request, with a clean toolchain build and the guest suite green.
+   **Remaining:** `build/sysroot.rs`'s `SYSROOT_SOURCES` and
+   `build/sdkversion.rs`'s `PUBLISHED` are still lists. `SYSROOT_SOURCES`
+   cannot come from `sdk/` alone: libc links `toyos-elf`, which is in
+   `lib/elf` (rule step 5). `PUBLISHED` leaves out `sdk/libc`,
+   `sdk/libc/arch` and `sdk/std`, which are not published, and
+   `sdk/filepicker`, which the filepicker ruling makes public. No release
+   dry run was made: `release` and `publish` run only on a push to `main`.
+   **Exit:** `PUBLISHED` is derived from `sdk/` and names `sdk/filepicker`;
+   `SYSROOT_SOURCES` is derived from `sdk/` and the `lib/` crates libc links;
+   a release dry run green.
 6. **`lib/`, and what one thing uses into that thing:** `kernel/cpuvuln`,
    `kernel/microcode`, the net family and `toyos-dns` into
-   `system/netstack/`. **Exit:** no `toyos-*` or `bcachefs` directory is left
-   at the root; `git diff -M` reports every change a
-   rename; `--ci host` and the guest suite green.
+   `system/netstack/`. Landed with stage 4, in one pull request. **Exit:** no
+   `toyos-*` or `bcachefs` directory is left at the root; `git diff -M`
+   reports every change a rename; `--ci host` and the guest suite green.
 7. **`userland/` splits into `system/`, `apps/` and `tests/guest/`;**
    programs resolve by name; `userland/CLAUDE.md` becomes `system/CLAUDE.md`;
-   `files` drops `sprite` and `sprite` moves into the compositor. **Exit:**
-   `userland/` is gone; no `apps/` package depends on a path outside `sdk/`;
-   `--build-only` and the guest suite green.
-8. **Tests and images:** `images/`, `tests/images/`, `tests/machines/t14/`
-   (`src/metal*.rs` and `tests/t14-linux/` as package
-   `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
-   `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
-   `bootable-<stem>.img`. `src/flash.rs` reads `metal`'s `whole_disk` and
-   `Node`, which move with it: they go to an owner both share, or
-   `toyos-flash` moves into `toyos-metal`. **Exit:** no `tests/*case/`,
-   `console/` or `diag/` directory and no root `system.toml` remains, and
-   `--diag-boot`, `--console-boot` and a `--metal-readback` build green.
-9. **`src/` becomes `build/`, `bootloader/` becomes `loader/`,** and
+   `files` drops `sprite` and `sprite` moves into the compositor. Landed with
+   stage 4, in one pull request. **Exit:** `userland/` is gone; no `apps/`
+   package depends on a path outside `sdk/`; `--build-only` and the guest
+   suite green.
+8. **Tests and images:** `images/`, `tests/images/`, `tests/metal/` (the
+   metal loop as package `toyos-metal`, with the Linux readings in
+   `t14-linux/`; a machine's records are in the host's store, so there is no
+   descriptor), `tests/guest/rust-tests/`, `tests/guest/c/` and
+   `tests/corpus/tinycc/`. Image names stay `bootable-<stem>.img`.
+   `whole_disk` and `Node`, which `toyos-flash` and the loop both read, are
+   in `build/disk.rs`. Landed with stage 4, in one pull request. **Exit:** no
+   `tests/*case/`, `console/` or `diag/` directory and no root `system.toml`
+   remains, and `--diag-boot`, `--console-boot` and a `--metal-readback`
+   build green.
+9. **`src/` becomes `build/`, `bootloader/` becomes `loader/`,**
    `examples/imgstat.rs` becomes a binary of the root package in `build/`
-   (rule step 2). **Exit:** `src/`, `bootloader/` and `examples/` are gone;
-   `--ci host` and `--build-only` green.
+   (rule step 2), `.github/qemu-version` becomes `build/ci/qemu-version`, and
+   `toyos-ssh` becomes `build/ssh`. Landed with stage 4, in one pull request.
+   **Exit:** `src/`, `bootloader/` and `examples/` are gone; `--ci host` and
+   `--build-only` green.
 10. **`assets/` into `share/`, `apps/doom/` and `system/compositor/`**;
     each licence text beside what it covers; `OPENED_BY` goes; `doom.jpg`
     and `first-boot.jpg`, which only the README shows, into `.github/`

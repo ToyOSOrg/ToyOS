@@ -6,7 +6,7 @@ opened: 2026-10-10
 
 # The launcher boots off a stick though an image on NVMe can update itself
 
-`cargo run`'s machine (`src/qemu.rs`) boots its image off a USB stick beside
+`cargo run`'s machine (`build/qemu.rs`) boots its image off a USB stick beside
 an NVMe disk, `target/nvme.img`. It did so because only a disk the kernel
 drives could have its slots written; `update` now writes the idle slot through
 diskserver's sessions, and `update_writes_the_idle_slot_through_the_block_service`
@@ -20,4 +20,4 @@ ToyOS is installed on its internal disk.
 
 ## Owner
 
-The launcher, `src/qemu.rs`; unheld.
+The launcher, `build/qemu.rs`; unheld.

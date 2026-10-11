@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # The `/tmp` leftover check can name another worktree's killed run
 
-`src/ci.rs`'s `left_behind` names every root `toyos_tmpdir::gone_roots(short)`
+`build/ci.rs`'s `left_behind` names every root `toyos_tmpdir::gone_roots(short)`
 finds that `before` does not: a `toyos_tmpdir::TempDir::short` whose owning
 process died during the steps that ran between the two calls. `gone_roots`
 reads `SHORT_BASE` (`/tmp`), and every worktree on the host shares that base

@@ -6,7 +6,7 @@ opened: 2026-09-01
 
 # The corpus is held to its counts and to nothing about any one file
 
-`src/sourcegate.rs`'s `every_committed_binary_file_is_declared` covers every
+`build/sourcegate.rs`'s `every_committed_binary_file_is_declared` covers every
 committed file carrying a NUL, plus everything under `assets/` whether it does
 or not. The clause it half-closes was written over *"every binary file git
 tracks **plus every third-party source corpus**"*.

@@ -23,7 +23,7 @@ both refused it with `-D warnings`:
 
 It had never been linted: as `userland/sprite` it held no test, so the
 userland survey gated it nowhere. So that the move left nothing less
-checked than before, `src/hostws.rs`'s `guest_built` names
+checked than before, `build/hostws.rs`'s `guest_built` names
 `system/compositor/sprite`, which keeps it out of the host members.
 
 **Owner:** the compositor.

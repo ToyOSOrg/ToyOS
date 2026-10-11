@@ -122,7 +122,7 @@ reverted (`kernel/sim/tests/policy.rs`,
 
 **Why a CPU stops reaching a pass at all.** Nothing in this work touched it and
 nothing in it explains it. In a guest, `info registers -a` over QMP
-(`src/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
+(`build/qemu.rs`) gives every vCPU's `RIP`, `RFL` and `HLT`, and is taken before
 injecting anything, since a keystroke revives a halted CPU. On metal, a CPU
 that has stopped taking interrupts is ended by `crate::hardlockup` on a boot
 armed with a deadline and a CPU that states a PMU, and its record in the black

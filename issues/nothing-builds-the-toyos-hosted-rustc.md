@@ -28,8 +28,8 @@ What that build left owed, which the one that replaces it owes too:
 
 Owner: `issues/toyos-builds-itself.md`, M3.
 
-**Exit**: a hosted rustc is a product of the host's store (`src/keystore.rs`),
-keyed as `src/compiler.rs` keys a compiler and on the sources of the std it
+**Exit**: a hosted rustc is a product of the host's store (`build/keystore.rs`),
+keyed as `build/compiler.rs` keys a compiler and on the sources of the std it
 runs on, and built by whichever checkout first names it; an image whose config
 asks for it carries that one, with its licences read; and the `libstd-*.so` it
 carries holds `sdk/std/sys/` paths and no `sys/pal/toyos`.

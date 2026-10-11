@@ -8,7 +8,7 @@ opened: 2026-10-10
 
 The loader asks firmware's `GetTime` before `ExitBootServices` on every
 architecture and hands the instant, with the counter it was true at, in
-`KernelArgs::wall_clock_*` (`bootloader/src/wallclock.rs`). AArch64 anchors
+`KernelArgs::wall_clock_*` (`loader/src/wallclock.rs`). AArch64 anchors
 its wall clock on that (`kernel/src/arch/aarch64/rtc.rs`); x86-64 ignores it
 and reads the CMOS itself (`kernel/src/arch/x86_64/rtc.rs`), with the FADT's
 century register (`kernel/src/drivers/acpi.rs`), so the two architectures keep

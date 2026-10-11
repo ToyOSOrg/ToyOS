@@ -16,7 +16,7 @@ The job is pinned to 1.98.1 for it, and since #780 the test passes under
 on every target, and is not this compiler's alone: it copies an increment's
 no-wrap flag onto its phi's recurrence, where it holds only if the wrapped
 increment is observed, and `indvars` folds the loop's last exit to `false`.
-The fork's LLVM no longer does, and `src/miscompile.rs` holds a reproducer
+The fork's LLVM no longer does, and `build/miscompile.rs` holds a reproducer
 every sysroot's compiler must compile right; the host's `rustc` is upstream's
 and still does.
 
@@ -40,7 +40,7 @@ reports on. The thread named `a_port_answers_as_its_declaration_says` has its
 program counter at offset 0 of the test's own function (the closure's
 `FnOnce::call_once`), its link register in libtest's caller of it, and as
 inlined frames at that one address `standing` (`tests/firmware.rs:495`),
-`firmware::port` (`src/firmware.rs:344`, the `match` inside its loop) and the
+`firmware::port` (`build/firmware.rs:344`, the `match` inside its loop) and the
 test's line 513, the loop over the ports nothing declared.
 
 ## The same binary, made here
@@ -106,7 +106,7 @@ the measurement and removed after it:
 
 So the test stopped showing the fault before #778, which pinned the job for
 it, had landed: nothing reran the row at the tree that landed. **The
-compiler has the fault as it had**: `src/miscompile/last_exit.rs`, this
+compiler has the fault as it had**: `build/miscompile/last_exit.rs`, this
 test's loop cut out, compiled by 1.99.0 for `aarch64-apple-darwin` at
 `opt-level=2` over `u16` and over `u128`, has `caller` as a branch to
 itself. What moved is the code around the loop, which no longer gives it the

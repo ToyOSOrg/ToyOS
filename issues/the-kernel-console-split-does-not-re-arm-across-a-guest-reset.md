@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # The kernel console split does not re-arm across a guest reset
 
-`src/kernelconsole.rs`'s `KernelConsole` withholds the virtio port's bytes
+`build/kernelconsole.rs`'s `KernelConsole` withholds the virtio port's bytes
 until the kernel's first record (`toyos_logstream::kernel_opening`) and
 passes every byte after it: `held` is
 `None` from then on. A guest reset inside one QEMU process does not re-arm it.
@@ -41,4 +41,4 @@ file is deleted with the capture in the commit.
 
 ## Owner
 
-`src/kernelconsole.rs` and `tests/common/qemu.rs`'s stdio reader; unheld.
+`build/kernelconsole.rs` and `tests/common/qemu.rs`'s stdio reader; unheld.

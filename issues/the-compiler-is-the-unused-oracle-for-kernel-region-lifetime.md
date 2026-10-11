@@ -34,7 +34,7 @@ result to be either an owned copy or a word-atomic protocol. A cooperative
 writer cannot reproduce a hardware race, so the harness's verdict is evidence
 only where it agrees with a separate stress of the real copy path.
 
-`src/sourcegate.rs`'s `no_slice_or_exclusive_reference_is_built_over_a_mapped_page`
+`build/sourcegate.rs`'s `no_slice_or_exclusive_reference_is_built_over_a_mapped_page`
 is the precedent for preferring a compile-or-gate answer here: it closed the
 boundary's version of this question over `sdk/abi/src/ring.rs` and
 `kernel/src/user_ptr.rs`, and the defect record it closed is already deleted

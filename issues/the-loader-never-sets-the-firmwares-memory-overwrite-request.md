@@ -14,7 +14,7 @@ At `Ubuntu-6.8.0-142.142`, the x86 EFI stub runs
 `e20939be-32d4-41be-a150-897f85d49829`
 (`drivers/firmware/efi/libstub/tpm.c:20-21`) so firmware wipes RAM
 on the next boot after an unclean reset, where the firmware already defines
-the variable (`tpm.c:36-40`). `bootloader/src` writes no variable under this
+the variable (`tpm.c:36-40`). `loader/src` writes no variable under this
 GUID.
 
 **Declined** (owner, 2026-10-03): **"Keep crash records"**. ToyOS does not ask

@@ -22,7 +22,7 @@ for `MemoryOverwriteRequestControlLock`: efivarfs's four attribute bytes
 (non-volatile, boot-service and runtime access), then the value: the request
 0x01, set, and its lock 0x00, unlocked. The variable is
 non-volatile, so it stays set into every ToyOS boot that follows Ubuntu, and
-`bootloader/src` neither reads nor writes it. Whether this firmware honours it
+`loader/src` neither reads nor writes it. Whether this firmware honours it
 on the reset paths ToyOS takes is unmeasured: a black-box record has survived
 two hours of Ubuntu, which does not say what an unclean reset does. Every
 UEFI call ToyOS makes is the loader's, so the write belongs with

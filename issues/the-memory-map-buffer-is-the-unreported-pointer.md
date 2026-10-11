@@ -31,4 +31,4 @@ stick, and no boot has asked the same question there.
 
 Closed by the same reading on the T14, after which the sizing and the
 allocation move above the three lines and the memory map's `report_reach`
-(`bootloader/src/main.rs`) joins the ones already there.
+(`loader/src/main.rs`) joins the ones already there.

@@ -6,7 +6,7 @@ opened: 2026-10-09
 
 # The sysroot build discards the result of removing libc's scratch target directory
 
-`src/sysroot.rs`'s `build` ends libc's two builds with `let _ =
+`build/sysroot.rs`'s `build` ends libc's two builds with `let _ =
 fs::remove_dir_all(&libc_target);`: a removal that fails leaves
 `<key>.libc-target` beside the published sysroot in the store, and nothing
 says so. The line above it, the miscompile check's scratch, fails through

@@ -52,7 +52,7 @@ the group).
 | `redundant_clone` | 6 | Real, not the false-positive-prone lint its `nursery` placement suggested — every instance checked was a clone of a binding never used again after (verified by hand, not by trusting the lint): `4a98107f^:kernel/src/arch/syscall.rs`, a `kernel-loom` test, `toyos-cc`'s parser (a double clone — the match scrutinee was already an owned value), and three in `tests/toyos.rs`. |
 | `unchecked_time_subtraction` | 1 | `tests/toyos.rs`: a bare `Duration - Duration` that panics identically today either way — `.checked_sub().expect(msg)` says why it can't underflow instead of hiding the same panic behind an operator. No behavior change; an honesty win at zero cost. |
 | `unnecessary_semicolon` | 2 | Two dead `;` after `if` statements in `kernel/src/process.rs` and `kernel/src/main.rs`. Nothing to weigh. |
-| `default_trait_access` | 1 | `bootloader/src/main.rs`'s UEFI `open()` call passed `Default::default()` where `FileAttribute::default()` names the type. One site, one import. |
+| `default_trait_access` | 1 | `loader/src/main.rs`'s UEFI `open()` call passed `Default::default()` where `FileAttribute::default()` names the type. One site, one import. |
 
 `undocumented_unsafe_blocks` — see its own section below; bootloader (10) and
 `toyos-abi` (19) are adopted the same way, gated as their own invocations.
@@ -96,7 +96,7 @@ the two filed below as their own issues.
 | `unused_self` | 44 | **checked, false positive on this tree's idiom**: `serial::BackendGuard::has_data`/`try_read_byte` (and the same shape in `mm::paging::child_mut`, xHCI device setup) don't read `self`'s fields, but holding `&self`/`&mut self` *is* the capability — it proves the caller holds the lock/exclusive access the method needs. Converting to associated functions would delete that proof. |
 | `needless_pass_by_ref_mut` | 28 | **checked, same false-positive class as `unused_self`** — every kernel instance is a `&mut` enforcing exclusive access to memory reached through a raw pointer (a DMA buffer, a page table, `BackendGuard`'s lock), not a literal field mutation the lint's heuristic can see |
 | `case_sensitive_file_extension_comparisons` | 28 | **checked, false positive**: every instance compares a file extension this project's own deterministic build tooling produced (`.o`, `.bin`), never external/untrusted input |
-| `suboptimal_flops` / `imprecise_flops` | 37 / 2 | all in `src/wallpaper.rs`'s procedural image generator — a floating-point rounding change is a visual-output change, which CLAUDE.md requires the owner's sign-off for; out of scope here |
+| `suboptimal_flops` / `imprecise_flops` | 37 / 2 | all in `build/wallpaper.rs`'s procedural image generator — a floating-point rounding change is a visual-output change, which CLAUDE.md requires the owner's sign-off for; out of scope here |
 | `duration_suboptimal_units` | 37 | cosmetic — smaller-unit `Duration` constructors, no behavior change |
 | everything else (~50 more lints, 1–30 each) | ~450 combined | style/perf-neutral suggestions (`format_push_string`, `bool_to_int_with_if`, `wildcard_imports`, `assigning_clones`, `self_only_used_in_recursion`, `zero_sized_map_values`, …) — sampled, not individually fixed; none changes correctness, dead code, or a name's honesty |
 
@@ -128,7 +128,7 @@ before adopting:
 
 | lint | count | what was measured, and what it does not see |
 |---|---:|---|
-| `significant_drop_in_scrutinee` | 6, 1 a defect | Silent in the gate: it reports only a guard marked `#[clippy::has_significant_drop]`, and no kernel guard is. With `sync::LockGuard` alone marked, the kernel under `x86_64-unknown-none` with default features reported 6 sites, and 5 once `sys_chdir` stopped holding the VFS guard into `process_data` — the one defect. The 5 left (`arch/x86_64/idt/mod.rs`'s `for` over `IDT.lock()`, `loader/mod.rs`'s `/system/lib` fallback, `user_ptr::translate_user`, `sys_readdir`, `sys_dlopen`) take no second lock under the guard, and adopting the lint rewrites each. Unmeasured: AArch64, the actuator and instrument shapes, and the guards the measurement did not mark (`SleepGuard`, `block`'s `Locked`, the serial guard). It cannot join `ADOPTED`, which `src/clippy.rs` splices into the host workspace's shapes too, where std's `MutexGuard` is already marked: it would be a per-shape `-W`, as `undocumented_unsafe_blocks` is. **It sees one spelling, not the order**: an `if let Some(x) = L.lock().as_mut()` whose value borrows from the guard is in the tree and in neither report (`file_cache::touch`, `scheduler::remove_vruntime`, `inbox`'s `answer`), and so is any inversion through a named guard, the common shape. |
+| `significant_drop_in_scrutinee` | 6, 1 a defect | Silent in the gate: it reports only a guard marked `#[clippy::has_significant_drop]`, and no kernel guard is. With `sync::LockGuard` alone marked, the kernel under `x86_64-unknown-none` with default features reported 6 sites, and 5 once `sys_chdir` stopped holding the VFS guard into `process_data` — the one defect. The 5 left (`arch/x86_64/idt/mod.rs`'s `for` over `IDT.lock()`, `loader/mod.rs`'s `/system/lib` fallback, `user_ptr::translate_user`, `sys_readdir`, `sys_dlopen`) take no second lock under the guard, and adopting the lint rewrites each. Unmeasured: AArch64, the actuator and instrument shapes, and the guards the measurement did not mark (`SleepGuard`, `block`'s `Locked`, the serial guard). It cannot join `ADOPTED`, which `build/clippy.rs` splices into the host workspace's shapes too, where std's `MutexGuard` is already marked: it would be a per-shape `-W`, as `undocumented_unsafe_blocks` is. **It sees one spelling, not the order**: an `if let Some(x) = L.lock().as_mut()` whose value borrows from the guard is in the tree and in neither report (`file_cache::touch`, `scheduler::remove_vruntime`, `inbox`'s `answer`), and so is any inversion through a named guard, the common shape. |
 
 ## `undocumented_unsafe_blocks`, per area
 
@@ -146,7 +146,7 @@ before adopting:
 | `drivers/` | 121 | **adopted 2026-08-22 — the first sweep under the reduction ruling.** 121 undocumented blocks (132 `unsafe` blocks in all); **60 removed, 72 documented, 1 filed.** Per driver below — and the filed one was built the same day, taking the area from 72 blocks to 37. |
 | `arch/` | 107 | **adopted 2026-08-22 — the last area, and the highest-risk one.** 107 findings (112 `unsafe` blocks in all); **30 removed, 77 documented, 3 filed.** Per file below. |
 | root files (`user_ptr.rs`, `process.rs`, `preempt.rs`, `inbox.rs`, `main.rs`, `symbols.rs`, `hw.rs`, `file_backing.rs`, `sync.rs`, `scheduler.rs`, `pipe.rs`, `page_cache.rs`, `bcachefs_adapter.rs`) | 76 | **adopted** — 13 removed, 63 documented, 4 filed. Per file and per finding below. |
-| `mm/` | 35 | **adopted** — every site now carries a `SAFETY:` comment; two (`object::shm::Pages`, `mm::paging::AddressSpace`'s `Send`/`Sync` impls) turned out to be vestigial and were deleted, and `src/sourcegate.rs`'s `AUTO_TRAIT_IMPLS` now names every hand-written one the kernel keeps |
+| `mm/` | 35 | **adopted** — every site now carries a `SAFETY:` comment; two (`object::shm::Pages`, `mm::paging::AddressSpace`'s `Send`/`Sync` impls) turned out to be vestigial and were deleted, and `build/sourcegate.rs`'s `AUTO_TRAIT_IMPLS` now names every hand-written one the kernel keeps |
 | `elf/` | 23 | **adopted** — every site now carries a `SAFETY:` comment; writing the justification found two functions (`elf::read_backing_into`, `elf::index::RelocationIndex::apply_to_page`) that write through a raw pointer without being `unsafe fn`, filed rather than fixed. Both took a `mm::KernelSlice` (2026-08-22), so the extent is the allocation's and the file is closed; the second is deleted since, with the fault-time relocation index. |
 | `sched/` | 8 | **adopted 2026-08-22**, under the reduction ruling. 8 findings (26 `unsafe` blocks in all); **4 removed, 5 documented, 1 filed** — the five sites of the same shape outside this area, since taken by the root-file and `arch/` sweeps, so that file is closed too. |
 | `loader/` | 8 | **adopted** — every site now carries a `SAFETY:` comment (one finding shared with `elf/`, above) |
@@ -430,7 +430,7 @@ pairs that `cargo check` says are unnecessary — `object::shm::Pages` and
 `mm::paging::AddressSpace` — filed rather than removed here, the same
 reasoning as the two findings above: this pass's job was documentation, and
 the fix touches a security-relevant module's actual code, not its comments.
-All four impls are gone now, and `src/sourcegate.rs`'s `AUTO_TRAIT_IMPLS`
+All four impls are gone now, and `build/sourcegate.rs`'s `AUTO_TRAIT_IMPLS`
 declares every hand-written one `kernel/src` still holds. Documenting `elf/` surfaced a related but distinct pattern
 — two functions that take a raw pointer without being `unsafe fn`, so the
 validity requirement is real but not type-enforced — filed rather than fixed,

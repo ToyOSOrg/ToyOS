@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # Two refusals of a product whose sources moved have no test
 
-`src/sysroot.rs`'s `build` and `build_freestanding` each read their key again
+`build/sysroot.rs`'s `build` and `build_freestanding` each read their key again
 once the product is built and refuse to publish it when the sources moved
 meanwhile, as `compiler::place` and `llvm::place` do. Those two have a test
 whose stand-in build moves a source; these two run bootstrap inline

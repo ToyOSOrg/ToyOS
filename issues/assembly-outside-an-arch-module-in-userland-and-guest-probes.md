@@ -9,7 +9,7 @@ opened: 2026-09-26
 The owner's ruling of 2026-09-26 puts every `asm!`, `global_asm!`,
 `naked_asm!`, naked function and `core::arch::*` intrinsic inside an
 architecture's own module: `kernel/src/arch/<arch>/`, the bootloader's
-`bootloader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. The kernel and
+`loader/src/arch/`, and `toyos-abi`'s per-arch syscall entry. The kernel and
 the loader now hold none outside those; what is left:
 
 - Guest probes in `tests/guest/rust-tests/src/bin/`, whose subject

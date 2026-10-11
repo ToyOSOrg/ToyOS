@@ -6,7 +6,7 @@ opened: 2026-09-16
 
 # The shipping-kernel actuator gate reads the checkout's own path
 
-`assert_actuators_match_features` (`src/build.rs`) asks the artifact whether it
+`assert_actuators_match_features` (`build/build.rs`) asks the artifact whether it
 carries an actuator by searching the kernel image for each declared name as a
 byte string. The kernel image embeds absolute source paths, so the search also
 matches the directory the checkout sits in.

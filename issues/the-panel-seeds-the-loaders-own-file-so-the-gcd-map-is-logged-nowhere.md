@@ -9,7 +9,7 @@ opened: 2026-09-14
 `/system/bin/console` seeds the screen from every `*.log` file in `/log`, newest
 two, oldest first (`system/console/src/main.rs:277-286`). `/log` is the root of
 the log partition and the bootloader writes `loader.log` there
-(`userland/logd/src/store.rs:8-9`, `bootloader/src/loaderlog.rs:51`), so
+(`userland/logd/src/store.rs:8-9`, `loader/src/loaderlog.rs:51`), so
 `loader.log` passes the extension filter. A line the loader writes to its file costs a row of the
 kernel's log on the panel exactly as a line it prints to the firmware console
 does — the file is not a second channel.
@@ -27,7 +27,7 @@ no kernel line left over it. The same head with those lines written to neither
 channel is `cargo test screen_console_shell` **EXIT=0**, `PASS (2s)`, `30 kernel
 log rows above a prompt`.
 
-What that costs today: `bootloader/src/gcd.rs` prints one line per free MMIO
+What that costs today: `loader/src/gcd.rs` prints one line per free MMIO
 range it hands the kernel and no line for any other descriptor, so the map's
 held MMIO descriptors — firmware's *current* allocations, the reading that lets
 that file's module header be checked against a real machine — reach no console
@@ -40,7 +40,7 @@ and nobody is holding it. What pays for it is `toyos-metal`'s readback of
 channel cannot have that premise checked against it afterwards.
 
 **Exit condition.** `/system/bin/console`'s seed takes only the files
-`/system/bin/logd` wrote — `src/bootlog.rs:175-187` already splits a `/log`
+`/system/bin/logd` wrote — `build/bootlog.rs:175-187` already splits a `/log`
 listing that way for the host-side reader, so the rule exists and the guest does
 not apply it. With that in place `loader.log` costs no panel row, the loader
 writes one line per descriptor to its file alone, and `cargo test

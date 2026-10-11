@@ -24,7 +24,7 @@ between 1:04 and 1:54 from creation (36985281365, 36986108744, 36986326239,
 than that margin, behind a landing made just before the nightly, is read as a
 missing one.
 
-Owner: the release module (`src/release.rs`).
+Owner: the release module (`build/release.rs`).
 
 **Exit**: a `release` at main's tip is red for crates crates.io does not hold
 only once that tip's `publish` run has concluded: a test stages a tip whose

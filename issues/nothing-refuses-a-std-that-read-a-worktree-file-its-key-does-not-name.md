@@ -6,7 +6,7 @@ opened: 2026-10-07
 
 # Nothing refuses a std that read a worktree file its key does not name
 
-A sysroot's key reads the trees `src/sysroot.rs`'s `SYSROOT_SOURCES` lists,
+A sysroot's key reads the trees `build/sysroot.rs`'s `SYSROOT_SOURCES` lists,
 and nothing holds that list against what std's build read. With `sdk/std`
 taken off it, an edit to `sdk/std/sys/pal/mod.rs` that makes every program
 exit one higher left the key at `46c572c6e5176094`: `cargo run --

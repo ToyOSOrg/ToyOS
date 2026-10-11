@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # n2 does not compile for ToyOS
 
-n2 is the only Ninja the build runs (`src/n2.rs`), pinned at `b1fead52ccda`.
+n2 is the only Ninja the build runs (`build/n2.rs`), pinned at `b1fead52ccda`.
 At that commit its `process::run_command` exists under `cfg(unix)`,
 `cfg(windows)` and for `wasm32`, and its `terminal::use_fancy` and `get_cols`
 under the same three; its `task.rs`, `run.rs` and `progress_fancy.rs` call

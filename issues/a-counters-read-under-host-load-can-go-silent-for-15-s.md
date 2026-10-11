@@ -161,7 +161,7 @@ built within 2 s of each other, after a 23 s wait on the artifact lock, and
 the three guests failed together.
 
 The fork compiler's ScalarEvolution fault (llvm/llvm-project#175729, which
-`src/miscompile.rs` now refuses a sysroot for) is not their cause.
+`build/miscompile.rs` now refuses a sysroot for) is not their cause.
 `tests/images/virtsmpcase.toml`'s image was built and `virt_el1_smp` run by the compiler
 before the fix and by the fixed one, each with the sysroot it built, and every
 function of the image's 124 crates compared in object code as the image build

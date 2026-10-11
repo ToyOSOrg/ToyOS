@@ -11,7 +11,7 @@ all-ones base word by name, but under Tiger Lake-LP's row (`8086:a0a3`,
 `base_mask: !1`) a word from `0xFFFF_FFEE` to `0xFFFF_FFFE` reaches `:284`,
 where `base + base_offset + TCO_TMR + 1` overflows `u32`. The loader and the
 kernel each read the word out of the PCH's configuration space and hand it to
-`port` (`bootloader/src/watchdog.rs:141`, `:73`;
+`port` (`loader/src/watchdog.rs:141`, `:73`;
 `kernel/src/arch/x86_64/watchdog.rs:51`, `:58`), and both build with
 `overflow-checks`. So a boot that arms the watchdog on a machine whose function
 answers one of those words panics where it should refuse.

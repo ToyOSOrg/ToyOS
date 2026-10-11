@@ -45,7 +45,7 @@ one that drops `tid=0`.
 
 ## Why it was not fixed there
 
-`sdk/abi/src/log.rs` is a sysroot source (`src/toolchain.rs`'s
+`sdk/abi/src/log.rs` is a sysroot source (`build/toolchain.rs`'s
 `SYSROOT_SOURCES`), so an ABI change lands on its own pull request and the
 kernel-side commit could not carry one.
 

@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # `kernel-loom` without `loom` is linted by no clippy run
 
-Both host shapes in `src/clippy.rs` build `kernel-loom` with its default
+Both host shapes in `build/clippy.rs` build `kernel-loom` with its default
 `loom`, so its other arm — the `cfg(not(feature = "loom"))` sites in
 `kernel-loom/src/lib.rs` and the test files gated that way — is compiled by no
 shape. A `mem::forget` planted in the non-`loom` `percpu_fetch_add` leaves

@@ -6,13 +6,13 @@ opened: 2026-10-11
 
 # A test in a guest-built crate outside `userland/` runs nowhere
 
-`src/hostws.rs`'s `guest_built` takes a member out of the host members, so
+`build/hostws.rs`'s `guest_built` takes a member out of the host members, so
 `--ci host`'s workspace `cargo test` and clippy's workspace shapes skip it.
 Each such member is then tested by a step of its own, or not at all:
 
-- `kernel` (its library) and `sdk/toyos` each have a step in `src/ci.rs`;
+- `kernel` (its library) and `sdk/toyos` each have a step in `build/ci.rs`;
 - every program directly under `system/`, `apps/` and `tests/guest/`
-  (`build::PROGRAM_ROOTS`) is read by `src/userlandhost.rs`'s survey, which
+  (`build::PROGRAM_ROOTS`) is read by `build/userlandhost.rs`'s survey, which
   runs a program's tests once it holds one;
 - `bootloader`, `sdk/window`, `sdk/font`, `sdk/filepicker`, `lib/logkeeper-api`,
   `lib/pci-claim` and `system/compositor/sprite` have neither.

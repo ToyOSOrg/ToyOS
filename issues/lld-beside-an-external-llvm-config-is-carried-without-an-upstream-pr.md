@@ -11,7 +11,7 @@ external llvm-config that is Rust's LLVM") accepts `rust.lld = true` with an
 external `llvm-config` for the host when that `llvm-config` has
 `llvm-has-rust-patches = true` and an `lld` sits in its `bin/`, and takes that
 `lld` as `rust-lld`; before it, bootstrap refused the combination. Every
-compiler build ToyOS runs relies on it (`src/llvm.rs`).
+compiler build ToyOS runs relies on it (`build/llvm.rs`).
 
 It is a configuration change, which upstream records in
 `src/bootstrap/src/utils/change_tracker.rs` under the number of the pull

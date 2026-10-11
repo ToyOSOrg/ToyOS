@@ -7,7 +7,7 @@ opened: 2026-10-01
 # A host's apps are judged on other hosts' runners
 
 `cargo run -- --ci host` builds each host's apps where it runs on that host's
-triple, and checks them against it elsewhere (`src/userlandhost.rs`). `ci.yml`
+triple, and checks them against it elsewhere (`build/userlandhost.rs`). `ci.yml`
 runs it on Linux alone and the nightly on Linux and macOS, so on a pull
 request macOS's and Windows's apps are only checked, and Windows's are built
 nowhere. These go unseen:
@@ -24,7 +24,7 @@ nowhere. These go unseen:
   only where one runner judges the host: while two do, a fix that passes on one
   and fails on the other is red whether its `fails` entry stays or goes.
 
-Owner: the host gate, `src/userlandhost.rs` and `src/ci.rs`'s `apps_for`.
+Owner: the host gate, `build/userlandhost.rs` and `build/ci.rs`'s `apps_for`.
 
 **Exit:** on each pull request, a runner of each host builds that host's apps,
 judges no other host's, and attempts each app whose `fails` names its host, red

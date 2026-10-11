@@ -16,6 +16,6 @@ Taking it costs a `swapgs` entry and the swapgs barriers of
 TCG, a `boot-actuators` arm enters vector 2 at CPL 0 while the user GS base is
 live, between entry and its `swapgs` or after the exit path's, and the handler
 finds the kernel's per-CPU data; `CR4_FORBIDDEN`, the `user-writable-gsbase`
-kernel (`src/build.rs:1370`) and the test `gsbase_locked` are deleted.
+kernel (`build/build.rs:1370`) and the test `gsbase_locked` are deleted.
 **Mutation**: an IST entry that decides `swapgs` from the saved CS alone.
 **Oracle**: Linux's `paranoid_entry`.

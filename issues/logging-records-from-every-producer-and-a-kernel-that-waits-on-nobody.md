@@ -41,7 +41,7 @@ machine mid-boot finding the tail in the next boot's `/log`.
 **2. Verdicts that match on fields instead of English.** A record carries its
 severity and origin; the tests and metal verdicts this change touched match on
 them. The rest still search sentences: about 600 string literals in `tests/`
-and 33 sentence constants in `src/bootlog.rs`, where rewording a diagnostic
+and 33 sentence constants in `build/bootlog.rs`, where rewording a diagnostic
 breaks a verdict. Records grow a key the way journald's `MESSAGE_ID` does, and
 a verdict matches the key.
 *Exit:* no verdict in `tests/` or `tests/metal/src/*.rs` reads a record by its prose.

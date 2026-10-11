@@ -9,7 +9,7 @@ opened: 2026-09-26
 The loader refuses an image whose version is below the highest version a boot
 has proven, and keeps that floor in a UEFI variable per signing key
 (`toyos_update::floor`) that it creates non-volatile and boot-services-only
-(`bootloader/src/floor.rs`). That
+(`loader/src/floor.rs`). That
 holds against everything after the handoff: no kernel, no program and no write
 to the disk can lower it, because the variable is unreachable once
 `ExitBootServices` has run. It does not hold against:
