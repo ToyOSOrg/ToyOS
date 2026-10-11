@@ -1,6 +1,6 @@
 # ToyOS
 
-A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Metal is first-class and virtual machines are supported second: modern x86-64 (2020+) and AArch64, the two equal, UEFI only, with AArch64 tested under QEMU `virt` alone until there is ARM hardware to test on; keep the architecture portable. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
+A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Metal is first-class and virtual machines are supported second: modern x86-64 (2020+) and AArch64, the two equal, UEFI only, with AArch64 tested under QEMU `virt` alone until there is ARM hardware to test on; keep the architecture portable. ToyOS runs on QEMU and adapts to it per machine; QEMU never degrades what metal gets. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
 
 ## Where the rest of this lives
 
