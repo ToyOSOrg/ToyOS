@@ -96,7 +96,7 @@ fn guest_built(member: &str) -> bool {
     [
         crate::ci::KERNEL_DIR,
         crate::ci::SDK_DIR,
-        "bootloader",
+        crate::build::LOADER_DIR,
         "sdk/window",
         "sdk/font",
         "sdk/filepicker",

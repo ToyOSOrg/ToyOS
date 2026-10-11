@@ -333,7 +333,7 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
         },
         ConfigCrate {
             name: LOADER.to_string(),
-            dir: root.join(LOADER),
+            dir: root.join(LOADER_DIR),
             built: Built::Bootloader,
             features: Features::Default,
         },
@@ -1647,6 +1647,8 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
 
 /// The loader's package.
 const LOADER: &str = "bootloader";
+/// [`LOADER`]'s directory, as the workspace's `members` names it.
+pub(crate) const LOADER_DIR: &str = "bootloader";
 
 /// Build the kernel with `features`, comma-separated.
 fn build_kernel(root: &Path, arch: Arch, features: &str, env: &GuestEnv, quiet: bool) {
