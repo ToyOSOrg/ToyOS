@@ -193,9 +193,30 @@ struct ProgramConfig {
     login: bool,
 }
 
-/// The crate directory of the program `name`.
-fn program_dir(root: &Path, name: &str) -> PathBuf {
-    root.join("userland").join(name)
+/// The directories a program's crate sits directly under, by who uses it:
+/// the system, the user, the tests. The one list program resolution, the
+/// userland test survey, the host workspace and the source gate read.
+pub const PROGRAM_ROOTS: &[&str] = &["userland"];
+
+/// The crate directory of the program `name`: `<root>/<name>` for the one
+/// [`PROGRAM_ROOTS`] entry that holds it. A config is the repository's own, so
+/// a name no root holds, or two do, is a broken checkout.
+pub(crate) fn program_dir(root: &Path, name: &str) -> PathBuf {
+    find_program(root, PROGRAM_ROOTS, name).unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// [`program_dir`] over `roots`; a name two of them hold is refused, naming both.
+fn find_program(root: &Path, roots: &[&str], name: &str) -> Result<PathBuf, String> {
+    let found: Vec<PathBuf> =
+        roots.iter().map(|r| root.join(r).join(name)).filter(|dir| dir.join("Cargo.toml").is_file()).collect();
+    match &found[..] {
+        [dir] => Ok(dir.clone()),
+        [] => Err(format!("no program `{name}`: none of {} holds a {name}/Cargo.toml", roots.join(", "))),
+        _ => Err(format!(
+            "program `{name}` is in {}: a program name names one crate",
+            found.iter().map(|d| crate::hostws::rel(root, d)).collect::<Vec<_>>().join(" and ")
+        )),
+    }
 }
 
 fn parse_config(path: &Path) -> SystemConfig {
@@ -2154,6 +2175,31 @@ pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, q
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A program name resolves to the one root holding its crate**, and a
+    /// name in two roots or in none is refused by name.
+    #[test]
+    fn a_program_resolves_in_exactly_one_root() {
+        let root = toyos_tmpdir::TempDir::new("program-roots");
+        for crate_dir in ["system/a", "apps/b", "system/c", "tests/guest/c", "system/d/e"] {
+            fs::create_dir_all(root.join(crate_dir)).unwrap();
+            fs::write(root.join(crate_dir).join("Cargo.toml"), "").unwrap();
+        }
+        fs::create_dir_all(root.join("apps/f")).unwrap();
+        let roots = &["system", "apps", "tests/guest"];
+        assert_eq!(find_program(&root, roots, "a"), Ok(root.join("system/a")));
+        assert_eq!(find_program(&root, roots, "b"), Ok(root.join("apps/b")));
+        assert_eq!(
+            find_program(&root, roots, "c"),
+            Err("program `c` is in system/c and tests/guest/c: a program name names one crate".into())
+        );
+        for absent in ["e", "f"] {
+            assert_eq!(
+                find_program(&root, roots, absent),
+                Err(format!("no program `{absent}`: none of system, apps, tests/guest holds a {absent}/Cargo.toml"))
+            );
+        }
+    }
 
     /// **The release a tree records is its commit, at that commit's own time,
     /// and dirty from the first file that is not that commit's**: an

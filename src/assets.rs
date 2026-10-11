@@ -546,24 +546,26 @@ mod tests {
     /// The right-hand column of [`OPENED_BY`] is true of the tree.
     ///
     /// The claim is that one program opens the file, so a second program naming
-    /// its path is an image losing a file it needs. `userland/` only: the
-    /// harness names doom's paths in its assertions, and it runs on the host.
+    /// its path is an image losing a file it needs. The program roots only:
+    /// the harness names doom's paths in its assertions, and it runs on the
+    /// host.
     #[test]
     fn only_its_reader_opens_an_owned_file() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         for (asset, reader) in OPENED_BY {
             let out = Command::new("git")
                 .args(["-C", &root.display().to_string()])
-                .args(["grep", "-l", &format!("/system/share/{asset}"), "--", "userland"])
+                .args(["grep", "-l", &format!("/system/share/{asset}"), "--"])
+                .args(crate::build::PROGRAM_ROOTS)
                 .output()
                 .expect("run git grep");
             let hits: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .map(str::to_string)
                 .collect();
-            assert!(!hits.is_empty(), "nothing under userland/ opens /system/share/{asset} at all");
-            let strangers: Vec<&String> =
-                hits.iter().filter(|p| !p.starts_with(&format!("userland/{reader}/"))).collect();
+            assert!(!hits.is_empty(), "no program opens /system/share/{asset} at all");
+            let dir = crate::hostws::rel(&root, &crate::build::program_dir(&root, reader));
+            let strangers: Vec<&String> = hits.iter().filter(|p| !p.starts_with(&format!("{dir}/"))).collect();
             assert!(
                 strangers.is_empty(),
                 "OPENED_BY says only /system/bin/{reader} opens /system/share/{asset}, and {strangers:?} \

@@ -30,9 +30,10 @@
 //! whose work a `cfg` compiles out of a host checks green there: only review
 //! holds that (`.claude/agents/reviewer.md`, Hosts).
 //!
-//! Most of `userland/` builds for ToyOS alone, so no crate under it is among the
-//! workspace's host members ([`crate::hostws`]); the gate runs `cargo test` on
-//! each crate [`survey`] gates instead. There is no list: a crate's
+//! Most programs build for ToyOS alone, so no crate under a
+//! [`crate::build::PROGRAM_ROOTS`] entry is among the workspace's host members
+//! ([`crate::hostws`]); the gate runs `cargo test` on each crate [`survey`]
+//! gates in each of them instead. There is no list: a crate's
 //! first test gates the merge that adds it.
 //!
 //! **A test is found by reading text**, because cargo's metadata knows targets
@@ -53,18 +54,18 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// What [`survey`] found under one `userland/` directory.
+/// What [`survey`] found under one program root.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Survey {
-    /// The crates `host` runs, by directory under `userland/`, sorted.
+    /// The crates `host` runs, by directory under the root, sorted.
     pub gated: Vec<String>,
-    /// Every test the gate would not run, each as `<path under userland>: why`,
+    /// Every test the gate would not run, each as `<path under the root>: why`,
     /// sorted. `host` is red while this is not empty.
     pub escapes: Vec<String>,
 }
 
-/// Every crate under `userland` that holds a test, and every test that no
-/// `cargo test` in one of them runs.
+/// Every crate under the program root `userland` that holds a test, and every
+/// test that no `cargo test` in one of them runs.
 pub fn survey(userland: &Path) -> Result<Survey, String> {
     let mut files = Vec::new();
     rs_files(userland, &mut files)?;
@@ -444,13 +445,17 @@ mod tests {
     /// **Every userland test gates a merge.**
     #[test]
     fn every_userland_test_is_in_the_gate() {
-        let survey = survey(&repo_root().join("userland")).expect("userland is readable");
-        assert!(!survey.gated.is_empty(), "no userland crate holds a test, so this looked at nothing");
-        assert!(
-            survey.escapes.is_empty(),
-            "`cargo run -- --ci host` runs none of these:\n  {}",
-            survey.escapes.join("\n  ")
-        );
+        let mut gated = 0;
+        for program_root in crate::build::PROGRAM_ROOTS {
+            let survey = survey(&repo_root().join(program_root)).expect("a program root is readable");
+            gated += survey.gated.len();
+            assert!(
+                survey.escapes.is_empty(),
+                "`cargo run -- --ci host` runs none of these under {program_root}/:\n  {}",
+                survey.escapes.join("\n  ")
+            );
+        }
+        assert!(gated > 0, "no program's crate holds a test, so this looked at nothing");
     }
 
     /// The survey's judgment, on a tree built to hold each shape it has to tell

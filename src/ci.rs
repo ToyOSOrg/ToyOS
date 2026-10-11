@@ -790,16 +790,18 @@ fn host(root: &Path) -> Vec<Step> {
     for control in CONTROLS {
         steps.push(step(&format!("control `{}`", control.feature), || run_control(root, control)));
     }
-    match crate::userlandhost::survey(&root.join("userland")) {
-        Ok(survey) => {
-            for name in survey.gated {
-                let manifest = format!("userland/{name}/Cargo.toml");
-                steps.push(step(&format!("userland/{name}"), || {
-                    cargo(root, &["test", "--manifest-path", &manifest])
-                }));
+    for program_root in crate::build::PROGRAM_ROOTS {
+        match crate::userlandhost::survey(&root.join(program_root)) {
+            Ok(survey) => {
+                for name in survey.gated {
+                    let manifest = format!("{program_root}/{name}/Cargo.toml");
+                    steps.push(step(&format!("{program_root}/{name}"), || {
+                        cargo(root, &["test", "--manifest-path", &manifest])
+                    }));
+                }
             }
+            Err(why) => steps.push(Step { label: format!("the host crates under {program_root}/"), verdict: Err(why) }),
         }
-        Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
     match crate::userlandhost::programs(root) {
         Ok(programs) => {

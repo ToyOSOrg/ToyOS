@@ -200,9 +200,12 @@ const NESTED: Shape = Shape {
 /// Every run: each of [`SHAPES`], then [`NESTED`] with the manifest of each
 /// nested crate `src/userlandhost.rs`'s survey gates.
 fn runs(root: &Path) -> Result<Vec<(&'static Shape, Option<String>)>, String> {
-    let survey = crate::userlandhost::survey(&root.join("userland"))?;
-    let nested = survey.gated.into_iter().filter(|c| c.contains('/'));
-    let nested = nested.map(|c| (&NESTED, Some(format!("userland/{c}/Cargo.toml"))));
+    let mut nested = Vec::new();
+    for program_root in crate::build::PROGRAM_ROOTS {
+        let survey = crate::userlandhost::survey(&root.join(program_root))?;
+        let crates = survey.gated.into_iter().filter(|c| c.contains('/'));
+        nested.extend(crates.map(|c| (&NESTED, Some(format!("{program_root}/{c}/Cargo.toml")))));
+    }
     Ok(SHAPES.iter().map(|s| (s, None)).chain(nested).collect())
 }
 

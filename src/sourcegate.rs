@@ -150,9 +150,10 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
 ];
 
 /// Directories whose Rust is compiled for the guest, by repository-relative
-/// prefix. **A crate's build script is host code and is walked**, whatever
-/// prefix it is under. Both spellings --- the `build.rs` default and
-/// whatever a `build = "…"` key names --- because the key overrides the name.
+/// prefix, beside every [`crate::build::PROGRAM_ROOTS`] entry. **A crate's
+/// build script is host code and is walked**, whatever prefix it is under.
+/// Both spellings --- the `build.rs` default and whatever a `build = "…"` key
+/// names --- because the key overrides the name.
 const GUEST_CODE: &[&str] = &[
     "rust",
     "kernel/src",
@@ -163,7 +164,6 @@ const GUEST_CODE: &[&str] = &[
     "sdk/window",
     "sdk/filepicker",
     "sdk/libc/src",
-    "userland",
     "tests/toyos-rust-tests",
     "tests/testcases",
 ];
@@ -264,6 +264,7 @@ fn host_files() -> Vec<PathBuf> {
             }
             let guest = GUEST_CODE
                 .iter()
+                .chain(crate::build::PROGRAM_ROOTS)
                 .any(|skip| at == *skip || at.starts_with(&format!("{skip}/")));
             if !guest || name == "build.rs" || scripts.contains(&at) {
                 out.push(path);
