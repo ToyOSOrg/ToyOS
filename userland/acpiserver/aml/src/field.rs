@@ -407,7 +407,7 @@ impl Machine<'_> {
     /// Runs `body` holding the Global Lock where `lock` says (§19.6.47).
     fn locked<T>(&mut self, lock: bool, body: impl FnOnce(&mut Self) -> Result<T, Error>) -> Result<T, Error> {
         if lock {
-            self.take_global()?;
+            self.take_global(None)?;
         }
         let r = body(self);
         if lock {

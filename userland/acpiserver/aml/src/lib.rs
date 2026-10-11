@@ -21,7 +21,8 @@
 //! SystemIO, PCI_Config and EmbeddedControl space; an access in any other
 //! space is refused as [`Error::Unsupported`], as are `Load`, `LoadTable`
 //! and `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
-//! never contended and an Event is never signalled by anyone else.
+//! never contended and an Event is never signalled by anyone else; `\_GL`'s
+//! other owner is the firmware, whose side the [`Host`] waits out.
 //!
 //! The predefined objects are the operating system's (§5.7), answered as
 //! Windows answers them, by the owner's rulings ("Like Windows, not Linux";
@@ -80,7 +81,8 @@ pub const MAX_LIVE: usize = 16 << 20;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;
-/// The time one evaluation may ask to Sleep, Stall and Wait, together, in µs.
+/// The time one evaluation may ask to Sleep, Stall and Wait, and wait out
+/// in Acquires of `\_GL` that timed out, together, in µs.
 pub(crate) const MAX_WAIT_US: u64 = 10_000_000;
 /// What the Revision opcode answers (§19.6.119): this interpreter's revision.
 pub(crate) const REVISION: u64 = 1;
@@ -181,9 +183,16 @@ pub trait Host {
     fn timer(&mut self) -> u64;
     /// Notify (§19.6.94) of the object at this absolute path.
     fn notify(&mut self, object: &str, value: u64);
-    /// Takes (`true`) or gives back (`false`) the firmware's Global Lock
-    /// (§5.2.10.1), around a Lock field's access and `\_GL`'s ownership.
-    fn global_lock(&mut self, take: bool) -> Result<(), Denied>;
+    /// Takes the firmware's Global Lock (§5.2.10.1), for a Lock field's
+    /// access or an Acquire of `\_GL` with no TimeoutValue (0xFFFF,
+    /// §19.6.2), waiting where the firmware holds it for its release.
+    fn global_take(&mut self) -> Result<(), Denied>;
+    /// Takes the Global Lock for an Acquire of `\_GL` whose TimeoutValue is
+    /// `ms`, waiting where the firmware holds it at most that long: `false`
+    /// is the timeout, and nothing taken.
+    fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied>;
+    /// Gives back the Global Lock a take took.
+    fn global_release(&mut self) -> Result<(), Denied>;
 }
 
 /// An object as the caller receives or passes it.

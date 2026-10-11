@@ -117,11 +117,6 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
-    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
-    // machine has.
-    "claim_lpi",
-    "claim_unrouted",
-    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
@@ -139,6 +134,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
     // not give: the `app_view` metal row runs it on tests/proctreecase.
     "app_view",
+    // Needs a desktop driven by a person's keys and pointer: `consent_prompt`
+    // runs it on tests/consentcase.
+    "consent",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
@@ -187,7 +185,8 @@ const RUST_SKIP: &[&str] = &[
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
     // i8042's row another claim's, which need the test kernel and its
-    // `i8042-withheld`: `acpi_mediated_access` runs it on tests/acpicase.
+    // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_across_a_lock_wait`
+    // run it on tests/acpicase.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
@@ -309,8 +308,14 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
-    ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
+    // A package's launch from the desktop asks the person at the screen, in
+    // the prompt layer, over a hostile fullscreen window: the supervisor
+    // parking a launch, filepicker drawing through `prompt` and the compositor
+    // giving it every key, run together. Driven through the desktop's own
+    // keyboard and tablet and read off the panel, neither of which the T14's
+    // loop can do; each rule alone is a host test.
+    ("consent_prompt", qemu::Profile::Desktop),
     ("virt_wall_clock_utc", qemu::Profile::Virt),
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
@@ -376,6 +381,12 @@ const MACHINE_TESTS: &[&str] = &[
     // by stopping. No host test reaches either, and the T14 is never asked to
     // power off.
     "acpi_supply_outlives_holder",
+    // A press while acpiserver waits for the firmware's release of the Global
+    // Lock: the firmware's hold is the test kernel's actuator on the FACS's
+    // word, the table that takes the lock is one QEMU adds, and the press is
+    // QEMU's on demand. The T14's firmware holds the lock when it will, and
+    // nothing presses its button but a hand.
+    "acpi_press_across_a_lock_wait",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
     // the T14 hands over in legacy mode, where no holder means no quieting.
@@ -398,6 +409,11 @@ const MACHINE_TESTS: &[&str] = &[
     // `console/system.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The desktop on CPUs that offer no x2APIC, whose local APICs run in
+    // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
+    // which no host build has and the T14, whose CPUs offer x2APIC, never
+    // reaches; the AMD laptop that needs it is not on the bench.
+    "desktop_without_x2apic",
     // A machine whose one NVMe disk is all it has: its firmware boots the
     // image off it, and `/log` and `/home` are `diskserver`'s partitions of
     // it across a reset. The claim on the controller and the firmware that
@@ -612,6 +628,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The T14's battery and AC adapter as the server read them through
+        // its AML and its embedded controller: `battery_on_metal` says what
+        // is held, and prints the readings for Linux's on the same machine.
+        // The same boot as `acpi_server_events`, held past several polls.
+        "battery_read",
+        metal::Metal {
+            arms: TESTCASES_HELD,
+            judge: |b| battery_on_metal(b[0]),
+        },
+    ),
+    (
         // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
         // and `SCI_EN` reads clear after it.
         "acpi_server_death",
@@ -699,7 +726,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            judge: |b| {
+                let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
+                smp_roster_and_tsc_trail(log.text(), cpus)?;
+                apic_mode_held(&log, cpus, "X2apic")
+            },
         },
     ),
     (
@@ -2029,6 +2061,57 @@ fn console_image_boots() -> Result<(), String> {
     serial::Serial::named("the console image's boot", console).must_be_clean()
 }
 
+/// Boot `tests/panelcase` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
+/// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
+/// declared its local APIC in xAPIC mode, every CPU the firmware named came
+/// up — started by an xAPIC ICR's two halves — and the desktop ran across
+/// them, which every timer re-arm, EOI and TLB shootdown on the way reached
+/// through the xAPIC's MMIO page.
+fn desktop_without_x2apic() -> Result<(), String> {
+    const CPUS: u32 = 4;
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/panelcase"),
+        &[],
+        &[],
+        BootOptions {
+            profile: qemu::Profile::MetalNoX2apic,
+            smp: CPUS,
+            qmp: true,
+            ready_marker: bootlog::COMPLETE,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "compositor: ready", "the compositor to take its panel")?;
+    let taken = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| d.fill() != FILL_BOOT);
+    if taken.fill() == FILL_BOOT {
+        return Err(format!("the compositor said it is ready and never took the screen\n{console}"));
+    }
+    let said = serial::Serial::named("the boot without x2APIC", console);
+    said.must_be_clean()?;
+    apic_mode_held(&said, CPUS, "Xapic")?;
+    smp_roster_and_tsc_trail(said.text(), CPUS)?;
+    eprintln!("  [xapic] {CPUS} CPUs in xAPIC mode, and the compositor holds the panel");
+    Ok(())
+}
+
+/// Every one of `cpus` CPUs declared its local APIC in `mode`, as
+/// `control_regs` names it, and the machine's report says the same.
+fn apic_mode_held(log: &serial::Serial, cpus: u32, mode: &str) -> Result<(), String> {
+    for cpu in 0..cpus {
+        let line = log.must_say(&format!("control_regs: cpu{cpu} apic_base="))?;
+        if !line.trim_end().ends_with(&format!(" {mode}")) {
+            return Err(format!("cpu{cpu} did not declare its local APIC {mode}: {line:?}"));
+        }
+    }
+    let held = log.must_say(&format!("control_regs: {cpus} of {cpus} cpus hold "))?;
+    if !held.trim_end().ends_with(&format!(" apic={mode}")) {
+        return Err(format!("the machine's declaration is not {mode}: {held:?}"));
+    }
+    log.must_say(&format!("LAPIC: {mode} enabled ("))?;
+    Ok(())
+}
+
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
 /// with `cpus` CPUs reporting.
 fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
@@ -2331,140 +2414,6 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     // A halt, which writes the record and the stop's line and no panic.
     if let Some(death) = lines.iter().find(|l| serial::died(l).is_some() && !l.contains("owner=kernel")) {
         return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
-    }
-    Ok(())
-}
-
-/// `tests/toyos-rust-tests`' binaries that `tests/virtclaimcase` runs as its
-/// jobs, each `test_rs_` and its name.
-const VIRT_CLAIM_LPI: &str = "claim_lpi";
-const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
-const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
-
-/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
-/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
-/// the console only if the kernel read through the BAR for a crash report.
-const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
-
-/// A claimed function's message, translated by the ITS into its claim slot's
-/// LPI, and the claims the kernel refuses beside it, on `tests/virtclaimcase`.
-/// Its first job claims QEMU's `edu` and reads every message it asks it for as
-/// one interrupt of its claim (`tests/toyos-rust-tests/src/bin/claim_lpi.rs`),
-/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
-/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
-/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
-/// unmapped again. The second is refused the `e1000e` the IORT routes past
-/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
-/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
-/// crash report reads through it. And no access of a function's is refused
-/// at the SMMUv3.
-fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
-    const JOB: &str = "test_rs_claim_lpi";
-    const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
-    const EDU: &str = "[1234:11e8]";
-    let config = compile::repo_root().join("tests/virtclaimcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-    // One CPU, so each message is taken where the job wrote the register
-    // that sends it: at EL0, which holds the preempt count at zero.
-    let options = BootOptions {
-        profile,
-        smp: 1,
-        ready_marker: "control registers: SCTLR_EL1=",
-        extra_root_files: vec![
-            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
-            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
-            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
-        ],
-        ..Default::default()
-    };
-    let argv = qemu::profile_argv(&options);
-    for want in ["its=on", "kernel-irqchip=off", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
-        if !argv.iter().any(|a| a.contains(want)) {
-            return Err(format!("the machine has no {want}: {argv:?}"));
-        }
-    }
-    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
-    let mut serial = virt_console(&qemu);
-    judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
-    // The release's own line, its last: the DeviceID's unmapping comes before it.
-    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
-    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
-    let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
-        return Err(format!("the MADT's ITS was never armed
-serial:
-{serial}"));
-    };
-    eprintln!("  [virt] {armed}");
-    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
-        return Err(format!("edu was never handed over
-serial:
-{serial}"));
-    };
-    eprintln!("  [virt] {handed}");
-    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
-    let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
-        let (at, rest) = rest.split_once(' ')?;
-        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
-        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
-    });
-    let Some((at, slot, lpi)) = parsed else {
-        return Err(format!("{handed:?} names no function, slot and LPI"));
-    };
-    if lpi != 8192 + slot {
-        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
-    }
-    // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
-    // that to the ITS's DeviceID unchanged.
-    let (bus, rest) = at.split_once(':').ok_or_else(|| format!("{at} is no bus:device.function"))?;
-    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("{at} is no bus:device.function"))?;
-    let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
-    let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
-    for want in [
-        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
-        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
-        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
-        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
-    ] {
-        let Some(found) = line(&want) else {
-            return Err(format!("the kernel never said {want:?}
-serial:
-{serial}"));
-        };
-        eprintln!("  [virt] {found}");
-    }
-
-    judge_virt_job(
-        &mut qemu,
-        &mut serial,
-        "test_rs_claim_unrouted",
-        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
-    )?;
-    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
-    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
-                            DeviceID at this kernel's ITS behind the SMMUv3";
-    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
-        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
-    };
-    eprintln!("  [virt] {refused}");
-
-    judge_virt_job(
-        &mut qemu,
-        &mut serial,
-        "test_rs_claim_bar_fault",
-        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
-    )?;
-    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
-    if faults.len() != 2 {
-        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
-    }
-    let console = serial.to_lowercase();
-    for mark in BAR_MARKS {
-        if console.contains(&format!("{mark:x}")) {
-            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
-        }
-    }
-    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
-        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
     }
     Ok(())
 }
@@ -3201,7 +3150,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
-        "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
@@ -3225,6 +3173,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
+        "consent_prompt" => consent_prompt(profile),
         "screen_fatal_behind_a_painter" => {
             // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
@@ -3958,12 +3907,14 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
+        "acpi_press_across_a_lock_wait" => power::acpi_press_across_a_lock_wait(suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")),
         "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         "machine_shutdown_wire_held" => power::machine_shutdown_wire_held(test_config, false),
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
         "console_image_boots" => console_image_boots(),
+        "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
@@ -4012,6 +3963,304 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
         return Err(format!("diskserver opened {read_only} read-only sessions, and only the slot's volume is granted one\n{console}"));
     }
     Ok(())
+}
+
+/// `consent`'s steps, driven through the desktop's own keyboard and tablet
+/// (`tests/toyos-rust-tests/src/bin/consent.rs`), and each held to what the
+/// panel, the supervisor and the package said.
+///
+/// **Every step is the guest's line and the host's answer to it**: the job
+/// says `CONSENT <step>`, and the host clicks the package in the launcher;
+/// the compositor says its prompt is on the panel, and the host reads the
+/// panel and answers with keys; the package says what it saw, and the host
+/// taps F12, which the job waits on through its hostile window. Nothing here
+/// waits on a clock but the run's own ceiling.
+fn consent_prompt(profile: qemu::Profile) -> Result<(), String> {
+    let case = compile::repo_root().join("tests/consentcase");
+    let (_, job) = suite_bin(profile.arch(), "consent");
+    let digest: String = toyos_sha2_hw::sha256_digest(&job).iter().map(|b| format!("{b:02x}")).collect();
+    let options = BootOptions { profile, qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[("consent".to_string(), job)], options);
+    let mut drive = Consent { digest, out: qemu.screendump_file(), ..Consent::default() };
+    let result = qemu.run_test_paced("test_rs_consent", Duration::from_secs(300), |qmp, line| {
+        drive.line(qmp.expect("consent_prompt boots with QMP"), line)
+    });
+    if let Some(why) = &result.error {
+        drive.red.push(format!("the job did not finish: {why}"));
+    } else if result.exit_code != Some(0) {
+        drive.red.push(format!("the job ended {:?}", result.exit_code));
+    }
+    let all = ["always", "again", "deny", "denied", "skip", "once", "ssh"];
+    if drive.done != all {
+        drive.red.push(format!("the steps finished were {:?}, not {all:?}", drive.done));
+    }
+    match drive.red.is_empty() {
+        true => Ok(()),
+        false => Err(format!("{:#?}\nthe job said:\n{}", drive.red, result.stdout)),
+    }
+}
+
+/// [`consent_prompt`]'s side of the conversation.
+#[derive(Default)]
+struct Consent {
+    /// The SHA-256 of the binary the job installs as the package, computed
+    /// here, which an answer the supervisor keeps is keyed on.
+    digest: String,
+    out: std::path::PathBuf,
+    /// The panel's size, from the first dump.
+    screen: Option<(usize, usize)>,
+    step: Option<ConsentStep>,
+    done: Vec<String>,
+    /// The panel above the taskbar before the launch off the screen.
+    before: Option<Vec<[u8; 3]>>,
+    red: Vec<String>,
+}
+
+#[derive(Default)]
+struct ConsentStep {
+    name: String,
+    /// Where Games is in the prompt's list, from the job.
+    games: usize,
+    /// The supervisor's word on the answer.
+    answer: Option<String>,
+    /// What the package saw.
+    saw: Option<String>,
+    /// The prompt came up, and went.
+    up: bool,
+    down: bool,
+}
+
+/// What the hostile window paints.
+const HOSTILE_RGB: [u8; 3] = [0xff, 0x00, 0xff];
+const ROM_SEEN: &str = "cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok";
+const NOTHING_SEEN: &str = "cwd=/ roms=[] saved=Err";
+
+impl ConsentStep {
+    /// Whether this step asks, the keys that answer it, the supervisor's word
+    /// on the answer, and what the package sees.
+    fn expected(&self) -> (bool, Vec<&'static str>, Option<&'static str>, &'static str) {
+        let down = || std::iter::repeat_n("down", self.games);
+        let tabs = |n| std::iter::repeat_n("tab", n);
+        match self.name.as_str() {
+            "always" => (
+                true,
+                down().chain(tabs(3)).chain(["ret"]).collect(),
+                Some("always, /home/toy/Games read-write"),
+                ROM_SEEN,
+            ),
+            "again" => (false, Vec::new(), None, ROM_SEEN),
+            "deny" => (true, tabs(4).chain(["ret"]).collect(), Some("denied, until `grants revoke`"), NOTHING_SEEN),
+            "denied" => (false, Vec::new(), None, NOTHING_SEEN),
+            "skip" => (true, vec!["esc"], Some("skipped, so its next launch asks again"), NOTHING_SEEN),
+            "once" => (
+                true,
+                down().chain(tabs(2)).chain(["ret"]).collect(),
+                Some("once, /home/toy/Games read-write"),
+                ROM_SEEN,
+            ),
+            other => panic!("consent_prompt: the job asked for a step `{other}` this side has no answer for"),
+        }
+    }
+}
+
+impl Consent {
+    fn line(&mut self, qmp: &Path, line: &str) {
+        let after = |marker: &str| line.find(marker).map(|at| line[at + marker.len()..].trim().to_string());
+        if let Some(step) = after("CONSENT ") {
+            self.begin(qmp, &step);
+        } else if line.contains("compositor: the prompt is on the panel") {
+            self.prompt_up(qmp);
+        } else if line.contains("compositor: the prompt is down") {
+            match &mut self.step {
+                Some(step) => step.down = true,
+                None => self.red.push("the prompt went down outside any step".to_string()),
+            }
+        } else if let Some(answer) = after("supervisor: consent: consentee: ") {
+            match &mut self.step {
+                Some(step) => step.answer = Some(answer),
+                None => self.red.push(format!("the supervisor took an answer outside any step: {answer}")),
+            }
+        } else if let Some(saw) = after("CONSENTEE ") {
+            match &mut self.step {
+                Some(step) => step.saw = Some(saw),
+                None => self.red.push(format!("the package ran outside any step and saw {saw}")),
+            }
+        } else if let Some(stored) = after("STORE ") {
+            self.stored(&stored);
+        }
+        self.finish(qmp);
+    }
+
+    fn dump(&mut self, qmp: &Path) -> screen::Ppm {
+        let dump = qemu::QmpInput::open(qmp).screendump(&self.out);
+        self.screen.get_or_insert((dump.width, dump.height));
+        dump
+    }
+
+    fn begin(&mut self, qmp: &Path, said: &str) {
+        let mut words = said.split_whitespace();
+        let name = words.next().unwrap_or_default().to_string();
+        let games = words.find_map(|w| w.strip_prefix("down=")).map_or(0, |n| n.parse().unwrap_or(0));
+        match name.as_str() {
+            // Off the screen: the panel above the taskbar is unchanged across
+            // it, and no prompt comes up (`prompt_up` reds one outside a step).
+            "ssh" if said == "ssh" => self.before = Some(self.above_taskbar(qmp)),
+            "ssh" => {
+                let after = self.above_taskbar(qmp);
+                if self.before.take().is_none_or(|before| before != after) {
+                    self.red.push("the panel changed across the launch off the screen".to_string());
+                }
+                self.done.push(name);
+                Self::tap_done(qmp);
+            }
+            _ => {
+                if self.screen.is_none() {
+                    self.dump(qmp);
+                }
+                let (w, h) = self.screen.expect("the first dump measured the panel");
+                // The `+`, then the launcher's last row, which is the one
+                // package installed: built-in rows come first.
+                let desk = toyos_desktop::Desk {
+                    chrome: toyos_desktop::Chrome::DEFAULT,
+                    screen: toyos_desktop::Rect::new(0, 0, w as i32, h as i32),
+                    font_w: 8,
+                    apps: 1,
+                };
+                let bar = desk.taskbar(1);
+                let centre = |r: toyos_desktop::Rect| (i32::midpoint(r.x0, r.x1), i32::midpoint(r.y0, r.y1));
+                // **The row is clicked once the launcher is on the panel**: the
+                // compositor folds two clicks it reads at once into one at
+                // the second's place (issues/two-clicks-the-compositor-reads-at-once-are-one-click.md).
+                let row = bar.launcher_item(0);
+                let shown = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
+                    (row.y0 as usize..row.y1 as usize)
+                        .flat_map(|y| dump.pixels[y * dump.width + row.x0 as usize..y * dump.width + row.x1 as usize].to_vec())
+                        .collect()
+                };
+                let mut input = qemu::QmpInput::open(qmp);
+                let closed = shown(&input.screendump(&self.out));
+                input.click(centre(bar.new_button()), (w, h));
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while shown(&input.screendump(&self.out)) == closed {
+                    if Instant::now() >= deadline {
+                        self.red.push(format!("{name}: the launcher did not open in 20 s"));
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                input.click(centre(row), (w, h));
+                self.step = Some(ConsentStep { name, games, ..ConsentStep::default() });
+            }
+        }
+    }
+
+    fn above_taskbar(&mut self, qmp: &Path) -> Vec<[u8; 3]> {
+        let dump = self.dump(qmp);
+        let rows = dump.height - toyos_desktop::Chrome::DEFAULT.taskbar as usize;
+        dump.pixels[..rows * dump.width].to_vec()
+    }
+
+    /// The prompt is on the panel: it is drawn over the hostile window, and a
+    /// press outside it and the keys that answer it go in.
+    fn prompt_up(&mut self, qmp: &Path) {
+        let asks = match &self.step {
+            Some(step) => step.expected().0,
+            None => false,
+        };
+        if !asks {
+            let name = self.step.as_ref().map_or("none", |s| s.name.as_str()).to_string();
+            self.red.push(format!("a prompt came up in step {name}, which asks nothing"));
+            return;
+        }
+        let dump = self.dump(qmp);
+        let framed: Vec<(usize, usize)> = (0..dump.height)
+            .flat_map(|y| (0..dump.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| dump.pixels[y * dump.width + x] == toyos_desktop::PROMPT_FRAME)
+            .collect();
+        let at = |x: usize, y: usize| dump.pixels[y * dump.width + x];
+        let (x0, x1) = match (framed.iter().map(|p| p.0).min(), framed.iter().map(|p| p.0).max()) {
+            (Some(x0), Some(x1)) if x1 - x0 >= 600 => (x0, x1),
+            other => {
+                self.red.push(format!("no prompt's frame on the panel: {} pixels, across {other:?}", framed.len()));
+                return;
+            }
+        };
+        let y0 = framed.iter().map(|p| p.1).min().unwrap_or(0);
+        let y1 = framed.iter().map(|p| p.1).max().unwrap_or(0);
+        if at(usize::midpoint(x0, x1), usize::midpoint(y0, y1)) == HOSTILE_RGB || at(x0, y0 + 2) != toyos_desktop::PROMPT_FRAME {
+            self.red.push(format!("the prompt at ({x0}, {y0})-({x1}, {y1}) is under the hostile window"));
+        }
+        if at(8, 40) != HOSTILE_RGB {
+            self.red.push(format!("the hostile window is not on the panel beside the prompt: {:?}", at(8, 40)));
+        }
+        let screen = (dump.width, dump.height);
+        let prompt = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
+            (y0..=y1).flat_map(|y| dump.pixels[y * dump.width + x0..=y * dump.width + x1].to_vec()).collect()
+        };
+        let mut shown = prompt(&dump);
+        let mut input = qemu::QmpInput::open(qmp);
+        // A press on the hostile window around the prompt, which nothing takes.
+        input.click((8, 40), screen);
+        // **Each key is paced against the prompt it changes.** QEMU's keyboard
+        // loses a press or a release sent behind another before the guest has
+        // read it, so the next key goes only once the panel shows the last.
+        let keys = self.step.as_ref().map(|s| s.expected().1).unwrap_or_default();
+        for key in keys {
+            input.keys(&[(key, true), (key, false)]);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let now = prompt(&input.screendump(&self.out));
+                if now != shown {
+                    shown = now;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    self.red.push(format!("`{key}` changed nothing on the prompt in 20 s"));
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if let Some(step) = &mut self.step {
+            step.up = true;
+        }
+    }
+
+    /// A step that has said all it will: held to what it should have said,
+    /// and its F12 tapped.
+    fn finish(&mut self, qmp: &Path) {
+        let Some(step) = &self.step else { return };
+        let (asks, _, answer, seen) = step.expected();
+        if step.saw.is_none() || (asks && !(step.up && step.down)) {
+            return;
+        }
+        let step = self.step.take().expect("a step is under way");
+        if step.answer.as_deref() != answer {
+            self.red.push(format!("{}: the supervisor said {:?}, not {answer:?}", step.name, step.answer));
+        }
+        if step.saw.as_deref() != Some(seen) {
+            self.red.push(format!("{}: the package saw {:?}, not {seen:?}", step.name, step.saw));
+        }
+        self.done.push(step.name);
+        Self::tap_done(qmp);
+    }
+
+    /// The store's line after a step, held to the binary's own digest.
+    fn stored(&mut self, said: &str) {
+        let (step, line) = said.split_once(':').unwrap_or((said, ""));
+        let want = match step {
+            "always" => format!("grant toy consentee {} read-write /home/toy/Games", self.digest),
+            "deny" => format!("deny toy consentee {}", self.digest),
+            _ => String::new(),
+        };
+        if line.trim() != want {
+            self.red.push(format!("{step}: the store holds {:?}, not {want:?}", line.trim()));
+        }
+    }
+
+    fn tap_done(qmp: &Path) {
+        qemu::QmpInput::open(qmp).keys(&[("f12", true), ("f12", false)]);
+    }
 }
 
 /// Run `command` as a job of the boot, to exit 0: what it said.
@@ -4718,7 +4967,8 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
 /// `app_view` passed, every arm its package asks held, and the supervisor
 /// refused each of the two launches for its own reason: a package named after
 /// the shell's row, and one whose folder is a file. The guest sees only that
-/// each was refused.
+/// each was refused. And the supervisor wrote and took away the package's
+/// grant, and refused the machine's session one.
 fn app_view(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_app_view")?;
     let log = back.log();
@@ -4729,6 +4979,10 @@ fn app_view(back: &metal::Readback) -> Result<(), String> {
         &named,
         "supervisor: launcher: appview was not started: /home/toy/Apps/appview could not be made: \
          /home/toy/Apps/appview is no directory",
+        "supervisor: grants: refused grants in the machine's session: only a login session may ask for grants",
+        "supervisor: grants: appview is granted /home/toy/Games read-write",
+        "  granted: cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok",
+        "supervisor: grants: appview's grant is revoked; its next launch holds no folder",
     ] {
         if !log.text().lines().any(|l| l.contains(said)) {
             return Err(format!("the log never said `{said}`\n{}", log.text()));
@@ -5638,6 +5892,50 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     for line in [took, bytes, aml] {
         eprintln!("  [acpi] {}", line.trim());
+    }
+    Ok(())
+}
+
+/// What the T14's tables name, by a census of them read outside the tree:
+/// one control-method battery, one AC adapter, and one embedded controller,
+/// attached to the server's AML.
+const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-method batteries present, 1 AC adapter(s), with an embedded controller attached; the Global Lock taken ";
+
+/// The T14's battery as the server read it: the one battery its tables name
+/// found present once the controller's `_REG` ran, its information read,
+/// and at least one reading of it with the adapter's state; every method
+/// answered. The census's Global Lock counts are printed and held to
+/// nothing: an evaluation gives back the lock it still holds as it ends
+/// (`finish`, `userland/acpiserver/aml/src/exec.rs`), and the real lock
+/// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
+/// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
+/// the same machine are compared against, by whoever holds both.
+fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_hold")?;
+    let log = back.log();
+    let lines: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_some_and(|said| said.tag == "acpiserver"))
+        .collect();
+    if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
+        return Err(format!("the server died: {fired}"));
+    }
+    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
+    if !refused.is_empty() {
+        return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
+    }
+    let found = log.must_say(T14_POWER_SOURCES)?;
+    let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
+    let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
+    if read.is_empty() {
+        return Err("the server said no reading of the battery".into());
+    }
+    if let Some(unknown) = read.iter().find(|l| l.contains("unknown") || !(l.ends_with("; AC online") || l.ends_with("; AC offline"))) {
+        return Err(format!("a reading with a value unknown: {unknown}"));
+    }
+    for line in [found, info].into_iter().chain(read.iter().map(|l| **l)) {
+        eprintln!("  [battery] {}", line.trim());
     }
     Ok(())
 }

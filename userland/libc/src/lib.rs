@@ -4,9 +4,12 @@
 
 extern crate alloc;
 
+mod alarm;
+mod alarmreq;
 mod arch;
 mod ctype;
 mod elfsym;
+mod errcode;
 mod errno;
 mod fdreq;
 mod fparts;
@@ -24,6 +27,7 @@ mod posix_io;
 mod printf;
 mod pthread;
 mod refused;
+mod resolve;
 mod sigmask;
 mod socket;
 mod sockopt;

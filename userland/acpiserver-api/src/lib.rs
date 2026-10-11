@@ -13,3 +13,13 @@ pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 /// [`CONTROLLER_NONE`] and why where it serves none.
 pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
 pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
+
+/// A present battery's static information, once after the controller is
+/// armed: `battery <n> of <count>`, then its numbers.
+pub const BATTERY_INFO: &str = "battery information: ";
+
+/// A battery's reading, on its first and wherever its whole percent or state
+/// or the adapters' moved: `battery <n> of <count>: <percent>%`, its
+/// remaining and full capacity, its state, rate, voltage and the power it
+/// moves in mW, then the adapters' state.
+pub const BATTERY_READ: &str = "battery read: ";

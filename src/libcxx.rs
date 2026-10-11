@@ -40,9 +40,11 @@ pub(crate) const OPTIONS: [(&str, &str); 18] = [
     ("LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL", "ON"),
     // The C library has no `dladdr`, so libunwind names no function it unwinds.
     ("LIBUNWIND_ADDITIONAL_COMPILE_FLAGS", "-D_LIBUNWIND_USE_DLADDR=0"),
-    // The C library has no directory, `stat` or path surface for it
-    // (`issues/libcxx-is-built-without-std-filesystem.md`).
-    ("LIBCXX_ENABLE_FILESYSTEM", "OFF"),
+    // `open` refuses every directory, so no descriptor names one for `openat`
+    // and `unlinkat` to resolve against: `remove_all` walks a directory
+    // iterator, as libc++'s Windows does
+    // (`issues/remove-all-follows-a-link-swapped-in-mid-walk.md`).
+    ("LIBCXX_ADDITIONAL_COMPILE_FLAGS", "-DREMOVE_ALL_USE_DIRECTORY_ITERATOR"),
     ("LIBCXX_INCLUDE_BENCHMARKS", "OFF"),
     ("LIBCXX_INCLUDE_TESTS", "OFF"),
 ];

@@ -27,14 +27,18 @@
 //! supervisor-serve <name>   a name the supervisor serves itself
 //! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
+//! app-folder <access>       the most of a folder of the home a package may be granted
 //! starts <key>              a row this program may start through the launcher, or `/apps`
 //! login                     a launch it makes from the machine's session opens a login session
 //! ```
 //!
 //! [`package`] is the other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
-//! [`launch`] is who may start what.
+//! [`launch`] is who may start what, [`grants`] which folder of the home a
+//! package is granted, and [`consent`] how the person at the screen is asked.
 
+pub mod consent;
+pub mod grants;
 pub mod launch;
 pub mod package;
 
@@ -221,7 +225,7 @@ pub fn syscap_rights(names: &[String]) -> Result<Rights, String> {
     Ok(rights)
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Program {
     pub name: String,
     pub path: String,
@@ -256,6 +260,10 @@ pub struct Program {
     /// The supervisor starts it again when it ends, on the same ports, for as long as
     /// it does not end faster than [`RESTARTS`] allows.
     pub restart: bool,
+    /// The folder of the session's home a package's launch was granted
+    /// ([`grants::decide`]): set by the supervisor on the row it synthesizes
+    /// for that launch, and never on a declared row.
+    pub folder: Option<grants::Folder>,
     /// The rows it may start through the supervisor's launcher: program keys,
     /// and [`launch::APPS`] for any installed package. Non-empty is what
     /// endows it a launcher at all.
@@ -289,14 +297,18 @@ impl Program {
     }
 
     /// The directories this row's program is endowed. **An installed package
-    /// sees its own directory read-only and its own folder of the home
-    /// read-write, and nothing else any role serves**: no other package, no
-    /// other part of the home, no `/config`, `/state`, `/log` or `/boot`.
+    /// sees its own directory read-only, its own folder of the home
+    /// read-write and the folder its launch was granted, and nothing else any
+    /// role serves**: no other package, no other part of the home, no
+    /// `/config`, `/state`, `/log` or `/boot`.
     /// Every other row sees the whole tree, until each declares its own
     /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
     pub fn view(&self) -> Vec<View> {
         match self.package() {
-            Some(name) => vec![data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)],
+            Some(name) => {
+                let granted = self.folder.iter().map(|f| data_dir(f.path.clone(), f.access == grants::Access::ReadWrite));
+                [data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)].into_iter().chain(granted).collect()
+            }
             None => whole_tree(),
         }
     }
@@ -316,6 +328,10 @@ pub struct Manifest {
     /// which is why a device class and a `syscap` right have no spelling on
     /// the package side at all.
     pub apps: Vec<String>,
+    /// The most of a folder of the session's home a package may be granted
+    /// (`[apps] folder`), and, until signed package entries carry their own
+    /// request, what every package asks for: `None` grants none.
+    pub folder: Option<grants::Access>,
     /// Program names, in the order `[boot] start` gave them — which orders
     /// nothing, because every port exists before any server runs.
     pub start: Vec<String>,
@@ -444,6 +460,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         check("supervisor", "apps", name)?;
         out.push_str(&format!("app-receive {name}\n"));
     }
+    if let Some(access) = manifest.folder {
+        out.push_str(&format!("app-folder {access}\n"));
+    }
     for name in &manifest.start {
         check("supervisor", "start", name)?;
         out.push_str(&format!("start {name}\n"));
@@ -503,6 +522,10 @@ pub fn parse(text: &str) -> Manifest {
             }
             "supervisor-serve" => manifest.supervisor_serves.push(rest.to_string()),
             "app-receive" => manifest.apps.push(rest.to_string()),
+            "app-folder" => {
+                let access = grants::Access::parse(rest).unwrap_or_else(|| panic!("manifest: `{rest}` is no access"));
+                assert!(manifest.folder.replace(access).is_none(), "manifest: `app-folder` twice");
+            }
             "start" => manifest.start.push(rest.to_string()),
             "" => {}
             _ => {
@@ -583,6 +606,7 @@ mod tests {
             ],
             supervisor_serves: vec!["swap".into()],
             apps: vec!["compositor".into(), "soundserver".into()],
+            folder: Some(grants::Access::ReadWrite),
             start: vec!["compositor".into(), "soundserver".into()],
         }
     }
@@ -684,6 +708,24 @@ mod tests {
             views(&row).into_iter().map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
             [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
         );
+    }
+
+    /// **A package's launch granted a folder sees it too, at the access it
+    /// was granted**, and nothing else is added. Spelled out whole.
+    #[test]
+    fn a_package_granted_a_folder_sees_it_beside_its_own() {
+        for (access, write) in [(grants::Access::ReadWrite, true), (grants::Access::ReadOnly, false)] {
+            let mut row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
+            row.folder = Some(grants::Folder { path: "/home/toy/Games".into(), access });
+            assert_eq!(
+                views(&row),
+                [
+                    ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
+                    ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
+                    ("data", "/home/toy/Games".into(), "home/toy/Games".into(), write),
+                ]
+            );
+        }
     }
 
     /// Every row the image declares sees the whole tree read-write, the

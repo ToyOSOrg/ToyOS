@@ -93,7 +93,7 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
 #[cfg(not(feature = "std-runtime"))]
 fn or_enomem(p: *mut u8) -> *mut u8 {
     if p.is_null() {
-        crate::errno::set(crate::errno::ENOMEM);
+        crate::errno::set(crate::errcode::ENOMEM);
     }
     p
 }
@@ -102,7 +102,7 @@ fn or_enomem(p: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
     if !align.is_power_of_two() {
-        crate::errno::set(crate::errno::EINVAL);
+        crate::errno::set(crate::errcode::EINVAL);
         return ptr::null_mut();
     }
     or_enomem(unsafe { backend::alloc(size, align) })
@@ -112,11 +112,11 @@ pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, size: usize) -> i32 {
     if !align.is_power_of_two() || align % core::mem::size_of::<usize>() != 0 {
-        return crate::errno::EINVAL;
+        return crate::errcode::EINVAL;
     }
     let p = unsafe { backend::alloc(size, align) };
     if p.is_null() {
-        return crate::errno::ENOMEM;
+        return crate::errcode::ENOMEM;
     }
     unsafe { *out = p };
     0

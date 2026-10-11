@@ -1,0 +1,14 @@
+[package]
+name = "grants"
+description = "grants list | add <package> <folder> [read-only] | revoke <package>: which folder of the home an installed package is granted, asked of the supervisor."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+# The request's codec and the folder rules, read by the supervisor too.
+toyos-manifest = { path = "../../toyos-manifest" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's grants of a folder of the home to an installed package, through the supervisor's `grants` port"

@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 use crate::file_cache::FileId;
 use crate::sync::{Lock, LockGuard};
 
@@ -107,6 +107,13 @@ impl MountPoint {
             (false, false) => format!("{}/{}", self.prefix, file),
         }
     }
+
+    /// The volume its files are on, as `toyos_abi::syscall::Stat::volume`
+    /// says: its filesystem's index plus one, so 0 stays "no volume" and every
+    /// kernel mount is below a file server's bit 63.
+    fn volume(&self) -> u64 {
+        self.fs as u64 + 1
+    }
 }
 
 /// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
@@ -132,9 +139,6 @@ pub struct Vfs {
     mounts: Vec<Mount>,
     created_dirs: BTreeSet<String>,
 }
-
-/// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
-pub const MAX_PATH: usize = 4096;
 
 /// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
@@ -381,7 +385,7 @@ impl Vfs {
     }
 
     fn resolve_for_open_depth(&mut self, path: &str, depth: u32) -> Result<OpenTarget, SyscallError> {
-        if depth > 10 { return Err(SyscallError::InvalidArgument); }
+        if depth > MAX_LINKS { return Err(SyscallError::InvalidArgument); }
         let (mount, file) = self.resolve_path("/", path);
         // A mount point is a directory, never a file to open.
         if file.is_empty() { return Err(SyscallError::NotFound); }
@@ -399,32 +403,36 @@ impl Vfs {
         Ok(OpenTarget(format!("/{mount}/{file}")))
     }
 
-    fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String), SyscallError> {
+    /// `target`'s filesystem, its path there, and its volume ([`MountPoint::volume`]).
+    fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String, u64), SyscallError> {
         let (mount, file) = self.resolve_path("/", target.as_str());
         if file.is_empty() { return Err(SyscallError::NotFound); }
-        self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
+        Ok((self.mounts[point.fs].fs.as_mut(), point.path(&file), point.volume()))
     }
 
-    pub fn open_target(&mut self, target: &OpenTarget) -> Result<FileId, SyscallError> {
-        let (fs, fs_path) = self.fs_for_target(target)?;
+    /// The file `target` names, and the volume it is on.
+    pub fn open_target(&mut self, target: &OpenTarget) -> Result<(FileId, u64), SyscallError> {
+        let (fs, fs_path, volume) = self.fs_for_target(target)?;
         let (file_id, backing) = fs.open_file(&fs_path)?;
         if let Some(backing) = backing {
             crate::file_cache::set_backing(file_id, backing);
         }
-        Ok(file_id)
+        Ok((file_id, volume))
     }
 
     pub fn mtime_target(&mut self, target: &OpenTarget) -> Result<u64, SyscallError> {
-        let (fs, fs_path) = self.fs_for_target(target)?;
+        let (fs, fs_path, _) = self.fs_for_target(target)?;
         fs.file_mtime(&fs_path)
     }
 
-    /// Create a new empty file. Returns FileId.
-    pub fn create_file(&mut self, path: &str, mtime: u64) -> Result<FileId, SyscallError> {
+    /// Create a new empty file: it, and the volume it is on.
+    pub fn create_file(&mut self, path: &str, mtime: u64) -> Result<(FileId, u64), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
         if file.is_empty() { return Err(SyscallError::InvalidArgument); }
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        fs.create(&fs_path, mtime)
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
+        let file_id = self.mounts[point.fs].fs.create(&point.path(&file), mtime)?;
+        Ok((file_id, point.volume()))
     }
 
     /// Unlink `path` on its mount.
@@ -554,7 +562,7 @@ impl Vfs {
         path: &str,
     ) -> Result<(alloc::sync::Arc<dyn crate::file_backing::FileBacking>, BackingId), SyscallError> {
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
-        let (fs, fs_path) = self.fs_for_target(&target)?;
+        let (fs, fs_path, _) = self.fs_for_target(&target)?;
         let mtime = fs.file_mtime(&fs_path)?;
         let backing = fs.open_backing(&fs_path)?;
         let id = BackingId { size: backing.file_size(), mtime };

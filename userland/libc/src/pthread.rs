@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use toyos_abi::syscall;
 
-use crate::errno::{EAGAIN, EBUSY, EDEADLK, EINVAL, EPERM, ESRCH, ETIMEDOUT};
+use crate::errcode::{EAGAIN, EBUSY, EDEADLK, EINVAL, EPERM, ESRCH, ETIMEDOUT};
 
 type PthreadT = u64;
 type StartRoutine = unsafe extern "C" fn(*mut u8) -> *mut u8;

@@ -156,6 +156,12 @@ pub const RX_RING: usize = 256;
 /// so what this bounds is how many may be in flight at once: one fewer than
 /// this, [`I219::tx_room`]'s most.
 pub const TX_RING: usize = 16;
+/// `ITR` (§10.2.4.2): the least interval between two of the function's
+/// interrupts, in 256 ns units — 128 µs. It runs from the last interrupt, so a
+/// frame after a quiet spell that long interrupts at once, and a gigabit
+/// stream's full-sized frames, one each 12.3 µs, wake their reader about ten at
+/// a time.
+const THROTTLE: u32 = 500;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
 /// Bytes per transmit buffer, and therefore the longest frame [`I219::tx_reserve`]
@@ -190,13 +196,6 @@ const _: () = {
     // would be programmed somewhere else entirely.
     assert!(OFF_RX_RING.is_multiple_of(16) && OFF_TX_RING.is_multiple_of(16));
 };
-
-/// Frames this driver hands up in one pass before it says there are no more.
-///
-/// **A ring that never empties is a ring the specification permits**: at line
-/// rate the device refills descriptors as fast as they are returned, and a
-/// caller that loops until the ring is empty never returns to its other work.
-pub const RX_BUDGET: u32 = 64;
 
 /// Why the function was not brought up. Each keeps its own word: a caller asks
 /// different things of a grant that is too small and of a part with no station
@@ -766,7 +765,6 @@ pub struct I219<R: Registers, C, D, I> {
     /// receive ring keeps in software's hands (§7.1.8: the queue is empty when
     /// head equals tail).
     rx_tail: usize,
-    rx_budget: u32,
     /// Next transmit descriptor to hand out, which is also `TDT`.
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
@@ -915,7 +913,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             link_up_at: None,
             rx_next: 0,
             rx_tail: RX_RING - 1,
-            rx_budget: RX_BUDGET,
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
@@ -933,10 +930,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
         nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
 
-        // No moderation on either side: §10.2.4.2's throttle and the two
-        // receive timers all hold an interrupt back, and what this driver
-        // waits on is the frame that has already arrived.
-        nic.regs.write32(regs::ITR, 0);
+        // The throttle alone: the two receive timers hold back every frame's
+        // interrupt, the first after a quiet spell too, and the throttle none
+        // of those.
+        nic.regs.write32(regs::ITR, THROTTLE);
         nic.regs.write32(regs::RDTR, 0);
         nic.regs.write32(regs::RADV, 0);
         nic.regs.write32(regs::TIDV, 0);
@@ -1085,8 +1082,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.link_up_at.map(|at| at.saturating_sub(self.opened_at))
     }
 
-    /// Take the interrupt, read and acknowledge its causes, and give the
-    /// receive budget back.
+    /// Take the interrupt, and read and acknowledge its causes.
     ///
     /// **The record has to be taken, not merely noticed**: a claim reads ready
     /// while it holds an undrained interrupt, so a caller that saw the token
@@ -1103,7 +1099,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// down, so a link that reads up on both sides of it starts the same
     /// deadline.
     pub fn begin_pass(&mut self) -> Result<Pass, PassRefused<I::Refused>> {
-        self.rx_budget = RX_BUDGET;
         let messages = match self.irq.taken() {
             Ok(count) => count,
             Err(why) if why == I::IDLE => 0,
@@ -1212,17 +1207,13 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
     }
 
-    /// The next received frame, or `None` — for an empty ring and for a budget
-    /// already spent alike.
+    /// The next received frame, or `None` for an empty ring.
     ///
     /// A refused descriptor is counted, its buffer given straight back, and
     /// the walk continues: one frame this driver will not act on may not hide
     /// the ones behind it.
     pub fn poll_rx(&mut self) -> Option<Frame> {
         loop {
-            if self.rx_budget == 0 {
-                return None;
-            }
             let index = self.rx_next;
             let at = OFF_RX_RING + index * rx_desc::BYTES;
             let word = self.dma.read64(at + 8);
@@ -1235,7 +1226,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.dma.observe();
             let word = self.dma.read64(at + 8);
             self.rx_next = (index + 1) % RX_RING;
-            self.rx_budget -= 1;
             match parse_rx(word) {
                 Ok(len) => {
                     self.counters.received = self.counters.received.saturating_add(1);

@@ -25,14 +25,15 @@ const VALID: u64 = 2_000;
 const BENT: u64 = 4_000;
 const SEED: u64 = 0x6770_745F_6F72_636C;
 
-/// One entry: index, type as text, unique GUID, first and last block.
-type Row = (u32, String, Guid, u64, u64);
+/// One entry: index, type as text, unique GUID, first and last block, name.
+type Row = (u32, String, Guid, u64, u64, String);
 
 /// toyos-gpt's reading.
 struct Ours {
     disk: Guid,
     placed: BTreeMap<u32, Row>,
-    unplaced: BTreeMap<u32, Row>,
+    /// Unique GUID, first and last block.
+    unplaced: BTreeMap<u32, (Guid, u64, u64)>,
 }
 
 fn ours(img: &mut Image) -> Result<Ours, GptError> {
@@ -43,11 +44,11 @@ fn ours(img: &mut Image) -> Result<Ours, GptError> {
     for entry in out.iter().flatten() {
         match entry {
             Ok(p) => {
-                let row = (p.index(), p.type_guid().to_string(), p.unique_guid(), p.first_lba(), p.last_lba());
+                let row = (p.index(), p.type_guid().to_string(), p.unique_guid(), p.first_lba(), p.last_lba(), String::from_utf16_lossy(p.name()));
                 read.placed.insert(p.index(), row);
             }
             Err(u) => {
-                read.unplaced.insert(u.index, (u.index, u.type_guid.to_string(), u.unique_guid, u.first, u.last));
+                read.unplaced.insert(u.index, (u.unique_guid, u.first, u.last));
             }
         }
     }
@@ -80,7 +81,7 @@ fn theirs(img: &Image) -> Theirs {
             rows: parts
                 .iter()
                 .map(|(&key, p)| {
-                    let row = (key - 1, p.part_type_guid.guid.to_string(), Guid(p.part_guid.to_bytes_le()), p.first_lba, p.last_lba);
+                    let row = (key - 1, p.part_type_guid.guid.to_string(), Guid(p.part_guid.to_bytes_le()), p.first_lba, p.last_lba, p.name.clone());
                     (key - 1, row)
                 })
                 .collect(),
@@ -128,10 +129,10 @@ fn differ(layout: &Layout, img: &Image, ours: &Result<Ours, GptError>, theirs: &
                 match (o.placed.get(index), o.unplaced.get(index)) {
                     (Some(mine), None) if mine == row => {}
                     // A type only toyos-gpt names: gpt answers the zero GUID.
-                    (Some(mine), None) if row.1 == unnamed && (&mine.0, &mine.2, mine.3, mine.4) == (&row.0, &row.2, row.3, row.4) => {
+                    (Some(mine), None) if row.1 == unnamed && (&mine.0, &mine.2, mine.3, mine.4, &mine.5) == (&row.0, &row.2, row.3, row.4, &row.5) => {
                         named = "a type gpt's own table does not name";
                     }
-                    (None, Some(stated)) if (stated.2, stated.3, stated.4) == (row.2, row.3, row.4) => {
+                    (None, Some(stated)) if *stated == (row.2, row.3, row.4) => {
                         named = "an entry toyos-gpt places as no partition: gpt checks no range";
                     }
                     // gpt counts an entry by any non-zero byte, toyos-gpt by its type GUID.

@@ -127,12 +127,31 @@ struct BootConfig {
     start: Vec<String>,
 }
 
+/// **Unknown fields refused**: a misspelled `folder` would be an image that
+/// silently grants no package a folder.
 #[derive(Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 struct AppsConfig {
     /// Connectors, and no `devices` or `syscap` beside it: an installed package
     /// reaches servers and claims no hardware.
     receives: Vec<String>,
+    /// The most of a folder of the session's home a package may be granted,
+    /// `read-only` or `read-write` (`toyos_manifest::grants`). It names a
+    /// right and never an app.
+    folder: Option<String>,
+}
+
+/// `[apps] folder`, spelled as `toyos_manifest::grants::Access` spells it.
+fn apps_folder(config: &SystemConfig) -> Result<Option<toyos_manifest::grants::Access>, String> {
+    config
+        .apps
+        .folder
+        .as_deref()
+        .map(|word| {
+            toyos_manifest::grants::Access::parse(word)
+                .ok_or_else(|| format!("`[apps] folder` is {word:?}, and is `read-only` or `read-write`"))
+        })
+        .transpose()
 }
 
 /// **Unknown fields refused**: a misspelled `starts` would be a row that
@@ -571,24 +590,42 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 ///
 /// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
 /// row receives it.
-const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power"];
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
 
-/// Who may hold the two authorities that change what the machine runs:
-/// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
-/// `[programs]` row and never `[apps]` — and the idle slot,
-/// [`toyos_update::slots::HOLDER`] alone.
+/// The ports that one row alone may receive, each with that row: the swap
+/// port, whose holder replaces any service's binary, the grants port, whose
+/// holder writes which folder of the home a package sees, and the prompt
+/// port, whose holder draws above every window and has every key while it does.
+const HELD_ALONE: &[(&str, &str)] = &[
+    (toyos_swap::PORT, toyos_swap::HOLDER),
+    (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
+    (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
+];
+
+/// Who may hold the authorities that change what the machine runs or what a
+/// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
+/// — no other `[programs]` row and never `[apps]` — the idle slot,
+/// [`toyos_update::slots::HOLDER`] alone, and the consent port, which no row
+/// receives and its server alone serves.
 ///
 /// **Checked on every manifest rendered, not only on the committed configs**,
-/// because the holder of the one can replace any service's binary and the
-/// holder of the other writes the image the machine boots next.
+/// because the swap port's holder can replace any service's binary, the
+/// grants port's hands a package part of the home, the prompt port's and the
+/// consent port's ask the person at the screen and answer for them, and the
+/// idle slot's holder writes the image the machine boots next.
 fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
+    use toyos_manifest::consent;
     for (name, program) in &config.programs {
-        if name != toyos_swap::HOLDER && program.receives.iter().any(|r| r == toyos_swap::PORT) {
-            return Err(format!(
-                "`{name}` receives `{}`, which only `{}` may hold",
-                toyos_swap::PORT,
-                toyos_swap::HOLDER
-            ));
+        for (port, holder) in HELD_ALONE {
+            if name != holder && program.receives.iter().any(|r| r == port) {
+                return Err(format!("`{name}` receives `{port}`, which only `{holder}` may hold"));
+            }
+        }
+        if program.receives.iter().any(|r| r == consent::PORT) {
+            return Err(format!("`{name}` receives `{}`, which only the supervisor may hold", consent::PORT));
+        }
+        if name != consent::SERVER && program.serves.iter().any(|s| s == consent::PORT) {
+            return Err(format!("`{name}` serves `{}`, which only `{}` may serve", consent::PORT, consent::SERVER));
         }
         if name != toyos_update::slots::HOLDER && program.slots {
             return Err(format!("`{name}` asks for `slots`, which only `{}` may hold", toyos_update::slots::HOLDER));
@@ -599,10 +636,15 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
     }
-    if config.apps.receives.iter().any(|r| r == toyos_swap::PORT) {
-        return Err(format!("`[apps] receives` names `{}`, which only `{}` may hold", toyos_swap::PORT, toyos_swap::HOLDER));
+    for (port, holder) in HELD_ALONE {
+        if config.apps.receives.iter().any(|r| r == port) {
+            return Err(format!("`[apps] receives` names `{port}`, which only `{holder}` may hold"));
+        }
     }
-    Ok(())
+    if config.apps.receives.iter().any(|r| r == consent::PORT) {
+        return Err(format!("`[apps] receives` names `{}`, which only the supervisor may hold", consent::PORT));
+    }
+    apps_folder(config).map(drop)
 }
 
 /// What a row may start through the launcher, and which rows open a login
@@ -662,11 +704,13 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     restart: cfg.restart,
                     starts: cfg.starts.clone(),
                     login: cfg.login,
+                    folder: None,
                 }
             })
             .collect(),
         supervisor_serves: SUPERVISOR_SERVED.iter().map(|s| (*s).to_string()).collect(),
         apps: config.apps.receives.clone(),
+        folder: apps_folder(config).expect("the gate above read it"),
         start: config.boot.start.clone(),
     };
     toyos_manifest::render(&manifest)
@@ -675,43 +719,27 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
 
 /// Which build `root`'s tree makes for `arch` against the sysroot whose key
 /// for it is `toolchain`, as `/system/etc/os-release` records it, read with
-/// gitoxide (`issues/the-build-runs-host-tools-outside-rust-and-qemu.md`,
-/// row 21). Untracked files are dirty whatever `status.showUntrackedFiles`
+/// `git`. Untracked files are dirty whatever `status.showUntrackedFiles`
 /// says; submodules are not read, because the fork's state is the toolchain
 /// key's.
 fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_osrelease::Release {
-    let repo = gix::open(root).unwrap_or_else(|e| panic!("{} is no git checkout: {e}", root.display()));
-    let head = repo.head_commit().unwrap_or_else(|e| panic!("{}'s HEAD names no commit: {e}", root.display()));
-    let commit = toyos_osrelease::Hex::parse(&head.id.to_string()).expect("a SHA-1 commit is forty hex digits");
-    let time = head.time().unwrap_or_else(|e| panic!("commit {} names no committer time: {e}", head.id));
-    let committed = u64::try_from(time.seconds)
-        .unwrap_or_else(|_| panic!("commit {} was committed before 1970: {}", head.id, time.seconds));
-    // Set whole: the platform `status` makes has no walk at all for a
-    // checkout configured to show no untracked files.
-    let walk = repo
-        .dirwalk_options()
-        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))
-        .emit_untracked(gix::dir::walk::EmissionMode::CollapseDirectory);
-    let changes = repo
-        .status(gix::progress::Discard)
-        .and_then(|status| {
-            status
-                .index_worktree_options_mut(|options| options.dirwalk_options = Some(walk))
-                .index_worktree_submodules(None)
-                .into_iter(None)
-        })
-        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()));
-    // An index entry whose stat alone moved, and an ignored file the walk
-    // passed, summarise to nothing.
-    let dirty = changes.map(|item| item.unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))).any(
-        |item| match item {
-            gix::status::Item::IndexWorktree(change) => change.summary().is_some(),
-            gix::status::Item::TreeIndex(_) => true,
-        },
+    let head = crate::sysroot::git_out(root, &["log", "-1", "--no-show-signature", "--format=%H %ct", "HEAD"]);
+    let (id, time) = head
+        .trim()
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("{}'s HEAD names no commit and time: {head:?}", root.display()));
+    let commit = toyos_osrelease::Hex::parse(id).expect("a SHA-1 commit is forty hex digits");
+    let committed: u64 =
+        time.parse().unwrap_or_else(|_| panic!("commit {id} was not committed after 1970: {time}"));
+    // `--no-optional-locks`, because a status otherwise rewrites the index it
+    // refreshes, under the lock a concurrent `git` in this checkout takes.
+    let status = crate::sysroot::git_bytes(
+        root,
+        &["--no-optional-locks", "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=all"],
     );
     toyos_osrelease::Release {
         commit,
-        tree: if dirty { toyos_osrelease::Tree::Dirty } else { toyos_osrelease::Tree::Clean },
+        tree: if status.is_empty() { toyos_osrelease::Tree::Clean } else { toyos_osrelease::Tree::Dirty },
         toolchain: toyos_osrelease::Hex::parse(toolchain.as_str()).expect("a key is sixteen hex digits"),
         arch: match arch {
             Arch::X86_64 => toyos_osrelease::Arch::X86_64,
@@ -760,9 +788,12 @@ fn build_and_assemble(
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
+    let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
     if !config.assets.is_empty() {
-        let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
+    }
+    if assets::wanted(crate::wallpaper::NAME, &programs) {
+        root_files.push((format!("share/{}", crate::wallpaper::NAME), crate::wallpaper::rgb()));
     }
 
     root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
@@ -2143,7 +2174,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(committed.success());
-        // The ref as `git` wrote it, for an oracle that is not gitoxide.
+        // The ref as `git` wrote it, read off the file rather than asked of `git`.
         let head = fs::read_to_string(work.join(".git/refs/heads/wt")).unwrap();
         let key = crate::keystore::Key::parse("0123456789abcdef").unwrap();
 
@@ -2922,6 +2953,7 @@ mod tests {
         "console/system.toml",
         "tests/acpicase/system.toml",
         "tests/blockgrantcase/system.toml",
+        "tests/consentcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",
@@ -2932,7 +2964,6 @@ mod tests {
         "tests/proctreecase/system.toml",
         "tests/slotscase/system.toml",
         "tests/testcases/system.toml",
-        "tests/virtclaimcase/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
         "tests/virtrebootcase/system.toml",
@@ -2999,6 +3030,51 @@ mod tests {
         let booted: SystemConfig =
             toml::from_str("[boot]\nstart = [\"update\"]\n[programs.update]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&booted).is_err());
+        let grants: SystemConfig = toml::from_str("[programs.grants]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&grants).is_ok());
+        let shell: SystemConfig = toml::from_str("[programs.shell]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&shell).is_err());
+        let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&apps).is_err());
+    }
+
+    /// The prompt port reaches its server alone, and the consent port no row,
+    /// nor `[apps]`, and is served by its server alone.
+    #[test]
+    fn only_the_consent_server_holds_the_prompt_and_serves_consent() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert_eq!(
+            gate("[programs.filepicker]\nserves = [\"filepicker\", \"consent\"]\nreceives = [\"prompt\"]\n\
+                  [programs.compositor]\nserves = [\"prompt\"]\n"),
+            Ok(())
+        );
+        for (text, said) in [
+            ("[programs.paint]\nreceives = [\"prompt\"]\n", "`paint` receives `prompt`, which only `filepicker` may hold"),
+            ("[apps]\nreceives = [\"prompt\"]\n", "`[apps] receives` names `prompt`"),
+            ("[programs.filepicker]\nreceives = [\"consent\"]\n", "`filepicker` receives `consent`, which only the supervisor"),
+            ("[programs.shell]\nreceives = [\"consent\"]\n", "`shell` receives `consent`"),
+            ("[apps]\nreceives = [\"consent\"]\n", "`[apps] receives` names `consent`"),
+            ("[programs.paint]\nserves = [\"consent\"]\n", "`paint` serves `consent`, which only `filepicker` may serve"),
+        ] {
+            match gate(text) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{text:?}: {other:?}, not {said:?}"),
+            }
+        }
+    }
+
+    /// `[apps] folder` is one of the two accesses, spelled as the manifest
+    /// spells it, and nothing else reaches a manifest.
+    #[test]
+    fn the_apps_folder_ceiling_is_one_of_two_spellings() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert!(gate("[apps]\nfolder = \"read-write\"\n").is_ok());
+        assert!(gate("[apps]\nfolder = \"read-only\"\n").is_ok());
+        assert!(gate("[apps]\n").is_ok());
+        for bad in ["rw", "read_write", "write", "Read-Write", ""] {
+            assert!(gate(&format!("[apps]\nfolder = {bad:?}\n")).is_err(), "{bad}");
+        }
+        assert!(toml::from_str::<SystemConfig>("[apps]\nfolders = \"read-write\"\n").is_err());
     }
 
     /// Every committed config passes, and each refusal has a config that

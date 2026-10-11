@@ -9,7 +9,7 @@ use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
-use crate::errno::{EACCES, EAGAIN, EEXIST, EINVAL, EIO, ENOENT, EPIPE};
+use crate::errcode::EINVAL;
 use crate::fdreq::CloseOnExec;
 use crate::pthread::Lock;
 use crate::time::Timespec;
@@ -37,19 +37,7 @@ const S_IFLNK: u32 = 0o120000;
 // Helper: set errno from toyos-abi error
 
 pub(crate) fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
-    use toyos_abi::syscall::SyscallError;
-    let code = match e {
-        SyscallError::NotFound => ENOENT,
-        SyscallError::PermissionDenied => EACCES,
-        SyscallError::AlreadyExists => EEXIST,
-        SyscallError::InvalidArgument => EINVAL,
-        SyscallError::WouldBlock => EAGAIN,
-        // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
-        SyscallError::Gone => EPIPE,
-        SyscallError::Io => EIO,
-        _ => EINVAL,
-    };
-    crate::errno::set(code);
+    crate::errno::set(crate::errcode::of(e));
     -1
 }
 
@@ -150,6 +138,8 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
             if !buf.is_null() {
                 ptr::write_bytes(buf, 0, 1);
                 let s = &mut *buf;
+                s.st_dev = st.volume;
+                s.st_ino = st.node;
                 s.st_size = st.size as i64;
                 s.st_mtim = Timespec {
                     tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
@@ -175,6 +165,34 @@ pub unsafe extern "C" fn ftruncate(raw_fd: i32, length: i64) -> i32 {
     match syscall::ftruncate(fd(raw_fd), length as u64) {
         Ok(()) => 0,
         Err(e) => set_errno(e),
+    }
+}
+
+/// [`ftruncate`] of `path` opened for writing.
+#[no_mangle]
+pub unsafe extern "C" fn truncate(path: *const u8, length: i64) -> i32 {
+    let fd = unsafe { open(path, O_WRONLY, 0) };
+    if fd < 0 {
+        return -1;
+    }
+    let truncated = unsafe { ftruncate(fd, length) };
+    unsafe { close(fd) };
+    truncated
+}
+
+/// `_PC_PATH_MAX`, `unistd.h`'s.
+const PC_PATH_MAX: i32 = 4;
+
+/// The longest path the kernel resolves, for every path; no other limit is
+/// answered.
+#[no_mangle]
+pub unsafe extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
+    match name {
+        PC_PATH_MAX => syscall::MAX_PATH as i64,
+        _ => {
+            crate::errno::set(EINVAL);
+            -1
+        }
     }
 }
 
@@ -345,6 +363,55 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
     }
 }
 
+struct TheKernel;
+
+impl crate::resolve::Kernel for TheKernel {
+    fn read_link(&mut self, at: &[u8], target: &mut [u8]) -> Result<usize, syscall::SyscallError> {
+        syscall::readlink(at, target)
+    }
+
+    fn open(&mut self, at: &[u8]) -> Result<(), syscall::SyscallError> {
+        syscall::open(at, OpenFlags::READ).map(syscall::close)
+    }
+
+    fn is_dir(&mut self, at: &[u8]) -> bool {
+        // SAFETY: `is_dir` reads only `at`.
+        unsafe { is_dir(at) }
+    }
+}
+
+/// POSIX's `realpath`, by the kernel's rules of resolution (`resolve`): the
+/// file `open` of `path` reaches, in a block of `malloc`'s when `resolved` is
+/// null.
+#[no_mangle]
+pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8 {
+    use syscall::MAX_PATH;
+    if path.is_null() {
+        crate::errno::set(EINVAL);
+        return ptr::null_mut();
+    }
+    let mut cwd = [0u8; MAX_PATH];
+    let n = syscall::getcwd(&mut cwd);
+    assert!(n != 0 && n <= MAX_PATH, "SYS_GETCWD: a working directory past MAX_PATH");
+    let at = match crate::resolve::resolve(&cwd[..n], c_str_to_bytes(path), &mut TheKernel) {
+        Ok(at) => at,
+        Err(code) => {
+            crate::errno::set(code);
+            return ptr::null_mut();
+        }
+    };
+    let out = if resolved.is_null() { unsafe { crate::memory::malloc(at.len() + 1) } } else { resolved };
+    if !out.is_null() {
+        // SAFETY: `PATH_MAX` bytes at the caller's `resolved`, as POSIX has it,
+        // or `at.len() + 1` of `malloc`'s; `resolve` answers under `MAX_PATH`, which is it.
+        unsafe {
+            ptr::copy_nonoverlapping(at.as_ptr(), out, at.len());
+            *out.add(at.len()) = 0;
+        }
+    }
+    out
+}
+
 unsafe fn stat_impl(path: *const u8, buf: *mut Stat) -> i32 {
     let path_bytes = c_str_to_bytes(path);
     // Try opening read-only
@@ -411,7 +478,7 @@ pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
             return 0;
         }
         Command::Invalid => EINVAL,
-        Command::Unsupported => crate::errno::ENOSYS,
+        Command::Unsupported => crate::errcode::ENOSYS,
     };
     crate::errno::set(refused);
     -1
@@ -455,7 +522,7 @@ pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     let start = d.at;
     let Some(entry) = syscall::dirent(&d.listing, &mut d.at) else { return ptr::null_mut() };
     let Some(d_name) = crate::listing::d_name(entry.name) else {
-        crate::errno::set(crate::errno::EOVERFLOW);
+        crate::errno::set(crate::errcode::EOVERFLOW);
         return ptr::null_mut();
     };
 
@@ -508,9 +575,9 @@ pub unsafe extern "C" fn mmap(
     if let Some(refusal) = memreq::mmap_refusal(addr.addr(), len, prot, flags) {
         crate::errno::set(match refusal {
             MapRefusal::Invalid => EINVAL,
-            MapRefusal::File => crate::errno::ENODEV,
+            MapRefusal::File => crate::errcode::ENODEV,
             // POSIX's ENOTSUP, which is EOPNOTSUPP here.
-            MapRefusal::Exec => crate::errno::EOPNOTSUPP,
+            MapRefusal::Exec => crate::errcode::EOPNOTSUPP,
         });
         return MAP_FAILED;
     }
@@ -529,7 +596,7 @@ pub unsafe extern "C" fn mmap(
     if ptr.is_null() {
         // The kernel's refusal does not say which it is: ENOMEM is POSIX's
         // for a place or size the address space does not allow.
-        crate::errno::set(crate::errno::ENOMEM);
+        crate::errno::set(crate::errcode::ENOMEM);
         MAP_FAILED
     } else {
         ptr
@@ -551,7 +618,7 @@ pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32
         Some(refusal) => {
             crate::errno::set(match refusal {
                 AdviceRefusal::Invalid => EINVAL,
-                AdviceRefusal::Discard => crate::errno::ENOSYS,
+                AdviceRefusal::Discard => crate::errcode::ENOSYS,
             });
             -1
         }

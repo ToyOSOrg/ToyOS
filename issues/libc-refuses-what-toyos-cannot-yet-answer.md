@@ -14,15 +14,13 @@ These answer failure in their POSIX form and do nothing
 - `symlink`, `ENOSYS`: `SYS_SYMLINK` displaces what its name held
   (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`).
 - `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
+- `utimes`, `ENOSYS`: no call sets a file's times.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
   free space.
 - `getrlimit` and `setrlimit`, `ENOSYS`: no call answers a process's limits.
   LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
   the failure and reads the `rlimit` it did not get.
 - `gethostname`, `ENOSYS`: no host name is published to a process.
-- `realpath`, `ENOSYS`: the kernel resolves a path by rules of its own (`..`
-  read off the text, only the last name's link followed, a relative link read
-  against its mount), and no call answers where a path leads.
 - `msync` and `mprotect`, `ENOSYS`: no call answers which pages of a range are
   mapped, and a mapping's protection is fixed when it is made.
 - `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel

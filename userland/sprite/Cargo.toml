@@ -1,12 +1,9 @@
 [package]
 name = "sprite"
-description = "An SVG rasterized through resvg into an RGBA pixel buffer, optionally in one colour."
+description = "An icon the build drew, in one colour, as an RGBA pixel buffer, and its alpha-blended blit."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [lib]
 doctest = false
-
-[dependencies]
-resvg = { version = "0.47", default-features = false }
