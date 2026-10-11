@@ -34,6 +34,21 @@ const GLOBAL_FIXED_CTR2: u64 = 1 << 34;
 /// written back.
 static WIDTH_MASK: AtomicU64 = AtomicU64::new(0);
 
+/// MEASUREMENT ONLY: the counters `arch::counters` enabled for the scout, as
+/// their bits of `IA32_FIXED_CTR_CTRL` and of `IA32_PERF_GLOBAL_CTRL`, which
+/// [`arm`] writes whole and so carries.
+static MEASURED_FIXED: AtomicU64 = AtomicU64::new(0);
+static MEASURED_GLOBAL: AtomicU64 = AtomicU64::new(0);
+
+/// MEASUREMENT ONLY: enable the measurement's counters on this CPU now, and in
+/// every later [`arm`].
+pub fn measure(fixed: u64, global: u64) {
+    MEASURED_FIXED.fetch_or(fixed, Relaxed);
+    MEASURED_GLOBAL.fetch_or(global, Relaxed);
+    write_msr(IA32_FIXED_CTR_CTRL, cpu::rdmsr(IA32_FIXED_CTR_CTRL) | fixed);
+    write_msr(IA32_PERF_GLOBAL_CTRL, cpu::rdmsr(IA32_PERF_GLOBAL_CTRL) | global);
+}
+
 /// The counter's width, or `None` on a CPU with no architectural performance
 /// monitoring — which is every QEMU TCG guest.
 ///
@@ -70,11 +85,11 @@ pub fn arm(period: u64) -> bool {
     // Stopped, then set up, then started: a counter enabled while its control
     // register is half written can overflow into an LVT that is not armed yet.
     write_msr(IA32_PERF_GLOBAL_CTRL, 0);
-    write_msr(IA32_FIXED_CTR_CTRL, FIXED_CTR2_ARMED);
+    write_msr(IA32_FIXED_CTR_CTRL, FIXED_CTR2_ARMED | MEASURED_FIXED.load(Relaxed));
     write_msr(IA32_PERF_GLOBAL_OVF_CTRL, GLOBAL_FIXED_CTR2);
     reload(period);
     apic::arm_perf_nmi();
-    write_msr(IA32_PERF_GLOBAL_CTRL, GLOBAL_FIXED_CTR2);
+    write_msr(IA32_PERF_GLOBAL_CTRL, GLOBAL_FIXED_CTR2 | MEASURED_GLOBAL.load(Relaxed));
     true
 }
 

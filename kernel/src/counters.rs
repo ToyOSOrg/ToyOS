@@ -86,6 +86,7 @@ static LAST: Lock<Option<(Generation, Instant)>> = Lock::new(None);
 /// asked anything.
 pub fn bring_up() {
     crate::arch::counters::bring_up();
+    soft::start();
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
     BLOCKS[me].publish(words);
@@ -136,9 +137,33 @@ fn sample(me: usize) -> [u64; WORDS] {
             | Counter::InboxRearms
             | Counter::PipeLockSpinCycles
             | Counter::PipeLockHoldCycles
-            | Counter::PipeCopyBytes => Some(soft::get(me, counter)),
+            | Counter::PipeCopyBytes
+            | Counter::PmmLockTakes
+            | Counter::PmmPinTakes
+            | Counter::PmmLockSpinCycles
+            | Counter::PmmLockHoldCycles => Some(soft::get(me, counter)),
             Counter::Instructions => hardware.instructions,
             Counter::PkgEnergyUj => hardware.pkg_energy_uj,
+            Counter::CoreC6
+            | Counter::CoreC7
+            | Counter::PkgC2
+            | Counter::PkgC3
+            | Counter::PkgC6
+            | Counter::PkgC7
+            | Counter::PkgC8
+            | Counter::PkgC9
+            | Counter::PkgC10
+            | Counter::PerfStatus
+            | Counter::HwpStatus
+            | Counter::PerfLimitReasons
+            | Counter::HwpCapabilities
+            | Counter::PkgPowerLimit
+            | Counter::RaplPowerUnit
+            | Counter::PmuGlobalCtrl
+            | Counter::PowerCtl
+            | Counter::PkgCstConfig
+            | Counter::HitmLoads
+            | Counter::HitmRfos => crate::arch::counters::scout(counter),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;
@@ -272,6 +297,58 @@ pub mod soft {
 
     pub(super) fn get(cpu: usize, counter: Counter) -> u64 {
         BLOCKS[cpu].counts[counter as usize - FIRST].load(Relaxed)
+    }
+
+    /// Set once the boot processor has a CPU index to count under: the PMM's
+    /// lock is taken before it does.
+    static STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    pub(super) fn start() {
+        STARTED.store(true, Relaxed);
+    }
+
+    /// The PMM's `BITMAP` lock, timed: its take's spin, and on drop its hold.
+    pub struct Timed<G> {
+        guard: G,
+        held_since: u64,
+    }
+
+    /// `take` timed as a take of the PMM's lock, `pin` where a user copy's frame
+    /// pin or unpin took it.
+    #[inline]
+    pub fn pmm<G>(pin: bool, take: impl FnOnce() -> G) -> Timed<G> {
+        let t0 = now();
+        let guard = take();
+        let t1 = now();
+        if STARTED.load(Relaxed) {
+            add(Counter::PmmLockSpinCycles, t1.wrapping_sub(t0));
+            add(Counter::PmmLockTakes, 1);
+            if pin {
+                add(Counter::PmmPinTakes, 1);
+            }
+        }
+        Timed { guard, held_since: if STARTED.load(Relaxed) { t1 } else { 0 } }
+    }
+
+    impl<G> Drop for Timed<G> {
+        fn drop(&mut self) {
+            if self.held_since != 0 {
+                since(Counter::PmmLockHoldCycles, self.held_since);
+            }
+        }
+    }
+
+    impl<G: core::ops::Deref> core::ops::Deref for Timed<G> {
+        type Target = G::Target;
+        fn deref(&self) -> &G::Target {
+            &self.guard
+        }
+    }
+
+    impl<G: core::ops::DerefMut> core::ops::DerefMut for Timed<G> {
+        fn deref_mut(&mut self) -> &mut G::Target {
+            &mut self.guard
+        }
     }
 
     /// The idle loop's halt returned.

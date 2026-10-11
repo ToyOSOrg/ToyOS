@@ -41,7 +41,7 @@ impl Linux {
         let mut msrs = Vec::new();
         for cpu in 0.. {
             let path = format!("/dev/cpu/{cpu}/msr");
-            match File::open(&path) {
+            match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
                 Ok(f) => msrs.push(f),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
                 Err(e) => panic!("{path}: {e} (run as root, after `modprobe msr`)"),
@@ -50,6 +50,30 @@ impl Linux {
         assert!(!msrs.is_empty(), "no /dev/cpu/*/msr: `modprobe msr` first");
         Self { msrs }
     }
+}
+
+/// MEASUREMENT ONLY, the clock scout: the wall clock, for lining a window up
+/// with `turbostat`'s `Time_Of_Day_Seconds`.
+fn unix() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// MEASUREMENT ONLY: `MSR_CORE_PERF_LIMIT_REASONS` and `IA32_HWP_STATUS` read on
+/// every CPU and cleared, as ToyOS's scout does each read: what was logged
+/// since the last call, ORed over the CPUs, or why a clear was refused.
+fn logs(machine: &Linux) -> String {
+    let (mut limits, mut hwp) = (0u64, 0u64);
+    let mut refused = String::new();
+    for f in &machine.msrs {
+        limits |= msr(f, 0x64F);
+        hwp |= msr(f, 0x777);
+        for at in [0x64F, 0x777] {
+            if let Err(e) = f.write_all_at(&0u64.to_le_bytes(), at) {
+                refused = format!(" clear_refused={e}");
+            }
+        }
+    }
+    format!("limits_now={:#x} limits_logged={:#x} hwp_status={hwp:#x}{refused}", limits & 0xFFFF, limits >> 16 & 0xFFFF)
 }
 
 fn msr(f: &File, at: u64) -> u64 {
@@ -120,18 +144,24 @@ fn main() {
         println!("{}{line}", netperf_table::PREFIX);
         said.push_str(&format!("{}{line}\n", netperf_table::PREFIX));
     };
+    logs(&machine);
+    let start = unix();
     let idle = netperf::idle(&machine, machine.msrs.len(), IDLE_SECS);
+    say(format!("clock window=idle start_unix={start:.3} end_unix={:.3} {}", unix(), logs(&machine)));
     say(idle.clone());
     let pem = std::fs::read(ROOTS).unwrap_or_else(|e| panic!("read {ROOTS}: {e}"));
     let suite = netperf::suite(&pem, HOST, 443, PATH);
     say(netperf::benches(&machine, &suite, &idle));
     let url = format!("https://{HOST}{PATH}");
     for run in 1..=RUNS {
+        logs(&machine);
+        let start = unix();
         let before = machine.snap();
         let at = Instant::now();
         let fetched = netperf::fetch(https_client::config(ROOTS), &url, |_| {});
         let secs = at.elapsed().as_secs_f64();
         let d = netperf::delta(&before, &machine.snap());
+        say(format!("clock window=run run={run} start_unix={start:.3} end_unix={:.3} {}", unix(), logs(&machine)));
         say(format!(
             "whole bytes={} sha256={} secs={secs:.3} mbps={:.1} tcp_ms={:.1} tls_ms={:.1}",
             fetched.bytes,

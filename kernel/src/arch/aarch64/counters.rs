@@ -9,3 +9,8 @@ pub fn bring_up() {}
 pub fn read() -> Hardware {
     Hardware { smi: None, aperf: None, mperf: None, envelope: None, firmware: None, instructions: None, pkg_energy_uj: None }
 }
+
+/// MEASUREMENT ONLY: the x86 clock scout's registers; none here.
+pub fn scout(_counter: toyos_abi::counters::Counter) -> Option<u64> {
+    None
+}

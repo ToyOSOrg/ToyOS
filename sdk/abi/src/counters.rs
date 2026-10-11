@@ -79,10 +79,68 @@ pub enum Counter {
     /// MEASUREMENT ONLY: its package's energy (`MSR_PKG_ENERGY_STATUS`), in
     /// microjoules, carried past the register's 32-bit wrap.
     PkgEnergyUj,
+    /// MEASUREMENT ONLY, the clock scout: core C6 residency (`MSR_CORE_C6_RESIDENCY`,
+    /// 0x3FD), in TSC ticks, the core's, so both its threads read the same.
+    CoreC6,
+    /// Core C7 residency (0x3FE).
+    CoreC7,
+    /// Package C2 residency (`MSR_PKG_C2_RESIDENCY`, 0x60D), in TSC ticks.
+    PkgC2,
+    /// Package C3 residency (0x3F8).
+    PkgC3,
+    /// Package C6 residency (0x3F9).
+    PkgC6,
+    /// Package C7 residency (0x3FA).
+    PkgC7,
+    /// Package C8 residency (0x630).
+    PkgC8,
+    /// Package C9 residency (0x631).
+    PkgC9,
+    /// Package C10 residency (0x632).
+    PkgC10,
+    /// `IA32_PERF_STATUS` (0x198) as read: bits 15:8 the ratio the core runs at.
+    PerfStatus,
+    /// `IA32_HWP_STATUS` (0x777): the log bits set since this CPU's previous
+    /// read, which clears them.
+    HwpStatus,
+    /// `MSR_CORE_PERF_LIMIT_REASONS` (0x64F): bits 15:0 what limits the clock
+    /// now, bits 31:16 what did since the previous read on its package, which
+    /// clears them.
+    PerfLimitReasons,
+    /// `IA32_HWP_CAPABILITIES` (0x771) as read.
+    HwpCapabilities,
+    /// `MSR_PKG_POWER_LIMIT` (0x610) as read: PL1 in bits 14:0, PL2 in 46:32,
+    /// in [`Counter::RaplPowerUnit`]'s units.
+    PkgPowerLimit,
+    /// `MSR_RAPL_POWER_UNIT` (0x606) as read.
+    RaplPowerUnit,
+    /// `IA32_PERF_GLOBAL_CTRL` (0x38F) as read: which counters count.
+    PmuGlobalCtrl,
+    /// `MSR_POWER_CTL` (0x1FC) as read: bit 1 promotes C1 to C1E.
+    PowerCtl,
+    /// `MSR_PKG_CST_CONFIG_CONTROL` (0xE2) as read: bits 3:0 the deepest
+    /// package C-state firmware allows.
+    PkgCstConfig,
+    /// MEASUREMENT ONLY, the contention scout: retired loads whose data came
+    /// from another core's modified line (`MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM`,
+    /// event D2H umask 04H), both rings.
+    HitmLoads,
+    /// Demand RFOs answered by a snoop that hit another core's modified line
+    /// (`OCR.DEMAND_RFO.L3_HIT.SNOOP_HITM`, event B7H umask 01H,
+    /// `MSR_OFFCORE_RSP_0` 0x10003C0002), both rings.
+    HitmRfos,
+    /// Takes of the PMM's `BITMAP` lock.
+    PmmLockTakes,
+    /// Of them, a user copy's frame pin or unpin.
+    PmmPinTakes,
+    /// Stamp ticks spent taking it.
+    PmmLockSpinCycles,
+    /// Stamp ticks it was held.
+    PmmLockHoldCycles,
 }
 
 impl Counter {
-    pub const COUNT: usize = 23;
+    pub const COUNT: usize = 47;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -107,6 +165,30 @@ impl Counter {
         Self::PipeCopyBytes,
         Self::Instructions,
         Self::PkgEnergyUj,
+        Self::CoreC6,
+        Self::CoreC7,
+        Self::PkgC2,
+        Self::PkgC3,
+        Self::PkgC6,
+        Self::PkgC7,
+        Self::PkgC8,
+        Self::PkgC9,
+        Self::PkgC10,
+        Self::PerfStatus,
+        Self::HwpStatus,
+        Self::PerfLimitReasons,
+        Self::HwpCapabilities,
+        Self::PkgPowerLimit,
+        Self::RaplPowerUnit,
+        Self::PmuGlobalCtrl,
+        Self::PowerCtl,
+        Self::PkgCstConfig,
+        Self::HitmLoads,
+        Self::HitmRfos,
+        Self::PmmLockTakes,
+        Self::PmmPinTakes,
+        Self::PmmLockSpinCycles,
+        Self::PmmLockHoldCycles,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -134,6 +216,30 @@ impl Counter {
             Self::PipeCopyBytes => "pipe_copy_bytes",
             Self::Instructions => "instructions",
             Self::PkgEnergyUj => "pkg_energy_uj",
+            Self::CoreC6 => "core_c6",
+            Self::CoreC7 => "core_c7",
+            Self::PkgC2 => "pkg_c2",
+            Self::PkgC3 => "pkg_c3",
+            Self::PkgC6 => "pkg_c6",
+            Self::PkgC7 => "pkg_c7",
+            Self::PkgC8 => "pkg_c8",
+            Self::PkgC9 => "pkg_c9",
+            Self::PkgC10 => "pkg_c10",
+            Self::PerfStatus => "perf_status",
+            Self::HwpStatus => "hwp_status",
+            Self::PerfLimitReasons => "perf_limit_reasons",
+            Self::HwpCapabilities => "hwp_capabilities",
+            Self::PkgPowerLimit => "pkg_power_limit",
+            Self::RaplPowerUnit => "rapl_power_unit",
+            Self::PmuGlobalCtrl => "pmu_global_ctrl",
+            Self::PowerCtl => "power_ctl",
+            Self::PkgCstConfig => "pkg_cst_config",
+            Self::HitmLoads => "hitm_loads",
+            Self::HitmRfos => "hitm_rfos",
+            Self::PmmLockTakes => "pmm_lock_takes",
+            Self::PmmPinTakes => "pmm_pin_takes",
+            Self::PmmLockSpinCycles => "pmm_lock_spin_cycles",
+            Self::PmmLockHoldCycles => "pmm_lock_hold_cycles",
         }
     }
 
@@ -159,7 +265,31 @@ impl Counter {
             | Self::PipeLockHoldCycles
             | Self::PipeCopyBytes
             | Self::Instructions
-            | Self::PkgEnergyUj => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::PkgEnergyUj
+            | Self::CoreC6
+            | Self::CoreC7
+            | Self::PkgC2
+            | Self::PkgC3
+            | Self::PkgC6
+            | Self::PkgC7
+            | Self::PkgC8
+            | Self::PkgC9
+            | Self::PkgC10
+            | Self::PerfStatus
+            | Self::HwpStatus
+            | Self::PerfLimitReasons
+            | Self::HwpCapabilities
+            | Self::PkgPowerLimit
+            | Self::RaplPowerUnit
+            | Self::PmuGlobalCtrl
+            | Self::PowerCtl
+            | Self::PkgCstConfig
+            | Self::HitmLoads
+            | Self::HitmRfos
+            | Self::PmmLockTakes
+            | Self::PmmPinTakes
+            | Self::PmmLockSpinCycles
+            | Self::PmmLockHoldCycles => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }

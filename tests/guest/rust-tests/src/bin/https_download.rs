@@ -130,6 +130,25 @@ impl Machine for Toy<'_> {
                     // Round 4: one package, which every CPU reads alike: the first CPU's.
                     Counter::PkgEnergyUj if index == 0 => counter.name().to_string(),
                     Counter::PkgEnergyUj => continue,
+                    // The clock scout's: said per window by `clocked`, never summed.
+                    Counter::CoreC6
+                    | Counter::CoreC7
+                    | Counter::PkgC2
+                    | Counter::PkgC3
+                    | Counter::PkgC6
+                    | Counter::PkgC7
+                    | Counter::PkgC8
+                    | Counter::PkgC9
+                    | Counter::PkgC10
+                    | Counter::PerfStatus
+                    | Counter::HwpStatus
+                    | Counter::PerfLimitReasons
+                    | Counter::HwpCapabilities
+                    | Counter::PkgPowerLimit
+                    | Counter::RaplPowerUnit
+                    | Counter::PmuGlobalCtrl
+                    | Counter::PowerCtl
+                    | Counter::PkgCstConfig => continue,
                     Counter::Smi
                     | Counter::HwpRequest
                     | Counter::HwpRequestPkg
@@ -203,8 +222,9 @@ fn main() {
         // gets, and what the job's own kernels cost on this CPU.
         let machine = Toy(cap);
         let cpus = syscall::cpu_count() as usize;
-        let idle = netperf::idle(&machine, cpus, IDLE_SECS);
+        let idle = clocked(cap, "window=idle", || netperf::idle(&machine, cpus, IDLE_SECS));
         println!("https_download: {idle}");
+        println!("https_download: {}", hitm_control(cap));
         let pem = std::fs::read(&roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
         let path = url.splitn(4, '/').nth(3).map_or("/".to_string(), |p| format!("/{p}"));
         let suite = netperf::suite(&pem, &host, port, &path);
@@ -228,7 +248,7 @@ fn main() {
             let at = Instant::now();
             // The LAN's round trip while the download moves, every 50 ms.
             let moving = std::sync::atomic::AtomicBool::new(true);
-            let (fetched, lan) = std::thread::scope(|probes| {
+            let (fetched, lan) = clocked(cap, &format!("window=run run={run} k={k}"), || std::thread::scope(|probes| {
                 let lan = probes.spawn(|| {
                     let mut ms = Vec::new();
                     while moving.load(std::sync::atomic::Ordering::Relaxed) {
@@ -249,7 +269,7 @@ fn main() {
                 });
                 moving.store(false, std::sync::atomic::Ordering::Relaxed);
                 (fetched, lan.join().expect("the probe thread"))
-            });
+            }));
             let secs = at.elapsed().as_secs_f64();
             println!("https_download: lan run={run} k={k} lan_ms={}", spread(lan));
             let d = netperf::delta(&before, &machine.snap());
@@ -346,4 +366,233 @@ fn report(word: &str, sha256: Option<&str>, progress: &Progress, rtt: &str, cap:
     let mbps = mb * 8.0 / secs;
     let sha256 = sha256.map(|hex| format!(" sha256={hex}")).unwrap_or_default();
     format!("{word} bytes={}{sha256} secs={secs:.3} mbps={mbps:.1} rtt_ms={rtt} {busy}", progress.bytes)
+}
+
+/// MEASUREMENT ONLY: how often `clocked` reads every CPU's counters inside its
+/// window. Each read kicks every CPU, so it is also the scout's own load.
+const SAMPLE: Duration = Duration::from_millis(250);
+
+/// MEASUREMENT ONLY: `f`, with every CPU's counters read as it starts, every
+/// [`SAMPLE`] while it runs and as it ends, and the `clock <window>` line of
+/// what they say printed after it.
+fn clocked<R>(cap: &SysCap, window: &str, f: impl FnOnce() -> R) -> R {
+    let (done, sampled) = mpsc::channel::<()>();
+    let at = Instant::now();
+    let (r, rounds) = std::thread::scope(|s| {
+        let sampler = s.spawn(move || {
+            let mut rounds = vec![round(cap)];
+            // Woken early, and for good, as `f` returns.
+            while sampled.recv_timeout(SAMPLE) == Err(mpsc::RecvTimeoutError::Timeout) {
+                rounds.push(round(cap));
+            }
+            rounds.push(round(cap));
+            rounds
+        });
+        let r = f();
+        drop(done);
+        (r, sampler.join().expect("the clock sampler"))
+    });
+    println!("https_download: clock {window} {}", clock_words(&rounds, at.elapsed().as_secs_f64()));
+    r
+}
+
+/// MEASUREMENT ONLY: the clock line's words over `rounds`, the first read
+/// `secs` before the last:
+///
+/// - `cpu<i>=c0:c1:c6:c7:ghz`: each CPU's share of its stamp in C0 (MPERF),
+///   in core C6 and C7 (the core's residency, so both threads of a core read
+///   it alike), C1 as the rest (`turbostat`'s `CPU%c1`), and its clock while
+///   in C0 (APERF over MPERF at the stamp's rate);
+/// - `pkg=pc2:pc3:pc6:pc7:pc8:pc9:pc10`: the package's shares of CPU 0's stamp;
+/// - `pkg_w`, `pl1_w`/`pl2_w` (each with its enable bit), `energy_uj`;
+/// - `ratio=[<ratio>:<reads>]`: `IA32_PERF_STATUS` bits 15:8 over every CPU's
+///   every read after the first;
+/// - `limits_active=[<bit>:<reads>]`: of those reads, in how many some CPU's
+///   `MSR_CORE_PERF_LIMIT_REASONS` had that status bit (15:0) set;
+///   `limits_logged`: its log bits (31:16, shifted down) over every read
+///   after the first, which is what was logged inside the window;
+/// - `hwp_status`: `IA32_HWP_STATUS` over the same reads;
+/// - `hwp_caps`, `hwp_request`, `power_ctl` (C1E), `pkg_cst_config`,
+///   `pmu_global`: CPU 0's, as read last, with
+///   `pmu_global_agree` whether every CPU held CPU 0's;
+/// - the window's sums over every CPU: `instructions`, `aperf`, `mperf`,
+///   `hitm_loads`, `hitm_rfos`, `pmm_takes`, `pmm_pin_takes`, `pmm_spin`,
+///   `pmm_hold` (stamp ticks), and `stale` reads.
+fn clock_words(rounds: &[Vec<Record>], secs: f64) -> String {
+    let (first, last) = (&rounds[0], &rounds[rounds.len() - 1]);
+    let d = |cpu: usize, c: Counter| -> Option<u64> { Some(last.get(cpu)?.get(c)?.wrapping_sub(first.get(cpu)?.get(c)?)) };
+    let sum = |c: Counter| -> String {
+        let each: Option<Vec<u64>> = (0..last.len()).map(|cpu| d(cpu, c)).collect();
+        each.map_or("unread".into(), |each| each.iter().sum::<u64>().to_string())
+    };
+    let mut words = vec![format!("secs={secs:.3} reads={}", rounds.len())];
+    for cpu in 0..last.len() {
+        let cell = (|| {
+            let tsc = d(cpu, Counter::Stamp)? as f64;
+            let mperf = d(cpu, Counter::Mperf)? as f64;
+            let aperf = d(cpu, Counter::Aperf)? as f64;
+            let (c6, c7) = (d(cpu, Counter::CoreC6)? as f64, d(cpu, Counter::CoreC7)? as f64);
+            let c0 = mperf / tsc;
+            let ghz = aperf / mperf * tsc / secs / 1e9;
+            Some(format!("{c0:.4}:{:.4}:{:.4}:{:.4}:{ghz:.3}", 1.0 - c0 - c6 / tsc - c7 / tsc, c6 / tsc, c7 / tsc))
+        })();
+        words.push(format!("cpu{cpu}={}", cell.unwrap_or_else(|| "unread".into())));
+    }
+    let pkg = (|| {
+        let tsc = d(0, Counter::Stamp)? as f64;
+        let each: Option<Vec<String>> = [
+            Counter::PkgC2,
+            Counter::PkgC3,
+            Counter::PkgC6,
+            Counter::PkgC7,
+            Counter::PkgC8,
+            Counter::PkgC9,
+            Counter::PkgC10,
+        ]
+        .into_iter()
+        .map(|c| Some(format!("{:.4}", d(0, c)? as f64 / tsc)))
+        .collect();
+        Some(each?.join(":"))
+    })();
+    words.push(format!("pkg={}", pkg.unwrap_or_else(|| "unread".into())));
+    let energy = d(0, Counter::PkgEnergyUj);
+    words.push(format!(
+        "pkg_w={} energy_uj={}",
+        energy.map_or("unread".into(), |uj| format!("{:.3}", uj as f64 / 1e6 / secs)),
+        energy.map_or("unread".into(), |uj| uj.to_string())
+    ));
+    let limit = (|| {
+        let raw = last.first()?.get(Counter::PkgPowerLimit)?;
+        let unit = 1.0 / (1u64 << (last.first()?.get(Counter::RaplPowerUnit)? & 0xF)) as f64;
+        Some(format!(
+            "pl1_w={:.3}/{} pl2_w={:.3}/{} pkg_power_limit={raw:#x}",
+            (raw & 0x7FFF) as f64 * unit,
+            raw >> 15 & 1,
+            (raw >> 32 & 0x7FFF) as f64 * unit,
+            raw >> 47 & 1
+        ))
+    })();
+    words.push(limit.unwrap_or_else(|| "pl1_w=unread".into()));
+    let mut ratio = std::collections::BTreeMap::<u64, u64>::new();
+    let mut active = std::collections::BTreeMap::<u32, u64>::new();
+    let (mut logged, mut hwp_status, mut stale) = (0u64, 0u64, 0u64);
+    for r in &rounds[1..] {
+        let mut now = 0u64;
+        for record in r {
+            stale += u64::from(record.stale);
+            if let Some(v) = record.get(Counter::PerfStatus) {
+                *ratio.entry(v >> 8 & 0xFF).or_default() += 1;
+            }
+            if let Some(v) = record.get(Counter::PerfLimitReasons) {
+                now |= v & 0xFFFF;
+                logged |= v >> 16 & 0xFFFF;
+            }
+            hwp_status |= record.get(Counter::HwpStatus).unwrap_or(0);
+        }
+        for bit in 0..16 {
+            if now & 1 << bit != 0 {
+                *active.entry(bit).or_default() += 1;
+            }
+        }
+    }
+    let map = |m: Vec<String>| format!("[{}]", m.join(" "));
+    words.push(format!("ratio={}", map(ratio.iter().map(|(r, n)| format!("{r}:{n}")).collect())));
+    words.push(format!("limits_active={}", map(active.iter().map(|(b, n)| format!("{b}:{n}")).collect())));
+    words.push(format!("limits_logged={logged:#x} hwp_status={hwp_status:#x}"));
+    let cpu0 = |c: Counter| last.first().and_then(|r| r.get(c)).map_or("unread".into(), |v| format!("{v:#x}"));
+    let global = last.first().and_then(|r| r.get(Counter::PmuGlobalCtrl));
+    words.push(format!(
+        "hwp_caps={} hwp_request={} power_ctl={} pkg_cst_config={} pmu_global={} pmu_global_agree={}",
+        cpu0(Counter::HwpCapabilities),
+        cpu0(Counter::HwpRequest),
+        cpu0(Counter::PowerCtl),
+        cpu0(Counter::PkgCstConfig),
+        cpu0(Counter::PmuGlobalCtrl),
+        last.iter().all(|r| r.get(Counter::PmuGlobalCtrl) == global)
+    ));
+    for (name, c) in [
+        ("instructions", Counter::Instructions),
+        ("aperf", Counter::Aperf),
+        ("mperf", Counter::Mperf),
+        ("hitm_loads", Counter::HitmLoads),
+        ("hitm_rfos", Counter::HitmRfos),
+        ("pmm_takes", Counter::PmmLockTakes),
+        ("pmm_pin_takes", Counter::PmmPinTakes),
+        ("pmm_spin", Counter::PmmLockSpinCycles),
+        ("pmm_hold", Counter::PmmLockHoldCycles),
+    ] {
+        words.push(format!("{name}={}", sum(c)));
+    }
+    words.push(format!("stale={stale}"));
+    words.join(" ")
+}
+
+/// MEASUREMENT ONLY: laps of [`hitm_control`]'s ring.
+const LAPS: u64 = 100_000;
+/// MEASUREMENT ONLY: its threads: four on a machine of two threads per core
+/// span at least two cores, so at least two of every lap's hops cross one.
+const RING: u64 = 4;
+/// MEASUREMENT ONLY: the hang ceiling on the ring's laps.
+const RING_CEILING: Duration = Duration::from_secs(20);
+
+/// MEASUREMENT ONLY: the HITM counters' positive control. A token goes round
+/// a ring of [`RING`] spinning threads [`LAPS`] times; each holder reads the
+/// token another thread just wrote, a load that hits a line modified in the
+/// writer's core wherever the two are on different cores, and stores to a
+/// scratch line the previous holder modified and nobody read since, a demand
+/// RFO that does the same. At least half of the hops cross a core, so a live
+/// pair of counters reads at least a quarter of the hops each.
+fn hitm_control(cap: &SysCap) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    #[repr(align(64))]
+    struct Line(AtomicU64);
+    let (token, scratch) = (Line(AtomicU64::new(0)), Line(AtomicU64::new(0)));
+    // Set by the first thread past the ceiling: the line then says so, and the
+    // download it comes before still runs.
+    let gave_up = std::sync::atomic::AtomicBool::new(false);
+    let hops = LAPS * RING;
+    let before = round(cap);
+    let at = Instant::now();
+    std::thread::scope(|s| {
+        for me in 0..RING {
+            let (token, scratch, gave_up) = (&token, &scratch, &gave_up);
+            s.spawn(move || {
+                let mut mine = me;
+                while mine < hops {
+                    let mut spins = 0u64;
+                    while token.0.load(Ordering::Acquire) != mine {
+                        core::hint::spin_loop();
+                        spins += 1;
+                        if spins % 4096 == 0 && (gave_up.load(Ordering::Relaxed) || at.elapsed() > RING_CEILING) {
+                            gave_up.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                    scratch.0.store(mine, Ordering::Relaxed);
+                    token.0.store(mine + 1, Ordering::Release);
+                    mine += RING;
+                }
+            });
+        }
+    });
+    let secs = at.elapsed().as_secs_f64();
+    let after = round(cap);
+    let hops = token.0.load(Ordering::Relaxed);
+    let ended = if gave_up.load(Ordering::Relaxed) { "gave up at the ceiling" } else { "whole" };
+    let sum = |c: Counter| -> Option<u64> {
+        before.iter().zip(&after).map(|(a, b)| Some(b.get(c)?.wrapping_sub(a.get(c)?))).sum()
+    };
+    let word = |v: Option<u64>| v.map_or("unread".into(), |v| v.to_string());
+    let (loads, rfos) = (sum(Counter::HitmLoads), sum(Counter::HitmRfos));
+    let live = |v: Option<u64>| v.map_or("unread", |v| if v >= hops / 4 { "live" } else { "dead" });
+    format!(
+        "hitm control {ended} hops={hops} secs={secs:.3} ns_per_hop={:.1} hitm_loads={} ({}) hitm_rfos={} ({}) aperf={} instructions={}",
+        secs * 1e9 / hops as f64,
+        word(loads),
+        live(loads),
+        word(rfos),
+        live(rfos),
+        word(sum(Counter::Aperf)),
+        word(sum(Counter::Instructions)),
+    )
 }

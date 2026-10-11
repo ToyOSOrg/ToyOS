@@ -178,7 +178,7 @@ pub fn alloc_page() -> Option<PhysPage> {
 
 /// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
 pub(super) fn claim() -> Option<PhysPage> {
-    let mut bm = BITMAP.lock();
+    let mut bm = crate::counters::soft::pmm(false, || BITMAP.lock());
     if bm.free_count == 0 { return None; }
     let start = bm.next_hint;
     for offset in 0..bm.page_count {
@@ -199,7 +199,7 @@ pub(super) fn claim() -> Option<PhysPage> {
 pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
     if count == 0 { return None; }
-    let mut bm = BITMAP.lock();
+    let mut bm = crate::counters::soft::pmm(false, || BITMAP.lock());
     if bm.free_count < count { return None; }
 
     let mut run = 0usize;
@@ -237,7 +237,7 @@ pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
 
 /// Returns a page to the free bitmap.
 fn free_page(phys: u64) {
-    let mut bm = BITMAP.lock();
+    let mut bm = crate::counters::soft::pmm(false, || BITMAP.lock());
     let idx = bm.phys_to_idx(phys);
     assert!(!bm.is_free(idx), "double free of physical page at {:#x}", phys);
     bm.set_free(idx);
@@ -250,7 +250,7 @@ pub fn pin_range(phys: u64, len: usize) -> bool {
     if len == 0 {
         return true;
     }
-    let mut bm = BITMAP.lock();
+    let mut bm = crate::counters::soft::pmm(true, || BITMAP.lock());
     let span = bm.frame_span(phys, len);
     for idx in span.clone() {
         if bm.pins[idx] == u32::MAX {
@@ -269,7 +269,7 @@ pub fn unpin_range(phys: u64, len: usize) {
     if len == 0 {
         return;
     }
-    let mut bm = BITMAP.lock();
+    let mut bm = crate::counters::soft::pmm(true, || BITMAP.lock());
     let span = bm.frame_span(phys, len);
     for idx in span {
         bm.pins[idx] = bm.pins[idx]
@@ -281,13 +281,13 @@ pub fn unpin_range(phys: u64, len: usize) {
 /// One past the highest physical frame this kernel manages; the IOMMU identity domain's exclusive upper bound.
 /// Taken from the bitmap, not the firmware memory map, whose backing buffer is ordinary free RAM by the time anything asks.
 pub fn top() -> u64 {
-    let bm = BITMAP.lock();
+    let bm = crate::counters::soft::pmm(false, || BITMAP.lock());
     bm.base + bm.page_count as u64 * PAGE_2M
 }
 
 /// Return (total_bytes, used_bytes).
 pub fn stats() -> (u64, u64) {
-    let bm = BITMAP.lock();
+    let bm = crate::counters::soft::pmm(false, || BITMAP.lock());
     let total = bm.total_usable as u64 * PAGE_2M;
     let used = (bm.total_usable - bm.free_count) as u64 * PAGE_2M;
     (total, used)
