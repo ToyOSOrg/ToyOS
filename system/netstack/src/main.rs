@@ -531,6 +531,7 @@ fn main() {
 
         let mut ready: Vec<u64> = Vec::new();
         prof::since(prof::Slot::CyPass, pass_at);
+        prof::add(prof::Slot::Submits, u64::from(poller.pending()));
         let t_wait = prof::now();
         let mut answering = 0u64;
         poller.wait_answers(1, timeout, |token, answer| {
