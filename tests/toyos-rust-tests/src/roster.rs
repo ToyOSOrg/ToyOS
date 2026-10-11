@@ -29,7 +29,7 @@ pub fn my_threads(cap: &SysCap) -> Vec<(bool, u8)> {
 ///
 /// Even one's own threads arrive in the machine-wide roster, which is
 /// `Rights::ROSTER` on a `SysCap` — there is no narrower question in the ABI,
-/// and `tests/testcases` names `roster` on the test-runner row for this.
+/// and `tests/images/testcases.toml` names `roster` on the test-runner row for this.
 pub fn threads_of(cap: &SysCap, pid: u32) -> Vec<(bool, u8)> {
     const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
     const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;

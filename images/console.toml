@@ -32,7 +32,7 @@ service = true
 syscap = ["logread"]
 serves = ["log"]
 
-# The machine's ACPI fixed hardware, as `system.toml` serves it: `shutdown`
+# The machine's ACPI fixed hardware, as `images/system.toml` serves it: `shutdown`
 # powers this machine off with the sleep type this program reads out of the
 # firmware's tables and hands the kernel, which refuses a power-off without
 # one.

@@ -2,7 +2,7 @@
 //! kernel reads and writes for it, what it refuses and by which name, and the
 //! firmware's Global Lock taken, found owned and given back.
 //!
-//! Run on a boot that starts no ACPI server (`tests/acpicase`) and whose
+//! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`) and whose
 //! kernel leaves the i8042 to a claim (`i8042-withheld`), so its row is
 //! another claim's; on a guest: every write here that must be refused is one
 //! a kernel that made it would make for real — to RAM, to the tables, to

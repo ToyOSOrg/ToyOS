@@ -1,6 +1,6 @@
 //! soundserver plays on while the log reads nothing of what it says.
 //!
-//! Booted on `tests/logstallcase`, where `logkeeper` leaves soundserver's log ring unread
+//! Booted on `tests/images/logstallcase.toml`, where `logkeeper` leaves soundserver's log ring unread
 //! until this program says [`RELEASE`]. The ring is filled first, by soundserver's
 //! own words: this program takes every control connection soundserver will hold and
 //! then connects [`FLOOD`] more times, and soundserver refuses each with a line. Then
@@ -25,7 +25,7 @@ use toyos::ipc::{IpcError, IpcHeader};
 use toyos::Connection;
 use toyos_abi::syscall::SyscallError;
 
-/// What ends `logkeeper`'s stall. `tests/logstallcase` names the same words.
+/// What ends `logkeeper`'s stall. `tests/images/logstallcase.toml` names the same words.
 const RELEASE: &str = "soundserver_log_stall: the tone has played, and logkeeper may read soundserver again";
 
 /// soundserver's `MAX_CONTROL_CLIENTS`: past it, a connection is refused with a line.

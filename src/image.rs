@@ -1347,7 +1347,7 @@ mod tests {
     #[test]
     fn every_declared_path_resolves_inside_the_root_partition() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let (manifest, symlinks) = crate::build::manifest_and_symlinks(&root.join("system.toml"));
+        let (manifest, symlinks) = crate::build::manifest_and_symlinks(&root.join("images/system.toml"));
         let declared = toyos_manifest::parse(
             std::str::from_utf8(&manifest).expect("the manifest this build renders is text"),
         );

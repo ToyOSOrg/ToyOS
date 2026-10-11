@@ -6,7 +6,7 @@
 //! refused, which is an object whose only handle went before its holder ever
 //! had it.
 //!
-//! The function is QEMU's virtio NIC, which no program of `tests/testcases`
+//! The function is QEMU's virtio NIC, which no program of `tests/images/testcases.toml`
 //! holds.
 
 use toyos::endow::Endowments;

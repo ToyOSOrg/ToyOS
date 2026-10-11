@@ -72,7 +72,7 @@ const RUST_SKIP: &[&str] = &[
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
-    // `tests/latencycase` endows. `latency_wake` runs it there.
+    // `tests/images/latencycase.toml` endows. `latency_wake` runs it there.
     "cyclictest",
     // Its verdict is a ratio of cycle counts, which a guest's host moves: the
     // `wake_storm_cost` metal row runs it on the T14.
@@ -117,48 +117,48 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
-    // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
-    // does not give: the `process_tree` metal row runs it on tests/proctreecase.
+    // Needs a launcher and a declared `cat` and shell, which `tests/images/testcases.toml`
+    // does not give: the `process_tree` metal row runs it on tests/images/proctreecase.toml.
     "process_tree",
     // Needs a launcher and a declared `toybox` holding `roster`, which
-    // `tests/testcases` does not give: the `launch_toctou` metal row runs it on
-    // tests/proctreecase.
+    // `tests/images/testcases.toml` does not give: the `launch_toctou` metal row runs it on
+    // tests/images/proctreecase.toml.
     "launch_toctou",
     // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
     // and a shell that opens a login session: the `launch_authority` metal row
-    // runs it on tests/proctreecase.
+    // runs it on tests/images/proctreecase.toml.
     "launch_authority",
     // A kernel primitive with no use for any one boot's devices: the
-    // `port_badge` metal row runs it on tests/proctreecase.
+    // `port_badge` metal row runs it on tests/images/proctreecase.toml.
     "port_badge",
-    // Needs a launcher whose row lists `/apps`, which `tests/testcases` does
-    // not give: the `app_view` metal row runs it on tests/proctreecase.
+    // Needs a launcher whose row lists `/apps`, which `tests/images/testcases.toml` does
+    // not give: the `app_view` metal row runs it on tests/images/proctreecase.toml.
     "app_view",
     // Needs a desktop driven by a person's keys and pointer: `consent_prompt`
-    // runs it on tests/consentcase.
+    // runs it on tests/images/consentcase.toml.
     "consent",
     // Needs a launcher whose row lists a shell, and a shell whose row opens a
     // login session and lists a shell, so that a login session and its
     // launches ask DATA's server while this job's share holds all it may: the
-    // `fs_share` metal row runs it on tests/proctreecase.
+    // `fs_share` metal row runs it on tests/images/proctreecase.toml.
     "fs_share",
     // It needs a NIC in front of netstack and a host server behind it:
-    // `netstack_socket_churn` runs it on `tests/netcase`.
+    // `netstack_socket_churn` runs it on `tests/images/netcase.toml`.
     "netstack_socket_churn",
     // It needs a NIC in front of netstack, a host server behind it and a host
-    // that dials its listener: `netstack_streams` runs it on `tests/netcase`.
+    // that dials its listener: `netstack_streams` runs it on `tests/images/netcase.toml`.
     "netstack_streams",
     // It needs a host that dials its listeners when it says they wait:
-    // `libc_sockets` runs it on `tests/netcase`.
+    // `libc_sockets` runs it on `tests/images/netcase.toml`.
     "nodelay_accepted",
     // It needs a NIC in front of netstack and HTTPS servers behind it:
-    // `https_fetch` runs it on `tests/netcase`.
+    // `https_fetch` runs it on `tests/images/netcase.toml`.
     "https_get",
     // `https_fetch` runs it on the boot its fetches run on, so that test
     // carries its own oracle; a shared run would be the same QEMU CPU twice.
     "ring_kat",
     // It needs a host peer that ends each stream as the stream asks:
-    // `libc_sockets` runs it on `tests/netcase`.
+    // `libc_sockets` runs it on `tests/images/netcase.toml`.
     "stream_ends_std",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
@@ -176,7 +176,7 @@ const RUST_SKIP: &[&str] = &[
     "soundserver_log_stall",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
-    // tests/acpicase.
+    // tests/images/acpicase.toml.
     "acpi_release",
     // It waits for the ACPI server's count of its embedded controller's
     // queries, and no guest's machine has that controller: the
@@ -186,7 +186,7 @@ const RUST_SKIP: &[&str] = &[
     // server, and stages the firmware's side of the Global Lock and finds the
     // i8042's row another claim's, which need the test kernel and its
     // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_across_a_lock_wait`
-    // run it on tests/acpicase.
+    // run it on tests/images/acpicase.toml.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
@@ -194,15 +194,15 @@ const RUST_SKIP: &[&str] = &[
     // runs it.
     "bar_map_again",
     // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
-    // `hosted_clang_hello` runs it on tests/hostedclangcase.
+    // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
     // It claims the NVMe controller a boot off that disk starts no server
     // for, and reads the inventory: `block_grants_reach_their_partitions`
-    // runs it on tests/blockgrantcase.
+    // runs it on tests/images/blockgrantcase.toml.
     "partition_grant",
     // It installs the image its machine test staged into a second slot on
     // the disk diskserver drives: `update_writes_the_idle_slot_through_the_block_service`
-    // runs it on tests/slotscase.
+    // runs it on tests/images/slotscase.toml.
     "update_idle_slot",
     // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
     // boot's kernel does: `usbd_drives_the_spare` and the
@@ -405,11 +405,11 @@ const MACHINE_TESTS: &[&str] = &[
     // runs nothing but the stop from the seal on.
     "machine_shutdown_wire_at_the_seal",
     // A claimable function with a mappable BAR that no program of the boot
-    // holds: QEMU's virtio NIC on `tests/testcases`. The T14's one such
+    // holds: QEMU's virtio NIC on `tests/images/testcases.toml`. The T14's one such
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
-    // `console/system.toml`'s image, which runs no job and hands no machine
+    // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
     // The desktop on CPUs that offer no x2APIC, whose local APICs run in
@@ -471,7 +471,7 @@ const MACHINE_TESTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
-    // ---- one image: tests/testcases, no parameters, one job list ----
+    // ---- one image: tests/images/testcases.toml, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
         metal::Metal { arms: TESTCASES, judge: |b| power::blackbox_unclaimed(&b[0].loader(), &b[0].kernel()) },
@@ -583,7 +583,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- one image: tests/testcases armed with the chipset watchdog ----
+    // ---- one image: tests/images/testcases.toml armed with the chipset watchdog ----
     (
         // Two boots, and they cannot merge: the control is the same image
         // *without* the parameter, which is the boot every row above rides —
@@ -592,10 +592,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         "loader_watchdog_arms",
         metal::Metal {
             arms: &[
-                metal::once("testcases-watchdog", "tests/testcases", &["watchdog"], &[]),
+                metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[]),
                 // The batch's job list is the union of its riders'; this arm
                 // needs none of its own.
-                metal::once("testcases", "tests/testcases", &[], &[]),
+                metal::once("testcases", "tests/images/testcases.toml", &[], &[]),
             ],
             judge: |b| {
                 power::watchdog_armed(&b[0].loader(), &b[0].kernel())?;
@@ -609,7 +609,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // is held and what is read beside Linux's.
         "counters",
         metal::Metal {
-            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
         },
     ),
@@ -650,7 +650,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // and `SCI_EN` reads clear after it.
         "acpi_server_death",
         metal::Metal {
-            arms: &[metal::once("acpicase", "tests/acpicase", &[], &["test_rs_acpi_release"])],
+            arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
             judge: |b| acpi_death_on_metal(b[0]),
         },
     ),
@@ -690,7 +690,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
-                ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &["test_rs_tlb_shootdown_waits"])
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
         },
@@ -703,7 +703,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
-                ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &["test_rs_trace_flood"])
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_trace_flood"])
             }],
             judge: |b| {
                 b[0].job_passed("test_rs_trace_flood")?;
@@ -718,11 +718,11 @@ const METAL: &[(&str, metal::Metal)] = &[
         // which a chipset reset anywhere in it would have cut short.
         "watchdog_fed",
         metal::Metal {
-            arms: &[metal::once("testcases-watchdog", "tests/testcases", &["watchdog"], &[])],
+            arms: &[metal::once("testcases-watchdog", "tests/images/testcases.toml", &["watchdog"], &[])],
             judge: |b| b[0].log_reached_the_stick(),
         },
     ),
-    // ---- the boot facts, riding the same tests/testcases image ----
+    // ---- the boot facts, riding the same tests/images/testcases.toml image ----
     //
     // **Six names and no extra minute of the machine.** Every needle below is a
     // record the *shipping* kernel writes on any boot it takes, so each rides
@@ -766,7 +766,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "pci_inventory",
         metal::Metal { arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
     ),
-    // ---- one image: tests/latencycase armed with the shootdown bench ----
+    // ---- one image: tests/images/latencycase.toml armed with the shootdown bench ----
     (
         "tlb_shootdown_cost",
         metal::Metal {
@@ -790,14 +790,14 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- tests/jobcase, each image armed to end its boot its own way ----
+    // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
         // profile that deliberately leaves the machine unable to end its own
         // boot, and what it judges is that the machine ended it anyway.
         "boot_deadline_ends_a_wedge",
         metal::Metal {
-            arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
+            arms: &[metal::once("deadlinewedge", "tests/images/jobcase.toml", &["wedge-before-reset"], &[])],
             judge: |b| power::deadline_wedge_chain(&b[0].after_the_reset()?),
         },
     ),
@@ -807,14 +807,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the stick enumerable on the next host afterwards.
         "usb_reset_records_the_phase_it_cut",
         metal::Metal {
-            arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
+            arms: &[metal::once("usbload", "tests/images/jobcase.toml", &["usb-reset-under-load"], &[])],
             judge: |b| power::usb_load_chain(&b[0].after_the_reset()?),
         },
     ),
     (
         "usb_stick_left",
         metal::Metal {
-            arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
+            arms: &[metal::once("usbbreak", "tests/images/jobcase.toml", &["usb-transport-break"], &[])],
             judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
@@ -827,7 +827,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // which of the two bounds ended it.
         "hard_lockup_ends_a_deaf_cpu",
         metal::Metal {
-            arms: &[metal::once("hardlockup", "tests/jobcase", &["hard-lockup-probe"], &[])],
+            arms: &[metal::once("hardlockup", "tests/images/jobcase.toml", &["hard-lockup-probe"], &[])],
             judge: |b| power::hard_lockup_chain(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
@@ -839,7 +839,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once(
                 "foreignrecord",
-                "tests/jobcase",
+                "tests/images/jobcase.toml",
                 &[toyos_build::metal::FOREIGN_RECORD_ARM],
                 &[],
             )],
@@ -855,7 +855,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- one image: tests/proctreecase ----
+    // ---- one image: tests/images/proctreecase.toml ----
     (
         // A parent's end takes its children down. The guest carries every
         // verdict but two the kernel speaks.
@@ -892,7 +892,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "app_view",
         metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
     ),
-    // ---- one image: tests/metalcase, which runs no job ----
+    // ---- one image: tests/images/metalcase.toml, which runs no job ----
     //
     // The rows after the first read what any boot that hands the machine back
     // writes, so they ride this one.
@@ -991,7 +991,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
-    // ---- a claimed function at the unit, on tests/testcases ----
+    // ---- a claimed function at the unit, on tests/images/testcases.toml ----
     (
         // Claimed, given back and claimed again: both claims name one
         // remapping entry, and each release leaves it not present.
@@ -1017,7 +1017,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once(
                 "iommu-no-remap",
-                "tests/testcases",
+                "tests/images/testcases.toml",
                 &["iommu-no-remap"],
                 &[claims::RECLAIM],
             )],
@@ -1031,7 +1031,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // which reset the function advertises.
         "usbd_drives_the_type_c_controller",
         metal::Metal {
-            arms: &[metal::once("testcases-xhci-leave", "tests/testcases", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
+            arms: &[metal::once("testcases-xhci-leave", "tests/images/testcases.toml", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
             judge: |b| {
                 b[0].job_passed("test_rs_usbd_spare")?;
                 usbd_on_metal(&b[0].kernel(), &b[0].log())
@@ -1067,7 +1067,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "crash_report_reads_no_kernel_memory",
         metal::Metal {
-            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_fault_gates"])],
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_fault_gates"])],
             judge: |b| {
                 b[0].job_passed("test_rs_fault_gates")?;
                 faults::crash_report_reads_no_kernel_memory(&b[0].kernel())
@@ -1080,16 +1080,16 @@ const METAL: &[(&str, metal::Metal)] = &[
 /// free: the ports' job first, since its last holder keeps them until it ends.
 const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
     "isa-withheld",
-    "tests/testcases",
+    "tests/images/testcases.toml",
     &["i8042-withheld"],
     &["test_rs_isa_grant", "test_rs_isa_lines"],
 )];
 
 /// The boot most rows ride, and every shipping-kernel member behind them
-/// ([`shared_metal`]): the plain `tests/testcases` shape.
+/// ([`shared_metal`]): the plain `tests/images/testcases.toml` shape.
 const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
-    "tests/testcases",
+    "tests/images/testcases.toml",
     &[],
     &[
         "test_rs_wake_storm_cost",
@@ -1110,7 +1110,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 /// boot, which a list of members before it would spend.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
-    ..metal::once("testcases", "tests/testcases", &[], &[])
+    ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
 }];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
@@ -1118,10 +1118,10 @@ const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
 /// and `readdir_bound`'s own `create_dir("/tmp/empty")` is then refused with
 /// `OutOfMemory` and it panics — measured on the first staged image.
 const TESTCASES_MKDIR: &[metal::Arm] =
-    &[metal::once("testcases-mkdir", "tests/testcases", &[], &["test_rs_mkdir_cap"])];
+    &[metal::once("testcases-mkdir", "tests/images/testcases.toml", &[], &["test_rs_mkdir_cap"])];
 
 const TESTCASES_READDIR: &[metal::Arm] =
-    &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
+    &[metal::once("testcases-readdir", "tests/images/testcases.toml", &[], &["test_rs_readdir_bound"])];
 
 /// The shipping kernel with the windows' instrument and nothing else, so what
 /// it reads is that kernel under the herd. Three exits, a report each:
@@ -1131,7 +1131,7 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
     features: toyos_build::build::MASK_WINDOWS_KERNEL,
     ..metal::once(
         "windowscase",
-        "tests/testcases",
+        "tests/images/testcases.toml",
         &[],
         &["test_rs_idle_span", "pwd", WINDOWS_LOAD],
     )
@@ -1147,7 +1147,7 @@ fn windows_load_exited() -> String {
 
 /// A `logkeeper` that leaves soundserver's ring unread until the job says the tone played.
 const LOGSTALLCASE: &[metal::Arm] =
-    &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundserver_log_stall"])];
+    &[metal::once("logstallcase", "tests/images/logstallcase.toml", &[], &["test_rs_soundserver_log_stall"])];
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
 /// with megabytes behind it, and `metalcase` for one with no job behind it.
@@ -1158,10 +1158,10 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
         &[],
         devices::JOBS,
     ),
-    metal::once("metalcase", "tests/metalcase", &[], &[]),
+    metal::once("metalcase", "tests/images/metalcase.toml", &[], &[]),
 ];
 
-const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
@@ -1170,7 +1170,7 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 /// the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
-    "tests/proctreecase",
+    "tests/images/proctreecase.toml",
     &[],
     &[
         "test_rs_process_tree",
@@ -1206,7 +1206,7 @@ const SELFTEST_PARAMS: &[&str] = &[
 
 const SELFTESTS: &[metal::Arm] = &[metal::Arm {
     features: ACTUATOR_KERNEL,
-    ..metal::once("shared-debug", "tests/testcases", SELFTEST_PARAMS, &[])
+    ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &[])
 }];
 
 /// The two boots every discovered member rides on the T14, each behind its
@@ -1228,7 +1228,7 @@ fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
         metal::SharedBoot { members: rust(shipping).chain(corpus.members.clone()).chain(last).collect(), ..corpus },
         metal::SharedBoot {
             boot: "shared-debug".to_string(),
-            config: "tests/testcases",
+            config: "tests/images/testcases.toml",
             params: SELFTEST_PARAMS,
             features: ACTUATOR_KERNEL,
             members: rust(debug).collect(),
@@ -1239,14 +1239,14 @@ fn shared_metal(c_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
 }
 
 /// **One boot for both measurements this suite takes rather than reads.**
-/// `tests/latencycase` is the only config that endows the real-time band, and
+/// `tests/images/latencycase.toml` is the only config that endows the real-time band, and
 /// the TLB bench is a boot parameter rather than a job — so arming this image
 /// with it costs the machine nothing and saves a whole minute. The bench runs
 /// on the BSP between the roster's release and the idle loop, before either job
 /// starts, so what it spends is boot time and not latency.
 const LATENCYCASE: &[metal::Arm] = &[metal::once(
     "latencycase",
-    "tests/latencycase",
+    "tests/images/latencycase.toml",
     &["tlb-shootdown-bench"],
     &["test_rs_cyclictest", "test_rs_sched_stress"],
 )];
@@ -1278,7 +1278,7 @@ fn c_corpus_metal(c_bins: &[(String, Vec<u8>)]) -> metal::SharedBoot {
         links.push((format!("bin/{case}"), format!("/system/bin/{CCHECK}")));
         members.push(metal::Member { job: case.clone(), adds_ms: toyos_tco::C_MEMBER_MS });
     }
-    metal::SharedBoot { boot: "testcases".to_string(), config: "tests/testcases", params: &[], features: &[], members, files, links }
+    metal::SharedBoot { boot: "testcases".to_string(), config: "tests/images/testcases.toml", params: &[], features: &[], members, files, links }
 }
 
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
@@ -1775,18 +1775,18 @@ fn inked(dump: &screen::Ppm, needle: &str, want: [u8; 3], why: &str) -> Result<(
     }
 }
 
-/// `tests/toyos-rust-tests`' binary that `tests/virtjobcase` runs as its job
+/// `tests/toyos-rust-tests`' binary that `tests/images/virtjobcase.toml` runs as its job
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
 /// The same for its job `test_rs_ring0_timer_in_syscall`.
 const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
 
-/// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
+/// `tests/toyos-rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
 
-/// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
+/// `tests/toyos-rust-tests`' binary that `tests/images/virtsmpcase.toml` runs as its job
 /// `test_rs_trace_read`.
 const VIRT_TRACE_READ: &str = "trace_read";
 
@@ -1813,7 +1813,7 @@ const VIRT_RANDOM: &str = "random_draws";
 /// The same for its job `test_rs_wall_clock_now`.
 const VIRT_WALL_CLOCK: &str = "wall_clock_now";
 
-/// The instant `tests/virtjobcase`'s RTC starts at, and the same in Unix
+/// The instant `tests/images/virtjobcase.toml`'s RTC starts at, and the same in Unix
 /// seconds: years from any host's own, so a reading on it came from the RTC.
 const VIRT_RTC_BASE: &str = "2033-03-07T09:14:25";
 const VIRT_RTC_BASE_SECS: u64 = 1_993_799_665;
@@ -1821,7 +1821,7 @@ const VIRT_RTC_BASE_SECS: u64 = 1_993_799_665;
 /// What `wall_clock_now` says before the `SYS_CLOCK_EPOCH` its line carries.
 const WALL_CLOCK_SAID: &str = "wall-clock: epoch=";
 
-/// `tests/virtjobcase`'s jobs, in the order its job list runs them, and what
+/// `tests/images/virtjobcase.toml`'s jobs, in the order its job list runs them, and what
 /// each says once the kernel kept what it asks about.
 const VIRT_JOBS: &[(&str, &str)] = &[
     ("preempt", "preempt: the counting thread was preempted twice"),
@@ -1841,15 +1841,14 @@ const RANDOM_DRAWS_SAID: &str = "random_draws: 8 threads drew 1000 times each an
 /// What the kernel says once the loader's seed is in its generator's key.
 const LOADER_SEED_MIXED: &str = "random: the loader's seed is mixed into the generator's key";
 
-/// Boot `tests/virtjobcase` on one CPU, because `preempt` and `fp_isolation`
+/// Boot `tests/images/virtjobcase.toml` on one CPU, because `preempt` and `fp_isolation`
 /// see a sibling run only when it took theirs, with its RTC at
 /// [`VIRT_RTC_BASE`]. The kernel carries `SYS_DEBUG` for `debug_refused`, and
 /// every job runs in every boot of the case.
 fn boot_virt_jobs(profile: qemu::Profile) -> QemuInstance {
-    let config = compile::repo_root().join("tests/virtjobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
+    let config = compile::repo_root().join("tests/images/virtjobcase.toml");
     QemuInstance::boot_with_options(
-        case,
+        &config,
         &[],
         &[],
         BootOptions {
@@ -1897,7 +1896,7 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
 
-/// Boot `tests/acpicase`, whose one job is `test_rs_acpi_mediated`, on the
+/// Boot `tests/images/acpicase.toml`, whose one job is `test_rs_acpi_mediated`, on the
 /// test kernel, and judge the job and what the kernel said beside it: the
 /// lock found at boot, given back for the holder that died with it, and
 /// given back for the probe itself, which asks for the power-off holding it
@@ -1921,7 +1920,7 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
     const GIVEN_BACK_AT_THE_STOP: &str = "acpi: the Global Lock given back for a holder that left it taken (the machine is stopping)";
     const NO_S5: &str = "shutdown: no ACPI server supplied S5 — refused";
-    let case = compile::repo_root().join("tests/acpicase");
+    let case = compile::repo_root().join("tests/images/acpicase.toml");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
         &[],
@@ -2002,7 +2001,7 @@ fn s5_supplied(said: &serial::Serial) -> Vec<&str> {
     said.text().lines().filter_map(|line| Some(line.split_once(S5_SUPPLIED)?.1.trim())).collect()
 }
 
-/// Boot `tests/acpicase` on the shipping kernel with `acpi_mediated`'s
+/// Boot `tests/images/acpicase.toml` on the shipping kernel with `acpi_mediated`'s
 /// `outlived` arm staged: a holder supplies q35's own sleep type and exits,
 /// its claim and one more that supplied nothing are released, and the probe,
 /// holding no claim, asks for the power-off. The kernel kept one sleep type,
@@ -2011,7 +2010,7 @@ fn s5_supplied(said: &serial::Serial) -> Vec<&str> {
 fn acpi_supply_outlives_holder() -> Result<(), String> {
     const JOB: &str = "test_rs_acpi_mediated";
     const ASKED: &str = "acpi: asking for the power-off with no claim held, on what a holder that is gone supplied";
-    let case = compile::repo_root().join("tests/acpicase");
+    let case = compile::repo_root().join("tests/images/acpicase.toml");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
         &[],
@@ -2058,7 +2057,7 @@ fn acpi_supply_outlives_holder() -> Result<(), String> {
 /// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
 fn console_image_boots() -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(
-        &compile::repo_root().join("console"),
+        &compile::repo_root().join("images/console.toml"),
         &[],
         &[],
         BootOptions { profile: qemu::Profile::Metal, ready_marker: bootlog::COMPLETE, ..Default::default() },
@@ -2068,7 +2067,7 @@ fn console_image_boots() -> Result<(), String> {
     serial::Serial::named("the console image's boot", console).must_be_clean()
 }
 
-/// Boot `tests/panelcase` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
+/// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
 /// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
 /// declared its local APIC in xAPIC mode, every CPU the firmware named came
 /// up — started by an xAPIC ICR's two halves — and the desktop ran across
@@ -2077,7 +2076,7 @@ fn console_image_boots() -> Result<(), String> {
 fn desktop_without_x2apic() -> Result<(), String> {
     const CPUS: u32 = 4;
     let mut qemu = QemuInstance::boot_with_options(
-        &compile::repo_root().join("tests/panelcase"),
+        &compile::repo_root().join("tests/images/panelcase.toml"),
         &[],
         &[],
         BootOptions {
@@ -2462,7 +2461,7 @@ const UNMAP_TOUCH_SAID: &str =
 /// The CPUs `virt_smp` boots.
 const VIRT_CPUS: u32 = 8;
 
-/// The windows on AArch64: `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs of a
+/// The windows on AArch64: `tests/images/virtsmpcase.toml` on [`VIRT_CPUS`] CPUs of a
 /// `mask-windows` kernel, whose every hook checks the state it finds, judged
 /// on the whole console once the case's job `unmap_touch` has ended and the
 /// boot has said its last word.
@@ -2480,12 +2479,11 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     mask_windows(&serial, VIRT_CPUS)
 }
 
-/// Boot `tests/virtsmpcase` as `options` say.
+/// Boot `tests/images/virtsmpcase.toml` as `options` say.
 fn boot_virt_smp(options: BootOptions) -> QemuInstance {
-    let config = compile::repo_root().join("tests/virtsmpcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
+    let config = compile::repo_root().join("tests/images/virtsmpcase.toml");
     QemuInstance::boot_with_options(
-        case,
+        &config,
         &[],
         &[],
         BootOptions {
@@ -2505,7 +2503,7 @@ const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, 
 /// What `trace_read` says once the diary read back as the scheduler wrote it.
 const TRACE_READ_SAID: &str = "trace_read: a wake precedes its pick, a cursor is its reader's own, and the diary is TRACE's";
 
-/// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under `profile`, whose
+/// Boot `tests/images/virtsmpcase.toml` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
 /// each CPU is started by `CPU_ON`, holds the control-register declaration as
 /// entered there and joins the scheduler, and the case's jobs `unmap_touch`,
@@ -2676,17 +2674,16 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     Ok(())
 }
 
-/// `tests/virtrebootcase`'s one job asks for a reboot: the boot's last word is
+/// `tests/images/virtrebootcase.toml`'s one job asks for a reboot: the boot's last word is
 /// `Rebooting.`, QEMU stops for `guest-reset`, and its trace of PSCI holds one
 /// `SYSTEM_RESET` and neither `CPU_OFF` nor `SYSTEM_OFF`. With `staged`
 /// actuators `klogd` holds the console's wire as the stop begins, judged by
 /// [`power::judge_the_held_wire`].
 fn virt_reboot(profile: qemu::Profile, staged: &'static [&'static str]) -> Result<(), String> {
-    let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
+    let config = compile::repo_root().join("tests/images/virtrebootcase.toml");
     let trace = common::lane::dir().join("virt_reboot.psci");
     let mut qemu = QemuInstance::boot_with_options(
-        case,
+        &config,
         &[],
         &[],
         BootOptions {
@@ -2763,13 +2760,12 @@ fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String>
 const REBOOT_REFUSED: &str = "reboot: this machine has no reset this kernel performs — refused";
 
 /// `psci-withheld` leaves this kernel no PSCI and so no reset:
-/// `tests/virtrebootcase`'s job `reboot` is refused by name before anything is
+/// `tests/images/virtrebootcase.toml`'s job `reboot` is refused by name before anything is
 /// torn down, ends with exit 1, and the boot never says `Rebooting.`.
 fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String> {
-    let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
+    let config = compile::repo_root().join("tests/images/virtrebootcase.toml");
     let mut qemu = QemuInstance::boot_with_options(
-        case,
+        &config,
         &[],
         &[],
         BootOptions {
@@ -2795,15 +2791,14 @@ fn virt_reboot_refused_without_psci(profile: qemu::Profile) -> Result<(), String
     Ok(())
 }
 
-/// `tests/virtpaniccase` runs `test_rs_panic_halts_first` as its one job on
+/// `tests/images/virtpaniccase.toml` runs `test_rs_panic_halts_first` as its one job on
 /// [`STOP_CPUS`] CPUs, and the halt SGI stops every CPU but the one going
 /// fatal.
 fn virt_fatal_halts_the_others_first(profile: qemu::Profile) -> Result<(), String> {
-    let config = compile::repo_root().join("tests/virtpaniccase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
+    let config = compile::repo_root().join("tests/images/virtpaniccase.toml");
     let fatal = qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), "panic_halts_first");
     let qemu = QemuInstance::boot_with_options(
-        case,
+        &config,
         &[],
         &[],
         BootOptions {
@@ -3242,7 +3237,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // Driven by `metal-panic-probe`, which is the same kernel the owner
             // flashes: a gate that staged this with SYS_DEBUG would certify a
             // path his image does not contain.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/panelcase");
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/panelcase.toml");
             let options = BootOptions {
                 profile,
                 smp: 8,
@@ -3677,7 +3672,7 @@ fn answering_server() -> Result<u16, String> {
     Ok(port)
 }
 
-/// Boot `tests/netcase` with these binaries staged, to netstack's lease, since
+/// Boot `tests/images/netcase.toml` with these binaries staged, to netstack's lease, since
 /// its jobs name their peer by an address, and then to the claim of its name:
 /// a responder whose probing never ends leaves the machine nameless, and
 /// nothing else on a boot reads the name.
@@ -3689,7 +3684,7 @@ fn boot_netcase(
     const LEASED: &str = "netstack: DHCP: lease ";
     /// `system/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
-    let case = compile::repo_root().join("tests/netcase");
+    let case = compile::repo_root().join("tests/images/netcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
     await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
@@ -3725,7 +3720,7 @@ fn forwards_into<const N: usize>(qemu: &QemuInstance, guest_ports: [u16; N]) -> 
 }
 
 /// libc's sockets as a C program uses them and std's as a Rust one does, on
-/// one boot of `tests/netcase`: each job dials a host server that holds what
+/// one boot of `tests/images/netcase.toml`: each job dials a host server that holds what
 /// it accepts, or sends to one that answers each datagram with itself, at the
 /// address the guest's network gives the host; and each time a job says its
 /// listeners wait, the host dials them through the ports QEMU forwards; and
@@ -3746,9 +3741,9 @@ fn libc_sockets() -> Result<(), String> {
         return Err(format!("this host's TCP reports\n{}\nand not\n{}", host.join("\n"), stream_ends::EXPECTED.join("\n")));
     }
 
-    let case = compile::repo_root().join("tests/netcase");
+    let sources = compile::repo_root().join("tests/netcase");
     let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound", "stream_ends"]
-        .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&case, name), name)))
+        .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&sources, name), name)))
         .into();
     let rust_bins: Vec<(String, Vec<u8>)> = RUST_JOBS
         .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), job)))
@@ -3814,7 +3809,7 @@ fn libc_sockets() -> Result<(), String> {
 /// An unchanged HTTPS client — `ureq` on `rustls` on `ring`, as published but
 /// for `ring`'s ToyOS arms — trusting `build::trust_roots` and this run's
 /// authority, and sending the project's `User-Agent`, on one boot of
-/// `tests/netcase` against servers this run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
+/// `tests/images/netcase.toml` against servers this run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
 /// every byte the host computes with another SHA-256 than the guest's; and it
 /// refuses a certificate for another address and one from an authority the
 /// roots file does not hold, each by its own name, at the handshake. First,
@@ -3984,7 +3979,7 @@ fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result
 /// taps F12, which the job waits on through its hostile window. Nothing here
 /// waits on a clock but the run's own ceiling.
 fn consent_prompt(profile: qemu::Profile) -> Result<(), String> {
-    let case = compile::repo_root().join("tests/consentcase");
+    let case = compile::repo_root().join("tests/images/consentcase.toml");
     let (_, job) = suite_bin(profile.arch(), "consent");
     let digest: String = toyos_sha2_hw::sha256_digest(&job).iter().map(|b| format!("{b:02x}")).collect();
     let options = BootOptions { profile, qmp: true, ..Default::default() };
@@ -4426,7 +4421,7 @@ const GRANTS_SAID: [&str; 5] = [
 fn block_grants_reach_their_partitions() -> Result<(), String> {
     const JOB: &str = "partition_grant";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/blockgrantcase");
+    let case = compile::repo_root().join("tests/images/blockgrantcase.toml");
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
     let result = qemu.run_test("test_rs_partition_grant", Duration::from_secs(60));
@@ -4496,7 +4491,7 @@ fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String>
     const JOB: &str = "update_idle_slot";
     let staged = staged_update();
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/toyos-rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/slotscase");
+    let case = compile::repo_root().join("tests/images/slotscase.toml");
     let options = BootOptions {
         profile: qemu::Profile::HeadlessNoUsb,
         extra_root_files: vec![(UPDATE_IMAGE.to_string(), staged.image.clone())],
@@ -6286,7 +6281,7 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
     let _ = fs::remove_file(result_path);
     let _ = fs::remove_file(ready_path);
 
-    let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
+    let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/testcases.toml");
     let mut qemu = QemuInstance::boot_with_options(
         &test_config,
         c_tests,
@@ -6802,9 +6797,9 @@ fn metal_rows_are_whole(rows: &[(&str, metal::Metal)]) -> Result<(), String> {
             return Err(format!("{name}'s metal declaration asks for no boot at all"));
         }
         for arm in decl.arms {
-            let at = compile::repo_root().join(arm.config).join("system.toml");
+            let at = compile::repo_root().join(arm.config);
             if !at.is_file() {
-                return Err(format!("{name} boots {}, which holds no system.toml", arm.config));
+                return Err(format!("{name} boots {}, which is no image config", arm.config));
             }
         }
     }
@@ -6820,7 +6815,7 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
     const RUNS: metal::Metal = metal::Metal { arms: METALCASE, judge };
     const NONE: metal::Metal = metal::Metal { arms: &[], judge };
     const NO_CONFIG: metal::Metal = metal::Metal {
-        arms: &[metal::once("nowhere", "tests/no-such-config", &[], &[])],
+        arms: &[metal::once("nowhere", "tests/images/no-such-config.toml", &[], &[])],
         judge,
     };
     /// A fixture's name, its METAL rows, and the refusal it must draw, `None`
@@ -6830,7 +6825,7 @@ fn the_metal_gate_refuses_what_it_names() -> Result<(), String> {
         ("two rows", &[("one", RUNS), ("two", RUNS)], None),
         ("a row twice", &[("one", RUNS), ("one", RUNS)], Some("has two metal declarations")),
         ("no boot", &[("one", NONE)], Some("asks for no boot at all")),
-        ("no config", &[("one", NO_CONFIG)], Some("holds no system.toml")),
+        ("no config", &[("one", NO_CONFIG)], Some("which is no image config")),
     ];
     for (case, rows, refused) in cases {
         match (metal_rows_are_whole(rows), refused) {
@@ -6974,7 +6969,7 @@ fn main() {
         run.exit(1);
     }
 
-    let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
+    let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/images/testcases.toml");
     let mut tally = Tally::new();
 
     let suite_start = common::clock::mark();

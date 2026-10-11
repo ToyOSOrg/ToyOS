@@ -4,7 +4,7 @@ pub mod claims;
 pub mod clock;
 pub mod lane;
 pub mod compile;
-/// The device boot: what `tests/metaldevicecase` measures.
+/// The device boot: what `tests/images/metaldevicecase.toml` measures.
 pub mod devices;
 pub mod faults;
 pub mod hostedclang;

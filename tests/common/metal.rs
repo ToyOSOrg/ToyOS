@@ -39,7 +39,7 @@ pub struct Arm {
     /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
     /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
-    /// The boot config's directory, relative to the repository root.
+    /// The image config, relative to the repository root.
     pub config: &'static str,
     /// What the image is armed with. Every name here is judged by the
     /// pre-flash gate (`toyos_build::metal::FLASHABLE`) before it is written.
@@ -713,7 +713,7 @@ fn build(
     let home = at(dir, label);
     std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
 
-    let committed = root.join(batch.config).join("system.toml");
+    let committed = root.join(batch.config);
     let text = std::fs::read_to_string(&committed)
         .map_err(|e| format!("{}: {e}", committed.display()))?;
     let jobs: Vec<&str> = batch.jobs.iter().map(String::as_str).collect();

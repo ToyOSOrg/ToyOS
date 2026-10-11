@@ -15,7 +15,7 @@ service = true
 syscap = ["logread"]
 serves = ["log"]
 
-# The machine's ACPI fixed hardware, as `system.toml` serves it: on the T14
+# The machine's ACPI fixed hardware, as `images/system.toml` serves it: on the T14
 # every row of this image runs in ACPI mode, and on q35 `acpi_power_button`
 # presses the button it serves.
 [programs.acpiserver]

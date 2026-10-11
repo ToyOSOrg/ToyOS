@@ -1,7 +1,7 @@
 # The boot `screen_fatal_halt_composited` reads the panel of: a compositor
 # holding the scanout when the kernel dies, on `Profile::Metal`'s machine.
 #
-# Not tests/metalcase: that image's sshserver is most of what it compiles, and
+# Not tests/images/metalcase.toml: that image's sshserver is most of what it compiles, and
 # no guest speaks SSH.
 
 assets = ["assets"]

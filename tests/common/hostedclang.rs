@@ -2,7 +2,7 @@
 //! M2 of `issues/toyos-builds-itself.md`.
 //!
 //! The binaries, clang's resource headers and the C sysroot's headers and
-//! `libtoyos_c.a` go on the ROOT of `tests/hostedclangcase`, as fixtures
+//! `libtoyos_c.a` go on the ROOT of `tests/images/hostedclangcase.toml`, as fixtures
 //! beside the image's own files: ROOT is memory the loader filled, so the
 //! guest reads them with no disk and no server behind it. The job compiles and
 //! links `hello.c` there, runs it, and compares each product with what the
@@ -32,13 +32,13 @@ const HELLO: &str = "hello from a C program compiled and linked inside ToyOS";
 pub fn hosted_clang_hello() -> Result<(), String> {
     let hosted = toyos_build::hostedclang::ensure(&compile::repo_root());
     let c = compile::c_sysroot();
-    let case = compile::repo_root().join("tests/hostedclangcase");
+    let (case, sources) = (compile::repo_root().join("tests/images/hostedclangcase.toml"), compile::repo_root().join("tests/hostedclangcase"));
 
     let scratch = super::lane::dir().join(JOB);
     fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
     let (object, linked) = (scratch.join("hello.o"), scratch.join("hello"));
     let mut cc = Command::new(&c.clang);
-    cc.args(c.args()).args(["-c", "hello.c", "-o"]).arg(&object).current_dir(&case);
+    cc.args(c.args()).args(["-c", "hello.c", "-o"]).arg(&object).current_dir(&sources);
     host_run(cc)?;
     // The line the ToyOS driver hands LLD (`clang -###`), as the guest runs it.
     let lld = c.clang.with_file_name("ld.lld");
@@ -59,7 +59,7 @@ pub fn hosted_clang_hello() -> Result<(), String> {
     stage("bin/clang", &hosted.dir.join("bin/clang"));
     stage("bin/ld.lld", &hosted.dir.join("bin/ld.lld"));
     stage("sysroot/lib/libtoyos_c.a", &c.dir.join("lib/libtoyos_c.a"));
-    stage("src/hello.c", &case.join("hello.c"));
+    stage("src/hello.c", &sources.join("hello.c"));
     for (name, product) in [("hello.o", &object), ("hello", &linked)] {
         let bytes = fs::read(product).map_err(|e| format!("read {}: {e}", product.display()))?;
         let sha256: String = toyos_sha2_hw::sha256_digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();

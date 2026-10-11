@@ -299,7 +299,7 @@ fn a_right_the_capability_lacks_is_a_word() {
     );
 
     // **Narrowed and not the estate's own cap, because this estate does carry
-    // `POWER`.** `tests/testcases` names `power` on the test-runner row so that
+    // `POWER`.** `tests/images/testcases.toml` names `power` on the test-runner row so that
     // this arm has a right to narrow away, and every binary it spawns holds a
     // duplicate — including this one. The subject is a
     // capability that resolves and lacks the bit, which is what `toothless` is.
@@ -380,7 +380,7 @@ fn cap() -> &'static SysCap {
 ///
 /// Narrowed rather than the estate's own cap, because this estate does carry
 /// `ROSTER`: four guest binaries read entries out of the same call, and
-/// `tests/testcases` names `roster` on the test-runner row for them. The
+/// `tests/images/testcases.toml` names `roster` on the test-runner row for them. The
 /// subject is a capability that resolves and lacks the bit.
 fn the_roster_is_a_right_and_the_header_is_not() {
     let toothless = cap().narrowed(Rights::TRANSFER).expect("a capability carrying less");

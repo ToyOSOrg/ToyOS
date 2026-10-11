@@ -356,7 +356,7 @@ mod tests {
     fn a_flag_that_reads_one_value_is_refused_when_it_is_written_twice() {
         for words in [
             vec!["--smp", "1", "--smp", "2"],
-            vec!["--boot-config", "diag", "--boot-config", "console"],
+            vec!["--boot-config", "tests/images/jobcase.toml", "--boot-config", "tests/images/netcase.toml"],
             vec!["--build-only", "--build-only"],
         ] {
             let message = refusal(&words);
@@ -384,7 +384,7 @@ mod tests {
             vec!["--kernel-param", "--help"],
             vec!["--boot-config", "--help"],
             vec!["--ci", "host", "--help"],
-            vec!["--boot-config", "diag", "--build-only"],
+            vec!["--boot-config", "tests/images/jobcase.toml", "--build-only"],
         ] {
             assert!(matches!(checked(&words), Outcome::Proceed), "{words:?} must proceed");
         }
@@ -393,7 +393,7 @@ mod tests {
         assert!(!CARGO_RUN.present(&line, &HELP), "the actuator's name is not the flag");
         let ci = argv(&["--ci", "guest", "--help"]);
         assert_eq!(CARGO_RUN.rest(&ci, &CI), ["guest", "--help"]);
-        assert_eq!(CARGO_RUN.value(&argv(&["--boot-config", "diag"]), &BOOT_CONFIG), Some("diag"));
+        assert_eq!(CARGO_RUN.value(&argv(&["--boot-config", "tests/images/jobcase.toml"]), &BOOT_CONFIG), Some("tests/images/jobcase.toml"));
         assert_eq!(CARGO_RUN.value(&argv(&["--build-only"]), &BOOT_CONFIG), None);
     }
 

@@ -47,7 +47,7 @@ login = true
 [programs.grants]
 receives = ["grants"]
 
-# The block service and the file servers, as `tests/proctreecase` has them:
+# The block service and the file servers, as `tests/images/proctreecase.toml` has them:
 # the package, the home and the store are DATA's.
 [programs.diskserver]
 service = true

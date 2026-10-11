@@ -179,27 +179,27 @@ fn main() {
     let diag = asked(&flags::DIAG_BOOT);
     let console = asked(&flags::CONSOLE_BOOT);
     assert!(!(diag && console), "--diag-boot and --console-boot are two images; build one");
-    // `--boot-config <dir>` builds the `system.toml` in that directory.
+    // `--boot-config <file>` builds that test image config, a file in `tests/images/`.
     // **A flashed image carries no actuator**, so only the kernel's own boot
     // parameters are admitted beside it, and every flag it cannot combine with
     // is refused by name.
     let boot_config = CARGO_RUN.value(&args, &flags::BOOT_CONFIG);
-    if let Some(dir) = boot_config {
+    if let Some(config) = boot_config {
         for (other, flag) in [
             (diag, &flags::DIAG_BOOT),
             (console, &flags::CONSOLE_BOOT),
         ] {
-            assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
+            assert!(!other, "--boot-config {config} cannot be combined with {}", flag.name);
         }
-        assert!(build_only, "--boot-config {dir} builds an image; pass --build-only");
+        assert!(build_only, "--boot-config {config} builds an image; pass --build-only");
         let params: Vec<String> =
             CARGO_RUN.values(&args, &flags::KERNEL_PARAM).into_iter().map(String::from).collect();
         toyos_build::build::flashable_params(&root, &params)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
     }
     let boot = match (boot_config, diag, console) {
-        (Some(dir), _, _) => {
-            toyos_build::build::Boot::case(&root, dir).unwrap_or_else(|refusal| panic!("{refusal}"))
+        (Some(config), _, _) => {
+            toyos_build::build::Boot::case(&root, config).unwrap_or_else(|refusal| panic!("{refusal}"))
         }
         (None, true, _) => toyos_build::build::Boot::diag(&root),
         (None, _, true) => toyos_build::build::Boot::console(&root),

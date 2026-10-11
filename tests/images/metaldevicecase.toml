@@ -1,7 +1,7 @@
 # The device suite's boot: one job per number the T14 is asked for, and then
 # the machine back to firmware.
 #
-# The shape is `tests/jobcase`'s — a job list is the only way a boot ends on a
+# The shape is `tests/images/jobcase.toml`'s — a job list is the only way a boot ends on a
 # machine whose console reaches nobody — with `metalprobe` behind it. Each job
 # exits with its measurement as its exit code, and the kernel's own
 # `exit: <name> pid=N code=N cpu=Nms` record is what carries it off the stick.

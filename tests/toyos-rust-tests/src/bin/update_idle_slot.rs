@@ -6,7 +6,7 @@
 
 use std::process::{Command, Stdio};
 
-/// Where the harness puts the image (`tests/slotscase`).
+/// Where the harness puts the image (`tests/images/slotscase.toml`).
 const IMAGE: &str = "/system/share/update-test.img";
 
 fn main() {

@@ -837,7 +837,7 @@ fn hex_after(line: &str, after: &str) -> Result<u64, String> {
 /// the Global Lock is served once the wait ends at its Acquire's timeout: the
 /// wait clears the press's enable once it finds its status latched, takes
 /// the SCI the press raised, and puts every enable back after, so the press's
-/// status raises the SCI again for `serve`. `tests/acpicase` with the test
+/// status raises the SCI again for `serve`. `tests/images/acpicase.toml` with the test
 /// kernel's actuator for the firmware's side of the lock, which
 /// `acpi_mediated`'s `held` arm stages owned before it hands the server the
 /// claim; the table QEMU adds waits as it loads for the press, sent once the
@@ -845,7 +845,7 @@ fn hex_after(line: &str, after: &str) -> Result<u64, String> {
 /// Then the press must power the machine off, after the Acquire said it timed
 /// out.
 pub fn acpi_press_across_a_lock_wait(probe: (String, Vec<u8>)) -> Result<(), String> {
-    let case = super::compile::repo_root().join("tests/acpicase");
+    let case = super::compile::repo_root().join("tests/images/acpicase.toml");
     let mut qemu = QemuInstance::boot_with_options(
         &case,
         &[],

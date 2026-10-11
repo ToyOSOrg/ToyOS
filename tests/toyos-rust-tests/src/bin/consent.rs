@@ -1,7 +1,7 @@
 //! A package's launch from the desktop asks the person at the screen for a
 //! folder, in the prompt layer, and what they answer is what it holds.
 //!
-//! Run by `consent_prompt` on `tests/consentcase`, whose host side drives the
+//! Run by `consent_prompt` on `tests/images/consentcase.toml`, whose host side drives the
 //! desktop through QEMU's keyboard and tablet: each step here says
 //! `CONSENT <step>` on the console, the host clicks the package in the
 //! launcher and answers the prompt with keys, and taps F12 once the package

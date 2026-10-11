@@ -3,7 +3,7 @@
 //!
 //! **A T14 boot has to end itself.** Nobody is on the console — a machine with
 //! no serial port has nothing at the other end to type a job — so the
-//! stdin path every `tests/*case` but `jobcase` leaves the runner on parks
+//! stdin path every config in `tests/images/` but `jobcase.toml` leaves the runner on parks
 //! forever, and the loop refuses after `metal::return_secs`. What ends a boot
 //! is `[programs.test-runner] args`: the list's bound, one binary name per
 //! job, then `reboot`.
@@ -90,7 +90,7 @@ pub fn derive(
     }
     // The applet the last job runs. A config that already builds it keeps
     // whatever its row says; one that does not gets the bare row, which is what
-    // `tests/jobcase` carries.
+    // `tests/images/jobcase.toml` carries.
     programs.entry(TOYBOX).or_insert_with(|| Value::Table(toml::map::Map::new()));
 
     let runner = programs
@@ -139,11 +139,16 @@ mod tests {
     /// Every committed config the metal profile derives from, read from the
     /// tree so the transform is exercised on the real text rather than on a
     /// fixture that agrees with it today.
-    const CONFIGS: &[&str] =
-        &["tests/testcases", "tests/jobcase", "tests/metalcase", "tests/latencycase", "tests/acpicase"];
+    const CONFIGS: &[&str] = &[
+        "tests/images/testcases.toml",
+        "tests/images/jobcase.toml",
+        "tests/images/metalcase.toml",
+        "tests/images/latencycase.toml",
+        "tests/images/acpicase.toml",
+    ];
 
-    fn derived(dir: &str, jobs: &[&str]) -> String {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join("system.toml");
+    fn derived(config: &str, jobs: &[&str]) -> String {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(config);
         let text = std::fs::read_to_string(&at).expect("a committed boot config");
         derive(&text, 133_100, jobs, &[]).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
     }
@@ -153,22 +158,22 @@ mod tests {
     /// it holds the connector the last job needs.
     #[test]
     fn every_derived_config_ends_its_own_boot() {
-        for dir in CONFIGS {
-            let out = derived(dir, &["test_rs_mkdir_cap"]);
+        for config in CONFIGS {
+            let out = derived(config, &["test_rs_mkdir_cap"]);
             let parsed: Value = toml::from_str(&out).expect("the derived config parses");
             let runner = &parsed["programs"][RUNNER];
             let args: Vec<&str> =
                 runner["args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-            assert_eq!(args, ["--bound-ms=133100", "test_rs_mkdir_cap", REBOOT], "{dir}");
+            assert_eq!(args, ["--bound-ms=133100", "test_rs_mkdir_cap", REBOOT], "{config}");
             let receives: Vec<&str> = runner["receives"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|v| v.as_str().unwrap())
                 .collect();
-            assert!(receives.contains(&POWER), "{dir}: {receives:?} lacks {POWER}");
-            assert_eq!(parsed["symlinks"][REBOOT_LINK].as_str(), Some(TOYBOX_PATH), "{dir}");
-            assert!(parsed["programs"].get(TOYBOX).is_some(), "{dir} builds no {TOYBOX}");
+            assert!(receives.contains(&POWER), "{config}: {receives:?} lacks {POWER}");
+            assert_eq!(parsed["symlinks"][REBOOT_LINK].as_str(), Some(TOYBOX_PATH), "{config}");
+            assert!(parsed["programs"].get(TOYBOX).is_some(), "{config} builds no {TOYBOX}");
         }
     }
 
@@ -176,7 +181,7 @@ mod tests {
     /// list, and a right or a symlink it did not put there is not its to drop.
     #[test]
     fn nothing_the_config_declared_is_dropped() {
-        let out = derived("tests/testcases", &[]);
+        let out = derived("tests/images/testcases.toml", &[]);
         let parsed: Value = toml::from_str(&out).unwrap();
         let syscap: Vec<&str> = parsed["programs"][RUNNER]["syscap"]
             .as_array()
@@ -184,7 +189,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // `tests/testcases` declares all seven, and the derivation takes none
+        // `tests/images/testcases.toml` declares all seven, and the derivation takes none
         // away and spells none twice; nor the connector it needs, declared too.
         for right in ["device", "dup", "logread", "power", "roster", "counters", "trace"] {
             assert_eq!(

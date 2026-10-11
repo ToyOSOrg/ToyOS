@@ -5,7 +5,7 @@
 //! control loop running without a reason.
 //!
 //! Another process's threads is the process roster, which costs
-//! `Rights::ROSTER` on a `SysCap` — `tests/testcases` names `roster` on the
+//! `Rights::ROSTER` on a `SysCap` — `tests/images/testcases.toml` names `roster` on the
 //! test-runner row and every binary it spawns holds the duplicate. A capability
 //! this binary does not hold is a config fact and says so, rather than reading
 //! back zero soundserver threads and calling that a suspended daemon.

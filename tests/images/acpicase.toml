@@ -1,6 +1,6 @@
 # The ACPI server's death, judged on the T14 by `acpi_server_death`: the server
 # is built into the image and started by nothing but the one job, which holds
-# the claim it hands it. A boot that ends itself, as `tests/jobcase` does.
+# the claim it hands it. A boot that ends itself, as `tests/images/jobcase.toml` does.
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 

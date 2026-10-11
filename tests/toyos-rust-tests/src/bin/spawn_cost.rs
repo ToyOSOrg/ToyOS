@@ -2,7 +2,7 @@
 //! for, its line to nowhere. It returns as soon as it has started, so what the
 //! clock reads is the kernel's spawn, the program's own start, its relocation
 //! among it, and its exit. `toybox` because it is on the ROOT of the boot this
-//! runs on, `tests/testcases`, and carries the most `RELATIVE` entries of what
+//! runs on, `tests/images/testcases.toml`, and carries the most `RELATIVE` entries of what
 //! that ROOT does.
 //!
 //! **No threshold, and the host reads the numbers instead**, as
