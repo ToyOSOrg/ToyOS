@@ -7,7 +7,7 @@
 //! nothing in a store names the checkout that made it, in a record or as the
 //! target of a link. A runner's store is in its checkout (`src/release.rs`).
 //! Beside the keyed kinds, `metal/` holds each metal bench's record
-//! (`crate::metaltimings`), which no sweep walks: it is no product and has no key.
+//! (`toyos-metal`'s `timings`), which no sweep walks: it is no product and has no key.
 //!
 //! **A key hashes what its product's build reads**: its sources, the
 //! configuration its build is given, the tools that run that build and the keys

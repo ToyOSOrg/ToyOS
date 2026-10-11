@@ -125,6 +125,7 @@ members = [
     "tests/guest/metalprobe",
     "tests/guest/proctest",
     "tests/guest/test-runner",
+    "tests/metal",
     "toyos-ssh",
 ]
 default-members = ["."]
@@ -159,8 +160,8 @@ description = "The build system: toolchain, kernel, bootloader, userland and ima
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-# `src/bin/toyos-metal.rs` and `src/bin/toyos-flash.rs` are binaries of this package too, so a bare
-# `cargo run` would otherwise be ambiguous — and that command is the dev loop.
+# `src/bin/toyos-flash.rs` is a binary of this package too, so a bare `cargo run`
+# would otherwise be ambiguous — and that command is the dev loop.
 default-run = "toyos-build"
 
 [dependencies]
@@ -187,9 +188,6 @@ toyos-keymap = { path = "sdk/keymap" }
 toyos-logstream = { path = "lib/logstream" }
 toyos-manifest = { path = "lib/manifest" }
 toyos-osrelease = { path = "sdk/osrelease" }
-# The shutdown's stop record: the kernel renders it and this crate reads it back
-# off a stick, so one declaration is what both sides spell it with.
-toyos-quiesce = { path = "lib/quiesce" }
 # The swap port's name and the one program the image may give it to, so the
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
@@ -257,6 +255,12 @@ toyos-desktop = { path = "system/compositor/desktop" }
 # against, and the authority and certificates it presents, made per run.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = "0.14"
+# The metal loop, the suite's command line, and what the metal profile
+# derives, times and reads off a boot.
+toyos-metal = { path = "tests/metal" }
+# The shutdown's stop record: the kernel renders it and the harness reads it
+# back off a log, so one declaration is what both sides spell it with.
+toyos-quiesce = { path = "lib/quiesce" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

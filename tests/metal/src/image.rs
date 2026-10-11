@@ -125,7 +125,7 @@ pub fn derive(
     }
 
     let mut out = String::from(
-        "# Derived by `toyos_build::metalimage::derive` — not committed, not edited.\n\
+        "# Derived by `toyos_metal::image::derive` — not committed, not edited.\n\
          # A metal boot ends itself: the job list below, then `reboot`.\n",
     );
     out.push_str(&toml::to_string(&root).map_err(|e| Underived::Toml(e.to_string()))?);
@@ -148,7 +148,7 @@ mod tests {
     ];
 
     fn derived(config: &str, jobs: &[&str]) -> String {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(config);
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(config);
         let text = std::fs::read_to_string(&at).expect("a committed boot config");
         derive(&text, 133_100, jobs, &[]).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
     }

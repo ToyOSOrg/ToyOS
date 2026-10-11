@@ -1,12 +1,12 @@
 //! The metal loop's entry point. Everything it does is
-//! [`toyos_build::metal`]; this decides only the exit status, and it decides
+//! this crate's; this decides only the exit status, and it decides
 //! two: a boot that failed exits 1 and a loop that could not run exits 2, so
 //! "the machine is broken" is never read as "the driver is".
 
 #[macro_use(eprintln)]
 extern crate toyos_build;
 
-use toyos_build::metal::{run, Args, REFUSAL_HEAD};
+use toyos_metal::{run, Args, REFUSAL_HEAD};
 
 fn main() {
     let words: Vec<String> = std::env::args().skip(1).collect();

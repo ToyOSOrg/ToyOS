@@ -388,7 +388,7 @@ pub enum OnePartitionError {
 /// The one partition a [`toyos_gpt::locate_type`] scan found, out of its
 /// [`toyos_gpt::TypeScan`] and the `out[0]` slot it filled — the match shared
 /// by every caller that owes exactly one partition of a type and nothing else.
-pub(crate) fn one_partition_of(
+pub fn one_partition_of(
     scan: toyos_gpt::TypeScan,
     first: Option<toyos_gpt::Entry>,
 ) -> Result<toyos_gpt::Partition, OnePartitionError> {
@@ -435,7 +435,7 @@ fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usi
 const SECTOR: usize = 4096;
 
 /// The logical block a GPT on this image is written and read in.
-pub(crate) const LBA: u32 = 512;
+pub const LBA: u32 = 512;
 
 fn round_up_sectors(n: usize) -> usize {
     n.div_ceil(SECTOR) * SECTOR
@@ -742,7 +742,7 @@ fn designation(blocks: u64) -> [u8; SECTOR] {
 }
 
 /// A disk file as logical blocks, for a reader that may not hold the image.
-pub(crate) struct FileSectors<'a>(pub(crate) &'a mut std::fs::File);
+pub struct FileSectors<'a>(pub &'a mut std::fs::File);
 
 impl toyos_gpt::Sectors for FileSectors<'_> {
     fn lba_bytes(&self) -> u32 {

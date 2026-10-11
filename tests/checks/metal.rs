@@ -3,11 +3,11 @@
 
 use super::*;
 use metal::{Metal, Readback};
-use toyos_build::metal::{
+use toyos_metal::{
     verdict_file, BootFile, Phases, Refusal, READBACK_BOOT, READBACK_KERNEL, READBACK_LOADER,
     READBACK_VERDICT,
 };
-use toyos_build::metaltimings::{Machine, Record, Stick};
+use toyos_metal::timings::{Machine, Record, Stick};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
 const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
@@ -55,14 +55,14 @@ pub fn readbacks_of_a_machine_with_no_record_are_red_and_record_nothing() {
 pub fn the_bench_reaches_the_loop_as_its_host() {
     let suite: Vec<String> =
         ["--metal", "--metal-host", "dev@box"].iter().map(ToString::to_string).collect();
-    let host = toyos_build::testargs::parse(&suite).expect("a suite line").metal_host;
+    let host = toyos_metal::testargs::parse(&suite).expect("a suite line").metal_host;
     let (image, home) = (Path::new("/i.img"), Path::new("/h"));
     let words = metal::invocation(image, home, host);
     let after = words.iter().position(|w| w == "--").expect("cargo's own words end") + 1;
     let tail = &words[after..];
     let at = tail.iter().position(|w| w == "--host").expect("--host forwarded");
     assert_eq!(tail[at + 1], "dev@box", "{words:?}");
-    toyos_build::metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
+    toyos_metal::Args::parse(tail).expect("toyos-metal takes the words it is handed");
     let t14 = metal::invocation(image, home, None);
     assert!(!t14.iter().any(|w| w == "--host"), "{t14:?}");
 }
@@ -516,7 +516,7 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
         judge: |_| Ok(()),
     };
     static WEDGES: Metal = Metal {
-        arms: &[metal::once("wedge", "tests/images/jobcase.toml", &[toyos_build::metal::WEDGE_ARM], &[])],
+        arms: &[metal::once("wedge", "tests/images/jobcase.toml", &[toyos_metal::WEDGE_ARM], &[])],
         judge: |_| Ok(()),
     };
     let members = |boot: &str, members: &[(&str, u64)]| metal::SharedBoot {

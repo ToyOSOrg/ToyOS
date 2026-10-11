@@ -18,7 +18,7 @@ use common::qemu::{
 };
 use common::{audio, claims, compile, devices, faults, isa, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
-use toyos_build::testargs::{self, SUITE};
+use toyos_metal::testargs::{self, SUITE};
 
 /// The width with no `--jobs`.
 const DEFAULT_WIDTH: usize = 12;
@@ -840,7 +840,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: &[metal::once(
                 "foreignrecord",
                 "tests/images/jobcase.toml",
-                &[toyos_build::metal::FOREIGN_RECORD_ARM],
+                &[toyos_metal::FOREIGN_RECORD_ARM],
                 &[],
             )],
             judge: |b| {
@@ -6879,7 +6879,7 @@ fn main() {
     // First, before any lock and before anything is compiled: a flag this suite
     // does not have would otherwise cost nothing and hand its value to the
     // filter below.
-    let parsed = match toyos_build::testargs::parse(&args) {
+    let parsed = match toyos_metal::testargs::parse(&args) {
         Ok(parsed) => parsed,
         Err(refusal) => {
             eprintln!("[toyos] {refusal}");

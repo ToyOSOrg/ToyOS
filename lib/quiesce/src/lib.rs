@@ -12,7 +12,7 @@
 //! process it would have to keep running.
 //!
 //! [`Record`] is written by the kernel and read back off a stick by
-//! `src/metal.rs` and by the harness, so its wire form is rendered and parsed
+//! `tests/metal` and by the harness, so its wire form is rendered and parsed
 //! here and nowhere else.
 
 #![no_std]

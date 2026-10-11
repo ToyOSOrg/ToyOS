@@ -2,7 +2,7 @@
 //! the black box.
 //!
 //! **Text in, verdicts out.** Everything here reads the two strings
-//! `src/metal.rs` brings back off the stick — the loader's file and `logkeeper`'s —
+//! the loop (`lib.rs`) brings back off the stick — the loader's file and `logkeeper`'s —
 //! and nothing here touches a machine.
 
 #![forbid(unsafe_code)]
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn the_kernel_writes_the_quiesce_lines_the_host_reads() {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("kernel/src/drivers/xhci/stop.rs");
+            .join("../../kernel/src/drivers/xhci/stop.rs");
         let source = std::fs::read_to_string(&at).expect("the reset path");
         let written = code_of(&source);
         for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_ENDPOINT] {

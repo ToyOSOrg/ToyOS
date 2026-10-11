@@ -6,7 +6,7 @@
 //! harness's whole vocabulary, and [`SUITE`] is the only way to read a word
 //! off its argv.
 
-use crate::flags::declare_flags;
+use toyos_build::flags::declare_flags;
 use std::path::PathBuf;
 
 declare_flags!(pub SUITE = {
@@ -98,7 +98,7 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     }
     let metal_host = SUITE.value(args, &METAL_HOST);
     if let Some(host) = metal_host {
-        crate::metal::host_of(host).map_err(|refusal| format!("--metal-host: {refusal}"))?;
+        crate::host_of(host).map_err(|refusal| format!("--metal-host: {refusal}"))?;
     }
     if has(&METAL) {
         for flag in [&JOBS, &JOBS_SHORT] {
@@ -168,7 +168,7 @@ pub enum MetalMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flags::Value;
+    use toyos_build::flags::Value;
 
     fn owned(args: &[&str]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()

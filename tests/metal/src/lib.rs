@@ -1,5 +1,5 @@
 //! `toyos-metal` — the loop that flashes ToyOS to a metal bench's stick, boots
-//! it once, and answers with [`crate::bootlog`]'s verdict on what that boot
+//! it once, and answers with [`toyos_build::bootlog`]'s verdict on what that boot
 //! wrote to the log partition.
 //!
 //! It runs on the development host and reaches the machine over `ssh`: the
@@ -17,16 +17,28 @@
 //! NVMe disk, `/dev/sd<letter>` or `/dev/nvme<n>n<m>`, and nothing else: the
 //! T14 is a playground whose internal NVMe ToyOS may be installed on and a
 //! broken driver may wipe, so it is nameable like the stick.
+//!
+//! Beside the loop: [`testargs`], the suite's command line, which carries the
+//! metal profile's flags; [`image`], the config a metal boot derives;
+//! [`timings`], each bench's record; and [`devices`], what a boot's reset says
+//! about itself.
 
 use std::fmt;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::bootlog;
-use crate::flags::{declare_flags, Flag};
-use crate::image::LBA;
-use crate::metaltimings::{self, Machine, Record, Stick};
+use toyos_build::bootlog;
+use toyos_build::disk::{whole_disk, Node, Unfit};
+use toyos_build::flags::{declare_flags, Flag};
+use toyos_build::image::LBA;
+
+use crate::timings::{Machine, Record, Stick};
+
+pub mod devices;
+pub mod image;
+pub mod testargs;
+pub mod timings;
 
 const CONNECT_SECS: u64 = 10;
 
@@ -103,8 +115,8 @@ pub fn said_refusal(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().collect();
     let at = lines
         .iter()
-        .rposition(|line| crate::printer::unstamped(line).starts_with(REFUSAL_HEAD))?;
-    let mut said = vec![&crate::printer::unstamped(lines[at])[REFUSAL_HEAD.len()..]];
+        .rposition(|line| toyos_build::printer::unstamped(line).starts_with(REFUSAL_HEAD))?;
+    let mut said = vec![&toyos_build::printer::unstamped(lines[at])[REFUSAL_HEAD.len()..]];
     said.extend(&lines[at + 1..]);
     Some(said.join("\n").trim_end().to_string())
 }
@@ -112,8 +124,8 @@ pub fn said_refusal(stderr: &str) -> Option<String> {
 /// Every way this loop refuses, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// A device node that is not `/dev/sd<letter>`.
-    Node(String),
+    /// The node is no whole disk's, or the image no whole disk's image.
+    Disk(Unfit),
     /// A word that cannot be written into a sudoers rule unambiguously.
     Word(String),
     /// No `HOME`, so the default key path would be rooted at `/`.
@@ -121,10 +133,6 @@ pub enum Refusal {
     /// The disk did not answer with the identity this loop was given.
     Identity { field: &'static str, want: String, got: String },
     File { path: String, why: String },
-    /// The image's length is not a whole number of sectors.
-    Sectors { bytes: u64 },
-    /// The final sector does not begin `EFI PART`: the backup table is gone.
-    BackupHeader { at: u64, saw: String },
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
@@ -210,11 +218,7 @@ impl Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Node(got) => write!(
-                f,
-                "{got:?} is not /dev/sd<letter> or /dev/nvme<n>n<m>; this loop writes a whole disk \
-                 and names no partition and no other device"
-            ),
+            Self::Disk(unfit) => write!(f, "{unfit}"),
             Self::Word(got) => {
                 write!(f, "{got:?} cannot be written into a sudoers command line unambiguously")
             }
@@ -223,15 +227,6 @@ impl fmt::Display for Refusal {
                 write!(f, "the disk's {field} reads {got:?} where this loop was given {want:?}")
             }
             Self::File { path, why } => write!(f, "{path}: {why}"),
-            Self::Sectors { bytes } => write!(
-                f,
-                "the image is {bytes} bytes, which is not a whole number of {LBA}-byte sectors"
-            ),
-            Self::BackupHeader { at, saw } => write!(
-                f,
-                "the image's final sector at byte {at} begins {saw:?} and not \"EFI PART\": a \
-                 healthy primary table hides a missing backup"
-            ),
             Self::Table(why) => write!(f, "the image carries no readable partition table: {why}"),
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
@@ -260,7 +255,7 @@ impl fmt::Display for Refusal {
                 f,
                 "the image is armed with {name:?}, and nothing in this tree has ruled on whether \
                  the machine survives it. Every parameter a flashed image carries needs a row \
-                 in `toyos_build::metal::FLASHABLE`"
+                 in `toyos_metal::FLASHABLE`"
             ),
             Self::PartitionIndex { what, want, got } => write!(
                 f,
@@ -331,72 +326,13 @@ impl fmt::Display for Refusal {
             Self::Unrecorded { path } => write!(
                 f,
                 "this machine has no record at {path}, so nothing names the stick this loop may \
-                 write. Record it once, with the boot stick in: `cargo run --bin toyos-metal -- \
+                 write. Record it once, with the boot stick in: `cargo run -p toyos-metal -- \
                  --install-sudoers <password file> --host <user>@<machine>` writes the record from \
                  what the machine and the stick answer, and installs the rule"
             ),
             Self::Record(why) => write!(f, "the machine's record does not read: {why}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
-    }
-}
-
-/// A whole disk's node: a SCSI disk, `/dev/sd` and one lower-case letter, or
-/// an NVMe namespace, `/dev/nvme<controller>n<namespace>` with one digit each.
-/// A partition is spelled from one and never passed as one, so no job can be
-/// aimed at a partition of a disk it was not given.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Node {
-    Scsi(u8),
-    Nvme { controller: u8, namespace: u8 },
-}
-
-impl Node {
-    pub(crate) fn parse(path: &str) -> Result<Self, Refusal> {
-        let scsi = path.strip_prefix("/dev/sd").and_then(|rest| {
-            let [byte] = rest.as_bytes() else { return None };
-            byte.is_ascii_lowercase().then_some(Node::Scsi(*byte))
-        });
-        let nvme = path.strip_prefix("/dev/nvme").and_then(|rest| {
-            let [controller, b'n', namespace] = rest.as_bytes() else { return None };
-            (controller.is_ascii_digit() && (b'1'..=b'9').contains(namespace))
-                .then_some(Node::Nvme { controller: *controller, namespace: *namespace })
-        });
-        scsi.or(nvme).ok_or_else(|| Refusal::Node(path.to_string()))
-    }
-
-    /// The disk's own name, as `/dev` and `/sys/class/block` spell it.
-    pub(crate) fn name(&self) -> String {
-        match *self {
-            Node::Scsi(letter) => format!("sd{}", letter as char),
-            Node::Nvme { controller, namespace } => format!("nvme{}n{}", controller as char, namespace as char),
-        }
-    }
-
-    /// A partition's name: `sda3`, and `nvme0n1p3` where the disk's own name
-    /// ends in a digit.
-    fn part_name(&self, index: u32) -> String {
-        match self {
-            Node::Scsi(_) => format!("{}{index}", self.name()),
-            Node::Nvme { .. } => format!("{}p{index}", self.name()),
-        }
-    }
-
-    fn whole(&self) -> String {
-        format!("/dev/{}", self.name())
-    }
-
-    fn partition(&self, index: u32) -> String {
-        format!("/dev/{}", self.part_name(index))
-    }
-
-    /// Where `/sys` answers for the disk, and for one of its partitions.
-    fn sysfs(&self) -> String {
-        format!("/sys/class/block/{}", self.name())
-    }
-
-    fn part_sysfs(&self, index: u32) -> String {
-        format!("{}/{}", self.sysfs(), self.part_name(index))
     }
 }
 
@@ -936,14 +872,14 @@ pub fn flashable(name: &str) -> bool {
     // address, which every image the harness builds has, and the boot
     // deadline's bound. Neither arms an instrument, and the second is what ends
     // a boot this loop would otherwise wait 360 s for and then need a hand on.
-    crate::build::is_valued_param(name) || FLASHABLE.contains(&name)
+    toyos_build::build::is_valued_param(name) || FLASHABLE.contains(&name)
 }
 
 /// The pre-flash gate: what the image is armed with, judged before it is
 /// written. Read off the image's own ESP, so it answers about the artifact
 /// rather than about whoever built it.
 fn arms_are_admissible(path: &Path) -> Result<(Vec<String>, u64), Refusal> {
-    let armed = crate::image::params_of(path)
+    let armed = toyos_build::image::params_of(path)
         .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
     let deadline_ms = judge_arms(&armed)?;
     Ok((armed, deadline_ms))
@@ -972,32 +908,10 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     }
 }
 
-/// A whole disk's image, opened: whole sectors, `EFI PART` in the *final*
-/// one, and its length in bytes.
-pub fn whole_disk(path: &Path) -> Result<(std::fs::File, u64), Refusal> {
-    let sector = u64::from(LBA);
-    let unreadable = |why: String| Refusal::File { path: path.display().to_string(), why };
-    let mut file = std::fs::File::open(path).map_err(|e| unreadable(e.to_string()))?;
-    let bytes = file.metadata().map_err(|e| unreadable(e.to_string()))?.len();
-    if bytes == 0 || bytes % sector != 0 {
-        return Err(Refusal::Sectors { bytes });
-    }
-
-    let at = bytes - sector;
-    let mut last = vec![0u8; sector as usize];
-    file.seek(SeekFrom::Start(at)).map_err(|e| unreadable(e.to_string()))?;
-    file.read_exact(&mut last).map_err(|e| unreadable(e.to_string()))?;
-    if &last[..8] != b"EFI PART" {
-        let saw = String::from_utf8_lossy(&last[..8]).to_string();
-        return Err(Refusal::BackupHeader { at, saw });
-    }
-    Ok((file, bytes))
-}
-
 /// [`whole_disk`], and exactly one partition of each of the three types at the
 /// numbers the installed rule names.
 fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
-    let (mut file, bytes) = whole_disk(path)?;
+    let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
     let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
     let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
     one_partition(&mut file, toyos_gpt::Guid::TOYOS_ROOT, "TOYOS-ROOT")?;
@@ -1019,13 +933,13 @@ fn one_partition(
     what: &'static str,
 ) -> Result<Part, Refusal> {
     let mut out = [None; 2];
-    let scan = toyos_gpt::locate_type(&mut crate::image::FileSectors(file), guid, &mut out)
+    let scan = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(file), guid, &mut out)
         .map_err(|e| Refusal::Table(format!("{e:?}")))?;
-    let part = crate::image::one_partition_of(scan, out[0]).map_err(|e| match e {
-        crate::image::OnePartitionError::Unplaced(unplaced) => {
+    let part = toyos_build::image::one_partition_of(scan, out[0]).map_err(|e| match e {
+        toyos_build::image::OnePartitionError::Unplaced(unplaced) => {
             Refusal::Table(format!("the {what} entry is no partition: {unplaced:?}"))
         }
-        crate::image::OnePartitionError::Matched(matched) => Refusal::Partitions { what, matched },
+        toyos_build::image::OnePartitionError::Matched(matched) => Refusal::Partitions { what, matched },
     })?;
     Ok(Part {
         index: part.index() + 1,
@@ -1555,7 +1469,7 @@ impl Args {
             out.target.key = PathBuf::from(key);
         }
         if let Some(node) = value(&DEVICE) {
-            out.target.node = Node::parse(node)?;
+            out.target.node = Node::parse(node).map_err(Refusal::Disk)?;
         }
         // **`--install-sudoers` is an action, not a mode.** It installs the
         // rule and exits; a command line that also describes a boot is asking
@@ -1601,7 +1515,7 @@ fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
     let disk = Identity::parse(&driver.ssh("reading the disk", &target.identity())?)?;
-    println!("{}", record_machine(&metaltimings::dir(), &machine, &disk)?.said(&target.node));
+    println!("{}", record_machine(&timings::dir(), &machine, &disk)?.said(&target.node));
     // Staged in the account's own home rather than in a world-writable /tmp,
     // where another user could win the race between `visudo -c` and `install`.
     let staged = shell_word(&driver.home.staged());
@@ -1722,14 +1636,14 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         .map_err(Refusal::Machine)?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
     let identity = Identity::parse(&driver.ssh("reading the disk", &args.target.identity())?)?;
-    recorded_stick(&metaltimings::dir(), &machine, &identity)?;
+    recorded_stick(&timings::dir(), &machine, &identity)?;
     println!(
         "disk {}: {} sectors, {} {}, removable — the stick {} names",
         args.target.node.whole(),
         identity.sectors,
         identity.vendor,
         identity.model,
-        metaltimings::dir().join(machine.file()).display()
+        timings::dir().join(machine.file()).display()
     );
     let preamble = began.elapsed().as_secs_f64();
 
@@ -2366,7 +2280,7 @@ mod tests {
     #[test]
     fn the_bound_the_gate_demands_is_a_bound_the_gate_clears() {
         let bound = alloc_deadline();
-        assert!(crate::build::is_valued_param(&bound), "{bound}");
+        assert!(toyos_build::build::is_valued_param(&bound), "{bound}");
         assert!(flashable(&bound));
         // And it is exactly what `tests/common/metal.rs` arms every image with:
         // the same two constants, so a change to either moves both.
@@ -2478,12 +2392,12 @@ mod tests {
     /// was deleted. Read off the kernel's own two declarations.
     #[test]
     fn every_ruling_names_a_parameter_the_kernel_declares() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut declared = crate::build::declared_actuators(root);
-        declared.extend(crate::build::declared_params(root));
+        let root = &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut declared = toyos_build::build::declared_actuators(root);
+        declared.extend(toyos_build::build::declared_params(root));
         for name in FLASHABLE {
             assert!(
-                declared.iter().any(|d| crate::build::arms(d, name)),
+                declared.iter().any(|d| toyos_build::build::arms(d, name)),
                 "`FLASHABLE` rules on {name:?}, which the kernel declares as neither an \
                  actuator nor a boot parameter: {declared:?}"
             );
@@ -2637,29 +2551,6 @@ mod tests {
             Ok(1151)
         );
         assert_eq!(written(), Ok(()));
-    }
-
-    #[test]
-    fn a_node_is_a_whole_scsi_or_nvme_disk_and_nothing_else() {
-        for name in [
-            "/dev/nvme0n1p3",
-            "/dev/nvme0n0",
-            "/dev/nvme10n1",
-            "/dev/nvme0",
-            "/dev/sda1",
-            "/dev/sdaa",
-            "/dev/SDA",
-            "sda",
-        ] {
-            assert_eq!(Node::parse(name), Err(Refusal::Node(name.to_string())), "{name}");
-        }
-        assert_eq!(Node::parse("/dev/sda").unwrap().whole(), "/dev/sda");
-        assert_eq!(Node::parse("/dev/sdb").unwrap().partition(3), "/dev/sdb3");
-        assert_eq!(Node::parse("/dev/sda").unwrap().part_sysfs(1), "/sys/class/block/sda/sda1");
-        let nvme = Node::parse("/dev/nvme0n1").unwrap();
-        assert_eq!(nvme.whole(), "/dev/nvme0n1");
-        assert_eq!(nvme.partition(3), "/dev/nvme0n1p3");
-        assert_eq!(nvme.part_sysfs(1), "/sys/class/block/nvme0n1/nvme0n1p1");
     }
 
     /// **The stick a machine's loop writes is the one its record names.**
@@ -3061,7 +2952,7 @@ mod tests {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: 420 }.about_the_boot());
-        assert!(!Refusal::Node("/dev/nvme0n1p1".to_string()).about_the_boot());
+        assert!(!Refusal::Disk(Unfit::Node("/dev/nvme0n1p1".to_string())).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
@@ -3122,7 +3013,7 @@ mod tests {
         let nvme = ["--device".to_string(), "/dev/nvme0n1".to_string()];
         assert_eq!(Args::parse(&nvme).unwrap().target.node.whole(), "/dev/nvme0n1");
         let part = ["--device".to_string(), "/dev/nvme0n1p2".to_string()];
-        assert_eq!(Args::parse(&part), Err(Refusal::Node("/dev/nvme0n1p2".to_string())));
+        assert_eq!(Args::parse(&part), Err(Refusal::Disk(Unfit::Node("/dev/nvme0n1p2".to_string()))));
         assert!(matches!(Args::parse(&["--image".to_string()]), Err(Refusal::Usage(_))));
         assert!(matches!(Args::parse(&["--flash".to_string()]), Err(Refusal::Usage(_))));
     }
@@ -3132,17 +3023,17 @@ mod tests {
     fn disk(parts: &[(&str, toyos_gpt::Guid)]) -> Vec<u8> {
         const TOTAL: u64 = 16 * 1024 * 1024;
         const ALIGN: u64 = 2048;
-        let entries: Vec<crate::gptwrite::Entry<'_>> = (1..)
+        let entries: Vec<toyos_build::gptwrite::Entry<'_>> = (1..)
             .zip(parts)
-            .map(|(i, (name, kind))| crate::gptwrite::Entry {
+            .map(|(i, (name, kind))| toyos_build::gptwrite::Entry {
                 kind: *kind,
-                unique: crate::gptwrite::random_guid(),
+                unique: toyos_build::gptwrite::random_guid(),
                 first_lba: i * ALIGN,
                 last_lba: i * ALIGN + 511,
                 name,
             })
             .collect();
-        let table = crate::gptwrite::table(TOTAL / u64::from(LBA), crate::gptwrite::random_guid(), &entries);
+        let table = toyos_build::gptwrite::table(TOTAL / u64::from(LBA), toyos_build::gptwrite::random_guid(), &entries);
         let mut out = vec![0u8; TOTAL as usize];
         out[..table.primary.len()].copy_from_slice(&table.primary);
         let back = out.len() - table.backup.len();
@@ -3163,12 +3054,12 @@ mod tests {
 
         assert_eq!(
             admit(&write("ragged.img", &vec![0u8; 1000]), &t),
-            Err(Refusal::Sectors { bytes: 1000 })
+            Err(Refusal::Disk(Unfit::Sectors { bytes: 1000 }))
         );
-        assert_eq!(admit(&write("empty.img", &[]), &t), Err(Refusal::Sectors { bytes: 0 }));
+        assert_eq!(admit(&write("empty.img", &[]), &t), Err(Refusal::Disk(Unfit::Sectors { bytes: 0 })));
         assert_eq!(
             admit(&write("headless.img", &vec![0u8; 1024]), &t),
-            Err(Refusal::BackupHeader { at: 512, saw: "\0\0\0\0\0\0\0\0".to_string() })
+            Err(Refusal::Disk(Unfit::BackupHeader { at: 512, saw: "\0\0\0\0\0\0\0\0".to_string() }))
         );
         // The signature in the *primary* header alone: the false pass a healthy
         // front hides, which is why the check reads the final sector.
@@ -3176,7 +3067,7 @@ mod tests {
         front[512..520].copy_from_slice(b"EFI PART");
         assert!(matches!(
             admit(&write("front-only.img", &front), &t),
-            Err(Refusal::BackupHeader { .. })
+            Err(Refusal::Disk(Unfit::BackupHeader { .. }))
         ));
 
         let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("root", root)]);

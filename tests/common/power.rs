@@ -462,14 +462,14 @@ pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
     // **The account reaching the page is itself under test**: it is made a line
     // at a time from the reset path, under the reserve
     // `toyos_blackbox::ACCOUNT_BYTES` keeps for it.
-    after.must_say(toyos_build::metaldevices::QUIESCE_HEAD)?;
+    after.must_say(toyos_metal::devices::QUIESCE_HEAD)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     // **Reported and not judged.** Which state the reset found the controller
     // in is the open question this arm gathers answers to; a predicate over it
     // would be the suite deciding it. A reset that found no command open writes
     // no such line, and that is a fact about the boot rather than a failure of
     // it.
-    let endpoint = toyos_build::metaldevices::QUIESCE_ENDPOINT;
+    let endpoint = toyos_metal::devices::QUIESCE_ENDPOINT;
     match after.text().lines().find(|line| line.contains(endpoint)) {
         Some(said) => eprintln!("  [power] {}", said.trim()),
         None => eprintln!("  [power] the reset found no command open on the device"),
@@ -649,8 +649,8 @@ pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String
     let mut bad = Vec::new();
     for back in arms {
         let text = back.loader();
-        let head = toyos_build::metaldevices::QUIESCE_HEAD;
-        let Some(account) = toyos_build::metaldevices::quiesced(text.text()) else {
+        let head = toyos_metal::devices::QUIESCE_HEAD;
+        let Some(account) = toyos_metal::devices::quiesced(text.text()) else {
             bad.push(format!(
                 "{}: loader.log carries no readable {head:?} summary, so nothing stopped this \
                  machine's USB before it reset",

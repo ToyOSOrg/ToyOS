@@ -1,7 +1,7 @@
 //! What a boot's own log says about that boot, and nothing else: the two
 //! records that make a boot a pass, and the grammar for reading them.
 //!
-//! Neither the T14 driver's nor the QEMU harness's — `src/metal.rs` reads a log
+//! Neither the T14 driver's nor the QEMU harness's — `tests/metal` reads a log
 //! off a flashed stick and `tests/common/power.rs` reads one off a guest's log
 //! partition, and they must not be able to reach different answers about one
 //! log. Text in, a verdict out; its one gate reads the loader's source.

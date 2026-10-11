@@ -22,7 +22,7 @@ const HEADER_BYTES: usize = 92;
 const NAME_UNITS: usize = 36;
 
 /// One partition: its type, its own GUID, its first and last block, and its name.
-pub(crate) struct Entry<'a> {
+pub struct Entry<'a> {
     pub kind: Guid,
     pub unique: Guid,
     pub first_lba: u64,
@@ -32,7 +32,7 @@ pub(crate) struct Entry<'a> {
 
 /// A table's two halves: `primary` goes at byte 0 of the disk and `backup`
 /// ends at its last byte.
-pub(crate) struct Table {
+pub struct Table {
     pub primary: Vec<u8>,
     pub backup: Vec<u8>,
 }
@@ -44,7 +44,7 @@ fn last_usable(lbas: u64) -> u64 {
 
 /// The table of a disk of `lbas` blocks named `disk`, carrying `entries` in
 /// their order.
-pub(crate) fn table(lbas: u64, disk: Guid, entries: &[Entry<'_>]) -> Table {
+pub fn table(lbas: u64, disk: Guid, entries: &[Entry<'_>]) -> Table {
     assert!(entries.len() as u64 <= ENTRIES, "{} partitions in a table of {ENTRIES}", entries.len());
     let last_usable = last_usable(lbas);
     let mut array = vec![0u8; (ENTRIES * ENTRY_BYTES) as usize];
@@ -108,7 +108,7 @@ fn protective_mbr(lbas: u64) -> Vec<u8> {
 /// A version 4 GUID from the operating system's random source, in the
 /// on-disk order: the version is the high nibble of byte 7, the third field
 /// being little-endian, and the variant the top two bits of byte 8.
-pub(crate) fn random_guid() -> Guid {
+pub fn random_guid() -> Guid {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("the operating system's random source");
     bytes[7] = (bytes[7] & 0x0F) | 0x40;

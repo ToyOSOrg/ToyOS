@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Where every machine's record lives, and the one place either reader looks.
 pub fn dir() -> PathBuf {
-    crate::keystore::host().join("metal")
+    toyos_build::keystore::host().join("metal")
 }
 
 /// Past this a reading is a red: twice what the machine recorded, and a record

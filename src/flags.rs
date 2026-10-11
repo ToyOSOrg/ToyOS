@@ -1,6 +1,6 @@
 //! The vocabulary of `cargo run --`, and the one walk every command line in
-//! this crate is read with; `src/testargs.rs` declares the harness's argv
-//! against the same [`Flag`].
+//! this crate is read with; `toyos-metal`'s `testargs` declares the harness's
+//! argv against the same [`Flag`].
 //!
 //! [`check`] runs before `main` builds, locks or launches anything, and an
 //! argument that is neither a declared flag nor a declared flag's value is
@@ -11,12 +11,12 @@
 
 pub struct Flag {
     pub name: &'static str,
-    pub(crate) value: Value,
+    pub value: Value,
 }
 
 /// What follows a flag on the command line.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Value {
+pub enum Value {
     /// Nothing; the next word is the next argument.
     None,
     /// The next word, whatever it looks like, and the flag is written once. A
@@ -31,11 +31,12 @@ pub(crate) enum Value {
 }
 
 /// One command line's whole vocabulary, and the only way to read one.
-pub struct Vocabulary(pub(crate) &'static [&'static Flag]);
+pub struct Vocabulary(pub &'static [&'static Flag]);
 
 /// The declaration: one line per flag, expanding to the constant every reader
 /// names it by and to the table [`check`] holds a command line against, so the
 /// two cannot disagree.
+#[macro_export]
 macro_rules! declare_flags {
     ($tvis:vis $table:ident = { $($(#[$about:meta])* $vis:vis $konst:ident = $name:literal, $value:ident;)* }) => {
         $($(#[$about])* $vis const $konst: $crate::flags::Flag = $crate::flags::Flag {
@@ -46,7 +47,7 @@ macro_rules! declare_flags {
             $crate::flags::Vocabulary(&[$(&$konst),*]);
     };
 }
-pub(crate) use declare_flags;
+pub use crate::declare_flags;
 
 declare_flags!(pub CARGO_RUN = {
     pub HELP = "--help", None;
@@ -127,7 +128,7 @@ fn shape(value: Value) -> &'static str {
 
 /// What a command line wrote after a flag.
 #[derive(Clone, Copy)]
-pub(crate) enum Given<'a> {
+pub enum Given<'a> {
     Nothing,
     /// The next word: `--smp 4`.
     Next(&'a str),
@@ -146,20 +147,20 @@ impl<'a> Given<'a> {
     }
 }
 
-pub(crate) struct Seen<'a> {
-    pub(crate) flag: &'static Flag,
+pub struct Seen<'a> {
+    pub flag: &'static Flag,
     /// The word as it was typed, which is what a refusal names.
-    pub(crate) word: &'a str,
-    pub(crate) given: Given<'a>,
+    pub word: &'a str,
+    pub given: Given<'a>,
 }
 
-pub(crate) struct Walk<'a> {
-    pub(crate) seen: Vec<Seen<'a>>,
+pub struct Walk<'a> {
+    pub seen: Vec<Seen<'a>>,
     /// Words that are nobody's value.
-    pub(crate) positionals: Vec<&'a str>,
+    pub positionals: Vec<&'a str>,
     /// The first word the declaration does not account for; the walk stops
     /// there, because what follows it belongs to a flag nobody declared.
-    pub(crate) unknown: Option<&'a str>,
+    pub unknown: Option<&'a str>,
 }
 
 impl Walk<'_> {
@@ -171,7 +172,7 @@ impl Walk<'_> {
     /// twice has every use but one dropped; and an inline value is dropped by
     /// exactly two readers, `Value::None` having none and `rest` taking only the
     /// words after the flag, [`Given::value`] handing it to all the rest.
-    pub(crate) fn malformed(&self) -> Option<String> {
+    pub fn malformed(&self) -> Option<String> {
         for (at, seen) in self.seen.iter().enumerate() {
             let name = seen.flag.name;
             let shape = shape(seen.flag.value);
@@ -208,7 +209,7 @@ impl Walk<'_> {
 impl Vocabulary {
     /// Flag then value, because a declared flag's value is that flag's and is
     /// never a flag itself.
-    pub(crate) fn walk<'a>(&self, args: &'a [String]) -> Walk<'a> {
+    pub fn walk<'a>(&self, args: &'a [String]) -> Walk<'a> {
         let (mut seen, mut positionals) = (Vec::new(), Vec::new());
         let mut at = 0;
         while at < args.len() {
@@ -274,7 +275,7 @@ impl Vocabulary {
     }
 
     /// The declaration as a list to print, one flag a line.
-    pub(crate) fn usage(&self) -> String {
+    pub fn usage(&self) -> String {
         self.0
             .iter()
             .map(|f| format!("  {}{}", f.name, shape(f.value)))

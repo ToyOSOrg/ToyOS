@@ -17,7 +17,7 @@
 //! reach that same `diskseq`.
 //!
 //! Only a Linux host is read, from `/sys/class/block`, the way
-//! [`crate::metal`] reads the T14's stick. Any other host is refused by name;
+//! the metal loop reads the T14's stick. Any other host is refused by name;
 //! writing from macOS is `issues/writing-a-stick-from-a-macos-host.md`.
 //!
 //! **Root writes; nothing here asks for it.** Run unprivileged, it shows the
@@ -216,7 +216,7 @@ pub fn run(args: &[String]) -> Result<(), Refusal> {
     let (path, asked) = image(args)?;
     let disks = host::disks()?;
     let (mut file, bytes) =
-        crate::metal::whole_disk(&path).map_err(|r| Refusal::Image(format!("{}: {r}", path.display())))?;
+        crate::disk::whole_disk(&path).map_err(|r| Refusal::Image(format!("{}: {r}", path.display())))?;
     println!("image  {}, {bytes} bytes", path.display());
     for disk in &disks {
         println!("read   {disk}");
@@ -320,7 +320,7 @@ mod host {
     use std::os::unix::fs::OpenOptionsExt;
 
     use super::{io, sysfs, Disk, Refusal};
-    use crate::metal::Node;
+    use crate::disk::Node;
 
     /// `BLKGETDISKSEQ`, `_IOR(0x12, 128, __u64)` in `linux/fs.h`.
     const BLKGETDISKSEQ: libc::c_ulong = 0x8008_1280;
@@ -582,7 +582,7 @@ mod tests {
         let at = dir.join("built.img");
         std::fs::write(&at, &image).unwrap();
 
-        let (mut file, bytes) = crate::metal::whole_disk(&at).unwrap();
+        let (mut file, bytes) = crate::disk::whole_disk(&at).unwrap();
         let mut device = Vec::new();
         copy(&mut file, bytes, &mut device).unwrap();
         assert!(device == image, "the disk holds other bytes than the image");
