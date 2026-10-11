@@ -20,6 +20,11 @@
 //! **Buttons are looked for only where the FADT says the power button is a
 //! control method device**; on a machine whose button is the fixed one, a
 //! PNP0C0C the firmware lists anyway is not another way to press it.
+//!
+//! **Batteries (PNP0C0A) and AC adapters (ACPI0003) are found by the same
+//! walk** and handed on by path ([`crate::battery`]), their `_STA` unasked:
+//! a battery's says whether one is present only once the controller's
+//! space is there.
 
 use std::collections::BTreeSet;
 
@@ -47,13 +52,19 @@ pub struct Found {
     pub ec: Option<Ec>,
     /// Every control-method power button present, by path.
     pub buttons: Vec<String>,
+    /// Every control-method battery and AC adapter, by path.
+    pub batteries: Vec<String>,
+    pub adapters: Vec<String>,
 }
 
 const EC: &str = "PNP0C09";
 const POWER_BUTTON: &str = "PNP0C0C";
+const BATTERY: &str = "PNP0C0A";
+const ADAPTER: &str = "ACPI0003";
 
-/// Find the controller, and the buttons where `control_method`, in the
-/// namespace `interpreter` holds; `gpe0` is the block every GPE is in.
+/// Find the controller, the buttons where `control_method`, and every
+/// battery and adapter, in the namespace `interpreter` holds; `gpe0` is the
+/// block every GPE is in.
 pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, gpe0: Block, control_method: bool) -> Found {
     let mut found = Found::default();
     let (devices, named) = match devices(interpreter) {
@@ -78,6 +89,14 @@ pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, gpe0: Block, con
             }
         };
         let wanted = match id.as_deref() {
+            Some(BATTERY) => {
+                found.batteries.push(device);
+                continue;
+            }
+            Some(ADAPTER) => {
+                found.adapters.push(device);
+                continue;
+            }
             Some(EC) => true,
             Some(POWER_BUTTON) => control_method,
             _ => false,
@@ -311,8 +330,8 @@ pub mod tests {
     #[test]
     fn an_amd_laptops_controller_and_button_are_found_in_its_dsdt() {
         let ec = Ec { path: EC_PATH.into(), command: 0x66, data: 0x62, gpe: 3, queries: BTreeSet::new() };
-        assert_eq!(found(&laptop(&[]), true), Found { ec: Some(ec.clone()), buttons: vec![PWRB.into()] });
-        assert_eq!(found(&laptop(&[]), false), Found { ec: Some(ec), buttons: vec![] }, "a fixed button's machine looks for none");
+        assert_eq!(found(&laptop(&[]), true), Found { ec: Some(ec.clone()), buttons: vec![PWRB.into()], ..Found::default() });
+        assert_eq!(found(&laptop(&[]), false), Found { ec: Some(ec), ..Found::default() }, "a fixed button's machine looks for none");
     }
 
     /// An AMD laptop's `_Q28`, decoded: its query's number stored to the POST

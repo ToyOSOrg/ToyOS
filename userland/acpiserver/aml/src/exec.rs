@@ -250,7 +250,7 @@ impl<'a> Machine<'a> {
         let mut released = Ok(());
         if self.global > 0 {
             self.global = 0;
-            released = self.host.global_lock(false).map_err(|d| Error::Host(d.0));
+            released = self.host.global_release().map_err(|d| Error::Host(d.0));
         }
         let r = r?;
         released?;
@@ -260,18 +260,33 @@ impl<'a> Machine<'a> {
         Ok(r)
     }
 
-    pub(crate) fn take_global(&mut self) -> Result<(), Error> {
+    /// Holds the Global Lock once more, taking it from the host where this
+    /// evaluation does not hold it yet: `Ok(false)` is a take `within` a
+    /// bound that timed out, charged as a wait, and nothing held. The take
+    /// waits no longer than the evaluation has left to wait, so a bound past
+    /// that is refused once what is left has run out.
+    pub(crate) fn take_global(&mut self, within: Option<u16>) -> Result<bool, Error> {
         if self.global == 0 {
-            self.host.global_lock(true).map_err(|d| Error::Host(d.0))?;
+            match within {
+                None => self.host.global_take().map_err(|d| Error::Host(d.0))?,
+                Some(ms) => {
+                    let left = (MAX_WAIT_US - self.waited_us) / 1000;
+                    let bound = u16::try_from(left).map_or(ms, |left| ms.min(left));
+                    if !self.host.global_take_within(bound).map_err(|d| Error::Host(d.0))? {
+                        self.wait(u64::from(ms) * 1000)?;
+                        return Ok(false);
+                    }
+                }
+            }
         }
         self.global += 1;
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn drop_global(&mut self) -> Result<(), Error> {
         self.global = self.global.checked_sub(1).expect("the Global Lock is given back only by who took it");
         if self.global == 0 {
-            self.host.global_lock(false).map_err(|d| Error::Host(d.0))?;
+            self.host.global_release().map_err(|d| Error::Host(d.0))?;
         }
         Ok(())
     }
@@ -874,18 +889,20 @@ impl<'a> Machine<'a> {
         Ok(Flow::Next)
     }
 
-    fn acquire(&mut self, m: &Kept<Mutex>) -> Result<(), Error> {
+    /// `false` where `\_GL`'s firmware side held it past `within`
+    /// milliseconds, and nothing was acquired.
+    fn acquire(&mut self, m: &Kept<Mutex>, within: Option<u16>) -> Result<bool, Error> {
         // §19.6.88: an Acquire's SyncLevel is equal to or above the current one.
         if m.held.get() == 0 && self.levels.last().is_some_and(|&l| m.sync < l) {
             return Err(Error::Rule("Acquire of a Mutex below the current SyncLevel (§19.6.88)"));
         }
-        if m.global && m.held.get() == 0 {
-            self.take_global()?;
+        if m.global && m.held.get() == 0 && !self.take_global(within)? {
+            return Ok(false);
         }
         m.held.set(m.held.get() + 1);
         self.held.push(m.clone());
         self.levels.push(m.sync);
-        Ok(())
+        Ok(true)
     }
 
     fn release(&mut self, m: &Kept<Mutex>) -> Result<(), Error> {
@@ -1487,15 +1504,15 @@ impl<'a> Machine<'a> {
 
     fn acquire_op(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
         let t = self.super_name(f, c)?;
-        c.word()?;
+        // §19.6.2: 0xFFFF waits with no bound.
+        let within = Some(c.word()?).filter(|&ms| ms != 0xFFFF);
         let id = self.node_of(f, &t)?;
         let Object::Mutex(m) = self.node_object(id)? else {
             return Err(Error::Type("Acquire of an object that is not a Mutex (§19.6.2)"));
         };
-        // One invocation runs at a time, so no Mutex is owned by another:
-        // every Acquire is granted, and none times out.
-        self.acquire(&m)?;
-        Ok(Object::Int(0))
+        // One invocation runs at a time, so no Mutex is owned by another
+        // invocation: only `\_GL`'s firmware side can time an Acquire out.
+        Ok(Object::Int(if self.acquire(&m, within)? { 0 } else { self.w.ones() }))
     }
 
     fn wait_op(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
