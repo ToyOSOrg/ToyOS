@@ -432,6 +432,7 @@ pub mod prof {
         B17_64 = "b17_64",
         B65 = "b65",
         Watches = "watches",
+        Submits = "submits",
         TxCalls = "tx_calls",
         Owed = "owed",
         EmptyPasses = "empty_passes",
