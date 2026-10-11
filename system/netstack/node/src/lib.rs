@@ -69,10 +69,17 @@ toyos_net_wire::counters! {
     QueryFailed = "node.query-failed";
 }
 
-/// The most frames one [`Node::receive`] takes. A device may refill its ring as fast as it is
-/// read, and a batch that waited for it to empty would keep the deadlines, the transmit
-/// opportunity and every stream's pass waiting with it.
-const RECEIVE_BUDGET: usize = 64;
+/// What one [`Node::receive`] took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Batch {
+    pub frames: usize,
+    /// The batch stopped at its bound, and another is owed without waiting for the device to
+    /// say so.
+    pub owed: bool,
+    /// The least round trip among the streams whose data the batch moved
+    /// ([`toyos_net_tcp::Tcp::take_least_rtt`]).
+    pub least_rtt: Option<core::time::Duration>,
+}
 
 /// A line for the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,15 +162,19 @@ impl Node {
 
     // ---- the device ----
 
-    /// The frames the device received since the last call, one by one and at most
-    /// `RECEIVE_BUDGET`: `next` hands its next frame to the sink it is given and answers
-    /// `false` once it had none. One pass over the streams follows the last frame, so what the
-    /// batch brought reaches each client in one write and not one a frame. `true` is a batch
-    /// that stopped at the bound, and another is owed without waiting for the device to say so.
-    pub fn receive(&mut self, now: Instant, mut next: impl FnMut(&mut dyn FnMut(&[u8])) -> bool, mut draw: impl FnMut() -> u32) -> bool {
+    /// The frames the device received since the last call, one by one and at most `budget`:
+    /// `next` hands its next frame to the sink it is given and answers `false` once it had none.
+    /// One pass over the streams follows the last frame, so what the batch brought reaches each
+    /// client in one write and not one a frame.
+    ///
+    /// **The budget is the device's ring**: a device may refill it as fast as it is read, and a
+    /// batch that waited for it to empty would keep the deadlines, the transmit opportunity and
+    /// every stream's pass waiting with it, while a bound below what one interrupt's wait can
+    /// bring would owe a second pass for every long wait.
+    pub fn receive(&mut self, now: Instant, budget: usize, mut next: impl FnMut(&mut dyn FnMut(&[u8])) -> bool, mut draw: impl FnMut() -> u32) -> Batch {
         let mut taken = 0usize;
         let owed = loop {
-            if taken == RECEIVE_BUDGET {
+            if taken == budget {
                 break true;
             }
             if !next(&mut |frame| {
@@ -175,7 +186,7 @@ impl Node {
             taken = taken.saturating_add(1);
         };
         self.pass(now, false);
-        owed
+        Batch { frames: taken, owed, least_rtt: self.stack.take_least_rtt() }
     }
 
     /// A transmit opportunity with room for `credit` frames, each handed to `sink` as it is built.

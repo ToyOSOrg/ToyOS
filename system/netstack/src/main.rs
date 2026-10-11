@@ -9,7 +9,8 @@
 //! random source, the kernel's pipes (`pipes`), the clients' connections
 //! (`client`) and their requests (`serve`).
 //!
-//! **One pass**: the card's link and its received frames, as one batch, go to the node, then
+//! **One pass**: the card's link and its received frames, as one batch, go to the node, and
+//! what the batch moved sets how long the card holds its next interrupt (`cadence`); then
 //! every deadline that is due, then the node is offered the card's transmit
 //! room until it has no frame left or the card no room; what the node has to
 //! say is written to the log and to the clients that waited for it; and the
@@ -42,6 +43,7 @@ use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
+mod cadence;
 mod card;
 mod client;
 mod i219;
@@ -380,7 +382,11 @@ fn main() {
                 node.link(clock(), link_up, draw);
             }
         }
-        let owed = node.receive(clock(), |sink| card.rx(sink), draw);
+        let batch = card.receive(|budget, next| node.receive(clock(), budget, next, draw));
+        // A pass that took no frame says nothing new about the streams the card's wait is for.
+        if batch.frames > 0 {
+            card.pace(batch.least_rtt);
+        }
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);
@@ -422,7 +428,7 @@ fn main() {
         // were taken with this pass's.
         let nanos = |left: Duration| u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
         let mut timeout = node.next_deadline().map_or(u64::MAX, |at| nanos(at.since(clock())));
-        if owed {
+        if batch.owed {
             timeout = 0;
         }
         if let Some(left) = leases.due_in() {

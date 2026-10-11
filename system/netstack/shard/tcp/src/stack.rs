@@ -232,6 +232,8 @@ pub struct Tcp {
     port_table: [u16; 16],
     log: Log,
     scratch: Vec<u8>,
+    /// The least round trip of a connection whose data moved since [`Tcp::take_least_rtt`].
+    least_rtt: Option<Duration>,
 }
 
 fn slot<T>(slots: &mut [Slot<T>], index: u32, generation: u32) -> Option<&mut T> {
@@ -389,11 +391,24 @@ impl Tcp {
             port_table,
             log: Log::default(),
             scratch: Vec::new(),
+            least_rtt: None,
         })
     }
 
     pub fn counters(&self) -> &Counters {
         &self.log.counters
+    }
+
+    /// The least round trip among the connections whose data moved since the last call: the
+    /// receiver's own estimate where in-order text arrived, the sender's SRTT where an
+    /// acknowledgment moved SND.UNA. `None` where none moved or none has an estimate yet.
+    ///
+    /// A caller that holds segments back by a fraction of it before they reach [`Self::receive`]
+    /// lengthens no such connection's round trip by more than that fraction, and holds back no
+    /// more than that fraction of a round trip's acknowledgments: the least wins, so a short path
+    /// beside a long one keeps its own clock.
+    pub fn take_least_rtt(&mut self) -> Option<Duration> {
+        self.least_rtt.take()
     }
 
     /// Refusals and reachability advice since the last call.
@@ -867,10 +882,15 @@ impl Tcp {
                 }
             }
             Tcb::Sync(mut sync) => {
-                let una = sync.tx.una;
+                let (una, next) = (sync.tx.una, sync.rx.next);
                 let verdict = sync.receive(seg, &mut ctx);
                 if sync.tx.una != una {
                     conn.soft = None;
+                }
+                let received = (sync.rx.next != next).then(|| sync.rx.rtt()).flatten();
+                let acknowledged = (sync.tx.una != una).then(|| sync.rtt.srtt()).flatten();
+                for rtt in received.into_iter().chain(acknowledged) {
+                    self.least_rtt = Some(self.least_rtt.map_or(rtt, |least| least.min(rtt)));
                 }
                 return self.after_sync(index, tuple, sync, verdict, now);
             }

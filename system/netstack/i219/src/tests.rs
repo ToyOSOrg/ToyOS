@@ -47,6 +47,7 @@ fn drain(nic: &Nic, driver: &mut Driver) -> Vec<Vec<u8>> {
     for frame in taken {
         driver.rx_done(frame);
     }
+    driver.rx_flush();
     got
 }
 
@@ -122,11 +123,11 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     assert_eq!(nic.peek(regs::TDLEN) as usize, TX_RING * tx_desc::BYTES);
     assert_eq!(nic.peek(regs::TDT), 0);
 
-    // Both timers off and the throttle on: the first frame after a quiet
-    // spell is not held back, and a stream's are taken a batch a wake.
+    // Both timers off, and the throttle the caller's to set: the first frame
+    // after a quiet spell is not held back.
     assert_eq!(nic.peek(regs::RDTR), 0);
     assert_eq!(nic.peek(regs::RADV), 0);
-    assert_eq!(u64::from(nic.peek(regs::ITR)) * 256, 128_000, "§10.2.4.2 counts in 256 ns");
+    assert_eq!(nic.peek(regs::ITR), 0);
 
     assert_eq!(driver.mac(), NVM_MAC);
 }
@@ -528,6 +529,7 @@ fn a_buffer_given_back_out_of_turn_does_not_carry_the_tail_over_an_older_one() {
     assert_eq!(armed as usize, RX_RING - 1, "{}", nic.because("the ring did not arm its tail"));
 
     driver.rx_done(second);
+    driver.rx_flush();
     assert_eq!(
         nic.peek(regs::RDT),
         armed,
@@ -536,6 +538,7 @@ fn a_buffer_given_back_out_of_turn_does_not_carry_the_tail_over_an_older_one() {
     );
 
     driver.rx_done(first);
+    driver.rx_flush();
     assert_eq!(
         nic.peek(regs::RDT),
         1,
@@ -574,6 +577,7 @@ fn a_refused_descriptor_does_not_carry_the_tail_over_a_frame_still_held() {
         nic.because("the refused descriptor was handed up as a frame")
     );
     assert_eq!(driver.counters().over_length, 1, "{}", nic.because("the length was believed"));
+    driver.rx_flush();
     assert_eq!(
         nic.peek(regs::RDT) as usize,
         RX_RING - 1,
@@ -582,12 +586,135 @@ fn a_refused_descriptor_does_not_carry_the_tail_over_a_frame_still_held() {
     );
 
     driver.rx_done(held);
+    driver.rx_flush();
     assert_eq!(
         nic.peek(regs::RDT),
         1,
         "{}",
         nic.because("the tail did not move over both once the held frame came back")
     );
+}
+
+/// The ring that fills the grant takes frames whole and in order through its wrap, twice over,
+/// in batches of up to a third of it with a flush at each end.
+#[test]
+fn frames_come_up_whole_and_in_order_through_the_rings_wrap() {
+    let nic = Nic::new(26);
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    let mut sent = Vec::new();
+    let mut got = Vec::new();
+    for batch in 0..8 {
+        for i in 0..RX_RING / 3 {
+            let tag = (batch * RX_RING / 3 + i) as u32;
+            let mut bytes = frame(tag as u8, 64 + (tag % 1400) as usize);
+            bytes[7..11].copy_from_slice(&tag.to_le_bytes());
+            nic.deliver(&bytes);
+            sent.push(bytes);
+        }
+        for _ in 0..RX_RING {
+            nic.run();
+            one_pass(&mut driver);
+            got.extend(drain(&nic, &mut driver));
+            if got.len() == sent.len() {
+                break;
+            }
+        }
+    }
+    assert!(sent.len() > 2 * RX_RING, "the ring did not wrap twice");
+    assert_eq!(got.len(), sent.len(), "{}", nic.because("frames were lost or invented"));
+    assert!(got == sent, "{}", nic.because("the frames did not come up whole and in order"));
+}
+
+/// How many times the driver has written `reg`.
+fn writes_of(nic: &Nic, reg: usize) -> usize {
+    nic.trace().iter().filter(|access| **access == Access::Write { reg }).count()
+}
+
+/// A batch's buffers reach the part in one `RDT` write at its end, and sooner
+/// only once [`HELD_MAX`] wait: the part is never kept from more than that.
+#[test]
+fn the_tail_moves_once_a_batch_and_sooner_only_once_held_max_wait() {
+    let nic = Nic::with(
+        24,
+        Part::E82574,
+        Permits { batched_writeback: false, spurious_interrupts: false, ..Permits::default() },
+    );
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    let late = 3;
+    for i in 0..HELD_MAX + late {
+        nic.deliver(&frame(i as u8, 64));
+    }
+    nic.run();
+    one_pass(&mut driver);
+    let frames: Vec<Frame> = core::iter::from_fn(|| driver.poll_rx()).collect();
+    assert_eq!(frames.len(), HELD_MAX + late, "{}", nic.because("the frames did not all arrive"));
+    let (armed, writes) = (nic.peek(regs::RDT), writes_of(&nic, regs::RDT));
+
+    let mut frames = frames.into_iter();
+    for frame in frames.by_ref().take(HELD_MAX - 1) {
+        driver.rx_done(frame);
+    }
+    assert_eq!(
+        (nic.peek(regs::RDT), writes_of(&nic, regs::RDT)),
+        (armed, writes),
+        "{}",
+        nic.because("the tail moved before a batch ended or HELD_MAX buffers waited")
+    );
+
+    driver.rx_done(frames.next().expect("the HELD_MAX-th frame"));
+    assert_eq!(
+        (nic.peek(regs::RDT) as usize, writes_of(&nic, regs::RDT)),
+        (HELD_MAX - 1, writes + 1),
+        "{}",
+        nic.because("HELD_MAX buffers waited and the tail did not move over them once")
+    );
+
+    for frame in frames {
+        driver.rx_done(frame);
+    }
+    driver.rx_flush();
+    assert_eq!(
+        (nic.peek(regs::RDT) as usize, writes_of(&nic, regs::RDT)),
+        (HELD_MAX + late - 1, writes + 2),
+        "{}",
+        nic.because("the batch's end did not hand the rest over in one write")
+    );
+    driver.rx_flush();
+    assert_eq!(writes_of(&nic, regs::RDT), writes + 2, "{}", nic.because("a flush with nothing held wrote RDT"));
+    assert_eq!(driver.rx_free(), RX_RING - 1, "{}", nic.because("the part does not hold the whole ring"));
+}
+
+/// §10.2.4.2's `ITR` takes its 256 ns units at or below what the caller
+/// asked, inside its sixteen bits, to three leading bits, and is written only
+/// when that changes: an interval recomputed every pass costs no write unless
+/// it moves by a step of an eighth to a quarter.
+#[test]
+fn the_throttle_is_written_only_when_its_three_leading_bits_change() {
+    let nic = Nic::new(25);
+    let mut driver = open(&nic);
+    let opened = writes_of(&nic, regs::ITR);
+    for (nanos, units, written) in [
+        // 390 units, 0b110000110: 0b110 << 6.
+        (100_000, 384, 1),
+        (99_000, 384, 1),
+        (98_303, 320, 2),
+        (65_536, 256, 3),
+        (65_535, 224, 4),
+        (7 * 256, 7, 5),
+        (0, 1, 6),
+        (255, 1, 6),
+        (u64::MAX, 0b111 << 13, 7),
+    ] {
+        driver.throttle(nanos);
+        assert_eq!(
+            (nic.peek(regs::ITR), writes_of(&nic, regs::ITR) - opened),
+            (units, written),
+            "{}",
+            nic.because(&format!("asked for {nanos} ns"))
+        );
+    }
 }
 
 // --- transmit ---

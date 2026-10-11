@@ -242,6 +242,12 @@ impl Shard {
 
     // ---- the device ----
 
+    /// The least round trip among the TCP connections whose data moved since the last call
+    /// ([`Tcp::take_least_rtt`]).
+    pub fn take_least_rtt(&mut self) -> Option<core::time::Duration> {
+        self.tcp.take_least_rtt()
+    }
+
     /// A frame the device received.
     pub fn receive(&mut self, now: Instant, frame: &[u8]) {
         match self.ip.receive(now, self.iface, frame) {
