@@ -4,18 +4,18 @@
 //! the end of a page had its tail read or written *past the physical page*, in
 //! whatever the PMM had handed out next.
 //!
-//! Two are reachable from userland: `fstat`'s 24-byte `Stat`, a kernel write,
-//! and `spawn`'s 96-byte `SpawnArgs`, a kernel read whose `argv_ptr` and
-//! `argv_len` the kernel then acts on.
+//! Two are reachable from userland: `fstat`'s `Stat`, a kernel write, and
+//! `spawn`'s `SpawnArgs`, a kernel read whose `argv_ptr` and `argv_len` the
+//! kernel then acts on.
 //!
-//! **The verdict is not the assertion.** The canary is the sixteen bytes on the
-//! far side of the boundary: this process owns both pages, and mmap gives it
+//! **The verdict is not the assertion.** The canary is the bytes on the far
+//! side of the boundary: this process owns both pages, and mmap gives it
 //! them contiguously, so the bytes the kernel would have written past the end
 //! of the first physical page are bytes this process can read back.
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
-    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SchedInfo, SpawnArgs, SyscallError,
+    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SchedInfo, SpawnArgs, Stat, SyscallError,
     SYS_FSTAT, SYS_PROCESS_STATS, SYS_SCHED_INFO,
 };
 
@@ -23,8 +23,7 @@ use toyos_abi::syscall::{
 const CWD: &str = "/";
 
 const PAGE_2M: u64 = 2 * 1024 * 1024;
-/// `Stat` is three `u64`, and `SpawnArgs` twelve.
-const STAT_LEN: usize = 24;
+const STAT_LEN: usize = core::mem::size_of::<Stat>();
 const CANARY: u8 = 0xA5;
 
 /// Every typed wrapper fills the value on its own stack, so none of them can
@@ -72,7 +71,7 @@ fn main() {
     let handle = syscall::open(b"/system/bin/test_rs_abuse_page_straddle", OpenFlags::READ).expect("open self");
 
     // 1. A `Stat` eight bytes below the boundary: eight bytes of it are in this
-    //    page and sixteen are not.
+    //    page and the rest are not.
     let straddling = boundary - 8;
     let poison = |addr: u64, len: usize| {
         for i in 0..len {
@@ -102,7 +101,7 @@ fn main() {
     poison(fitting, STAT_LEN);
     let ret = fstat_raw(handle, fitting);
     assert!(err(ret).is_none(), "fstat refused a Stat that ends at the boundary: {ret:#x}");
-    let size = unsafe { (fitting as *const u64).add(1).read_volatile() };
+    let size = unsafe { ((fitting as usize + core::mem::offset_of!(Stat, size)) as *const u64).read_volatile() };
     assert!(size > 0, "fstat wrote a Stat with no size in it");
     syscall::close(handle);
 
@@ -148,7 +147,7 @@ fn main() {
     let child = unsafe { syscall::spawn(&*fitting) }.expect("spawn a SpawnArgs that fits");
     syscall::process_wait(child).expect("wait for the child that fits");
 
-    // 5. `SchedInfo`, 24 bytes the kernel fills. It used to be reached by
+    // 5. `SchedInfo`, which the kernel fills. It used to be reached by
     //    casting a validated byte slice to `&mut SchedInfo`, which checked
     //    neither the alignment the cast needs nor the page the write lands in.
     let info_len = core::mem::size_of::<SchedInfo>();
@@ -166,7 +165,7 @@ fn main() {
     let ret = raw(SYS_SCHED_INFO, boundary - info_len as u64, 0, 0);
     assert!(err(ret).is_none(), "sched_info refused a SchedInfo that ends at the boundary: {ret:#x}");
 
-    // 6. `ProcessStats` is 128 bytes, and the child waited for above still
+    // 6. `ProcessStats`, and the child waited for above still
     //    answers for one — the numbers are the object's and the handle outlives
     //    the process.
     let stats_len = core::mem::size_of::<ProcessStats>();
