@@ -2,4 +2,4 @@
 
 Graphical file browser.
 
-Depends on the window, font, and sprite libraries.
+Depends on the window and font libraries.

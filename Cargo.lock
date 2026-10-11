@@ -1261,7 +1261,6 @@ dependencies = [
 name = "files"
 version = "0.1.0"
 dependencies = [
- "sprite",
  "toyos-font",
  "toyos-window",
 ]

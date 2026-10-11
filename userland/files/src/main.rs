@@ -1,7 +1,9 @@
+mod icon;
+
 use std::fs;
 use std::path::PathBuf;
 
-use sprite::Sprite;
+use icon::Icon;
 use window::{Color, Framebuffer, Window};
 
 const BG: Color = Color { r: 0x1e, g: 0x1e, b: 0x2e };
@@ -40,8 +42,8 @@ struct FileBrowser {
     window: Window,
     fb: Framebuffer,
     font: font::Font,
-    folder_icon: Sprite,
-    file_icon: Sprite,
+    folder_icon: Icon,
+    file_icon: Icon,
     entries: Vec<Entry>,
     selected: Option<usize>,
     current_dir: PathBuf,
@@ -59,8 +61,8 @@ impl FileBrowser {
         let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
         let font = font::Font::from_prebuilt(&font_data);
 
-        let folder_icon = Sprite::icon("folder-bold", [0xf0, 0xc8, 0x50]);
-        let file_icon = Sprite::icon("file-bold", [0xd0, 0xd0, 0xd8]);
+        let folder_icon = Icon::load("folder-bold", Color { r: 0xf0, g: 0xc8, b: 0x50 });
+        let file_icon = Icon::load("file-bold", Color { r: 0xd0, g: 0xd0, b: 0xd8 });
 
         let current_dir = std::env::home_dir().expect("files: the supervisor starts every program with HOME");
 
@@ -167,15 +169,7 @@ impl FileBrowser {
             let icon = if entry.is_dir { &self.folder_icon } else { &self.file_icon };
             if y >= content_top && y + icon.height() <= content_bottom {
                 let icon_x = x + (ITEM_WIDTH - icon.width()) / 2;
-                icon.draw(
-                    self.fb.ptr(),
-                    self.fb.stride(),
-                    self.fb.width(),
-                    self.fb.height(),
-                    self.fb.pixel_format_raw(),
-                    icon_x,
-                    y,
-                );
+                icon.draw(&self.fb, icon_x, y);
             }
 
             let text_bg = if self.selected == Some(i) { SELECTED_BG } else { BG };

@@ -6,6 +6,5 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-sprite = { path = "../sprite" }
 toyos-font = { path = "../../sdk/font" }
 toyos-window = { path = "../../sdk/window" }
