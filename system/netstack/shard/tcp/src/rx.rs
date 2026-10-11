@@ -43,6 +43,8 @@ struct Range {
     start: Seq,
     end: Seq,
     stamp: u32,
+    /// MEASUREMENT ONLY: when its first text arrived.
+    at: Instant,
 }
 
 impl Range {
@@ -99,6 +101,20 @@ pub struct Rx {
     mss_bounds: (u32, u32),
     /// MEASUREMENT ONLY: when the ack point last moved on a segment sent.
     pub last_ack_at: core::cell::Cell<Option<Instant>>,
+    /// MEASUREMENT ONLY, round 4: the time of the segment being placed; when RCV.NXT passed each
+    /// point lately, and when each acknowledgment sent lately left; the SACK blocks sent lately.
+    pub at: core::cell::Cell<Instant>,
+    delivered: core::cell::RefCell<alloc::collections::VecDeque<(Seq, Instant)>>,
+    acked: core::cell::RefCell<alloc::collections::VecDeque<(Seq, Instant)>>,
+    reported: core::cell::RefCell<alloc::collections::VecDeque<(Seq, Seq)>>,
+}
+
+/// MEASUREMENT ONLY, round 4: how many points each timeline keeps.
+const KEPT: usize = 4096;
+
+/// MEASUREMENT ONLY, round 4: when the first point of `timeline` at or past `end` was recorded.
+fn first_past(timeline: &alloc::collections::VecDeque<(Seq, Instant)>, end: Seq) -> Option<Instant> {
+    timeline.iter().find(|(at, _)| at.at_or_after(end)).map(|&(_, when)| when)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +160,56 @@ impl Rx {
             short: 0,
             mss_bounds: (floor, mss.saturating_sub(options)),
             last_ack_at: core::cell::Cell::new(None),
+            at: core::cell::Cell::new(now),
+            delivered: core::cell::RefCell::new(alloc::collections::VecDeque::new()),
+            acked: core::cell::RefCell::new(alloc::collections::VecDeque::new()),
+            reported: core::cell::RefCell::new(alloc::collections::VecDeque::new()),
+        }
+    }
+
+    /// MEASUREMENT ONLY, round 4: an acknowledgment of RCV.NXT left at `now`, carrying `blocks`.
+    pub fn note_sent(&self, now: Instant, blocks: &[SackBlock]) {
+        let mut acked = self.acked.borrow_mut();
+        if acked.back().is_none_or(|&(at, _)| at != self.next) {
+            if acked.len() == KEPT {
+                acked.pop_front();
+            }
+            acked.push_back((self.next, now));
+        }
+        let mut reported = self.reported.borrow_mut();
+        for b in blocks {
+            if reported.len() == KEPT {
+                reported.pop_front();
+            }
+            reported.push_back((Seq::from(b.left), Seq::from(b.right)));
+        }
+    }
+
+    /// MEASUREMENT ONLY, round 4: a duplicate of `[start, end)` arrived at `now`, all of it
+    /// below RCV.NXT where `below`, else inside a range held above a hole; `first` is when the
+    /// text it duplicates arrived, where known.
+    fn dsack_seen(&self, start: Seq, end: Seq, below: bool, first: Option<Instant>) {
+        use toyos_net_wire::prof::{add, age, Slot};
+        let now = self.at.get();
+        if below {
+            add(Slot::DsOld, 1);
+            let acked = self.acked.borrow();
+            match first_past(&acked, end) {
+                Some(when) => {
+                    add(Slot::DsOldAcked, 1);
+                    age(true, u64::try_from(now.since(when).as_nanos()).unwrap_or(u64::MAX));
+                }
+                None => add(Slot::DsOldUnacked, 1),
+            }
+        } else {
+            add(Slot::DsInRange, 1);
+            let told = self.reported.borrow().iter().any(|&(l, r)| l.at_or_before(start) && end.at_or_before(r));
+            if !told {
+                add(Slot::DsInRangeUntold, 1);
+            }
+        }
+        if let Some(first) = first {
+            age(false, u64::try_from(now.since(first).as_nanos()).unwrap_or(u64::MAX));
         }
     }
 
@@ -258,6 +324,7 @@ impl Rx {
             let dup = (cursor.later(r.start), end.earlier(r.end));
             if dsack.is_none() && dup.0.before(dup.1) {
                 dsack = Some(dup);
+                self.dsack_seen(dup.0, dup.1, false, Some(r.at));
             }
             cursor = cursor.later(r.end);
         }
@@ -272,10 +339,16 @@ impl Rx {
         }
         let holes = !self.ranges.is_empty();
         let stamp = self.bump();
-        let merged = self.ranges.get(lo..hi).unwrap_or_default().iter().fold(Range { start: seq, end, stamp }, |m, r| Range {
+        let now = self.at.get();
+        if touching == 0 && seq != self.next {
+            let below = lo.checked_sub(1).and_then(|i| self.ranges.get(i)).map_or(self.next, |r| r.end);
+            toyos_net_wire::prof::run(u64::from(seq.since(below)).div_ceil(u64::from(self.rcv_mss.max(1))));
+        }
+        let merged = self.ranges.get(lo..hi).unwrap_or_default().iter().fold(Range { start: seq, end, stamp, at: now }, |m, r| Range {
             start: m.start.earlier(r.start),
             end: m.end.later(r.end),
             stamp,
+            at: m.at.min(r.at),
         });
         self.ranges.splice(lo..hi, [merged]);
         if merged.start != self.next {
@@ -289,6 +362,13 @@ impl Rx {
         self.ranges.remove(lo);
         self.buf.commit(usize::try_from(merged.end.since(self.next)).unwrap_or(0));
         self.next = merged.end;
+        {
+            let mut delivered = self.delivered.borrow_mut();
+            if delivered.len() == KEPT {
+                delivered.pop_front();
+            }
+            delivered.push_back((self.next, now));
+        }
         self.trigger = None;
         if self.discard {
             let n = self.buf.len();
@@ -356,6 +436,8 @@ impl Rx {
     pub fn duplicate(&mut self, seq: Seq, text: u32) {
         if text > 0 {
             self.dsack = Some((seq, seq.add(text)));
+            let first = first_past(&self.delivered.borrow(), seq.add(text));
+            self.dsack_seen(seq, seq.add(text), true, first);
         }
         self.ack_now = true;
     }

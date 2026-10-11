@@ -53,7 +53,9 @@ pub mod prof {
 
     /// The card's `RDT` writes so far, as the last pass left them.
     pub static RDT: AtomicU64 = AtomicU64::new(0);
-    static LAST: Mutex<Option<(u64, ProcessStats)>> = Mutex::new(None);
+    /// Round 4: the MAC's missed frames so far, as the last pass left them.
+    pub static MISSED: AtomicU64 = AtomicU64::new(0);
+    static LAST: Mutex<Option<(u64, u64, ProcessStats)>> = Mutex::new(None);
 
     pub fn batch(n: u64) {
         add(
@@ -77,14 +79,16 @@ pub mod prof {
         process_stats(SELF_PROCESS, &mut stats).expect("netstack reads its own accounting");
         let rdt = RDT.load(Relaxed);
         let mut last = LAST.lock().unwrap();
-        let (rdt0, s0) = last.unwrap_or_default();
+        let missed = MISSED.load(Relaxed);
+        let (rdt0, missed0, s0) = last.unwrap_or_default();
         words.push(format!("rdt_writes={}", rdt.wrapping_sub(rdt0)));
+        words.push(format!("missed={}", missed.wrapping_sub(missed0)));
         words.push(format!("cpu_ns={}", stats.cpu_ns - s0.cpu_ns));
         words.push(format!("syscalls={}", stats.syscall_total - s0.syscall_total));
         words.push(format!("syscall_ns={}", stats.syscall_total_ns - s0.syscall_total_ns));
         words.push(format!("runq_ns={}", stats.runqueue_wait_ns - s0.runqueue_wait_ns));
         words.push(format!("wall_ns={}", stats.wall_ns - s0.wall_ns));
-        *last = Some((rdt, stats));
+        *last = Some((rdt, missed, stats));
         words.join(" ")
     }
 }
@@ -441,6 +445,7 @@ fn main() {
         }, draw);
         prof::since(prof::Slot::CyReceive, t0);
         prof::RDT.store(card.rdt_writes(), std::sync::atomic::Ordering::Relaxed);
+        prof::MISSED.store(card.missed(), std::sync::atomic::Ordering::Relaxed);
         prof::add(prof::Slot::FramesRx, got);
         prof::batch(got);
         if owed {

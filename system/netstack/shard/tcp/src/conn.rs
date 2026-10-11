@@ -543,6 +543,7 @@ impl Sync {
                 text = if seq.after(limit) { &[] } else { text.get(..room).unwrap_or_default() };
             }
         }
+        self.rx.at.set(now);
         if !text.is_empty() {
             let placed = self.rx.place(seq, text);
             if placed == Placed::RangeLimit {
@@ -581,6 +582,7 @@ impl Sync {
         let keepalive = seg.seq == next.sub(1) && seg.text() <= 1;
         let probe = self.rx.window() == 0 && seg.seq == next;
         if old && seg.text() > 0 && self.sack_ok {
+            self.rx.at.set(ctx.now);
             self.rx.duplicate(seg.seq.add(u32::from(seg.syn())), seg.text());
         } else if old || keepalive || probe {
             self.rx.ack_now = true;
@@ -1139,6 +1141,7 @@ impl Sync {
             if sack.1 > 0 && self.rx.has_dsack() {
                 add(Slot::DsackSent, 1);
             }
+            self.rx.note_sent(now, sack.0.get(..sack.1).unwrap_or_default());
             let acked = u64::from(self.rx.next.since(self.rx.last_ack_sent));
             if acked == 0 {
                 add(Slot::AckZero, 1);

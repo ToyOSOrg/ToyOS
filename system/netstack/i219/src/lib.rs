@@ -1065,6 +1065,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// its filters dropped and the ones it had no descriptor for — which is
     /// what separates "nothing arrived" from "something arrived and went
     /// nowhere" on a boot with no other record.
+    /// MEASUREMENT ONLY, round 4: [`Self::wire`]'s missed frames, `MPC` alone read.
+    pub fn missed(&mut self) -> u64 {
+        self.wire.missed = self.wire.missed.saturating_add(u64::from(self.regs.read32(regs::MPC)));
+        self.wire.missed
+    }
+
     pub fn wire(&mut self) -> Wire {
         let take = |reg| u64::from(self.regs.read32(reg));
         let read = Wire {

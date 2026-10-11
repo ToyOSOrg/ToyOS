@@ -55,16 +55,16 @@ const ROOTS: &str = "/system/etc/ssl/cert.pem";
 const PROBES: usize = 5;
 
 /// MEASUREMENT ONLY: downloads of the file, one after another, each with the
-/// cadence's `K` netstack is told before it: a palindrome, so drift across the
-/// boot weighs every `K` alike. A netstack with no cadence refuses the word, and
-/// the label is then the run's place in the order.
+/// cadence's stretch `S` netstack is told before it: a palindrome, so drift
+/// across the boot weighs every `S` alike. A netstack with no stretch refuses
+/// the word, and the label is then the run's place in the order.
 const K_ORDER: [u32; 6] = [8, 16, 32, 32, 16, 8];
 
-/// MEASUREMENT ONLY: the word that sets netstack's `K`: `K=` and the value.
+/// MEASUREMENT ONLY: the word that sets netstack's stretch: `S=` and the value.
 fn set_k(k: u32) {
     use toyos::ipc::{FrameRx, RxStep};
     let conn = toyos::endow::service("netstack").expect("the job holds a netstack connector");
-    conn.signal(u32::from_le_bytes([b'K', b'=', 0, 0]) | k << 16).expect("netstack takes the word");
+    conn.signal(u32::from_le_bytes([b'S', b'=', 0, 0]) | k << 16).expect("netstack takes the word");
     let mut rx: Box<FrameRx<64>> = Box::new(FrameRx::new());
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -73,7 +73,7 @@ fn set_k(k: u32) {
             _ => return,
         }
     }
-    panic!("netstack did not answer K={k} in 2 s");
+    panic!("netstack did not answer S={k} in 2 s");
 }
 
 /// MEASUREMENT ONLY: one lookup of the file's host, timed: a round trip to
@@ -122,11 +122,14 @@ struct Toy<'a>(&'a SysCap);
 impl Machine for Toy<'_> {
     fn snap(&self) -> Snap {
         let mut snap = Snap::new();
-        for r in round(self.0) {
+        for (index, r) in round(self.0).into_iter().enumerate() {
             for counter in Counter::ALL {
                 let Some(v) = r.get(counter) else { continue };
                 let key = match counter {
                     Counter::Stamp | Counter::Aperf | Counter::Mperf => counter.name().to_string(),
+                    // Round 4: one package, which every CPU reads alike: the first CPU's.
+                    Counter::PkgEnergyUj if index == 0 => counter.name().to_string(),
+                    Counter::PkgEnergyUj => continue,
                     Counter::Smi
                     | Counter::HwpRequest
                     | Counter::HwpRequestPkg

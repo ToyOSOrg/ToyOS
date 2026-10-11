@@ -46,6 +46,12 @@ pub fn table(log: &str) -> String {
         g(idle, "aperf") / 1e6 / idle_s,
         g(idle, "aperf") / g(idle, "mperf") * tsc_hz / 1e9
     );
+    let _ = writeln!(
+        out,
+        "netperf: idle rates: {:.3} W package, {:.2} Minst/s",
+        g(idle, "pkg_energy_uj") / 1e6 / idle_s,
+        g(idle, "k.instructions") / 1e6 / idle_s
+    );
     let _ = writeln!(out, "netperf: {bench}");
     for (k, run) in said("perf run").iter().enumerate() {
         let (bytes, secs) = (g(run, "bytes"), g(run, "secs"));
@@ -64,6 +70,15 @@ pub fn table(log: &str) -> String {
         row(&mut out, 'D', "system C0 less the idle window's rate", (g(run, "mperf") - idle_mperf) / tsc_hz * 1e3 / mb, "ms");
         let busy_mcyc = (g(run, "aperf") - idle_aperf) / 1e6 / mb;
         row(&mut out, 'D', "system cycles less the idle window's rate", busy_mcyc, "Mcyc");
+        // Round 4: the work and the energy, apart from the clock.
+        row(&mut out, 'M', "system instructions retired (sum fixed ctr 0)", g(run, "k.instructions") / 1e6 / mb, "Minst");
+        row(&mut out, 'D', "system instructions per cycle", g(run, "k.instructions") / g(run, "aperf"), "IPC");
+        let idle_inst = g(idle, "k.instructions") / idle_s * secs;
+        row(&mut out, 'D', "system instructions less the idle window's rate", (g(run, "k.instructions") - idle_inst) / 1e6 / mb, "Minst");
+        row(&mut out, 'M', "package energy (RAPL)", g(run, "pkg_energy_uj") / 1e3 / mb, "mJ");
+        row(&mut out, 'M', "package power over the run", g(run, "pkg_energy_uj") / 1e6 / secs, "W");
+        let idle_uj = g(idle, "pkg_energy_uj") / idle_s * secs;
+        row(&mut out, 'D', "package energy less the idle window's rate", (g(run, "pkg_energy_uj") - idle_uj) / 1e3 / mb, "mJ");
         let app_ms = g(run, "app.cpu_ns") / 1e6 / mb;
         row(&mut out, 'M', "app cpu (its own accounting)", app_ms, "ms");
         let app_mcyc = app_ms * ghz;
