@@ -6755,18 +6755,15 @@ fn build_tasks(
     machine.chain(screen).collect()
 }
 
-/// Machine tests a run boots only when a filter is the whole name, so no
-/// unfiltered run, CI's included, boots one: each needs a product only
+/// Machine tests a run boots only when a filter names them, so no unfiltered
+/// run, CI's included, boots one: each needs a product only
 /// `cargo run -- --hosted-clang` builds, which no CI job holds.
 const ON_DEMAND: &[&str] = &["hosted_clang_hello"];
 
-/// Whether a run takes `name`: it has no filter, or one that matches it; one
-/// [`ON_DEMAND`] is taken only by its whole name.
+/// Whether a run takes `name`: a filter matches it, or there is none and it is
+/// not [`ON_DEMAND`].
 fn kept(filters: &[&str], name: &str) -> bool {
-    if ON_DEMAND.contains(&name) {
-        return filters.contains(&name);
-    }
-    filters.is_empty() || filters.iter().any(|f| name.contains(f))
+    filters.iter().any(|f| name.contains(f)) || (filters.is_empty() && !ON_DEMAND.contains(&name))
 }
 
 /// The machine tests and the screen tests a run boots.
@@ -6972,7 +6969,7 @@ fn main() {
 
     // A filter that takes nothing would be dropped in silence beside one that
     // takes something.
-    if let Some(dead) = filters.iter().find(|f| !declared().any(|name| kept(std::slice::from_ref(f), name))) {
+    if let Some(dead) = filters.iter().find(|f| !declared().any(|name| name.contains(**f))) {
         eprintln!("No test matches filter {dead:?}");
         run.exit(1);
     }
