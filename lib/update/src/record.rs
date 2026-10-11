@@ -1,7 +1,7 @@
 //! What the loader keeps between its passes about the slots: which image it
 //! handed the machine last, and which images died on a boot of their own.
 //!
-//! It extends the loader's attempt count (`bootloader/src/attempt.rs`, a file
+//! It extends the loader's attempt count (`loader/src/attempt.rs`, a file
 //! on the log partition) rather than standing beside it: the count is the
 //! bound on a hang, and **a panic, a fault, a wedge, a boot that never reached
 //! its kernel's panic path, and a hang of an image no boot has proven are one

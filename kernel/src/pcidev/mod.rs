@@ -368,7 +368,7 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 ///
 /// **One lock over the whole array, because this is where a function's
 /// exclusivity is decided.** `Claim::acquire`'s per-class flag does not answer
-/// for a class that names several devices, and `src/build.rs`'s
+/// for a class that names several devices, and `build/build.rs`'s
 /// `one_claimant_per_device` compares `system.toml` strings, and a host-side
 /// gate is not the capability boundary.
 ///

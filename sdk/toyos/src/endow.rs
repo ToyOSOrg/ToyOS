@@ -190,7 +190,7 @@ pub fn service(name: &str) -> Result<Connection, EndowError> {
 
 /// The acceptor of a name the manifest says this program serves.
 ///
-/// A refusal is a build-system bug rather than a race: `src/build.rs` checked
+/// A refusal is a build-system bug rather than a race: `build/build.rs` checked
 /// the manifest before the image was written, so there is no other process to
 /// have taken the name and no name to take.
 pub fn acceptor(name: &str) -> Option<Acceptor> {

@@ -1,7 +1,7 @@
 //! What every program in an image is allowed to hold, written by the build
 //! system and read by `/system/bin/supervisor`.
 //!
-//! **One definition of the format, used by both halves.** `src/build.rs`
+//! **One definition of the format, used by both halves.** `build/build.rs`
 //! resolves `system.toml` into a [`Manifest`] and [`render`]s it into the
 //! ROOT at [`PATH`]; the supervisor [`parse`]s it back. A round-trip test here is what
 //! makes that a fact rather than two hand-matched implementations — the shape
@@ -246,7 +246,7 @@ pub struct Program {
     /// The machine's idle slot: the slot table's partition and the idle
     /// slot's FAT volume and ROOT (`toyos_update::slots`). The
     /// authority to write the next image and nothing else: the slot a boot
-    /// runs is never among them. One program holds it — `src/build.rs` gates
+    /// runs is never among them. One program holds it — `build/build.rs` gates
     /// which.
     pub slots: bool,
     /// A system service: its `HOME` is its own [`STATE`] directory rather

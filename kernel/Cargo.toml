@@ -127,8 +127,8 @@ counting-allocator = []
 # The process lifecycle's controls (`pure/proclife/`), declared for the
 # library's own tests and never enabled by any kernel build: each reverts one
 # decision to the form this kernel really had, so the host model that refuses
-# it is shown able to red at all. `src/ci.rs`'s `CONTROLS` runs each and
-# demands the named test's own FAILED line; `src/build.rs`'s
+# it is shown able to red at all. `build/ci.rs`'s `CONTROLS` runs each and
+# demands the named test's own FAILED line; `build/build.rs`'s
 # `every_model_control_is_run` reds on a control declared with no row behind
 # it.
 #

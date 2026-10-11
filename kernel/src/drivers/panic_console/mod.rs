@@ -945,7 +945,7 @@ static PIXELS: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static TICKS_MAX: AtomicU64 = AtomicU64::new(0);
 
-/// The head `src/bootlog.rs` reads the census by.
+/// The head `build/bootlog.rs` reads the census by.
 const CENSUS: &str = "panel: paints=";
 
 /// The panel's line of `crate::census`.
@@ -1120,7 +1120,7 @@ fn mapped(fb: &Fb) -> bool {
     mm::paging::present_in_current_tables(base) && mm::paging::present_in_current_tables(last)
 }
 
-/// `pixel_format` is 0 for RGB, 1 for BGR (`bootloader/src/main.rs`).
+/// `pixel_format` is 0 for RGB, 1 for BGR (`loader/src/main.rs`).
 fn rgb(fb: &Fb, r: u32, g: u32, b: u32) -> u32 {
     if fb.format == 0 {
         r | (g << 8) | (b << 16)

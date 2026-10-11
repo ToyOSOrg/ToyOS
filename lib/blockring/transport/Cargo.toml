@@ -16,7 +16,7 @@ publish = false
 
 [features]
 # Declared, never enabled by any build that ships: each reverts one decision so
-# the model that refuses it is shown able to red at all. `src/ci.rs`'s
+# the model that refuses it is shown able to red at all. `build/ci.rs`'s
 # `CONTROLS` runs each and demands the named test's own FAILED line.
 #
 # A producer publishes its tail `Relaxed`, so a consumer can see the index

@@ -226,7 +226,7 @@ pub const UNTIMED: &str = "--.---";
 /// - `<wall>` is the wall clock, which only `/log` carries;
 /// - the time is seconds since the CPU's counter last started — power-on, or
 ///   the reset since — read at the rate the machine states or measured
-///   (`bootloader/src/stamp.rs`, `kernel/src/clock.rs`), its seconds right
+///   (`loader/src/stamp.rs`, `kernel/src/clock.rs`), its seconds right
 ///   aligned in two columns; [`UNTIMED`] where no rate was known yet;
 /// - `cpu<n>` where the sayer knows its CPU;
 /// - the severity's [`word`](Severity::word) above `Info`, the thread where it

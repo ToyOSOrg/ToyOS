@@ -65,7 +65,7 @@ const MAGIC: u32 = 0x5041_4E43;
 const HEADER: usize = 40;
 
 /// What a record says it belongs to: the log partition's GPT signature, which
-/// `src/image.rs` mints fresh for every image it builds.
+/// `build/image.rs` mints fresh for every image it builds.
 ///
 /// **A record outlives more than the boot that wrote it.** The page is DRAM at
 /// a fixed address and nothing between two operating systems clears it: on the

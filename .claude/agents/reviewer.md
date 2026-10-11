@@ -54,8 +54,8 @@ if it meets the bar above; otherwise it is a NOTE.
   cleanest path, a general and widely used crate the pull request says why it takes; no new
   fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
-  architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in
-  `src/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
+  architecture's own module; `target_arch` only there, in its selector, in `build/arch.rs` and in
+  `build/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
   `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
   `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
@@ -83,12 +83,12 @@ if it meets the bar above; otherwise it is a NOTE.
   that corpus and its `LICENSE`.
 - **What no gate reads.** A BLOCKER each: a workspace member's `Cargo.toml` declaring `[profile]`
   or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
-  saying what it is; a new cargo feature or `cfg` arm of one, or an arm a changed `src/clippy.rs`
-  shape stops building, that no shape in `src/clippy.rs` lints; an `issues/` file added, changed
+  saying what it is; a new cargo feature or `cfg` arm of one, or an arm a changed `build/clippy.rs`
+  shape stops building, that no shape in `build/clippy.rs` lints; an `issues/` file added, changed
   or deleted against `issues/README.md`.
 - **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. No workflow uses the
   combined `actions/cache`, which saves too. The host cache has one writer, nightly's `host`,
-  and one reader, ci.yml's `host`, on the same `runs-on`, both caching `src/cicache.rs`'s
+  and one reader, ci.yml's `host`, on the same `runs-on`, both caching `build/cicache.rs`'s
   `PATHS` with its `DRIVER` as their `CARGO_TARGET_DIR` and `line-tables-only` as their
   `CARGO_PROFILE_DEV_DEBUG`, the two variables an `env:` gives either: an `ImageOS` or
   `ImageVersion` set there outlives an image move. The reader's `restore-keys` is the writer's `key` up to its

@@ -227,7 +227,7 @@ unsafe extern "C" fn refused_mmu_on_at_entry() -> ! {
 
 /// Where a CPU entered at EL2 halts when `HCR_EL2` reads back anything but the
 /// declaration the entry wrote: `E2H` held set, which the loader refuses by
-/// name first (`bootloader/src/arch/aarch64.rs`), or any other bit. There the
+/// name first (`loader/src/arch/aarch64.rs`), or any other bit. There the
 /// registers the drop programs are not the ones the declaration names, so the
 /// kernel does not run. Nothing can report yet: the console is found
 /// after the drop, so the refusal is this symbol, which the halted PC names.

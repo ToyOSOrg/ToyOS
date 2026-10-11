@@ -500,7 +500,7 @@ unsafe extern "C" fn toyos_sound_is_playing(handle: i32) -> bool {
 
 // ── Music ──
 
-// A General MIDI SoundFont. The image ships one — `src/soundfont.rs` cuts
+// A General MIDI SoundFont. The image ships one — `build/soundfont.rs` cuts
 // GeneralUser GS down to the instruments this WAD's MUS lumps select — and the
 // name is the role rather than that bank, so a build carrying another one plays
 // through it unchanged. `toyos_music_init` says which it opened and says so

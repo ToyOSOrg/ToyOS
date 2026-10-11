@@ -3,7 +3,7 @@
 # every decision a signed image, a slot and its record make, so the loader and
 # the updater cannot read one format two ways; and a signed package
 # repository's format and every decision its client makes, which the publisher
-# (`src/publish.rs`) reads its own output back through.
+# (`build/publish.rs`) reads its own output back through.
 
 [package]
 name = "toyos-update"

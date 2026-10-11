@@ -1,4 +1,4 @@
-//! An icon the build drew (`src/icons.rs`), in one colour, and its blit.
+//! An icon the build drew (`build/icons.rs`), in one colour, and its blit.
 
 use window::{Color, Framebuffer};
 

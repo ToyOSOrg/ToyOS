@@ -163,7 +163,7 @@ pub struct Session {
 impl Session {
     pub fn start() -> Self {
         // Every one of these is a statement about the manifest the image was
-        // built from, which `src/build.rs` checked before the image was
+        // built from, which `build/build.rs` checked before the image was
         // written — so `expect` is right here where `services::listen`'s was
         // not. There is no other process to have taken the name and no name to
         // take.

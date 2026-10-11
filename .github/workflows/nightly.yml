@@ -1,6 +1,6 @@
 name: nightly
 
-# Every job's logic is `cargo run -- --ci <job>` (src/ci.rs); this file says
+# Every job's logic is `cargo run -- --ci <job>` (build/ci.rs); this file says
 # where each one runs.
 
 on:
@@ -17,13 +17,13 @@ permissions:
 
 jobs:
   # The host cache's writer restores nothing, and `seal` is green only once
-  # src/cicache.rs has sealed the tree the save stores.
+  # build/cicache.rs has sealed the tree the save stores.
   host:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       # The driver's own target, and no step's: it says this job carries the
-      # host cache (src/cicache.rs).
+      # host cache (build/cicache.rs).
       CARGO_TARGET_DIR: target/ci-driver
       # The driver's and every step's: a backtrace in a log reads line tables,
       # and nothing reads the rest of the debuginfo, of which a Linux link
@@ -125,7 +125,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo run -- --build-only
       # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
-      # The driver ends a cargo that goes silent and names it (src/ci.rs's
+      # The driver ends a cargo that goes silent and names it (build/ci.rs's
       # `heard`); this is for a step that hangs while it talks, and is the
       # limit `host` above runs under.
       - timeout-minutes: 90

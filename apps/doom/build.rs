@@ -36,7 +36,7 @@ fn main() {
     // The C compiler, archiver and sysroot are the toolchain's own clang, its
     // `llvm-ar` and libc's C sysroot, which the build system names in `cc`'s
     // `CC_<target>`, `AR_<target>` and `CFLAGS_<target>` for every userland
-    // build (`src/build.rs`), as it would for any crate that compiles C.
+    // build (`build/build.rs`), as it would for any crate that compiles C.
     let suffix = std::env::var("TARGET").expect("cargo names the target").replace('-', "_");
     let tool = |name: &str| {
         let var = format!("{name}_{suffix}");
@@ -149,7 +149,7 @@ fn main() {
 
     build.compile("doomgeneric");
     // The C library doomgeneric calls, which the sysroot carries beside std
-    // (`src/libc.rs`): the driver names it, as `cc` names libc for any C
+    // (`build/libc.rs`): the driver names it, as `cc` names libc for any C
     // program, and the linker is given no rule of its own for finding it.
     println!("cargo:rustc-link-lib=static=toyos_c");
 

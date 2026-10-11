@@ -20,7 +20,7 @@ license = "MIT OR Apache-2.0"
 
 [features]
 # Declared, never enabled by any build that ships: each reverts one decision so
-# the model that refuses it is shown able to red at all. `src/ci.rs`'s
+# the model that refuses it is shown able to red at all. `build/ci.rs`'s
 # `CONTROLS` runs each and demands the named test's own FAILED line.
 #
 # `Client::session_ended` forgets the requests that were on the wire instead of

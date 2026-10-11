@@ -308,7 +308,7 @@ toyos-abi = { path = "../../sdk/abi" }
 # and the schedule exploration is loom's own. The optimisation comes from the
 # root workspace's `[profile.dev] opt-level = 2` (the `test` profile inherits
 # it; a member's own `[profile]` table is ignored by cargo and refused by
-# `src/hostws.rs`) — so lowering the root's opt-level does not slow these
+# `build/hostws.rs`) — so lowering the root's opt-level does not slow these
 # models, it overflows their stacks.
 
 [lib]

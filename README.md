@@ -228,7 +228,7 @@ clone needs one, and so does every toolchain change. And that bootstrap builds
 LLVM and clang from source with CMake, whenever the LLVM commit
 `rust/` names has not been built on the machine before.
 
-Nothing in the OS goes near any of them. `bootloader/`, `kernel/`, `system/`,
+Nothing in the OS goes near any of them. `loader/`, `kernel/`, `system/`,
 `apps/` and `tests/guest/` all link with the toolchain's `rust-lld`, and no image contains a C
 toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
 Line Tools, and CMake comes from Homebrew (`brew install cmake`); on Debian and

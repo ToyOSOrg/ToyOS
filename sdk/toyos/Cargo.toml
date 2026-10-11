@@ -1,6 +1,6 @@
 [package]
 name = "toyos"
-version = "0.18.0" # never bumped; crates.io's is assigned on publish (src/sdkversion.rs)
+version = "0.18.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, surfaces and net."

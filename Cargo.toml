@@ -6,7 +6,7 @@
 # `cargo` builds, so a member's features never reach the kernel's or the
 # loader's build.
 #
-# `src/hostws.rs` reds on a `Cargo.toml` in this tree that is neither a member
+# `build/hostws.rs` reds on a `Cargo.toml` in this tree that is neither a member
 # nor excluded below with a reason, and says which members a host tests:
 # `cargo run -- --ci host` runs every one of those.
 #
@@ -22,7 +22,7 @@ members = [
     "apps/paint",
     "apps/snake",
     "apps/toyfetch",
-    "bootloader",
+    "build/ssh",
     "kernel",
     "kernel/cpuvuln",
     "kernel/dma",
@@ -74,6 +74,7 @@ members = [
     "lib/wallclock",
     "lib/xhci",
     "lib/xhci/sim",
+    "loader",
     "sdk/abi",
     "sdk/filepicker",
     "sdk/font",
@@ -126,11 +127,10 @@ members = [
     "tests/guest/proctest",
     "tests/guest/test-runner",
     "tests/metal",
-    "toyos-ssh",
 ]
 default-members = ["."]
 # Everything that keeps its own resolution. Each is excluded for a reason, and
-# `src/hostws.rs` holds this list against the tree — an entry that stops naming
+# `build/hostws.rs` holds this list against the tree — an entry that stops naming
 # a directory with a `Cargo.toml` under it is a red, so a stale excuse cannot
 # outlive what it excused.
 exclude = [
@@ -139,9 +139,9 @@ exclude = [
     "rust",
     # The C library, built into a sysroot with `--release` and its own
     # `panic = "abort"` profile, which cargo ignores in a member; its lock is one
-    # of the sysroot key's inputs (`src/sysroot.rs`).
+    # of the sysroot key's inputs (`build/sysroot.rs`).
     "sdk/libc",
-    # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
+    # Guest programs `build/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory but `tls-multi-crate/dep`, its parent's dependency: the
     # first patches memmap2 and `tls-cranelift` target-lexicon, and a `[patch]`
     # is the whole workspace's. Named, and not `tests/` whole, so the gate finds
@@ -160,9 +160,24 @@ description = "The build system: toolchain, kernel, bootloader, userland and ima
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-# `src/bin/toyos-flash.rs` is a binary of this package too, so a bare `cargo run`
-# would otherwise be ambiguous — and that command is the dev loop.
+# `toyos-flash` and `imgstat` are binaries of this package too, so a bare
+# `cargo run` would otherwise be ambiguous — and that command is the dev loop.
 default-run = "toyos-build"
+
+[lib]
+path = "build/lib.rs"
+
+[[bin]]
+name = "toyos-build"
+path = "build/main.rs"
+
+[[bin]]
+name = "toyos-flash"
+path = "build/bin/toyos-flash.rs"
+
+[[bin]]
+name = "imgstat"
+path = "build/bin/imgstat.rs"
 
 [dependencies]
 fontdue = "0.9"
@@ -198,7 +213,7 @@ toyos-tco = { path = "lib/tco" }
 # every test here; `--ci host` holds the host tests to leaving nothing behind.
 toyos-tmpdir = { path = "lib/tmpdir" }
 toyos-blackbox = { path = "lib/blackbox" }
-# The signed image, the slot table and the signer: `src/signing.rs` signs with
+# The signed image, the slot table and the signer: `build/signing.rs` signs with
 # the same crate the loader and `/system/bin/update` verify with.
 toyos-update = { path = "lib/update", features = ["sign"] }
 # A throwaway key's seed and every GUID a partition table names, from the
@@ -209,7 +224,7 @@ getrandom = "0.3"
 libm = "0.2.16"
 # The one `openssh-key-v1` reader and writer, shared with the SSH server's
 # host key, and the `SHA256:` fingerprint the owner's key is named by.
-toyos-ssh = { path = "toyos-ssh" }
+toyos-ssh = { path = "build/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
@@ -217,7 +232,7 @@ toyos-wallclock = { path = "lib/wallclock" }
 # store key, a ROOT's name, a release asset's digest, and the harness's of a
 # body a guest fetches over TLS.
 toyos-sha2-hw = { path = "lib/sha2-hw" }
-# The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
+# The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
@@ -232,9 +247,9 @@ webpki-root-certs = "1"
 pem = "4"
 
 [dev-dependencies]
-# The FAT implementation `src/fatformat.rs` is judged against, byte for byte.
+# The FAT implementation `build/fatformat.rs` is judged against, byte for byte.
 fatfs = "0.3.6"
-# The GPT writer `src/gptwrite.rs` is judged against, byte for byte.
+# The GPT writer `build/gptwrite.rs` is judged against, byte for byte.
 gpt = "3.1.0"
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
@@ -328,7 +343,7 @@ opt-level = 2
 # `LogRecord`s passing through them; at `opt-level = 0` the per-temporary copies
 # overflow one before the first assertion. Lowering the number here does not
 # make those models slower, it stops them running. A member's own `[profile]`
-# table cannot rescue it: cargo ignores one in a member, and `src/hostws.rs`
+# table cannot rescue it: cargo ignores one in a member, and `build/hostws.rs`
 # reds on it.
 [profile.dev]
 opt-level = 2

@@ -2,11 +2,11 @@
 # started by hand (`detach /system/bin/sshserver`, so it outlives the shell) on a
 # machine that wants remote access: it listens on every interface, so carrying
 # it in every boot is a listening port nobody asked for.
-# `src/build.rs`'s `no_shipped_boot_config_starts_sshserver` is the gate.
+# `build/build.rs`'s `no_shipped_boot_config_starts_sshserver` is the gate.
 
 # `assets/soundfont.sf2` is in here and is doom's music: GeneralUser GS cut down
 # to the 37 melodic programs and 23 percussion keys `assets/DOOM1.WAD`'s own MUS
-# headers select, by `src/soundfont.rs`. `NOTICE` carries its licence, the
+# headers select, by `build/soundfont.rs`. `NOTICE` carries its licence, the
 # provenance caveat that comes with it, and the zero-byte OPL3 path that may one
 # day delete it.
 assets = ["assets"]
@@ -104,7 +104,7 @@ starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "pai
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netstack
+# refuses it to any other program (`build/build.rs`). `ssh <machine> swap netstack
 # <sha256> <length> < netstack` runs it for a login.
 [programs.swap]
 receives = ["swap"]
@@ -147,7 +147,7 @@ syscap = ["trace"]
 
 # The file picker, and the consent server: `consent` is the supervisor's
 # question before a package's launch, which no row receives, and `prompt` the
-# layer it asks it in, which no other row may hold (`src/build.rs`).
+# layer it asks it in, which no other row may hold (`build/build.rs`).
 [programs.filepicker]
 service = true
 serves = ["filepicker", "consent"]

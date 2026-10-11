@@ -3086,7 +3086,7 @@ mod tests {
             admit(&write("moved-log.img", &moved), &t),
             Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
         );
-        // And the shape `src/image.rs` writes, which is the one admitted.
+        // And the shape `build/image.rs` writes, which is the one admitted.
         let built = disk(&[("esp", esp), ("root", root), ("log", basic)]);
         let ok = admit(&write("built.img", &built), &t).expect("the built shape is admitted");
         assert_eq!((ok.esp.index, ok.log.index), (1, 3));

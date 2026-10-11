@@ -58,7 +58,7 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
     }
 }
 
-/// The head the tail is sealed under, read back by `src/bootlog.rs`.
+/// The head the tail is sealed under, read back by `build/bootlog.rs`.
 const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 
 /// Seal the stop's own records onto the black box, the one channel a boot's

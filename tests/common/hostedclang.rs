@@ -1,4 +1,4 @@
-//! clang and LLD built for ToyOS (`src/hostedclang.rs`), run inside a guest:
+//! clang and LLD built for ToyOS (`build/hostedclang.rs`), run inside a guest:
 //! M2 of `issues/toyos-builds-itself.md`.
 //!
 //! The binaries, clang's resource headers and the C sysroot's headers and
