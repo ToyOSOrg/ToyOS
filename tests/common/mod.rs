@@ -7,6 +7,7 @@ pub mod compile;
 /// The device boot: what `tests/metaldevicecase` measures.
 pub mod devices;
 pub mod faults;
+pub mod hostedclang;
 /// The HTTPS server a guest's client fetches from.
 pub mod https;
 pub mod iommu;

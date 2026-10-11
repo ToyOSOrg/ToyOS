@@ -193,6 +193,9 @@ const RUST_SKIP: &[&str] = &[
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
+    // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
+    // `hosted_clang_hello` runs it on tests/hostedclangcase.
+    "hosted_clang_hello",
     // It claims the NVMe controller a boot off that disk starts no server
     // for, and reads the inventory: `block_grants_reach_their_partitions`
     // runs it on tests/blockgrantcase.
@@ -420,6 +423,10 @@ const MACHINE_TESTS: &[&str] = &[
     // reads it have no host build, and the T14 boots from a stick beside an
     // NVMe disk that is another system's.
     "nvme_disk_keeps_log_and_home",
+    // clang and LLD built for ToyOS, compiling and linking inside it: the
+    // claim is that they run on ToyOS, which no host test can make, and the
+    // T14 would read nothing a guest does not. On demand: [`ON_DEMAND`].
+    "hosted_clang_hello",
     // A badge the kernel stamps on a connection to diskserver, judged by
     // diskserver on the disk it drives: the grant's decisions are host-tested
     // in diskserver and toyos-blockring, but whether the badge diskserver
@@ -3916,6 +3923,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
@@ -6747,9 +6755,15 @@ fn build_tasks(
     machine.chain(screen).collect()
 }
 
-/// Whether a run takes `name`: it has no filter, or one that matches it.
+/// Machine tests a run boots only when a filter names them, so no unfiltered
+/// run, CI's included, boots one: each needs a product only
+/// `cargo run -- --hosted-clang` builds, which no CI job holds.
+const ON_DEMAND: &[&str] = &["hosted_clang_hello"];
+
+/// Whether a run takes `name`: a filter matches it, or there is none and it is
+/// not [`ON_DEMAND`].
 fn kept(filters: &[&str], name: &str) -> bool {
-    filters.is_empty() || filters.iter().any(|f| name.contains(f))
+    filters.iter().any(|f| name.contains(f)) || (filters.is_empty() && !ON_DEMAND.contains(&name))
 }
 
 /// The machine tests and the screen tests a run boots.

@@ -2954,6 +2954,7 @@ mod tests {
         "tests/acpicase/system.toml",
         "tests/blockgrantcase/system.toml",
         "tests/consentcase/system.toml",
+        "tests/hostedclangcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/logstallcase/system.toml",

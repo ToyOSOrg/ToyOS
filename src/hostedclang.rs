@@ -5,7 +5,8 @@
 //! host makes both
 //! (`issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`).
 //!
-//! **Made only when asked for** (`cargo run -- --hosted-clang`): its build is
+//! **Made only when asked for**, by `cargo run -- --hosted-clang` and by the
+//! guest test that runs it (`tests/common/hostedclang.rs`): its build is
 //! LLVM's, and its key moves with every sysroot's, so no other build makes it.
 //!
 //! **A function of its key** ([`key_of`]): the host LLVM's key, which names the
@@ -97,12 +98,7 @@ pub struct HostedClang {
 /// `cargo run -- --hosted-clang`: make this tree's, and name each binary with
 /// its size.
 pub fn dispatch(root: &Path) {
-    let mut lock = crate::buildlock::shared(root, "the ToyOS-hosted clang");
-    let sysroot = crate::toolchain::ensure(root, &mut lock);
-    let fork = crate::sysroot::fork_checkout(root, &mut lock);
-    let store = keystore::host();
-    let llvm = crate::llvm::resolve_held(root, &store, &fork, &mut lock);
-    let hosted = resolve(&store, &fork, &llvm.dir, sysroot.dir(), &crate::n2::ninja(root));
+    let hosted = ensure(root);
     for (_, kept) in BINARIES {
         let binary = hosted.dir.join("bin").join(kept);
         let size = fs::metadata(&binary).unwrap_or_else(|e| panic!("stat {}: {e}", binary.display())).len();
@@ -110,10 +106,20 @@ pub fn dispatch(root: &Path) {
     }
 }
 
+/// This tree's, made if nobody on this host has made it.
+pub fn ensure(root: &Path) -> HostedClang {
+    let mut lock = crate::buildlock::shared(root, "the ToyOS-hosted clang");
+    let sysroot = crate::toolchain::ensure(root, &mut lock);
+    let fork = crate::sysroot::fork_checkout(root, &mut lock);
+    let store = keystore::host();
+    let llvm = crate::llvm::resolve_held(root, &store, &fork, &mut lock);
+    resolve(&store, &fork, &llvm.dir, sysroot.dir(), &crate::n2::ninja(root))
+}
+
 /// The product of the LLVM at `llvm`, the one the fork `fork` names, and the
 /// sysroot at `sysroot`, both held in use in `store`: made if nobody on this
 /// host has made it, under `ninja`.
-pub fn resolve(store: &Path, fork: &Path, llvm: &Path, sysroot: &Path, ninja: &Path) -> HostedClang {
+fn resolve(store: &Path, fork: &Path, llvm: &Path, sysroot: &Path, ninja: &Path) -> HostedClang {
     let key = key_of(&stored(llvm), &stored(sysroot), &options());
     let dir = Keyed::HostedClang.store(store).join(&key);
     let make = || place(fork, llvm, sysroot, ninja, &key, &dir);

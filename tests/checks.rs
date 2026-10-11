@@ -780,9 +780,10 @@ mod checks {
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let every: BTreeSet<String> = declared().map(String::from).collect();
-        let cases: [(&[&str], _); 6] = [
+        let every: BTreeSet<String> = declared().filter(|n| *n != "hosted_clang_hello").map(String::from).collect();
+        let cases: [(&[&str], _); 7] = [
             (&[], every),
+            (&["hosted_clang_hello"], names(&["hosted_clang_hello"])),
             (&["virt_el2"], names(&["virt_el2_drop"])),
             (&["el2_drop"], names(&["virt_el2_drop"])),
             (&["nested_nmi"], names(&["nested_nmi_is_loud"])),
