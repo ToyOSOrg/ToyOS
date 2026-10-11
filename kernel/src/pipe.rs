@@ -184,6 +184,7 @@ fn with_pipes<R>(f: impl FnOnce(&IdMap<PipeId, Pipe>) -> R) -> R {
     let guard = PIPES.lock();
     let t1 = soft::now();
     soft::add(Counter::PipeLockSpinCycles, t1.wrapping_sub(t0));
+    soft::add(Counter::PipeLockTakes, 1);
     let r = f(guard.as_ref().expect("pipes not initialized"));
     soft::since(Counter::PipeLockHoldCycles, t1);
     r
@@ -196,6 +197,7 @@ fn with_pipes_mut<R>(f: impl FnOnce(&mut IdMap<PipeId, Pipe>) -> R) -> R {
     let mut guard = PIPES.lock();
     let t1 = soft::now();
     soft::add(Counter::PipeLockSpinCycles, t1.wrapping_sub(t0));
+    soft::add(Counter::PipeLockTakes, 1);
     let r = f(guard.as_mut().expect("pipes not initialized"));
     soft::since(Counter::PipeLockHoldCycles, t1);
     r
@@ -235,7 +237,12 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
                 .as_mut()
                 .expect("available() > 0 implies a ring")
                 .ring
-                .read(len, |off, src| buf.write_run(off, &src));
+                .read(len, |off, src| {
+                    let t = crate::counters::soft::now();
+                    let r = buf.write_run(off, &src);
+                    crate::counters::soft::since(toyos_abi::counters::Counter::PipeReadCopyCycles, t);
+                    r
+                });
             crate::counters::soft::add(toyos_abi::counters::Counter::PipeCopyBytes, n as u64);
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
@@ -270,7 +277,12 @@ pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
             return Some(PipeWrite::NoMemory);
         };
         if backing.ring.space() > 0 {
-            let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
+            let n = backing.ring.write(buf.len(), |off, mut dst| {
+                let t = crate::counters::soft::now();
+                let r = buf.read_run(off, &mut dst);
+                crate::counters::soft::since(toyos_abi::counters::Counter::PipeWriteCopyCycles, t);
+                r
+            });
             crate::counters::soft::add(toyos_abi::counters::Counter::PipeCopyBytes, n as u64);
             Some(PipeWrite::Wrote(n))
         } else {

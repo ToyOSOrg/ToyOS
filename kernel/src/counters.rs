@@ -133,7 +133,10 @@ fn sample(me: usize) -> [u64; WORDS] {
             | Counter::InboxRearms
             | Counter::PipeLockSpinCycles
             | Counter::PipeLockHoldCycles
-            | Counter::PipeCopyBytes => Some(soft::get(me, counter)),
+            | Counter::PipeCopyBytes
+            | Counter::PipeLockTakes
+            | Counter::PipeReadCopyCycles
+            | Counter::PipeWriteCopyCycles => Some(soft::get(me, counter)),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;

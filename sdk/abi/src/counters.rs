@@ -73,10 +73,16 @@ pub enum Counter {
     PipeLockHoldCycles,
     /// Bytes pipe reads and writes copied.
     PipeCopyBytes,
+    /// Takes of the pipe table's lock.
+    PipeLockTakes,
+    /// Stamp ticks of a pipe read's copy out of the ring, under the lock.
+    PipeReadCopyCycles,
+    /// Stamp ticks of a pipe write's copy into the ring, under the lock.
+    PipeWriteCopyCycles,
 }
 
 impl Counter {
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 24;
     pub const ALL: [Counter; Self::COUNT] = [
         Self::Stamp,
         Self::Smi,
@@ -99,6 +105,9 @@ impl Counter {
         Self::PipeLockSpinCycles,
         Self::PipeLockHoldCycles,
         Self::PipeCopyBytes,
+        Self::PipeLockTakes,
+        Self::PipeReadCopyCycles,
+        Self::PipeWriteCopyCycles,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -124,6 +133,9 @@ impl Counter {
             Self::PipeLockSpinCycles => "pipe_lock_spin_cycles",
             Self::PipeLockHoldCycles => "pipe_lock_hold_cycles",
             Self::PipeCopyBytes => "pipe_copy_bytes",
+            Self::PipeLockTakes => "pipe_lock_takes",
+            Self::PipeReadCopyCycles => "pipe_read_copy_cycles",
+            Self::PipeWriteCopyCycles => "pipe_write_copy_cycles",
         }
     }
 
@@ -147,7 +159,10 @@ impl Counter {
             | Self::InboxRearms
             | Self::PipeLockSpinCycles
             | Self::PipeLockHoldCycles
-            | Self::PipeCopyBytes => Rights::COUNTERS.union(Rights::TRACE),
+            | Self::PipeCopyBytes
+            | Self::PipeLockTakes
+            | Self::PipeReadCopyCycles
+            | Self::PipeWriteCopyCycles => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }

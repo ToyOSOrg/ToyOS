@@ -58,7 +58,7 @@ const PROBES: usize = 5;
 /// cadence's `K` netstack is told before it: a palindrome, so drift across the
 /// boot weighs every `K` alike. A netstack with no cadence refuses the word, and
 /// the label is then the run's place in the order.
-const K_ORDER: [u32; 6] = [8, 16, 32, 32, 16, 8];
+const K_ORDER: [u32; 6] = [32; 6];
 
 /// MEASUREMENT ONLY: the word that sets netstack's `K`: `K=` and the value.
 fn set_k(k: u32) {
