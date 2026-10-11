@@ -11,9 +11,11 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use super::{apic, cpu};
 
 /// The architectural performance-monitoring MSRs this file writes, SDM Vol. 3B
-/// §20.2.2 and Vol. 4 Table 2-2. Nothing else in this kernel programs the PMU,
+/// §20.2.2 and Vol. 4 Table 2-2. Nothing else in this kernel programs the PMU
+/// but the measurement's `arch::counters`, whose enables [`measure`] records,
 /// which is why each control register below is declared whole and written
-/// whole rather than read, modified and written back.
+/// whole, the measurement's bits with it, rather than read, modified and
+/// written back.
 const IA32_FIXED_CTR2: u32 = 0x30B;
 const IA32_FIXED_CTR_CTRL: u32 = 0x38D;
 const IA32_PERF_GLOBAL_STATUS: u32 = 0x38E;
