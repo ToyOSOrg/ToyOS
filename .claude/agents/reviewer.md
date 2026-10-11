@@ -96,7 +96,7 @@ if it meets the bar above; otherwise it is a NOTE.
   `cargo run -- --ci <job>`, `seal` in the writer and `host` in the reader, and nothing else;
   the reader restores before that step, and the writer saves after it. The save's guard,
   `github.ref == 'refs/heads/main'`, is the only step-level `if:` in those jobs; ci.yml's `host`
-  skips only a draft, and nightly's `host` has no `if:` of its own, a skipped job being a green
+  skips only a `pull_request` run, and nightly's `host` has no `if:` of its own, a skipped job being a green
   check. No `continue-on-error`, `shell:`, `defaults:` or cargo `runner` reaches them.
   nightly.yml's `on:` is one daily `schedule` and `workflow_dispatch`.
 - **Workflows.** A BLOCKER each:
@@ -104,7 +104,7 @@ if it meets the bar above; otherwise it is a NOTE.
   - `nightly.yml`'s `release` is the only job granted `contents: write`.
   - No workflow runs on `pull_request_target`, `workflow_run`, `issue_comment` or any other trigger that runs code other than main's on main's ref.
   - No workflow or job declares `cache-mode: write` or `write-only`.
-  - `guest / suite` has no job-level `if:`, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
+  - `guest / suite`'s one job-level `if:` skips a `pull_request` run, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
   - A job that saves a cache entry runs only `cargo run -- --ci <job>`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...<head>`), production and tests apart. Production code that
