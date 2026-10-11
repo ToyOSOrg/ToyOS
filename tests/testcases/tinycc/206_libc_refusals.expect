@@ -14,7 +14,6 @@ getrlimit: -1, ENOSYS
 setrlimit: -1, ENOSYS
 msync: -1, ENOSYS
 mprotect: -1, ENOSYS
-realpath: -1, ENOSYS
 utimes: -1, ENOSYS
 wait: -1, ECHILD
 wait4: -1, ECHILD

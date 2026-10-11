@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use core::ops::{Deref, DerefMut};
-use toyos_abi::syscall::{FileType, SyscallError};
+use toyos_abi::syscall::{FileType, SyscallError, MAX_LINKS, MAX_PATH};
 use crate::file_cache::{self, FileId};
 use crate::object::ops::Stat;
 use crate::sync::{Lock, LockGuard};
@@ -162,9 +162,6 @@ pub struct Vfs {
     /// Every mounted directory's node, by absolute path.
     dirs: Directories,
 }
-
-/// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
-pub const MAX_PATH: usize = 4096;
 
 /// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
@@ -454,10 +451,10 @@ impl Vfs {
     }
 
     /// The mount and the path under it that the absolute `path` names once
-    /// every symlink it ends in is followed, ten at most.
+    /// every symlink it ends in is followed, [`MAX_LINKS`] at most.
     fn followed(&mut self, path: &str) -> Result<(String, String), SyscallError> {
         let (mut mount, mut file) = self.resolve_path("/", path);
-        for _ in 0..=10 {
+        for _ in 0..=MAX_LINKS {
             let link = match self.resolve_fs(&mount, &file) {
                 Some((fs, fs_path)) if !file.is_empty() => fs.read_link(&fs_path)?,
                 _ => None,

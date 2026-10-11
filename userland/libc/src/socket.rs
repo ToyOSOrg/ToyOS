@@ -7,7 +7,7 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
 
-use crate::errno::{
+use crate::errcode::{
     EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT,
     ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
 };

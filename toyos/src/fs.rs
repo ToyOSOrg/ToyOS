@@ -48,7 +48,7 @@ pub const CAPABILITY_PREFIX: &str = "fs:";
 pub const WINDOW_BYTES: usize = 2 << 20;
 
 /// The longest path either end puts on the wire.
-pub const MAX_PATH: usize = 4096;
+pub use toyos_abi::syscall::MAX_PATH;
 
 /// The largest offset a file has, on every server: a page index that fits a
 /// `u32`. A seek past it is refused where the offset is kept, and a write or a
