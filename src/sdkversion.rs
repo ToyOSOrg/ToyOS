@@ -21,12 +21,12 @@ pub struct Crate {
 
 /// The published crates, in the order a publisher must take them.
 pub const PUBLISHED: &[Crate] = &[
-    Crate { name: "toyos-abi", dir: "toyos-abi" },
-    Crate { name: "toyos-keymap", dir: "toyos-keymap" },
-    Crate { name: "toyos-font", dir: "userland/toyos-font" },
-    Crate { name: "toyos", dir: "toyos" },
-    Crate { name: "toyos-window", dir: "userland/toyos-window" },
-    Crate { name: "toyos-osrelease", dir: "toyos-osrelease" },
+    Crate { name: "toyos-abi", dir: "sdk/abi" },
+    Crate { name: "toyos-keymap", dir: "sdk/keymap" },
+    Crate { name: "toyos-font", dir: "sdk/font" },
+    Crate { name: "toyos", dir: "sdk/toyos" },
+    Crate { name: "toyos-window", dir: "sdk/window" },
+    Crate { name: "toyos-osrelease", dir: "sdk/osrelease" },
 ];
 
 /// One crate at this tree: the version crates.io has or is owed, whether it is
@@ -148,10 +148,10 @@ mod tests {
     use toyos_tmpdir::TempDir;
 
     const TWO: &[Crate] =
-        &[Crate { name: "toyos-abi", dir: "toyos-abi" }, Crate { name: "toyos", dir: "toyos" }];
+        &[Crate { name: "toyos-abi", dir: "sdk/abi" }, Crate { name: "toyos", dir: "sdk/toyos" }];
     const ABI: &str = "[package]\nname = \"toyos-abi\"\n";
     const TOYOS: &str =
-        "[package]\nname = \"toyos\"\n\n[dependencies]\ntoyos-abi = { path = \"../toyos-abi\" }\n";
+        "[package]\nname = \"toyos\"\n\n[dependencies]\ntoyos-abi = { path = \"../abi\" }\n";
 
     fn index_of(lines: &[(&str, bool)]) -> String {
         lines.iter().map(|(v, yanked)| format!("{{\"vers\":\"{v}\",\"yanked\":{yanked}}}\n")).collect()
@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn a_key_moves_with_the_crate_and_its_published_dependencies() {
         let (_dir, _origin, wt) = repo("sdk-keys");
-        commit(&wt, "toyos-abi/Cargo.toml", ABI, "abi");
-        commit(&wt, "toyos/Cargo.toml", TOYOS, "sdk");
+        commit(&wt, "sdk/abi/Cargo.toml", ABI, "abi");
+        commit(&wt, "sdk/toyos/Cargo.toml", TOYOS, "sdk");
         let now = || -> Vec<String> {
             let plan = plan_of(TWO, |k| source(&wt, k), |_| Ok(String::new())).unwrap();
             plan.into_iter().map(|r| r.key).collect()
@@ -189,10 +189,10 @@ mod tests {
         let base = now();
         commit(&wt, "kernel/src/lib.rs", "// work\n", "elsewhere");
         assert_eq!(now(), base);
-        commit(&wt, "toyos/src/lib.rs", "pub struct T;\n", "sdk source");
+        commit(&wt, "sdk/toyos/src/lib.rs", "pub struct T;\n", "sdk source");
         let sdk = now();
         assert!(sdk[0] == base[0] && sdk[1] != base[1], "{sdk:?} against {base:?}");
-        commit(&wt, "toyos-abi/tests/a.rs", "#[test]\nfn a() {}\n", "abi test");
+        commit(&wt, "sdk/abi/tests/a.rs", "#[test]\nfn a() {}\n", "abi test");
         let abi = now();
         assert!(abi[0] != sdk[0] && abi[1] != sdk[1], "{abi:?} against {sdk:?}");
     }

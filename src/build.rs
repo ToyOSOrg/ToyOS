@@ -2908,8 +2908,8 @@ mod tests {
                 every_program.insert(name);
             }
         }
-        let handle = root.join("toyos-abi/src/handle.rs");
-        let source = fs::read_to_string(&handle).expect("toyos-abi/src/handle.rs");
+        let handle = root.join("sdk/abi/src/handle.rs");
+        let source = fs::read_to_string(&handle).expect("sdk/abi/src/handle.rs");
         // Only a backticked token that is a program name somewhere is a holder
         // claim: `SYS_LOG_READ` and `/log` are in the same block and are not.
         let named: BTreeSet<String> = doc_block(&source, "pub const LOG: Rights")

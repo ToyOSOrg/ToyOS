@@ -7,13 +7,13 @@ description = "Client library for ToyOS windows: create one, draw into it, read 
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [dependencies]
-toyos-font = { path = "../toyos-font" }
-toyos-abi = { path = "../../toyos-abi" }
-toyos-keymap = { path = "../../toyos-keymap" }
-toyos = { path = "../../toyos" }
+toyos-font = { path = "../font" }
+toyos-abi = { path = "../abi" }
+toyos-keymap = { path = "../keymap" }
+toyos = { path = "../toyos" }
 
 # `window` is taken on crates.io, so the package is `toyos-window`; the lib
-# target keeps the name every caller spells, `toyos/src`'s citations included.
+# target keeps the name every caller spells, `sdk/toyos/src`'s citations included.
 [lib]
 name = "window"
 doctest = false

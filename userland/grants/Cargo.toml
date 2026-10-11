@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
+toyos = { path = "../../sdk/toyos" }
 # The request's codec and the folder rules, read by the supervisor too.
 toyos-manifest = { path = "../../toyos-manifest" }
 

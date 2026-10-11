@@ -100,7 +100,7 @@ upstream's, but upstream inherited it with a header of its own:
 free licence by any definition, and it was never TinyCC's to relicense — they
 vendored it as a test input the same way we did. It cannot sit in a repository
 offered under MIT OR Apache-2.0. It was in `C_SKIP` and had never been run
-here: it needs `argc`/`argv` and `FILE*`, neither of which `userland/libc`
+here: it needs `argc`/`argv` and `FILE*`, neither of which `sdk/libc`
 provides yet.
 
 Do not re-import it. If a regex case is wanted, write one.

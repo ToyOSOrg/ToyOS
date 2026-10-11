@@ -9,4 +9,4 @@ license = "MIT OR Apache-2.0"
 # Both are ABI vocabulary, and a manifest crate holding its own copy of either
 # would be a config the build system accepts and `/system/bin/supervisor` cannot act on.
 [dependencies]
-toyos-abi = { path = "../toyos-abi" }
+toyos-abi = { path = "../sdk/abi" }

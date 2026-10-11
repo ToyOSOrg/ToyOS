@@ -7,10 +7,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 cpal = "0.18"
-toyos-abi = { path = "../../toyos-abi" }
-toyos-keymap = { path = "../../toyos-keymap" }
-toyos = { path = "../../toyos" }
-toyos-window = { path = "../toyos-window" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-keymap = { path = "../../sdk/keymap" }
+toyos = { path = "../../sdk/toyos" }
+toyos-window = { path = "../../sdk/window" }
 
 [package.metadata.toyos.host]
 fails = ["linux", "macos", "windows"]

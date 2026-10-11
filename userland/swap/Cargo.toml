@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
+toyos = { path = "../../sdk/toyos" }
 # The words the supervisor says about a swap, and the digest it is held to.
 toyos-swap = { path = "../../toyos-swap" }
 

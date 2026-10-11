@@ -5,8 +5,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos-abi = { path = "../../toyos-abi" }
-toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
 toyos-hda = { path = "../../toyos-hda" }
 toyos-mixer = { path = "mixer" }
 toyos-virtio-sound = { path = "virtio-sound" }

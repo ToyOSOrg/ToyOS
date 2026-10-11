@@ -768,7 +768,7 @@ mod tests {
         fs::set_permissions(stage2.join("bin/rustc"), fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink("rustc", stage2.join("bin/ld.lld")).unwrap();
         std::os::unix::fs::symlink("/a/runner/s/cargo", stage2.join("bin/cargo")).unwrap();
-        fs::write(build.join("toyos-sysroot-witness"), "toyos-abi/src/lib.rs:00").unwrap();
+        fs::write(build.join("toyos-sysroot-witness"), "sdk/abi/src/lib.rs:00").unwrap();
         fs::write(build.join("TOOLCHAIN"), manifest("toolchain-linux-x86_64-0123456789abcdef")).unwrap();
     }
 
@@ -828,7 +828,7 @@ mod tests {
             (format!("{stage2}/lib/rustlib"), "dir"),
             (format!("{stage2}/lib/rustlib/empty"), "dir"),
             (format!("{stage2}/lib/rustlib/empty/.keep"), "644 "),
-            ("toyos-sysroot-witness".to_string(), "644 toyos-abi/src/lib.rs:00"),
+            ("toyos-sysroot-witness".to_string(), "644 sdk/abi/src/lib.rs:00"),
             ("TOOLCHAIN".to_string(), "644 toolchain toolchain-linux-x86_64-0123456789abcdef\nhost x86_64-unknown-linux-gnu\nglibc 2.39\n"),
         ]
         .map(|(name, what)| (name, what.to_string()))
@@ -841,10 +841,10 @@ mod tests {
         for tree in crate::sysroot::SYSROOT_SOURCES {
             fs::create_dir_all(root.join(tree)).unwrap();
         }
-        fs::write(root.join("toyos-abi/src/lib.rs"), abi).unwrap();
+        fs::write(root.join("sdk/abi/src/lib.rs"), abi).unwrap();
         for manifest in crate::sysroot::SYSROOT_MANIFESTS {
             fs::create_dir_all(root.join(manifest).parent().unwrap()).unwrap();
-            fs::write(root.join(manifest), "[package]\n").unwrap();
+            fs::write(root.join(manifest), "[package]\nname = \"a\"\n").unwrap();
         }
     }
 
@@ -873,9 +873,9 @@ mod tests {
         let two = restored(&root, "fedcba9876543210", &witness);
         assert!(lay_out(&root).unwrap_err().contains("holds 2 entries"));
         fs::remove_dir_all(&two).unwrap();
-        fs::write(root.join("toyos-abi/src/lib.rs"), "pub struct A(u64);\n").unwrap();
+        fs::write(root.join("sdk/abi/src/lib.rs"), "pub struct A(u64);\n").unwrap();
         assert!(lay_out(&root).unwrap_err().contains("built from other sources"), "a sysroot of other sources was laid out");
-        fs::write(root.join("toyos-abi/src/lib.rs"), "pub struct A;\n").unwrap();
+        fs::write(root.join("sdk/abi/src/lib.rs"), "pub struct A;\n").unwrap();
         assert_eq!(lay_out(&root), Ok(Key::parse("0123456789abcdef").unwrap()));
         let rust_dir = root.join("rust");
         assert!(!one.exists() && crate::toolchain::stage2(&rust_dir).join("bin/rustc").is_file());

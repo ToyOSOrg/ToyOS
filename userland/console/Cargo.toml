@@ -7,10 +7,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 terminal = { path = "../terminal" }
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
-toyos-font = { path = "../toyos-font" }
-toyos-window = { path = "../toyos-window" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-font = { path = "../../sdk/font" }
+toyos-window = { path = "../../sdk/window" }
 toyos-logstream = { path = "../../toyos-logstream" }
 logkeeper-api = { path = "../logkeeper-api" }
 

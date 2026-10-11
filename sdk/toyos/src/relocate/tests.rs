@@ -1,6 +1,6 @@
 //! The relocator against lld, and every refusal.
 //!
-//! The oracle is lld itself. `toyos/tests/relocate/fixture.rs` is linked three
+//! The oracle is lld itself. `sdk/toyos/tests/relocate/fixture.rs` is linked three
 //! times per architecture with the sysroot's `rust-lld`, from its object
 //! `rustc --edition 2021 --crate-type lib --emit obj -C panic=abort --target
 //! <arch>-unknown-toyos fixture.rs` (`RUSTC_BOOTSTRAP=1`, and `--cfg tls` for

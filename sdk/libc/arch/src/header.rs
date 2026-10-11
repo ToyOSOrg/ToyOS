@@ -1,10 +1,10 @@
 //! A libc header's integer `#define`s as a C program reads them: a decimal or
 //! `0x` value after the name. A `#define` of anything else is not one.
 
-pub(crate) const ERRNO_H: &str = include_str!("../../../userland/libc/include/errno.h");
-pub(crate) const FCNTL_H: &str = include_str!("../../../userland/libc/include/fcntl.h");
-pub(crate) const LIMITS_H: &str = include_str!("../../../userland/libc/include/limits.h");
-pub(crate) const SIGNAL_H: &str = include_str!("../../../userland/libc/include/signal.h");
+pub(crate) const ERRNO_H: &str = include_str!("../../include/errno.h");
+pub(crate) const FCNTL_H: &str = include_str!("../../include/fcntl.h");
+pub(crate) const LIMITS_H: &str = include_str!("../../include/limits.h");
+pub(crate) const SIGNAL_H: &str = include_str!("../../include/signal.h");
 
 /// Each integer `#define` in `header`, in its order.
 fn defines(header: &str) -> impl Iterator<Item = (&str, i64)> {

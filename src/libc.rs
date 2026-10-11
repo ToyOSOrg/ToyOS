@@ -5,7 +5,7 @@ use std::process::Command;
 use crate::arch::Arch;
 
 /// The crate every sysroot links into std, so into every userland binary.
-pub const CRATE: &str = "userland/libc";
+pub const CRATE: &str = "sdk/libc";
 
 /// The features [`build`] gives [`CRATE`].
 pub const FEATURES: &str = "std-runtime";
@@ -20,7 +20,7 @@ pub(crate) const BUILD_C: [&str; 4] = ["rustc", "--release", "--crate-type", "st
 
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
-/// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
+/// (`src/sysroot.rs`), whose key `sdk/libc/src` is one of.
 pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let dest = toolchain.join(format!("lib/rustlib/{}/lib/libtoyos_c.a", arch.userland()));
 

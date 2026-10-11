@@ -7,5 +7,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 sprite = { path = "../sprite" }
-toyos-font = { path = "../toyos-font" }
-toyos-window = { path = "../toyos-window" }
+toyos-font = { path = "../../sdk/font" }
+toyos-window = { path = "../../sdk/window" }

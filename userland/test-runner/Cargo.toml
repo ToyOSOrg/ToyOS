@@ -6,6 +6,6 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 toyos-tco = { path = "../../toyos-tco" }

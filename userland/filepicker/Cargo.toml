@@ -6,8 +6,8 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-filepicker-api = { path = "../filepicker-api" }
-toyos = { path = "../../toyos" }
-toyos-font = { path = "../toyos-font" }
+filepicker-api = { path = "../../sdk/filepicker" }
+toyos = { path = "../../sdk/toyos" }
+toyos-font = { path = "../../sdk/font" }
 toyos-manifest = { path = "../../toyos-manifest" }
-toyos-window = { path = "../toyos-window" }
+toyos-window = { path = "../../sdk/window" }

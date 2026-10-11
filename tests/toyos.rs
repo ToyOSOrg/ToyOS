@@ -1447,7 +1447,7 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "115_bound_setjmp",
         stage: Stage::Built,
-        why: Why::Declined("`libc panic: longjmp not implemented` (`userland/libc/src/misc.rs`), exit 134. The reason the old skip list gave for this pair — setjmp — is the one claim of its kind that turned out to be right"),
+        why: Why::Declined("`libc panic: longjmp not implemented` (`sdk/libc/src/misc.rs`), exit 134. The reason the old skip list gave for this pair — setjmp — is the one claim of its kind that turned out to be right"),
     },
     NotRun {
         case: "116_bound_setjmp2",

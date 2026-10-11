@@ -3,7 +3,7 @@
 //! it rather than leaving them armed on somebody else's memory.
 //!
 //! Both halves of the first sentence are the ABI's own
-//! (`toyos-abi/src/syscall.rs`: "wake up to `count` threads waiting on `addr`.
+//! (`sdk/abi/src/syscall.rs`: "wake up to `count` threads waiting on `addr`.
 //! Returns number of threads woken"), and the completion cutover briefly
 //! honoured neither. The count went to a 64-way bucket queue that nothing had
 //! registered on since the park moved to the thread's own queue — so the return

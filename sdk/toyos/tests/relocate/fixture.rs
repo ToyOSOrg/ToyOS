@@ -1,7 +1,7 @@
 //! The relocator's oracle fixture: every word lld relocates in a static PIE
 //! of it, a table of pointers, a table of vtables and a table of functions,
 //! and with `--cfg tls` a thread-local holding a pointer, which lld relocates
-//! inside the `PT_TLS` template. `toyos/src/relocate/tests.rs` says how each
+//! inside the `PT_TLS` template. `sdk/toyos/src/relocate/tests.rs` says how each
 //! file beside this one is made.
 
 #![no_std]

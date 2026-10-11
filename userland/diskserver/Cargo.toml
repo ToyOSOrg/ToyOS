@@ -16,8 +16,8 @@ name = "diskserver"
 path = "src/main.rs"
 
 [dependencies]
-toyos-abi = { path = "../../toyos-abi" }
-toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
 toyos-blockring = { path = "../../toyos-blockring" }
 toyos-blockhold = { path = "../../toyos-blockhold" }
 toyos-gpt = { path = "../../toyos-gpt" }

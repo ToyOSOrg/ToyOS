@@ -16,60 +16,60 @@
 extern crate alloc;
 
 #[cfg(test)]
-#[path = "../../../userland/libc/src/alarmreq.rs"]
+#[path = "../../src/alarmreq.rs"]
 mod alarmreq;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/arch/mod.rs"]
+#[path = "../../src/arch/mod.rs"]
 mod arch;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/errcode.rs"]
+#[path = "../../src/errcode.rs"]
 // Every code libc answers with, of which the modules here use a few.
 #[allow(dead_code)]
 mod errcode;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/elfsym.rs"]
+#[path = "../../src/elfsym.rs"]
 mod elfsym;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/fdreq.rs"]
+#[path = "../../src/fdreq.rs"]
 mod fdreq;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/fparts.rs"]
+#[path = "../../src/fparts.rs"]
 mod fparts;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/inaddr.rs"]
+#[path = "../../src/inaddr.rs"]
 mod inaddr;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/linkreq.rs"]
+#[path = "../../src/linkreq.rs"]
 mod linkreq;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/listing.rs"]
+#[path = "../../src/listing.rs"]
 mod listing;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/memreq.rs"]
+#[path = "../../src/memreq.rs"]
 mod memreq;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/pollreq.rs"]
+#[path = "../../src/pollreq.rs"]
 mod pollreq;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/resolve.rs"]
+#[path = "../../src/resolve.rs"]
 mod resolve;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/sigmask.rs"]
+#[path = "../../src/sigmask.rs"]
 mod sigmask;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/sockopt.rs"]
+#[path = "../../src/sockopt.rs"]
 mod sockopt;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/streamend.rs"]
+#[path = "../../src/streamend.rs"]
 mod streamend;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/strtonum.rs"]
+#[path = "../../src/strtonum.rs"]
 mod strtonum;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/text.rs"]
+#[path = "../../src/text.rs"]
 mod text;
 #[cfg(test)]
-#[path = "../../../userland/libc/src/utf8.rs"]
+#[path = "../../src/utf8.rs"]
 mod utf8;
 
 #[cfg(test)]

@@ -49,7 +49,7 @@ pub use toyos_abi::ioport;
 /// **One thing, one name.** Six of the typed wrappers below and in [`device`]
 /// and [`ipc`] carried a second public accessor with an identical body until
 /// 2026-08-20, when the wave that confined libc's descriptor vocabulary to
-/// `userland/libc` deleted them rather than renaming them: a second word for
+/// `sdk/libc` deleted them rather than renaming them: a second word for
 /// what `as_handle` already says is the blur that ruling exists to remove.
 pub trait AsHandle {
     fn as_handle(&self) -> RawHandle;

@@ -7,7 +7,7 @@ description = "Pre-rasterized glyph bitmaps drawn into a pixel buffer, for ToyOS
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 # `font` is taken on crates.io, so the package is `toyos-font`; the lib target
-# keeps the name every caller spells, which the sysroot's own `toyos/src`
+# keeps the name every caller spells, which the sysroot's own `sdk/toyos/src`
 # citations are written in and no branch of this shape may edit.
 [lib]
 name = "font"

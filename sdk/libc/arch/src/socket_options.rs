@@ -18,8 +18,8 @@ use std::ptr;
 use crate::header;
 use crate::sockopt::{self, Kept, Refusal};
 
-const SOCKET_H: &str = include_str!("../../../userland/libc/include/sys/socket.h");
-const TCP_H: &str = include_str!("../../../userland/libc/include/netinet/tcp.h");
+const SOCKET_H: &str = include_str!("../../include/sys/socket.h");
+const TCP_H: &str = include_str!("../../include/netinet/tcp.h");
 
 unsafe extern "C" {
     fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const u8, len: u32) -> c_int;

@@ -15,8 +15,8 @@ name = "fileserver"
 path = "src/main.rs"
 
 [dependencies]
-toyos-abi = { path = "../../toyos-abi" }
-toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
 toyos-manifest = { path = "../../toyos-manifest" }
 toyos-blockring = { path = "../../toyos-blockring" }
 toyos-gpt = { path = "../../toyos-gpt" }

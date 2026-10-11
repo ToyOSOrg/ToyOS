@@ -17,7 +17,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 rustc-demangle = "0.1"
-toyos-abi = { path = "../toyos-abi" }
+toyos-abi = { path = "../sdk/abi" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-elide = { path = "../toyos-elide" }
 

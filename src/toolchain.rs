@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use crate::arch::Arch;
 use crate::buildlock;
-use crate::sysroot::{self, Sysroot, SYSROOT_SOURCES};
+use crate::sysroot::{self, StdCrate, Sysroot, SYSROOT_SOURCES};
 
 /// Which checkout holds the `rust/` submodule.
 pub enum Owner {
@@ -89,14 +89,14 @@ pub(crate) fn stage2(rust_dir: &Path) -> PathBuf {
     rust_dir.join(format!("build/{}/stage2", host_triple()))
 }
 
-/// Every `toyos-abi`/`toyos` source file a std build under `dep_info` actually
+/// Every source file of `crates` a std build under `dep_info` actually
 /// compiled, read out of cargo's dep-info rather than out of what was asked for.
-fn std_toyos_sources(dep_info: &Path) -> Vec<String> {
+fn std_toyos_sources(crates: &[StdCrate], dep_info: &Path) -> Vec<String> {
     let mut deps = Vec::new();
     collect_dep_info(dep_info, &mut deps);
     let mut found: Vec<String> = deps
         .iter()
-        .flat_map(|text| toyos_sources_in_dep_info(text))
+        .flat_map(|text| toyos_sources_in_dep_info(crates, text))
         .collect();
     found.sort_unstable();
     found.dedup();
@@ -132,25 +132,26 @@ fn paths_in_dep_info(text: &str) -> impl Iterator<Item = &str> {
         .map(|word| word.strip_suffix(':').unwrap_or(word))
 }
 
-/// Which of `sysroot::std_crates` `path` is a source of, if any: one under
-/// `<crate>/src/`, as a checkout holds it, or `<crate>-<version>/src/`, as a
-/// registry does.
-fn std_crate_of(path: &str) -> Option<&'static str> {
+/// Which of `crates` `path` is a source of, if any: one under `<dir>/src/`,
+/// as a checkout holds it, or `<name>-<version>/src/`, as a registry does.
+fn std_crate_of<'a>(crates: &'a [StdCrate], path: &str) -> Option<&'a str> {
     let dirs: Vec<&str> = path.split('/').collect();
-    let holds = |name: &str| {
-        dirs.windows(2).any(|pair| {
-            let version = pair[0].strip_prefix(name).and_then(|rest| rest.strip_prefix('-'));
-            pair[1] == "src" && (pair[0] == name || version.is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())))
-        })
+    let holds = |krate: &StdCrate| {
+        let checkout: Vec<&str> = krate.dir.split('/').chain(["src"]).collect();
+        let registry = dirs.windows(2).any(|pair| {
+            let version = pair[0].strip_prefix(krate.name.as_str()).and_then(|rest| rest.strip_prefix('-'));
+            pair[1] == "src" && version.is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        });
+        registry || dirs.windows(checkout.len()).any(|window| window == checkout.as_slice())
     };
-    path.ends_with(".rs").then(|| sysroot::std_crates().find(|name| holds(name))).flatten()
+    path.ends_with(".rs").then(|| crates.iter().find(|krate| holds(krate)).map(|krate| krate.name.as_str())).flatten()
 }
 
-/// The paths in one dep-info file that name a source of a crate std names by
-/// version. Split out from the filesystem so the gate below has a negative
-/// control that is a string literal.
-fn toyos_sources_in_dep_info(text: &str) -> Vec<String> {
-    paths_in_dep_info(text).filter(|path| std_crate_of(path).is_some()).map(str::to_string).collect()
+/// The paths in one dep-info file that name a source of one of `crates`.
+/// Split out from the filesystem so the gate below has a negative control
+/// that is a string literal.
+fn toyos_sources_in_dep_info(crates: &[StdCrate], text: &str) -> Vec<String> {
+    paths_in_dep_info(text).filter(|path| std_crate_of(crates, path).is_some()).map(str::to_string).collect()
 }
 
 /// Refuse a std whose dep-info under `dep_info` names a `toyos-abi` or `toyos`
@@ -160,9 +161,13 @@ fn toyos_sources_in_dep_info(text: &str) -> Vec<String> {
 /// handed. A std built against another `toyos-abi` still builds, links and
 /// boots, and its syscall arguments land at different offsets.
 pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
-    let sources = std_toyos_sources(dep_info);
-    let unnamed: Vec<&str> =
-        sysroot::std_crates().filter(|name| !sources.iter().any(|p| std_crate_of(p) == Some(*name))).collect();
+    let crates = sysroot::std_crates(root);
+    let sources = std_toyos_sources(&crates, dep_info);
+    let unnamed: Vec<&str> = crates
+        .iter()
+        .map(|krate| krate.name.as_str())
+        .filter(|name| !sources.iter().any(|p| std_crate_of(&crates, p) == Some(*name)))
+        .collect();
     assert!(
         unnamed.is_empty(),
         "the std build under {} names no source of {}, so the check that it was built from this \
@@ -625,6 +630,7 @@ mod tests {
             fs::write(lock, "# as committed\n").unwrap();
         }
         fs::write(fork.join(FAKE), "").unwrap();
+        crate::sysroot::tests::std_manifests(&fork);
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
 
         let args = ["--exact", "toolchain::tests::a_fake_bootstrap", "--include-ignored", "--nocapture"];
@@ -658,6 +664,7 @@ mod tests {
             fs::write(fork.join(lock), "# as committed\n").unwrap();
         }
         fs::write(fork.join(FAKE), "").unwrap();
+        crate::sysroot::tests::std_manifests(&fork);
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
         let llvm = fork.join("llvm");
         fs::create_dir_all(llvm.join("bin")).unwrap();
@@ -755,6 +762,7 @@ mod tests {
             fs::write(fork.join(lock), "# as committed\n").unwrap();
         }
         fs::write(fork.join(FAKE), "").unwrap();
+        crate::sysroot::tests::std_manifests(&fork);
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
         let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_reads_ci", "--include-ignored", "--nocapture"];
         let (ok, log) = x_build_with(&fork, &fork, &args, "a fake bootstrap", |command| {
@@ -772,31 +780,34 @@ mod tests {
         println!("GITHUB_ACTIONS {}, CI {}", read("GITHUB_ACTIONS"), read("CI"));
     }
 
-    /// The negative control is the defect itself: this is verbatim what cargo
-    /// wrote for a worktree build before the override existed.
+    /// The negative control is the defect itself: what cargo wrote for a
+    /// worktree build before the override existed, its paths those of this
+    /// tree's layout. The crates are this tree's, read from its manifests.
     #[test]
     fn dep_info_names_the_checkout_std_was_really_built_from() {
-        let primary = "/Users/jan/Dev/jan/toyos/toyos-abi/src/lib.rs \
-                       /Users/jan/Dev/jan/toyos/toyos/src/audio.rs \
+        let crates = sysroot::std_crates(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let primary = "/Users/jan/Dev/jan/toyos/sdk/abi/src/lib.rs \
+                       /Users/jan/Dev/jan/toyos/sdk/toyos/src/audio.rs \
                        /Users/jan/Dev/jan/toyos/rust/build/host/stage1-std/out/libcore.rmeta";
         assert_eq!(
-            toyos_sources_in_dep_info(primary),
+            toyos_sources_in_dep_info(&crates, primary),
             [
-                "/Users/jan/Dev/jan/toyos/toyos-abi/src/lib.rs",
-                "/Users/jan/Dev/jan/toyos/toyos/src/audio.rs"
+                "/Users/jan/Dev/jan/toyos/sdk/abi/src/lib.rs",
+                "/Users/jan/Dev/jan/toyos/sdk/toyos/src/audio.rs"
             ],
         );
 
         // A dep-info line ends in a colon when the file is its own target.
-        let target = "/Users/jan/Dev/jan/toyos-endow/toyos-abi/src/lib.rs:";
+        let target = "/Users/jan/Dev/jan/toyos-endow/sdk/abi/src/lib.rs:";
         assert_eq!(
-            toyos_sources_in_dep_info(target),
-            ["/Users/jan/Dev/jan/toyos-endow/toyos-abi/src/lib.rs"],
+            toyos_sources_in_dep_info(&crates, target),
+            ["/Users/jan/Dev/jan/toyos-endow/sdk/abi/src/lib.rs"],
         );
 
         // std's ToyOS backend is not one of these trees.
         assert!(
-            toyos_sources_in_dep_info("library/std/src/sys/pal/../../../../../../sdk/std/sys/pal/mod.rs").is_empty()
+            toyos_sources_in_dep_info(&crates, "library/std/src/sys/pal/../../../../../../sdk/std/sys/pal/mod.rs")
+                .is_empty()
         );
     }
 
@@ -809,7 +820,8 @@ mod tests {
         let root = fs::canonicalize(&*temp).unwrap();
         let built = root.join("rust/build/toyos-std/host/stage0-std/x86_64-unknown-toyos");
         fs::create_dir_all(built.join("dist")).unwrap();
-        let ours = |name: &str| format!("{}/{name}/src/lib.rs", root.display());
+        crate::sysroot::tests::std_manifests(&root);
+        let ours = |dir: &str| format!("{}/{dir}/src/lib.rs", root.display());
         let registry = |name: &str, version: &str| {
             format!("/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/{name}-{version}/src/lib.rs")
         };
@@ -819,10 +831,10 @@ mod tests {
                 .err()
                 .map(|refused| *refused.downcast::<String>().expect("a formatted refusal"))
         };
-        assert_eq!(built_from(&ours("toyos-abi"), &ours("toyos")), None);
+        assert_eq!(built_from(&ours("sdk/abi"), &ours("sdk/toyos")), None);
 
         let (abi, toyos) = (registry("toyos-abi", "0.63.0+267ff3ef79dccdcb"), registry("toyos", "0.75.0+0ea8e9e321a9f71c"));
-        for (taken, from) in [(&abi, built_from(&abi, &ours("toyos"))), (&toyos, built_from(&ours("toyos-abi"), &toyos))] {
+        for (taken, from) in [(&abi, built_from(&abi, &ours("sdk/toyos"))), (&toyos, built_from(&ours("sdk/abi"), &toyos))] {
             let said = from.unwrap_or_else(|| panic!("a std built from {taken} was taken"));
             assert!(said.contains(taken.as_str()) && said.contains("a registry's copy"), "{said}");
         }
@@ -868,7 +880,7 @@ mod tests {
             refusal(&built, &format!("dep-info naming {named}"))
         };
         let system = file(&root.join("system.toml"));
-        for read in [file(&root.join("toyos-abi/src/lib.rs")), file(&root.join("userland/libc/src/lib.rs")), system.clone()] {
+        for read in [file(&root.join("sdk/abi/src/lib.rs")), file(&root.join("sdk/libc/src/lib.rs")), system.clone()] {
             let said = naming(&read);
             assert!(said.contains(&read), "{said}");
         }

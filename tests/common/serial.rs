@@ -45,7 +45,7 @@ pub enum Died {
     /// children, and nothing left is going to reach the marker.
     Faulted,
     /// A process that ended itself — its own panic handler wrote the line
-    /// (`userland/libc/src/lib.rs`, or the std fork's). Never the machine's
+    /// (`sdk/libc/src/lib.rs`, or the std fork's). Never the machine's
     /// business, and not even always the boot's: `sshserver` lost a race with
     /// `netstack`'s teardown on a NIC-less machine and panicked across four
     /// recorded boots that then came up perfectly, which is why a boot wait

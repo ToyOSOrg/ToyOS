@@ -6,8 +6,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 toyos-trace = { path = "../../toyos-trace" }
 
 [package.metadata.toyos.host]

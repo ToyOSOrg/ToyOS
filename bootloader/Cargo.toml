@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-toyos-abi = { path = "../toyos-abi" }
+toyos-abi = { path = "../sdk/abi" }
 # The ECAM window's address, and the TCO block the loader arms in it: the two
 # pure crates the kernel reads the same answers out of.
 toyos-acpi = { path = "../toyos-acpi" }

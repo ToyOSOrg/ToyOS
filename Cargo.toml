@@ -24,9 +24,14 @@ members = [
     "kernel/pci",
     "kernel/ps2",
     "kernel/sim",
-    "tests/libc-arch",
-    "toyos",
-    "toyos-abi",
+    "sdk/abi",
+    "sdk/filepicker",
+    "sdk/font",
+    "sdk/keymap",
+    "sdk/libc/arch",
+    "sdk/osrelease",
+    "sdk/toyos",
+    "sdk/window",
     "toyos-acpi",
     "toyos-blackbox",
     "toyos-blockhold",
@@ -46,7 +51,6 @@ members = [
     "toyos-i219",
     "toyos-inspect",
     "toyos-its",
-    "toyos-keymap",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-microcode",
@@ -56,7 +60,6 @@ members = [
     "toyos-net-shard/testnet",
     "toyos-net-udp",
     "toyos-net-wire",
-    "toyos-osrelease",
     "toyos-phys",
     "toyos-quiesce",
     "toyos-random",
@@ -90,7 +93,6 @@ members = [
     "userland/doom",
     "userland/editor",
     "userland/filepicker",
-    "userland/filepicker-api",
     "userland/grants",
     "userland/files",
     "userland/fileserver",
@@ -120,9 +122,7 @@ members = [
     "userland/test-runner",
     "userland/toybox",
     "userland/toyfetch",
-    "userland/toyos-font",
     "userland/toyos-pci-claim",
-    "userland/toyos-window",
     "userland/trace",
     "userland/update",
     "userland/usbd",
@@ -139,7 +139,7 @@ exclude = [
     # The C library, built into a sysroot with `--release` and its own
     # `panic = "abort"` profile, which cargo ignores in a member; its lock is one
     # of the sysroot key's inputs (`src/sysroot.rs`).
-    "userland/libc",
+    "sdk/libc",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory but `tls-multi-crate/dep`, its parent's dependency: the
     # first patches memmap2 and `tls-cranelift` target-lexicon, and a `[patch]`
@@ -170,7 +170,7 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcachefs = { path = "bcachefs" }
-toyos-abi = { path = "toyos-abi" }
+toyos-abi = { path = "sdk/abi" }
 # What `build::syscall_entry_bytes` finds a staged kernel's entry with: its
 # segments, and its symbol table where the kernel's own backtrace finds it.
 toyos-elf = { path = "toyos-elf" }
@@ -181,12 +181,12 @@ toyos-fat32 = { path = "toyos-fat32" }
 # not published until they have both passed on it.
 toyos-fat32-check = { path = "toyos-fat32/check" }
 toyos-gpt = { path = "toyos-gpt" }
-toyos-keymap = { path = "toyos-keymap" }
+toyos-keymap = { path = "sdk/keymap" }
 # The form a program's line takes in a boot's log and the port `logkeeper` serves it
 # on, so the judges reading the log and `logkeeper` writing it read one declaration.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
-toyos-osrelease = { path = "toyos-osrelease" }
+toyos-osrelease = { path = "sdk/osrelease" }
 # The shutdown's stop record: the kernel renders it and this crate reads it back
 # off a stick, so one declaration is what both sides spell it with.
 toyos-quiesce = { path = "toyos-quiesce" }
@@ -264,10 +264,10 @@ loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
 # consumed as git dependencies (a path escaping the fork's own repo cannot
 # resolve once cargo checks it out alone). These redirects keep local builds
 # on the working tree.
-toyos-abi = { path = "toyos-abi" }
-toyos = { path = "toyos" }
-toyos-window = { path = "userland/toyos-window" }
-toyos-osrelease = { path = "toyos-osrelease" }
+toyos-abi = { path = "sdk/abi" }
+toyos = { path = "sdk/toyos" }
+toyos-window = { path = "sdk/window" }
+toyos-osrelease = { path = "sdk/osrelease" }
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2-sdk-0.12", package = "getrandom" }
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }

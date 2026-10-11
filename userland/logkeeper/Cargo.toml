@@ -6,8 +6,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 toyos-logstream = { path = "../../toyos-logstream" }
 # The per-program allowance: how many records a second a program may put in the log.
 toyos-elide = { path = "../../toyos-elide" }

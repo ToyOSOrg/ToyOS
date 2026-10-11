@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
+toyos = { path = "../../sdk/toyos" }
 # A slot's partitions, claimed on a disk the kernel drives or opened through
 # the block service.
 diskserver = { path = "../diskserver" }

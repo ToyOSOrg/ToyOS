@@ -189,7 +189,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
 /// round to: a shorter one that rounds to the same pages names a part its
 /// caller means to keep, and which lengths those are would move with the page
 /// size. A caller that counts in pages rounds both of its own lengths, as
-/// `userland/libc` does.
+/// `sdk/libc` does.
 pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
     let pt = process::current_address_space();
     let taken = process::with_process_data(|data| {

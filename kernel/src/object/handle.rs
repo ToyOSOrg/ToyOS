@@ -3,7 +3,7 @@
 //! Lives behind `ProcessData`'s own lock; every accessor returns an owned
 //! value, so no borrow into the table outlives the guard.
 //!
-//! Not a file-descriptor table — `fd` names only `userland/libc`'s POSIX
+//! Not a file-descriptor table — `fd` names only `sdk/libc`'s POSIX
 //! surface (owner ruling) — and a slot at its last generation retires
 //! rather than wrapping, so a stale handle can never resolve again.
 

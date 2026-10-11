@@ -939,6 +939,7 @@ mod tests {
         write(&fork.join("x"), "#!/bin/sh\nenv > build/toyos-llvm/environment\n");
         fs::set_permissions(fork.join("x"), fs::Permissions::from_mode(0o755)).unwrap();
         let n2 = crate::n2::tests::installed_stand_in(&scratch);
+        crate::sysroot::tests::std_manifests(&scratch);
 
         let mut rerun = buildlock::tests::rerun("llvm::tests::keyed_and_built");
         let out = rerun.env(FORK, &fork).env(ROOT, &*scratch).envs(AMBIENT).output().unwrap();

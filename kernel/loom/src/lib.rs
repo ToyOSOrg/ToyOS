@@ -399,7 +399,7 @@ pub mod capture_access;
 /// needs the same loom this crate already carries. `tests/log_ring.rs` drives
 /// its two protocols against loom's atomics; the file names nothing outside
 /// itself, so it needs no shim.
-#[path = "../../../toyos/src/log/ring.rs"]
+#[path = "../../../sdk/toyos/src/log/ring.rs"]
 pub mod log_ring;
 
 /// The seqlock the panic console's descriptor and each CPU's counters are

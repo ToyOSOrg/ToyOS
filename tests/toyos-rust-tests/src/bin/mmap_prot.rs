@@ -2,7 +2,7 @@
 //!
 //! `sys_mmap`'s third argument was named `_prot`. Every mapping came back
 //! readable and writable whatever the caller asked for, so
-//! `userland/libc`'s translation of POSIX `PROT_NONE` produced a writable
+//! `sdk/libc`'s translation of POSIX `PROT_NONE` produced a writable
 //! guard page and the stack-overflow detection a C program builds on it
 //! silently did not exist.
 //!

@@ -20,7 +20,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # The `acpi` claim's access and refusal words, and firmware's memory map
 # entry: one declaration each, read by the policy and by the kernel.
-toyos-abi = { path = "../toyos-abi" }
+toyos-abi = { path = "../sdk/abi" }
 # Which memory types the kernel hands out as RAM.
 toyos-bootmap = { path = "../toyos-bootmap" }
 # The ECAM window, as the MCFG decode made it: the one declaration of which

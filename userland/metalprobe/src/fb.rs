@@ -4,7 +4,7 @@
 //! **The two directions are not one measurement.** The scanout is mapped
 //! write-combining (`kernel/src/drivers/gop.rs` picks the memory type and says
 //! so in a record), so a write lands in the fill buffers and a read misses
-//! every cache — which is why `userland/toyos-window` has no read path at all.
+//! every cache — which is why `sdk/window` has no read path at all.
 //! The rate each way is a fact about the machine's PAT entry and its memory
 //! controller, and no emulated display can answer it.
 

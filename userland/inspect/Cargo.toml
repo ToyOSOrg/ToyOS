@@ -12,8 +12,8 @@ license = "MIT OR Apache-2.0"
 doctest = false
 
 [dependencies]
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 toyos-inspect = { path = "../../toyos-inspect" }
 
 [package.metadata.toyos.host]

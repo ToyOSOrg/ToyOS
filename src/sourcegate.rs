@@ -156,9 +156,13 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
 const GUEST_CODE: &[&str] = &[
     "rust",
     "kernel/src",
-    "toyos/src",
-    "toyos-abi/src",
+    "sdk/abi/src",
+    "sdk/toyos/src",
     "sdk/std",
+    "sdk/font",
+    "sdk/window",
+    "sdk/filepicker",
+    "sdk/libc/src",
     "userland",
     "tests/toyos-rust-tests",
     "tests/testcases",
@@ -172,7 +176,7 @@ const TEMP_DIR_ALLOWED: &[(&str, usize)] = &[
     ("toyos-tmpdir/src/lib.rs", 1),
     // A failed golden comparison leaves its dump for the reader to copy over
     // the golden file: outliving the test is its purpose.
-    ("toyos-keymap/tests/tables.rs", 1),
+    ("sdk/keymap/tests/tables.rs", 1),
 ];
 
 /// `bytes` look like a binary file by git's own heuristic: a NUL in the first
@@ -676,7 +680,7 @@ mod tests {
     /// the same page, its whole subject being an `AtomicU32`.
     #[test]
     fn no_slice_or_exclusive_reference_is_built_over_a_mapped_page() {
-        const OVER_A_MAPPING: &[&str] = &["toyos-abi/src/ring.rs", "kernel/src/user_ptr.rs"];
+        const OVER_A_MAPPING: &[&str] = &["sdk/abi/src/ring.rs", "kernel/src/user_ptr.rs"];
         const SLICES: &[&str] =
             &["from_raw_parts", "from_raw_parts_mut", "from_ptr_range", "from_ptr_range_mut"];
         const EXCLUSIVE: &str = "&mut *";

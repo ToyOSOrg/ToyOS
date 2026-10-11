@@ -10,10 +10,10 @@ license = "MIT OR Apache-2.0"
 std-runtime = []
 
 [dependencies]
-toyos-abi = { path = "../../toyos-abi" }
-toyos = { path = "../../toyos" }
+toyos-abi = { path = "../abi" }
+toyos = { path = "../toyos" }
 toyos-elf = { path = "../../toyos-elf" }
-toyos-osrelease = { path = "../../toyos-osrelease" }
+toyos-osrelease = { path = "../osrelease" }
 dlmalloc = "0.2.7"
 
 [profile.dev]

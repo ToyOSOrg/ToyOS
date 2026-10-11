@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 doctest = false
 
 [dependencies]
-toyos-abi = { path = "../../../toyos-abi" }
+toyos-abi = { path = "../../../sdk/abi" }
 
 [lints.rust]
 warnings = "deny"

@@ -66,40 +66,57 @@ use whole_toolchain::{whole, Whole};
 /// The per-worktree sources that end up inside a sysroot: std links the
 /// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
 /// backend from `sdk/std`, and
-/// `libtoyos_c.a` is `userland/libc` with `toyos-elf` and `toyos-osrelease`.
+/// `libtoyos_c.a` is `sdk/libc` with `toyos-elf` and `toyos-osrelease`.
 pub const SYSROOT_SOURCES: [&str; 7] = [
-    "toyos-abi/src",
-    "toyos/src",
+    "sdk/abi/src",
+    "sdk/toyos/src",
     "sdk/std",
     "toyos-elf/src",
-    "toyos-osrelease/src",
-    "userland/libc/src",
-    "userland/libc/include",
+    "sdk/osrelease/src",
+    "sdk/libc/src",
+    "sdk/libc/include",
 ];
 
 /// Their manifests, and the lockfile and cargo configuration libc is built
 /// under: the features, versions and flags of the same build.
 pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
-    "toyos-abi/Cargo.toml",
-    "toyos/Cargo.toml",
+    "sdk/abi/Cargo.toml",
+    "sdk/toyos/Cargo.toml",
     "toyos-elf/Cargo.toml",
-    "toyos-osrelease/Cargo.toml",
-    "userland/libc/Cargo.toml",
-    "userland/libc/Cargo.lock",
+    "sdk/osrelease/Cargo.toml",
+    "sdk/libc/Cargo.toml",
+    "sdk/libc/Cargo.lock",
     ".cargo/config.toml",
 ];
 
-/// Of [`SYSROOT_MANIFESTS`], the crates std names by version, each in the
-/// directory named for it, which std's lockfile resolves with the fork's own
-/// through [`std_patch`]: what of a worktree can move a freestanding target's
-/// dependency versions.
-const STD_MANIFESTS: [&str; 2] = ["toyos-abi/Cargo.toml", "toyos/Cargo.toml"];
+/// Of [`SYSROOT_MANIFESTS`], the crates std names by version, which std's
+/// lockfile resolves with the fork's own through [`std_patch`]: what of a
+/// worktree can move a freestanding target's dependency versions.
+const STD_MANIFESTS: [&str; 2] = ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml"];
 
-/// The crates of [`STD_MANIFESTS`], by the name of each one's directory.
-pub(crate) fn std_crates() -> impl Iterator<Item = &'static str> {
-    STD_MANIFESTS.into_iter().map(|manifest| {
-        manifest.strip_suffix("/Cargo.toml").unwrap_or_else(|| panic!("{manifest} is no Cargo.toml"))
-    })
+/// One of the crates std names by version, in a worktree.
+pub(crate) struct StdCrate {
+    /// The package name its manifest declares, which std and a registry name it by.
+    pub(crate) name: String,
+    /// Its directory, repository-relative.
+    pub(crate) dir: &'static str,
+}
+
+/// The crates of [`STD_MANIFESTS`] in the worktree at `root`, each named by
+/// its manifest's `[package] name`.
+pub(crate) fn std_crates(root: &Path) -> Vec<StdCrate> {
+    STD_MANIFESTS
+        .into_iter()
+        .map(|manifest| {
+            let dir = manifest.strip_suffix("/Cargo.toml").unwrap_or_else(|| panic!("{manifest} is no Cargo.toml"));
+            let path = root.join(manifest);
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let doc: toml::Table = text.parse().unwrap_or_else(|e| panic!("{} is not TOML: {e}", path.display()));
+            let name = doc.get("package").and_then(|p| p.get("name")).and_then(toml::Value::as_str);
+            let name = name.unwrap_or_else(|| panic!("{} names no package", path.display()));
+            StdCrate { name: name.to_string(), dir }
+        })
+        .collect()
 }
 
 /// The `[patch]` that hands std, which names the [`std_crates`] by version, the
@@ -110,22 +127,25 @@ pub(crate) fn std_crates() -> impl Iterator<Item = &'static str> {
 pub(crate) fn std_patch(root: &Path) -> Vec<String> {
     let root = fs::canonicalize(root).unwrap_or_else(|e| panic!("resolve {}: {e}", root.display()));
     let spelt = root.to_str().filter(|path| !path.contains(|c: char| c.is_whitespace() || c.is_control() || c == '"' || c == '\\'));
-    let root = spelt.unwrap_or_else(|| {
+    let spelt = spelt.unwrap_or_else(|| {
         panic!(
             "{} is a worktree path cargo cannot take in std's [patch]: bootstrap splits it at whitespace, and \
              a quote, a backslash, a control character or a byte that is not UTF-8 is no plain TOML string",
             root.display()
         )
     });
-    patch_spelt(root)
+    patch_spelt(&std_crates(&root), spelt)
 }
 
 /// The variable bootstrap reads [`std_patch`] from (the header says why this one).
 pub(crate) const STD_PATCH_FLAGS: &str = "CARGOFLAGS_NOT_BOOTSTRAP";
 
-/// [`std_patch`] of the worktree at `root`, spelt as it is.
-fn patch_spelt(root: &str) -> Vec<String> {
-    std_crates().flat_map(|name| ["--config".to_string(), format!("patch.crates-io.{name}.path=\"{root}/{name}\"")]).collect()
+/// [`std_patch`] of `crates` in the worktree at `root`, spelt as it is.
+fn patch_spelt(crates: &[StdCrate], root: &str) -> Vec<String> {
+    crates
+        .iter()
+        .flat_map(|c| ["--config".to_string(), format!("patch.crates-io.{}.path=\"{root}/{}\"", c.name, c.dir)])
+        .collect()
 }
 
 /// The file a directory [`publish`] made carries last, naming what it was
@@ -483,14 +503,14 @@ impl Keys {
 /// (`Compiler::key`): none of [`SYSROOT_SOURCES`], and of `root` only
 /// [`STD_MANIFESTS`].
 pub(crate) fn freestanding_key(root: &Path, compiler: &Key, fork: &Path) -> Key {
-    freestanding_key_of(root, compiler, fork, RECIPE, &keyed_std_config())
+    freestanding_key_of(root, compiler, fork, RECIPE, &keyed_std_config(root))
 }
 
-/// [`std_config`] and [`std_patch`] with no path of this host in them, as a key
-/// reads them.
-fn keyed_std_config() -> String {
+/// [`std_config`] and [`std_patch`] of the worktree at `root` with no path of
+/// this host in them, as a key reads them.
+fn keyed_std_config(root: &Path) -> String {
     let placeholder = Path::new("<placeholder>");
-    let patch = patch_spelt("<placeholder>").join(" ");
+    let patch = patch_spelt(&std_crates(root), "<placeholder>").join(" ");
     format!("{}\n{STD_PATCH_FLAGS} {patch}", std_config(placeholder, placeholder, placeholder, "<host>"))
 }
 
@@ -1220,7 +1240,7 @@ fn git_run(dir: &Path, args: &[&str]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::compiler::tests::compiler as placed_compiler;
     use crate::keystore::tests::{last_used, LONG_AGO};
@@ -1250,6 +1270,14 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
+    /// The manifests [`std_crates`] reads, in a worktree at `root` that has
+    /// no other source: what a bootstrap run is handed std's patch from.
+    pub(crate) fn std_manifests(root: &Path) {
+        for (manifest, name) in STD_MANIFESTS.into_iter().zip(["toyos-abi", "toyos"]) {
+            write(&root.join(manifest), &format!("[package]\nname = \"{name}\"\n"));
+        }
+    }
+
     /// A worktree's trees, a store and a fork checkout, laid out the way the
     /// key reads them.
     fn keyed(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -1258,7 +1286,7 @@ mod tests {
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A;\n");
         }
         for manifest in SYSROOT_MANIFESTS {
-            write(&root.join(manifest), "[package]\nversion = \"0.1.0\"\n");
+            write(&root.join(manifest), "[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
         }
         let fork = base.join("fork");
         write(&fork.join("library/std/src/lib.rs"), "//! std\npub fn exit() {}\n");
@@ -1268,23 +1296,24 @@ mod tests {
         (root, base.join("store"), fork)
     }
 
-    /// **std's patch names each crate's directory in the worktree, as its
-    /// canonical path; a worktree path bootstrap would split or TOML would
-    /// misread is refused by name.**
+    /// **std's patch names each crate by the package name its manifest
+    /// declares and its directory in the worktree, as its canonical path; a
+    /// worktree path bootstrap would split or TOML would misread is refused by
+    /// name.**
     #[test]
     fn std_s_patch_names_the_worktree_s_crates_or_refuses_its_path() {
         let temp = TempDir::new("std-patch");
         let root = fs::canonicalize(&*temp).unwrap();
         let plain = root.join("worktree");
-        fs::create_dir(&plain).unwrap();
+        std_manifests(&plain);
         let at = plain.display();
         assert_eq!(
             std_patch(&plain.join("../worktree")),
             [
                 "--config".to_string(),
-                format!("patch.crates-io.toyos-abi.path=\"{at}/toyos-abi\""),
+                format!("patch.crates-io.toyos-abi.path=\"{at}/sdk/abi\""),
                 "--config".to_string(),
-                format!("patch.crates-io.toyos.path=\"{at}/toyos\""),
+                format!("patch.crates-io.toyos.path=\"{at}/sdk/toyos\""),
             ],
         );
         for name in ["work tree", "work\"tree", "work\\tree", "work\ttree"] {
@@ -1332,7 +1361,7 @@ mod tests {
             assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::Targets(all.clone())), "{what}");
         };
 
-        let abi = root.join("toyos-abi/src/lib.rs");
+        let abi = root.join("sdk/abi/src/lib.rs");
         write(&abi, "//! The crate.\n/// A, said better.\n// and a plain comment\npub struct A;\n");
         same("a comment in toyos-abi");
         write(&abi, "/// A.\npub struct A(pub u64);\n");
@@ -1340,23 +1369,23 @@ mod tests {
         write(&abi, "/// A.\npub struct A;\n");
         same("toyos-abi as it was");
 
-        for tree in ["toyos/src", "sdk/std", "userland/libc/src"] {
+        for tree in ["sdk/toyos/src", "sdk/std", "sdk/libc/src"] {
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A(u8);\n");
             sysroot_only(tree);
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A;\n");
             same(tree);
         }
 
-        let header = root.join("userland/libc/include/stdio.h");
+        let header = root.join("sdk/libc/include/stdio.h");
         write(&header, "int puts(const char *);\n");
         sysroot_only("a header the C sysroot carries");
         fs::remove_file(&header).unwrap();
         same("the C sysroot's headers as they were");
 
-        for read in ["userland/libc/Cargo.toml", "userland/libc/Cargo.lock", ".cargo/config.toml"] {
-            write(&root.join(read), "[package]\nversion = \"0.2.0\"\n");
+        for read in ["sdk/libc/Cargo.toml", "sdk/libc/Cargo.lock", ".cargo/config.toml"] {
+            write(&root.join(read), "[package]\nname = \"a\"\nversion = \"0.2.0\"\n");
             sysroot_only(&format!("{read}, which std's lockfile does not resolve,"));
-            write(&root.join(read), "[package]\nversion = \"0.1.0\"\n");
+            write(&root.join(read), "[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
             same(&format!("{read} as it was"));
         }
         assert_eq!(key_of(&root, &was.freestanding, &build_text()), was.sysroot);
@@ -1393,14 +1422,14 @@ mod tests {
         same("the fork without the link");
 
         for manifest in STD_MANIFESTS {
-            write(&root.join(manifest), "[package]\nversion = \"0.2.0\"\n");
+            write(&root.join(manifest), "[package]\nname = \"a\"\nversion = \"0.2.0\"\n");
             both(manifest);
-            write(&root.join(manifest), "[package]\nversion = \"0.1.0\"\n");
+            write(&root.join(manifest), "[package]\nname = \"a\"\nversion = \"0.1.0\"\n");
             same(manifest);
         }
 
         let compiler = one.key();
-        let config = keyed_std_config();
+        let config = keyed_std_config(&root);
         assert_eq!(freestanding_key_of(&root, compiler, &fork, RECIPE, &config), was.freestanding);
         assert_ne!(freestanding_key_of(&root, compiler, &fork, RECIPE, ""), was.freestanding,
                    "the freestanding key reads no std configuration");
@@ -1465,7 +1494,7 @@ mod tests {
     #[test]
     fn a_sysroot_records_the_witness_it_was_built_from() {
         let dir = TempDir::new("recorded-witness");
-        let witness = "toyos-abi/src/lib.rs:0011223344556677\ntoyos/Cargo.toml:8899aabbccddeeff";
+        let witness = "sdk/abi/src/lib.rs:0011223344556677\nsdk/toyos/Cargo.toml:8899aabbccddeeff";
         fs::write(dir.join(SOURCES), sources_text(&Key::of(b"a sysroot"), witness)).unwrap();
         assert_eq!(recorded_witness(&dir), Ok(witness.to_string()));
         fs::write(dir.join(SOURCES), "0123456789abcdef\n").unwrap();
@@ -1630,7 +1659,7 @@ mod tests {
         let primary = base.join("primary");
         fs::create_dir_all(&primary).unwrap();
         git(&primary, &["init", "-q"]);
-        write(&primary.join("toyos-abi/src/lib.rs"), "pub struct A;\n");
+        write(&primary.join("sdk/abi/src/lib.rs"), "pub struct A;\n");
         write(&primary.join(".gitignore"), ".build-locks/\n");
         git(&primary, &["submodule", "add", "-q", fork.to_str().unwrap(), "rust"]);
         git(&primary.join("rust"), &["checkout", "-q", &c1]);

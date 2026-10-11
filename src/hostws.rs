@@ -85,10 +85,12 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 
 /// Whether the member at `member` is built for a guest: the kernel, whose
 /// library alone a host tests, and the SDK, each from a step of its own; the
-/// loader; and every program under `userland/`, which `src/userlandhost.rs`
-/// surveys.
+/// loader; the SDK's window, font and file-picker clients; and every program
+/// under `userland/`, which `src/userlandhost.rs` surveys.
 fn guest_built(member: &str) -> bool {
-    [crate::ci::KERNEL_DIR, crate::ci::SDK_DIR, "bootloader"].contains(&member) || member.starts_with("userland/")
+    [crate::ci::KERNEL_DIR, crate::ci::SDK_DIR, "bootloader", "sdk/window", "sdk/font", "sdk/filepicker"]
+        .contains(&member)
+        || member.starts_with("userland/")
 }
 
 /// The members a host tests: all but the [`guest_built`].

@@ -6,8 +6,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-toyos = { path = "../../toyos" }
-toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
 # The tables' decode, which the kernel reads its own of by.
 toyos-acpi = { path = "../../toyos-acpi" }
 toyos-aml = { path = "aml" }

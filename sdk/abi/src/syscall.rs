@@ -1046,8 +1046,8 @@ pub fn set_thread_name(name: &[u8]) {
 /// chain reaches past them is refused `InvalidArgument`.
 pub const MAX_LINKS: u32 = 10;
 
-/// The longest path a file server's wire carries (`toyos/src/fs.rs`), and
-/// libc's `PATH_MAX` (`userland/libc/include/limits.h`).
+/// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
+/// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
 pub const MAX_PATH: usize = 4096;
 
 /// Open a file.

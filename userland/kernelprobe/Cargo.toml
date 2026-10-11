@@ -6,4 +6,4 @@ license = "MIT OR Apache-2.0"
 description = "Test-only multi-call binary: the kernel probes the AArch64 guest's virt jobs run, one per name it is invoked by."
 
 [dependencies]
-toyos-abi = { path = "../../toyos-abi" }
+toyos-abi = { path = "../../sdk/abi" }
