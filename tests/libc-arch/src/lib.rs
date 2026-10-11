@@ -9,7 +9,8 @@
 //! `long double` widening against compiler-builtins', the errno codes against
 //! `include/errno.h`, IPv4 addresses and their texts against the host C
 //! library's, and the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, and the rule that reads a stream's end.
+//! `getsockopt`, the rule that reads a stream's end, and `realpath`'s
+//! resolution over a tree laid out here.
 
 #[cfg(test)]
 extern crate alloc;
@@ -20,6 +21,11 @@ mod alarmreq;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/arch/mod.rs"]
 mod arch;
+#[cfg(test)]
+#[path = "../../../userland/libc/src/errcode.rs"]
+// Every code libc answers with, of which the modules here use a few.
+#[allow(dead_code)]
+mod errcode;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/elfsym.rs"]
 mod elfsym;
@@ -44,6 +50,9 @@ mod memreq;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/pollreq.rs"]
 mod pollreq;
+#[cfg(test)]
+#[path = "../../../userland/libc/src/resolve.rs"]
+mod resolve;
 #[cfg(test)]
 #[path = "../../../userland/libc/src/sigmask.rs"]
 mod sigmask;
@@ -87,6 +96,8 @@ mod listing_reader;
 mod long_double;
 #[cfg(test)]
 mod memory_refusals;
+#[cfg(test)]
+mod path_resolution;
 #[cfg(test)]
 mod poll_requests;
 #[cfg(test)]

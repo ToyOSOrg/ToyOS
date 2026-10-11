@@ -4,6 +4,11 @@ readlink into 4: 4, "/sys#"
 readlink into 0: -1, EINVAL
 readlink of a file: -1, EINVAL
 readlink of nothing: -1, ENOENT
+realpath of a link: /system/bin/toybox
+realpath of a directory through ..: /system/lib
+realpath of a relative path: /system/bin/toybox
+realpath of nothing: -1, ENOENT
+realpath through a file: -1, ENOTDIR
 truncate to 2: 0; stat size: 2
 truncate of nothing: -1, ENOENT
 setbuf: file 0 bytes, the buffer holds them

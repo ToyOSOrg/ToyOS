@@ -217,7 +217,7 @@ pub extern "C" fn round(x: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn lround(x: f64) -> i64 {
     crate::fparts::lround(x).unwrap_or_else(|crate::fparts::Domain| {
-        crate::errno::set(crate::errno::EDOM);
+        crate::errno::set(crate::errcode::EDOM);
         i64::MIN
     })
 }
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn logb(x: f64) -> f64 {
     crate::fparts::logb(x).unwrap_or_else(|crate::fparts::Pole| {
-        crate::errno::set(crate::errno::ERANGE);
+        crate::errno::set(crate::errcode::ERANGE);
         f64::NEG_INFINITY
     })
 }
