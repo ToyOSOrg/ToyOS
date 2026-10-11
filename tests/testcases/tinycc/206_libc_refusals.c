@@ -83,7 +83,6 @@ int main(void) {
     said("setrlimit", setrlimit(RLIMIT_CORE, &limit));
     said("msync", msync(page, 4096, MS_SYNC));
     said("mprotect", mprotect(page, 4096, PROT_READ));
-    said("realpath", realpath("/tmp", NULL) == NULL ? -1 : 0);
     said("utimes", utimes(FILE_PATH, NULL));
     int status = 0;
     said("wait", wait(&status));

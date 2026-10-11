@@ -1,6 +1,7 @@
 /* What libc does for the names LLVM builds against: a directory listed with
    the name and kind of each entry; dladdr naming the image and the exported
-   symbol an address lies in; a file truncated by its path; a stream on a
+   symbol an address lies in; realpath through a link, `..` and a
+   relative path, and of nothing; a file truncated by its path; a stream on a
    buffer of its caller's, or none, sought and told by off_t; SIGALRM's
    action, read back whole, and an alarm armed and disarmed; and strnlen, strsignal, modf,
    lround, logb, pathconf and the <endian.h> conversions. */
@@ -52,6 +53,7 @@ static const char *errno_name(int e) {
     case EEXIST: return "EEXIST";
     case EINVAL: return "EINVAL";
     case ENOENT: return "ENOENT";
+    case ENOTDIR: return "ENOTDIR";
     default: return "another errno";
     }
 }
@@ -86,6 +88,17 @@ static void links(void) {
     refused("readlink into 0", readlink(LINK, buf, 0));
     refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
     refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
+
+    char *real = realpath(LINK, NULL);
+    printf("realpath of a link: %s\n", real ? real : "NULL");
+    free(real);
+    char held[PATH_MAX];
+    printf("realpath of a directory through ..: %s\n", realpath("/system/bin/../lib", held) ? held : "NULL");
+    if (chdir("/system/bin") == 0)
+        printf("realpath of a relative path: %s\n", realpath("../bin/./cat", held) ? held : "NULL");
+    chdir("/");
+    refused("realpath of nothing", realpath(DIR_PATH "/none", held) ? 0 : -1);
+    refused("realpath through a file", realpath(TARGET "/x", held) ? 0 : -1);
 }
 
 static void truncated(void) {

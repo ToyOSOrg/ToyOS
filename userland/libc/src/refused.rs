@@ -134,12 +134,3 @@ pub unsafe extern "C" fn msync(_addr: *mut u8, _len: usize, _flags: i32) -> i32 
 pub unsafe extern "C" fn mprotect(_addr: *mut u8, _len: usize, _prot: i32) -> i32 {
     refuse()
 }
-
-/// The kernel resolves a path by its own rules, not POSIX's (`..` read off
-/// the text, only the last name's link followed, a relative link read
-/// against its mount), and no call answers where one leads.
-#[no_mangle]
-pub unsafe extern "C" fn realpath(_path: *const u8, _resolved: *mut u8) -> *mut u8 {
-    errno::set(ENOSYS);
-    ptr::null_mut()
-}

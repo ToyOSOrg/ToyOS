@@ -9,7 +9,7 @@ use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
-use crate::errno::{EACCES, EAGAIN, EEXIST, EINVAL, EIO, ENOENT, EPIPE};
+use crate::errno::EINVAL;
 use crate::fdreq::CloseOnExec;
 use crate::pthread::Lock;
 use crate::time::Timespec;
@@ -37,19 +37,7 @@ const S_IFLNK: u32 = 0o120000;
 // Helper: set errno from toyos-abi error
 
 pub(crate) fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
-    use toyos_abi::syscall::SyscallError;
-    let code = match e {
-        SyscallError::NotFound => ENOENT,
-        SyscallError::PermissionDenied => EACCES,
-        SyscallError::AlreadyExists => EEXIST,
-        SyscallError::InvalidArgument => EINVAL,
-        SyscallError::WouldBlock => EAGAIN,
-        // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
-        SyscallError::Gone => EPIPE,
-        SyscallError::Io => EIO,
-        _ => EINVAL,
-    };
-    crate::errno::set(code);
+    crate::errno::set(crate::errcode::of(e));
     -1
 }
 
@@ -373,6 +361,51 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
         }
         Err(e) => set_errno(e) as isize,
     }
+}
+
+struct TheKernel;
+
+impl crate::resolve::Kernel for TheKernel {
+    fn read_link(&mut self, at: &[u8], target: &mut [u8]) -> Result<usize, syscall::SyscallError> {
+        syscall::readlink(at, target)
+    }
+
+    fn open(&mut self, at: &[u8]) -> Result<(), syscall::SyscallError> {
+        syscall::open(at, OpenFlags::READ).map(syscall::close)
+    }
+
+    fn is_dir(&mut self, at: &[u8]) -> bool {
+        // SAFETY: `is_dir` reads only `at`.
+        unsafe { is_dir(at) }
+    }
+}
+
+/// POSIX's `realpath`, by the kernel's rules of resolution (`resolve`): the
+/// path every call of this library that takes `path` reaches, in a block of
+/// `malloc`'s when `resolved` is null.
+#[no_mangle]
+pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8 {
+    use crate::resolve::{self, PATH_MAX};
+    let mut cwd = [0u8; PATH_MAX];
+    let n = syscall::getcwd(&mut cwd);
+    assert!(n != 0 && n <= PATH_MAX, "SYS_GETCWD: a working directory past the kernel's MAX_PATH");
+    let at = match resolve::resolve(&cwd[..n], c_str_to_bytes(path), &mut TheKernel) {
+        Ok(at) => at,
+        Err(code) => {
+            crate::errno::set(code);
+            return ptr::null_mut();
+        }
+    };
+    let out = if resolved.is_null() { unsafe { crate::memory::malloc(at.len() + 1) } } else { resolved };
+    if !out.is_null() {
+        // SAFETY: `PATH_MAX` bytes at the caller's `resolved`, as POSIX has it,
+        // or `at.len() + 1` of `malloc`'s; `resolve` answers under `PATH_MAX`.
+        unsafe {
+            ptr::copy_nonoverlapping(at.as_ptr(), out, at.len());
+            *out.add(at.len()) = 0;
+        }
+    }
+    out
 }
 
 unsafe fn stat_impl(path: *const u8, buf: *mut Stat) -> i32 {
