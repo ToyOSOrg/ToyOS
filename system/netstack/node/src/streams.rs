@@ -420,6 +420,12 @@ impl Node {
 
     /// The client lets go of the stream: nobody reads it, and what its pipe still holds is sent
     /// before the FIN. A connect not yet answered is answered [`StreamEvent::Closed`].
+    /// MEASUREMENT ONLY: the stream's connection's variables.
+    pub fn tcp_info(&mut self, id: StreamId) -> Option<toyos_net_tcp::Info> {
+        let conn = self.streams.live.get(&id)?.conn;
+        self.stack.tcp_info(conn)
+    }
+
     pub fn close(&mut self, now: Instant, id: StreamId) {
         let Some(stream) = self.streams.live.get_mut(&id) else { return };
         if stream.connecting {

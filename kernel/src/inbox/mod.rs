@@ -171,7 +171,10 @@ pub struct PollEntry {
 impl Ring for PollEntry {
     fn fire(&self, how: Fire) {
         match how {
-            Fire::Ready => self.poll.fire(self.direction.raw()),
+            Fire::Ready => {
+                crate::counters::soft::add(toyos_abi::counters::Counter::InboxFires, 1);
+                self.poll.fire(self.direction.raw())
+            }
             Fire::Gone => self.poll.end(),
         }
     }
@@ -536,9 +539,10 @@ fn arm(
     let ready = readiness_of(object, flags).any();
     let read = if flags.readable() { ops::read_watch(object) } else { None };
     let write = if flags.writable() { ops::write_watch(object) } else { None };
-    // A pipe end's own watch is the one its other end's last holder posts;
-    // an object with no other end is refused the question, whatever else the
-    // watch asks. A direction asked above has taken that watch already.
+    // A pipe end's leaving watch is posted by its other end's last holder
+    // alone; an object with no other end is refused the question, whatever
+    // else the watch asks. A direction asked above needs no second entry: that
+    // last holder posts the end's own data watch too.
     let own = match flags.other_end_gone().then(|| ops::pipe_end_watch(object)) {
         Some(None) => return Err(SyscallError::NotSupported),
         Some(Some(_)) if read.is_some() || write.is_some() => None,
@@ -614,6 +618,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
     }
 
     fn look(&self, poll: &Arc<Poll>) -> Look {
+        crate::counters::soft::add(toyos_abi::counters::Counter::InboxLooks, 1);
         let object = match resolve(poll.handle) {
             Ok(object) => object,
             // Closed since it was watched, which is no bug of the process's:
@@ -634,6 +639,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
         if now.any() {
             return Look::Ready(now.result_flags());
         }
+        crate::counters::soft::add(toyos_abi::counters::Counter::InboxRearms, 1);
         let again = Poll::new(self.clone(), poll.user_data, poll.handle, poll.flags);
         match arm(self, again, Some(poll), &object) {
             Ok(()) => Look::Waits,

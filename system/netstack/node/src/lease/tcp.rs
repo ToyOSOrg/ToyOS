@@ -23,6 +23,11 @@ impl Stack {
         self.shard.connect(now, None, remote)
     }
 
+    /// MEASUREMENT ONLY.
+    pub(crate) fn tcp_info(&mut self, id: ConnId) -> Option<toyos_net_tcp::Info> {
+        self.shard.tcp_info(id)
+    }
+
     pub(crate) fn tcp_status(&mut self, id: ConnId) -> Status {
         held(self.shard.status(id))
     }

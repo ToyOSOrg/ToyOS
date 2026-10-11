@@ -42,12 +42,64 @@ use toyos_net_shard::{Config, Secrets};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
+/// Measurement only, never lands: counts and cycles of the pass's work, in
+/// toyos-net-wire's registry, and this process's accounting since the last line.
+pub mod prof {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub use toyos_net_wire::prof::{Slot, add, now, since};
+    use toyos_abi::syscall::{ProcessStats, SELF_PROCESS, process_stats};
+
+    /// The card's `RDT` writes so far, as the last pass left them.
+    pub static RDT: AtomicU64 = AtomicU64::new(0);
+    /// Round 4: the MAC's missed frames so far, as the last pass left them.
+    pub static MISSED: AtomicU64 = AtomicU64::new(0);
+    static LAST: Mutex<Option<(u64, u64, ProcessStats)>> = Mutex::new(None);
+
+    pub fn batch(n: u64) {
+        add(
+            match n {
+                0 => Slot::B0,
+                1 => Slot::B1,
+                2 => Slot::B2,
+                3..=4 => Slot::B3_4,
+                5..=8 => Slot::B5_8,
+                9..=16 => Slot::B9_16,
+                17..=64 => Slot::B17_64,
+                _ => Slot::B65,
+            },
+            1,
+        );
+    }
+
+    pub fn line() -> String {
+        let mut words: Vec<String> = toyos_net_wire::prof::take().map(|(n, c)| format!("{n}={c}")).collect();
+        let mut stats = ProcessStats::default();
+        process_stats(SELF_PROCESS, &mut stats).expect("netstack reads its own accounting");
+        let rdt = RDT.load(Relaxed);
+        let mut last = LAST.lock().unwrap();
+        let missed = MISSED.load(Relaxed);
+        let (rdt0, missed0, s0) = last.unwrap_or_default();
+        words.push(format!("rdt_writes={}", rdt.wrapping_sub(rdt0)));
+        words.push(format!("missed={}", missed.wrapping_sub(missed0)));
+        words.push(format!("cpu_ns={}", stats.cpu_ns - s0.cpu_ns));
+        words.push(format!("syscalls={}", stats.syscall_total - s0.syscall_total));
+        words.push(format!("syscall_ns={}", stats.syscall_total_ns - s0.syscall_total_ns));
+        words.push(format!("runq_ns={}", stats.runqueue_wait_ns - s0.runqueue_wait_ns));
+        words.push(format!("wall_ns={}", stats.wall_ns - s0.wall_ns));
+        *last = Some((rdt, missed, stats));
+        words.join(" ")
+    }
+}
+
 mod card;
 mod client;
 mod i219;
 mod pipes;
 mod serve;
 mod virtio_net;
+mod watches;
 
 use card::Card;
 use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
@@ -208,8 +260,8 @@ impl Leases {
                 // read off a stick or a stream has this line and nothing else
                 // to say what this machine's network was.
                 Some(lease) => say!(
-                    "netstack: DHCP: lease {}/{} from {}, gateway {}, dns [{}], {} ms after \
-                     netstack came up",
+                    "{}{}/{} from {}, gateway {}, dns [{}], {} ms after netstack came up",
+                    toyos_tco::LEASE_SAID,
                     lease.address,
                     lease.prefix_len,
                     lease.server,
@@ -232,8 +284,8 @@ impl Leases {
                 return false;
             }
             say!(
-                "netstack: DHCP: no lease as {} in {} s; this machine has no address and every \
-                 connect through it is refused",
+                "{}{} in {} s; this machine has no address and every connect through it is refused",
+                toyos_tco::NO_LEASE_SAID,
                 HOSTNAME,
                 self.began.elapsed().as_secs(),
             );
@@ -356,7 +408,7 @@ fn main() {
         node.link(clock(), true, draw);
     }
 
-    let poller = Poller::new(
+    let mut poller = watches::Watches::new(
         FIXED_WATCHES + serve::WATCHES_PER_PLACE * MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
     );
     const TOKEN_ACCEPTOR: u64 = 0;
@@ -371,19 +423,42 @@ fn main() {
     let mut accept_refused: u64 = 0;
 
     loop {
+        let pass_at = prof::now();
         // First, because it is what makes the interrupt taken.
-        if let Some(link) = card.begin_pass() {
+        let t0 = prof::now();
+        let begun = card.begin_pass();
+        prof::since(prof::Slot::CyBeginPass, t0);
+        if let Some(link) = begun {
             // A change of state only: a speed change is no new network.
             if link.is_up() != link_up {
                 link_up = link.is_up();
                 node.link(clock(), link_up, draw);
             }
         }
-        let owed = node.receive(clock(), |sink| card.rx(sink), draw);
+        prof::add(prof::Slot::Passes, 1);
+        let mut got = 0u64;
+        let t0 = prof::now();
+        let owed = node.receive(clock(), |sink| {
+            let one = card.rx(sink);
+            got += u64::from(one);
+            one
+        }, draw);
+        prof::since(prof::Slot::CyReceive, t0);
+        prof::RDT.store(card.rdt_writes(), std::sync::atomic::Ordering::Relaxed);
+        prof::MISSED.store(card.missed(), std::sync::atomic::Ordering::Relaxed);
+        prof::add(prof::Slot::FramesRx, got);
+        prof::batch(got);
+        if owed {
+            prof::add(prof::Slot::Owed, 1);
+        }
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
+            let t0 = prof::now();
             node.fire(now, draw);
+            prof::since(prof::Slot::CyFire, t0);
         }
+        let mut sent_total = 0u64;
+        let t_tx = prof::now();
         loop {
             // A card with no room is asked to say when it has some, and a
             // frame the node still holds leaves in the pass that wakes.
@@ -391,13 +466,36 @@ fn main() {
                 0 => card.wake_on_room(),
                 room => room,
             };
-            if room == 0 || node.transmit(now, room, |frame| card.tx(frame.len(), |slot| slot.copy_from_slice(frame)), draw) < room {
+            prof::add(prof::Slot::TxCalls, 1);
+            let sent = if room == 0 {
+                0
+            } else {
+                node.transmit(
+                    now,
+                    room,
+                    |frame| {
+                        let t0 = prof::now();
+                        card.tx(frame.len(), |slot| slot.copy_from_slice(frame));
+                        prof::since(prof::Slot::CyCardTx, t0);
+                    },
+                    draw,
+                )
+            };
+            prof::add(prof::Slot::FramesTx, sent as u64);
+            sent_total += sent as u64;
+            if room == 0 || sent < room {
                 break;
             }
         }
+        prof::since(prof::Slot::CyTransmit, t_tx);
+        if got == 0 && sent_total == 0 {
+            prof::add(prof::Slot::EmptyPasses, 1);
+        }
         card.report();
 
+        let t0 = prof::now();
         sockets.settle(&mut node, now);
+        prof::since(prof::Slot::CySettle, t0);
         // Before anything is served: the lease is what gives this machine an
         // address, a route and its resolvers.
         if leases.pass(node.lease()) {
@@ -408,12 +506,14 @@ fn main() {
             );
         }
 
+        let t0 = prof::now();
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
         poller.watch(card.claim(), READABLE, TOKEN_NIC);
-        sockets.watch(&node, &poller);
+        sockets.watch(&node, &mut poller);
         for p in pending.iter() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }
+        prof::since(prof::Slot::CyWatch, t0);
 
         // The node's next deadline: a retransmission, a lease's timer, a
         // lookup's wait, a connect's. Zero when one is due, and when the
@@ -436,12 +536,25 @@ fn main() {
         }
 
         let mut ready: Vec<u64> = Vec::new();
+        prof::since(prof::Slot::CyPass, pass_at);
+        prof::add(prof::Slot::Submits, u64::from(poller.pending()));
+        let t_wait = prof::now();
+        let mut answering = 0u64;
         poller.wait_answers(1, timeout, |token, answer| {
+            let t0 = prof::now();
+            if token == TOKEN_NIC {
+                prof::add(prof::Slot::NicReady, 1);
+            }
             if !sockets.answered(&mut node, clock(), token, answer) {
                 ready.push(token);
             }
+            answering += prof::now().wrapping_sub(t0);
         });
+        prof::add(prof::Slot::CyWait, prof::now().wrapping_sub(t_wait).wrapping_sub(answering));
+        prof::add(prof::Slot::CyAnswers, answering);
+        let t0 = prof::now();
         sockets.bridge(&mut node, clock());
+        prof::since(prof::Slot::CyBridge, t0);
 
         // On a pass that found nothing ready too: otherwise a silent client
         // is only ever timed out by some other client's traffic.

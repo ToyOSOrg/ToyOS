@@ -4,7 +4,8 @@
 //! address classes and prefixes, and the declaration of a crate's counters.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "prof"), forbid(unsafe_code))]
+#![cfg_attr(feature = "prof", deny(unsafe_code))]
 #![cfg_attr(
     not(test),
     forbid(
@@ -395,4 +396,231 @@ mod compile_fail {
     /// ```
     #[allow(non_camel_case_types)]
     pub struct write_payload_and_write_frame_body_are_sealed;
+}
+
+/// MEASUREMENT ONLY, never lands: netstack's per-stage cycle counts, one
+/// registry every crate of its stack adds to, read and cleared by netstack.
+/// Without the `prof` feature, which netstack alone enables, it counts nothing.
+pub mod prof {
+    macro_rules! slots {
+        ($($name:ident = $text:literal,)*) => {
+            #[allow(non_camel_case_types)]
+            #[derive(Clone, Copy)]
+            #[repr(usize)]
+            pub enum Slot { $($name,)* }
+            pub const NAMES: &[&str] = &[$($text,)*];
+        };
+    }
+
+    slots! {
+        Passes = "passes",
+        NicReady = "nic_ready",
+        FramesRx = "frames_rx",
+        FramesTx = "frames_tx",
+        PipeW = "pipe_w",
+        PipeWBytes = "pipe_w_bytes",
+        PipeWRefused = "pipe_w_refused",
+        PipeR = "pipe_r",
+        PipeREmpty = "pipe_r_empty",
+        Bridges = "bridges",
+        B0 = "b0",
+        B1 = "b1",
+        B2 = "b2",
+        B3_4 = "b3_4",
+        B5_8 = "b5_8",
+        B9_16 = "b9_16",
+        B17_64 = "b17_64",
+        B65 = "b65",
+        Watches = "watches",
+        Submits = "submits",
+        TxCalls = "tx_calls",
+        Owed = "owed",
+        EmptyPasses = "empty_passes",
+        CyPass = "cy_pass",
+        CyBeginPass = "cy_begin_pass",
+        CyReceive = "cy_receive",
+        CyPollRx = "cy_poll_rx",
+        CyRxDone = "cy_rx_done",
+        RxDone = "rx_done",
+        CyNodeFrame = "cy_node_frame",
+        CyNodeSettle = "cy_node_settle",
+        CyChecksum = "cy_checksum",
+        ChecksumBytes = "checksum_bytes",
+        CyRingWrite = "cy_ring_write",
+        RingWriteBytes = "ring_write_bytes",
+        CyFire = "cy_fire",
+        CyTransmit = "cy_transmit",
+        CyCardTx = "cy_card_tx",
+        CySettle = "cy_settle",
+        CyWatch = "cy_watch",
+        CyPipeW = "cy_pipe_w",
+        CyPipeR = "cy_pipe_r",
+        CyWait = "cy_wait",
+        CyAnswers = "cy_answers",
+        CyBridge = "cy_bridge",
+        // Round 3: what the receiver says to the sender, and what it was told.
+        OooSegs = "ooo_segs",
+        HoleFilled = "hole_filled",
+        SackSent = "sack_sent",
+        DsackSent = "dsack_sent",
+        AckSegs = "ack_segs",
+        AckBytes = "ack_bytes",
+        AckZero = "ack_zero",
+        AckGapNs = "ack_gap_ns",
+        AckGapN = "ack_gap_n",
+        G0_100us = "gap_lt100us",
+        G100_300us = "gap_100_300us",
+        G300us_1ms = "gap_300us_1ms",
+        G1_3ms = "gap_1_3ms",
+        G3ms = "gap_ge3ms",
+        S1_2 = "stretch_1_2",
+        S3_8 = "stretch_3_8",
+        S9_32 = "stretch_9_32",
+        S33_64 = "stretch_33_64",
+        S65 = "stretch_ge65",
+        Paces = "paces",
+        PaceNs = "pace_ns",
+        ItrUnits = "itr_units",
+        // Round 4: each duplicate a D-SACK reports, by what this end had said of it, and how old;
+        // and each run of segments lost below a new out-of-order range.
+        DsOld = "ds_old",
+        DsOldAcked = "ds_old_acked",
+        DsOldUnacked = "ds_old_unacked",
+        DsInRange = "ds_in_range",
+        DsInRangeUntold = "ds_in_range_untold",
+        DaLt500us = "ds_first_lt500us",
+        Da500us2ms = "ds_first_500us_2ms",
+        Da2_8ms = "ds_first_2_8ms",
+        Da8_32ms = "ds_first_8_32ms",
+        DaGe32ms = "ds_first_ge32ms",
+        DkLt500us = "ds_acked_lt500us",
+        Dk500us2ms = "ds_acked_500us_2ms",
+        Dk2_8ms = "ds_acked_2_8ms",
+        Dk8_32ms = "ds_acked_8_32ms",
+        DkGe32ms = "ds_acked_ge32ms",
+        L1 = "lost_run_1",
+        L2_4 = "lost_run_2_4",
+        L5_16 = "lost_run_5_16",
+        L17_64 = "lost_run_17_64",
+        L65 = "lost_run_ge65",
+    }
+
+    /// Round 4: a duplicate `ns` after the text it duplicates first arrived, or, `acked`, after
+    /// the acknowledgment that covered it left.
+    pub fn age(acked: bool, ns: u64) {
+        let bucket = match ns {
+            0..500_000 => 0,
+            500_000..2_000_000 => 1,
+            2_000_000..8_000_000 => 2,
+            8_000_000..32_000_000 => 3,
+            _ => 4,
+        };
+        let first = [Slot::DaLt500us, Slot::Da500us2ms, Slot::Da2_8ms, Slot::Da8_32ms, Slot::DaGe32ms];
+        let since_ack = [Slot::DkLt500us, Slot::Dk500us2ms, Slot::Dk2_8ms, Slot::Dk8_32ms, Slot::DkGe32ms];
+        add(if acked { since_ack[bucket] } else { first[bucket] }, 1);
+    }
+
+    /// Round 4: a new out-of-order range with `segs` full-sized segments missing below it.
+    pub fn run(segs: u64) {
+        add(
+            match segs {
+                0..=1 => Slot::L1,
+                2..=4 => Slot::L2_4,
+                5..=16 => Slot::L5_16,
+                17..=64 => Slot::L17_64,
+                _ => Slot::L65,
+            },
+            1,
+        );
+    }
+
+    /// Round 3: the gap between two acknowledgments that moved the ack point, in ns.
+    pub fn gap(ns: u64) {
+        add(Slot::AckGapNs, ns);
+        add(Slot::AckGapN, 1);
+        add(
+            match ns {
+                0..100_000 => Slot::G0_100us,
+                100_000..300_000 => Slot::G100_300us,
+                300_000..1_000_000 => Slot::G300us_1ms,
+                1_000_000..3_000_000 => Slot::G1_3ms,
+                _ => Slot::G3ms,
+            },
+            1,
+        );
+    }
+
+    /// Round 3: an acknowledgment that moved the ack point by `segs` full-sized segments.
+    pub fn stretch(segs: u64) {
+        add(
+            match segs {
+                0..=2 => Slot::S1_2,
+                3..=8 => Slot::S3_8,
+                9..=32 => Slot::S9_32,
+                33..=64 => Slot::S33_64,
+                _ => Slot::S65,
+            },
+            1,
+        );
+    }
+
+    #[cfg(feature = "prof")]
+    pub use on::{add, now, since, take};
+
+    #[cfg(feature = "prof")]
+    #[allow(unsafe_code, clippy::arithmetic_side_effects, clippy::indexing_slicing, clippy::as_conversions)]
+    mod on {
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        use super::{Slot, NAMES};
+
+        static C: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
+
+        /// The CPU's free-running counter: the TSC, `CNTVCT_EL0`.
+        #[inline]
+        pub fn now() -> u64 {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: reads the time-stamp counter, which CR4.TSD leaves to Ring 3.
+            unsafe {
+                core::arch::x86_64::_rdtsc()
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let v: u64;
+                // SAFETY: reads the virtual counter, which EL0 may.
+                unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+                v
+            }
+        }
+
+        #[inline]
+        pub fn add(slot: Slot, n: u64) {
+            C[slot as usize].fetch_add(n, Relaxed);
+        }
+
+        /// Ticks since `t0` to `slot`.
+        #[inline]
+        pub fn since(slot: Slot, t0: u64) {
+            add(slot, now().wrapping_sub(t0));
+        }
+
+        /// Each slot's name and count, each cleared as it is read.
+        pub fn take() -> impl Iterator<Item = (&'static str, u64)> {
+            NAMES.iter().zip(&C).map(|(name, c)| (*name, c.swap(0, Relaxed)))
+        }
+    }
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn now() -> u64 {
+        0
+    }
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn add(_: Slot, _: u64) {}
+
+    #[cfg(not(feature = "prof"))]
+    #[inline]
+    pub fn since(_: Slot, _: u64) {}
 }

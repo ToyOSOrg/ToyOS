@@ -28,7 +28,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use toyos::net::*;
-use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE, Poller};
+use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE};
 use toyos::{ipc, say, AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_inspect::Snapshot;
@@ -42,6 +42,7 @@ use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
 use crate::pipes::{self, Watched};
+use crate::watches::Watches;
 use crate::HOSTNAME;
 
 /// A watch's token names the socket it was asked of by its id, in the low
@@ -132,6 +133,33 @@ fn data_pipes(client: &Client) -> Option<(Pipes, Watched, Watched)> {
 }
 
 /// The pipe ABI's word for each of the node's.
+/// MEASUREMENT ONLY: what a connection grew to, and the stack's recovery counts, as its client
+/// closes it or its client's end of the pipe goes.
+fn say_tcp(node: &mut Node, id: StreamId, how: &str) {
+    let Some(i) = node.tcp_info(id) else { return };
+    let c = node.shard().tcp_counters();
+    let n = |counter| c.get(counter);
+    use toyos_net_tcp::Counter as K;
+    say!(
+        "netstack: tcp closed: ({how}) snd_shift={} rcv_shift={} rcv_capacity={} rcv_wnd={} rcv_rtt={:?} rcv_mss={} srtt={:?} cwnd={} smss={} | stack rto={} loss_probe={} loss_probe_recovery={} retransmit_bytes={} dsack={} sack_recovery={}",
+        i.snd_shift,
+        i.rcv_shift,
+        i.rcv_capacity,
+        i.rcv_edge.since(i.rcv_nxt),
+        i.rcv_rtt,
+        i.rcv_mss,
+        i.srtt,
+        i.cwnd,
+        i.smss,
+        n(K::Rto),
+        n(K::LossProbe),
+        n(K::LossProbeRecovery),
+        n(K::RetransmitBytes),
+        n(K::DsackRcvd),
+        n(K::SackRecovery),
+    );
+}
+
 fn refused(refusal: Refused) -> u32 {
     match refusal {
         Refused::AddrInUse => ERR_ADDR_IN_USE,
@@ -298,7 +326,10 @@ impl Sockets {
             return;
         };
         match self.ids.remove(&req.socket_id) {
-            Some(Socket::Stream(id)) => node.close(now, id),
+            Some(Socket::Stream(id)) => {
+                say_tcp(node, id, "closed");
+                node.close(now, id)
+            }
             Some(Socket::Listener { id, .. }) => {
                 node.close_listener(now, id);
             }
@@ -723,6 +754,7 @@ impl Sockets {
         self.ends.retain(|socket_id, ends| {
             let held = ends.to_client.held().is_some() || ends.from_client.held().is_some();
             if !held {
+                say!("netstack: prof {}", crate::prof::line());
                 by_stream.remove(&ends.stream);
                 if matches!(ids.get(socket_id), Some(Socket::Stream(_))) {
                     ids.remove(socket_id);
@@ -737,13 +769,14 @@ impl Sockets {
     /// one pipe of each datagram socket for its owner's leaving, and the
     /// connection of each client that waits for a lookup, which hangs up by
     /// closing it.
-    pub fn watch(&self, node: &Node, poller: &Poller) {
+    pub fn watch(&self, node: &Node, poller: &mut Watches) {
         for (stream, watch) in node.watches() {
             let Some((socket_id, ends)) = self.by_stream.get(&stream).and_then(|id| Some((*id, self.ends.get(id)?))) else {
                 unreachable!("the node holds a stream whose ends netstack does not")
             };
             let from = if watch.readable { READABLE } else { 0 } | if watch.writer { OTHER_END_GONE } else { 0 };
             if let (true, Some(pipe)) = (from != 0, ends.from_client.held()) {
+                crate::prof::add(crate::prof::Slot::Watches, 1);
                 poller.watch(&*pipe, from, TOKEN_FROM_CLIENT | u64::from(socket_id));
             }
             let to = if watch.writable { WRITABLE } else { 0 } | if watch.reader { OTHER_END_GONE } else { 0 };
@@ -787,7 +820,13 @@ impl Sockets {
                         say!("netstack: resetting a connection — the kernel refused the watch of its {end:?} pipe: {why:?}");
                         node.pipe_broken(now, ends.stream, end);
                     }
-                    Ok(met) if met & OTHER_END_GONE != 0 => node.pipe_gone(now, ends.stream, end),
+                    Ok(met) if met & OTHER_END_GONE != 0 => {
+                        // MEASUREMENT ONLY: a client that ends without a close says nothing else.
+                        if end == PipeEnd::ToClient && matches!(self.ids.get(&socket_id), Some(Socket::Stream(_))) {
+                            say_tcp(node, ends.stream, "client gone");
+                        }
+                        node.pipe_gone(now, ends.stream, end)
+                    }
                     Ok(_) => {
                         if end == PipeEnd::FromClient {
                             self.readable.push(ends.stream);
@@ -837,6 +876,7 @@ impl Sockets {
     /// The pass over the streams the last wake's answers asked for, once.
     pub fn bridge(&mut self, node: &mut Node, now: Instant) {
         if std::mem::take(&mut self.bridge) {
+            crate::prof::add(crate::prof::Slot::Bridges, 1);
             node.bridge(now, self.readable.drain(..));
         }
     }
