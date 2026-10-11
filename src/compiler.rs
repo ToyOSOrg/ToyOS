@@ -202,7 +202,7 @@ fn build_in_fork(root: &Path, store: &Path, fork: &Path) -> PathBuf {
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
-    let (ok, log) = toolchain::x_build_compiler(fork, &args, "the compiler", &llvm.dir);
+    let (ok, log) = toolchain::x_build_compiler(root, fork, &args, "the compiler", &llvm.dir);
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
     let stage2 = build_dir.join(&host).join("stage2");

@@ -507,7 +507,7 @@ fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--config", config, "src/llvm-project/llvm", "src/llvm-project/lld"];
-    let (ok, _) = toolchain::x_build_with(fork, &args, "LLVM", |command| {
+    let (ok, _) = toolchain::x_build_with(root, fork, &args, "LLVM", |command| {
         clear(command);
         command.env("PATH", path);
     });
@@ -946,7 +946,8 @@ mod tests {
         let built = fork.join("build/toyos-llvm");
         assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork).as_str(), "the caller's environment moved the key");
         let seen = fs::read_to_string(built.join("environment")).unwrap();
-        let allowed = ["PATH", "TMPDIR", "BOOTSTRAP_SKIP_TARGET_SANITY", "PWD", "OLDPWD", "SHLVL", "_"];
+        // Every bootstrap run is handed std's patch, which is the build's and not the caller's.
+        let allowed = ["PATH", "TMPDIR", "BOOTSTRAP_SKIP_TARGET_SANITY", crate::sysroot::STD_PATCH_FLAGS, "PWD", "OLDPWD", "SHLVL", "_"];
         for name in seen.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name) {
             assert!(allowed.contains(&name), "the build saw {name}: {seen}");
         }

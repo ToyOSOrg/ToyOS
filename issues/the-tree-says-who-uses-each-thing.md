@@ -185,8 +185,11 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
 1. **A flat tracker.** Landed in #723.
 2. **Version alignment.** Landed in #724, #732 and #738.
 3. **One workspace.** Landed in #746.
-4. **std off repository paths:** `issues/std-names-the-sdk-crates-by-path.md`.
-   **Exit:** that file's.
+4. **std off repository paths.** Landed with stages 5-9, in one pull
+   request. **Exit:** std names both by version; the build supplies them by
+   one `[patch]`; a clean toolchain build passes; the userland targets'
+   `libstd`/`libtoyos` are identical before and after; the keys move once,
+   through the fork's `library/`.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker, osrelease and libc (with
    `tests/libc-arch` as `sdk/libc/arch/`); `src/sysroot.rs`,
    `src/sdkversion.rs` and `src/release.rs` read the directory instead of a

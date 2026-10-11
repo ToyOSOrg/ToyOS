@@ -23,12 +23,21 @@
 //! moved to the commit its tree pins;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins and never moved ([`fork_checkout`]).
-//! `library/std` names `toyos-abi` and `toyos` as `../../../` and each file of
-//! its ToyOS backend, `sdk/std`, by a `#[path]` as far up, so each checkout's
-//! std compiles against its own worktree's ABI and backend with nothing
-//! rewritten. The build is bootstrap's stage-0 local rebuild: the compiler the
-//! checkout names (`src/compiler.rs`) compiles the checkout's `library/` for
-//! the guest targets into `<checkout>/build/toyos-std/`.
+//! `library/std` names `toyos-abi` and `toyos` by version, and every bootstrap
+//! run is handed this worktree's by one `[patch]` ([`std_patch`]); each file of
+//! its ToyOS backend, `sdk/std`, it names by a `#[path]` up out of the fork. So
+//! each checkout's std compiles against its own worktree's ABI and backend with
+//! nothing rewritten, and the fork names no path to either crate, so moving one
+//! breaks no fork commit pinned before the move. The build is bootstrap's
+//! stage-0 local rebuild: the compiler the checkout names (`src/compiler.rs`)
+//! compiles the checkout's `library/` for the guest targets into
+//! `<checkout>/build/toyos-std/`.
+//!
+//! **The patch rides in `CARGOFLAGS_NOT_BOOTSTRAP`** ([`STD_PATCH_FLAGS`]), because a local rebuild
+//! counts its compiler as stage 1: `CARGOFLAGS_BOOTSTRAP` never reaches its std,
+//! which then resolves both crates from crates.io, and `CARGOFLAGS` reaches
+//! bootstrap's own build too, which records the patch as unused in
+//! `src/bootstrap/Cargo.lock`, a file of the fork no build puts back.
 //!
 //! Locks, in the one order every acquirer takes them: the compiler key's; the
 //! sysroot key's (`buildlock::keyed_*`), with this worktree's build lock put
@@ -54,8 +63,9 @@ use crate::keystore::{self, Key};
 use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGETS};
 use whole_toolchain::{whole, Whole};
 
-/// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos` and compiles its ToyOS backend from `sdk/std`, and
+/// The per-worktree sources that end up inside a sysroot: std links the
+/// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
+/// backend from `sdk/std`, and
 /// `libtoyos_c.a` is `userland/libc` with `toyos-elf` and `toyos-osrelease`.
 pub const SYSROOT_SOURCES: [&str; 7] = [
     "toyos-abi/src",
@@ -79,9 +89,44 @@ pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
     ".cargo/config.toml",
 ];
 
-/// Of [`SYSROOT_MANIFESTS`], the ones std's lockfile resolves with the fork's
-/// own: what of a worktree can move a freestanding target's dependency versions.
+/// Of [`SYSROOT_MANIFESTS`], the crates std names by version, each in the
+/// directory named for it, which std's lockfile resolves with the fork's own
+/// through [`std_patch`]: what of a worktree can move a freestanding target's
+/// dependency versions.
 const STD_MANIFESTS: [&str; 2] = ["toyos-abi/Cargo.toml", "toyos/Cargo.toml"];
+
+/// The crates of [`STD_MANIFESTS`], by the name of each one's directory.
+pub(crate) fn std_crates() -> impl Iterator<Item = &'static str> {
+    STD_MANIFESTS.into_iter().map(|manifest| {
+        manifest.strip_suffix("/Cargo.toml").unwrap_or_else(|| panic!("{manifest} is no Cargo.toml"))
+    })
+}
+
+/// The `[patch]` that hands std, which names the [`std_crates`] by version, the
+/// ones in the worktree at `root`: `--config patch.crates-io.<crate>.path="<dir>"`
+/// for each. A worktree whose path cargo cannot take that way is refused by
+/// name: bootstrap splits its cargo flags on whitespace, and the value is a TOML
+/// basic string.
+pub(crate) fn std_patch(root: &Path) -> Vec<String> {
+    let root = fs::canonicalize(root).unwrap_or_else(|e| panic!("resolve {}: {e}", root.display()));
+    let spelt = root.to_str().filter(|path| !path.contains(|c: char| c.is_whitespace() || c.is_control() || c == '"' || c == '\\'));
+    let root = spelt.unwrap_or_else(|| {
+        panic!(
+            "{} is a worktree path cargo cannot take in std's [patch]: bootstrap splits it at whitespace, and \
+             a quote, a backslash, a control character or a byte that is not UTF-8 is no plain TOML string",
+            root.display()
+        )
+    });
+    patch_spelt(root)
+}
+
+/// The variable bootstrap reads [`std_patch`] from (the header says why this one).
+pub(crate) const STD_PATCH_FLAGS: &str = "CARGOFLAGS_NOT_BOOTSTRAP";
+
+/// [`std_patch`] of the worktree at `root`, spelt as it is.
+fn patch_spelt(root: &str) -> Vec<String> {
+    std_crates().flat_map(|name| ["--config".to_string(), format!("patch.crates-io.{name}.path=\"{root}/{name}\"")]).collect()
+}
 
 /// The file a directory [`publish`] made carries last, naming what it was
 /// built from. A directory without it is a build that did not finish.
@@ -441,10 +486,12 @@ pub(crate) fn freestanding_key(root: &Path, compiler: &Key, fork: &Path) -> Key 
     freestanding_key_of(root, compiler, fork, RECIPE, &keyed_std_config())
 }
 
-/// [`std_config`] with no path of this host in it, as a key reads it.
+/// [`std_config`] and [`std_patch`] with no path of this host in them, as a key
+/// reads them.
 fn keyed_std_config() -> String {
     let placeholder = Path::new("<placeholder>");
-    std_config(placeholder, placeholder, placeholder, "<host>")
+    let patch = patch_spelt("<placeholder>").join(" ");
+    format!("{}\n{STD_PATCH_FLAGS} {patch}", std_config(placeholder, placeholder, placeholder, "<host>"))
 }
 
 /// [`freestanding_key`], with the recipe and std's configuration it reads.
@@ -919,7 +966,7 @@ fn build_std(root: &Path, compiler: &Compiler, fork: &Path, libraries: Libraries
     let listed = targets.join(",");
     let args = ["build", "library", "--stage", "0", "--config", path_str(&config), "--warnings", "warn",
                 "--target", &listed];
-    let (ok, log) = toolchain::x_build(fork, &args, "std");
+    let (ok, log) = toolchain::x_build(root, fork, &args, "std");
     toolchain::refuse_on_compile_error(&log, "std");
     assert!(ok, "the std build failed, and nothing in its output was a compile error");
     let built = build_dir.join(&host).join("stage0-std");
@@ -1219,6 +1266,36 @@ mod tests {
         write(&fork.join(".gitignore"), "__pycache__\n.DS_Store\n");
         git(&fork, &["init", "-q"]);
         (root, base.join("store"), fork)
+    }
+
+    /// **std's patch names each crate's directory in the worktree, as its
+    /// canonical path; a worktree path bootstrap would split or TOML would
+    /// misread is refused by name.**
+    #[test]
+    fn std_s_patch_names_the_worktree_s_crates_or_refuses_its_path() {
+        let temp = TempDir::new("std-patch");
+        let root = fs::canonicalize(&*temp).unwrap();
+        let plain = root.join("worktree");
+        fs::create_dir(&plain).unwrap();
+        let at = plain.display();
+        assert_eq!(
+            std_patch(&plain.join("../worktree")),
+            [
+                "--config".to_string(),
+                format!("patch.crates-io.toyos-abi.path=\"{at}/toyos-abi\""),
+                "--config".to_string(),
+                format!("patch.crates-io.toyos.path=\"{at}/toyos\""),
+            ],
+        );
+        for name in ["work tree", "work\"tree", "work\\tree", "work\ttree"] {
+            let refused = root.join(name);
+            fs::create_dir(&refused).unwrap();
+            let said = std::panic::catch_unwind(|| std_patch(&refused))
+                .err()
+                .unwrap_or_else(|| panic!("{name:?} was taken"));
+            let said = said.downcast_ref::<String>().expect("a formatted refusal");
+            assert!(said.starts_with(&format!("{} is a worktree path cargo cannot take", refused.display())), "{said}");
+        }
     }
 
     /// **Each key is the identity of what it is built from, and only that**: a

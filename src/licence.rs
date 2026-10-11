@@ -43,8 +43,7 @@
 //! computes, or names on another line than its `include_bytes!`; a registry or
 //! git crate's vendored non-Rust source, judged by the crate's `license` field
 //! alone; a path package's vendored source that has neither a row nor a
-//! section. And std's graph is re-locked when the gate runs, not read from a
-//! committed lock, so two runs at one head can resolve it differently.
+//! section.
 //!
 //! The expression grammar is SPDX's (`OR`, `AND`, `WITH`, parentheses) plus
 //! cargo's legacy `/` for `OR`. An identifier outside the allowlist is refused
@@ -1376,20 +1375,15 @@ pub fn judge(root: &Path) -> Result<String, String> {
         docs.push(Doc { metadata, features, members, roots: vec![dir] });
     }
 
-    // Bootstrap re-locks `library/Cargo.lock` to this tree's `toyos-abi` and
-    // `toyos` versions on every std build and puts the fork's file back, so the
-    // committed lock is stale by design: it is re-locked into a scratch copy,
-    // and the fork's is never written. `RUSTC_BOOTSTRAP` because the fork's
-    // manifests use cargo features a stable cargo otherwise refuses.
+    // std resolves as every std build does, handed this tree's `toyos-abi` and
+    // `toyos` by the same `[patch]`, and `--locked`, so the fork's lockfile is
+    // never written. `RUSTC_BOOTSTRAP` because the fork's manifests use cargo
+    // features a stable cargo otherwise refuses.
     let library = std_library(root)?;
-    let scratch = root.join("target/licence");
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
-    let lock = scratch.join("Cargo.lock");
-    std::fs::copy(library.join("Cargo.lock"), &lock)
-        .map_err(|e| format!("copy std's Cargo.lock: {e}"))?;
-    let lockfile = format!("resolver.lockfile-path={:?}", lock.display().to_string());
+    let patch = crate::sysroot::std_patch(root);
     let mut args = Features::AnyDeclared.args();
-    args.extend(["--config", &lockfile]);
+    args.push("--locked");
+    args.extend(patch.iter().map(String::as_str));
     let std_doc = metadata(
         root,
         &library.join("Cargo.toml"),

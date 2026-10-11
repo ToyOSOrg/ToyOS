@@ -47,10 +47,6 @@ pub fn owner(root: &Path) -> Owner {
     Owner::Elsewhere(primary)
 }
 
-/// Of the sysroot's sources, the crates std links, which its dep-info names
-/// by the path cargo resolved; `sdk/std` it names through the fork.
-const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
-
 /// Every target a guest artifact is built for: ToyOS userland, the kernel's
 /// bare-metal target, and the UEFI bootloader.
 pub const GUEST_TARGETS: [GuestTarget; 6] = [
@@ -136,38 +132,55 @@ fn paths_in_dep_info(text: &str) -> impl Iterator<Item = &str> {
         .map(|word| word.strip_suffix(':').unwrap_or(word))
 }
 
-/// The paths in one dep-info file that name a `toyos-abi/src` or `toyos/src`
-/// source. Split out from the filesystem so the gate below has a negative
-/// control that is a string literal.
-fn toyos_sources_in_dep_info(text: &str) -> Vec<String> {
-    paths_in_dep_info(text)
-        .filter(|path| path.ends_with(".rs") && STD_SOURCES.iter().any(|src| path.contains(&format!("/{src}/"))))
-        .map(str::to_string)
-        .collect()
+/// Which of `sysroot::std_crates` `path` is a source of, if any: one under
+/// `<crate>/src/`, as a checkout holds it, or `<crate>-<version>/src/`, as a
+/// registry does.
+fn std_crate_of(path: &str) -> Option<&'static str> {
+    let dirs: Vec<&str> = path.split('/').collect();
+    let holds = |name: &str| {
+        dirs.windows(2).any(|pair| {
+            let version = pair[0].strip_prefix(name).and_then(|rest| rest.strip_prefix('-'));
+            pair[1] == "src" && (pair[0] == name || version.is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())))
+        })
+    };
+    path.ends_with(".rs").then(|| sysroot::std_crates().find(|name| holds(name))).flatten()
 }
 
-/// Refuse a std whose dep-info under `dep_info` names another checkout's ABI.
+/// The paths in one dep-info file that name a source of a crate std names by
+/// version. Split out from the filesystem so the gate below has a negative
+/// control that is a string literal.
+fn toyos_sources_in_dep_info(text: &str) -> Vec<String> {
+    paths_in_dep_info(text).filter(|path| std_crate_of(path).is_some()).map(str::to_string).collect()
+}
+
+/// Refuse a std whose dep-info under `dep_info` names a `toyos-abi` or `toyos`
+/// that is not this worktree's: a registry's, or another checkout's.
 ///
 /// What the builder believed is not evidence; this reads what the compiler was
-/// handed. A std built against another worktree's `toyos-abi` still builds,
-/// links and boots, and its syscall arguments land at different offsets.
+/// handed. A std built against another `toyos-abi` still builds, links and
+/// boots, and its syscall arguments land at different offsets.
 pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
     let sources = std_toyos_sources(dep_info);
+    let unnamed: Vec<&str> =
+        sysroot::std_crates().filter(|name| !sources.iter().any(|p| std_crate_of(p) == Some(*name))).collect();
     assert!(
-        !sources.is_empty(),
-        "the std build under {} names no toyos-abi or toyos source at all, so the check that \
-         it was built from this worktree cannot answer. Cargo's dep-info moved.",
+        unnamed.is_empty(),
+        "the std build under {} names no source of {}, so the check that it was built from this \
+         worktree cannot answer. Cargo's dep-info moved.",
         dep_info.display(),
+        unnamed.join(" or "),
     );
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let foreign: Vec<&String> =
         sources.iter().filter(|p| !Path::new(p).starts_with(&root)).collect();
     assert!(
         foreign.is_empty(),
-        "std was compiled against {} sources that are not this worktree's:\n  {}\n\
-         `library/std` names them as `../../../`, so the fork checkout that built it is not \
-         this worktree's own.",
+        "std was compiled against {} toyos-abi or toyos sources that are not this worktree's {}:\n  {}\n\
+         std names both by version and takes this worktree's only through the [patch] bootstrap is \
+         handed (`sysroot::std_patch`): a registry's copy is a resolve that patch did not reach, and \
+         another checkout's a patch that named another tree.",
         foreign.len(),
+        root.display(),
         foreign.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n  "),
     );
 }
@@ -423,20 +436,21 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
     );
 }
 
-/// Run bootstrap in the fork checkout `rust_dir`, streaming its output where it
-/// was going anyway and keeping a copy, with both the checkout's lockfiles put
-/// back as they were when this returns, however the build that holds them
-/// ends.
+/// Run bootstrap in the fork checkout `rust_dir`, handed std's `[patch]` of the
+/// worktree at `root` (`sysroot::std_patch`), streaming its output where it was
+/// going anyway and keeping a copy, with both the checkout's lockfiles put back
+/// as they were when this returns, however the build that holds them ends.
 ///
-/// Bootstrap re-locks them against this worktree's `toyos-abi` and `toyos`;
+/// Bootstrap re-locks one whose resolve the patch moves: the workspace's, which
+/// records it as unused, and the library's, where a manifest's version moved;
 /// putting them back keeps the checkout clean, and a key read from it the one
 /// that was built.
 ///
 /// `.status()` was enough while the only question was the exit code. It is not
 /// enough for the question [`refuse_on_compile_error`] asks, which is what the
 /// failure *was*.
-pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<String>) {
-    x_build_with(rust_dir, args, what, |_| {})
+pub(crate) fn x_build(root: &Path, rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<String>) {
+    x_build_with(root, rust_dir, args, what, |_| {})
 }
 
 /// [`x_build`] of a compiler that links the LLVM at `llvm`. On an Apple host
@@ -444,9 +458,9 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
 /// `back/link.rs`), the rust workspace strips `lld-wrapper`, and the stage-1
 /// sysroot carries no `rust-objcopy` when bootstrap copies none of LLVM's tools
 /// (`compiler::config_text`): the build finds that LLVM's `llvm-objcopy` by that name on `PATH`.
-pub(crate) fn x_build_compiler(rust_dir: &Path, args: &[&str], what: &str, llvm: &Path) -> (bool, Vec<String>) {
+pub(crate) fn x_build_compiler(root: &Path, rust_dir: &Path, args: &[&str], what: &str, llvm: &Path) -> (bool, Vec<String>) {
     if !host_triple().ends_with("apple-darwin") {
-        return x_build(rust_dir, args, what);
+        return x_build(root, rust_dir, args, what);
     }
     let strip = toyos_tmpdir::TempDir::new("rust-objcopy");
     let objcopy = llvm.join("bin").join(crate::llvm::APPLE_TOOL);
@@ -455,7 +469,7 @@ pub(crate) fn x_build_compiler(rust_dir: &Path, args: &[&str], what: &str, llvm:
     let caller = std::env::var_os("PATH").unwrap_or_else(|| panic!("PATH is unset, and bootstrap finds its tools on it"));
     let path = std::env::join_paths(std::iter::once(strip.to_path_buf()).chain(std::env::split_paths(&caller)))
         .unwrap_or_else(|e| panic!("{} cannot lead PATH: {e}", strip.display()));
-    x_build_with(rust_dir, args, what, |command| {
+    x_build_with(root, rust_dir, args, what, |command| {
         command.env("PATH", path);
     })
 }
@@ -465,6 +479,7 @@ pub(crate) fn x_build_compiler(rust_dir: &Path, args: &[&str], what: &str, llvm:
 /// `HEAD^1` as the upstream commit whose artifacts to fetch when it sees them,
 /// and in this fork that is our own merge, which rust-lang's CI never built.
 pub(crate) fn x_build_with(
+    root: &Path,
     rust_dir: &Path,
     args: &[&str],
     what: &str,
@@ -481,6 +496,7 @@ pub(crate) fn x_build_with(
     let mut command = Command::new(x);
     environment(&mut command);
     command.env_remove("GITHUB_ACTIONS").env_remove("CI");
+    command.env(sysroot::STD_PATCH_FLAGS, sysroot::std_patch(root).join(" "));
     let mut child = command
         .args(args)
         .env("BOOTSTRAP_SKIP_TARGET_SANITY", "1")
@@ -612,7 +628,7 @@ mod tests {
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
 
         let args = ["--exact", "toolchain::tests::a_fake_bootstrap", "--include-ignored", "--nocapture"];
-        let (ok, log) = x_build(&fork, &args, "a fake bootstrap");
+        let (ok, log) = x_build(&fork, &fork, &args, "a fake bootstrap");
         assert!(!ok, "the fake bootstrap did not run: {log:?}");
         assert!(log.iter().any(|l| l.contains("re-locked both")), "{log:?}");
         for lock in &locks {
@@ -648,7 +664,7 @@ mod tests {
         fs::write(llvm.join("bin").join(crate::llvm::APPLE_TOOL), "the llvm-objcopy").unwrap();
 
         let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_strips", "--include-ignored", "--nocapture"];
-        let (ok, log) = x_build_compiler(&fork, &args, "a fake bootstrap", &llvm);
+        let (ok, log) = x_build_compiler(&fork, &fork, &args, "a fake bootstrap", &llvm);
         assert!(ok, "the fake bootstrap did not run: {log:?}");
         let found = if host_triple().ends_with("apple-darwin") { "the llvm-objcopy" } else { "none" };
         assert!(log.iter().any(|l| *l == format!("rust-objcopy: {found}")), "{log:?}");
@@ -741,7 +757,7 @@ mod tests {
         fs::write(fork.join(FAKE), "").unwrap();
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
         let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_reads_ci", "--include-ignored", "--nocapture"];
-        let (ok, log) = x_build_with(&fork, &args, "a fake bootstrap", |command| {
+        let (ok, log) = x_build_with(&fork, &fork, &args, "a fake bootstrap", |command| {
             command.env("GITHUB_ACTIONS", "true").env("CI", "true");
         });
         assert!(ok, "the fake bootstrap did not run: {log:?}");
@@ -782,6 +798,36 @@ mod tests {
         assert!(
             toyos_sources_in_dep_info("library/std/src/sys/pal/../../../../../../sdk/std/sys/pal/mod.rs").is_empty()
         );
+    }
+
+    /// **A std that took either crate from a registry is refused, naming the
+    /// registry's source**: what a std build the patch did not reach compiles,
+    /// as its dep-info spells it. Only this worktree's copies of both pass.
+    #[test]
+    fn a_std_built_from_a_registry_s_copy_of_either_crate_is_refused() {
+        let temp = TempDir::new("std-registry");
+        let root = fs::canonicalize(&*temp).unwrap();
+        let built = root.join("rust/build/toyos-std/host/stage0-std/x86_64-unknown-toyos");
+        fs::create_dir_all(built.join("dist")).unwrap();
+        let ours = |name: &str| format!("{}/{name}/src/lib.rs", root.display());
+        let registry = |name: &str, version: &str| {
+            format!("/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/{name}-{version}/src/lib.rs")
+        };
+        let built_from = |abi: &str, toyos: &str| {
+            fs::write(built.join("dist/libstd.d"), format!("{}/dist/libstd.rlib: {abi} {toyos}\n", built.display())).unwrap();
+            std::panic::catch_unwind(|| assert_std_built_from(&root, &built))
+                .err()
+                .map(|refused| *refused.downcast::<String>().expect("a formatted refusal"))
+        };
+        assert_eq!(built_from(&ours("toyos-abi"), &ours("toyos")), None);
+
+        let (abi, toyos) = (registry("toyos-abi", "0.63.0+267ff3ef79dccdcb"), registry("toyos", "0.75.0+0ea8e9e321a9f71c"));
+        for (taken, from) in [(&abi, built_from(&abi, &ours("toyos"))), (&toyos, built_from(&ours("toyos-abi"), &toyos))] {
+            let said = from.unwrap_or_else(|| panic!("a std built from {taken} was taken"));
+            assert!(said.contains(taken.as_str()) && said.contains("a registry's copy"), "{said}");
+        }
+        let said = built_from(&abi, &toyos).expect("a std built from the registry's copies of both was taken");
+        assert!(said.contains(&abi) && said.contains(&toyos), "{said}");
     }
 
     /// **Freestanding libraries whose dep-info names the worktree outside its
