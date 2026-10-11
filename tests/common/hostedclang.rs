@@ -1,5 +1,5 @@
 //! clang and LLD built for ToyOS (`src/hostedclang.rs`), run inside a guest:
-//! M2a of `issues/toyos-builds-itself.md`.
+//! M2 of `issues/toyos-builds-itself.md`.
 //!
 //! The binaries, clang's resource headers and the C sysroot's headers and
 //! `libtoyos_c.a` go on the ROOT of `tests/hostedclangcase`, as fixtures

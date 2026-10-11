@@ -119,17 +119,25 @@ memory beyond what 2 MiB process pages allow
 
 **No linker runs inside ToyOS** (owner, 2026-10-04: "Just get rid of toyos
 ld"). `/system/bin/toyos-ld` went with its crate, its `[programs]` row and its
-host tests, and nothing replaced it: a ToyOS process cannot link an object, and
+host tests, and no image ships a linker: `ld.lld` links inside ToyOS only
+where `hosted_clang_hello` stages it, and
 the ToyOS-hosted rustc names no linker the guest has
 (`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). *Exit*: the
 commit that lands M2's compile-and-run test, which links inside the guest.
 
-**What stops M2: clang and lld running inside ToyOS.** `cargo run --
+**What stops M2: the driver's link and the install.** `cargo run --
 --hosted-clang` makes a clang and an `ld.lld` for `x86_64-unknown-toyos`,
 static PIEs that name no library (`src/hostedclang.rs`): 147.5 MB and
-85.6 MB, 121.9 MB and 70.9 MB stripped. No guest has run either.
-- Run: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md` lists, and
-  `issues/libc-has-no-pread-or-pwrite.md`.
+85.6 MB, 121.9 MB and 70.9 MB stripped. Both run in a guest:
+`hosted_clang_hello` (`tests/common/hostedclang.rs`, run on demand) stages them
+on ROOT, compiles `hello.c` with `clang -c`, links it by running `ld.lld` on the
+line the driver gives it, runs the program, and both products are the host's
+bytes.
+- Link through the driver: `clang hello.c` starts LLD as a child, which libc
+  cannot (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
+- Install: `pkg` installs neither (**To build**, "`pkg` installs a toolchain").
+- Run past `hello.c`: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md`
+  lists, and `issues/libc-has-no-pread-or-pwrite.md`.
 
 **What M3 adds: a rustc that carries that LLVM**, after all of M2's.
 - Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`, and
