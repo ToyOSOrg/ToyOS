@@ -17,4 +17,6 @@ dispatches the reshape.
 
 **Exit condition**: `--ci guest` runs a declared list in `tests/toyos.rs` and nothing else, the
 rest of the suite runs on demand, and root `CLAUDE.md`'s "The guest suite is their `guest /
-suite` check" and `reviewer.md`'s **Guest tests** say so in the same diff.
+suite` check" and `reviewer.md`'s **Guest tests** say so in the same diff. The same diff deletes
+`ON_DEMAND` in `tests/toyos.rs`, the stopgap that keeps a test out of an unfiltered run until then:
+once `--ci guest` runs a declared list, everything outside it is on demand.
