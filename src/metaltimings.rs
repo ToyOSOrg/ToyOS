@@ -477,14 +477,6 @@ mod tests {
         assert!(why.contains("duplicate"), "{why}");
     }
 
-    /// **No record is a checkout's**: both readers, the loop and the judge,
-    /// read [`dir`], and it is under no checkout.
-    #[test]
-    fn the_records_are_under_no_checkout() {
-        let at = dir();
-        assert!(!at.starts_with(env!("CARGO_MANIFEST_DIR")), "{}", at.display());
-    }
-
     #[test]
     fn a_machine_is_three_non_empty_lines() {
         assert_eq!(

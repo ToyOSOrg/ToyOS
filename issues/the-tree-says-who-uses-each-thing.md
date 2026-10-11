@@ -205,7 +205,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    `userland/` is gone; no `apps/` package depends on a path outside `sdk/`;
    `--build-only` and the guest suite green.
 8. **Tests and images:** `images/`, `tests/images/`, `tests/machines/t14/`
-   (`src/metal*.rs`, `tests/metal/` and `tests/t14-linux/` as package
+   (`src/metal*.rs` and `tests/t14-linux/` as package
    `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
    `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
    `bootable-<stem>.img`. Blocked on

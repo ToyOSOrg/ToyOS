@@ -33,7 +33,7 @@ text: `lan_talk` and `lan_dhcp_lease`, which read what the host heard, and
   judges (`tests/common/lan.rs`, `tests/common/logstream.rs`) and
   `lan_dhcp_lease`'s fixture (`tests/checks/lan.rs`);
 - the boot `lantalkcase`: `tests/lantalkcase`, its job `lan_talk_hold`, and its
-  rows in `tests/metal/lenovo-20w0003amz.toml`;
+  rows in the T14's record;
 - the harness's talking boots: `Arm::talk`, `Arm::nic`, the key minted beside
   an image (`tests/common/ssh.rs`), `Readback::talk` and `Readback::wire_mac`;
 - `toyos-metal`'s half: `--talk` and `--nic`, `Refusal::Talk`, `Refusal::Wire`
