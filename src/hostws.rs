@@ -88,7 +88,7 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 /// loader; and every program under `userland/`, which `src/userlandhost.rs`
 /// surveys.
 fn guest_built(member: &str) -> bool {
-    [crate::ci::KERNEL, crate::ci::SDK, "bootloader"].contains(&member) || member.starts_with("userland/")
+    [crate::ci::KERNEL_DIR, crate::ci::SDK_DIR, "bootloader"].contains(&member) || member.starts_with("userland/")
 }
 
 /// The members a host tests: all but the [`guest_built`].

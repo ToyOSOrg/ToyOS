@@ -426,8 +426,12 @@ use Verdict::{Fails, Passes, Says};
 
 /// The kernel package, whose library's tests are its models.
 pub(crate) const KERNEL: &str = "kernel";
+/// [`KERNEL`]'s directory, as the workspace's `members` names it.
+pub(crate) const KERNEL_DIR: &str = "kernel";
 /// The SDK's package, whose tests link no syscall on a host.
 pub(crate) const SDK: &str = "toyos";
+/// [`SDK`]'s directory, as the workspace's `members` names it.
+pub(crate) const SDK_DIR: &str = "toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";

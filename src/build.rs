@@ -306,7 +306,7 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
     let mut crates = vec![
         ConfigCrate {
             name: crate::ci::KERNEL.to_string(),
-            dir: root.join(crate::ci::KERNEL),
+            dir: root.join(crate::ci::KERNEL_DIR),
             built: Built::Kernel,
             features: Features::AnyDeclared,
         },
@@ -2675,13 +2675,13 @@ mod tests {
     /// Each file's own comment beside a name carries the argument for it.
     fn declared_model_controls(root: &Path) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for dir in std::iter::once(crate::ci::KERNEL.to_string()).chain(crate::hostws::host_members(root)) {
+        for dir in std::iter::once(crate::ci::KERNEL_DIR.to_string()).chain(crate::hostws::host_members(root)) {
             let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
             let parsed: KernelManifest = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
-            let skip: &[&[&str]] = if dir == crate::ci::KERNEL {
+            let skip: &[&[&str]] = if dir == crate::ci::KERNEL_DIR {
                 &[KERNEL_BUILDS, KERNEL_CARRIES]
             } else {
                 &[NOT_A_CONTROL]
