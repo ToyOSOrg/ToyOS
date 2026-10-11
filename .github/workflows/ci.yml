@@ -7,11 +7,8 @@ name: ci
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 # No job here writes: a toolchain release is main's publisher's alone.
 permissions:

@@ -104,7 +104,7 @@ if it meets the bar above; otherwise it is a NOTE.
   - `nightly.yml`'s `release` is the only job granted `contents: write`.
   - No workflow runs on `pull_request_target`, `workflow_run`, `issue_comment` or any other trigger that runs code other than main's on main's ref.
   - No workflow or job declares `cache-mode: write` or `write-only`.
-  - `guest / suite`'s one job-level `if:` skips a `pull_request` run, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
+  - `guest / suite`'s only job-level `if:` is `github.event_name != 'pull_request'`, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
   - A job that saves a cache entry runs only `cargo run -- --ci <job>`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...<head>`), production and tests apart. Production code that
