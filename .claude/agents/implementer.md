@@ -20,6 +20,14 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 
 ## Measure, build, test
 
+A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
+development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
+feature, and never because another OS does it that way; when an environment cannot run the right
+design, the environment changes or the gap is filed. On high-risk code — root `CLAUDE.md`'s
+classes, CPU state and cryptography — your first deliverable is the design and its roast in the
+draft pull request's body, and you build nothing until the orchestrator, or the owner where the
+orchestrator says so, has accepted that design.
+
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
 

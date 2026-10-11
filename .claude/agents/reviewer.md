@@ -35,7 +35,9 @@ Name a mutation only where a defect would otherwise land unseen, never one a typ
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
 patch and the test it must turn red, and the implementer runs it. On high-risk code (root
 `CLAUDE.md`'s list), check every claim against the measurement behind it, and the negative control
-and independent oracle root `CLAUDE.md` asks of it.
+and independent oracle root `CLAUDE.md` asks of it. On high-risk code, CPU state and cryptography
+included, a branch whose design and its roast the orchestrator, or the owner where the orchestrator
+said so, did not accept on the pull request before anything was built is a BLOCKER.
 
 A later round judges each earlier BLOCKER closed or open, by the implementer's measurement of it,
 and reviews what changed since the last reviewed head. A new finding outside that is a BLOCKER only
@@ -50,9 +52,12 @@ if it meets the bar above; otherwise it is a NOTE.
   boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition that
-  userland could own; a design made worse to spare the ABI. A new dependency only where it is the
-  cleanest path, a general and widely used crate the pull request says why it takes; no new
-  fetch. Nothing outside the brief's fence.
+  userland could own; a design made worse to spare the ABI; a design choice whose stated reason is
+  a test or development environment's capability (QEMU, CI, the dev host), a particular test
+  machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
+  ToyOS targets, and an environment that cannot run it changes or the gap is filed. A new
+  dependency only where it is the cleanest path, a general and widely used crate the pull request
+  says why it takes; no new fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
   architecture's own module; `target_arch` only there, in its selector, in `build/arch.rs` and in
   `build/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
