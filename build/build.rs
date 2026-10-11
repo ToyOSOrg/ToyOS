@@ -542,7 +542,7 @@ fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
         Arch::X86_64 => {
             assert!(
                 has("x87"),
-                "the kernel target no longer reports x87, so `arch::fpu`'s FXSAVE64 image is \
+                "the kernel target no longer reports x87, so `arch::fpu`'s legacy region is \
                  not the state this machine has:\n{cfg}"
             );
             assert!(

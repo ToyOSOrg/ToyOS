@@ -3,12 +3,19 @@
 //! A transition out of Ring 3 that can reach another task must save and
 //! restore the whole user machine state, as the last act before returning to
 //! Ring 3, after any point the task could have switched. [`save_user_state`]
-//! leaves `rsp` aligned to [`UserFpState`]; [`restore_user_state`] restores it
-//! exactly, and `r11` is scratch between them.
-
-use core::mem::{align_of, size_of};
-
-use super::fpu::UserFpState;
+//! parks it in [`fpu::AREA_BYTES`](super::fpu::AREA_BYTES) on this kernel
+//! stack, leaving `rsp` 64-byte aligned on the slot that holds the `rsp` it
+//! found; [`restore_user_state`] restores both. Each clobbers `rax` and `rdx`,
+//! the components' mask, and the save leaves `r11` the `rsp` it found.
+//!
+//! **`XSAVEOPT`'s invariant.** `XSAVEOPT` skips a component unmodified since
+//! the last `XRSTOR` from the same address, so between the `XRSTOR` that
+//! returns a thread to Ring 3 and that thread's next save on the same CPU
+//! nothing may write the area. It holds because every restore is followed
+//! only by pops and `iretq`/`sysretq` with `IF` clear; the area lies on the
+//! thread's own kernel stack below the frame every Ring 3 entry builds; and
+//! the IST stacks that save (`#DF`, `#MC`) never return to Ring 3. A save and
+//! restore nested in Ring 0 is undone by the outer restore before Ring 3 runs.
 
 /// A gate whose handler can reach another task before returning to Ring 3,
 /// and therefore brackets the user machine state.
@@ -39,14 +46,8 @@ impl Ring0Entry {
     }
 }
 
-// `fp_bytes + fp_align`, aligned down, fits any incoming `rsp` alignment,
-// with room in the slack above it to stash the caller's `rsp`.
-const _: () = assert!(size_of::<UserFpState>().is_multiple_of(align_of::<UserFpState>()));
-const _: () = assert!(align_of::<UserFpState>() >= 8);
-
 /// `naked_asm!` for an entry that can reach another task: supplies the save
-/// area's size and alignment from [`UserFpState`], and prepends `cld`. The
-/// body must end with a trailing comma.
+/// area's size, and prepends `cld`. The body must end with a trailing comma.
 #[cfg(not(feature = "entry-df-unclean"))]
 macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
@@ -56,8 +57,7 @@ macro_rules! ring3_naked_asm {
             // interrupts a copy with `DF` set.
             "cld",
             $($body)*
-            fp_bytes = const core::mem::size_of::<$crate::arch::fpu::UserFpState>(),
-            fp_align = const core::mem::align_of::<$crate::arch::fpu::UserFpState>(),
+            fp_area = sym $crate::arch::fpu::AREA_BYTES,
         )
     };
 }
@@ -69,8 +69,7 @@ macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
         core::arch::naked_asm!(
             $($body)*
-            fp_bytes = const core::mem::size_of::<$crate::arch::fpu::UserFpState>(),
-            fp_align = const core::mem::align_of::<$crate::arch::fpu::UserFpState>(),
+            fp_area = sym $crate::arch::fpu::AREA_BYTES,
         )
     };
 }
@@ -86,10 +85,16 @@ macro_rules! ring3_trampoline_asm {
     };
 }
 
-/// The state a task that has never been in Ring 3 starts from.
+/// The state a task that has never been in Ring 3 starts from: every
+/// component `XCR0` enables, so no upper half of a register is left from the
+/// CPU's last tenant. Clobbers `rax` and `rdx`.
 macro_rules! initial_user_state {
     () => {
-        "fxrstor64 [rip + {fp_initial}]\n"
+        concat!(
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "xrstor64 [rip + {fp_initial}]\n",
+        )
     };
 }
 
@@ -99,13 +104,20 @@ macro_rules! save_user_state {
     () => {
         concat!(
             "mov r11, rsp\n",
-            "sub rsp, {fp_bytes}\n",
-            "sub rsp, {fp_align}\n",
-            "and rsp, -{fp_align}\n",
-            "mov [rsp + {fp_bytes}], r11\n",
-            // fxsave64, not fsave/fxsave: non-waiting (won't trap a pending x87
-            // exception) and REX.W-wide (fxsave truncates FIP/FDP to 32 bits).
-            "fxsave64 [rsp]\n",
+            "sub rsp, qword ptr [rip + {fp_area}]\n",
+            "and rsp, -64\n",
+            "sub rsp, 64\n",
+            "mov [rsp], r11\n",
+            // `XSAVEOPT` writes only `XCR0`'s bits of `XSTATE_BV`, and the
+            // standard form's `XRSTOR` is `#GP` on any other bit set or on a
+            // nonzero `XCOMP_BV` or reserved word: a stack holds whatever was
+            // last there (SDM Vol. 1 §13.8.1).
+            "mov qword ptr [rsp + 64 + 512], 0\n",
+            "mov qword ptr [rsp + 64 + 520], 0\n",
+            "mov qword ptr [rsp + 64 + 528], 0\n",
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "xsaveopt64 [rsp + 64]\n",
         )
     };
 }
@@ -114,8 +126,10 @@ macro_rules! save_user_state {
 macro_rules! restore_user_state {
     () => {
         concat!(
-            "fxrstor64 [rsp]\n",
-            "mov rsp, [rsp + {fp_bytes}]\n",
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "xrstor64 [rsp + 64]\n",
+            "mov rsp, [rsp]\n",
         )
     };
 }

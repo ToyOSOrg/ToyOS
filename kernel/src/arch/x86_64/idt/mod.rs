@@ -348,7 +348,7 @@ extern "sysv64" fn common_entry() {
         "call {dispatch}",
         "lock sub dword ptr gs:[{preempt_count}], 1",
         // Exit-to-user epilogue runs before the GPR pops: the call clobbers scratch regs that must not leak into user state.
-        "mov r11, [rsp + {fp_bytes}]",
+        "mov r11, [rsp]",
         "test dword ptr [r11 + 144], 3",
         "jz 9f",
         "cli",

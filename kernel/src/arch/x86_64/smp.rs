@@ -399,7 +399,7 @@ global_asm!(
     // Load kernel IDT (safe now — percpu/GS is set up).
     // The BSP's order is the opposite and deliberate: `init_bsp` applies the
     // control registers before it loads this table, because an entry stub saves
-    // SSE state and `fxsave` without `CR4.OSFXSR` is `#UD`. This CR4 holds
+    // by `XCR0` and `xsaveopt` without `CR4.OSXSAVE` is `#UD`. This CR4 holds
     // `PAE` alone until `init_ap` reaches `control_regs::init`, so a fault
     // before that point faults again in its own handler —
     // `issues/an-ap-loads-the-idt-before-its-control-registers.md`.

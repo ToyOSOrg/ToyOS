@@ -8,8 +8,7 @@
 //! of test image.
 //!
 //! **No threshold, and the host reads the numbers instead.** A bound measured
-//! under TCG is meaningless — QEMU implements `FXSAVE` as a helper call and
-//! prices nothing like silicon — and one measured on metal drifts. The number
+//! under TCG is meaningless and one measured on metal drifts. The number
 //! is for a same-session A/B against another build of this tree; what the host
 //! refuses is a counter that did not move (`check_syscall_cost`).
 //!

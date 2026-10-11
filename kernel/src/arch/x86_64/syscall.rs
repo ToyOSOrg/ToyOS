@@ -59,6 +59,10 @@ extern "sysv64" fn syscall_entry() {
         "push r10",
 
         save_user_state!(),
+        // The save took `rdx` for its mask; the handler's third argument is
+        // the pushed copy, above `r10`, `r9` and `r8` at the `rsp` the save
+        // left in `r11`.
+        "mov rdx, [r11 + 24]",
 
         "lock add dword ptr gs:[{preempt_count}], 1",
 
@@ -71,10 +75,13 @@ extern "sysv64" fn syscall_entry() {
         "sub rsp, 16",
         "mov [rsp], rax",
         "call {exit_to_user}",
-        "mov rax, [rsp]",
+        // Across the restore, which takes `rax` for its mask, in `r11`, which
+        // the pops below give `RFLAGS` next.
+        "mov r11, [rsp]",
         "add rsp, 16",
 
         restore_user_state!(),
+        "mov rax, r11",
 
         "pop r10",
         "pop r9",

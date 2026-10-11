@@ -1,13 +1,26 @@
 //! What a transition out of Ring 3 must save and restore in full; a task
 //! that has never run in Ring 3 starts from the declared state below.
+//!
+//! The user machine state is every component `XCR0` enables
+//! (`control_regs`, `kernel::xsave`): `arch::entry` saves it with `XSAVEOPT`
+//! and restores it with `XRSTOR`, standard form, into [`AREA_BYTES`] parked on
+//! the thread's kernel stack.
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use kernel::xsave::IMAGE_BYTES;
 
 use crate::log;
 
-/// The whole user machine state this kernel permits, in `FXSAVE64`/
-/// `FXRSTOR64` layout. Complete only while `CR4.OSXSAVE` stays clear.
+/// The legacy region of an `XSAVE` area, which is the `FXSAVE64` image.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
-pub struct UserFpState([u8; 512]);
+struct Legacy([u8; 512]);
+
+/// A whole standard-form `XSAVE` area, as large as any CPU this kernel
+/// accepts reports one.
+#[repr(C, align(64))]
+pub struct XsaveImage([u8; IMAGE_BYTES]);
 
 /// The x87 control word `FNINIT` leaves.
 const FCW_INITIAL: u16 = 0x037F;
@@ -15,26 +28,22 @@ const FCW_INITIAL: u16 = 0x037F;
 /// `MXCSR`'s SDM-defined power-on default.
 const MXCSR_INITIAL: u32 = 0x1F80;
 
-// Field offsets in the FXSAVE64 image (SDM Vol. 1 Table 10-2).
+// Field offsets in the FXSAVE64 image (SDM Vol. 1 Table 10-2) and the XSAVE
+// header after it (SDM Vol. 1 §13.4.2).
 const OFF_FCW: usize = 0;
 const OFF_MXCSR: usize = 24;
+const OFF_XSTATE_BV: usize = 512;
 
-/// Every field `FNINIT` and `LDMXCSR` leave architecturally defined, as name,
-/// offset and width — and the whole of what [`self_check`] may compare.
-///
-/// `FNINIT` sets `FCW` to `0x037F` and zeroes `FSW`, `FTW`, `FIP`, `FDP` and
-/// `FOP` (SDM Vol. 2A, `FINIT/FNINIT`); `LDMXCSR` sets `MXCSR`. **Nothing else
-/// in the image is defined by either instruction**, and each exclusion is a
-/// field a real CPU is free to hand back differently from a fresh emulator:
-///
-/// - the x87 data registers at 32 and the XMM registers at 160, because
-///   `FNINIT` marks the stack empty *without clearing it* — the same fact
-///   [`INITIAL_IMAGE`] exists for — so they hold whatever firmware last left
-///   in them;
-/// - `MXCSR_MASK` at 28, which is the model's own and reads 0, `0xFFFF` or
-///   `0x1FFFF` depending on the part;
-/// - the reserved byte at 5 and everything from 464, which no specification
-///   defines at all.
+/// The components [`INITIAL_IMAGE`] loads from its own bytes: x87 and SSE.
+/// Every other component `XCR0` enables is put in its initial configuration,
+/// which is zero (SDM Vol. 1 §13.6).
+const XSTATE_BV_INITIAL: u8 = 0b11;
+
+/// Every field [`self_check`] compares, as name, offset and width: the whole
+/// legacy region but `MXCSR_MASK` at 28, which is the model's own and reads 0,
+/// `0xFFFF` or `0x1FFFF` depending on the part, the six reserved bytes of each
+/// x87 register's slot and the reserved byte at 5, and everything from 416,
+/// which no specification defines.
 ///
 /// `FTW` here is the abridged one-byte tag word `FXSAVE` writes, not the x87
 /// tag register: all-empty is `0x00` in it and `0xFFFF` in the register.
@@ -46,11 +55,21 @@ const DEFINED: &[(&str, usize, usize)] = &[
     ("FIP", 8, 8),
     ("FDP", 16, 8),
     ("MXCSR", OFF_MXCSR, 4),
+    ("ST0", 32, 10),
+    ("ST1", 48, 10),
+    ("ST2", 64, 10),
+    ("ST3", 80, 10),
+    ("ST4", 96, 10),
+    ("ST5", 112, 10),
+    ("ST6", 128, 10),
+    ("ST7", 144, 10),
+    ("XMM0-XMM15", 160, 256),
 ];
 
-impl UserFpState {
-    /// The declared state a task that has never been in Ring 3 starts from.
-    pub const INITIAL: Self = {
+impl Legacy {
+    /// The declared x87 and SSE state: `FNINIT`'s control word, `MXCSR`'s
+    /// default, every register zero.
+    const INITIAL: Self = {
         let mut b = [0u8; 512];
         let fcw = FCW_INITIAL.to_le_bytes();
         b[OFF_FCW] = fcw[0];
@@ -63,9 +82,10 @@ impl UserFpState {
         Self(b)
     };
 
-    /// This CPU's state, now — the Rust mirror of `arch::entry`'s naked
-    /// `save_user_state!`, which sizes its reservation from `size_of::<Self>()`.
-    pub fn saved_from_cpu() -> Self {
+    /// This CPU's x87 and SSE state, now. `FXSAVE64` writes the whole legacy
+    /// region whatever a component's use, where `XSAVE` may skip one in its
+    /// initial configuration.
+    fn saved_from_cpu() -> Self {
         let mut state = Self([0u8; 512]);
         // SAFETY: `fxsave64` needs 16-byte alignment; `state` is
         // `repr(C, align(16))` over `[u8; 512]`.
@@ -79,91 +99,90 @@ impl UserFpState {
         state
     }
 
-    /// One [`DEFINED`] field, as the little-endian integer it is.
-    fn field(&self, at: usize, width: usize) -> u64 {
-        let mut value = 0u64;
-        let mut i = 0;
-        while i < width {
-            // Every (offset, width) in `DEFINED` is inside a 512-byte image.
-            value |= (self.0[at + i] as u64) << (8 * i);
-            i += 1;
-        }
-        value
-    }
-
-    /// The first [`DEFINED`] field these two disagree about: name, offset, this
-    /// one's value, the other's. Named rather than reported as a byte range,
-    /// because a range says which bytes differ and never which field they were.
-    fn first_difference(&self, other: &Self) -> Option<(&'static str, usize, u64, u64)> {
+    /// The first [`DEFINED`] field these two disagree about, by name and
+    /// offset, with both values.
+    fn first_difference<'a>(&'a self, other: &'a Self) -> Option<(&'static str, usize, &'a [u8], &'a [u8])> {
         DEFINED.iter().find_map(|&(name, at, width)| {
-            let (got, want) = (self.field(at, width), other.field(at, width));
+            let (got, want) = (&self.0[at..at + width], &other.0[at..at + width]);
             (got != want).then_some((name, at, got, want))
         })
     }
 }
 
-/// [`UserFpState::INITIAL`] in memory, for stackless trampolines to load in
-/// one instruction; not `FNINIT`, which leaves x87 empty without clearing it.
-pub static INITIAL_IMAGE: UserFpState = UserFpState::INITIAL;
+/// The state a task that has never been in Ring 3 starts from, in memory for
+/// stackless trampolines to load in one `XRSTOR`.
+pub static INITIAL_IMAGE: XsaveImage = {
+    let mut b = [0u8; IMAGE_BYTES];
+    let mut i = 0;
+    while i < Legacy::INITIAL.0.len() {
+        b[i] = Legacy::INITIAL.0[i];
+        i += 1;
+    }
+    b[OFF_XSTATE_BV] = XSTATE_BV_INITIAL;
+    XsaveImage(b)
+};
 
-/// Puts this CPU's FPU into the declared state and asserts it matches.
-/// Call once per CPU after `CR4.OSFXSR` is set; `LDMXCSR` is `#UD` otherwise.
+/// The bytes one save writes on every CPU of this machine: `CPUID.(0DH,0):EBX`
+/// for the declared `XCR0`. Zero until the BSP's [`declare_area`]; read by
+/// every entry stub (`arch::entry::save_user_state`), which reserves this much
+/// and the line below it.
+pub static AREA_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Declares the save area this CPU's `XCR0` implies, and checks it against the
+/// machine's. Runs once `XCR0` holds the declaration, and before any entry
+/// stub that saves can run.
+pub fn declare_area(cpu_id: u32) {
+    let reported = super::cpu::leaf_d(0).1;
+    let bytes = match kernel::xsave::area_bytes(reported) {
+        Ok(bytes) => bytes as u64,
+        Err(refusal) => panic!("fpu: cpu{cpu_id} reports a {reported}-byte save area: {}", refusal.reason()),
+    };
+    if let Err(machine) = AREA_BYTES.compare_exchange(0, bytes, Ordering::Release, Ordering::Acquire) {
+        assert!(
+            machine == bytes,
+            "fpu: cpu{cpu_id} saves {bytes} bytes and the machine declared {machine}",
+        );
+    }
+}
+
+/// Puts this CPU into the declared state and asserts it matches. Call once
+/// per CPU after [`declare_area`].
 pub fn init(cpu_id: u32) {
     load_initial();
     self_check(cpu_id);
 }
 
-/// `FNINIT` then `LDMXCSR`; neither waits, so this is safe over a pending
-/// unmasked exception.
+/// [`INITIAL_IMAGE`] by the instruction the first-entry trampolines use.
 fn load_initial() {
-    // SAFETY: `&MXCSR_INITIAL` is valid for a 4-byte read; `CR4.OSFXSR` is the
-    // caller's job (see `init`).
+    // SAFETY: `INITIAL_IMAGE` is 64-byte aligned and as long as any area this
+    // machine's `XCR0` reaches (`declare_area` refused a longer one); its
+    // header names only x87 and SSE, both in every declared `XCR0`, and its
+    // `MXCSR` sets no reserved bit.
     unsafe {
         core::arch::asm!(
-            "fninit",
-            "ldmxcsr [{}]",
-            in(reg) &MXCSR_INITIAL,
+            "xrstor64 [{}]",
+            in(reg) &raw const INITIAL_IMAGE.0,
+            in("eax") u32::MAX,
+            in("edx") u32::MAX,
             options(nostack, readonly),
         );
     }
 }
 
-/// Asserts the CPU's architectural default matches [`UserFpState::INITIAL`];
-/// a mismatch would be silently restored onto every new thread.
+/// Asserts what loading [`INITIAL_IMAGE`] left on this CPU reads back as the
+/// declaration; a mismatch would be silently restored onto every new thread.
 ///
 /// Takes its own id for the same reason [`log_state`] does: the BSP runs this
 /// before the `wrmsr` that makes `gs:` valid, so reading the id from there
 /// would fault inside the message of the assertion reporting the mismatch.
 fn self_check(cpu_id: u32) {
-    assert_eq!(
-        (&raw const INITIAL_IMAGE) as usize % core::mem::align_of::<UserFpState>(),
-        0,
-        "fpu: the initial image is misaligned, so every trampoline would #GP",
-    );
-    let live = UserFpState::saved_from_cpu();
-    if let Some((name, at, got, want)) = live.first_difference(&UserFpState::INITIAL) {
+    let live = Legacy::saved_from_cpu();
+    if let Some((name, at, got, want)) = live.first_difference(&Legacy::INITIAL) {
         panic!(
-            "fpu: cpu{cpu_id} disagrees about the architectural default state — \
-             {name} at offset {at} reads {got:#x}, the declaration is {want:#x}"
+            "fpu: cpu{cpu_id} disagrees about the declared initial state — \
+             {name} at offset {at} reads {got:02x?}, the declaration is {want:02x?}"
         );
     }
-}
-
-/// XCR0: which state components `XSAVE` would move.
-///
-/// # Safety
-/// `CR4.OSXSAVE` must be set; `xgetbv` is `#UD` otherwise.
-unsafe fn xgetbv0() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    core::arch::asm!(
-        "xgetbv",
-        in("ecx") 0u32,
-        out("eax") lo,
-        out("edx") hi,
-        options(nomem, nostack, preserves_flags),
-    );
-    ((hi as u64) << 32) | lo as u64
 }
 
 /// Logs one line per CPU naming what state exists; per CPU because two CPUs
@@ -173,17 +192,16 @@ unsafe fn xgetbv0() -> u64 {
 /// [`init`] and the `wrmsr` that makes `gs:` valid, so that a boot which stops
 /// in that gap has still said what this CPU's extended state is.
 pub fn log_state(cpu_id: u32) {
-    let (max_leaf, _, _, _) = super::cpu::cpuid(0, 0);
     let (_, _, ecx1, _) = super::cpu::cpuid(1, 0);
     let xsave = ecx1 & (1 << 26) != 0;
     let osxsave = ecx1 & (1 << 27) != 0;
     // SAFETY: gated on `osxsave`, CPUID leaf 1's report that `CR4.OSXSAVE` is set.
-    let xcr0 = if osxsave { unsafe { xgetbv0() } } else { 0 };
-    let (d0a, d0b, d0c, _) = if max_leaf >= 0xD { super::cpu::cpuid(0xD, 0) } else { (0, 0, 0, 0) };
-    let (d1a, _, _, _) = if max_leaf >= 0xD { super::cpu::cpuid(0xD, 1) } else { (0, 0, 0, 0) };
+    let xcr0 = if osxsave { unsafe { super::cpu::xgetbv0() } } else { 0 };
+    let (d0a, d0b, d0c, _) = super::cpu::leaf_d(0);
+    let (d1a, _, _, _) = super::cpu::leaf_d(1);
     log!(
         "fpu: cpu{} xsave={} osxsave={} xcr0={:#x} \
-         cpuid.d.0=({:#x},{},{}) cpuid.d.1.eax={:#x}",
+         cpuid.d.0=({:#x},{},{}) cpuid.d.1.eax={:#x} area={}",
         cpu_id,
         xsave as u8,
         osxsave as u8,
@@ -192,22 +210,24 @@ pub fn log_state(cpu_id: u32) {
         d0b,
         d0c,
         d1a,
+        AREA_BYTES.load(Ordering::Relaxed),
     );
 }
 
-/// [`DEFINED`] stays inside the image and stays a partition of it: ascending,
-/// non-overlapping, and every field whole. `first_difference` reads each field
-/// by offset and width without bounds-checking either, and a table that grew a
-/// typo would read another field's bytes or run off the end.
+/// [`DEFINED`] stays inside the legacy region and stays ascending and
+/// non-overlapping: `first_difference` slices each field by offset and width.
 const _: () = {
     let mut i = 0;
     let mut end = 0;
     while i < DEFINED.len() {
         let (_, at, width) = DEFINED[i];
         assert!(at >= end, "DEFINED is not ascending and non-overlapping");
-        assert!(width > 0 && width <= 8, "a field wider than the u64 it is read into");
+        assert!(width > 0, "an empty field");
         end = at + width;
-        assert!(end <= 512, "a field outside the FXSAVE64 image");
+        assert!(end <= 512, "a field outside the legacy region");
         i += 1;
     }
 };
+
+// The header the trampolines' `XRSTOR` reads lies inside the image.
+const _: () = assert!(OFF_XSTATE_BV + 64 <= IMAGE_BYTES);
