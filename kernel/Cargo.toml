@@ -462,6 +462,16 @@ entry-df-unclean = []
 # own cost into the arm it is being compared against.
 pass-spin = []
 heap-lockspin = ["pass-spin"]
+# Measurement scout, never landed: each is one arm of a metal comparison.
+# Four general-purpose counters programmed for TLB misses on every CPU, and
+# `CR4.PCE` so Ring 3 reads them.
+scout-pmc = []
+# `PCIDE` never declared: every switch flushes, as on a CPU without PCID.
+scout-no-pcid = []
+# `PCIDE` declared on `PCID` alone, with no `INVPCID` used.
+scout-pcid-without-invpcid = []
+# Diary marks bracketing an idle wake's IPI, delivery, pass and timer re-arm.
+scout-wake-marks = []
 
 [lib]
 path = "pure/lib.rs"

@@ -36,6 +36,8 @@ pub mod pio;
 pub mod pmu;
 pub mod power;
 pub mod rtc;
+#[cfg(feature = "scout-pmc")]
+pub mod scout_pmc;
 pub mod smi_cmd;
 pub mod smp;
 pub mod switch;

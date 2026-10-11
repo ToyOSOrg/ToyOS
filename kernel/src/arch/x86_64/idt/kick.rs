@@ -1,6 +1,8 @@
 use super::device_irq::device_irq_entry;
 
 extern "sysv64" fn kick_handler() {
+    #[cfg(feature = "scout-wake-marks")]
+    crate::trace::scout::mark(crate::trace::scout::ARRIVE, 0);
     crate::arch::percpu::irq_took!(Kick);
     crate::counters::serve_here();
     crate::arch::smi_cmd::serve_here();

@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
+    // Measurement scout, never landed: the `scout_*` metal rows run them.
+    "scout_tlb",
+    "scout_wake",
     // Its product is how long a spawn of `toybox` takes to its exit, which a
     // guest's host sets: the `spawn_cost` metal row runs it.
     "spawn_cost",
@@ -676,6 +679,31 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // Measurement scout, never landed: one boot per kernel twin, each judged
+    // only on its job having run and said its numbers.
+    (
+        "scout_tlb_base",
+        metal::Metal { arms: SCOUT_TLB_BASE, judge: |b| scout_tlb_said(b[0]) },
+    ),
+    (
+        "scout_tlb_nopcid",
+        metal::Metal { arms: SCOUT_TLB_NOPCID, judge: |b| scout_tlb_said(b[0]) },
+    ),
+    (
+        "scout_tlb_pcid_noinvpcid",
+        metal::Metal { arms: SCOUT_TLB_PCID_NOINVPCID, judge: |b| scout_tlb_said(b[0]) },
+    ),
+    (
+        "scout_wake_split",
+        metal::Metal {
+            arms: SCOUT_WAKE,
+            judge: |b| {
+                b[0].job_passed("test_rs_scout_wake")?;
+                b[0].log().must_say("scout_wake: done")?;
+                Ok(())
+            },
+        },
+    ),
     (
         // How long a spawn of `toybox` takes to its exit, printed by the job and
         // read off the stick for an A/B against another build: that it ran, and
@@ -1128,6 +1156,31 @@ const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
 
 /// The boot most rows ride, and every shipping-kernel member behind them
 /// ([`shared_metal`]): the plain `tests/images/testcases.toml` shape.
+/// Measurement scout, never landed: the kernel twins, one boot each.
+const SCOUT_TLB_BASE: &[metal::Arm] = &[metal::Arm {
+    features: &["scout-pmc"],
+    ..metal::once("scout-tlb-base", "tests/images/testcases.toml", &[], &["test_rs_scout_tlb"])
+}];
+const SCOUT_TLB_NOPCID: &[metal::Arm] = &[metal::Arm {
+    features: &["scout-pmc", "scout-no-pcid"],
+    ..metal::once("scout-tlb-nopcid", "tests/images/testcases.toml", &[], &["test_rs_scout_tlb"])
+}];
+const SCOUT_TLB_PCID_NOINVPCID: &[metal::Arm] = &[metal::Arm {
+    features: &["scout-pmc", "scout-pcid-without-invpcid"],
+    ..metal::once("scout-tlb-pcid-noinvpcid", "tests/images/testcases.toml", &[], &["test_rs_scout_tlb"])
+}];
+const SCOUT_WAKE: &[metal::Arm] = &[metal::Arm {
+    features: &["scout-pmc", "scout-wake-marks"],
+    ..metal::once("scout-wake", "tests/images/testcases.toml", &[], &["test_rs_scout_wake"])
+}];
+
+fn scout_tlb_said(b: &metal::Readback) -> Result<(), String> {
+    b.job_passed("test_rs_scout_tlb")?;
+    b.log().must_say("scout_tlb: tsc ")?;
+    b.log().must_say("scout_tlb: k=64 pages")?;
+    Ok(())
+}
+
 const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/images/testcases.toml",

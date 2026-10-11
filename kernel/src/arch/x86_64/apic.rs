@@ -256,7 +256,16 @@ pub(super) fn tlb_ipi() {
 pub fn kick_cpu(cpu_id: u32) {
     if !ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);
+    #[cfg(feature = "scout-wake-marks")]
+    {
+        use crate::trace::scout::*;
+        mark(CAL_A, cpu_id);
+        mark(CAL_B, cpu_id);
+        mark(KICK_BEGIN, cpu_id);
+    }
     send(Some(apic_id), 0x4000 | u32::from(super::idt::KICK_VECTOR));
+    #[cfg(feature = "scout-wake-marks")]
+    crate::trace::scout::mark(crate::trace::scout::KICK_END, cpu_id);
 }
 
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
@@ -363,6 +372,8 @@ impl OneShot {
 
 /// Arm a one-shot timer to fire after `nanos` nanoseconds, or after [`MIN_ONE_SHOT`] if that is longer.
 pub fn arm_one_shot(nanos: u64) {
+    #[cfg(feature = "scout-wake-marks")]
+    crate::trace::scout::mark(crate::trace::scout::ARM_BEGIN, 0);
     OneShot::after(nanos).arm();
     crate::trace::trace(crate::trace::Kind::TimerArm, nanos as u32);
 }
@@ -405,6 +416,8 @@ pub(crate) extern "sysv64" fn ring0_fire() {
 
 /// Stop the timer. No more interrupts until re-armed.
 pub fn stop_timer() {
+    #[cfg(feature = "scout-wake-marks")]
+    crate::trace::scout::mark(crate::trace::scout::STOP_BEGIN, 0);
     percpu::set_last_armed_ticks(0);
     Reg::TIMER_INIT.write(0);
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);
