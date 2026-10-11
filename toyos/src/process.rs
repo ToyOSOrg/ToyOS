@@ -115,6 +115,11 @@ impl Image {
         Ok(Self { object, len })
     }
 
+    /// The program's bytes, as they were read.
+    pub fn bytes(&self) -> &[u8] {
+        &self.object.as_slice()[..self.len as usize]
+    }
+
     /// What `SpawnArgs::image` and `SpawnArgs::image_len` carry. The object is
     /// this process's until the spawn returns; the child keeps its own.
     pub fn spawn_words(&self) -> (u64, u64) {

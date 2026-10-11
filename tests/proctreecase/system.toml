@@ -21,9 +21,15 @@
 # And `app_view`: test-runner's row lists `/apps`, so a job launches the
 # package it installed under the image's `[apps]` row and the view an
 # installed package is minted, and is refused one named after the `shell` row.
+# It grants that package a folder through `grants`, which test-runner's row
+# lists, so it is refused in the machine's session, and the shell's, so the
+# login session the shell opens is answered.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+
+[apps]
+folder = "read-write"
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -36,7 +42,7 @@ syscap = ["logread"]
 # because test-runner hands each binary a duplicate of its capability.
 [programs.test-runner]
 syscap = ["dup", "roster"]
-starts = ["toybox", "shell", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "swap", "update", "grants", "/apps"]
 
 # `roster`, which a child the job spawns itself never holds: a child holding
 # it ran under this row, and `launch_toctou` asks which bytes that child was.
@@ -45,8 +51,11 @@ syscap = ["roster"]
 starts = ["swap"]
 
 [programs.shell]
-starts = ["toybox", "shell"]
+starts = ["toybox", "shell", "grants"]
 login = true
+
+[programs.grants]
+receives = ["grants"]
 
 [programs.swap]
 receives = ["swap"]

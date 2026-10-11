@@ -838,6 +838,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-desktop"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-font"
 version = "0.2.0"
 
@@ -879,6 +886,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-blockring",
+ "toyos-desktop",
  "toyos-gpt",
  "toyos-inspect",
  "toyos-logstream",
