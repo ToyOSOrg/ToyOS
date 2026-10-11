@@ -425,7 +425,7 @@ const MACHINE_TESTS: &[&str] = &[
     "nvme_disk_keeps_log_and_home",
     // clang and LLD built for ToyOS, compiling and linking inside it: the
     // claim is that they run on ToyOS, which no host test can make, and the
-    // T14 would read nothing a guest does not.
+    // T14 would read nothing a guest does not. On demand: [`ON_DEMAND`].
     "hosted_clang_hello",
     // A badge the kernel stamps on a connection to diskserver, judged by
     // diskserver on the disk it drives: the grant's decisions are host-tested
@@ -6755,8 +6755,17 @@ fn build_tasks(
     machine.chain(screen).collect()
 }
 
-/// Whether a run takes `name`: it has no filter, or one that matches it.
+/// Machine tests a run boots only when a filter is the whole name, so no
+/// unfiltered run, CI's included, boots one: each needs a product only
+/// `cargo run -- --hosted-clang` builds, which no CI job holds.
+const ON_DEMAND: &[&str] = &["hosted_clang_hello"];
+
+/// Whether a run takes `name`: it has no filter, or one that matches it; one
+/// [`ON_DEMAND`] is taken only by its whole name.
 fn kept(filters: &[&str], name: &str) -> bool {
+    if ON_DEMAND.contains(&name) {
+        return filters.contains(&name);
+    }
     filters.is_empty() || filters.iter().any(|f| name.contains(f))
 }
 
