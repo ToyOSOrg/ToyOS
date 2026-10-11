@@ -458,6 +458,59 @@ pub mod prof {
         CyWait = "cy_wait",
         CyAnswers = "cy_answers",
         CyBridge = "cy_bridge",
+        // Round 3: what the receiver says to the sender, and what it was told.
+        OooSegs = "ooo_segs",
+        HoleFilled = "hole_filled",
+        SackSent = "sack_sent",
+        DsackSent = "dsack_sent",
+        AckSegs = "ack_segs",
+        AckBytes = "ack_bytes",
+        AckZero = "ack_zero",
+        AckGapNs = "ack_gap_ns",
+        AckGapN = "ack_gap_n",
+        G0_100us = "gap_lt100us",
+        G100_300us = "gap_100_300us",
+        G300us_1ms = "gap_300us_1ms",
+        G1_3ms = "gap_1_3ms",
+        G3ms = "gap_ge3ms",
+        S1_2 = "stretch_1_2",
+        S3_8 = "stretch_3_8",
+        S9_32 = "stretch_9_32",
+        S33_64 = "stretch_33_64",
+        S65 = "stretch_ge65",
+        Paces = "paces",
+        PaceNs = "pace_ns",
+        ItrUnits = "itr_units",
+    }
+
+    /// Round 3: the gap between two acknowledgments that moved the ack point, in ns.
+    pub fn gap(ns: u64) {
+        add(Slot::AckGapNs, ns);
+        add(Slot::AckGapN, 1);
+        add(
+            match ns {
+                0..100_000 => Slot::G0_100us,
+                100_000..300_000 => Slot::G100_300us,
+                300_000..1_000_000 => Slot::G300us_1ms,
+                1_000_000..3_000_000 => Slot::G1_3ms,
+                _ => Slot::G3ms,
+            },
+            1,
+        );
+    }
+
+    /// Round 3: an acknowledgment that moved the ack point by `segs` full-sized segments.
+    pub fn stretch(segs: u64) {
+        add(
+            match segs {
+                0..=2 => Slot::S1_2,
+                3..=8 => Slot::S3_8,
+                9..=32 => Slot::S9_32,
+                33..=64 => Slot::S33_64,
+                _ => Slot::S65,
+            },
+            1,
+        );
     }
 
     #[cfg(feature = "prof")]

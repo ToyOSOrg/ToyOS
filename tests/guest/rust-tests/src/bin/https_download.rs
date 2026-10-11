@@ -54,8 +54,45 @@ const ROOTS: &str = "/system/etc/ssl/cert.pem";
 /// Handshakes timed before the transfer, one after another.
 const PROBES: usize = 5;
 
-/// MEASUREMENT ONLY: downloads of the file, one after another.
-const RUNS: usize = 2;
+/// MEASUREMENT ONLY: downloads of the file, one after another, each with the
+/// cadence's `K` netstack is told before it: a palindrome, so drift across the
+/// boot weighs every `K` alike. A netstack with no cadence refuses the word, and
+/// the label is then the run's place in the order.
+const K_ORDER: [u32; 6] = [8, 16, 32, 32, 16, 8];
+
+/// MEASUREMENT ONLY: the word that sets netstack's `K`: `K=` and the value.
+fn set_k(k: u32) {
+    use toyos::ipc::{FrameRx, RxStep};
+    let conn = toyos::endow::service("netstack").expect("the job holds a netstack connector");
+    conn.signal(u32::from_le_bytes([b'K', b'=', 0, 0]) | k << 16).expect("netstack takes the word");
+    let mut rx: Box<FrameRx<64>> = Box::new(FrameRx::new());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match rx.pump(&conn) {
+            RxStep::Idle => std::thread::sleep(Duration::from_millis(1)),
+            _ => return,
+        }
+    }
+    panic!("netstack did not answer K={k} in 2 s");
+}
+
+/// MEASUREMENT ONLY: one lookup of the file's host, timed: a round trip to
+/// the LAN's resolver, which netstack asks every time.
+fn lan_probe() -> f64 {
+    let at = Instant::now();
+    let _ = (HOST, 443).to_socket_addrs().unwrap_or_else(|e| panic!("look up {HOST}: {e}"));
+    at.elapsed().as_secs_f64() * 1e3
+}
+
+/// MEASUREMENT ONLY: min, median, 90th percentile and max of `ms`, and how many.
+fn spread(mut ms: Vec<f64>) -> String {
+    if ms.is_empty() {
+        return "none".into();
+    }
+    ms.sort_by(f64::total_cmp);
+    let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
+    format!("{:.2}/{:.2}/{:.2}/{:.2} n={}", ms[0], at(0.5), at(0.9), ms[ms.len() - 1], ms.len())
+}
 
 /// The ceiling on netstack's word reaching this job: its own bound on saying
 /// it, and two of logkeeper's rounds at its write budget
@@ -170,30 +207,58 @@ fn main() {
         let suite = netperf::suite(&pem, &host, port, &path);
         println!("https_download: {}", netperf::benches(&machine, &suite, &idle));
 
-        // MEASUREMENT ONLY: the file twice, back to back, so a CDN's cold first fetch is told apart.
-        for run in 1..=RUNS {
+        // MEASUREMENT ONLY: the LAN's round trip with nothing else moving.
+        let idle_lan: Vec<f64> = (0..10)
+            .map(|_| {
+                std::thread::sleep(Duration::from_millis(50));
+                lan_probe()
+            })
+            .collect();
+        println!("https_download: lan idle lan_ms={}", spread(idle_lan));
+
+        // MEASUREMENT ONLY: the file once per `K`, back to back.
+        for (index, k) in K_ORDER.into_iter().enumerate() {
+            let run = index + 1;
+            set_k(k);
             *progress.lock().unwrap_or_else(PoisonError::into_inner) = Progress { bytes: 0, first: None, last: None };
             let before = machine.snap();
             let at = Instant::now();
-            let fetched = netperf::fetch(https_client::config(&roots), &url, |bytes| {
-                let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
-                progress.bytes = bytes;
-                progress.last = Some(Instant::now());
-                if progress.first.is_none() {
-                    progress.first = Some((Instant::now(), round(cap), bytes));
-                }
+            // The LAN's round trip while the download moves, every 50 ms.
+            let moving = std::sync::atomic::AtomicBool::new(true);
+            let (fetched, lan) = std::thread::scope(|probes| {
+                let lan = probes.spawn(|| {
+                    let mut ms = Vec::new();
+                    while moving.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(50));
+                        if progress.lock().unwrap_or_else(PoisonError::into_inner).first.is_some() {
+                            ms.push(lan_probe());
+                        }
+                    }
+                    ms
+                });
+                let fetched = netperf::fetch(https_client::config(&roots), &url, |bytes| {
+                    let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
+                    progress.bytes = bytes;
+                    progress.last = Some(Instant::now());
+                    if progress.first.is_none() {
+                        progress.first = Some((Instant::now(), round(cap), bytes));
+                    }
+                });
+                moving.store(false, std::sync::atomic::Ordering::Relaxed);
+                (fetched, lan.join().expect("the probe thread"))
             });
             let secs = at.elapsed().as_secs_f64();
+            println!("https_download: lan run={run} k={k} lan_ms={}", spread(lan));
             let d = netperf::delta(&before, &machine.snap());
             let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
             let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
             println!(
-                "https_download: {} tcp_ms={:.1} tls_ms={:.1}",
+                "https_download: {} tcp_ms={:.1} tls_ms={:.1} run={run} k={k}",
                 report("whole", Some(&fetched.sha256), &progress, &rtt, cap),
                 fetched.tcp_ms,
                 fetched.tls_ms
             );
-            println!("https_download: perf run={run} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
+            println!("https_download: perf run={run} k={k} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
         }
         drop(transferring);
     });
