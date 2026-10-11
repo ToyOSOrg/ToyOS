@@ -477,33 +477,33 @@ toyos-abi = { path = "../sdk/abi" }
 
 # The binary's alone, so a host build of the library compiles none of them.
 [target.'cfg(target_os = "none")'.dependencies]
-bcachefs = { path = "../bcachefs", default-features = false }
-toyos-acpi = { path = "../toyos-acpi" }
+bcachefs = { path = "../lib/bcachefs", default-features = false }
+toyos-acpi = { path = "../lib/acpi" }
 toyos-dma = { path = "dma" }
-toyos-blackbox = { path = "../toyos-blackbox" }
-toyos-blockhold = { path = "../toyos-blockhold" }
-toyos-bootmap = { path = "../toyos-bootmap" }
-toyos-cpuvuln = { path = "../toyos-cpuvuln" }
-toyos-fat32 = { path = "../toyos-fat32" }
-toyos-elf = { path = "../toyos-elf" }
+toyos-blackbox = { path = "../lib/blackbox" }
+toyos-blockhold = { path = "../lib/blockhold" }
+toyos-bootmap = { path = "../lib/bootmap" }
+toyos-cpuvuln = { path = "cpuvuln" }
+toyos-fat32 = { path = "../lib/fat32" }
+toyos-elf = { path = "../lib/elf" }
 toyos-gicv3 = { path = "gicv3" }
-toyos-gpt = { path = "../toyos-gpt" }
-toyos-hda = { path = "../toyos-hda" }
-toyos-its = { path = "../toyos-its" }
+toyos-gpt = { path = "../lib/gpt" }
+toyos-hda = { path = "../lib/hda" }
+toyos-its = { path = "its" }
 toyos-pci = { path = "pci" }
-toyos-phys = { path = "../toyos-phys" }
-toyos-smmu = { path = "../toyos-smmu" }
-toyos-tco = { path = "../toyos-tco" }
-toyos-tsc = { path = "../toyos-tsc" }
+toyos-phys = { path = "phys" }
+toyos-smmu = { path = "smmu" }
+toyos-tco = { path = "../lib/tco" }
+toyos-tsc = { path = "../lib/tsc" }
 toyos-ps2 = { path = "ps2" }
-toyos-rootimage = { path = "../toyos-rootimage" }
-toyos-quiesce = { path = "../toyos-quiesce" }
-toyos-random = { path = "../toyos-random" }
-toyos-symbols = { path = "../toyos-symbols" }
-toyos-untrusted = { path = "../toyos-untrusted" }
-toyos-usbhid = { path = "../toyos-usbhid" }
-toyos-userbound = { path = "../toyos-userbound" }
-toyos-wallclock = { path = "../toyos-wallclock" }
-toyos-xhci = { path = "../toyos-xhci" }
+toyos-rootimage = { path = "../lib/rootimage" }
+toyos-quiesce = { path = "../lib/quiesce" }
+toyos-random = { path = "../lib/random" }
+toyos-symbols = { path = "../lib/symbols" }
+toyos-untrusted = { path = "../lib/untrusted" }
+toyos-usbhid = { path = "usbhid" }
+toyos-userbound = { path = "../lib/userbound" }
+toyos-wallclock = { path = "../lib/wallclock" }
+toyos-xhci = { path = "../lib/xhci" }
 hashbrown = { version = "0.16", default-features = false }
 dlmalloc = { version = "0.2", default-features = false }

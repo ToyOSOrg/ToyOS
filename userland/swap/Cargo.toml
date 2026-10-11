@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 # The words the supervisor says about a swap, and the digest it is held to.
-toyos-swap = { path = "../../toyos-swap" }
+toyos-swap = { path = "../../lib/swap" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's running services: it replaces one's binary through the supervisor's `swap` port"

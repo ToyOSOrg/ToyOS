@@ -253,19 +253,19 @@ pub mod tests {
     }
 
     /// QEMU's own tables where its guest held them
-    /// (`toyos-acpi/fixtures/qemu-11.1.1/SOURCE`), as ACPI reclaim memory.
+    /// (`lib/acpi/fixtures/qemu-11.1.1/SOURCE`), as ACPI reclaim memory.
     const RSDP: u64 = 0x7fb7_e014;
     const DSDT: u64 = 0x7fb7_a000;
     const QEMU: &[(u64, &[u8])] = &[
-        (RSDP, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/rsdp.bin")),
-        (0x7fb7_d0e8, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/xsdt.bin")),
-        (0x7fb7_9000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/facp.bin")),
-        (0x7fb7_8000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/apic.bin")),
-        (0x7fb7_7000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/hpet.bin")),
-        (0x7fb7_6000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/mcfg.bin")),
-        (0x7fb7_5000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/dmar.bin")),
-        (0x7fb7_4000, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/waet.bin")),
-        (DSDT, include_bytes!("../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin")),
+        (RSDP, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/rsdp.bin")),
+        (0x7fb7_d0e8, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/xsdt.bin")),
+        (0x7fb7_9000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/facp.bin")),
+        (0x7fb7_8000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/apic.bin")),
+        (0x7fb7_7000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/hpet.bin")),
+        (0x7fb7_6000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/mcfg.bin")),
+        (0x7fb7_5000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/dmar.bin")),
+        (0x7fb7_4000, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/waet.bin")),
+        (DSDT, include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/dsdt.bin")),
     ];
 
     fn machine(tables: &[(u64, &[u8])]) -> Scripted {

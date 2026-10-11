@@ -7,12 +7,12 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-hda = { path = "../../toyos-hda" }
+toyos-hda = { path = "../../lib/hda" }
 toyos-mixer = { path = "mixer" }
 toyos-virtio-sound = { path = "virtio-sound" }
-toyos-virtio = { path = "../../toyos-virtio" }
+toyos-virtio = { path = "../../lib/virtio" }
 toyos-pci-claim = { path = "../toyos-pci-claim" }
-toyos-inspect = { path = "../../toyos-inspect" }
+toyos-inspect = { path = "../../lib/inspect" }
 rubato = { version = "0.16", default-features = false }
 
 [package.metadata.toyos.host]

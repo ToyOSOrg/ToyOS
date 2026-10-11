@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 # The request's codec and the folder rules, read by the supervisor too.
-toyos-manifest = { path = "../../toyos-manifest" }
+toyos-manifest = { path = "../../lib/manifest" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's grants of a folder of the home to an installed package, through the supervisor's `grants` port"

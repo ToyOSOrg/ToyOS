@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn the_gate_refuses_a_crate_that_joined_neither_list() {
         let members: BTreeSet<String> =
-            [".", "toyos-elf", "toyos-xhci", "toyos-xhci/sim"].iter().map(|s| s.to_string()).collect();
+            [".", "lib/elf", "lib/xhci", "lib/xhci/sim"].iter().map(|s| s.to_string()).collect();
 
         let all_declared: BTreeSet<String> = members.clone();
         assert!(unclaimed(&members, &all_declared).is_empty());
@@ -300,8 +300,8 @@ mod tests {
 
         // And a nested one.
         let with_a_nested_newcomer: BTreeSet<String> =
-            members.union(&["toyos-xhci/newthing".to_string()].into()).cloned().collect();
-        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["toyos-xhci/newthing"]);
+            members.union(&["lib/xhci/newthing".to_string()].into()).cloned().collect();
+        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["lib/xhci/newthing"]);
     }
 
     /// The walk has teeth only if it can find anything: it must reach the real
@@ -312,9 +312,9 @@ mod tests {
         let root = repo_root();
         let found = crate_dirs(&root);
         assert!(found.contains("."), "the walk did not find the root package");
-        assert!(found.contains("toyos-elf"), "the walk did not find toyos-elf: {found:?}");
+        assert!(found.contains("lib/elf"), "the walk did not find lib/elf: {found:?}");
         assert!(
-            found.contains("toyos-xhci/sim"),
+            found.contains("lib/xhci/sim"),
             "the walk did not descend past the first level, so a nested member could \
              go missing without this gate noticing: {found:?}"
         );
@@ -449,8 +449,8 @@ mod tests {
     #[test]
     fn the_dead_path_scan_reads_code_and_not_the_comment_beside_it() {
         assert_eq!(
-            code_only("let p = \"toyos-elf/target/x\"; // was toyos-abi/target\n", "//").trim(),
-            "let p = \"toyos-elf/target/x\";",
+            code_only("let p = \"lib/elf/target/x\"; // was toyos-abi/target\n", "//").trim(),
+            "let p = \"lib/elf/target/x\";",
         );
         assert_eq!(code_only("            target\n", "#").trim(), "target");
         assert_eq!(

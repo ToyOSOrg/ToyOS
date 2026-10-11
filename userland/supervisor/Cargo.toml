@@ -8,22 +8,22 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-manifest = { path = "../../toyos-manifest" }
+toyos-manifest = { path = "../../lib/manifest" }
 toyos-osrelease = { path = "../../sdk/osrelease" }
-toyos-wallclock = { path = "../../toyos-wallclock" }
-toyos-logstream = { path = "../../toyos-logstream" }
-toyos-swap = { path = "../../toyos-swap" }
+toyos-wallclock = { path = "../../lib/wallclock" }
+toyos-logstream = { path = "../../lib/logstream" }
+toyos-swap = { path = "../../lib/swap" }
 # The slot table and which slot is idle, for the one row that asks for it.
-toyos-update = { path = "../../toyos-update" }
+toyos-update = { path = "../../lib/update" }
 # The partition types that name the running ROOT and the slot table.
-toyos-gpt = { path = "../../toyos-gpt" }
+toyos-gpt = { path = "../../lib/gpt" }
 # The block service's port name, which marks a storage row, and the grant
 # every connector to it is minted with.
-toyos-blockring = { path = "../../toyos-blockring" }
+toyos-blockring = { path = "../../lib/blockring" }
 # The slot table, read through a session where the block service serves it.
 diskserver = { path = "../diskserver" }
 # How long a stop is prepared before the kernel is asked for it.
-toyos-quiesce = { path = "../../toyos-quiesce" }
+toyos-quiesce = { path = "../../lib/quiesce" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the machine's system capability: the kernel starts it, and it builds every program's namespace"

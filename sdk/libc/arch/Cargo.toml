@@ -16,4 +16,4 @@ std-runtime = []
 
 [dev-dependencies]
 toyos-abi = { path = "../../abi" }
-toyos-elf = { path = "../../../toyos-elf" }
+toyos-elf = { path = "../../../lib/elf" }

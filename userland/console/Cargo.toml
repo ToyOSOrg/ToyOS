@@ -11,7 +11,7 @@ toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-font = { path = "../../sdk/font" }
 toyos-window = { path = "../../sdk/window" }
-toyos-logstream = { path = "../../toyos-logstream" }
+toyos-logstream = { path = "../../lib/logstream" }
 logkeeper-api = { path = "../logkeeper-api" }
 
 [package.metadata.toyos.host]

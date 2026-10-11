@@ -673,7 +673,7 @@ fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), Stri
 
 /// The resolved config as the records `/system/bin/supervisor` reads.
 ///
-/// The format, the renderer and the parser are `toyos-manifest/`, whose
+/// The format, the renderer and the parser are `lib/manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {

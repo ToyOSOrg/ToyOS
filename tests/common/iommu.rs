@@ -427,7 +427,7 @@ fn class_function(log: &Serial, class: &str) -> Option<String> {
 }
 
 /// What the kernel says of the one unit QEMU's IVRS describes, as an 11h over
-/// a superseded 10h (`toyos-acpi/tests/ivrs.rs` decodes the same table).
+/// a superseded 10h (`lib/acpi/tests/ivrs.rs` decodes the same table).
 const AMDVI_UNIT: &str = "iommu: amdvi unit0 @0xfed80000 seg=0 dev=00:02.0 ivhd=0x11";
 const AMDVI_SUPERSEDED: &str = "iommu: IVRS IVHD 0x10 at +48 describes 00:02.0 again";
 /// The xHCI the boot stick is on, among the functions the unit serves.

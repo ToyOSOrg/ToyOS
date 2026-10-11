@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-tco = { path = "../../toyos-tco" }
+toyos-tco = { path = "../../lib/tco" }

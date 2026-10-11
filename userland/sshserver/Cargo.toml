@@ -11,4 +11,4 @@ tokio = { version = "1", features = ["rt", "net", "macros", "io-util", "sync", "
 
 [dev-dependencies]
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
-toyos-tmpdir = { path = "../../toyos-tmpdir" }
+toyos-tmpdir = { path = "../../lib/tmpdir" }

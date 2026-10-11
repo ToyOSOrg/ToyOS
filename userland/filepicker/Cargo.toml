@@ -9,5 +9,5 @@ license = "MIT OR Apache-2.0"
 filepicker-api = { path = "../../sdk/filepicker" }
 toyos = { path = "../../sdk/toyos" }
 toyos-font = { path = "../../sdk/font" }
-toyos-manifest = { path = "../../toyos-manifest" }
+toyos-manifest = { path = "../../lib/manifest" }
 toyos-window = { path = "../../sdk/window" }

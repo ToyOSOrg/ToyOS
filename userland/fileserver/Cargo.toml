@@ -17,11 +17,11 @@ path = "src/main.rs"
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-manifest = { path = "../../toyos-manifest" }
-toyos-blockring = { path = "../../toyos-blockring" }
-toyos-gpt = { path = "../../toyos-gpt" }
-toyos-fat32 = { path = "../../toyos-fat32" }
-bcachefs = { path = "../../bcachefs" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-gpt = { path = "../../lib/gpt" }
+toyos-fat32 = { path = "../../lib/fat32" }
+bcachefs = { path = "../../lib/bcachefs" }
 diskserver = { path = "../diskserver" }
 
 [package.metadata.toyos.host]

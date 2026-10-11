@@ -197,9 +197,9 @@ fn a_processor_parses_opens_a_scope_and_takes_notify() {
     assert_eq!(m.log, vec![Event::Notify("\\_PR_.CPU0".into(), 0x80)]);
 }
 
-const QEMU_DSDT: &[u8] = include_bytes!("../../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin");
+const QEMU_DSDT: &[u8] = include_bytes!("../../../../lib/acpi/fixtures/qemu-11.1.1/dsdt.bin");
 
-/// QEMU 11.1.1's DSDT, as `toyos-acpi/fixtures/qemu-11.1.1/SOURCE` records
+/// QEMU 11.1.1's DSDT, as `lib/acpi/fixtures/qemu-11.1.1/SOURCE` records
 /// it: QEMU powers its q35 off on `SLP_TYPa` 0.
 #[test]
 fn qemus_dsdt_loads_and_its_s5_is_what_its_boot_logged() {

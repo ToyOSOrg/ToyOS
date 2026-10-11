@@ -8,11 +8,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-logstream = { path = "../../toyos-logstream" }
+toyos-logstream = { path = "../../lib/logstream" }
 # The per-program allowance: how many records a second a program may put in the log.
-toyos-elide = { path = "../../toyos-elide" }
-toyos-inspect = { path = "../../toyos-inspect" }
-toyos-wallclock = { path = "../../toyos-wallclock" }
+toyos-elide = { path = "../../lib/elide" }
+toyos-inspect = { path = "../../lib/inspect" }
+toyos-wallclock = { path = "../../lib/wallclock" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the kernel's record ring, read under the `logread` SysCap"

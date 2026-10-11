@@ -11,21 +11,21 @@ toyos = { path = "../../sdk/toyos" }
 toyos-window = { path = "../../sdk/window" }
 # The desktop's furniture, for `consent`'s fullscreen window.
 toyos-desktop = { path = "../../userland/compositor/desktop" }
-toyos-tco = { path = "../../toyos-tco" }
-toyos-inspect = { path = "../../toyos-inspect" }
+toyos-tco = { path = "../../lib/tco" }
+toyos-inspect = { path = "../../lib/inspect" }
 # The log as logkeeper serves it, and the asking for it, for `counters_metal`'s
 # wait on the log being quiet.
-toyos-logstream = { path = "../../toyos-logstream" }
+toyos-logstream = { path = "../../lib/logstream" }
 logkeeper-api = { path = "../../userland/logkeeper-api" }
 # The ACPI server's count line, for `acpi_hold`'s wait on it.
 acpiserver-api = { path = "../../userland/acpiserver-api" }
 # A block service's session, its grants and the partition types, for
 # `partition_grant` and `update_idle_slot`.
 diskserver = { path = "../../userland/diskserver" }
-toyos-blockring = { path = "../../toyos-blockring" }
-toyos-gpt = { path = "../../toyos-gpt" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-gpt = { path = "../../lib/gpt" }
 # The diary's decoder, for `trace_read` and `trace_flood`.
-toyos-trace = { path = "../../toyos-trace" }
+toyos-trace = { path = "../../lib/trace" }
 # The reader's asker, for `hda_client_stall`.
 inspect = { path = "../../userland/inspect" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }

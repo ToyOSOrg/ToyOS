@@ -173,7 +173,7 @@ const GUEST_CODE: &[&str] = &[
 /// gone with its holder on a panic too.
 const TEMP_DIR_ALLOWED: &[(&str, usize)] = &[
     // The guard itself.
-    ("toyos-tmpdir/src/lib.rs", 1),
+    ("lib/tmpdir/src/lib.rs", 1),
     // A failed golden comparison leaves its dump for the reader to copy over
     // the golden file: outliving the test is its purpose.
     ("sdk/keymap/tests/tables.rs", 1),

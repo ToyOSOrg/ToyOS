@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-trace = { path = "../../toyos-trace" }
+toyos-trace = { path = "../../lib/trace" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's kernel diary: what its `trace` SysCap right reads off every CPU's ring"

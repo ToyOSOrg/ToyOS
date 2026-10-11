@@ -16,9 +16,9 @@ doctest = false
 [dependencies]
 # The transport's `Live`, which a doorbell is rung through, and the split
 # virtqueue every word the device writes back is bounded by.
-toyos-virtio = { path = "../../../toyos-virtio" }
+toyos-virtio = { path = "../../../lib/virtio" }
 # `DmaBuffers`, the grant the three queues and every buffer are laid out in.
-toyos-device-memory = { path = "../../../toyos-device-memory" }
+toyos-device-memory = { path = "../../../lib/device-memory" }
 
 [lints.rust]
 warnings = "deny"

@@ -9,8 +9,8 @@ publish = false
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-device-memory = { path = "../../toyos-device-memory" }
-toyos-virtio = { path = "../../toyos-virtio" }
+toyos-device-memory = { path = "../../lib/device-memory" }
+toyos-virtio = { path = "../../lib/virtio" }
 
 [features]
 # `Grant::leaked`, for a driver crate's host tests: a dev-dependency's, never

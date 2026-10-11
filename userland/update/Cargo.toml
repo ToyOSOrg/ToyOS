@@ -11,11 +11,11 @@ toyos = { path = "../../sdk/toyos" }
 # the block service.
 diskserver = { path = "../diskserver" }
 # The format, the verifier and the slot table the loader reads the same way.
-toyos-update = { path = "../../toyos-update" }
+toyos-update = { path = "../../lib/update" }
 # A slot's volume is FAT, written with the driver the kernel mounts FAT with.
-toyos-fat32 = { path = "../../toyos-fat32" }
+toyos-fat32 = { path = "../../lib/fat32" }
 # ROOT is hashed as it streams onto its partition, never held whole.
-toyos-sha2-hw = { path = "../../toyos-sha2-hw" }
+toyos-sha2-hw = { path = "../../lib/sha2-hw" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor grants it"

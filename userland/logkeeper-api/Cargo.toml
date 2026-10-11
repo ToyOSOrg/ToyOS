@@ -10,4 +10,4 @@ doctest = false
 
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
-toyos-logstream = { path = "../../toyos-logstream" }
+toyos-logstream = { path = "../../lib/logstream" }

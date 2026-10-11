@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-xhci = { path = "../../toyos-xhci" }
-toyos-inspect = { path = "../../toyos-inspect" }
+toyos-xhci = { path = "../../lib/xhci" }
+toyos-inspect = { path = "../../lib/inspect" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the xHCI controller ToyOS claims for it"

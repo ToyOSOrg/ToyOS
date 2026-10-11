@@ -11,7 +11,7 @@ doctest = false
 [dependencies]
 # The table a load takes, its §5.2.6 length and checksum already checked
 # where every other table's are.
-toyos-acpi = { path = "../../../toyos-acpi" }
+toyos-acpi = { path = "../../../lib/acpi" }
 
 [lints.rust]
 warnings = "deny"

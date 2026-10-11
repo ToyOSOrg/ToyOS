@@ -71,7 +71,7 @@ pub const SYSROOT_SOURCES: [&str; 7] = [
     "sdk/abi/src",
     "sdk/toyos/src",
     "sdk/std",
-    "toyos-elf/src",
+    "lib/elf/src",
     "sdk/osrelease/src",
     "sdk/libc/src",
     "sdk/libc/include",
@@ -82,7 +82,7 @@ pub const SYSROOT_SOURCES: [&str; 7] = [
 pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
     "sdk/abi/Cargo.toml",
     "sdk/toyos/Cargo.toml",
-    "toyos-elf/Cargo.toml",
+    "lib/elf/Cargo.toml",
     "sdk/osrelease/Cargo.toml",
     "sdk/libc/Cargo.toml",
     "sdk/libc/Cargo.lock",

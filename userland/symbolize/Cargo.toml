@@ -6,4 +6,4 @@ license = "MIT OR Apache-2.0"
 description = "Names the frames of a killed program's crash record: the file and offset the kernel recorded, looked up in that file's own symbol table."
 
 [dependencies]
-toyos-symbols = { path = "../../toyos-symbols" }
+toyos-symbols = { path = "../../lib/symbols" }

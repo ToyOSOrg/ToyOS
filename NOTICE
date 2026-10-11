@@ -259,16 +259,16 @@ agreement's text travel with the data, and the image carries it beside them as
     crate's `LICENSE`, sha256
     e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8)
 
-bcachefs/tests/fixtures/ — volumes upstream's tools wrote
----------------------------------------------------------
+lib/bcachefs/tests/fixtures/ — volumes upstream's tools wrote
+-------------------------------------------------------------
 
-    bcachefs/tests/fixtures/crc32c.img.gz
+    lib/bcachefs/tests/fixtures/crc32c.img.gz
     144,978 bytes gzip -9, of a 33,554,432-byte raw volume
     sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
     raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
     SPDX-License-Identifier: MIT OR Apache-2.0
 
-`bcachefs/src/upstream` implements upstream's on-disk format, and the only
+`lib/bcachefs/src/upstream` implements upstream's on-disk format, and the only
 honest judge of a format reader is bytes the format's own implementation wrote.
 This fixture is those bytes. It was produced by `bcachefs-tools` v1.39.4 running
 in a QEMU guest booted from the Arch Linux 2026.09.01 install medium, as a
@@ -326,8 +326,8 @@ and the file contents are ours. The tool is not distributed with this repository
 in any form.
 
 
-toyos-fat32/tests/fixtures/ — volumes macOS's FAT tools wrote
---------------------------------------------------------------
+lib/fat32/tests/fixtures/ — volumes macOS's FAT tools wrote
+------------------------------------------------------------
 
     blank-512.runs     3,672 bytes, of a  67,108,864-byte raw volume
       sha256 4f1686152769fb4b064a78b0a2287c8b54bff3ec1e279b35c8f337d538a45f78
@@ -355,14 +355,14 @@ toyos-fat32/tests/fixtures/ — volumes macOS's FAT tools wrote
 ones. The only honest judge of a FAT reader is bytes a FAT implementation that
 is not ours wrote, and these are those bytes. Each is committed as its runs of
 nonzero 512-byte sectors, which `Image::fixture` in
-`toyos-fat32/tests/common/mod.rs` expands into a sparse file; the raw digest is
+`lib/fat32/tests/common/mod.rs` expands into a sparse file; the raw digest is
 of that expansion, and equals the digest of what the tools wrote.
 
 They were made once, on macOS 27.0.1 (build 26A434), with Apple's `msdosfs`
 project at SourceVersion 845000003000001 (`/sbin/newfs_msdos`, sha256
 29b3d7daa299583015c823ea6ebce643c030a79c8bc26b9bf9c23deb4c6d1a73) and
 `/usr/bin/hdiutil`, by a throwaway program making the invocations
-`toyos-fat32/tests/common/mod.rs` made at fa134154c with a fixed label. Per
+`lib/fat32/tests/common/mod.rs` made at fa134154c with a fixed label. Per
 volume, on a sparse file of the raw size:
 
     hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -nomount <file>
@@ -383,7 +383,7 @@ volume, on a sparse file of the raw size:
                                  sub/inner.dat pattern(4000, 6), sub/deeper/leaf.txt "leaf"
     empty-file   1  TFEMPTYFILE  empty.txt "", full.txt "twelve bytes"
 
-`pattern` is the one in `toyos-fat32/tests/common/mod.rs`. Nothing in this
+`pattern` is the one in `lib/fat32/tests/common/mod.rs`. Nothing in this
 repository runs either tool: the suite reads only what is committed here.
 
 **What in them is not ours.** The names and contents of the files are this
@@ -411,8 +411,8 @@ a work of theirs. Two things the tools wrote are not:
   of them are input a reader has to skip.
 
 
-toyos-microcode/intel-ucode/* — Intel microcode, redistributable unmodified
----------------------------------------------------------------------------
+kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
+----------------------------------------------------------------------------
 
     06-8c-01  112,640 bytes, update revision 0xbe for processor signature
               0x806c1, processor flags 0x80 (Tiger Lake B0/B1, the T14's

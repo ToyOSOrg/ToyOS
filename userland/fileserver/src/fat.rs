@@ -470,7 +470,7 @@ impl<D: Disk> Volume for FatVolume<D> {
 /// A FAT32 volume built from fatgen103 by the checker's tests, and not by the
 /// driver under test.
 #[cfg(test)]
-#[path = "../../../toyos-fat32/check/tests/common/mod.rs"]
+#[path = "../../../lib/fat32/check/tests/common/mod.rs"]
 mod spec_volume;
 
 #[cfg(test)]

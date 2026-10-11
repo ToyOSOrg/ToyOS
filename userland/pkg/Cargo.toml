@@ -12,10 +12,10 @@ license = "MIT OR Apache-2.0"
 doctest = false
 
 [dependencies]
-toyos-manifest = { path = "../../toyos-manifest" }
-toyos-sha2-hw = { path = "../../toyos-sha2-hw" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-sha2-hw = { path = "../../lib/sha2-hw" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
-toyos-tmpdir = { path = "../../toyos-tmpdir" }
+toyos-tmpdir = { path = "../../lib/tmpdir" }

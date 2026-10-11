@@ -7,15 +7,15 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-device-memory = { path = "../../toyos-device-memory" }
+toyos-device-memory = { path = "../../lib/device-memory" }
 toyos-i219 = { path = "../../toyos-i219" }
-toyos-virtio = { path = "../../toyos-virtio" }
+toyos-virtio = { path = "../../lib/virtio" }
 toyos-pci-claim = { path = "../toyos-pci-claim" }
-toyos-tco = { path = "../../toyos-tco" }
+toyos-tco = { path = "../../lib/tco" }
 toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }
 toyos-dhcp = { path = "../../toyos-dhcp" }
-toyos-inspect = { path = "../../toyos-inspect" }
+toyos-inspect = { path = "../../lib/inspect" }
 toyos-net-node = { path = "node" }
 toyos-net-ip = { path = "../../toyos-net-ip" }
 toyos-net-shard = { path = "../../toyos-net-shard" }

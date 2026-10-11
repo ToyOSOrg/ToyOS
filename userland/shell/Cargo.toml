@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 # `launch_path`, which is the other half of the gate the supervisor refuses a launch on.
-toyos-manifest = { path = "../../toyos-manifest" }
+toyos-manifest = { path = "../../lib/manifest" }
 
 [package.metadata.toyos.host]
 fails = ["linux", "macos", "windows"]

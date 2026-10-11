@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
 # The tables' decode, which the kernel reads its own of by.
-toyos-acpi = { path = "../../toyos-acpi" }
+toyos-acpi = { path = "../../lib/acpi" }
 toyos-aml = { path = "aml" }
 # Its own lines, as their readers spell them.
 acpiserver-api = { path = "../acpiserver-api" }

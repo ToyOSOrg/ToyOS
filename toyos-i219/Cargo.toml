@@ -22,4 +22,4 @@ publish = false
 [dependencies]
 # `Registers` and `DmaBuffers`: the boundary every userland driver is written
 # against, and the order of its two barriers.
-toyos-device-memory = { path = "../toyos-device-memory" }
+toyos-device-memory = { path = "../lib/device-memory" }

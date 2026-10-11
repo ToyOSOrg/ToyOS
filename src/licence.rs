@@ -244,67 +244,67 @@ pub const EXCEPTIONS: &[Exception] = &[
 pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // The ACPI tables QEMU 11.1.1 published to a `Profile::Headless` guest,
     // read out of guest physical memory over the monitor. Firmware output, not
-    // third-party source: `toyos-acpi/tests/fixtures.rs` decodes them against
+    // third-party source: `lib/acpi/tests/fixtures.rs` decodes them against
     // what that boot's kernel logged.
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/apic.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/apic.bin",
         "441794f0b4bd74feb6f4fc1adf82048023a612ba676dc308c8173e449c0ccdbb",
         "ours: QEMU's own MADT, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/dmar.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/dmar.bin",
         "30df13af55b4b10bb3c2644d26480aa7ee302deaaf141a7a1ff2a3e053030290",
         "ours: QEMU's own DMAR, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/dsdt.bin",
         "d183acae4048280f9c9cd8353045544d7d84319b304b7f65d4d0895e8b8ac06b",
         "ours: QEMU's own DSDT, captured by the commit that reads `\\_S5_` out of it",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/facp.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/facp.bin",
         "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
         "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/hpet.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/hpet.bin",
         "8a486edc412b6e5f1b906ebf3fcfd6a647c8987d8ec437e4cbb808f34d7e2775",
         "ours: QEMU's own HPET table, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/mcfg.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/mcfg.bin",
         "5274632ea7572e49d97249c05ada4b2f597ad0603ba801538ddef4bd91add994",
         "ours: QEMU's own MCFG, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/rsdp.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/rsdp.bin",
         "8e3493811dfa7d164fc2076846908139df2f962eea2a5b2e45405949cbd82bf9",
         "ours: QEMU's own RSDP, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/waet.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/waet.bin",
         "21cf099f063f6422353ea0c9100bbe47a97d7be87449c12f201a8a3bb49b7f4e",
         "ours: QEMU's own WAET, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1/xsdt.bin",
+        "lib/acpi/fixtures/qemu-11.1.1/xsdt.bin",
         "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
         "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     // The IVRS QEMU 11.1.1 published to a q35 with its AMD IOMMU, read out
     // of guest physical memory with no operating system in the guest:
-    // `toyos-acpi/tests/ivrs.rs` decodes it.
+    // `lib/acpi/tests/ivrs.rs` decodes it.
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-amdvi/ivrs.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-amdvi/ivrs.bin",
         "c6d3f24592e7e69d5f3bcf4cad0a2cda57d93432d9fd6d2eb499fd289e6cc49d",
         "ours: QEMU's own IVRS, captured by the commit that decodes it",
         Terms::Spdx("MIT OR Apache-2.0"),
@@ -312,45 +312,45 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // The tables QEMU 11.1.1 published to its `virt` machine in both of its
     // GIC modes, read out of guest physical memory over the monitor with no
     // operating system in the guest. Firmware output, as the q35 tables above:
-    // `toyos-acpi/tests/iort.rs` decodes them.
+    // `lib/acpi/tests/iort.rs` decodes them.
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/hwgic/apic.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/hwgic/apic.bin",
         "5f65e29aa3c1d4b7afce9f22c144797f2d4234a58e7fbeaae48c1744d0713976",
         "ours: QEMU `virt`'s own MADT under the hypervisor's GIC, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/hwgic/iort.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/hwgic/iort.bin",
         "6b0a25a264422e32097f761d5d82cd7d5142bbe20a6d6ef22b7750c9ff7cd8e2",
         "ours: QEMU `virt`'s own IORT under the hypervisor's GIC, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/its/apic.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/its/apic.bin",
         "ca5ef1376c5e30ee314a9a22c225fe34e9721889a6884bc36239c9d145759452",
         "ours: QEMU `virt`'s own MADT under its emulated GIC and ITS, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/its/iort.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/its/iort.bin",
         "57b1d81a2995c018d623a8d4a0ecb7318624f03065c3deb820773f3c7d5c7a93",
         "ours: QEMU `virt`'s own IORT under its emulated GIC and ITS, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/rsdp.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/rsdp.bin",
         "88f4591b661d951ae67bca4b740dbebf8e0382b1e27dc915ae44ceddb3a09df7",
         "ours: QEMU `virt`'s own RSDP, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/qemu-11.1.1-virt/xsdt.bin",
+        "lib/acpi/fixtures/qemu-11.1.1-virt/xsdt.bin",
         "8129cb6793e7b6f375e60f6e9780feff0b11b1e99da8c0b1dc4135700123725d",
         "ours: QEMU `virt`'s own XSDT, captured by the commit that decodes the IORT",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
+        "lib/acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
         "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
         "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
         Terms::Spdx("MIT OR Apache-2.0"),
@@ -359,7 +359,7 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // it are this repository's test material; `NOTICE` carries the raw digest,
     // the commands, and the fsck that called it clean.
     (
-        "bcachefs/tests/fixtures/crc32c.img.gz",
+        "lib/bcachefs/tests/fixtures/crc32c.img.gz",
         "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
@@ -369,37 +369,37 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // `newfs_msdos`'s boot stub; `NOTICE` carries its notice, each raw digest
     // and the commands.
     (
-        "toyos-fat32/tests/fixtures/blank-4k.runs",
+        "lib/fat32/tests/fixtures/blank-4k.runs",
         "14e98fc505450882f4d284fb712d32b4f9e4d50c1bfc86702ace8f0adee745e0",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
-        "toyos-fat32/tests/fixtures/blank-512.runs",
+        "lib/fat32/tests/fixtures/blank-512.runs",
         "4f1686152769fb4b064a78b0a2287c8b54bff3ec1e279b35c8f337d538a45f78",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
-        "toyos-fat32/tests/fixtures/empty-file.runs",
+        "lib/fat32/tests/fixtures/empty-file.runs",
         "68a6abf1626e4bdf6b3586d3f52b2d7051390e4e18beb31258dd0021bb3e96b9",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
-        "toyos-fat32/tests/fixtures/hostile.runs",
+        "lib/fat32/tests/fixtures/hostile.runs",
         "c570b3c6944f47d2cd1498da14f12c4a98dc85683f782624181917eba68f9066",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
-        "toyos-fat32/tests/fixtures/read-4k.runs",
+        "lib/fat32/tests/fixtures/read-4k.runs",
         "cab78e1ea6c46b0a04a0de32a24f1a6ac90a2017dd7188745de2d603c5ab121b",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
-        "toyos-fat32/tests/fixtures/read-512.runs",
+        "lib/fat32/tests/fixtures/read-512.runs",
         "6bef14efca36070830f5a4a2b1dc9b69a0e2627679cc5c9ed542acaa4ece416c",
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
@@ -526,15 +526,15 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
-        "toyos-elf/tests/fixtures/lld-headers.bin",
+        "lib/elf/tests/fixtures/lld-headers.bin",
         "ba65b2a85776a973ad4fd49a224598391fde212e06b10aa51e2c8bcacfae0c79",
-        "ours: the first 4096 bytes of a rust-lld output (toyos-elf/tests/real.rs)",
+        "ours: the first 4096 bytes of a rust-lld output (lib/elf/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-symbols/tests/fixtures/input-test.bin",
+        "lib/symbols/tests/fixtures/input-test.bin",
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
-        "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
+        "ours: a ToyOS binary this build produced (lib/symbols/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
@@ -574,13 +574,13 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-microcode/intel-ucode/06-8c-01",
+        "kernel/microcode/intel-ucode/06-8c-01",
         "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
         "NOTICE",
         Terms::Spdx("LicenseRef-Intel-Microcode"),
     ),
     (
-        "toyos-microcode/intel-ucode/06-cc-02",
+        "kernel/microcode/intel-ucode/06-cc-02",
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
         Terms::Spdx("LicenseRef-Intel-Microcode"),

@@ -14,7 +14,7 @@ doctest = false
 [dependencies]
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
-toyos-inspect = { path = "../../toyos-inspect" }
+toyos-inspect = { path = "../../lib/inspect" }
 
 [package.metadata.toyos.host]
 exempt.manages = "ToyOS's machine inventory and counters: what every owner's port and the kernel's `inventory` and `counters` SysCap rights report"
