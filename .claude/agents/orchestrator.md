@@ -33,7 +33,7 @@ run queued. When the permission check refuses an agent, ask the owner and never 
 one-sentence rule an agent proposes is declined, or briefed to an agent to place.
 
 A brief is the fence: what to build, where it may touch, the worktree and branch, a scratchpad
-directory of its own for its logs, and the checks root `CLAUDE.md` asks of a production change.
+directory of its own for its logs, and the checks root `CLAUDE.md` asks of a change to production code.
 The role files carry the standing rules, so a brief carries only the task.
 
 The cost is Claude tokens, the owner's time and CI. An agent's tokens grow with how long it runs,

@@ -23,7 +23,7 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
-design, the environment changes or the gap is filed. On every production change your first
+design, the environment changes or the gap is filed. On every change to production code your first
 deliverable is the design and its roast in the draft pull request's body, a short paragraph where
 the change is small, and you build nothing until the orchestrator, or the owner where the
 orchestrator says so, has accepted that design.
@@ -84,11 +84,11 @@ Push from your branch, never `main`, with `git status --porcelain` empty: `git p
 <branch>`, and `gh pr create --draft` at the first push. Push once per round, when your tests are
 green. The design round opens the draft on one empty commit (`git commit --allow-empty -F
 <file>`), pushes it with no tests to be green, puts the design and its roast in the body, and
-reports; the build is a later round, begun only once the orchestrator's acceptance is a comment on
+reports; the build is a later round, begun only once the acceptance is a comment on
 the pull request, and drops that commit. The body is `main`'s record and the reviewer's evidence,
 kept true of the branch as it stands: what changed and why, per decision; each gate with its exit
 code; what you are unsure of; and what `reviewer.md` asks a body to show — the checks root
-`CLAUDE.md` asks of a production change, why a new guest test needs QEMU, why a new dependency is
+`CLAUDE.md` asks of a change to production code, why a new guest test needs QEMU, why a new dependency is
 the cleanest path, what a new gate, check, lock or test sees that reading cannot. Set the title and
 body with `gh pr edit --title <what landed> --body-file <file>`, never `--fill`. The pull request stays a draft: do not mark it ready, arm auto-merge or wait
 on CI unless the brief says so.

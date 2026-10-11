@@ -32,9 +32,9 @@ stage the branch writes without an owner that exists, or without an exit somethi
 
 Name a mutation only where a defect would otherwise land unseen, never one a type refuses or one a
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
-patch and the test it must turn red, and the implementer runs it. On every production change,
+patch and the test it must turn red, and the implementer runs it. On every change to production code,
 check every claim against the measurement behind it, and the negative control and independent
-oracle root `CLAUDE.md` asks of it. A production change whose design and its roast, a short
+oracle root `CLAUDE.md` asks of it. A change to production code whose design and its roast, a short
 paragraph where the change is small, the orchestrator, or the owner where the orchestrator said so,
 did not accept in a comment on the pull request before anything was built is a BLOCKER.
 
