@@ -162,8 +162,7 @@ impl Card {
             toyos_i219::Link::Up { speed, .. } => cadence(
                 least_rtt,
                 Ring {
-                    free: nic.rx_free(),
-                    reserve: toyos_i219::RX_SHORT,
+                    room: nic.rx_free().saturating_sub(toyos_i219::RX_SHORT),
                     mbps: NonZeroU32::new(speed.mbps().into()).expect("a link's rate is not zero"),
                 },
             ),

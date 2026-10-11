@@ -7,11 +7,16 @@
 //! handle, interest and token replaces a poll with its twin and costs the
 //! submit the poll's registration on every watch it names, for nothing.
 //!
-//! **Every armed watch is answered, once**: by readiness, by a refusal, or by
-//! `NotFound` when a handle it names is closed, so a record here is let go by
-//! the answer under its token and never outlives the poll it records. A record
-//! whose poll was answered and whose answer is not yet read costs one
-//! needless submit after that answer, and never a missed one.
+//! **The kernel keeps one poll a handle** (`admit` in `kernel/src/inbox/polls.rs`):
+//! a watch of a handle under another token withdraws the handle's earlier poll
+//! unanswered. So a record is kept by handle, and a watch under another token
+//! replaces it as the kernel replaces the poll.
+//!
+//! **Every poll the kernel keeps is answered, once**: by readiness, by a
+//! refusal, or by `NotFound` when a handle it names is closed, so a record here
+//! is let go by the answer under its token and never outlives the poll it
+//! records. A record whose poll was answered and whose answer is not yet read
+//! costs one needless submit after that answer, and never a missed one.
 
 use std::collections::HashMap;
 
@@ -19,20 +24,36 @@ use toyos::poller::Poller;
 use toyos::AsHandle;
 use toyos_abi::syscall::SyscallError;
 
-/// The watches the kernel holds armed for this process, by token.
+/// The watches the kernel holds armed for this process: each handle's token
+/// and interest, and each token's handle.
 #[derive(Default)]
-pub struct Armed(HashMap<u64, (u32, u32)>);
+pub struct Armed {
+    by_handle: HashMap<u32, (u64, u32)>,
+    by_token: HashMap<u64, u32>,
+}
 
 impl Armed {
     /// Whether a watch of `flags` on `handle` under `token` has to be
     /// submitted, recording it as armed where it does.
     pub fn submit(&mut self, token: u64, handle: u32, flags: u32) -> bool {
-        self.0.insert(token, (handle, flags)) != Some((handle, flags))
+        let was = self.by_handle.insert(handle, (token, flags));
+        if was == Some((token, flags)) {
+            return false;
+        }
+        if let Some((other, _)) = was.filter(|&(other, _)| other != token) {
+            self.by_token.remove(&other);
+        }
+        if let Some(moved) = self.by_token.insert(token, handle).filter(|&moved| moved != handle) {
+            self.by_handle.remove(&moved);
+        }
+        true
     }
 
     /// The kernel answered the watch under `token`: it is armed no more.
     pub fn answered(&mut self, token: u64) {
-        self.0.remove(&token);
+        if let Some(handle) = self.by_token.remove(&token) {
+            self.by_handle.remove(&handle);
+        }
     }
 }
 
@@ -105,6 +126,29 @@ mod tests {
         let mut armed = Armed::default();
         assert!(armed.submit(TOKEN, 7, READABLE));
         assert!(armed.submit(TOKEN, 8, READABLE));
+    }
+
+    /// A handle watched under another token is submitted, and so is the first
+    /// token's watch of it after that: the kernel withdrew that poll when the
+    /// second replaced it.
+    #[test]
+    fn a_handle_under_another_token_is_submitted_and_so_is_the_first_again() {
+        let mut armed = Armed::default();
+        assert!(armed.submit(TOKEN, 7, READABLE));
+        assert!(armed.submit(TOKEN + 1, 7, READABLE));
+        assert!(armed.submit(TOKEN, 7, READABLE));
+        assert!(!armed.submit(TOKEN, 7, READABLE));
+    }
+
+    /// The first token's answer, read after the handle moved to a second,
+    /// lets the second's record stand.
+    #[test]
+    fn an_answer_under_a_replaced_token_lets_the_handles_record_stand() {
+        let mut armed = Armed::default();
+        assert!(armed.submit(TOKEN, 7, READABLE));
+        assert!(armed.submit(TOKEN + 1, 7, READABLE));
+        armed.answered(TOKEN);
+        assert!(!armed.submit(TOKEN + 1, 7, READABLE));
     }
 
     /// The answer of one token lets no other's record go.

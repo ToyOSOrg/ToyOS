@@ -181,6 +181,21 @@ pub const TX_BUF_BYTES: usize = 2048;
 /// throttle at all.
 pub const THROTTLE_UNIT_NANOS: u64 = 256;
 
+/// What [`I219::throttle`] writes `ITR` with for an interval of `nanos`: its
+/// units at or below `nanos`, between one and the field's largest, kept to
+/// their three leading bits.
+///
+/// **Rounded down**, so the interval never exceeds what the caller bounded it
+/// by, and **to three leading bits**, so an interval the caller recomputes
+/// every pass moves the register only on a step of an eighth to a quarter, and
+/// loses at most a fifth of what was asked.
+pub const fn throttle_units(nanos: u64) -> u32 {
+    let units = nanos / THROTTLE_UNIT_NANOS;
+    let units = if units < 1 { 1 } else if units > u16::MAX as u64 { u16::MAX as u32 } else { units as u32 };
+    let low = units.ilog2().saturating_sub(2);
+    units >> low << low
+}
+
 const _: () = {
     // §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
     // a multiple of 128".
@@ -1318,20 +1333,11 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     }
 
     /// Hold the function's interrupts at least `nanos` apart (§10.2.4.2's
-    /// `ITR`): its units at or below `nanos`, between one and the field's
-    /// largest, kept to their three leading bits; the register is written only
-    /// when that changes.
-    ///
-    /// **Rounded down**, so the interval never exceeds what the caller bounded
-    /// it by, and **to three leading bits**, so an interval the caller
-    /// recomputes every pass moves the register only on a step of an eighth
-    /// to a quarter, and loses at most a fifth of what was asked. The throttle
-    /// runs from the last interrupt, so a frame after a quiet spell that long
-    /// interrupts at once.
+    /// `ITR`), as [`throttle_units`] puts it; the register is written only
+    /// when that changes. The throttle runs from the last interrupt, so a frame
+    /// after a quiet spell that long interrupts at once.
     pub fn throttle(&mut self, nanos: u64) {
-        let units = (nanos / THROTTLE_UNIT_NANOS).clamp(1, u64::from(u16::MAX)) as u32;
-        let low = units.ilog2().saturating_sub(2);
-        let units = units >> low << low;
+        let units = throttle_units(nanos);
         if units != self.throttle {
             self.throttle = units;
             self.regs.write32(regs::ITR, units);
