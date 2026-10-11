@@ -9,10 +9,9 @@
 //! no `_STA` has none), and its static information is read once, from
 //! `_BIX` where it has one and `_BIF` where it has not (§10.2.2).
 //!
-//! The census line [`Power::find`] says counts the Global Lock's takes of
-//! the batteries' and adapters' own methods alone ([`Locked`]): the
-//! controller's `_REG` and the walk that named the devices ran before it,
-//! and are not theirs.
+//! The census line [`Power::find`] answers counts the Global Lock's takes of
+//! the batteries' and adapters' own methods alone: the controller's `_REG`
+//! and the walk that named the devices ran before it, and are not theirs.
 //!
 //! **Every [`POLL`]** each battery's `_BST` and each adapter's `_PSR` are
 //! evaluated ([`Power::read`]), and a line is said on the first reading and
@@ -260,16 +259,6 @@ struct Battery {
     said: Option<(Option<u64>, u64)>,
 }
 
-/// The Global Lock as the host counted it across [`Power::find`]'s
-/// evaluations: the takes, the gives back, and the takes that found the
-/// firmware holding it.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-struct Locked {
-    taken: u64,
-    given_back: u64,
-    contended: u64,
-}
-
 /// The machine's power sources, found once and read every [`POLL`].
 pub struct Power {
     batteries: Vec<Battery>,
@@ -279,8 +268,6 @@ pub struct Power {
     refused: Ledger,
     /// The last evaluation found the machine stopping.
     stopping: bool,
-    /// What `find`'s evaluations took of the Global Lock.
-    locked: Locked,
 }
 
 impl Power {
@@ -309,9 +296,10 @@ impl Power {
 
     /// Keep each of `batteries` present, read its information and first
     /// reading, with `adapters`' (the devices [`crate::devices::find`] named
-    /// by path); `None` where there is no battery to read.
-    pub fn find<K: Kernel>(aml: &mut Aml<'_, K>, batteries: Vec<String>, adapters: Vec<String>) -> Option<Power> {
-        let mut power = Power { batteries: Vec::new(), adapters, ac_said: None, refused: Ledger::default(), stopping: false, locked: Locked::default() };
+    /// by path); `None` where there is no battery to read, and none on a
+    /// stopping machine. The census line beside it is its caller's to say.
+    pub fn find<K: Kernel>(aml: &mut Aml<'_, K>, batteries: Vec<String>, adapters: Vec<String>) -> (Option<Power>, Option<String>) {
+        let mut power = Power { batteries: Vec::new(), adapters, ac_said: None, refused: Ledger::default(), stopping: false };
         let (takes, contended, given_back) = (aml.host.takes, aml.host.contended, aml.host.given_back);
         let count = batteries.len();
         for device in batteries {
@@ -346,7 +334,7 @@ impl Power {
             }
         }
         if power.stopping {
-            return None;
+            return (None, None);
         }
 
         let present = power.batteries.len();
@@ -359,21 +347,19 @@ impl Power {
                 println!("{line}");
             }
         }
-        power.locked = Locked { taken: aml.host.takes - takes, given_back: aml.host.given_back - given_back, contended: aml.host.contended - contended };
         let found = format!(
             "{present} of {count} control-method batteries present, {} AC adapter(s), with {} embedded controller attached; the Global Lock taken {} times on the way and given back {} times, the firmware found holding it by {} of the takes",
             power.adapters.len(),
             if aml.host.ec.is_some() { "an" } else { "no" },
-            power.locked.taken,
-            power.locked.given_back,
-            power.locked.contended,
+            aml.host.takes - takes,
+            aml.host.given_back - given_back,
+            aml.host.contended - contended,
         );
         if present == 0 {
-            println!("acpiserver: {}{found}", acpiserver_api::NO_BATTERY);
-            return None;
+            return (None, Some(format!("acpiserver: no battery: {found}")));
         }
-        println!("acpiserver: power sources: {found}, the first reading's included; each read every {} s", POLL.as_secs());
-        Some(power)
+        let line = format!("acpiserver: power sources: {found}, the first reading's included; each read every {} s", POLL.as_secs());
+        (Some(power), Some(line))
     }
 
     /// Read every battery and adapter: the line of each battery whose
@@ -446,9 +432,9 @@ pub mod tests {
     use common::{device, field, if_, index, int, lequal, method, op_region, package, ret, scope, skip, store, string, unit as field_unit};
 
     /// The controller's space as the fixture's fields lay it out.
-    const CONNECTED: u8 = 0x03;
+    pub const CONNECTED: u8 = 0x03;
     const STATE: u8 = 0x38;
-    const AC: u8 = 0x46;
+    pub const AC: u8 = 0x46;
     const PAGE: u8 = 0x81;
     const RATE: u8 = 0xA0;
     const VOLTAGE: u8 = 0xA8;
@@ -462,8 +448,10 @@ pub mod tests {
     /// `_BST` reads that byte too, then selects a page of the controller's
     /// space with a write and reads it; and an adapter whose `_PSR` reads
     /// the controller.
-    /// `glk` is the controller's `_GLK`, where it has one.
-    fn laptop(glk: Option<u64>) -> Vec<u8> {
+    /// `glk` is the controller's `_GLK`, where it has one; with a `button`
+    /// the machine's power button is a control method device (§4.8.2.2.1.2)
+    /// and the controller's query 0x28's method reads the adapter's byte.
+    fn laptop(glk: Option<u64>, button: bool) -> Vec<u8> {
         let fields = [
             skip(8 * usize::from(CONNECTED)),
             field_unit("REGS", 8),
@@ -519,12 +507,14 @@ pub mod tests {
                 common::def_name("ECOK", &int(0)),
                 method("_REG", 2, &if_(&lequal(&[0x68], &int(3)), &[store(b"NVSB", &[0x60]), store(&[0x69], b"ECOK"), store(&[0x69], b"REGS")].concat())),
                 glk.map_or(Vec::new(), |glk| common::def_name("_GLK", &int(glk))),
+                if button { method("_Q28", 0, &store(b"ACST", &common::local(0))) } else { Vec::new() },
                 battery,
             ]
             .concat(),
         );
         let adapter = device("AC", &[common::def_name("_HID", &string("ACPI0003")), method("_PSR", 0, &ret(&common::name("\\_SB.EC0.ACST")))].concat());
-        sealed(b"DSDT", &scope("\\_SB", &[controller, adapter].concat()))
+        let button = if button { device("PWRB", &common::def_name("_HID", &int(0x0C0C_D041))) } else { Vec::new() };
+        sealed(b"DSDT", &scope("\\_SB", &[controller, adapter, button].concat()))
     }
 
     /// What the fixture's controller holds: discharging at 6210 mW with
@@ -546,7 +536,19 @@ pub mod tests {
 
     /// The fixture's machine, its controller answering at its two ports.
     pub fn laptop_machine(glk: Option<u64>) -> Scripted {
-        let mut kernel = crafted(&laptop(glk), &[]);
+        machine(laptop(glk, false))
+    }
+
+    /// The fixture's machine with a control-method power button, and query
+    /// 0x28 waiting on its controller.
+    pub fn button_laptop_machine() -> Scripted {
+        let kernel = machine(laptop(None, true));
+        kernel.controller.borrow_mut().as_mut().expect("a controller").queries.push(0x28);
+        kernel
+    }
+
+    fn machine(dsdt: Vec<u8>) -> Scripted {
+        let mut kernel = crafted(&dsdt, &[]);
         kernel.memory.push((NVS, 10, vec![0]));
         *kernel.controller.borrow_mut() = Some(Emulated::new(space()));
         kernel
@@ -563,9 +565,14 @@ pub mod tests {
     }
 
     fn found(kernel: &Scripted) -> (Aml<'_, Scripted>, Option<Power>) {
-        let (mut aml, found) = armed(kernel);
-        let power = Power::find(&mut aml, found.batteries, found.adapters);
+        let (aml, power, _) = census(kernel);
         (aml, power)
+    }
+
+    fn census(kernel: &Scripted) -> (Aml<'_, Scripted>, Option<Power>, Option<String>) {
+        let (mut aml, found) = armed(kernel);
+        let (power, census) = Power::find(&mut aml, found.batteries, found.adapters);
+        (aml, power, census)
     }
 
     fn done(kernel: &Scripted) -> Vec<(u8, u8, u8)> {
@@ -578,8 +585,8 @@ pub mod tests {
         ec.space[usize::from(at)..usize::from(at) + bytes.len()].copy_from_slice(bytes);
     }
 
-    const RD: u8 = 0x80;
-    const WR: u8 = 0x81;
+    pub const RD: u8 = 0x80;
+    pub const WR: u8 = 0x81;
 
     /// The controller is attached before its `_REG` runs, which writes it,
     /// and told its space is there before the battery is asked whether it
@@ -631,9 +638,11 @@ pub mod tests {
         let kernel = laptop_machine(None);
         *kernel.takes.borrow_mut() = [Take::Taken, Take::Pending, Take::Taken].into();
         *kernel.releases.borrow_mut() = [true].into();
-        let (aml, power) = found(&kernel);
-        let power = power.expect("a battery");
-        assert_eq!(power.locked, Locked { taken: 1, given_back: 1, contended: 1 });
+        let (aml, power, census) = census(&kernel);
+        assert!(power.is_some(), "a battery");
+        let census = census.expect("a census");
+        let counted = "the Global Lock taken 1 times on the way and given back 1 times, the firmware found holding it by 1 of the takes,";
+        assert!(census.contains(counted), "{census}");
         assert_eq!((aml.host.takes, aml.host.given_back, aml.host.contended), (2, 2, 1), "the controller's _REG took no lock of its own");
         assert!(kernel.takes.borrow().is_empty() && kernel.releases.borrow().is_empty() && !kernel.held.get());
     }

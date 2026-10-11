@@ -12,7 +12,11 @@ every CPU every 2.2 s
 
 The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
-has from nowhere else; it evaluates nothing else of their AML yet. What else
+has from nowhere else. Beyond that it evaluates only the devices it serves:
+the walk's `_HID`, `_STA`, `_CRS` and `_GPE`, the embedded controller's
+`_GLK` and `_REG`, its query methods where the power button is a control
+method device, and the batteries' and AC adapters' `_STA`, `_BIX` or
+`_BIF`, `_BST` and `_PSR`. What else
 ToyOS takes from them it takes another way: the loader asks UEFI for the root
 bridges' windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing
 reads `_CST`, which names a CPU's C-states.
@@ -287,7 +291,8 @@ mediated access, leaves open:
   long, at most what the evaluation has left of its 10 s, and the
   TimeoutValue is charged to it. Owner: this
   stage. **Exit**: a hold measured on the T14, either by a contended take
-  in the server's own count or by `ff_gbl_lock` after a long Linux session.
+  in the count the server logs, which covers the load and the power
+  sources' census alone, or by `ff_gbl_lock` after a long Linux session.
   That measurement sets the bound, or replaces it with no bound if the
   firmware never holds the lock.
 

@@ -356,7 +356,11 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// once the controller is armed ([`Power::find`]).
     fn find_power(&mut self, batteries: Vec<String>, adapters: Vec<String>) {
         let Some(aml) = &mut self.aml else { return };
-        self.power = Power::find(aml, batteries, adapters);
+        let census;
+        (self.power, census) = Power::find(aml, batteries, adapters);
+        if let Some(census) = census {
+            println!("{census}");
+        }
         self.ended();
     }
 
@@ -698,6 +702,29 @@ mod tests {
             let ports = kernel.asked.borrow().iter().skip(asked).filter(|access| access.space == Space::SystemIo as u8).count();
             assert_eq!(ports, 0, "refused to AML {to_aml}: the controller was asked again");
         }
+    }
+
+    /// A query waiting as the controller is armed, on a machine whose power
+    /// button is a control method device, is drained and its method run only
+    /// once the controller is attached to AML and its `_REG` run: the
+    /// method's read of the controller's space reaches the controller, and
+    /// is not denied as one no controller is attached for.
+    #[test]
+    fn a_query_waiting_at_arm_runs_its_method_on_the_attached_controller() {
+        use crate::battery::tests::{button_laptop_machine, AC, CONNECTED, RD, WR};
+        let kernel = button_laptop_machine();
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: 0, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        for (_, enable) in bytes(GPE0) {
+            server.ports.out8(enable, 0);
+        }
+        server.aml = load(&kernel, CRAFTED_RSDP).1;
+        server.arm_controller();
+        assert_eq!(server.counts, BTreeMap::from([(0x28, 1)]), "the query waiting was not drained");
+        let refused = &server.aml.as_ref().expect("the namespace").host.refused;
+        assert!(refused.is_empty(), "{}", refused.counts());
+        let done = kernel.controller.borrow().as_ref().expect("a controller").done.clone();
+        assert_eq!(done, [(WR, CONNECTED, 1), (0x84, 0, 0), (RD, AC, 0)], "_REG's write, the drain's query, the method's read");
     }
 
     /// The owner's ruling: a machine whose power button is a control method

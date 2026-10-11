@@ -5590,10 +5590,10 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
 /// and at least one reading of it with the adapter's state; every method
-/// answered, and every take of the Global Lock they made given back. No take
-/// is demanded: the census counts the battery's and adapter's own methods,
-/// which on this machine need not take the lock, and the real lock word's
-/// exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
+/// answered. The census's Global Lock counts are printed and held to
+/// nothing: an evaluation gives back the lock it still holds as it ends
+/// (`finish`, `userland/acpiserver/aml/src/exec.rs`), and the real lock
+/// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
 /// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
 /// the same machine are compared against, by whoever holds both.
 fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -5612,11 +5612,6 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
     let found = log.must_say(T14_POWER_SOURCES)?;
-    let takes = number_between(found, "; the Global Lock taken ", " times on the way")?;
-    let given_back = number_between(found, " times on the way and given back ", " times, the firmware found")?;
-    if given_back != takes {
-        return Err(format!("the battery's methods took the Global Lock {takes} times and gave it back {given_back}: {found}"));
-    }
     let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
     let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
     if read.is_empty() {

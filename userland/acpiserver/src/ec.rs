@@ -136,7 +136,8 @@ pub mod tests {
         }
     }
 
-    /// A controller as §12.2 and §12.3 have it: 256 bytes of space; a byte
+    /// A controller as §12.2 and §12.3 have it: 256 bytes of space, and
+    /// SCI_EVT set while one of its `queries` waits; a byte
     /// written fills the input buffer until the controller takes it, which
     /// it does `slow` status reads later; a command's answer fills the output
     /// buffer as it takes the command's last byte. It refuses, by panic,
@@ -170,7 +171,7 @@ pub mod tests {
                     self.pending -= 1;
                 }
             }
-            u8::from(self.output.is_some()) * OBF | u8::from(self.input) * IBF
+            u8::from(self.output.is_some()) * OBF | u8::from(self.input) * IBF | u8::from(!self.queries.is_empty()) * SCI_EVT
         }
 
         fn take(&mut self) {

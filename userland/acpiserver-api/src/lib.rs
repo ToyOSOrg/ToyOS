@@ -23,6 +23,3 @@ pub const BATTERY_INFO: &str = "battery information: ";
 /// remaining and full capacity, its state, rate, voltage and the power it
 /// moves in mW, then the adapters' state.
 pub const BATTERY_READ: &str = "battery read: ";
-
-/// No battery is read on this machine, and why.
-pub const NO_BATTERY: &str = "no battery: ";
