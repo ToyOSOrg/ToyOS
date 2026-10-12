@@ -37,7 +37,7 @@ use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, SimShareL
 use crate::topology::LevelCounts;
 use crate::workload::{
     AgeShape, BlockShape, ChargeShape, MigrateShape, Op, ParkShape, PlacementShape,
-    Protocol, Scenario, Script, ShareShape, WindowShape,
+    Protocol, Scenario, Script, ShareShape, SurplusShape, WindowShape,
 };
 
 /// How finely a `Run(ns)` op is chopped. Small enough that a 10 ms quantum
@@ -525,14 +525,16 @@ pub struct Vm<'q> {
     /// Per CPU: when its current probe gap opened, or `None` if it is not in
     /// one.
     probe_gap_since: Vec<Option<Nanos>>,
-    /// **Protocol rounds completed.** A round opens on the CPUs that are awake
-    /// — not halted, not stopped — and completes when each of them has run one
-    /// scheduler pass, the only point at which a CPU drains, answers a probe,
-    /// publishes and pushes.
+    /// **Protocol rounds completed.** A round opens on the CPUs that owe a
+    /// pass — awake, or halted with an IPI on its way, and not stopped — and
+    /// completes when each of them has run one scheduler pass, the only point
+    /// at which a CPU drains, answers a probe, publishes and pushes.
     ///
     /// Counted in passes and not in time because the model's clock measures the
     /// explorer as much as the protocol: a CPU whose pass the explorer defers
     /// holds its round open, and no work-conservation bound runs while it does.
+    /// An IPI's latency is time too, so a CPU rung before a round opens holds
+    /// that round open until its pass.
     pub round: u64,
     /// Which CPUs the open round still waits on, and how many; a count of zero
     /// is no round open.
@@ -1017,9 +1019,13 @@ impl<'q> Vm<'q> {
         for cpu in 0..self.scenario.cpus() {
             self.probing[cpu] = self.cpus[cpu].probe_outstanding();
         }
+        let actor = crate::explore::actor(&step);
+        // Only a CPU's own step takes a task out of its parked set.
+        let parked: Vec<TaskKey> =
+            actor.map_or_else(Vec::new, |cpu| self.cpus[cpu].parked().map(|p| p.key()).collect());
         self.execute_inner(step, choices);
         self.step_trace = self.hw.with(|s| std::mem::take(&mut s.trace));
-        self.note_levels(crate::explore::actor(&step));
+        self.note_levels(actor, parked);
         let (resched, halted) = self.hw.with(|s| (s.need_resched.clone(), s.halted.clone()));
         // A CPU number: it reads `resched` and writes `self.resched_at` at the
         // same index, which is the pairing this loop is about.
@@ -1081,24 +1087,26 @@ impl<'q> Vm<'q> {
         }
     }
 
-    /// With no round open, open one on every CPU awake now. A machine with
-    /// every CPU halted opens none until one wakes.
+    /// With no round open, open one on every CPU that owes a pass now. A
+    /// machine with every CPU halted and no IPI on its way opens none until one
+    /// wakes.
     fn open_round(&mut self) {
         if self.round_owed_count > 0 {
             return;
         }
-        let halted = self.hw.with(|s| s.halted.clone());
-        for (cpu, halted) in halted.into_iter().enumerate() {
-            let awake = !halted && !self.is_stopped(cpu);
-            self.round_owed[cpu] = awake;
-            self.round_owed_count += usize::from(awake);
+        let (halted, pending) = self.hw.with(|s| (s.halted.clone(), s.pending_ipi.clone()));
+        for cpu in 0..self.scenario.cpus() {
+            let owes = (!halted[cpu] || pending[cpu] > 0) && !self.is_stopped(cpu);
+            self.round_owed[cpu] = owes;
+            self.round_owed_count += usize::from(owes);
         }
     }
 
     /// Fold the step into [`Vm::levels`]: the level each kick, migration and
-    /// wake placement crossed, and each probe the step consumed with no task
-    /// handed back, from `actor`, the CPU whose step it was.
-    fn note_levels(&mut self, actor: Option<usize>) {
+    /// wake crossed, and each probe the step consumed with no task handed back,
+    /// from `actor`, the CPU whose step it was, and `parked`, its parked set
+    /// before the step.
+    fn note_levels(&mut self, actor: Option<usize>, parked: Vec<TaskKey>) {
         let topology = &self.scenario.topology;
         let at = |a: usize, b: CpuId| crate::topology::slot(topology.level(a, b.0 as usize));
         for target in self.hw.with(|s| std::mem::take(&mut s.kicked)) {
@@ -1107,26 +1115,31 @@ impl<'q> Vm<'q> {
                 None => self.levels.device_ipis += 1,
             }
         }
-        for (index, event) in self.step_trace.iter().enumerate() {
-            let from = event.cpu.0 as usize;
-            match event.kind {
-                TraceKind::Migrate { to, .. } => self.levels.migrations[at(from, to)] += 1,
-                // Placed where it parked, unless the same pass forwarded it.
-                TraceKind::Wake { task, .. } => {
-                    let placed = self.step_trace[index + 1..]
-                        .iter()
-                        .find_map(|later| match later.kind {
-                            TraceKind::Migrate { task: moved, to, .. }
-                                if moved == task && later.cpu == event.cpu =>
-                            {
-                                Some(to)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(event.cpu);
-                    self.levels.wakes[at(from, placed)] += 1;
-                }
-                _ => {}
+        for event in &self.step_trace {
+            if let TraceKind::Migrate { to, .. } = event.kind {
+                self.levels.migrations[at(event.cpu.0 as usize, to)] += 1;
+            }
+        }
+        // A wake is a task leaving its CPU's parked set, whatever took it out —
+        // a message, its deadline or a retire — including one this step parked.
+        if let Some(home) = actor {
+            let parked_in_step = self.step_trace.iter().filter_map(|event| match event.kind {
+                TraceKind::ParkCommit { task, .. } => Some(task),
+                _ => None,
+            });
+            let woken: Vec<TaskKey> = parked
+                .into_iter()
+                .chain(parked_in_step)
+                .filter(|&task| self.cpus[home].parked_task(task).is_none())
+                .collect();
+            for task in woken {
+                let placed = match self.shared[&task].state() {
+                    TaskState::Ready(cpu) | TaskState::Running(cpu) | TaskState::InTransit(cpu) => {
+                        cpu
+                    }
+                    state => unreachable!("{task:?} left the parked set as {state:?}"),
+                };
+                self.levels.wakes[at(home, placed)] += 1;
             }
         }
         // A probe is consumed only by its victim's drain, so the step that
@@ -1416,6 +1429,9 @@ impl<'q> Vm<'q> {
         }
         self.apply(action);
         self.hw.leave_pass();
+        if self.scenario.surplus == SurplusShape::Withheld {
+            self.handles.get(CpuId(cpu as u32)).publish_surplus(0);
+        }
         self.note_kicks(kicks_before);
         self.note_pass(cpu);
         end

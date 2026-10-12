@@ -13,7 +13,8 @@ use crate::topology::Shape;
 use crate::vm::RUN_CHUNK_NS;
 use crate::workload::{
     AgeShape, BlockShape, ChargeShape, IrqSpec, MigrateShape, Op, ParkShape,
-    PlacementShape, ProcSpec, Protocol, QueueSpec, Scenario, Script, ShareShape, WindowShape,
+    PlacementShape, ProcSpec, Protocol, QueueSpec, Scenario, Script, ShareShape, SurplusShape,
+    WindowShape,
 };
 
 const MS: u64 = 1_000_000;
@@ -49,6 +50,7 @@ fn scenario(
         balance: Balance::PushOnSurplus {
             threshold: kernel::sched::cpu::PUSH_THRESHOLD,
         },
+        surplus: SurplusShape::Published,
         order: FairOrder::InsertSequence,
         pass_cost_ns: 0,
         fair_allowance_ns: 0,

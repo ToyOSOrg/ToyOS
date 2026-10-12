@@ -885,12 +885,13 @@ fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
 /// failure the safety form names fails it: an idle CPU nobody rings, one that is
 /// rung and declines to probe, a probe that is never answered.
 ///
-/// **A round with a kick or a message on its way to the idle CPU is not
-/// counted against it**, the safety form's "nothing in flight to it": the CPU
-/// has been answered, and how long the answer takes to land is an interrupt's
-/// latency, a matter of time, while the rest of the machine can complete rounds
-/// in none. The count pauses rather than restarts, so a CPU that is rung and
-/// declines to probe still accrues every round it then spends unrung.
+/// **Nothing pauses the count.** A ring or a task on its way to the idle CPU
+/// lands after an interrupt's latency, a matter of time, which the rest of the
+/// machine could fill with rounds that take none; a round waits on every CPU an
+/// IPI is on its way to ([`crate::vm::Vm::round`]), so an answer in flight costs
+/// at most the round it was sent in. A CPU that is rung and declines to probe,
+/// or whose probe is never answered, accrues every round it stays idle however
+/// often it is rung.
 ///
 /// Rounds and not nanoseconds, because the clock measures the explorer as much
 /// as the protocol; and a stopped CPU is neither idle nor a victim, its numbers
@@ -902,19 +903,15 @@ fn check_work_conservation(vm: &mut Vm<'_>) {
     });
     let bound = work_conservation_bound(vm.scenario.balance, cpus).unwrap_or(u64::MAX);
     let completed = vm.round - std::mem::replace(&mut vm.wc_round_seen, vm.round);
-    let pending = vm.hw.with(|s| s.pending_ipi.clone());
     let mut problems = Vec::new();
-    for (cpu, kicks) in pending.into_iter().enumerate() {
+    for cpu in 0..cpus {
         let idle = !vm.is_stopped(cpu) && vm.cpus[cpu].running().is_none();
         let Some(victim) = victim.filter(|_| idle) else {
             vm.wc_idle[cpu] = None;
             continue;
         };
-        let answered = kicks > 0 || !vm.cpus[cpu].mailbox_is_empty();
         let rounds = vm.wc_idle[cpu].get_or_insert(0);
-        if !answered {
-            *rounds += completed;
-        }
+        *rounds += completed;
         let rounds = *rounds;
         vm.wc_rounds = vm.wc_rounds.max(rounds);
         if rounds > bound {
@@ -938,21 +935,21 @@ fn check_work_conservation(vm: &mut Vm<'_>) {
 /// **Derived for one victim.** An idle CPU `p` beside a victim `v`'s stealable
 /// work counts:
 ///
-/// 1. `cpus` rounds until `p` is rung. `v` runs a task, so it is awake when
-///    every round opens and passes in each; every such pass that leaves it
-///    stealable rings the first sleeping CPU at or after its cursor and moves
-///    the cursor past it, so `p` is reached within `cpus − 1` of them — and the
-///    round already open when `p` began counting may have had `v`'s pass before
-///    it.
-/// 2. One round before `p`'s idle pass. The ring counts nothing while it is in
-///    flight; once it lands, `p` is owed in every round opened after, so at
-///    most the round already open completes before `p` passes and probes `v`,
-///    the only CPU publishing a surplus worth a probe.
-/// 3. One round before `v` answers: at most the round open when the probe was
-///    posted completes before `v`'s next pass. The answer hands over a task
-///    unless that leaves `v` with none to spare — and then nothing is stealable
-///    and the count is over — and the task is in flight to `p`, counting
-///    nothing, until `p`'s pass takes it and runs it.
+/// 1. `cpus` rounds until `p` is rung: the round open when `p` began counting,
+///    whose pass of `v` may have come before it, and `cpus − 1` more. `v` runs
+///    a task, so it is awake when every round opens and passes in each; every
+///    such pass that leaves it stealable rings the first sleeping CPU at or
+///    after its cursor and moves the cursor past it, so `p` is reached within
+///    `cpus − 1` of them. A `p` the cursor passes because it is awake owes the
+///    next round its pass, which probes as term 2's does.
+/// 2. One round for `p`'s idle pass. A ring still in flight when the next round
+///    opens holds that round open until `p` has passed, so `p` has probed `v`,
+///    the only CPU publishing a surplus worth a probe, before it completes.
+/// 3. One round for `v`'s answer: `v` passes in the round after the probe was
+///    posted, and answers. The answer hands over a task unless that leaves `v`
+///    with none to spare — and then nothing is stealable and the count is over
+///    — and its post leaves `p` awake or rung, so the next round waits on the
+///    pass in which `p` takes it and runs it.
 ///
 /// With several victims the derivation does not hold: each walks its own
 /// cursor, and a probe sent to one that runs dry before it answers leaves `p`

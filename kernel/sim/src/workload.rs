@@ -258,6 +258,21 @@ pub enum PlacementShape {
     Listed(&'static [usize]),
 }
 
+/// What a pass's published surplus says to a CPU choosing whom to probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurplusShape {
+    /// The core's own: every pass publishes the fair band it could give away,
+    /// the number its push rang on.
+    Published,
+    /// Every pass's published surplus is overwritten with zero once it ends,
+    /// after its push rang a sleeper on the real one: the CPU it rang wakes,
+    /// finds nothing worth a probe and sleeps again. An adversary like
+    /// [`PlacementShape::AllOn`] — the defect two spellings of one inequality
+    /// write (`SchedPass::best_victim`), staged from outside the core, where a
+    /// rung CPU declines to probe.
+    Withheld,
+}
+
 /// Which teardown/balance algorithm the VM drives the core with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Protocol {
@@ -310,6 +325,7 @@ pub struct Scenario {
     /// core implements, so the simulator drives the real code whichever one a
     /// scenario names.
     pub balance: Balance,
+    pub surplus: SurplusShape,
     /// How the fair band picks between two ready threads of one share. A
     /// scenario dimension for the same reason [`ShareShape`] is, and the type is
     /// the core's own rather than a parallel copy of it: the broken orderings
@@ -445,6 +461,11 @@ impl Scenario {
 
     pub fn with_balance(mut self, balance: Balance) -> Self {
         self.balance = balance;
+        self
+    }
+
+    pub fn with_surplus(mut self, surplus: SurplusShape) -> Self {
+        self.surplus = surplus;
         self
     }
 

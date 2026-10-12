@@ -46,8 +46,9 @@ pub fn slot(level: Option<Level>) -> usize {
 pub struct LevelCounts {
     /// Tasks moved between CPUs, by steal or wake forward.
     pub migrations: [u64; 5],
-    /// Wakes, by the level between the CPU a task parked on and the one it was
-    /// placed on.
+    /// Wakes — a task taken out of its CPU's parked set, by a message, its
+    /// deadline or a retire — by the level between that CPU and the one the
+    /// waking pass left the task with: its own, unless the pass sent it on.
     pub wakes: [u64; 5],
     /// Steal probes their victim answered with no task.
     pub failed_steals: [u64; 5],

@@ -15,7 +15,7 @@ use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::scenarios;
 use kernel_sim::topology::{self, Keys, LevelCounts, Shape};
-use kernel_sim::workload::Scenario;
+use kernel_sim::workload::{Scenario, SurplusShape};
 
 const MS: u64 = 1_000_000;
 
@@ -172,7 +172,7 @@ fn lopsided(shape: Shape, threads: usize) -> Scenario {
 
 /// **The shipped push keeps every idle CPU inside I15's bound**, and the bound
 /// constrains: on the lopsided machine the last CPU its cursor reaches waits
-/// `cpus − 1` rounds against `cpus + 2`.
+/// out the cursor's walk, up to `cpus` rounds, against `cpus + 2`.
 #[test]
 fn the_push_keeps_an_idle_cpu_beside_work_inside_its_bound() {
     for shape in [Shape::t14(), Shape::amd_bench()] {
@@ -236,6 +236,34 @@ fn a_push_that_waits_for_more_than_a_probe_takes_is_caught() {
             );
         }
         println!("{}: caught in {} of {WC_SEEDS} schedules", shape.name, caught.len());
+        for outcome in sweep(&shipped, WC_SEEDS) {
+            assert!(outcome.passed(), "{}: {}", shape.name, outcome.report());
+        }
+    }
+}
+
+/// **The negative gate for a CPU that is rung and declines to probe**, on every
+/// machine down to two CPUs, where the rung CPU is the only sleeper and the
+/// victim the only CPU a round waits on, ringing it in the very pass that
+/// completes the round. Every pass's surplus is withheld from the probe after
+/// its push rang on it ([`SurplusShape::Withheld`]), so an idle CPU wakes, reads
+/// nothing worth a probe and sleeps again for as long as the work lasts. Every
+/// schedule must fail, on I15 alone; the published surplus on the same machine
+/// is the control and must hold.
+#[test]
+fn a_cpu_that_is_rung_and_declines_to_probe_is_caught() {
+    for shape in [Shape::flat(2), Shape::t14(), Shape::amd_bench()] {
+        let shipped = lopsided(shape.clone(), 3);
+        let declined = shipped.clone().with_surplus(SurplusShape::Withheld);
+        for outcome in sweep(&declined, WC_SEEDS) {
+            assert!(!outcome.passed(), "{}: a declined probe went undetected", shape.name);
+            assert!(
+                outcome.violations.iter().all(|v| v.starts_with("I15")),
+                "{}: caught by something other than I15: {:?}",
+                shape.name,
+                outcome.violations,
+            );
+        }
         for outcome in sweep(&shipped, WC_SEEDS) {
             assert!(outcome.passed(), "{}: {}", shape.name, outcome.report());
         }
