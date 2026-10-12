@@ -8,10 +8,9 @@
 //! that name.
 //!
 //! **A port write is the kernel's to make or refuse, as a read is**, each
-//! port and width said the first time it is asked: the owner's "Allow, like
-//! Linux", which writes every port ACPICA's port protection passes. The
-//! kernel refuses the ports it owns and those ACPICA keeps from AML
-//! (`toyos_userbound::firmware::PROTECTED`), and makes a byte to the FADT's
+//! port and width said the first time it is asked, as the owner ruled on
+//! #875. The kernel refuses the ports of the devices it drives
+//! (`toyos_userbound::firmware::PROTECTED` among them), and makes a byte to the FADT's
 //! `SMI_CMD` a call into the firmware, or refuses it by the byte and the rate.
 //!
 //! **A write to memory is the kernel's to make or refuse, as a read is**:
@@ -37,12 +36,12 @@
 //! [`Firmware::transaction`]), a byte each, on the controller the server
 //! attached ([`Firmware::ec`]) and through the kernel, which no row holds its
 //! ports for, each under the Global Lock where the controller's `_GLK` asks
-//! for it (ACPI 6.5 §6.5.7) and AML does not hold it already. With none
-//! attached the space is denied by name, and one attached is reached whether
-//! or not its `_REG` has run: ACPICA refuses a region no handler serves and
-//! reaches one a handler does, `_REG` or not (`AcpiEvAddressSpaceDispatch`,
-//! `source/components/events/evregion.c`, ACPICA 20260408), the owner's
-//! "follow ACPICA". A port of it the kernel refuses
+//! for it (ACPI 6.5 §6.5.7) and AML does not hold it already. A region is
+//! available while its handler is (§6.5.4: "When an operation region
+//! handler is unavailable, AML cannot access data fields in that region"),
+//! and `_REG` only tells AML so: one attached is reached whether or not its
+//! `_REG` has run, and with none attached the space is denied by name where
+//! §6.5.4 has writes ignored and reads indeterminate. A port of it the kernel refuses
 //! detaches the controller and is handed to the server ([`Firmware::ended`]),
 //! which serves it no more.
 //!
@@ -897,7 +896,7 @@ pub mod tests {
     }
 
     /// Every port write is asked of the kernel and made or refused as it
-    /// answers, the owner's "Allow, like Linux": the AMD bench's interrupt
+    /// answers, as the owner ruled on #875: the AMD bench's interrupt
     /// router's index and data, the POST port's word and a byte to
     /// `SMI_CMD`, made, and a port the kernel keeps, denied under its name
     /// for the refusal. Configuration space, and the controller's space with

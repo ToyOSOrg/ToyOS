@@ -20,14 +20,15 @@
 //! object is a device here. After a run-time load, the `_INI`s that load
 //! defined are run, by the same table, their ancestors' `_STA` asked again.
 //!
-//! **Which devices are examined, and a `_STA` refused, are ACPICA's**
-//! (`AcpiNsInitializeDevices` and `AcpiNsInitOneDevice`,
-//! `source/components/namespace/nsinit.c`, ACPICA 20260408), the owner's
-//! "follow ACPICA" for a read of the controller's space before its `_REG`:
-//! a device with no `_INI` at or below it is not examined, and its `_STA` is
-//! asked by what serves it, a battery's once the controller is attached
-//! ([`crate::battery`]); a `_STA` refused has its device's `_INI` not run
-//! and its children examined.
+//! **The walk looks for `_INI` methods** (§6.5.1: OSPM "will examine each of
+//! the children of the device for \_INI methods", and evaluates `_STA`
+//! "before evaluating the \_INI object"): a device with no `_INI` at or
+//! below it is not examined, and its `_STA` is asked by what serves it, a
+//! battery's once the controller is attached ([`crate::battery`]). **A
+//! `_STA` refused, or no Integer, says nothing**, of which §6.5.1 is silent:
+//! by ToyOS's rule its device's `_INI` is not run, since nothing said it is
+//! present, and its children are examined, as Table 6.67's row that runs
+//! nothing of a device yet closes nothing below it has them.
 //!
 //! **EmbeddedControl is announced in each scope that declares a region of
 //! it once the controller is attached** ([`announce`], `crate::devices`),
@@ -387,8 +388,7 @@ mod tests {
 
     /// A refused `_INI` is counted by kind and the walk goes on; a `_STA`
     /// that is refused or no Integer is counted, its device's `_INI` is not
-    /// run, and its children are examined, as ACPICA's `AcpiNsInitOneDevice`
-    /// moves on past a `_STA` that failed.
+    /// run, and its children are examined.
     #[test]
     fn a_refused_ini_or_sta_is_counted_and_the_walk_goes_on() {
         let dsdt = scope(
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    /// As ACPICA's walk: a device with no `_INI` at or below it is not
+    /// §6.5.1's walk looks for `_INI` methods: a device with no `_INI` at or below it is not
     /// examined, so a battery's `_STA` that reads the controller's space
     /// before any controller is attached is not asked, nor one that would
     /// post, and nothing is refused; a device above an `_INI` has its `_STA`

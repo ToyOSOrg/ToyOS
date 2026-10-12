@@ -11,9 +11,10 @@
 //! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
 //! without anything that table created, and the interpreter holding what it
 //! held before. An evaluation refused, at the heap bound as at any other,
-//! gives back everything its methods made and every Mutex they held, and
-//! keeps what they stored into an object that outlives them: ACPICA's end of
-//! a method refused for memory, the owner's "follow Linux/ACPICA". What the
+//! gives back everything its methods made (§5.5.2.3: they "are destroyed on
+//! exit") and every Mutex they held (§19.6.88), and keeps what they stored
+//! into an object that outlives them, which ACPI 6.5 never takes back: no
+//! store is journalled. What the
 //! last load or evaluation took of those bounds is [`Interpreter::usage`]'s,
 //! a refused one's too.
 //!

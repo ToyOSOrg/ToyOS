@@ -495,13 +495,12 @@ fn an_evaluation_holds_at_most_256_mutexes() {
     assert_eq!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Bound("more Mutexes held at once than one evaluation holds")));
 }
 
-/// A method refused at the bound ends as ACPICA ends one refused for memory
-/// (`AE_NO_MEMORY`), as any other: what it made, a named object and its
+/// A method refused at the bound ends as any other: what it made, a named object and its
 /// locals' buffers, is given back to the byte, the Global Lock it held is
 /// let go, so the next Acquire of it takes it from the firmware again, and
 /// it is refused by the bound's name; the next method builds a buffer of a
-/// mebibyte. What a method stores into an object that outlives it stays, as
-/// ACPICA keeps it (`what_is_held_live_is_bounded_in_sum`).
+/// mebibyte. What a method stores into an object that outlives it stays
+/// (`what_is_held_live_is_bounded_in_sum`).
 #[test]
 fn a_method_refused_at_the_bound_gives_back_what_it_made() {
     let acquire = cat(&[&[0x5B, 0x23], &name("\\_GL"), &0xFFFFu16.to_le_bytes()]);

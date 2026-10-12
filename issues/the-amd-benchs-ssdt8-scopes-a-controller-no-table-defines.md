@@ -8,12 +8,9 @@ opened: 2026-10-12
 
 The AMD bench's eighth SSDT ends in `Scope (\_SB.PCI0.LPC0.EC0)`, and no
 table of the bench defines `EC0_`: its controller is `EC__`. ACPI 6.5
-§19.6.122 reads "The object referred to by Location must already exist in
+§19.6.120 reads "The object referred to by Location must already exist in
 the namespace", so the block breaks a rule of the specification, and
-`toyos-aml` refuses it whole with `NotFound`, keeping nothing of it. Linux
-on the same boot logs the same defect, `ACPI BIOS Error (bug): Could not
-resolve symbol [\_SB.PCI0.LPC0.EC0], AE_NOT_FOUND`, and keeps the rest of
-the block.
+`toyos-aml` refuses it whole with `NotFound`, keeping nothing of it.
 
 **Ruled** (owner, 2026-10-12, on #875 in comment 6121646183): "Refuse the
 table whole", by name; SSDT11's two calls into it fail by name too.
