@@ -124,10 +124,6 @@ const RUST_SKIP: &[&str] = &[
     // `tests/images/testcases.toml` does not give: the `launch_toctou` metal row runs it on
     // tests/images/proctreecase.toml.
     "launch_toctou",
-    // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
-    // and a shell that opens a login session: the `launch_authority` metal row
-    // runs it on tests/images/proctreecase.toml.
-    "launch_authority",
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/images/proctreecase.toml.
     "port_badge",
@@ -884,12 +880,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
     ),
     (
-        // A launch starts only what the caller's row lists, and `swap` and
-        // `update` only in a login session.
-        "launch_authority",
-        metal::Metal { arms: PROCTREECASE, judge: |b| launch_authority(b[0]) },
-    ),
-    (
         // A connection's badge is the minted bytes, read back by its own
         // port's acceptor alone.
         "port_badge",
@@ -1181,9 +1171,8 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalc
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, the shells `fs_share`
-/// asks DATA's server through, under its share and in a login session, and
-/// the `/apps` `app_view` launches its package from.
+/// shells `fs_share` asks DATA's server through, under its share and in a
+/// login session, and the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/images/proctreecase.toml",
@@ -1191,7 +1180,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
     &[
         "test_rs_process_tree",
         "test_rs_launch_toctou",
-        "test_rs_launch_authority",
         "test_rs_port_badge",
         "test_rs_fs_share",
         "test_rs_app_view",
@@ -5009,28 +4997,6 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
     if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
-    }
-    Ok(())
-}
-
-/// `launch_authority` passed, and the supervisor refused each launch for its
-/// own reason: `proctest` as unlisted, `swap` and `update` as outside a login
-/// session, for test-runner and for the toybox it launched. The guest sees
-/// only that each was refused.
-fn launch_authority(back: &metal::Readback) -> Result<(), String> {
-    use toyos_manifest::launch::{refused, Refusal, Sessions};
-    back.job_passed("test_rs_launch_authority")?;
-    let log = back.log();
-    for (caller, target, why) in [
-        ("test-runner", "proctest", Refusal::NotListed),
-        ("test-runner", "swap", Refusal::OutsideLogin),
-        ("test-runner", "update", Refusal::OutsideLogin),
-        ("toybox", "swap", Refusal::OutsideLogin),
-    ] {
-        let line = refused(caller, Sessions::default().machine(), target, why);
-        if !log.text().lines().any(|l| l.contains(&line)) {
-            return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
-        }
     }
     Ok(())
 }

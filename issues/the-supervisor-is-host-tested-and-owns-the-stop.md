@@ -59,8 +59,12 @@ nothing.
    **Exit**: the crate's tests pass in
    `cargo test --workspace --exclude toyos-build`; a host test refuses a
    manifest whose dependencies form an undeclared cycle; each refusal and
-   each decision above has a mutation that reds a host test, named in the PR;
-   and the stage deletes each decision from `system/supervisor`, which calls
+   each decision above has a mutation that reds a host test, named in the PR,
+   namespace selection's among them: a row's launcher endowed as an entry of
+   `svc` (`launcher_namespace`), which a child its holder spawns directly
+   would inherit, and no such child holding one is what the `launch_authority`
+   metal row, deleted in #889, last asserted; and the stage deletes each
+   decision from `system/supervisor`, which calls
    the crate for it, named per decision in the PR; `toyos_manifest::launch`,
    who may start what and the launcher's badge codec, moves into the crate
    and out of `toyos-manifest`. No decision exists in two places.
