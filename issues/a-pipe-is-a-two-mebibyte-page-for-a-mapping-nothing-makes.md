@@ -19,8 +19,10 @@ request. It also keeps `Pipe::publish_ends` writing reader and writer flags
 into the page for a reader that no longer exists, and the ring's header
 contract over a page a process may write (`sdk/abi/src/ring.rs`).
 
-Exit: `SYS_PIPE_MAP`, `publish_ends`, the ring's closed flags and the guest
-tests that exercise only the map are gone, a pipe's ring is sized for a byte
-stream rather than for a mapping, and a guest test that opens a connection,
-sends one request and reads `memory_total` less free memory finds no 2 MiB
-moved.
+Owner: the orchestrator, who stages
+`issues/netstack-moves-every-byte-through-two-kernel-pipes.md`, whose streams
+ring their doorbells through pipes and pay a page for each until this closes.
+
+Exit: `rg -n -i 'pipe_?map|publish_ends|RING_(WRITER|READER)_CLOSED' kernel
+sdk tests` is empty, and a pipe's ring is no `pmm::alloc_page` page:
+`rg -n 'alloc_page|PAGE_2M' kernel/src/pipe.rs` is empty.
