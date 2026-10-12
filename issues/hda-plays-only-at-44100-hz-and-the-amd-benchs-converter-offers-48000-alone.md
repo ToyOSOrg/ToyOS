@@ -35,4 +35,4 @@ All of:
 - an AMD bench boot reads soundserver on HDA at 48000 Hz, with its audio rows green;
 - a T14 boot reads 44100 Hz, with its audio rows green;
 - a cpal client takes the rate soundserver answers;
-- a host test holds soundserver's resampler, on every interpolator rubato can take on the host's architecture and from every client rate in common use to both device rates, to a passband, a stop-band and an in-band THD+N bound, each cited from published practice, under the margin below the dithered 16-bit wire's own noise that the owner signed (#877's A5).
+- a host test holds soundserver's resampler, on every interpolator rubato can take on a CPU ToyOS runs on and from every client rate in common use to both device rates, to a passband, a stop-band and an in-band THD+N bound, each cited from published practice, under the margin below the dithered 16-bit wire's own noise that the owner signed (#877's A5).
