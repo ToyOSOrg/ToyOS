@@ -445,6 +445,8 @@ const MACHINE_TESTS: &[&str] = &[
     // Scout, never landed: the scout kernel boots and runs its job clean
     // before a T14 boot is spent on it.
     "scout_smoke",
+    // Scout, never landed: the row stages on a guest before a T14 boot is spent.
+    "wake_onto_busy_smoke",
     // The supervisor reading the slot table through a block session and
     // minting `update` the idle slot's partitions, which `update` writes and
     // marks through diskserver: the supervisor, the launcher and diskserver
@@ -3964,6 +3966,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
         "scout_smoke" => scout_smoke(test_config),
+        "wake_onto_busy_smoke" => wake_onto_busy_smoke(test_config),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
@@ -4391,7 +4394,7 @@ fn scout_smoke(test_config: &Path) -> Result<(), String> {
     let features: &'static [&'static str] = &["scout-wake"];
     let job = "scout_wake";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust, job);
-    let options = BootOptions { kernel_features: features, ..Default::default() };
+    let options = BootOptions { kernel_features: features, smp: 4, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(job.to_string(), bin)], options);
     let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(600));
     for line in result.serial.lines().filter(|l| l.contains("scout-")) {
@@ -4404,6 +4407,27 @@ fn scout_smoke(test_config: &Path) -> Result<(), String> {
         return Err(format!("{features:?}: the job ended {:?}:\n{}", result.exit_code, result.serial));
     }
     Ok(())
+}
+
+/// Scout, never landed: `wake_onto_busy` stages on a guest and ends in a
+/// measurement rather than a refusal; its number means nothing here.
+fn wake_onto_busy_smoke(test_config: &Path) -> Result<(), String> {
+    let rust = compile::repo_root().join("tests/guest/rust-tests");
+    let job = "wake_onto_busy";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust, job);
+    let options = BootOptions { smp: 4, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(job.to_string(), bin)], options);
+    let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(300));
+    for line in result.serial.lines().filter(|l| l.contains("wake_onto_busy")) {
+        eprintln!("  {line}");
+    }
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\n{}", result.serial));
+    }
+    match result.exit_code {
+        Some(code) if code >= 0 => Ok(()),
+        code => Err(format!("the job ended {code:?}:\n{}", result.serial)),
+    }
 }
 
 fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
