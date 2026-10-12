@@ -312,14 +312,20 @@ impl<'a> Machine<'a> {
         self.ns.object(id).cloned().ok_or_else(|| Error::NotFound(String::from("an object its method's exit destroyed")))
     }
 
-    /// The integer a named child of `scope` evaluates to, if it exists.
-    pub(crate) fn named_int(&mut self, scope: NodeId, seg: Seg) -> Result<Option<u64>, Error> {
+    /// What a named child of `scope` evaluates to, if it exists: a method of
+    /// no arguments invoked, anything else its value.
+    pub(crate) fn named_object(&mut self, scope: NodeId, seg: Seg) -> Result<Option<Object>, Error> {
         let Some(id) = self.ns.child(scope, seg) else { return Ok(None) };
         let v = match self.node_object(id)? {
             Object::Method(m) if m.args == 0 => self.invoke(id, m, Vec::new())?,
             _ => self.node_value(id)?,
         };
-        to_int(&v, self.w).map(Some)
+        Ok(Some(v))
+    }
+
+    /// The integer a named child of `scope` evaluates to, if it exists.
+    pub(crate) fn named_int(&mut self, scope: NodeId, seg: Seg) -> Result<Option<u64>, Error> {
+        self.named_object(scope, seg)?.map(|v| to_int(&v, self.w)).transpose()
     }
 
     pub(crate) fn evaluate(&mut self, id: NodeId, args: Vec<Object>) -> Result<Object, Error> {

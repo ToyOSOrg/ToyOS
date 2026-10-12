@@ -34,6 +34,7 @@ use toyos_aml::{Host, Interpreter, Kind, Value};
 
 use crate::aml::kind;
 use crate::host::OWN;
+use crate::init::Names;
 
 /// The embedded controller, as its device names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +45,8 @@ pub struct Ec {
     pub gpe: u16,
     /// The queries its device defines a method for.
     pub queries: BTreeSet<u8>,
+    /// Its `_GLK` asks for the Global Lock around each transaction (§6.5.7).
+    pub glk: bool,
 }
 
 /// What was found.
@@ -65,15 +68,10 @@ const ADAPTER: &str = "ACPI0003";
 /// Find the controller, the buttons where `control_method`, and every
 /// battery and adapter, in the namespace `interpreter` holds; `gpe0` is the
 /// block every GPE is in.
-pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, gpe0: Block, control_method: bool) -> Found {
+pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, names: &Names, gpe0: Block, control_method: bool) -> Found {
     let mut found = Found::default();
-    let (devices, named) = match devices(interpreter) {
-        Ok(walked) => walked,
-        Err(why) => {
-            println!("acpiserver: no device of the namespace is served: its walk was refused, {why}");
-            return found;
-        }
-    };
+    let named = &names.paths;
+    let devices = names.objects.iter().filter(|object| object.kind == Kind::Device).map(|object| object.path.clone());
     let mut controllers = Vec::new();
     for device in devices {
         let hid = format!("{device}._HID");
@@ -101,7 +99,7 @@ pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, gpe0: Block, con
             Some(POWER_BUTTON) => control_method,
             _ => false,
         };
-        if !wanted || !present(interpreter, host, &named, &device) {
+        if !wanted || !present(interpreter, host, named, &device) {
             continue;
         }
         match id.as_deref() {
@@ -117,7 +115,7 @@ pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, gpe0: Block, con
             println!("{CONTROLLER_NONE}no PNP0C09 device is present");
             None
         }
-        [device] => match controller(interpreter, host, device, gpe0, &named) {
+        [device] => match controller(interpreter, host, device, gpe0, named) {
             Ok(ec) => {
                 println!("{OWN}{device} is the embedded controller");
                 Some(ec)
@@ -160,23 +158,28 @@ pub fn query(interpreter: &mut Interpreter, host: &mut dyn Host, ec: &Ec, q: u8)
     }
 }
 
-/// Every device's path, and every name's, by one walk.
-fn devices(interpreter: &Interpreter) -> Result<(Vec<String>, BTreeSet<String>), String> {
-    let mut walk = interpreter.walk().map_err(|why| kind(&why))?;
-    let (mut devices, mut named) = (Vec::new(), BTreeSet::new());
-    while let Some(entry) = walk.next() {
-        if entry.kind == Kind::Device {
-            devices.push(walk.path().to_string());
+/// A fully qualified path as ASL writes it, `\\_SB.PCI0.EC`, as the
+/// namespace's walk writes it: each segment padded with `_` to four
+/// characters (§5.3). `None` where it is no such path.
+pub fn canonical(text: &str) -> Option<String> {
+    let segments = text.strip_prefix('\\')?;
+    let mut path = String::new();
+    for segment in segments.split('.') {
+        let lead = segment.bytes().next().is_some_and(|c| c.is_ascii_uppercase() || c == b'_');
+        let rest = segment.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_');
+        if !lead || !rest || segment.len() > 4 {
+            return None;
         }
-        named.insert(walk.path().to_string());
+        path.push(if path.is_empty() { '\\' } else { '.' });
+        path.push_str(&format!("{segment:_<4}"));
     }
-    Ok((devices, named))
+    Some(path)
 }
 
 /// A `_HID` as the text it names (§6.1.5): a string as it is, and an integer
 /// as the EISA ID it compresses, three letters of five bits each and four
 /// hex digits, its bytes in the order AML stores them.
-fn id(value: &Value) -> Option<String> {
+pub fn id(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => String::from_utf8(text.clone()).ok(),
         &Value::Integer(compressed) => {
@@ -238,7 +241,7 @@ fn controller(interpreter: &mut Interpreter, host: &mut dyn Host, device: &str, 
         Err(why) => return Err(format!("names no GPE: {}", kind(&why))),
     };
     let queries = (0..=u8::MAX).filter(|q| named.contains(&format!("{device}._Q{q:02X}"))).collect();
-    Ok(Ec { path: device.into(), command, data, gpe, queries })
+    Ok(Ec { path: device.into(), command, data, gpe, queries, glk: false })
 }
 
 #[cfg(test)]
@@ -324,12 +327,13 @@ pub mod tests {
         let kernel = crafted(&sealed(b"DSDT", dsdt), &[]);
         let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let Aml { mut interpreter, mut host } = kept.expect("the DSDT loads");
-        find(&mut interpreter, &mut host, GPE0, control_method)
+        let names = crate::init::Names::read(&interpreter).expect("the namespace reads");
+        find(&mut interpreter, &mut host, &names, GPE0, control_method)
     }
 
     #[test]
     fn an_amd_laptops_controller_and_button_are_found_in_its_dsdt() {
-        let ec = Ec { path: EC_PATH.into(), command: 0x66, data: 0x62, gpe: 3, queries: BTreeSet::new() };
+        let ec = Ec { path: EC_PATH.into(), command: 0x66, data: 0x62, gpe: 3, queries: BTreeSet::new(), glk: false };
         assert_eq!(found(&laptop(&[]), true), Found { ec: Some(ec.clone()), buttons: vec![PWRB.into()], ..Found::default() });
         assert_eq!(found(&laptop(&[]), false), Found { ec: Some(ec), ..Found::default() }, "a fixed button's machine looks for none");
     }
@@ -363,7 +367,8 @@ pub mod tests {
         kernel.ports = vec![(0x80, 0)];
         let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let Aml { mut interpreter, mut host } = kept.expect("the DSDT loads");
-        let found = find(&mut interpreter, &mut host, GPE0, true);
+        let names = crate::init::Names::read(&interpreter).expect("the namespace reads");
+        let found = find(&mut interpreter, &mut host, &names, GPE0, true);
         let ec = found.ec.expect("the controller");
         assert_eq!(ec.queries, BTreeSet::from([0x28, 0x2A]));
         host.buttons = found.buttons;
@@ -384,7 +389,8 @@ pub mod tests {
         let kernel = crafted(&sealed(b"DSDT", &laptop_with_queries()), &[]);
         let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let Aml { mut interpreter, mut host } = kept.expect("the DSDT loads");
-        let found = find(&mut interpreter, &mut host, GPE0, true);
+        let names = crate::init::Names::read(&interpreter).expect("the namespace reads");
+        let found = find(&mut interpreter, &mut host, &names, GPE0, true);
         host.buttons = found.buttons;
         let refused = query(&mut interpreter, &mut host, found.ec.as_ref().expect("the controller"), 0x28);
         assert_eq!(refused, Queried::Refused("denied by this server: a SystemIO write the kernel refused KernelPort".into()));

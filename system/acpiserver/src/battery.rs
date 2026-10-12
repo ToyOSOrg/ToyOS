@@ -559,8 +559,10 @@ pub mod tests {
     fn armed(kernel: &Scripted) -> (Aml<'_, Scripted>, Found) {
         let (_, aml) = crate::aml::load(kernel, CRAFTED_RSDP);
         let mut aml = aml.expect("the fixture's DSDT loads");
-        let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, false);
-        crate::attach(&mut aml, found.ec.as_ref().expect("the fixture's controller")).expect("no port of it refused");
+        let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
+        let found = devices::find(&mut aml.interpreter, &mut aml.host, &names, GPE0, false);
+        let ec = found.ec.clone().expect("the fixture's controller");
+        crate::attach(&mut aml, ec, &names, &mut crate::init::Census::default()).expect("no port of it refused");
         (aml, found)
     }
 
@@ -677,19 +679,27 @@ pub mod tests {
     }
 
     /// §6.5.7: a controller whose `_GLK` is 1 wants the Global Lock around
-    /// each transaction, which this server does not take: its space is not
-    /// attached to AML, its `_REG` is not run, and the battery, which says
-    /// it is present only after, is not read, nor is the controller reached.
+    /// each transaction: its space is attached, its `_REG` run and its
+    /// battery read, every transaction AML makes on it under the lock, which
+    /// the kernel's stand-in holds it to, and the lock given back after each.
+    /// One whose `_GLK` is absent or 0 is reached without the lock, and one
+    /// whose `_GLK` is another value is not attached, nor its battery read,
+    /// nor the controller reached.
     #[test]
-    fn a_controller_that_wants_the_global_lock_is_not_attached_and_no_battery_is_read() {
-        for (glk, attached) in [(Some(1), false), (Some(0), true), (None, true)] {
-            let kernel = laptop_machine(glk);
+    fn a_controller_that_wants_the_global_lock_is_reached_under_it_alone() {
+        for (glk, attached, locked) in [(Some(1), true, true), (Some(0), true, false), (None, true, false), (Some(2), false, false)] {
+            let mut kernel = laptop_machine(glk);
+            kernel.lock_rule = locked;
             let (mut aml, power) = found(&kernel);
             assert_eq!(power.is_some(), attached, "_GLK {glk:?}");
-            assert_eq!(aml.host.ec.is_some(), attached, "_GLK {glk:?}");
+            assert_eq!(aml.host.ec.as_ref().map(|ec| ec.glk), attached.then_some(locked), "_GLK {glk:?}");
             let ecok = aml.interpreter.evaluate(&mut aml.host, "\\_SB_.EC0_.ECOK", &[]);
             assert_eq!(ecok, Ok(Value::Integer(u64::from(attached))), "_GLK {glk:?}");
             assert_eq!(done(&kernel).is_empty(), !attached, "_GLK {glk:?}: {:x?}", done(&kernel));
+            assert!(!kernel.held.get(), "_GLK {glk:?}: the lock was left taken");
+            if locked {
+                assert!(aml.host.takes as usize > done(&kernel).len(), "_GLK {glk:?}: fewer takes than transactions");
+            }
         }
     }
 

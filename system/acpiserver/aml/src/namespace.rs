@@ -205,6 +205,10 @@ impl Namespace {
         Ok(id)
     }
 
+    pub(crate) fn defined(&self) -> u32 {
+        self.nodes.len() as u32
+    }
+
     pub(crate) fn mark(&self) -> Mark {
         Mark { nodes: self.nodes.len(), slots: self.nodes.capacity() }
     }
@@ -313,9 +317,9 @@ impl Drop for Walk<'_> {
 }
 
 impl Walk<'_> {
-    /// The next object's depth, a child of the root's being 1, its name and
-    /// the object.
-    pub(crate) fn step(&mut self) -> Option<(u32, Seg, &Object)> {
+    /// The next object's depth, a child of the root's being 1, its place in
+    /// the arena, its name and the object.
+    pub(crate) fn step(&mut self) -> Option<(u32, u32, Seg, &Object)> {
         let i = self.at as usize;
         if i == 0 {
             return None;
@@ -337,7 +341,7 @@ impl Walk<'_> {
             }
             self.at = self.next[up];
         }
-        Some((depth, n.seg, &n.object))
+        Some((depth, i as u32, n.seg, &n.object))
     }
 
     /// The absolute path of the object last stepped to.

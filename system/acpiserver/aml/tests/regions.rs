@@ -185,7 +185,79 @@ fn a_pci_config_region_addresses_its_devices_function() {
     let at = Address::PciConfig { segment: 1, bus: 0x80, device: 0x1F, function: 3, offset: 0x41 };
     assert_eq!(m.accesses(), vec![Event::Read(at, Access::Byte)]);
     let (_, v) = read(&lpc(&[]), &[], "\\_SB.PCI0.ISAB.R41");
-    assert!(matches!(v, Err(Error::Unsupported(_))));
+    assert_eq!(v, Err(Error::Rule(NO_HOST_BRIDGE)));
+}
+
+/// The refusal of a PCI_Config region no host bridge is above.
+const NO_HOST_BRIDGE: &str = "a PCI_Config region below no host bridge, which names a _BBN or is PNP0A03 or PNP0A08 by its _HID or _CID";
+
+/// A host bridge that names no `_BBN` is one by its `_HID` or a `_CID`
+/// (§6.1.5, §6.1.2), PNP0A03 or PNP0A08 as an EISA ID or a string, a `_CID`
+/// alone or in a package, each a name or a method: its bus is 0, the only
+/// root bus a machine that names no `_BBN` has. Any other ID names no host
+/// bridge, and the region is refused.
+#[test]
+fn a_host_bridge_without_a_bbn_is_found_by_its_hid_or_cid_on_bus_0() {
+    let lpc = |bridge: &[u8]| {
+        scope(
+            "\\_SB",
+            &device(
+                "PCI0",
+                &cat(&[
+                    bridge,
+                    &device(
+                        "ISAB",
+                        &cat(&[
+                            &def_name("_ADR", &int(0x001F_0000)),
+                            &op_region("ISAR", 0x02, &int(0x60), &int(0x04)),
+                            &field("ISAR", BYTE, &[unit("PRQA", 8)]),
+                        ]),
+                    ),
+                ]),
+            ),
+        )
+    };
+    // EisaId ("PNP0A03"), EisaId ("PNP0A08"), and another device's.
+    let (pnp0a03, pnp0a08, other) = (0x030A_D041u64, 0x080A_D041u64, 0x090C_D041u64);
+    let at = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 0, offset: 0x60 };
+    for bridge in [
+        def_name("_HID", &int(pnp0a08)),
+        cat(&[&def_name("_HID", &int(pnp0a08)), &def_name("_CID", &int(pnp0a03))]),
+        cat(&[&def_name("_HID", &int(other)), &def_name("_CID", &int(pnp0a03))]),
+        cat(&[&def_name("_HID", &string("ACPI0016")), &def_name("_CID", &package(&[int(other), string("PNP0A08")]))]),
+        method("_HID", 0, &ret(&string("PNP0A03"))),
+    ] {
+        let (m, v) = read(&lpc(&bridge), &[(at, &[0x8B])], "\\_SB.PCI0.ISAB.PRQA");
+        assert_eq!(v, Ok(Value::Integer(0x8B)));
+        assert_eq!(m.accesses(), vec![Event::Read(at, Access::Byte)]);
+    }
+    for not_one in [
+        def_name("_HID", &int(other)),
+        cat(&[&def_name("_HID", &string("PNP0A0")), &def_name("_CID", &package(&[string("PNP0A033")]))]),
+        def_name("_CID", &buffer(&int(4), b"PNP0")),
+    ] {
+        let (m, v) = read(&lpc(&not_one), &[(at, &[0x8B])], "\\_SB.PCI0.ISAB.PRQA");
+        assert_eq!(v, Err(Error::Rule(NO_HOST_BRIDGE)));
+        assert_eq!(m.accesses(), vec![]);
+    }
+}
+
+/// QEMU 11.1.1's q35 DSDT names no `_BBN`: its `\_SB.PCI0` is a host
+/// bridge by its `_HID` and `_CID`, so an interrupt link's `_CRS`, which
+/// reads the ISA bridge's routing registers, evaluates to its resource
+/// template.
+#[test]
+fn qemus_interrupt_link_reads_its_routing_register_below_a_bridge_named_by_its_hid() {
+    let dsdt = include_bytes!("../../../../lib/acpi/fixtures/qemu-11.1.1/dsdt.bin");
+    let mut m = Machine::default();
+    let mut i = Interpreter::new();
+    i.load_bytes(&mut m, dsdt).expect("QEMU's DSDT loads");
+    // PIRQA routed to IRQ 11, as edk2 leaves it on q35.
+    m.poke(Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 0, offset: 0x60 }, &[0x0B]);
+    m.log.clear();
+    let crs = i.evaluate(&mut m, "\\_SB.LNKA._CRS", &[]);
+    assert!(matches!(&crs, Ok(Value::Buffer(_))), "{crs:?}");
+    assert!(m.accesses().iter().all(|e| matches!(e, Event::Read(Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 0, .. }, _))), "{:?}", m.accesses());
 }
 
 /// A device below bridges is on the bus the nearest one's Secondary Bus
@@ -273,7 +345,7 @@ fn a_pci_config_region_below_more_bridges_than_buses_is_refused() {
     assert_eq!(v, Err(Error::Rule("a PCI_Config region below more bridges than there are buses for them")));
     assert_eq!(m.accesses(), vec![]);
     let (m, v) = below(256);
-    assert_eq!(v, Err(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN")));
+    assert_eq!(v, Err(Error::Rule(NO_HOST_BRIDGE)));
     assert_eq!(m.accesses(), vec![]);
 }
 

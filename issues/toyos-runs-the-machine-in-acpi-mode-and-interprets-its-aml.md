@@ -135,6 +135,13 @@ the server finds the PNP0C09 device in the namespace its load kept and takes
 its ports from `_CRS` and its GPE from `_GPE`, and reaches the ports through
 the kernel's mediated access, since no row names them
 (`system/acpiserver/src/devices.rs`); the kernel reads no ECDT.
+**Ruled** (owner, 2026-10-12, on #875, against ACPI 6.5 §6.5.4's "OSPM must
+make Embedded Controller operation regions, accessed via the Embedded
+Controllers described in ECDT, available before executing any control
+method"): "follow the spec". ECDT support is permanent: the server attaches
+the controller the ECDT names before the first table loads
+(`early_controller`, `system/acpiserver/src/aml.rs`), and serves the
+namespace's device in its place once it is found.
 
 The design, not a ruling: a machine whose power button is a control method
 device is claimed too, and its button served by the Notify the controller's
@@ -516,12 +523,13 @@ memory outside the map, so S2's ruling on those writes comes before both.
     load added, then `_REG`.
   - A root bridge without `_BBN`, found by `_HID` or `_CID`.
   - `_GLK`.
-  - Takes up:
-    - the `_REG` bullet above;
-    - `issues/qemus-interrupt-links-are-refused-by-the-aml-interpreter.md`;
-    - `issues/the-acpi-server-talks-to-the-embedded-controller-without-the-global-lock.md`.
-  - **Exit**: their exits, and every device's `_STA` on the T14 equal to
-    Linux's.
+  - Takes up the `_REG` bullet above. QEMU's interrupt links, refused for a
+    host bridge named by `_HID` alone, and the controller reached without the
+    Global Lock its `_GLK` asks for, are closed by their host tests
+    (`qemus_interrupt_link_reads_its_routing_register_below_a_bridge_named_by_its_hid`,
+    `a_controller_that_wants_the_global_lock_is_reached_under_it_alone`).
+  - **Exit**: the `_REG` bullet's, and every device's `_STA` on the T14
+    equal to Linux's.
 - **S4: the grammar whole.**
   - `LoadTable`, `DataTableRegion`, and every space's protocol.
   - **Exit**:

@@ -174,7 +174,7 @@ fn every_object_is_walked_as_what_it_is() {
     assert_eq!(at("\\STR0"), (1, Kind::String));
     assert_eq!(at("\\BUF0"), (1, Kind::Buffer));
     assert_eq!(at("\\PKG0"), (1, Kind::Package));
-    assert_eq!(at("\\REG0"), (1, Kind::OperationRegion));
+    assert_eq!(at("\\REG0"), (1, Kind::OperationRegion { space: 0 }));
     assert_eq!(at("\\FLD0"), (1, Kind::FieldUnit));
     assert_eq!(at("\\BFL0"), (1, Kind::BufferField));
     assert_eq!(at("\\MTX0"), (1, Kind::Mutex));

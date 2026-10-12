@@ -25,11 +25,13 @@
 //! space is denied by name.
 //!
 //! **The embedded controller's space is its own transactions'** ([`crate::ec`],
-//! [`transact`]), a byte each, on the controller the server attached
-//! ([`Firmware::ec`]) and through the kernel, which no row holds its ports
-//! for. With none attached the space is denied by name. A port of it the
-//! kernel refuses detaches the controller and is handed to the server
-//! ([`Firmware::ended`]), which serves it no more.
+//! [`Firmware::transaction`]), a byte each, on the controller the server
+//! attached ([`Firmware::ec`]) and through the kernel, which no row holds its
+//! ports for, each under the Global Lock where the controller's `_GLK` asks
+//! for it (ACPI 6.5 §6.5.7) and AML does not hold it already. With none
+//! attached the space is denied by name. A port of it the kernel refuses
+//! detaches the controller and is handed to the server ([`Firmware::ended`]),
+//! which serves it no more.
 //!
 //! **The Global Lock's word is the kernel's to exchange** (ACPI 6.5
 //! §5.2.10.1). A take that finds the firmware holding it leaves the firmware
@@ -276,6 +278,8 @@ pub struct Firmware<'k, K> {
     pub presses: u64,
     /// The kernel answered that the machine is stopping.
     pub stopping: bool,
+    /// AML holds the Global Lock, which a transaction it makes runs under.
+    locked: bool,
 }
 
 impl<'k, K: Kernel> Firmware<'k, K> {
@@ -298,7 +302,30 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             buttons: Vec::new(),
             presses: 0,
             stopping: false,
+            locked: false,
         }
+    }
+
+    /// One transaction on the controller at `command` and `data`, under the
+    /// Global Lock where its `_GLK` asks for it (`glk`) and AML does not hold
+    /// it already.
+    pub fn transaction(&mut self, command: u16, data: u16, glk: bool, tx: Transaction) -> Result<u8, Unmade> {
+        let lock = glk && !self.locked;
+        if lock {
+            match self.global_take() {
+                Ok(()) => {}
+                Err(_) if self.stopping => return Err(Unmade::Stopping),
+                Err(Denied(why)) => return Err(Unmade::Refused(why)),
+            }
+        }
+        let made = transact(self.kernel, command, data, tx);
+        if lock {
+            match self.global_release() {
+                Ok(()) => {}
+                Err(_) => return Err(Unmade::Stopping),
+            }
+        }
+        made
     }
 
     /// Deny by the name `what`, said the first time with `own`, the machine's
@@ -337,10 +364,10 @@ impl<'k, K: Kernel> Firmware<'k, K> {
     /// one of its ports, which detaches it.
     fn controller(&mut self, what: &str, at: Address, width: toyos_aml::Access, tx: Transaction) -> Result<u8, Denied> {
         assert_eq!(width, toyos_aml::Access::Byte, "the interpreter reaches EmbeddedControl a byte at a time (Table 19.34)");
-        let Some(ec) = &self.ec else {
+        let Some((command, data, glk)) = self.ec.as_ref().map(|ec| (ec.command, ec.data, ec.glk)) else {
             return Err(self.deny(format!("{what} {NO_CONTROLLER}"), format_args!("{at:x?}")));
         };
-        match transact(self.kernel, ec.command, ec.data, tx) {
+        match self.transaction(command, data, glk, tx) {
             Ok(byte) => Ok(byte),
             Err(Unmade::Stopping) => Err(self.stopped()),
             Err(Unmade::Refused(why)) => {
@@ -464,16 +491,20 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn global_take(&mut self) -> Result<(), Denied> {
         if self.take(Instant::now() + RELEASE)? {
+            self.locked = true;
             return Ok(());
         }
         panic!("acpiserver: the firmware held the Global Lock {RELEASE:?} after a take left it the pending bit, and raised no GBL_STS");
     }
 
     fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied> {
-        self.take(Instant::now() + Duration::from_millis(ms.into()))
+        let taken = self.take(Instant::now() + Duration::from_millis(ms.into()))?;
+        self.locked = taken;
+        Ok(taken)
     }
 
     fn global_release(&mut self) -> Result<(), Denied> {
+        self.locked = false;
         self.kernel.lock_release().map_err(|Stopping| self.stopped())?;
         self.given_back += 1;
         Ok(())
@@ -504,6 +535,8 @@ pub mod tests {
         pub written: RefCell<std::collections::BTreeMap<u64, u8>>,
         /// `(start, end, memory type)`.
         pub kept: Vec<(u64, u64, u8)>,
+        /// `(start, end)` of what the kernel drives, refused as device memory.
+        pub driven: Vec<(u64, u64)>,
         pub ports: Vec<(u64, u64)>,
         pub config: Vec<(u64, u64)>,
         pub asked: RefCell<Vec<Access>>,
@@ -517,6 +550,10 @@ pub mod tests {
         /// A controller at [`EC_DATA`] and [`EC_COMMAND`], answering its two
         /// ports before [`Self::ports`] is asked.
         pub controller: RefCell<Option<Emulated>>,
+        /// The controller is reached only under the Global Lock, as a `_GLK`
+        /// of 1 asks: a write to either port or a read of its data, which
+        /// takes the byte, made without it panics.
+        pub lock_rule: bool,
         /// Accesses and lock exchanges answered before the machine stops.
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
@@ -566,6 +603,9 @@ pub mod tests {
                             });
                             Answer { made: Ok(value), memory_type: *memory_type }
                         }
+                        None if self.driven.iter().any(|(start, end)| (*start..*end).contains(&access.address)) => {
+                            Answer { made: Err(Refused::DeviceMemory), memory_type: UNLISTED }
+                        }
                         None => match self.kept.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
                             Some(&(.., memory_type)) => Answer { made: Err(Refused::MemoryType), memory_type },
                             None => Answer { made: Err(Refused::UsableMemory), memory_type: 7 },
@@ -573,6 +613,9 @@ pub mod tests {
                     }
                 }
                 Space::SystemIo if self.controller.borrow().is_some() && [EC_DATA, EC_COMMAND].contains(&access.address) => {
+                    if access.write != 0 || access.address == EC_DATA {
+                        assert!(!self.lock_rule || self.held.get(), "a transaction on a controller whose _GLK asks for the Global Lock, made without it");
+                    }
                     let mut controller = self.controller.borrow_mut();
                     let ec = controller.as_mut().expect("just seen");
                     let read = match (access.address, access.write != 0) {
@@ -784,7 +827,7 @@ pub mod tests {
         space[0xA8] = 0x5A;
         *kernel.controller.borrow_mut() = Some(Emulated::new(space));
         let mut host = Firmware::new(&kernel);
-        host.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default() });
+        host.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default(), glk: false });
         assert_eq!(host.read(Address::EmbeddedControl(0xA8), Byte), Ok(0x5A));
         assert_eq!(host.write(Address::EmbeddedControl(0x81), Byte, 0x01), Ok(()));
         assert_eq!(host.read(Address::EmbeddedControl(0x81), Byte), Ok(0x01));
@@ -804,7 +847,7 @@ pub mod tests {
         use toyos_aml::Access::Byte;
         let kernel = machine();
         let mut host = Firmware::new(&kernel);
-        let ec = Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default() };
+        let ec = Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default(), glk: false };
         host.ec = Some(ec.clone());
         let refused = host.read(Address::EmbeddedControl(0xA8), Byte);
         assert_eq!(refused, Err(Denied("a read of EmbeddedControl: the kernel refused a port of the controller".into())));

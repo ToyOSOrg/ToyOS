@@ -181,16 +181,21 @@ impl Machine<'_> {
     /// the high word, function in the low), in the segment group the host
     /// bridge's `_SEG` names or 0 without one (§6.5.6). The host bridge is
     /// the nearest device naming a `_BBN`, which is the bus directly below it
-    /// (§6.5.5); each device between it and the region's is a PCI-to-PCI
+    /// (§6.5.5), or else whose `_HID` or one of whose `_CID`s (§6.1.5,
+    /// §6.1.2) names a PCI or PCI Express host bridge, PNP0A03 or PNP0A08,
+    /// on bus 0, the only root bus a machine that names no `_BBN` has; each
+    /// device between it and the region's is a PCI-to-PCI
     /// bridge by its Header Type register, whose Secondary Bus Number
     /// register is the bus below it (PCI-to-PCI Bridge Architecture
     /// Specification 1.2, §3.2.5.4). A region declared in the host bridge
     /// itself addresses the bridge.
     ///
     /// §6.5.4 holds a PCI_Config region accessible always only on a root bus
-    /// naming a `_BBN`, and one below a bridge once "the bridge controller
-    /// has been programmed with a bus number": a region below anything else
-    /// is refused, where any bus chosen for it would be another device's.
+    /// naming a `_BBN`; one on a root bus that names none once its `_REG(2,
+    /// 1)` has run, which is the caller's to run; and one below a bridge once
+    /// "the bridge controller has been programmed with a bus number": a
+    /// region below anything else is refused, where any bus chosen for it
+    /// would be another device's.
     ///
     /// Every access asks again, firmware's methods and the bridges both:
     /// nothing is kept that a bridge renumbered since would make stale. A
@@ -204,7 +209,7 @@ impl Machine<'_> {
         loop {
             self.step()?;
             if matches!(self.ns.object(host), Some(Object::Device)) {
-                if self.ns.child(host, bbn).is_some() {
+                if self.ns.child(host, bbn).is_some() || self.host_bridge(host)? {
                     break;
                 }
                 if below.len() > usize::from(u8::MAX) {
@@ -213,7 +218,7 @@ impl Machine<'_> {
                 below.push(host);
             }
             let above = self.ns.parent(host);
-            host = above.ok_or(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN"))?;
+            host = above.ok_or(Error::Rule("a PCI_Config region below no host bridge, which names a _BBN or is PNP0A03 or PNP0A08 by its _HID or _CID"))?;
         }
         let bus = self.named_int(host, bbn)?.unwrap_or(0);
         let segment = self.named_int(host, Seg(*b"_SEG"))?.unwrap_or(0);
@@ -249,6 +254,32 @@ impl Machine<'_> {
             bus = answered;
         }
         self.function(device, segment, bus)
+    }
+
+    /// Whether a device is a PCI host bridge by its `_HID` or a `_CID`: an
+    /// EISA ID's integer or a string, a `_CID` one or a package of them.
+    fn host_bridge(&mut self, device: NodeId) -> Result<bool, Error> {
+        // EisaId ("PNP0A03") and EisaId ("PNP0A08") as AML stores them.
+        const IDS: [u64; 2] = [0x030A_D041, 0x080A_D041];
+        const TEXT: [&[u8]; 2] = [b"PNP0A03", b"PNP0A08"];
+        for seg in [Seg(*b"_HID"), Seg(*b"_CID")] {
+            let ids = match self.named_object(device, seg)? {
+                None => continue,
+                Some(Object::Pkg(p)) => p.borrow().clone(),
+                Some(id) => vec![id],
+            };
+            for id in ids {
+                let hit = match self.resolve_lazy(id)? {
+                    Object::Int(id) => IDS.contains(&id),
+                    Object::Str(text) => TEXT.contains(&text.borrow().as_slice()),
+                    _ => false,
+                };
+                if hit {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// The function a device's `_ADR` names on `bus` (§6.1.1).

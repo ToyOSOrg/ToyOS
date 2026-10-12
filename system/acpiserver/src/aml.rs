@@ -1,7 +1,10 @@
 //! Everything only the machine's AML can answer: its definition blocks
 //! loaded into one namespace ([`toyos_aml`]), and what this server asks of it.
 //!
-//! [`load`] fetches the DSDT and every SSDT through the kernel
+//! [`load`] attaches the controller the ECDT names, which AML may reach
+//! before any control method runs (ACPI 6.5 §6.5.4), and the FADT's
+//! `SMI_CMD`, a byte to which is a call into the firmware, to the host; then
+//! fetches the DSDT and every SSDT through the kernel
 //! ([`crate::tables`]), loads each in the order the firmware lists them, and
 //! says one line a table: loaded, or refused and why. **A refused SSDT is
 //! said loudly and the load goes on** (the owner's ruling: "Go on, say it
@@ -36,7 +39,7 @@ use std::time::Instant;
 use toyos_acpi::TableError;
 use toyos_aml::{Error, Host, Interpreter, Value};
 
-use crate::host::{Firmware, Kernel, Refusal, Stopping, OWN};
+use crate::host::{Firmware, Kernel, Refusal, Stopping, Unmade, OWN};
 use crate::tables::Tables;
 
 /// A machine's namespace, and the host every evaluation in it is answered by.
@@ -140,6 +143,7 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
         Ok(Err(why)) => println!("acpiserver: the FADT's fixed hardware does not decode, so this machine's AML calls no firmware: {why:?}"),
         Err(why) => println!("acpiserver: no FADT was read, so this machine's AML calls no firmware: {}", unread(&why, |at| tables.refused(at))),
     }
+    early_controller(kernel, &tables, rsdp, host);
 
     let count = blocks.len();
     for (place, block) in blocks.iter().enumerate() {
@@ -231,6 +235,45 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
     loaded
 }
 
+/// Attach the embedded controller the ECDT names to `host`, so its space is
+/// there "before executing any control method" (ACPI 6.5 §6.5.4, the owner's
+/// "follow the spec"): its ports, its device's path, and no Global Lock,
+/// whose rule only the device's `_GLK` names, until the namespace's device
+/// is found and served in its place. A machine with no ECDT waits for that
+/// device; one whose ECDT names no controller this server reaches is said.
+fn early_controller<K: Kernel>(kernel: &K, tables: &Tables<'_, K>, rsdp: u64, host: &mut Firmware<'_, K>) {
+    let table = match toyos_acpi::find_table(tables, rsdp, b"ECDT", toyos_acpi::ECDT_NEEDED) {
+        Ok(table) => table,
+        Err(TableError::Absent) => return,
+        Err(why) => {
+            println!("acpiserver: the ECDT was not read, so the controller's space waits for its device: {}", unread(&why, |at| tables.refused(at)));
+            return;
+        }
+    };
+    let ec = match toyos_acpi::ecdt(&table) {
+        Ok(ec) => ec,
+        Err(why) => {
+            println!("acpiserver: the ECDT names no controller this server reaches, so its space waits for its device");
+            println!("{OWN}that was {why:x?}");
+            return;
+        }
+    };
+    let id: String = ec.id.clone().filter_map(|at| table.byte(at)).map(char::from).collect();
+    let Some(path) = crate::devices::canonical(&id) else {
+        println!("acpiserver: the ECDT's EC_ID is no fully qualified path, so the controller's space waits for its device");
+        println!("{OWN}that was {id:?}");
+        return;
+    };
+    // Its status register, which a read leaves as it was.
+    if let Err(Unmade::Refused(why)) = crate::host::port_in(kernel, ec.command) {
+        println!("acpiserver: the ECDT's embedded controller is not attached: {why}");
+        return;
+    }
+    println!("acpiserver: the ECDT's embedded controller is attached to AML before any control method runs");
+    println!("{OWN}it is {path} at {:#x}/{:#x}, GPE {:#x}", ec.command, ec.data, ec.gpe);
+    host.ec = Some(crate::devices::Ec { path, command: ec.command, data: ec.data, gpe: ec.gpe.into(), queries: Default::default(), glk: false });
+}
+
 /// `\_S5`'s first two elements: what `SLP_TYPa` and `SLP_TYPb` are written
 /// for soft-off.
 fn s5(interpreter: &mut Interpreter, host: &mut dyn Host) -> Result<(u64, u64), String> {
@@ -279,19 +322,34 @@ pub mod tests {
 
     /// What every guest boot does, against the kernel's stand-in: QEMU's
     /// DSDT is fetched, loads asking the machine for nothing, and its `\_S5`
-    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of;
-    /// its namespace names no embedded controller, and no control-method
-    /// button where one is looked for.
+    /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of.
+    /// Its initialisation runs no `_INI` and reads each device's `_STA` but
+    /// the CPUs', whose `_STA` writes QEMU's CPU hotplug selector, a port
+    /// this server writes for no AML, and the HPET's, which reads the timer
+    /// the kernel drives. Its namespace names no embedded controller, and no
+    /// control-method button where one is looked for.
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
-        let kernel = machine(QEMU);
+        let mut kernel = machine(QEMU);
+        // The ISA bridge's interrupt routing registers, PIRQA-D and PIRQE-H.
+        kernel.config = [0x60, 0x61, 0x62, 0x63, 0x68, 0x69, 0x6A, 0x6B].map(|offset| (toyos_abi::acpi::pci_address(0, 0, 0x1F, 0, offset), 0x0B)).to_vec();
+        kernel.driven = vec![(0xfed0_0000, 0xfed0_1000)];
         let (loaded, kept) = load(&kernel, RSDP);
         assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
-        let Aml { mut interpreter, mut host } = kept.expect("QEMU's DSDT loads");
+        let mut aml = kept.expect("QEMU's DSDT loads");
+        let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
+        let mut census = crate::init::Census::default();
+        crate::init::initialise(&mut aml, &names, &mut census);
+        assert_eq!((census.sb_ini, census.ini, census.sta), (None, 0, 14));
+        assert_eq!(
+            census.refused.counts(),
+            "_STA: denied by this server: a SystemIO write of a port and width this server asks of the kernel for no AML x2; _STA: denied by this server: a SystemMemory read the kernel refused DeviceMemory, in unlisted firmware memory x1"
+        );
+        let Aml { mut interpreter, mut host } = aml;
         for control_method in [false, true] {
-            assert_eq!(crate::devices::find(&mut interpreter, &mut host, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());
+            assert_eq!(crate::devices::find(&mut interpreter, &mut host, &names, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());
         }
-        assert!(kernel.asked.borrow().iter().all(|access| access.write == 0 && access.space == 0));
+        assert!(kernel.asked.borrow().iter().all(|access| access.write == 0 && access.space != 1), "QEMU's AML wrote or read a port");
         assert!(!kernel.held.get());
         assert_eq!(kernel.handed.get(), Some(0));
     }
@@ -325,6 +383,13 @@ pub mod tests {
 
     /// A machine whose XSDT lists a FADT naming `dsdt` and then `ssdts`.
     pub fn crafted(dsdt: &[u8], ssdts: &[&[u8]]) -> Scripted {
+        crafted_with(dsdt, ssdts, &[])
+    }
+
+    /// [`crafted`], its XSDT listing `others` after the SSDTs.
+    pub fn crafted_with(dsdt: &[u8], ssdts: &[&[u8]], others: &[&[u8]]) -> Scripted {
+        let tables: Vec<&[u8]> = ssdts.iter().chain(others).copied().collect();
+        let ssdts = &tables[..];
         const AT: u64 = 0x10_0000;
         let at = |n: usize| AT + 0x1_0000 * n as u64;
         let mut fadt_body = vec![0u8; 116 - 36];
@@ -351,6 +416,37 @@ pub mod tests {
     }
 
     pub const CRAFTED_RSDP: u64 = 0x10_0000 - 0x1000;
+
+    /// An ECDT (ACPI 6.5 Table 5.54) naming a controller at the host tests'
+    /// two ports, on GPE 3, whose device is `id`.
+    pub fn ecdt(id: &[u8]) -> Vec<u8> {
+        let gas = |port: u64| cat(&[&[1, 8, 0, 1], &port.to_le_bytes()]);
+        let mut table = sealed(b"ECDT", &cat(&[&gas(crate::host::tests::EC_COMMAND), &gas(crate::host::tests::EC_DATA), &1u32.to_le_bytes(), &[3], id, &[0]]));
+        table[8] = 1;
+        table[9] = 0;
+        table[9] = 0u8.wrapping_sub(table.iter().fold(0u8, |sum, &byte| sum.wrapping_add(byte)));
+        table
+    }
+
+    /// §6.5.4: the ECDT's controller is attached before the DSDT loads, by
+    /// the path its `EC_ID` names as the namespace writes it, with no Global
+    /// Lock, whose rule its device's `_GLK` names; a machine with no ECDT,
+    /// an `EC_ID` that is no path, and a controller whose status port the
+    /// kernel refuses have none attached.
+    #[test]
+    fn the_ecdts_controller_is_attached_before_any_control_method() {
+        let dsdt = sealed(b"DSDT", &s5_package(5, 0));
+        let attached = |kernel: &Scripted| load(kernel, CRAFTED_RSDP).1.expect("the DSDT loads").host.ec;
+        let mut kernel = crafted_with(&dsdt, &[], &[&ecdt(b"\\_SB.PCI0.LPC0.EC")]);
+        kernel.ports = vec![(crate::host::tests::EC_COMMAND, 0)];
+        let ec = crate::devices::Ec { path: "\\_SB_.PCI0.LPC0.EC__".into(), command: 0x66, data: 0x62, gpe: 3, queries: Default::default(), glk: false };
+        assert_eq!(attached(&kernel), Some(ec));
+        let mut kernel = crafted_with(&dsdt, &[], &[&ecdt(b"_SB.EC")]);
+        kernel.ports = vec![(crate::host::tests::EC_COMMAND, 0)];
+        assert_eq!(attached(&kernel), None, "an EC_ID that is no fully qualified path");
+        assert_eq!(attached(&crafted_with(&dsdt, &[], &[&ecdt(b"\\_SB.EC")])), None, "a status port the kernel refuses");
+        assert_eq!(attached(&crafted(&dsdt, &[])), None, "no ECDT");
+    }
 
     #[test]
     fn a_refused_ssdt_is_one_block_refused_and_the_rest_load() {

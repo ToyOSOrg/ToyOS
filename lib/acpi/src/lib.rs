@@ -15,6 +15,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod ecdt;
 mod facs;
 mod fadt;
 mod gtdt;
@@ -27,6 +28,7 @@ mod spcr;
 
 use toyos_bootmap::DirectMapEnd;
 
+pub use ecdt::{ecdt, Ec, EcRefused, EcRegister, ECDT_NEEDED};
 pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNED, PENDING};
 pub use fadt::{
     century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,

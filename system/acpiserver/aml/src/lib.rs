@@ -234,7 +234,8 @@ pub enum Kind {
     Event,
     Method,
     Mutex,
-    OperationRegion,
+    /// In this address space (Table 5.182).
+    OperationRegion { space: u8 },
     PowerResource,
     /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
     Processor,
@@ -252,6 +253,10 @@ pub struct Entry {
     /// below an object follows it at a greater depth, so a caller leaves a
     /// subtree out by skipping to the next entry no deeper than its top.
     pub depth: u32,
+    /// Its place among the objects the interpreter holds, in the order they
+    /// were defined: an object a load defines after [`Interpreter::defined`]
+    /// was read is at that place or past it.
+    pub serial: u32,
     pub name: [u8; 4],
     pub kind: Kind,
 }
@@ -275,7 +280,7 @@ impl Iterator for Walk<'_> {
     type Item = Entry;
 
     fn next(&mut self) -> Option<Entry> {
-        let (depth, seg, object) = self.0.step()?;
+        let (depth, serial, seg, object) = self.0.step()?;
         let kind = match object {
             Object::Uninit => Kind::Uninitialized,
             Object::Int(_) => Kind::Integer,
@@ -293,9 +298,9 @@ impl Iterator for Walk<'_> {
             Object::Method(_) => Kind::Method,
             Object::Mutex(_) => Kind::Mutex,
             Object::Event(_) => Kind::Event,
-            Object::Region(_) => Kind::OperationRegion,
+            Object::Region(r) => Kind::OperationRegion { space: r.space },
         };
-        Some(Entry { depth, name: seg.0, kind })
+        Some(Entry { depth, serial, name: seg.0, kind })
     }
 }
 
@@ -403,6 +408,12 @@ impl Interpreter {
     /// at its end.
     pub fn usage(&self) -> Usage {
         self.last
+    }
+
+    /// How many objects the interpreter holds that the tables defined and it
+    /// predefined: what a [`Walk`] entry's `serial` is read against.
+    pub fn defined(&self) -> u32 {
+        self.ns.defined()
     }
 
     /// Every object the loaded tables and this interpreter defined, read-only
