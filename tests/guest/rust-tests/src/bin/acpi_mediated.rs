@@ -249,7 +249,7 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     let (hole, ty) = holder.ask(Access::write(Space::SystemMemory, 0xD000_0000, Width::DWord, 0));
     assert_eq!((hole, ty), (Err(Refused::MemoryType), UNLISTED), "acpi: an unlisted address was written");
     let (hole, ty) = holder.ask(Access::read(Space::SystemMemory, 0xA_0000, Width::DWord));
-    assert_eq!((hole, ty), (Err(Refused::UnlistedCached), UNLISTED), "acpi: an unlisted address below 1 MiB");
+    assert_eq!((hole, ty), (Err(Refused::RegisterCached), UNLISTED), "acpi: an unlisted address below 1 MiB");
     // The local APIC; the I/O APIC, which the kernel drives through its
     // first 0x20 bytes, at its first register, at the EOI register a chipset
     // keeps at 0x40 and at its page's last dword; and the HPET. Each is a
@@ -266,7 +266,7 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemMemory, bar, Width::DWord), Err(Refused::DeviceMemory), "acpi: a function's BAR at {bar:#x} was read");
     assert_eq!(holder.write(Space::SystemMemory, bar + 0x14, Width::DWord, 0), Err(Refused::DeviceMemory), "acpi: a function's BAR was written");
     assert_eq!(holder.read(Space::SystemMemory, u64::MAX, Width::Word), Err(Refused::Unmapped));
-    println!("acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused UnlistedCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory");
+    println!("acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused RegisterCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory");
 
     // Non-volatile memory, both ways: the FACS, and the bytes after it.
     let fadt = holder.table(info.rsdp, b"FACP");

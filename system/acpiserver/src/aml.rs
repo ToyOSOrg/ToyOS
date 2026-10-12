@@ -135,6 +135,11 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
         println!("{STOPPING}");
         return loaded;
     }
+    match toyos_acpi::find_table(&tables, rsdp, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE).map(|fadt| toyos_acpi::fixed_hardware(&fadt)) {
+        Ok(Ok(fixed)) => host.smi_cmd = fixed.smi_cmd.map(|smi| smi.port),
+        Ok(Err(why)) => println!("acpiserver: the FADT's fixed hardware does not decode, so this machine's AML calls no firmware: {why:?}"),
+        Err(why) => println!("acpiserver: no FADT was read, so this machine's AML calls no firmware: {}", unread(&why, |at| tables.refused(at))),
+    }
 
     let count = blocks.len();
     for (place, block) in blocks.iter().enumerate() {

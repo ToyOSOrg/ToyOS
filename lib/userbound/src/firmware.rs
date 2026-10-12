@@ -11,9 +11,9 @@
 //! **Memory is the firmware's or it is refused.** The UEFI memory map types
 //! every range (UEFI 2.10 §7.2, `EFI_MEMORY_TYPE`): what the kernel hands out
 //! as RAM is refused whole, ACPI NVS and reserved memory pass both ways, ACPI
-//! reclaim memory, where the tables are, is read and never written, and every
-//! other type, and an address the map does not list, is refused with its
-//! type, for whoever reads the holder's log to rule on.
+//! reclaim memory, where the tables are, is read and never written, a
+//! register is read as the paragraphs below say, and every other type is
+//! refused with its type, for whoever reads the holder's log to rule on.
 //!
 //! **Runtime-services data is read and never written, as the tables'
 //! memory is, because on some machines it is.** UEFI 2.10 §2.3.4 has "ACPI
@@ -25,9 +25,13 @@
 //! the holder reads there beside the tables is whatever else that firmware
 //! keeps in it. Runtime-services code is refused both ways.
 //!
-//! **An address the map does not list is read where it is a register, and
-//! never written.** A chipset keeps registers at addresses its firmware lists
-//! nowhere, and a machine's AML reads them as it loads. Such a read passes at
+//! **An address the map does not list, and memory it types
+//! `EfiMemoryMappedIO`, is read where it is a register, and never written.**
+//! A chipset keeps registers at addresses its firmware lists nowhere, or lists
+//! as memory-mapped I/O, and a machine's AML reads them as it loads: the
+//! firmware's map declaring a range a device's registers is the bound, the
+//! owner's "if thats the best way to do it then yes", since nothing but the
+//! holder's interpreter knows which regions the tables define. Such a read passes at
 //! or above [`FIXED_RANGE_END`] where the kernel maps the address and the
 //! processor's range registers type it uncacheable ([`Memory::uncached`]):
 //! that is what makes a read of a register one read of it, on a machine
@@ -82,6 +86,8 @@ const EFI_RESERVED: u32 = 0;
 const EFI_RUNTIME_DATA: u32 = 6;
 const EFI_ACPI_RECLAIM: u32 = 9;
 const EFI_ACPI_NVS: u32 = 10;
+/// `EfiMemoryMappedIO`.
+const EFI_MMIO: u32 = 11;
 
 /// The local APIC's registers and the window every interrupt message is
 /// addressed to (Intel SDM Vol. 3A §11.4.1 and §11.11.1): the kernel's whether
@@ -121,8 +127,9 @@ pub struct Memory<'a, D> {
     /// The FACS, as `(start, end)`.
     pub facs: Option<(u64, u64)>,
     /// Whether the processor reads `len` bytes at an address uncached,
-    /// whatever maps them: asked only of an address the map does not list, at
-    /// or above [`FIXED_RANGE_END`].
+    /// whatever maps them: asked only of a register's read, at an address the
+    /// map does not list or types `EfiMemoryMappedIO`, at or above
+    /// [`FIXED_RANGE_END`].
     pub uncached: fn(u64, u64) -> bool,
     /// Some CPU's range registers are on and are not the ones `uncached`
     /// answers from: what it answers is not known of a read that CPU makes.
@@ -218,17 +225,18 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         match ty {
             Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
             Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
-            None if !write => {}
+            None | Some(EFI_MMIO) if !write => {}
             Some(_) | None => return No(Refused::MemoryType),
         }
         if last >= self.mapped_end {
             return No(Refused::Unmapped);
         }
-        if ty.is_none() && self.registers_differ {
+        let register = matches!(ty, None | Some(EFI_MMIO));
+        if register && self.registers_differ {
             return No(Refused::RangeRegistersDiffer);
         }
-        if ty.is_none() && (at < FIXED_RANGE_END || !(self.uncached)(at, width.bytes())) {
-            return No(Refused::UnlistedCached);
+        if register && (at < FIXED_RANGE_END || !(self.uncached)(at, width.bytes())) {
+            return No(Refused::RegisterCached);
         }
         if write && self.facs.is_some_and(|facs| overlaps(at, last, facs)) {
             return No(Refused::FacsWrite);

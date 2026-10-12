@@ -1894,7 +1894,7 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: an unbound claim was refused its access, the lock and the power-off's sleep type",
     "acpi: RAM was refused both ways as UsableMemory",
     "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
-    "acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused UnlistedCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
+    "acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused RegisterCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",

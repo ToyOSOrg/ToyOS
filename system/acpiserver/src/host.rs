@@ -7,13 +7,22 @@
 //! the kernel's to make or refuse**, and a refusal it names is denied under
 //! that name.
 //!
-//! **Only the port writes in [`FORWARDED`] are asked of the kernel**, each
-//! said the first time it is asked: a write to a register that changes
-//! nothing but an index or a POST code. Every other port write is denied by
-//! name and never reaches the kernel: a reset-capable port, `SMI_CMD`, a data
-//! register. The reset register is the kernel's to keep wherever it is. A
-//! write to memory or to configuration space is denied by name. SystemCMOS
-//! never arrives: the interpreter refuses that space itself.
+//! **Only the port writes in [`FORWARDED`], and a byte to the FADT's
+//! `SMI_CMD`, are asked of the kernel**, each said the first time it is
+//! asked: a write to a register that changes nothing but an index or a POST
+//! code, and a call into the firmware, which the kernel makes or refuses by
+//! the byte and the rate (`toyos_userbound::firmware`), the owner's "AML may
+//! write exactly the SMI command port the FADT declares". Every other port
+//! write is denied by name and never reaches the kernel: a reset-capable
+//! port, a data register. The reset register is the kernel's to keep wherever
+//! it is.
+//!
+//! **A write to memory is the kernel's to make or refuse, as a read is**:
+//! firmware records what it was told in its own NVS, `_OSC`'s capabilities
+//! among it, and the kernel passes NVS and reserved memory and refuses every
+//! other by name, a write outside every range the firmware's map lists
+//! among them, which is counted with every refusal. A write to configuration
+//! space is denied by name.
 //!
 //! **The embedded controller's space is its own transactions'** ([`crate::ec`],
 //! [`transact`]), a byte each, on the controller the server attached
@@ -257,8 +266,10 @@ pub struct Firmware<'k, K> {
     pub ended: Option<String>,
     pub refused: Ledger,
     notified: Ledger,
-    /// The [`FORWARDED`] writes asked of the kernel, by port and width.
+    /// The port writes asked of the kernel, by port and width.
     written: Ledger,
+    /// The FADT's `SMI_CMD`, a byte to which is a call into the firmware.
+    pub smi_cmd: Option<u16>,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
     /// Presses of one of them notified and not yet served.
@@ -283,6 +294,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             refused: Ledger::default(),
             notified: Ledger::default(),
             written: Ledger::default(),
+            smi_cmd: None,
             buttons: Vec::new(),
             presses: 0,
             stopping: false,
@@ -297,6 +309,22 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             println!("{OWN}that was {own}");
         }
         Denied(what)
+    }
+
+    /// A write the kernel makes or refuses, a refusal denied under its name
+    /// and, for memory, the type of what it was refused in.
+    fn written_through(&mut self, space: Space, address: u64, width: toyos_aml::Access, value: u64, at: Address) -> Result<(), Denied> {
+        match self.kernel.access(Access::write(space, address, wide(width), value)) {
+            Err(Stopping) => Err(self.stopped()),
+            Ok(Answer { made: Ok(_), .. }) => Ok(()),
+            Ok(Answer { made: Err(refused), memory_type }) => {
+                let what = match space {
+                    Space::SystemMemory => format!("a SystemMemory write the kernel refused {refused:?}, in {}", type_name(memory_type)),
+                    space => format!("a {} write the kernel refused {refused:?}", space_name(space)),
+                };
+                Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            }
+        }
     }
 
     fn stopped(&mut self) -> Denied {
@@ -385,21 +413,16 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
         let what = match at {
-            Address::Io(port) if !FORWARDED.contains(&(port, width)) => UNFORWARDED.into(),
+            Address::Io(port) if !FORWARDED.contains(&(port, width)) && (Some(port), width) != (self.smi_cmd, toyos_aml::Access::Byte) => {
+                UNFORWARDED.into()
+            }
             Address::Io(port) => {
                 if self.written.see(&format!("{port:#x} {width:?}")) {
                     println!("acpiserver: a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
                 }
-                return match self.kernel.access(Access::write(Space::SystemIo, u64::from(port), wide(width), value)) {
-                    Err(Stopping) => Err(self.stopped()),
-                    Ok(Answer { made: Ok(_), .. }) => Ok(()),
-                    Ok(Answer { made: Err(refused), .. }) => Err(self.deny(
-                        format!("a SystemIO write the kernel refused {refused:?}"),
-                        format_args!("{width:?} {value:#x} to {at:x?}"),
-                    )),
-                };
+                return self.written_through(Space::SystemIo, u64::from(port), width, value, at);
             }
-            Address::Memory(_) => "a write to SystemMemory: this server writes no memory for AML".into(),
+            Address::Memory(address) => return self.written_through(Space::SystemMemory, address, width, value, at),
             Address::PciConfig { .. } => "a write to PCI_Config: this server writes no configuration space for AML".into(),
             Address::EmbeddedControl(address) => {
                 let byte = u8::try_from(value).expect("a byte access writes a byte");
@@ -471,11 +494,14 @@ pub mod tests {
 
     /// A kernel that answers reads from bytes at addresses, each range with a
     /// memory type, refuses `kept` ranges as the real one refuses memory of a
-    /// type it passes no read of and every other address as it refuses RAM,
-    /// and answers the Global Lock from a script.
+    /// type it passes no access to and every other address as it refuses RAM,
+    /// writes memory where the real one does, which later reads see, and
+    /// answers the Global Lock from a script.
     #[derive(Default)]
     pub struct Scripted {
         pub memory: Vec<(u64, u8, Vec<u8>)>,
+        /// The bytes of `memory` a write changed, by address.
+        pub written: RefCell<std::collections::BTreeMap<u64, u8>>,
         /// `(start, end, memory type)`.
         pub kept: Vec<(u64, u64, u8)>,
         pub ports: Vec<(u64, u64)>,
@@ -514,7 +540,7 @@ pub mod tests {
         fn access(&self, access: Access) -> Result<Answer, Stopping> {
             self.stopping()?;
             self.asked.borrow_mut().push(access);
-            assert!(access.write == 0 || access.space == Space::SystemIo as u8, "this server asks the kernel for no write but a port's");
+            assert!(access.write == 0 || access.space != Space::PciConfig as u8, "this server asks the kernel for no configuration write");
             let width = Width::from_raw(access.width).expect("a width").bytes();
             let listed = |values: &[(u64, u64)]| values.iter().find(|(at, _)| *at == access.address).map(|&(_, value)| value);
             Ok(match Space::from_raw(access.space).expect("a space") {
@@ -523,9 +549,21 @@ pub mod tests {
                         access.address >= *base && access.address + width <= base + bytes.len() as u64
                     });
                     match held {
+                        // ACPI reclaim and runtime-services data, as the real one refuses them.
+                        Some((_, memory_type @ (6 | 9), _)) if access.write != 0 => Answer { made: Err(Refused::TableWrite), memory_type: *memory_type },
+                        Some((_, memory_type, _)) if access.write != 0 => {
+                            let mut written = self.written.borrow_mut();
+                            for i in 0..width {
+                                written.insert(access.address + i, (access.value >> (8 * i)) as u8);
+                            }
+                            Answer { made: Ok(0), memory_type: *memory_type }
+                        }
                         Some((base, memory_type, bytes)) => {
-                            let from = (access.address - base) as usize;
-                            let value = bytes[from..from + width as usize].iter().rev().fold(0u64, |value, &byte| value << 8 | u64::from(byte));
+                            let written = self.written.borrow();
+                            let value = (0..width).rev().fold(0u64, |value, i| {
+                                let at = access.address + i;
+                                value << 8 | u64::from(written.get(&at).copied().unwrap_or(bytes[(at - base) as usize]))
+                            });
                             Answer { made: Ok(value), memory_type: *memory_type }
                         }
                         None => match self.kept.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
@@ -654,18 +692,22 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
-    /// A port write in [`FORWARDED`] is asked of the kernel, and made or
-    /// refused as it answers; every other port and width, memory and
-    /// configuration space are denied by name, and so is the controller's
-    /// space with no controller attached, none of them asked of the kernel.
+    /// A port write in [`FORWARDED`], and a byte to the FADT's `SMI_CMD` once
+    /// the load named it, is asked of the kernel, and made or refused as it
+    /// answers; every other port and width, `SMI_CMD` at another width,
+    /// configuration space, and the controller's space with no controller
+    /// attached are denied by name, none of them asked of the kernel.
     #[test]
-    fn only_a_forwarded_port_write_is_asked_of_the_kernel() {
+    fn only_a_forwarded_port_write_or_a_byte_to_smi_cmd_is_asked_of_the_kernel() {
         use toyos_aml::Access::{Byte, DWord, Word};
         let mut kernel = machine();
-        kernel.ports = vec![(0x72, 0), (0x80, 0)];
+        kernel.ports = vec![(0x72, 0), (0x80, 0), (0xB2, 0)];
         let mut host = Firmware::new(&kernel);
+        assert_eq!(host.write(Address::Io(0xB2), Byte, 0xA0), Err(Denied(UNFORWARDED.into())), "SMI_CMD before the FADT named it");
+        host.smi_cmd = Some(0xB2);
         assert_eq!(host.write(Address::Io(0x80), Word, 0x28), Ok(()));
         assert_eq!(host.write(Address::Io(0x72), Byte, 0x08), Ok(()));
+        assert_eq!(host.write(Address::Io(0xB2), Byte, 0xA0), Ok(()));
         let refused = host.write(Address::Io(0xCD6), Byte, 0x60);
         assert_eq!(refused, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
         assert_eq!(
@@ -673,30 +715,62 @@ pub mod tests {
             [
                 Access::write(Space::SystemIo, 0x80, Width::Word, 0x28),
                 Access::write(Space::SystemIo, 0x72, Width::Byte, 0x08),
+                Access::write(Space::SystemIo, 0xB2, Width::Byte, 0xA0),
                 Access::write(Space::SystemIo, 0xCD6, Width::Byte, 0x60),
             ]
         );
         // Reset-capable ports with the values that reset a machine, the
-        // reset register an AMD laptop shares with `SMI_CMD`, a data
-        // register, and a forwarded port at a width it is not forwarded at.
-        for (port, width, value) in
-            [(0xCF9, Byte, 0x06), (0xCF9, Byte, 0x0E), (0x92, Byte, 0x01), (0xB0, Byte, 0xFB), (0xB2, Byte, 0xA0), (0x73, Byte, 0), (0xCD7, Byte, 0), (0x72, Word, 0), (0x80, Byte, 0), (0x80, DWord, 0)]
-        {
+        // reset register an AMD laptop shares with `SMI_CMD`, `SMI_CMD` at a
+        // width no call is, a data register, and a forwarded port at a width
+        // it is not forwarded at.
+        for (port, width, value) in [
+            (0xCF9, Byte, 0x06),
+            (0xCF9, Byte, 0x0E),
+            (0x92, Byte, 0x01),
+            (0xB0, Byte, 0xFB),
+            (0xB2, Word, 0xA0),
+            (0x73, Byte, 0),
+            (0xCD7, Byte, 0),
+            (0x72, Word, 0),
+            (0x80, Byte, 0),
+            (0x80, DWord, 0),
+        ] {
             assert_eq!(host.write(Address::Io(port), width, value), Err(Denied(UNFORWARDED.into())), "{port:#x} {width:?}");
         }
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
-        for (at, denied) in [
-            (Address::Memory(NVS), "a write to SystemMemory: this server writes no memory for AML"),
-            (function, "a write to PCI_Config: this server writes no configuration space for AML"),
-        ] {
-            assert_eq!(host.write(at, Byte, 0), Err(Denied(denied.into())));
-        }
+        let config = "a write to PCI_Config: this server writes no configuration space for AML";
+        assert_eq!(host.write(function, Byte, 0), Err(Denied(config.into())));
         let controller = Address::EmbeddedControl(0x38);
         assert_eq!(host.write(controller, Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
         assert_eq!(host.read(controller, Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert_eq!(kernel.asked.borrow().len(), 3, "the kernel was asked for an access this server denies itself");
+        assert_eq!(kernel.asked.borrow().len(), 4, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
-        assert_eq!(host.written.counts(), "0x72 Byte x1; 0x80 Word x1; 0xcd6 Byte x1");
+        assert_eq!(host.written.counts(), "0x72 Byte x1; 0x80 Word x1; 0xb2 Byte x1; 0xcd6 Byte x1");
+    }
+
+    /// A write to memory is the kernel's to make or refuse: NVS and reserved
+    /// memory are written, which a later read sees, and a write the kernel
+    /// refuses, to the tables' memory or to memory the firmware's map lists
+    /// nowhere, is denied under the kernel's name for it and the type, and
+    /// counted.
+    #[test]
+    fn a_memory_write_is_the_kernels_to_make_or_refuse() {
+        use toyos_aml::Access::{Byte, DWord, QWord};
+        let mut kernel = machine();
+        kernel.memory.push((0x7fb0_0000, 9, vec![0; 8]));
+        kernel.kept = vec![(0xfe00_0000, 0xfe00_1000, UNLISTED)];
+        let mut host = Firmware::new(&kernel);
+        assert_eq!(host.write(Address::Memory(NVS + 4), DWord, 0xdead_beef), Ok(()));
+        assert_eq!(host.read(Address::Memory(NVS), QWord), Ok(0xdead_beef_4433_2211));
+        assert_eq!(host.write(Address::Memory(NVS + 0x2000), Byte, 1), Ok(()));
+        assert_eq!(host.read(Address::Memory(NVS + 0x2000), Byte), Ok(1));
+        let tables = "a SystemMemory write the kernel refused TableWrite, in memory of type 9";
+        assert_eq!(host.write(Address::Memory(0x7fb0_0000), Byte, 1), Err(Denied(tables.into())));
+        let unlisted = "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory";
+        for _ in 0..2 {
+            assert_eq!(host.write(Address::Memory(0xfe00_0010), DWord, 0), Err(Denied(unlisted.into())));
+        }
+        assert_eq!(host.refused.counts(), format!("{unlisted} x2; {tables} x1"));
     }
 
     /// The controller's space is its own transactions', one a byte, through
