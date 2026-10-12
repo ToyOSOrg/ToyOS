@@ -67,7 +67,7 @@ fn main() -> ExitCode {
             };
             let seed: u64 = args.get(2).map_or(0, |s| s.parse().unwrap_or(0));
             let mut choices = if cmd == "pct" {
-                ChoiceStream::pct(seed, scenario.cpus, 3)
+                ChoiceStream::pct(seed, scenario.cpus(), 3)
             } else {
                 ChoiceStream::from_seed(seed)
             };
@@ -214,7 +214,7 @@ fn main() -> ExitCode {
             for seed in 0..seeds {
                 for pct in [false, true] {
                     let mut choices = if pct {
-                        ChoiceStream::pct(seed, scenario.cpus, 3)
+                        ChoiceStream::pct(seed, scenario.cpus(), 3)
                     } else {
                         ChoiceStream::from_seed(seed)
                     };
@@ -236,7 +236,7 @@ fn main() -> ExitCode {
             };
             let seed: u64 = args.get(2).map_or(0, |s| s.parse().unwrap_or(0));
             let mut choices = if args.get(3).is_some_and(|d| d == "pct") {
-                ChoiceStream::pct(seed, scenario.cpus, 3)
+                ChoiceStream::pct(seed, scenario.cpus(), 3)
             } else {
                 ChoiceStream::from_seed(seed)
             };

@@ -15,6 +15,8 @@ use kernel::sched::cpu::Balance;
 use kernel::sched::queue::FairOrder;
 use kernel::sched::task::WaitClass;
 
+use crate::topology::Shape;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Op {
     /// Consume CPU time. The VM splits it into chunks so that a quantum can
@@ -268,7 +270,8 @@ pub enum Protocol {
 #[derive(Clone, Debug)]
 pub struct Scenario {
     pub name: &'static str,
-    pub cpus: usize,
+    /// The machine: its CPUs, and the cache tree they sit in.
+    pub topology: Shape,
     pub queues: Vec<QueueSpec>,
     pub procs: Vec<ProcSpec>,
     pub irqs: Vec<IrqSpec>,
@@ -331,6 +334,10 @@ pub struct Scenario {
 }
 
 impl Scenario {
+    pub fn cpus(&self) -> usize {
+        self.topology.cpus()
+    }
+
     /// The longest preempt-off section any thread of this scenario runs. It
     /// is a *term* of invariant I4's RT latency bound, not an excuse for it:
     /// making the budget visible is what stops "the sim cannot see kernel
@@ -355,8 +362,9 @@ impl Scenario {
         self
     }
 
-    pub fn with_cpus(mut self, cpus: usize) -> Self {
-        self.cpus = cpus;
+    /// The same workload on another machine.
+    pub fn with_topology(mut self, topology: Shape) -> Self {
+        self.topology = topology;
         self
     }
 
@@ -402,10 +410,10 @@ impl Scenario {
     pub fn with_placement(mut self, placement: PlacementShape) -> Self {
         if let PlacementShape::AllOn(cpu) = placement {
             assert!(
-                cpu < self.cpus,
+                cpu < self.cpus(),
                 "{}: placement names cpu{cpu} on a {}-cpu machine",
                 self.name,
-                self.cpus,
+                self.cpus(),
             );
         }
         self.placement = placement;
@@ -417,10 +425,10 @@ impl Scenario {
     /// sweep is the wrong place to find out.
     pub fn with_stopped(mut self, cpu: usize) -> Self {
         assert!(
-            cpu < self.cpus,
+            cpu < self.cpus(),
             "{}: stopping cpu{cpu} on a {}-cpu machine",
             self.name,
-            self.cpus,
+            self.cpus(),
         );
         self.stopped = Some(cpu);
         self

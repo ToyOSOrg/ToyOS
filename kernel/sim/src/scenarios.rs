@@ -9,6 +9,7 @@ use kernel::sched::cpu::Balance;
 use kernel::sched::queue::FairOrder;
 use kernel::sched::task::WaitClass;
 
+use crate::topology::Shape;
 use crate::vm::RUN_CHUNK_NS;
 use crate::workload::{
     AgeShape, BlockShape, ChargeShape, IrqSpec, MigrateShape, Op, ParkShape,
@@ -29,7 +30,7 @@ fn scenario(
 ) -> Scenario {
     Scenario {
         name,
-        cpus,
+        topology: Shape::flat(cpus),
         queues,
         procs,
         irqs: Vec::new(),
