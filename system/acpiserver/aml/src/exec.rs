@@ -260,9 +260,11 @@ impl<'a> Machine<'a> {
         self.depth -= 1;
     }
 
-    /// Ends an evaluation: whatever it still holds is let go, and holding
-    /// anything at its end is itself a refusal (§19.6.88: "the top-level
-    /// control method cannot exit while still holding ownership of a Mutex").
+    /// Ends an evaluation: whatever it still holds is let go, as ACPICA's
+    /// `AcpiExReleaseAllMutexes` lets go at a refused evaluation's end, and
+    /// holding anything at its end is itself a refusal (§19.6.88: "the
+    /// top-level control method cannot exit while still holding ownership of
+    /// a Mutex").
     /// What it took goes to `took`, whichever way it ends.
     pub(crate) fn finish<T>(mut self, r: Result<T, Error>, took: &mut Usage) -> Result<T, Error> {
         (took.steps, took.waited_us) = (self.steps, self.waited_us);
@@ -441,6 +443,9 @@ impl<'a> Machine<'a> {
         let bytes = table.borrow();
         let mut c = Cursor::new(&bytes, start, end);
         let flow = self.term_list(&mut f, &mut c);
+        // However the method ends, refused at the heap bound among the ways,
+        // what it defined goes, as ACPICA's `AcpiDsTerminateControlMethod`
+        // deletes "everything that the method created" (ACPICA 20260408).
         self.ns.unwind(made);
         if m.serialized {
             self.levels.pop();

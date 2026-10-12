@@ -10,8 +10,12 @@
 //! what an interpreter holds of tables, namespace and objects is bounded in
 //! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
 //! without anything that table created, and the interpreter holding what it
-//! held before. What the last load or evaluation took of those bounds is
-//! [`Interpreter::usage`]'s, a refused one's too.
+//! held before. An evaluation refused, at the heap bound as at any other,
+//! gives back everything its methods made and every Mutex they held, and
+//! keeps what they stored into an object that outlives them: ACPICA's end of
+//! a method refused for memory, the owner's "follow Linux/ACPICA". What the
+//! last load or evaluation took of those bounds is [`Interpreter::usage`]'s,
+//! a refused one's too.
 //!
 //! [`Interpreter::walk`] reads the namespace an interpreter holds, and runs
 //! nothing of it: which objects a caller then evaluates, and in which order,
