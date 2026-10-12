@@ -76,10 +76,15 @@ fn wire(text: &str) -> Vec<u8> {
 }
 
 fn rr(owner: &[u8], rtype: u16, class: u16, data: &[u8]) -> Vec<u8> {
+    timed(owner, rtype, class, 300, data)
+}
+
+/// A record whose TTL is `ttl` (RFC 1035 §4.1.3).
+fn timed(owner: &[u8], rtype: u16, class: u16, ttl: u32, data: &[u8]) -> Vec<u8> {
     let mut out = owner.to_vec();
     out.extend_from_slice(&rtype.to_be_bytes());
     out.extend_from_slice(&class.to_be_bytes());
-    out.extend_from_slice(&300u32.to_be_bytes());
+    out.extend_from_slice(&ttl.to_be_bytes());
     out.extend_from_slice(&(data.len() as u16).to_be_bytes());
     out.extend_from_slice(data);
     out
@@ -96,21 +101,37 @@ fn cname(owner: &str, target: &str) -> Vec<u8> {
 /// A response with ID `id`, `flags`, one question for `asked`'s `A`, and
 /// `answers` as the answer section.
 fn reply(id: u16, flags: u16, asked: &str, answers: &[Vec<u8>]) -> Vec<u8> {
+    reply_with(id, flags, asked, answers, &[])
+}
+
+/// [`reply`], with `authority` as the authority section.
+fn reply_with(id: u16, flags: u16, asked: &str, answers: &[Vec<u8>], authority: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::new();
-    for word in [id, flags, 1, answers.len() as u16, 0, 0] {
+    for word in [id, flags, 1, answers.len() as u16, authority.len() as u16, 0] {
         out.extend_from_slice(&word.to_be_bytes());
     }
     out.extend_from_slice(&wire(asked));
     out.extend_from_slice(&TYPE_A.to_be_bytes());
     out.extend_from_slice(&CLASS_IN.to_be_bytes());
-    for answer in answers {
-        out.extend_from_slice(answer);
+    for record in answers.iter().chain(authority) {
+        out.extend_from_slice(record);
     }
     out
 }
 
-fn answer(aliases: &[&str], addrs: &[[u8; 4]]) -> Verdict {
-    Verdict::Answer(Answer { aliases: aliases.iter().map(|a| name(a)).collect(), addrs: addrs.to_vec() })
+/// An SOA record of `zone` (RFC 1035 §3.3.13) whose TTL is `ttl` and whose
+/// MINIMUM, its last field, is `minimum`.
+fn soa(zone: &str, ttl: u32, minimum: u32) -> Vec<u8> {
+    let mut data = wire("ns.example");
+    data.extend_from_slice(&wire("hostmaster.example"));
+    for field in [1, 7_200, 900, 1_209_600, minimum] {
+        data.extend_from_slice(&u32::to_be_bytes(field));
+    }
+    timed(&wire(zone), TYPE_SOA, CLASS_IN, ttl, &data)
+}
+
+fn answer(aliases: &[&str], addrs: &[[u8; 4]], keep: u32) -> Verdict {
+    Verdict::Answer(Answer { aliases: aliases.iter().map(|a| name(a)).collect(), addrs: addrs.to_vec(), keep })
 }
 
 fn stray(why: &'static str) -> Verdict {
@@ -183,7 +204,7 @@ fn rfc1035_5_1_a_name_off_the_wire_is_written_with_every_odd_byte_escaped() {
 
 #[test]
 fn a_real_reply_with_two_addresses_gives_both_in_order() {
-    assert_eq!(read(&REAL_GOOGLE, 0x1001, &name("dns.google"), MAX_ALIASES), answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]]));
+    assert_eq!(read(&REAL_GOOGLE, 0x1001, &name("dns.google"), MAX_ALIASES), answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]], 719));
 }
 
 #[test]
@@ -192,12 +213,13 @@ fn rfc1034_3_6_2_a_real_chain_of_aliases_is_followed_to_its_address() {
         read(&REAL_APPLE, 0x1000, &name("www.apple.com"), MAX_ALIASES),
         answer(
             &["www-apple-com.v.aaplimg.com", "www.apple.com.edgekey.net", "e6858.dsce9.akamaiedge.net"],
-            &[[23, 32, 112, 246]]
+            &[[23, 32, 112, 246]],
+            9
         )
     );
     assert_eq!(
         read(&REAL_MICROSOFT, 0x1003, &name("www.microsoft.com"), MAX_ALIASES),
-        answer(&["www.microsoft.com-c-3.edgekey.net", "e13678.dscb.akamaiedge.net"], &[[23, 212, 193, 218]])
+        answer(&["www.microsoft.com-c-3.edgekey.net", "e13678.dscb.akamaiedge.net"], &[[23, 212, 193, 218]], 7)
     );
     assert_eq!(
         read(&REAL_APPLE, 0x1000, &name("www.apple.com"), 2),
@@ -208,7 +230,7 @@ fn rfc1034_3_6_2_a_real_chain_of_aliases_is_followed_to_its_address() {
 
 #[test]
 fn rfc6761_6_4_a_real_invalid_name_does_not_exist() {
-    assert_eq!(read(&REAL_INVALID, 0x1002, &name("doesnotexist.invalid"), MAX_ALIASES), Verdict::NoSuchName);
+    assert_eq!(read(&REAL_INVALID, 0x1002, &name("doesnotexist.invalid"), MAX_ALIASES), Verdict::NoSuchName(KEEP_CAP_S));
 }
 
 // --- Whose reply it is (RFC 5452 §9.1) ---
@@ -220,7 +242,7 @@ fn rfc5452_9_1_a_reply_is_read_only_for_its_id_and_its_question() {
     assert_eq!(read(&REAL_GOOGLE, 0x1001, &name("dns.googlf"), MAX_ALIASES), Verdict::Stray(Stray::OtherQuestion));
     assert_eq!(
         read(&REAL_GOOGLE, 0x1001, &name("DNS.Google"), MAX_ALIASES),
-        answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]]),
+        answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]], 719),
         "a server may echo the question in another case"
     );
     let mut other_type = REAL_GOOGLE;
@@ -262,8 +284,9 @@ fn rfc1035_4_1_1_every_rcode_is_named() {
         let mut msg = REAL_GOOGLE;
         msg[3] = (msg[3] & 0xf0) | rcode;
         let expected = match rcode {
-            0 => answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]]),
-            3 => Verdict::NoSuchName,
+            0 => answer(&[], &[[8, 8, 4, 4], [8, 8, 8, 8]], 719),
+            // With no SOA to say how long, nothing.
+            3 => Verdict::NoSuchName(0),
             _ => Verdict::ServerFailed(rcode),
         };
         assert_eq!(read(&msg, 0x1001, &name("dns.google"), MAX_ALIASES), expected, "rcode {rcode}");
@@ -273,7 +296,7 @@ fn rfc1035_4_1_1_every_rcode_is_named() {
 #[test]
 fn rfc2308_2_2_a_name_with_no_address_is_an_empty_answer() {
     let msg = reply(7, OK, "mail.example", &[]);
-    assert_eq!(read(&msg, 7, &name("mail.example"), MAX_ALIASES), answer(&[], &[]));
+    assert_eq!(read(&msg, 7, &name("mail.example"), MAX_ALIASES), answer(&[], &[], 0));
 }
 
 // --- Which records are read ---
@@ -286,12 +309,12 @@ fn rfc2181_5_4_1_an_address_for_a_name_not_asked_is_not_read() {
         "www.example",
         &[a("bank.example", [6, 6, 6, 6]), a("www.example", [1, 2, 3, 4]), a("example", [6, 6, 6, 6])],
     );
-    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]]));
+    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]], 300));
     // An address beside an alias belongs to the name that is not the chain's
     // end, and so is not read either (RFC 1034 §3.6.2: no other data at an
     // alias).
     let beside = reply(7, OK, "www.example", &[a("www.example", [6, 6, 6, 6]), cname("www.example", "cdn.example")]);
-    assert_eq!(read(&beside, 7, &name("www.example"), MAX_ALIASES), answer(&["cdn.example"], &[]));
+    assert_eq!(read(&beside, 7, &name("www.example"), MAX_ALIASES), answer(&["cdn.example"], &[], 300));
 }
 
 #[test]
@@ -310,7 +333,7 @@ fn rfc1034_3_6_2_a_chain_is_followed_in_any_order() {
     );
     assert_eq!(
         read(&msg, 7, &name("www.example"), MAX_ALIASES),
-        answer(&["b.example", "c.example"], &[[9, 9, 9, 9], [8, 8, 8, 8]]),
+        answer(&["b.example", "c.example"], &[[9, 9, 9, 9], [8, 8, 8, 8]], 300),
         "each address once, in the reply's order"
     );
 }
@@ -329,7 +352,7 @@ fn a_chain_exactly_at_the_bound_is_followed() {
     answers.push(a(&hops[MAX_ALIASES], [5, 5, 5, 5]));
     let msg = reply(7, OK, &hops[0], &answers);
     let aliases: Vec<&str> = hops[1..].iter().map(|s| s.as_str()).collect();
-    assert_eq!(read(&msg, 7, &name(&hops[0]), MAX_ALIASES), answer(&aliases, &[[5, 5, 5, 5]]));
+    assert_eq!(read(&msg, 7, &name(&hops[0]), MAX_ALIASES), answer(&aliases, &[[5, 5, 5, 5]], 300));
     assert_eq!(read(&msg, 7, &name(&hops[0]), MAX_ALIASES - 1), Verdict::TooManyAliases);
 }
 
@@ -347,7 +370,7 @@ fn records_of_another_class_or_type_are_passed_over() {
         "www.example",
         &[rr(&wire("www.example"), TYPE_A, 3, &[6, 6, 6, 6]), rr(&wire("www.example"), 28, CLASS_IN, &[6; 16]), a("www.example", [1, 1, 1, 1])],
     );
-    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 1, 1, 1]]));
+    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 1, 1, 1]], 300));
 }
 
 #[test]
@@ -393,11 +416,11 @@ const FIRST_ANSWER: u16 = 12 + 13 + 4;
 
 #[test]
 fn rfc1035_4_1_4_a_pointer_to_a_prior_name_is_read() {
-    assert_eq!(read(&with_owner(&[0xc0, 12]), 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]]));
+    assert_eq!(read(&with_owner(&[0xc0, 12]), 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]], 300));
     // A label, then a pointer into the question's second label.
     let mut owner = vec![3, b'w', b'w', b'w'];
     owner.extend_from_slice(&[0xc0, 16]);
-    assert_eq!(read(&with_owner(&owner), 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]]));
+    assert_eq!(read(&with_owner(&owner), 7, &name("www.example"), MAX_ALIASES), answer(&[], &[[1, 2, 3, 4]], 300));
 }
 
 #[test]
@@ -466,7 +489,7 @@ fn rfc1035_2_3_4_a_name_built_past_255_bytes_by_pointers_is_refused() {
     // Three of them are 193 bytes, and read.
     assert_eq!(
         read(&pointing_at(starts[2]), 7, &name("www.example"), MAX_ALIASES),
-        answer(&[], &[]),
+        answer(&[], &[], 0),
         "a 193-byte owner not asked about"
     );
 }
@@ -491,7 +514,7 @@ fn rfc1035_2_3_4_an_owner_of_255_bytes_is_read_and_one_of_256_is_refused() {
     let msg = with_owner(&edge);
     let (read_back, after) = name_at(&msg, at).expect("a 255-byte owner");
     assert_eq!((read_back.wire(), after), (&edge[..], at + 255));
-    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[]), "255 bytes, not asked about");
+    assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), answer(&[], &[], 0), "255 bytes, not asked about");
     let msg = with_owner(&past);
     assert_eq!(name_at(&msg, at).map(|_| ()), Err(Stray::Malformed("a name longer than 255 bytes")));
     assert_eq!(read(&msg, 7, &name("www.example"), MAX_ALIASES), stray("a name longer than 255 bytes"));
@@ -1219,4 +1242,264 @@ fn a_server_that_answered_with_a_failure_is_what_a_lookup_that_then_reached_nobo
     let third = lookup.on_unreached(asked(&second).0, 2, || 3);
     assert_eq!(to(&third), (S1, 3));
     assert_eq!(lookup.on_unreached(asked(&third).0, 3, undrawn), Step::Done(Err(Failure::ServerFailed(2))));
+}
+
+// --- How long an answer is kept (RFC 1035 §4.1.3, RFC 2181 §5.2, RFC 2308 §5) ---
+
+const NX: u16 = OK | 3;
+
+/// Until when a lookup of `text` that starts at 1 s keeps what it ends with,
+/// having read `msgs` in turn, each the reply to the query before it, at the
+/// time it is paired with.
+fn kept_until(text: &str, msgs: &[(u64, Vec<u8>)]) -> Option<u64> {
+    let (mut lookup, first) = Lookup::start(name(text), &[S1], 1_000, || 1).unwrap();
+    let mut q = asked(&first).0;
+    for (at, msg) in msgs {
+        match lookup.on_datagram(q, S1, PORT, msg, *at, || 2) {
+            Step::Done(_) => break,
+            step => q = asked(&step).0,
+        }
+    }
+    lookup.keep_until()
+}
+
+#[test]
+fn rfc2181_5_2_an_answer_is_kept_for_the_least_ttl_of_its_aliases_and_its_differing_addresses() {
+    let msg = reply(
+        1,
+        OK,
+        "www.example",
+        &[
+            timed(&wire("www.example"), TYPE_CNAME, CLASS_IN, 200, &wire("cdn.example")),
+            timed(&wire("cdn.example"), TYPE_A, CLASS_IN, 100, &[1, 1, 1, 1]),
+            timed(&wire("cdn.example"), TYPE_A, CLASS_IN, 50, &[2, 2, 2, 2]),
+            timed(&wire("other.example"), TYPE_A, CLASS_IN, 5, &[6, 6, 6, 6]),
+        ],
+    );
+    assert_eq!(read(&msg, 1, &name("www.example"), MAX_ALIASES), answer(&["cdn.example"], &[[1, 1, 1, 1], [2, 2, 2, 2]], 50));
+    assert_eq!(kept_until("www.example", &[(1_500, msg)]), Some(1_000 + 50_000), "from the query's send at 1 s, not the reply's read");
+}
+
+// RFC 1034 §5.3.3 asks an alias's end again: the second query leaves after
+// the first reply is read, and the first reply's alias, which holds the least
+// TTL, still counts from the first query's send.
+#[test]
+fn every_ttl_counts_from_the_first_querys_send_across_an_alias_asked_again() {
+    let first = reply(1, OK, "www.example", &[timed(&wire("www.example"), TYPE_CNAME, CLASS_IN, 10, &wire("cdn.example"))]);
+    let second = reply(2, OK, "cdn.example", &[timed(&wire("cdn.example"), TYPE_A, CLASS_IN, 300, &[1, 2, 3, 4])]);
+    assert_eq!(kept_until("www.example", &[(4_000, first), (4_500, second)]), Some(1_000 + 10_000));
+}
+
+// RFC 1035 §4.2.1 asks again when a wait is over: a reply to the first query,
+// read after the second left, counts from the first's send.
+#[test]
+fn every_ttl_counts_from_the_first_querys_send_across_a_query_sent_again() {
+    let (mut lookup, first) = Lookup::start(name("www.example"), &[S1, S2], 0, || 1).unwrap();
+    assert_eq!(to(&lookup.on_time(WAIT_MS, || 2)), (S2, 2), "the premise: a second query left at the first one's wait");
+    let late = reply(1, OK, "www.example", &[timed(&wire("www.example"), TYPE_A, CLASS_IN, 10, &[1, 2, 3, 4])]);
+    assert_eq!(lookup.on_datagram(asked(&first).0, S1, PORT, &late, WAIT_MS + 1, undrawn), Step::Done(Ok(vec![[1, 2, 3, 4]])));
+    assert_eq!(lookup.keep_until(), Some(10_000));
+}
+
+#[test]
+fn rfc1035_4_1_3_a_ttl_of_zero_anywhere_in_what_was_read_keeps_nothing() {
+    let alias = reply(
+        1,
+        OK,
+        "www.example",
+        &[timed(&wire("www.example"), TYPE_CNAME, CLASS_IN, 0, &wire("cdn.example")), timed(&wire("cdn.example"), TYPE_A, CLASS_IN, 300, &[1, 2, 3, 4])],
+    );
+    let address = reply(1, OK, "www.example", &[timed(&wire("www.example"), TYPE_A, CLASS_IN, 0, &[1, 2, 3, 4])]);
+    let earlier = reply(1, OK, "www.example", &[timed(&wire("www.example"), TYPE_CNAME, CLASS_IN, 0, &wire("cdn.example"))]);
+    let later = reply(2, OK, "cdn.example", &[timed(&wire("cdn.example"), TYPE_A, CLASS_IN, 300, &[1, 2, 3, 4])]);
+    assert_eq!(kept_until("www.example", &[(1_000, alias)]), None, "an alias's");
+    assert_eq!(kept_until("www.example", &[(1_000, address)]), None, "an address's");
+    assert_eq!(kept_until("www.example", &[(1_000, earlier), (1_000, later)]), None, "an earlier reply's");
+}
+
+// RFC 8767 §4: "a 32-bit unsigned integer number of seconds", "SHOULD be
+// capped". The high-order bit set is a long time, not none.
+#[test]
+fn rfc8767_4_a_ttl_is_read_unsigned_and_kept_an_hour_at_most() {
+    for ttl in [KEEP_CAP_S + 1, 86_400, 0x8000_0000, u32::MAX] {
+        let msg = reply(1, OK, "www.example", &[timed(&wire("www.example"), TYPE_A, CLASS_IN, ttl, &[1, 2, 3, 4])]);
+        assert_eq!(kept_until("www.example", &[(1_000, msg)]), Some(1_000 + 3_600_000), "{ttl:#x}");
+    }
+    assert_eq!(
+        read(&REAL_INVALID, 0x1002, &name("doesnotexist.invalid"), MAX_ALIASES),
+        Verdict::NoSuchName(KEEP_CAP_S),
+        "the root's SOA, TTL and MINIMUM 86,400 s"
+    );
+}
+
+#[test]
+fn rfc2308_5_an_absence_is_kept_for_the_least_of_its_soas_ttl_and_minimum_and_of_its_aliases() {
+    let nxdomain = |alias: u32, ttl: u32, minimum: u32| {
+        reply_with(
+            1,
+            NX,
+            "www.example",
+            &[timed(&wire("www.example"), TYPE_CNAME, CLASS_IN, alias, &wire("gone.example"))],
+            &[soa("example", ttl, minimum)],
+        )
+    };
+    assert_eq!(read(&nxdomain(1_000, 300, 900), 1, &name("www.example"), MAX_ALIASES), Verdict::NoSuchName(300), "the SOA's TTL");
+    assert_eq!(read(&nxdomain(1_000, 900, 300), 1, &name("www.example"), MAX_ALIASES), Verdict::NoSuchName(300), "its MINIMUM");
+    assert_eq!(read(&nxdomain(100, 900, 300), 1, &name("www.example"), MAX_ALIASES), Verdict::NoSuchName(100), "the alias that led there");
+    let nodata = reply_with(1, OK, "www.example", &[], &[soa("www.example", 120, 900)]);
+    assert_eq!(read(&nodata, 1, &name("www.example"), MAX_ALIASES), answer(&[], &[], 120), "NODATA, under its own name's SOA");
+    assert_eq!(kept_until("www.example", &[(1_000, nodata)]), Some(1_000 + 120_000));
+}
+
+// RFC 2308 §5: "Negative responses without SOA records SHOULD NOT be cached";
+// and an SOA counts only where the denied name, the chain's last, is in its
+// zone.
+#[test]
+fn rfc2308_5_an_absence_with_no_soa_or_with_one_outside_the_denied_names_zone_keeps_nothing() {
+    let denied = |authority: &[Vec<u8>]| {
+        reply_with(1, NX, "www.example", &[cname("www.example", "gone.other")], authority)
+    };
+    for (what, authority) in [
+        ("none", vec![]),
+        ("another zone's", vec![soa("example", 300, 300)]),
+        ("a name below the denied one", vec![soa("x.gone.other", 300, 300)]),
+    ] {
+        assert_eq!(read(&denied(&authority), 1, &name("www.example"), MAX_ALIASES), Verdict::NoSuchName(0), "{what}");
+    }
+    for zone in ["gone.other", "other", "OTHER"] {
+        assert_eq!(read(&denied(&[soa(zone, 300, 300)]), 1, &name("www.example"), MAX_ALIASES), Verdict::NoSuchName(300), "{zone}");
+    }
+    let nodata = reply_with(1, OK, "www.example", &[], &[soa("other", 300, 300)]);
+    assert_eq!(read(&nodata, 1, &name("www.example"), MAX_ALIASES), answer(&[], &[], 0), "NODATA");
+}
+
+#[test]
+fn rfc1035_3_3_13_an_soa_record_is_two_names_and_five_numbers() {
+    let mut long = soa("example", 300, 300);
+    let len_at = long.len() - 20 - wire("ns.example").len() - wire("hostmaster.example").len() - 2;
+    long[len_at + 1] += 1;
+    long.push(0);
+    let mut short = soa("example", 300, 300);
+    short[len_at + 1] -= 1;
+    short.pop();
+    for record in [long, short] {
+        let msg = reply_with(1, NX, "www.example", &[], &[record]);
+        assert_eq!(read(&msg, 1, &name("www.example"), MAX_ALIASES), stray("an SOA record whose data is not two names and five numbers"));
+    }
+}
+
+// --- What a cache answers, to whom, and for how long ---
+
+const ONE: &[u8] = b"one";
+const TWO: &[u8] = b"two";
+
+/// `cache` keeps `addr` for `view` under `text`, from a lookup that started
+/// under its generation, until `until`.
+fn keep(cache: &mut Cache, view: &[u8], text: &str, addr: [u8; 4], until: u64) {
+    let generation = cache.generation();
+    cache.keep(view, &name(text), generation, Ok(&[addr]), Some(until), 0);
+}
+
+#[test]
+fn an_answer_is_given_before_its_deadline_and_not_at_it() {
+    let mut cache = Cache::default();
+    keep(&mut cache, ONE, "www.example", [1, 2, 3, 4], 10_000);
+    assert_eq!(cache.answer(ONE, &name("WWW.example"), 9_999), Some(Ok(vec![[1, 2, 3, 4]])));
+    assert_eq!(cache.answer(ONE, &name("www.example"), 10_000), None);
+}
+
+#[test]
+fn a_view_is_never_answered_from_another_views_entry() {
+    let mut cache = Cache::default();
+    keep(&mut cache, ONE, "www.example", [1, 2, 3, 4], 10_000);
+    assert_eq!(cache.answer(TWO, &name("www.example"), 0), None);
+    assert_eq!(cache.answer(ONE, &name("www.example"), 0), Some(Ok(vec![[1, 2, 3, 4]])), "the premise: the entry is live");
+}
+
+#[test]
+fn a_failure_is_never_kept_and_an_absence_is() {
+    let mut cache = Cache::default();
+    let generation = cache.generation();
+    for failure in [Failure::TimedOut, Failure::Unreachable, Failure::Truncated, Failure::ServerFailed(2), Failure::TooManyAliases] {
+        cache.keep(ONE, &name("www.example"), generation, Err(failure), Some(10_000), 0);
+        assert_eq!(cache.answer(ONE, &name("www.example"), 0), None, "{failure:?}");
+    }
+    for absence in [Failure::NoSuchName, Failure::NoAddress] {
+        cache.keep(ONE, &name("www.example"), generation, Err(absence), Some(10_000), 0);
+        assert_eq!(cache.answer(ONE, &name("www.example"), 0), Some(Err(absence)));
+    }
+}
+
+#[test]
+fn the_answer_of_a_lookup_started_before_an_emptying_is_not_kept() {
+    let mut cache = Cache::default();
+    let started = cache.generation();
+    cache.empty();
+    cache.keep(ONE, &name("www.example"), started, Ok(&[[1, 2, 3, 4]]), Some(10_000), 0);
+    assert_eq!(cache.answer(ONE, &name("www.example"), 0), None);
+    keep(&mut cache, ONE, "www.example", [1, 2, 3, 4], 10_000);
+    assert_eq!(cache.answer(ONE, &name("www.example"), 0), Some(Ok(vec![[1, 2, 3, 4]])), "the premise: the same answer, started after it");
+}
+
+/// A distinct name for each `i`.
+fn nth(i: usize) -> std::string::String {
+    std::format!("n{i}.example")
+}
+
+#[test]
+fn a_full_view_drops_its_own_least_recently_used_entry_and_no_other_views() {
+    let mut cache = Cache::default();
+    keep(&mut cache, TWO, "www.example", [2, 2, 2, 2], 10_000);
+    for i in 0..VIEW_ENTRIES {
+        keep(&mut cache, ONE, &nth(i), [1, 1, 1, 1], 10_000);
+    }
+    assert!(cache.answer(ONE, &name(&nth(0)), 0).is_some(), "the premise: the first is kept, and now the most recently used");
+    keep(&mut cache, ONE, "www.example", [1, 2, 3, 4], 10_000);
+    assert_eq!(cache.answer(ONE, &name(&nth(1)), 0), None, "the least recently used");
+    for i in (0..VIEW_ENTRIES).filter(|i| *i != 1) {
+        assert!(cache.answer(ONE, &name(&nth(i)), 0).is_some(), "{}", nth(i));
+    }
+    assert_eq!(cache.answer(TWO, &name("www.example"), 0), Some(Ok(vec![[2, 2, 2, 2]])), "the other view's");
+}
+
+#[test]
+fn a_full_view_drops_its_expired_entries_before_a_live_one() {
+    let mut cache = Cache::default();
+    for i in 0..VIEW_ENTRIES {
+        keep(&mut cache, ONE, &nth(i), [1, 1, 1, 1], if i == VIEW_ENTRIES - 1 { 5_000 } else { 10_000 });
+    }
+    let generation = cache.generation();
+    cache.keep(ONE, &name("www.example"), generation, Ok(&[[1, 2, 3, 4]]), Some(10_000), 5_000);
+    assert!(cache.answer(ONE, &name(&nth(0)), 5_000).is_some(), "the least recently used, live");
+    assert!(cache.answer(ONE, &name("www.example"), 5_000).is_some());
+}
+
+/// `cache` holding [`MAX_VIEWS`] views, view `i` named `[i]` and keeping one
+/// name until `until(i)`, view 0 the least recently used.
+fn every_view(cache: &mut Cache, until: impl Fn(u8) -> u64) {
+    for i in 0..MAX_VIEWS as u8 {
+        keep(cache, &[i], "www.example", [i, i, i, i], until(i));
+    }
+}
+
+#[test]
+fn a_new_view_replaces_one_whose_entries_have_all_expired_before_a_live_one() {
+    let mut cache = Cache::default();
+    every_view(&mut cache, |i| if i == 5 { 1_000 } else { 10_000 });
+    let generation = cache.generation();
+    cache.keep(b"new", &name("www.example"), generation, Ok(&[[9, 9, 9, 9]]), Some(10_000), 1_000);
+    assert_eq!(cache.answer(&[0], &name("www.example"), 1_000), Some(Ok(vec![[0, 0, 0, 0]])), "the least recently used view, live");
+    assert_eq!(cache.answer(b"new", &name("www.example"), 1_000), Some(Ok(vec![[9, 9, 9, 9]])));
+}
+
+#[test]
+fn a_new_view_replaces_the_least_recently_used_live_view_when_none_has_expired() {
+    let mut cache = Cache::default();
+    every_view(&mut cache, |_| 10_000);
+    assert!(cache.answer(&[0], &name("www.example"), 0).is_some(), "the premise: view 0 is now the most recently used");
+    keep(&mut cache, b"new", "www.example", [9, 9, 9, 9], 10_000);
+    assert_eq!(cache.answer(&[1], &name("www.example"), 0), None, "view 1's live entry");
+    for i in (0..MAX_VIEWS as u8).filter(|i| *i != 1) {
+        assert_eq!(cache.answer(&[i], &name("www.example"), 0), Some(Ok(vec![[i, i, i, i]])), "view {i}");
+    }
 }
