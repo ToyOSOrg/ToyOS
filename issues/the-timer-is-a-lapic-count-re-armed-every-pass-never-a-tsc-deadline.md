@@ -20,9 +20,10 @@ https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693). A timer fir
 calibration spins the boot for 10 ms (`apic.rs:315-320`, from
 `kernel/src/arch/x86_64/boot.rs:135`). TSC-deadline mode (CPUID.01H:ECX[24])
 takes the absolute deadline in TSC units as one `IA32_TSC_DEADLINE` write,
-with no calibration of a second timebase. The T14 enumerates it
-(`tsc_deadline_timer`, `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether
-the AMD bench does is unread.
+with no calibration of a second timebase (SDM 325462-093, Vol. 3A §13.5.4.1).
+The T14 enumerates it (`tsc_deadline_timer`,
+`kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether the AMD bench does is
+unread.
 
 **Measured** (`wt/toyos-scout-tlb` at `d4c2f8ebe`, `main`'s `177e72a9e` plus
 the scout; https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198),
@@ -47,23 +48,8 @@ the deadline into a span, and a deadline written as an absolute
 is an upper bound on what deadline mode saves, which still writes once to arm
 and once to stop; on the AMD bench both sit at its TSC's floor.
 
-**Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
-one-shot armed and stopped through `IA32_TSC_DEADLINE`, timed by the same
-split beside `main` in the same session, with the re-arm segment opening at
-`set_timer` (`kernel/src/hw.rs:49`) in both arms. Its kill line, fixed here
-before it runs: deadline mode is not worth building for speed if what it
-takes off a pass, `main`'s re-arm p50 less the twin's, is under 5 % of
-`main`'s pick plus switch in either direction (221 and 216 ticks on the
-scout's figures). Its clock control, fixed with the line: each arm reads
-APERF and MPERF on CPUs 4 and 5 before and after the split, and where the two
-arms' ratios of APERF's advance to MPERF's differ by more than 1 % on either
-CPU, both arms' readings are void and decide nothing. Where the line fires,
-this file becomes `rejected` with both readings, and the boot's 10 ms
-calibration spin stays the count's price.
-
-**Exit**: the twin's reading, posted, and the AMD bench's CPUID.01H:ECX[24]
-read. Where the twin clears the line, a deadline is armed on every CPU that
-enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the absolute
-value, and the T14's 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` is no worse
-than the count's.
+**Exit**: the AMD bench's CPUID.01H:ECX[24] read; a deadline armed on every
+CPU that enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the
+absolute value; and the split above, and the T14's 1 ms timer lateness of
+`issues/no-program-measures-toyos-against-linux-on-one-machine.md`, read with
+the count and with the deadline.

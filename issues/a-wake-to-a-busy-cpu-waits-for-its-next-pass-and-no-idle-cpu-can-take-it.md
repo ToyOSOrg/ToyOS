@@ -38,9 +38,11 @@ dispatch on the kernel clock; quantiles are bucket upper bounds, accurate to
 With 7 spinners every wake to a busy target waited out a whole quantum on
 both machines, while the slowest wake to a sleeping one took 2.16 µs (T14)
 and 3.17 µs (AMD bench), and the pair fell from about 181,600 (T14) and
-205,200 (AMD bench) rounds a second with no spinners to 100. The kill condition fixed before the run, the change
-dropped if the busy-target p99 is under about 100 µs with 7 and with 8
-spinners on both benches, did not fire: it reads 68 to 105 times that.
+205,200 (AMD bench) rounds a second with no spinners to 100. A woken task
+waiting in a busy CPU's mailbox while another CPU idles breaks the invariant
+published work holds a scheduler to: ready threads run on available cores,
+and no core stays idle while another is overloaded (Lozi et al., "The Linux
+Scheduler: a Decade of Wasted Cores", EuroSys 2016).
 
 **Exit**: a metal row on the T14 and the AMD bench that wakes a task onto a
 CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs, and

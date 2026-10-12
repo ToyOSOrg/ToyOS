@@ -18,14 +18,17 @@ each that has its feature. A figure is the T14's, and the AMD bench's too
 where the stage's path differs there, since the EPYC guests are shared CI
 runners: the median of 11 runs with its spread, taken by the program of
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md`.
-A stage is done at or past that program's Linux figure, or with the gap filed
-as a defect carrying both; a feature Linux has no counterpart for lands only
-if it beats ToyOS without it. What no proving machine is known to offer is
-`issues/features-no-proving-machine-is-known-to-offer.md`.
+A stage cites what its hardware's manufacturers document and the published
+state of the art. Where they back it, its figure is reported and never blocks
+it: a slowdown, or a gap to that program's Linux figure, is filed as a defect
+carrying both figures and investigated. A stage they do not cover is reviewed
+on its correctness and simplicity, its figure reported and deciding nothing by
+itself unless speed is the stage's only purpose. What no proving machine is
+known to offer is `issues/features-no-proving-machine-is-known-to-offer.md`.
 
 **Measurement first.** Each design round starts from a posted measurement,
-never a guess, judged by a kill condition fixed before the run. Three scouts
-on `main`'s `177e72a9e` have read both benches, or the T14 against Ubuntu:
+never a guess. Three scouts on `main`'s `177e72a9e` have read both benches,
+or the T14 against Ubuntu:
 https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119438569 (the
 syscall and wake latency),
 https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198 (the TLB
@@ -33,25 +36,18 @@ and the idle wake) and
 https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119513916 (the clock
 and contention).
 
-**Measured, and worth building.** Each issue carries its reading.
+**Measured.** Each issue carries its reading.
 
 - The syscall's FP save and the `lock` prefixes it takes are 34.5 % of a null
   syscall on the T14 and 43.4 % on the AMD bench:
   `issues/every-syscall-saves-the-fp-state-and-every-preemption-disable-is-locked.md`.
-- A wake to a busy CPU waits out a whole 10 ms quantum on both benches, p99
-  68 to 105 times a 100 µs bar:
+- A wake to a busy CPU waits out a whole 10 ms quantum on both benches:
   `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`.
-
-**Bounded, and judged next by a twin** whose kill line its issue fixes
-before it runs.
-
 - An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
   at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
-  AMD bench; next, an MWAIT twin on the AMD bench
-  (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
+  AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
 - A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
-  switch on the T14, and at the AMD bench's TSC floor; next, a TSC-deadline
-  twin on the T14
+  switch on the T14, and at the AMD bench's TSC floor
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
@@ -86,21 +82,12 @@ is nothing to enable.
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
 - **The wake storm's per-waiter gap** between the benches; next, its split
   (`issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`).
-- **Global pages.** CR4.PGE is clear on both benches, so where there is no
-  PCID every process switch drops the kernel's translations. On the AMD
-  bench, which has none, a user ping-pong takes 80.7 full page walks per round trip with no
-  user working set and 88.6 at four pages, which prices at about 7 % of the
-  round trip (derived, user and kernel walks together, so a ceiling on what
-  global pages save). On the T14, PCID saves 3.4 % of the same round trip at
-  four pages (`wt/toyos-scout-tlb` at `d4c2f8ebe`). The decision and its
-  sequencing are `issues/page-global-is-a-decision-nobody-has-made.md`'s;
-  next, a PGE twin on the AMD bench.
 
 The CPU cap is PR #865's (`wt/toyos-cpus`), a design round of its own.
 
 **Exit**: every issue below is closed. They are listed in the order they are
-taken: the instruments, then what is measured and worth building, then what
-waits on its next measurement, then the design rounds not yet measured.
+taken: the instruments, then what is measured, then the design rounds not
+yet measured.
 `issues/user-programs-use-avx-under-xsave.md` is PR #859's, built ahead of
 that order.
 
@@ -117,6 +104,6 @@ that order.
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
 - `issues/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`
 - `issues/a-tlb-shootdown-reaches-only-the-cpus-that-ran-the-space.md`
-- `issues/fsgsbase-is-measured-then-taken-or-rejected.md`
+- `issues/fsgsbase-is-taken.md`
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/diskserver-drives-nvme-apst.md`
