@@ -240,34 +240,36 @@ fn pair_cpus(here: usize, cpus: usize) -> (usize, usize) {
 /// nothing.
 fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
     let cpus = toyos_abi::syscall::cpu_count() as usize;
-    let here = cpu();
-    let (waker_on, partner_on) = match pair_cpus(here, cpus) {
-        (one, _) if together => (one, one),
-        pair => pair,
-    };
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let turn = Arc::new(AtomicU32::new(0));
     let go = Arc::new(AtomicBool::new(false));
     let partner_thread: Arc<OnceLock<Thread>> = Arc::new(OnceLock::new());
     let mut threads = Vec::new();
-    let mut spinning = Vec::new();
+    let mut spinning: Vec<(usize, Arc<AtomicUsize>)> = Vec::new();
     let mut refused = None;
-    if spinners {
-        for want in (0..cpus).filter(|&c| c != here) {
-            let at = Arc::new(AtomicUsize::new(UNSEEN));
-            match place(|on| on == want, staged_spinner(stop.clone(), at.clone())) {
-                Ok((spinner, _)) => {
-                    threads.push(spinner);
-                    spinning.push((want, at));
-                }
-                Err(landed) => {
-                    refused = Some(format!("no spinner landed on CPU {want}; the candidates ran on {landed:?}"));
-                    break;
-                }
+    // One spinner on every CPU but this thread's. This thread's CPU is asked
+    // at each decision, because a kernel that hands queued work to idle CPUs
+    // may hand it this thread while CPUs are still idle.
+    while spinners && spinning.len() + 1 < cpus {
+        let at = Arc::new(AtomicUsize::new(UNSEEN));
+        let taken: Vec<usize> = spinning.iter().map(|(on, _)| *on).collect();
+        match place(|on| on != cpu() && !taken.contains(&on), staged_spinner(stop.clone(), at.clone())) {
+            Ok((spinner, on)) => {
+                threads.push(spinner);
+                spinning.push((on, at));
+            }
+            Err(landed) => {
+                refused = Some(format!("no spinner landed beside {taken:?}; the candidates ran on {landed:?}"));
+                break;
             }
         }
     }
+    let here = cpu();
+    let (waker_on, partner_on) = match pair_cpus(here, cpus) {
+        (one, _) if together => (one, one),
+        pair => pair,
+    };
     let waker = refused.is_none().then(|| {
         let (stop, done, turn, go, partner_thread) =
             (stop.clone(), done.clone(), turn.clone(), go.clone(), partner_thread.clone());
@@ -346,8 +348,8 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
                 refused = Some(format!("the spinner kept on CPU {want} is on {on}"));
             }
         }
-        if cpu() != here {
-            refused = Some(format!("the coordinator left CPU {here} for {}", cpu()));
+        if cpu() != here || spinning.iter().any(|(on, _)| *on == here) {
+            refused = Some(format!("the coordinator, staged on CPU {here}, is on {} beside {spinning:?}", cpu()));
         }
     }
     match (&waker, &partner, &refused) {
