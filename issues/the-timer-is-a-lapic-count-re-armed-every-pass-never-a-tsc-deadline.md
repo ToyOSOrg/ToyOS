@@ -9,9 +9,12 @@ opened: 2026-10-12
 Every scheduler pass ends by handing its timer an absolute deadline
 (`kernel/pure/sched/cpu.rs:1912-1918`), and the kernel turns it back into a
 span from now (`kernel/src/hw.rs:47-51`) that `apic::arm_one_shot` converts to
-LAPIC ticks by the boot's calibration against the HPET and writes as three
-MMIO stores, `TIMER_DIVIDE`, `LVT_TIMER` and `TIMER_INIT`
-(`kernel/src/arch/x86_64/apic.rs:307-361`). A timer fire from Ring 3 writes
+LAPIC ticks by the boot's calibration against the TSC-derived clock
+(`kernel/src/arch/x86_64/apic.rs:307-336`) and writes as three APIC register
+writes, `TIMER_DIVIDE`, `LVT_TIMER` and `TIMER_INIT` (`apic.rs:355-368`):
+MMIO stores under xAPIC, `wrmsr` under x2APIC (`apic.rs:49-64`), which the
+T14 runs (`apic=X2apic`,
+https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693). A timer fire from Ring 3 writes
 `TIMER_INIT` once more before its handler runs
 (`kernel/src/arch/x86_64/idt/timer.rs:23-24`, `apic.rs:394-396`). TSC-deadline mode
 (CPUID.01H:ECX[24]) takes the absolute deadline in TSC units as one

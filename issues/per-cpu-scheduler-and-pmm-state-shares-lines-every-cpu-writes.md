@@ -31,5 +31,5 @@ None has been measured. `wt/toyos-scout-clock` holds the measurement: the
 contention each costs on the T14 and the AMD bench.
 
 **Exit**: that measurement, posted; and each of the four either written per
-CPU on a line no other CPU writes, or kept with its measured cost on both
-benches stated at its site.
+CPU on a line no other CPU writes, or kept with its refusal reason at its
+site and its measured cost on both benches in the closing commit.

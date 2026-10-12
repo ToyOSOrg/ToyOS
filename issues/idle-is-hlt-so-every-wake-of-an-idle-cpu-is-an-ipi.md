@@ -11,11 +11,12 @@ only thing that ends its wait is an interrupt: a wake posted to it rings its
 doorbell (`kernel/pure/sched/mailbox.rs:474-490`) and then sends a kick IPI
 (`kernel/src/arch/x86_64/apic.rs:256-260`). A CPU that waits in MWAIT on its
 doorbell's line (CPUID.01H:ECX[3]) is woken by the store alone. Nothing
-measures what the IPI and the exit cost: round 1 of PR #861 counts 3 idle
-exits, 2 kicks and 4 switches per netstack pass on the T14, about 22.6 kcyc of
-kernel per pass, without splitting them (its body, "Round 1 on the T14: main,
-D and Ubuntu"), and round 3 reads its idle window burning 36 to 59 Mcyc/s
-against Ubuntu's 13.1 ("Round 3 on the T14").
+measures what the IPI and the exit cost. Round 1 of PR #861 on the T14, in
+its `main` column (main's kernel plus the instrument; that PR's body, "Round 1
+on the T14: main, D and Ubuntu"), counts 178.1 idle exits, 118.0 kicks and
+236.0 switches per MB over 60.1 netstack passes, about 3, 2 and 4 a pass, and
+1.40 Mcyc/MB of kernel outside the app and netstack, about 23 kcyc a pass
+(derived), without splitting them.
 `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the wait
 enters; this file is what ends it. The doorbell shares a line with its
 neighbours' published counters

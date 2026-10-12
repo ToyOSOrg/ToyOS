@@ -28,19 +28,17 @@ measurement, never a guess. In flight:
 
 - `wt/toyos-scout-clock`: the clock gap, and the lock contention of
   `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`.
-  In round 3 of PR #861 on the T14, ToyOS ran at 1.91 GHz effective against
-  Ubuntu's 3.12, spent 5.45 against 3.03 ms of C0 per MB, and its idle window
-  burnt 36 to 59 Mcyc/s against Ubuntu's 13.1 (that PR's body, "Round 3 on
-  the T14").
+  In round 1 of PR #861 on the T14, `main`'s kernel plus the instrument spent
+  14.60 against Ubuntu's 9.14 Mcyc and 5.72 against 4.37 ms of C0 per MB, at
+  2.53 against 2.03 GHz effective, and its idle window took 0.55 of those
+  Mcyc against Ubuntu's 0.10 (derived; that PR's body, "Round 1 on the T14:
+  main, D and Ubuntu", its `main` column).
 - `wt/toyos-scout-sys`: the syscall split of
-  `issues/every-syscall-saves-the-fp-state-and-takes-two-locked-instructions.md`,
+  `issues/every-syscall-saves-the-fp-state-and-every-preemption-disable-is-locked.md`,
   and the wake latency of
   `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`.
 
-Next: the AMD bench's TLB cost across a cross-process ping-pong, which prices
-`issues/pcid-waits-on-invpcid-so-the-amd-bench-flushes-its-tlb-on-every-process-switch.md`
-and may first need ToyOS to read an AMD performance counter; and the T14's
-idle-exit split, which decides
+Next: the T14's idle-exit split, which decides
 `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md` and times the
 re-arm of `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`.
 
@@ -55,13 +53,11 @@ built ahead of that order.
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
-- `issues/every-syscall-saves-the-fp-state-and-takes-two-locked-instructions.md`
+- `issues/every-syscall-saves-the-fp-state-and-every-preemption-disable-is-locked.md`
 - `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
-- `issues/pcid-waits-on-invpcid-so-the-amd-bench-flushes-its-tlb-on-every-process-switch.md`
 - `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
 - `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
-- `issues/physical-memory-past-64-gib-panics-the-boot.md`
 - `issues/user-programs-use-avx-under-xsave.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
