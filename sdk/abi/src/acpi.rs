@@ -215,6 +215,9 @@ pub enum Refused {
     /// A byte for `SMI_CMD` past the most the kernel writes for the holder in
     /// a second.
     CommandRate = 19,
+    /// A port the kernel keeps from AML though it declared none of it:
+    /// `toyos_userbound::firmware::PROTECTED`.
+    ProtectedPort = 20,
 }
 
 impl Refused {
@@ -239,6 +242,7 @@ impl Refused {
             17 => Self::KernelCommand,
             18 => Self::CommandSpan,
             19 => Self::CommandRate,
+            20 => Self::ProtectedPort,
             _ => return None,
         })
     }

@@ -53,8 +53,10 @@
 //! another range types the same byte.
 //!
 //! **A port is the kernel's to answer where the kernel declared it**
-//! ([`crate::port::Mediated`]), another claim's where a row names it, and
-//! passes otherwise.
+//! ([`crate::port::Mediated`]), another claim's where a row names it, refused
+//! where [`PROTECTED`] names it, and passes otherwise, a write as a read: the
+//! owner's "Allow, like Linux", whose `acpi_os_write_port` writes whatever
+//! ACPICA's port protection passes.
 //!
 //! **A byte written to the port that commands the firmware is no port write:
 //! it is a call into the firmware, the kernel's to make** ([`FirmwareCall`]).
@@ -358,15 +360,30 @@ pub enum PortVerdict {
     Refused(Refused),
 }
 
+/// The ports kept from AML that no declaration of the kernel's holds, each
+/// `(first, last)`, as ACPICA's `AcpiProtectedPorts` writes them
+/// (`source/components/hardware/hwvalid.c`, ACPICA 20260408): the 8259
+/// pair's edge/level control, which ACPICA refuses whatever the firmware
+/// asks `_OSI`, as it refuses the pair the kernel declares; and the PIT,
+/// both of ACPICA's rows for it, which the owner's ruling names among the
+/// ports the kernel owns. ACPICA refuses the PIT, and the rest of its table,
+/// only to a firmware whose newest `_OSI` is Windows XP's, and the rest is
+/// written here as Linux writes it.
+pub const PROTECTED: [(u16, u16); 3] = [(0x40, 0x43), (0x48, 0x4B), (0x4D0, 0x4D1)];
+
 /// Decide an access of `width` at `port`, a write of `write`: every port it
-/// spans is asked of `standing`.
+/// spans is asked of `standing` and of [`PROTECTED`].
 pub fn port(standing: impl Fn(u16) -> Standing, port: u16, width: Width, write: Option<u64>) -> PortVerdict {
     use PortVerdict::Refused as No;
     if width == Width::QWord || port as usize + width.bytes() as usize > IO_PORTS {
         return No(Refused::PortSpan);
     }
+    let last = port + (width.bytes() as u16 - 1);
+    if PROTECTED.iter().any(|&(first, end)| port <= end && first <= last) {
+        return No(Refused::ProtectedPort);
+    }
     let mut commanded: Option<KeptCommands> = None;
-    for port in port..=port + (width.bytes() as u16 - 1) {
+    for port in port..=last {
         match standing(port) {
             Standing::Free | Standing::Declared(Mediated::Open) => {}
             Standing::Declared(Mediated::ReadOnly | Mediated::Command(_)) if write.is_none() => {}

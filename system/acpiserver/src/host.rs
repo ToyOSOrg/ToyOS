@@ -7,15 +7,12 @@
 //! the kernel's to make or refuse**, and a refusal it names is denied under
 //! that name.
 //!
-//! **Only the port writes in [`FORWARDED`], and a byte to the FADT's
-//! `SMI_CMD`, are asked of the kernel**, each said the first time it is
-//! asked: a write to a register that changes nothing but an index or a POST
-//! code, and a call into the firmware, which the kernel makes or refuses by
-//! the byte and the rate (`toyos_userbound::firmware`), the owner's "AML may
-//! write exactly the SMI command port the FADT declares". Every other port
-//! write is denied by name and never reaches the kernel: a reset-capable
-//! port, a data register. The reset register is the kernel's to keep wherever
-//! it is.
+//! **A port write is the kernel's to make or refuse, as a read is**, each
+//! port and width said the first time it is asked: the owner's "Allow, like
+//! Linux", which writes every port ACPICA's port protection passes. The
+//! kernel refuses the ports it owns and those ACPICA keeps from AML
+//! (`toyos_userbound::firmware::PROTECTED`), and makes a byte to the FADT's
+//! `SMI_CMD` a call into the firmware, or refuses it by the byte and the rate.
 //!
 //! **A write to memory is the kernel's to make or refuse, as a read is**:
 //! firmware records what it was told in its own NVS, `_OSC`'s capabilities
@@ -110,17 +107,6 @@ pub const RELEASE: Duration = Duration::from_secs(1);
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
 const EC_STEP: Duration = Duration::from_millis(500);
-
-/// The port writes asked of the kernel, by port and width: the index
-/// registers of the CMOS's upper bank and of the AMD FCH's power-management
-/// block, a byte each, and the POST port's word. No other: a port write this
-/// server has no account of can be a reset (0x92, 0xCF9), a call into the
-/// firmware (`SMI_CMD`) or a data register's.
-pub const FORWARDED: [(u16, toyos_aml::Access); 3] =
-    [(0x72, toyos_aml::Access::Byte), (0x80, toyos_aml::Access::Word), (0xCD6, toyos_aml::Access::Byte)];
-
-/// The denial of a port write not in [`FORWARDED`].
-pub const UNFORWARDED: &str = "a SystemIO write of a port and width this server asks of the kernel for no AML";
 
 /// The kernel does nothing more for this claim: the machine is stopping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -318,8 +304,6 @@ pub struct Firmware<'k, K> {
     said: Ledger,
     /// The port writes asked of the kernel, by port and width.
     written: Ledger,
-    /// The FADT's `SMI_CMD`, a byte to which is a call into the firmware.
-    pub smi_cmd: Option<u16>,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
     /// What a Sleep took of the SCI, for the server to serve.
@@ -357,7 +341,6 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             refused: Ledger::default(),
             said: Ledger::default(),
             written: Ledger::default(),
-            smi_cmd: None,
             buttons: Vec::new(),
             latched: Latched::default(),
             notified: Default::default(),
@@ -526,25 +509,24 @@ impl<K: Kernel> Host for Firmware<'_, K> {
     }
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
-        let what = match at {
-            Address::Io(port) if !FORWARDED.contains(&(port, width)) && (Some(port), width) != (self.smi_cmd, toyos_aml::Access::Byte) => {
-                UNFORWARDED.into()
-            }
+        match at {
             Address::Io(port) => {
                 if self.written.see(&format!("{port:#x} {width:?}")) {
-                    println!("acpiserver: a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
+                    println!("{OWN}a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
                 }
-                return self.written_through(Space::SystemIo, u64::from(port), width, value, at);
+                self.written_through(Space::SystemIo, u64::from(port), width, value, at)
             }
-            Address::Memory(address) => return self.written_through(Space::SystemMemory, address, width, value, at),
-            Address::PciConfig { .. } => "a write to PCI_Config: this server writes no configuration space for AML".into(),
+            Address::Memory(address) => self.written_through(Space::SystemMemory, address, width, value, at),
+            Address::PciConfig { .. } => {
+                let what = "a write to PCI_Config: this server writes no configuration space for AML".into();
+                Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            }
             Address::EmbeddedControl(address) => {
                 let byte = u8::try_from(value).expect("a byte access writes a byte");
-                return self.controller("a write to", at, width, Transaction::write_at(address, byte)).map(drop);
+                self.controller("a write to", at, width, Transaction::write_at(address, byte)).map(drop)
             }
-            other => return Err(self.unserved(other, width)),
-        };
-        Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            other => Err(self.unserved(other, width)),
+        }
     }
 
     fn sleep(&mut self, ms: u64) {
@@ -914,60 +896,43 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
-    /// A port write in [`FORWARDED`], and a byte to the FADT's `SMI_CMD` once
-    /// the load named it, is asked of the kernel, and made or refused as it
-    /// answers; every other port and width, `SMI_CMD` at another width,
-    /// configuration space, and the controller's space with no controller
-    /// attached are denied by name, none of them asked of the kernel.
+    /// Every port write is asked of the kernel and made or refused as it
+    /// answers, the owner's "Allow, like Linux": the AMD bench's interrupt
+    /// router's index and data, the POST port's word and a byte to
+    /// `SMI_CMD`, made, and a port the kernel keeps, denied under its name
+    /// for the refusal. Configuration space, and the controller's space with
+    /// no controller attached, are denied by name and ask the kernel nothing.
     #[test]
-    fn only_a_forwarded_port_write_or_a_byte_to_smi_cmd_is_asked_of_the_kernel() {
-        use toyos_aml::Access::{Byte, DWord, Word};
+    fn every_port_write_is_asked_of_the_kernel_and_made_or_refused_as_it_answers() {
+        use toyos_aml::Access::{Byte, Word};
         let mut kernel = machine();
-        kernel.ports = vec![(0x72, 0), (0x80, 0), (0xB2, 0)];
+        kernel.ports = vec![(0xC00, 0), (0xC01, 0), (0x80, 0), (0xB2, 0)];
         let mut host = Firmware::new(&kernel);
-        assert_eq!(host.write(Address::Io(0xB2), Byte, 0xA0), Err(Denied(UNFORWARDED.into())), "SMI_CMD before the FADT named it");
-        host.smi_cmd = Some(0xB2);
-        assert_eq!(host.write(Address::Io(0x80), Word, 0x28), Ok(()));
-        assert_eq!(host.write(Address::Io(0x72), Byte, 0x08), Ok(()));
-        assert_eq!(host.write(Address::Io(0xB2), Byte, 0xA0), Ok(()));
-        let refused = host.write(Address::Io(0xCD6), Byte, 0x60);
-        assert_eq!(refused, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
+        let made = [(0xC00, Byte, 0x02), (0xC01, Byte, 0x0B), (0x80, Word, 0x28), (0xB2, Byte, 0xA0)];
+        for (port, width, value) in made {
+            assert_eq!(host.write(Address::Io(port), width, value), Ok(()), "{port:#x} {width:?}");
+        }
+        let kept = host.write(Address::Io(0xCF9), Byte, 0x06);
+        assert_eq!(kept, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
         assert_eq!(
             *kernel.asked.borrow(),
             [
+                Access::write(Space::SystemIo, 0xC00, Width::Byte, 0x02),
+                Access::write(Space::SystemIo, 0xC01, Width::Byte, 0x0B),
                 Access::write(Space::SystemIo, 0x80, Width::Word, 0x28),
-                Access::write(Space::SystemIo, 0x72, Width::Byte, 0x08),
                 Access::write(Space::SystemIo, 0xB2, Width::Byte, 0xA0),
-                Access::write(Space::SystemIo, 0xCD6, Width::Byte, 0x60),
+                Access::write(Space::SystemIo, 0xCF9, Width::Byte, 0x06),
             ]
         );
-        // Reset-capable ports with the values that reset a machine, the
-        // reset register an AMD laptop shares with `SMI_CMD`, `SMI_CMD` at a
-        // width no call is, a data register, and a forwarded port at a width
-        // it is not forwarded at.
-        for (port, width, value) in [
-            (0xCF9, Byte, 0x06),
-            (0xCF9, Byte, 0x0E),
-            (0x92, Byte, 0x01),
-            (0xB0, Byte, 0xFB),
-            (0xB2, Word, 0xA0),
-            (0x73, Byte, 0),
-            (0xCD7, Byte, 0),
-            (0x72, Word, 0),
-            (0x80, Byte, 0),
-            (0x80, DWord, 0),
-        ] {
-            assert_eq!(host.write(Address::Io(port), width, value), Err(Denied(UNFORWARDED.into())), "{port:#x} {width:?}");
-        }
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
         let config = "a write to PCI_Config: this server writes no configuration space for AML";
         assert_eq!(host.write(function, Byte, 0), Err(Denied(config.into())));
         let controller = Address::EmbeddedControl(0x38);
         assert_eq!(host.write(controller, Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
         assert_eq!(host.read(controller, Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert_eq!(kernel.asked.borrow().len(), 4, "the kernel was asked for an access this server denies itself");
+        assert_eq!(kernel.asked.borrow().len(), 5, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
-        assert_eq!(host.written.counts(), "0x72 Byte x1; 0x80 Word x1; 0xb2 Byte x1; 0xcd6 Byte x1");
+        assert_eq!(host.written.counts(), "0x80 Word x1; 0xb2 Byte x1; 0xc00 Byte x1; 0xc01 Byte x1; 0xcf9 Byte x1");
     }
 
     /// A write to memory is the kernel's to make or refuse: NVS and reserved

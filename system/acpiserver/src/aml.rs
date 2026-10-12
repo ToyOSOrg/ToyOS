@@ -2,8 +2,7 @@
 //! loaded into one namespace ([`toyos_aml`]), and what this server asks of it.
 //!
 //! [`load`] attaches the controller the ECDT names, which AML may reach
-//! before any control method runs (ACPI 6.5 §6.5.4), and the FADT's
-//! `SMI_CMD`, a byte to which is a call into the firmware, to the host; then
+//! before any control method runs (ACPI 6.5 §6.5.4), to the host; then
 //! fetches the DSDT and every SSDT through the kernel
 //! ([`crate::tables`]), loads each in the order the firmware lists them, and
 //! says one line a table: loaded, or refused and why. **A refused SSDT is
@@ -139,11 +138,6 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
     if tables.stopping.get() {
         println!("{STOPPING}");
         return loaded;
-    }
-    match toyos_acpi::find_table(&tables, rsdp, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE).map(|fadt| toyos_acpi::fixed_hardware(&fadt)) {
-        Ok(Ok(fixed)) => host.smi_cmd = fixed.smi_cmd.map(|smi| smi.port),
-        Ok(Err(why)) => println!("acpiserver: the FADT's fixed hardware does not decode, so this machine's AML calls no firmware: {why:?}"),
-        Err(why) => println!("acpiserver: no FADT was read, so this machine's AML calls no firmware: {}", unread(&why, |at| tables.refused(at))),
     }
     early_controller(kernel, &tables, rsdp, host);
 
