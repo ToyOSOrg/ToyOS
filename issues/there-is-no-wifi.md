@@ -56,9 +56,15 @@ As the orchestrator recorded them on #876, quoted in its body's §0:
 - **Saved networks** (Q4): "plain text whatever until the key store concept
   exists", held by the supplicant alone. This overrides ruling 1's
   "encrypted at rest", and stage P7, the key store, went with it.
-- **Throughput and the link hop's cost are reported, never gated**: the
-  standing ruling's "Bench numbers are reported and never block", as #876 §0
-  applies it. `.claude/agents/implementer.md` carries that ruling.
+- **Throughput is reported and never blocks**: the standing ruling's "Bench
+  numbers are reported and never block", for a design the manufacturers back,
+  as #876 §0 applies it to the driver.
+- **The link hop's cost is measured and reported, and decides nothing by
+  itself**: the split and `link` are this design's, so the standing ruling's
+  "Review on merits" applies, "reviewed on correctness and simplicity like
+  any code. A speed claim is measured and reported but does not decide by
+  itself, unless the design's only purpose is speed" (#876 §0).
+  `.claude/agents/implementer.md` carries both clauses.
 
 ## Stages
 
@@ -101,7 +107,7 @@ second on one CPU, reported in P4's design round. Beside them stands the
 HE-MCS 11, two streams, 160 MHz, 0.8 µs GI, a standard's bound, not a
 measurement
 (https://github.com/ToyOSOrg/evidence/blob/1e0625eaf0feb22df2a760976b7ac3a2858b4e2c/e4-ceiling.log).
-It gates nothing.
+By itself it decides nothing (the link hop's line above).
 
 **The specification.** Owner: the orchestrator, who briefs its readers.
 Depends on: nothing.
@@ -111,9 +117,11 @@ Depends on: nothing.
   measurement with its run, or a standard's clause. The revision holds no
   code or pseudo-code of a reference.
 - **Its sources.** Where Intel's published firmware-interface headers state
-  a fact, the specification takes it from them. A fact the references leave
-  unsaid, or disagree on, stays open until a reader's scout measures it.
-  The scout runs on a branch kept off `origin`.
+  a fact, the specification takes it from them and the bench checks that it
+  works; another reference disagreeing does not reopen it. A fact those
+  headers leave unsaid is taken from the other references. Only a fact those
+  disagree on, or all of them leave unsaid, stays open until a reader's scout
+  measures it. The scout runs on a branch kept off `origin`.
 
 **P1, a BAR stays where firmware put it, in 4 KiB pages, its MSI-X table's
 page included.** Owner: the orchestrator.
@@ -129,7 +137,8 @@ page included.** Owner: the orchestrator.
     `build/qemu.rs`, so the NVMe guests drive QEMU's default controller
     through its table in BAR 0;
   - `issues/pcidev-moves-a-bar-behind-a-bridge-out-of-the-range-the-bridge-forwards.md`
-    closed;
+    closed, and each of the two placement issues it names closed or its exit
+    rewritten to the placement P1 lands;
   - the exit of
     `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
     rewritten, from a refused write to the table's page to the NVMe driven
@@ -146,8 +155,8 @@ AMD track. Depends on: that track.
     of the radio's own table, refused into the event log.
 - Only W7 waits on them.
 
-**P4, the LAN track's stage 3, whole.** Owner: stage 3 of
-`issues/the-lan-is-not-yet-production-grade.md`.
+**P4, the LAN track's stage 3, whole.** Owner: the orchestrator; P4 is
+stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
 - **Depends on:** the T14's outbound rows, which
   `issues/toyos-has-its-own-network-stack.md` owns; and S2, which its round
   reports.
@@ -169,8 +178,10 @@ AMD track. Depends on: that track.
     return, resolvers, mDNS per link, and a flow bound to a lost address;
   - a guest with two virtio NICs, in which the first's link is set off over
     QMP and traffic leaves on the second;
-  - a T14 row, after W6 and the image giving netstack the I219, in which
-    both links lease and the default route is the wired one.
+  - `issues/netstack-drives-one-card.md` closed, and the NIC taken out of
+    the virtio bullet of `issues/first-match-selection-that-remains.md`.
+- Its T14 row, both links leasing with the wired one the default route, is
+  W6's: it needs a radio.
 
 **P6, `lib/crypto`'s AES-CMAC and SAE.** Owner: the orchestrator, whose
 pull request brings the crate in unchanged at the commit the crypto agent,
@@ -255,12 +266,15 @@ W2.
 - The pull request landing it files the Transition Disable weakness below.
 
 **W5, bring-up and passive scan on the T14**, the first stage that ships
-`ax2xx`. Depends on: S1, P1, P4 (its match table), W3, W4. Exit: a T14 row
-reads the firmware up, its MAC address, and the test network seen. The
-network's name arrives per run through a test job holding `wifi`, so no
-shipping path reads the ESP.
+`ax2xx`. Depends on: S1, P1, P4 (its match table), W3, W4; and the test
+networks, an access point at the T14's bench serving a WPA2-Personal network
+and a WPA3-Personal one by hash-to-element, with PMF and HE, an instrument
+the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC
+address, and the test network seen. The network's name arrives per run
+through a test job holding `wifi`, so no shipping path reads the ESP.
 
-**W6, the first version: a full-rate join.** Depends on: W5, P4, P5, P6, P8.
+**W6, the first version: a full-rate join.** Depends on: W5 and its test
+networks, P4, P5, P6, P8.
 - **Exit, host tests:**
   - block-ack state;
   - a firmware restart's decisions;
@@ -274,18 +288,24 @@ shipping path reads the ESP.
   - block-ack both ways;
   - transmit limits applied before the first frame;
   - a wrong credential refused with its evidence;
-  - `ax2xx` killed, and rejoining.
+  - `ax2xx` killed, and rejoining;
+  - both links leasing, the I219's and the radio's, with the wired one the
+    default route (P5's).
 - **Reported, never gated:** the HT, VHT and HE rates, and throughput
   against Linux on the same machine, AP and position.
 - `issues/a-platform-with-no-transmit-power-table-joins-no-wifi-network.md`
   is its.
 
-**W7, the AX200 on the AMD bench.** Depends on: P2, P3, W6. Exit: W5's and
-W6's rows, on the AMD bench.
+**W7, the AX200 on the AMD bench.** Depends on: P2, P3, W6, and W5's test
+networks in reach of the AMD bench. Exit: W5's and W6's rows on the AMD
+bench, all but the I219's.
 
 **W8, power save, background scan, roaming, beacon loss and RF-kill.**
-Depends on: W6. Exit: host tests of the decisions, and rows on both benches;
-power and latency are reported.
+Depends on: W6; W7, for the AMD bench's rows; and, at each bench, two
+instruments of `issues/no-access-point-answers-to-the-harness.md`: an
+access point the harness silences, for beacon loss, and two access points of
+one network, for roaming. Exit: host tests of the decisions, and rows on both
+benches; power and latency are reported.
 
 **W9, 6 GHz on the AX210**, directly after W6. Depends on: W6, and a 6 GHz
 access point at the T14's bench, an instrument the orchestrator owns (Q3).
@@ -326,5 +346,5 @@ Ronen, "Dragonblood" (IEEE S&P 2020, §4.1.1).
 ## Owed beside the stages
 
 - `issues/no-access-point-answers-to-the-harness.md`: deauthentication and a
-  group rekey on demand.
-- `issues/the-wifi-demos-branches-are-on-origin.md`.
+  group rekey on demand, and W8's access points.
+- `issues/the-wifi-demos-commits-still-resolve-on-origin.md`.

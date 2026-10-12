@@ -18,6 +18,11 @@ The owner ruled for several interfaces over one chosen by the manifest. He
 also ruled that "netstack runs every link a driver brings, wired first, with
 failover" (#876, issuecomment-6120490125, ruling 3).
 
+That reverses part of `issues/first-match-selection-that-remains.md`
+(`kind: rejected`), whose virtio bullet says a second virtio NIC "would be
+dropped" and that "Neither is a defect today". Under ruling 3 a second NIC
+dropped is this defect.
+
 Owner: P5 of `issues/there-is-no-wifi.md`, after the LAN track's stage 3
 moves the drivers out (`issues/the-lan-is-not-yet-production-grade.md`).
 
@@ -26,4 +31,6 @@ moves the drivers out (`issues/the-lan-is-not-yet-production-grade.md`).
   responder, under one host name;
 - links ranked wired before wireless, then by arrival;
 - a guest with two virtio NICs in which the first's link is set off over
-  QMP, and traffic leaves on the second.
+  QMP, and traffic leaves on the second;
+- the NIC taken out of the virtio bullet of
+  `issues/first-match-selection-that-remains.md`.
