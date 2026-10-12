@@ -198,10 +198,11 @@ impl Shape {
 
     /// The lowest level `a` and `b` share, or `None` when they are one CPU.
     pub fn level(&self, a: usize, b: usize) -> Option<Level> {
-        let (a, b) = (self.keys[a], self.keys[b]);
+        // By id: SMT siblings share every key.
         if a == b {
             return None;
         }
+        let (a, b) = (self.keys[a], self.keys[b]);
         Some(if a.core == b.core {
             Level::Core
         } else if a.llc == b.llc {
@@ -266,6 +267,21 @@ mod tests {
         assert_eq!(shape.domains(Level::Core), 384);
         assert_eq!(shape.domains(Level::Llc), 48);
         assert_eq!(shape.domains(Level::Package), 2);
+    }
+
+    #[test]
+    fn a_pair_is_at_the_lowest_level_it_shares() {
+        let t14 = Shape::t14();
+        assert_eq!(t14.level(0, 0), None);
+        assert_eq!(t14.level(0, 4), Some(Level::Core));
+        assert_eq!(t14.level(0, 1), Some(Level::Llc));
+        let amd = Shape::amd_bench();
+        assert_eq!(amd.level(0, 1), Some(Level::Core));
+        assert_eq!(amd.level(0, 2), Some(Level::Llc));
+        assert_eq!(amd.level(0, 8), Some(Level::Package));
+        let wide = Shape::tree("2x24x8x2", 2, 24, 8, 2, 2);
+        let other_package = (1..wide.cpus()).find(|&cpu| wide.keys(cpu).package != wide.keys(0).package);
+        assert_eq!(other_package.map(|cpu| wide.level(0, cpu)), Some(Some(Level::Machine)));
     }
 
     #[test]
