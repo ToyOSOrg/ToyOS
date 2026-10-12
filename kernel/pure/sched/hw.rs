@@ -77,6 +77,9 @@ pub trait Kicker: Sync {
     /// Targeted kick IPI. Never broadcast. A kick aimed at the calling CPU is
     /// its own `need_resched`, never an IPI to itself.
     fn kick(&self, target: CpuId);
+
+    /// Whether the calling code runs on `cpu`.
+    fn runs_on(&self, cpu: CpuId) -> bool;
 }
 
 /// The half of the hardware surface that says nothing about tasks: clock,

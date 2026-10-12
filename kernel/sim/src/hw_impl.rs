@@ -148,6 +148,9 @@ impl Kicker for SimHw {
             }
         });
     }
+    fn runs_on(&self, cpu: CpuId) -> bool {
+        self.with(|s| s.poster == Some(cpu))
+    }
 }
 
 impl Machine for SimHw {

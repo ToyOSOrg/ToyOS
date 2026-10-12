@@ -2330,6 +2330,12 @@ impl<M: SchedMsg> CpuHandle<M> {
         self.doorbell.ring(urgency)
     }
 
+    /// Post one message and ring nothing: an ordinary wake whose poster runs on
+    /// this CPU, which this CPU's own next pass drains.
+    pub fn post_unrung(&self, slot: PostSlot<'_, M>, msg: M, preempt: &impl PreemptGuard) {
+        self.post.post(slot, msg, preempt);
+    }
+
     /// Ring the doorbell with **no message behind it** — the whole of
     /// [`Balance::PushOnSurplus`]'s effect on the target.
     ///
@@ -2490,6 +2496,9 @@ mod tests {
     impl Kicker for TestHw {
         fn kick(&self, target: CpuId) {
             self.state().kicks.push(target);
+        }
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
         }
     }
 

@@ -424,6 +424,8 @@ pub enum Urgency {
     /// Ordinary wake, adopt and probe: the target is kicked on the doorbell's
     /// 0→1 edge, busy or asleep, so it drains at its next preemption point and
     /// not at its quantum's end; a target already owed a pass costs nothing.
+    /// An ordinary wake posted on the CPU it goes to rings nothing
+    /// (`park::deliver`).
     Normal,
 }
 

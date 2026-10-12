@@ -35,11 +35,15 @@ pub(crate) const MIN_ONE_SHOT: Floor =
 
 impl Kicker for KernelHw {
     fn kick(&self, target: CpuId) {
-        if target.0 == percpu::cpu_id() {
+        if self.runs_on(target) {
             crate::preempt::set_need_resched();
         } else {
             irqchip::kick_cpu(target.0);
         }
+    }
+
+    fn runs_on(&self, cpu: CpuId) -> bool {
+        cpu.0 == percpu::cpu_id()
     }
 }
 
