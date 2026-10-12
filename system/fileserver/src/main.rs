@@ -58,7 +58,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::{Lent, SharedMemory};
 use toyos::volatile::Window;
-use toyos::{ObjectKind, Pipe};
+use toyos::Pipe;
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
 
 /// Clients served at once, machine-wide: one connection per directory per
@@ -589,7 +589,7 @@ impl Server {
                 let why = format!("it is refused, since its share is served {SERVED_SHARE} clients already");
                 return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
-            let Some([lent]) = client.conn.recv_handles_exact([ObjectKind::SharedMem]) else {
+            let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
                 return Answer::Drop("its hello carried no window");
             };
             match SharedMemory::lent(lent, WINDOW_BYTES) {

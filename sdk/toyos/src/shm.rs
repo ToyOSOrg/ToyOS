@@ -11,12 +11,11 @@
 //!
 //! **A region a peer lends is taken only through [`SharedMemory::lent`]**,
 //! which believes the kernel's answer about it and not the peer's: a handle
-//! of another kind is refused before this is reached
-//! ([`Connection::recv_handles_exact`](crate::ipc::Connection::recv_handles_exact)),
-//! and a region the kernel's [`fstat`](syscall::fstat) answers is not memory
-//! it allocated, or not the length the protocol says, is refused here before
-//! it is mapped. [`SharedMemory::adopt`] is for a region the kernel itself
-//! handed this process.
+//! the kernel's [`fstat`](syscall::fstat) says is not memory it allocated to a
+//! region — another kind of object, or a device's registers — or is not the
+//! length the protocol says, is refused before it is mapped, since mapping a
+//! handle that names no region ends this process. [`SharedMemory::adopt`] is
+//! for a region the kernel itself handed this process.
 
 use core::fmt;
 use core::sync::atomic::AtomicU8;
@@ -111,8 +110,9 @@ fn map(handle: &OwnedHandle) -> Result<*mut u8, SyscallError> {
 pub enum Lent {
     /// The kernel would not describe or map it.
     Kernel(SyscallError),
-    /// It is not memory the kernel allocated to a region, such as a device's
-    /// registers, which a reader would read and write as a device.
+    /// It is not memory the kernel allocated to a region: another kind of
+    /// object, or a device's registers, which a reader would read and write
+    /// as a device.
     NotRam,
     /// It is not the length the protocol says: `is` bytes, where `bytes`
     /// rounded up to whole pages was owed.

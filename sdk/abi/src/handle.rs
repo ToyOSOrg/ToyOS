@@ -57,9 +57,8 @@ impl RawHandle {
 /// any table issues.
 pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 
-/// Every kind of kernel object a handle can name: the kernel answers a
-/// received handle's kind as this word, and
-/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes one.
+/// Every kind of kernel object a handle can name, as the word
+/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ObjectKind {
@@ -100,8 +99,8 @@ impl ObjectKind {
     }
 }
 
-// `from_word` indexes `ALL` by the word: a row out of order would answer a
-// received handle's kind as its neighbour.
+// `from_word` indexes `ALL` by the word: a row out of order would count a
+// kind's neighbour.
 const _: () = {
     let mut i = 0;
     while i < ObjectKind::ALL.len() {
@@ -109,27 +108,6 @@ const _: () = {
         i += 1;
     }
 };
-
-crate::user_safe! {
-    /// One handle [`handle_recv`](crate::syscall::handle_recv) installed, and
-    /// what it names: a receiver refuses a handle of the wrong kind by name,
-    /// where using it typed would end the receiver.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub struct Received {
-        pub handle: RawHandle,
-        /// An [`ObjectKind`] word; [`Received::kind`] decodes it.
-        pub kind: u32,
-    }
-}
-
-impl Received {
-    /// The kernel writes only [`ObjectKind`] words here, so any other is a
-    /// kernel and SDK that disagree on the ABI.
-    pub fn kind(&self) -> ObjectKind {
-        ObjectKind::from_word(self.kind)
-            .unwrap_or_else(|| panic!("handle_recv answered object kind {}, which the ABI has no kind for", self.kind))
-    }
-}
 
 /// What the holder of a handle may do with the object behind it.
 ///

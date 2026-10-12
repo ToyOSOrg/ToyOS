@@ -177,8 +177,7 @@ pub const SYS_NAMESPACE_OPEN: u64 = 102;
 /// **handles are sent before the frame that announces them** and a receiver
 /// that has the frame already has the handles.
 pub const SYS_HANDLE_SEND: u64 = 103;
-/// Take the oldest batch of handles the peer sent, each with its kind. See
-/// [`handle_recv`].
+/// Take the oldest batch of handles the peer sent. See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
 /// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
@@ -438,7 +437,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
-use crate::handle::{Received, Rights};
+use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
 
@@ -1985,13 +1984,12 @@ pub fn handle_send(conn: RawHandle, handles: &[RawHandle]) -> Result<(), Syscall
     ))
 }
 
-/// Take the oldest batch the peer sent, into `out`, each handle with the kind
-/// of object it names. Answers how many it wrote.
+/// Take the oldest batch the peer sent, into `out`. Answers how many it wrote.
 ///
 /// Never blocks: zero means nothing is queued right now. A batch larger than
 /// `out` is `InvalidArgument` and stays queued — `out` should be
 /// [`MAX_TRANSFER_HANDLES`] long.
-pub fn handle_recv(conn: RawHandle, out: &mut [Received]) -> Result<usize, SyscallError> {
+pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
     check(syscall(
         SYS_HANDLE_RECV,
         conn.0 as u64,

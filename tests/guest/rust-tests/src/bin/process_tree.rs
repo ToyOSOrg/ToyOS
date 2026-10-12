@@ -161,7 +161,7 @@ fn grow() -> Grown {
     let conn = acceptor.accept().expect("B connected back");
     let header = conn.recv_header().expect("B's word that its subtree is grown");
     assert_eq!(header.msg_type, MSG_GROWN, "B said something else");
-    let [c, d, b_self, e] = conn.recv_handles_exact([toyos::ObjectKind::Process; 4]).expect("B sent four handles");
+    let [c, d, b_self, e] = conn.recv_handles_exact::<4>().expect("B sent four handles");
     // SAFETY: B moved each into this table with the frame, and nothing else
     // answers for them.
     let (c, d, e) = unsafe { (Process::from_raw(c), Process::from_raw(d), Process::from_raw(e)) };

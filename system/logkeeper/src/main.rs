@@ -87,7 +87,7 @@ use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos::port::Acceptor;
 use toyos::say;
 use toyos::syscap::SysCap;
-use toyos::{Console, ObjectKind, Pipe};
+use toyos::{Console, Pipe};
 use toyos_abi::syscall::SyscallError;
 use toyos_logstream::{
     ProgramLine, Registration, Tag, CONSOLE, FLUSH, FLUSHED, LOG_OPENED, MAX_TAG, ORIGINS, REGISTER, RESUME,
@@ -320,7 +320,7 @@ impl Log {
                         panic!("logkeeper: the supervisor registered a ring under no name");
                     };
                     let name = registration.tag.as_str();
-                    let Some([ring, alive]) = self.from_supervisor.recv_handles_exact([ObjectKind::SharedMem, ObjectKind::PipeRead]) else {
+                    let Some([ring, alive]) = self.from_supervisor.recv_handles_exact::<2>() else {
                         panic!("logkeeper: the supervisor registered {name:?} with no ring");
                     };
                     // SAFETY: the kernel moved this handle into this table with

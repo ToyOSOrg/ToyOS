@@ -51,7 +51,7 @@ fn test() {
     let conn = acceptor.accept().expect("the place connected back");
     let header = conn.recv_header().expect("the place's word");
     assert_eq!(header.msg_type, MSG_SELF, "the place said something else");
-    let [place_self] = conn.recv_handles_exact([toyos::ObjectKind::Process]).expect("the place sent its self");
+    let [place_self] = conn.recv_handles_exact::<1>().expect("the place sent its self");
     assert!(place.try_wait().expect("ask after the place").is_none(), "the place ended before the marked spawn");
 
     assert_eq!(

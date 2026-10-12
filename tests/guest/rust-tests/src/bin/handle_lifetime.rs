@@ -27,7 +27,8 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::census::Census;
-use toyos::{namespace, port, AsHandle, ObjectKind};
+use toyos::{namespace, port, AsHandle};
+use toyos_abi::handle::ObjectKind;
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
 

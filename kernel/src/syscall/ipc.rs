@@ -408,7 +408,7 @@ pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::User
     }
 }
 
-/// Take the oldest batch the peer sent, each handle with its kind. Never blocks; zero means none queued.
+/// Take the oldest batch the peer sent. Never blocks; zero means none queued.
 pub(super) fn sys_handle_recv(
     conn_h: RawHandle,
     out: &mut crate::user_ptr::UserBytesMut,
@@ -430,10 +430,8 @@ pub(super) fn sys_handle_recv(
         let Some(batch) = conn.recv_bounded(cap)? else { return Ok(0) };
         let count = batch.len();
         for (i, entry) in batch.into_iter().enumerate() {
-            let kind = entry.object().object_kind() as u32;
-            let handle = data.handles.install(entry).expect("room was asked for first");
-            let received = toyos_abi::handle::Received { handle, kind };
-            out.write_at(i * size_of::<toyos_abi::handle::Received>(), toyos_abi::usersafe::bytes(&received));
+            let h = data.handles.install(entry).expect("room was asked for first");
+            out.write_at(i * HANDLE_LEN, &h.0.to_ne_bytes());
         }
         Ok::<_, crate::object::Refusal>(count as u64)
     });

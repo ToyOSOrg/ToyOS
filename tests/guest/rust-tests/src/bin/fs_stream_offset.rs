@@ -48,7 +48,7 @@ fn main() {
         if reply.status == 0 {
             // What the server's end would have been: the pipe's bytes drained
             // at an offset that overflows.
-            if let Some([end]) = conn.recv_handles_exact([toyos::ObjectKind::PipeWrite]) {
+            if let Some([end]) = conn.recv_handles_exact::<1>() {
                 let _ = toyos_abi::syscall::write(end, &[0x5A; 16]);
                 toyos_abi::syscall::close(end);
             }

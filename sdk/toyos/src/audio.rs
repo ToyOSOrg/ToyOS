@@ -48,8 +48,6 @@ crate::ipc_payload! {
 pub const STREAM_OPENED_HANDLES: usize = 2;
 pub const STREAM_OPENED_SHM: usize = 0;
 pub const STREAM_OPENED_SIGNAL: usize = 1;
-pub const STREAM_OPENED_KINDS: [crate::ObjectKind; STREAM_OPENED_HANDLES] =
-    [crate::ObjectKind::SharedMem, crate::ObjectKind::PipeRead];
 
 pub struct AudioSlotWriter {
     shm: SharedMemory,
@@ -213,7 +211,7 @@ impl AudioStream {
         };
 
         let batch = control
-            .recv_handles_exact(STREAM_OPENED_KINDS)
+            .recv_handles_exact::<STREAM_OPENED_HANDLES>()
             .ok_or(AudioError::MissingHandles)?;
         let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
 

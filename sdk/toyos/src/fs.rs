@@ -476,7 +476,7 @@ impl Dir {
     pub fn stream(&mut self, fid: u64, generation: u64, offset: u64) -> Result<Pipe, SyscallError> {
         self.fid_call(STREAM, generation, &Request { fid, offset, ..Request::new() })?;
         let conn = self.conn.as_ref().ok_or(SyscallError::Gone)?;
-        let [end] = conn.recv_handles_exact([crate::ObjectKind::PipeWrite]).ok_or(SyscallError::Unknown)?;
+        let [end] = conn.recv_handles_exact::<1>().ok_or(SyscallError::Unknown)?;
         Ok(Pipe(crate::OwnedHandle(end)))
     }
 

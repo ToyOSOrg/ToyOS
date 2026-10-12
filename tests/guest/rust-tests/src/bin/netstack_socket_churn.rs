@@ -9,8 +9,8 @@
 //! connections to return.
 //!
 //! argv[2] is the port of a second, which holds every connection it accepts
-//! and reads nothing. On it, a client that moves netstack its receive end
-//! without the right to wait on it, and keeps its send end: the kernel
+//! and reads nothing. On it, a client that moves netstack a handle that is no
+//! pipe end where its receive end belongs, and keeps its send end: the kernel
 //! refuses netstack's watch of it, and that refusal is all that ends the
 //! connection.
 //!
@@ -39,8 +39,7 @@ use std::time::{Duration, Instant};
 use toyos::net::{
     MsgType, NetError, NetstackConn, TcpConnectPipedRequest, TcpConnectResponse, UdpRecvFromRequest, UdpRecvResponse,
 };
-use toyos::{AsHandle, OwnedHandle};
-use toyos_abi::handle::Rights;
+use toyos::OwnedHandle;
 use toyos_inspect::{Value, NET};
 
 /// The host, as QEMU's user network names it to a guest.
@@ -143,31 +142,29 @@ fn a_connect_past_the_places_is_refused(port: u16) {
 }
 
 /// A connection the peer holds open, whose client keeps its send end and moved
-/// netstack the end it writes the peer's bytes into without `Rights::WAIT`.
-/// The peer sends none, so netstack never writes it: its watch is refused, and
-/// the connection is reset and let go.
-fn a_receive_end_netstack_may_not_wait_on_is_reset(port: u16) {
+/// netstack an acceptor for the end netstack writes the peer's bytes into. The
+/// peer sends none, so netstack never writes it: its watch is refused, and the
+/// connection is reset and let go.
+fn a_receive_end_that_is_no_pipe_end_is_refused(port: u16) {
     let live = count("net.piped.live");
-    let (_reads, writes) = toyos::pipe_pair().expect("a pipe");
-    let unwaitable = toyos_abi::syscall::dup_narrowed(writes.as_handle(), Rights::TRANSFER.union(Rights::WRITE))
-        .expect("the receive end without the right to wait on it");
-    // SAFETY: the duplicate's one handle, which nothing else answers for.
-    let unwaitable = unsafe { OwnedHandle::from_raw(unwaitable) };
+    let (acceptor, _connector) = toyos::port::create().expect("a port");
+    // SAFETY: the acceptor's one handle, which nothing else answers for.
+    let no_pipe_end = unsafe { OwnedHandle::from_raw(acceptor.into_raw()) };
     let (from_client, kept) = toyos::pipe_pair().expect("a pipe");
     let connected: TcpConnectResponse = NetstackConn::connect()
         .and_then(|netstack| {
             netstack.request_with_handles(
-                [unwaitable, OwnedHandle::from(from_client)],
+                [no_pipe_end, OwnedHandle::from(from_client)],
                 MsgType::TcpConnectPiped,
                 &TcpConnectPipedRequest { addr: HOST, port, _pad: 0, timeout_ms: 0 },
             )
         })
         .and_then(|pending| pending.response())
-        .unwrap_or_else(|e| panic!("the holding server, with a receive end it may not wait on: {e:?}"));
+        .unwrap_or_else(|e| panic!("the holding server, with an acceptor for a receive end: {e:?}"));
     returns(
         "net.piped.live",
         live,
-        &format!("the kernel refused the watch of connection {}'s receive end, moved without WAIT", connected.socket_id),
+        &format!("the kernel refused the watch of connection {}'s receive end, which is no pipe end", connected.socket_id),
     );
     drop(kept);
 }
@@ -198,8 +195,8 @@ fn main() {
     );
     assert_eq!(left, streams, "netstack keeps a stream for a connection it let go");
     returns("net.places.held", held, "the last of the connections it let go ended on the wire");
-    a_receive_end_netstack_may_not_wait_on_is_reset(holding);
-    println!("netstack_socket_churn: a connection whose receive end netstack may not wait on was reset");
+    a_receive_end_that_is_no_pipe_end_is_refused(holding);
+    println!("netstack_socket_churn: a connection whose receive end is no pipe end was reset");
     left_after_a_shutdown(holding);
     println!("netstack_socket_churn: a client that shut down and left was let go");
     owners_that_left_are_let_go();

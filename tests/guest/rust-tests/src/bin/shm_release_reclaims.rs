@@ -18,7 +18,8 @@ use std::process::{Command, Stdio};
 
 use toyos::census::Census;
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port, ObjectKind};
+use toyos::{namespace, port};
+use toyos_abi::handle::ObjectKind;
 use toyos_abi::syscall::SVC_LABEL;
 
 #[path = "../census_wait.rs"]
@@ -84,7 +85,7 @@ fn main() {
     let conn = acceptor.accept().expect("the donor connects");
     conn.recv_header().expect("the donor announces its region");
     let [sent] = conn
-        .recv_handles_exact([ObjectKind::SharedMem])
+        .recv_handles_exact::<1>()
         .expect("the donor sent the region ahead of the frame");
 
     // Only now, after the donor has let go — its line says so.

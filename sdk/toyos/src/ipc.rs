@@ -3,7 +3,6 @@
 //! Wire format: `[u32 msg_type][u32 len][len bytes payload]`.
 
 use toyos_abi::RawHandle;
-use toyos_abi::handle::{ObjectKind, Received};
 use toyos_abi::syscall::{self, SyscallError};
 use crate::{AsHandle, OwnedHandle};
 
@@ -230,41 +229,36 @@ impl Connection {
         move_batch(handles, |batch| syscall::handle_send(self.0.raw(), batch))
     }
 
-    /// Take the batch the peer sent with the frame just received, each handle
-    /// with the kind of object it names.
+    /// Take the batch the peer sent with the frame just received.
     ///
     /// Never blocks. An empty answer for a frame that promised handles is a
     /// peer that sent them out of order, which is a protocol error and not
     /// something to wait for.
     pub fn recv_handles(
         &self,
-        out: &mut [Received; syscall::MAX_TRANSFER_HANDLES],
+        out: &mut [RawHandle; syscall::MAX_TRANSFER_HANDLES],
     ) -> Result<usize, SyscallError> {
         syscall::handle_recv(self.0.raw(), out)
     }
 
-    /// The handles of the kinds this frame's message type says travel with
-    /// it, in that order.
+    /// The `N` handles this frame's message type says travel with it.
     ///
-    /// `None` for any other count or any other kind, with whatever did arrive
-    /// closed rather than leaked: a short batch is a peer that sent its frame
-    /// first, a long one or a handle of another kind is a protocol this
-    /// endpoint does not speak — and using a handle of the wrong kind typed
-    /// would end this process — and none is something to wait for. Every
-    /// protocol here sends a fixed batch per message type, so this is the
-    /// shape every caller wants.
-    pub fn recv_handles_exact<const N: usize>(&self, kinds: [ObjectKind; N]) -> Option<[RawHandle; N]> {
+    /// `None` for any other count, with whatever did arrive closed rather than
+    /// leaked: a short batch is a peer that sent its frame first, a long one is
+    /// a protocol this endpoint does not speak, and neither is something to
+    /// wait for. Every protocol here sends a fixed number per message type, so
+    /// this is the shape every caller wants.
+    pub fn recv_handles_exact<const N: usize>(&self) -> Option<[RawHandle; N]> {
         const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-        let mut batch = [Received { handle: toyos_abi::HANDLE_INVALID, kind: 0 }; syscall::MAX_TRANSFER_HANDLES];
+        let mut batch = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
         let n = self.recv_handles(&mut batch).ok()?;
-        let batch = &batch[..n];
-        if !batch.iter().map(Received::kind).eq(kinds) {
-            for received in batch {
-                syscall::close(received.handle);
+        if n != N {
+            for h in &batch[..n] {
+                syscall::close(*h);
             }
             return None;
         }
-        Some(core::array::from_fn(|i| batch[i].handle))
+        Some(core::array::from_fn(|i| batch[i]))
     }
 
     pub fn recv_bytes(&self, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {

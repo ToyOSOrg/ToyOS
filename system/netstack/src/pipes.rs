@@ -7,6 +7,11 @@
 //! keeps: the handle closes when the node drops its half, which is how a
 //! client reads the end of its stream or finds its writes refused, and from
 //! then the watched half names nothing.
+//!
+//! **Untrusted input.** An end is whatever handle its client moved, and
+//! nothing checks its kind at intake: one that is no pipe end, or the wrong
+//! end, answers a refusal here that is neither a full pipe nor a vanished
+//! reader, and the node ends that client's stream or listener for it.
 
 use std::rc::{Rc, Weak};
 

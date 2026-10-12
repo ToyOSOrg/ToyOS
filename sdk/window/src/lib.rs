@@ -15,7 +15,6 @@ use toyos::endow::{self, EndowError};
 use toyos::surface;
 use toyos::Connection;
 use toyos::shm::{Lent, SharedMemory};
-use toyos::ObjectKind;
 /// Re-exported because [`KeyPress`] is made of them and a client that holds
 /// its own translator — `console`, a test that stands in for a surface —
 /// should not have to name a second crate to do what this one does.
@@ -466,7 +465,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     if header.msg_type != MSG_COPY_REGION || header.len() != 0 {
         return Err(CreateError::Protocol(header.msg_type));
     }
-    let [region] = conn.recv_handles_exact([ObjectKind::SharedMem]).ok_or(CreateError::NoHandle)?;
+    let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
     let mut region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.as_mut_slice().copy_from_slice(bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
@@ -552,7 +551,7 @@ impl Window {
         // The buffer crossed ahead of the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] = conn.recv_handles_exact([ObjectKind::SharedMem]).ok_or(CreateError::NoHandle)?;
+        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
@@ -653,7 +652,7 @@ impl Window {
                 // The old buffer is already gone on the compositor's side, so
                 // a window that cannot map the new one has nothing to draw
                 // into and its session is over.
-                let Some([buffer]) = self.conn.recv_handles_exact([ObjectKind::SharedMem]) else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
                     return Event::Close;
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
@@ -676,7 +675,7 @@ impl Window {
                 let Ok(info) = self.conn.recv_payload::<ClipboardShmMsg>(header) else {
                     return Event::Close;
                 };
-                let Some([buffer]) = self.conn.recv_handles_exact([ObjectKind::SharedMem]) else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {

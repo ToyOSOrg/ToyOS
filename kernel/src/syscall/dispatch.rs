@@ -508,7 +508,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 return SyscallError::InvalidArgument.to_u64();
             }
             let Some(mut out) = (a3 as usize)
-                .checked_mul(core::mem::size_of::<toyos_abi::handle::Received>())
+                .checked_mul(HANDLE_LEN)
                 .and_then(|len| ctx.user_bytes_mut(UserAddr::new(a2), len as u64))
             else {
                 return bad_addr;

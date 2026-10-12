@@ -758,7 +758,7 @@ fn handshake(service: &mut Service, acceptor: &toyos::port::Acceptor, p: Pending
         return;
     }
     let guid = wire::guid(p.rx.payload(payload_len));
-    let handles = p.conn.recv_handles_exact([toyos::ObjectKind::SharedMem]);
+    let handles = p.conn.recv_handles_exact::<1>();
     let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
         if let Some([region]) = handles {
             toyos_abi::syscall::close(region);
