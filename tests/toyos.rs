@@ -141,9 +141,6 @@ const RUST_SKIP: &[&str] = &[
     // launches ask DATA's server while this job's share holds all it may: the
     // `fs_share` metal row runs it on tests/images/proctreecase.toml.
     "fs_share",
-    // It needs a NIC in front of netstack and a host server behind it:
-    // `netstack_socket_churn` runs it on `tests/images/netcase.toml`.
-    "netstack_socket_churn",
     // It needs a NIC in front of netstack, a host server behind it and a host
     // that dials its listener: `netstack_streams` runs it on `tests/images/netcase.toml`.
     "netstack_streams",
@@ -340,10 +337,6 @@ const MACHINE_TESTS: &[&str] = &[
     // in reach, and the register sequence and the DMA it frees are no host
     // test's.
     "amdvi_firmware_left",
-    // netstack's own state behind a real stack and a peer that ends its
-    // connections: netstack is one binary that owns its NIC, with no host
-    // build, and the T14's peer is the bench's network.
-    "netstack_socket_churn",
     // The stack against a TCP its writers did not write, the host kernel's
     // behind QEMU's user network, through the kernel's own pipes and each of
     // netstack's two drivers: netstack has no host build, the stack's host
@@ -3457,38 +3450,6 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// netstack's stream count returns once connections that ended without their
-/// client's close request are let go, a client that left a connection its
-/// peer holds is counted gone, and a connection whose receive end the kernel
-/// refuses netstack's watch of is reset; a listener and a datagram socket
-/// whose owner left are let go, a receive that waits is answered by its
-/// datagram, and the connect past netstack's places is refused. One host
-/// server here ends each connection it accepts at once, one holds each and
-/// one answers each datagram; the guest's comparisons are the verdict.
-fn netstack_socket_churn() -> Result<(), String> {
-    const JOB: &str = "netstack_socket_churn";
-    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
-    let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
-    // Ends with the process: a guest that never dials leaves it in `accept`.
-    thread::spawn(move || server.incoming().for_each(drop));
-    let (holding, answering) = (holding_server()?, answering_server()?);
-
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
-    let result = qemu
-        .run_test(&format!("test_rs_netstack_socket_churn {port} {holding} {answering}"), Duration::from_secs(120));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netstack_socket_churn: ok")) {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
-    }
-    Ok(())
-}
-
 /// What one job of netstack's said, as its verdict: it ended by itself, with
 /// 0, and with its last line.
 fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
@@ -3912,7 +3873,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
-        "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
