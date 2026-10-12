@@ -541,7 +541,7 @@ fn main() {
                 answer_inspect(&request, &card, &leases, &sockets, &node);
                 continue;
             }
-            sockets.request(&mut node, clock(), request, draw);
+            sockets.request(&mut node, clock(), request, &acceptor, draw);
         }
     }
 }

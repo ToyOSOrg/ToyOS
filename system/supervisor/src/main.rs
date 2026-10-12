@@ -54,6 +54,12 @@
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
+//! **Every program whose row receives `netstack` holds one minted for it**,
+//! with its row and session as the badge ([`Grants::netstack`]), which netstack
+//! keeps each program's DNS answers apart by: nothing holds the port's own
+//! connector, and a program started once its server has ended for good is
+//! minted none.
+//!
 //! **An installed package's launch also holds the folder of the home it was
 //! granted** ([`toyos_manifest::grants`]): the answer stored for the exact
 //! bytes it starts, which the supervisor alone writes, at the request of the
@@ -110,6 +116,10 @@ use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
     SVC_LABEL, SYSCAP_LABEL,
 };
+
+/// netstack's port, whose every connector the supervisor mints for one row and
+/// session (`Grants::netstack`).
+const NETSTACK: &str = "netstack";
 
 /// What the supervisor makes in the session user's home before anything runs. English on
 /// disk in every locale: a translation is a label, never a rename.
@@ -401,6 +411,9 @@ fn main() {
         acceptors.insert(name, acceptor);
         connectors.insert(name, connector);
     }
+    // Its connector goes at once: every `netstack` a program holds is one
+    // minted with that program's row and session (`Grants::netstack`).
+    drop(connectors.remove(NETSTACK));
 
     // One port per file-server role, made here for the same reason: a
     // program's first open works whether or not its server runs yet. Its
@@ -459,7 +472,7 @@ fn main() {
         syscap: &syscap,
         acceptors,
         connectors,
-        grants: Grants { roles: Vec::new(), block: None },
+        grants: Grants { roles: Vec::new(), block: None, netstack: None },
         sessions: Sessions::default(),
         files,
         services: Vec::new(),
@@ -817,6 +830,11 @@ impl<'a> Supervisor<'a> {
     /// before the file servers its grants are minted on — every other start
     /// may make a directory, and a directory is a file server's — and the
     /// session's home is made before the first row that is not one.
+    ///
+    /// **Every service holds its acceptors before any is started**, so what a
+    /// start mints on another service's port — a role's directories, a
+    /// partition, `netstack` — does not depend on the order `[boot] start`
+    /// lists them in.
     fn boot(&mut self, role_acceptors: &mut BTreeMap<&str, Acceptor>, wake: toyos::RawHandle) {
         let system = self.system;
         let rank = |name: &&String| match system.program(name) {
@@ -826,15 +844,10 @@ impl<'a> Supervisor<'a> {
         };
         let mut storage_first: Vec<&String> = system.start.iter().collect();
         storage_first.sort_by_key(rank);
-        let mut homes_made = false;
         for name in storage_first {
             let program = system
                 .program(name)
                 .unwrap_or_else(|| panic!("supervisor: [boot] start names `{name}`, which is not declared"));
-            if !is_storage(program) && !homes_made {
-                self.make_session_home();
-                homes_made = true;
-            }
             let instances: Vec<Option<&str>> = match program.roles.is_empty() {
                 true => vec![None],
                 false => program.roles.iter().map(|r| Some(r.as_str())).collect(),
@@ -858,8 +871,7 @@ impl<'a> Supervisor<'a> {
                         vec![(format!("{CAPABILITY_PREFIX}{role}"), acceptor)]
                     }
                 };
-                self.make_home(program);
-                let mut service = Service::new(program, role, kept, self.sessions.machine(), wake);
+                let service = Service::new(program, role, kept, self.sessions.machine(), wake);
                 if let Some(role) = role {
                     self.grants.roles.push((role, Arc::clone(&service.kept)));
                 }
@@ -867,17 +879,30 @@ impl<'a> Supervisor<'a> {
                     assert!(self.grants.block.is_none(), "supervisor: two rows start a block service");
                     self.grants.block = Some(Arc::clone(&service.kept));
                 }
-                let started =
-                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
-                match started {
-                    Ok(_) => {}
-                    Err(StartError::Partition(why)) => {
-                        service.kept.lock().expect("supervisor: a service's state is poisoned").acceptors.clear();
-                        say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
-                    }
-                    Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
+                if program.serves.iter().any(|name| name == NETSTACK) {
+                    self.grants.netstack = Some(Arc::clone(&service.kept));
                 }
                 self.services.push(service);
+            }
+        }
+        let mut homes_made = false;
+        for at in 0..self.services.len() {
+            let program = self.services[at].program;
+            if !is_storage(program) && !homes_made {
+                self.make_session_home();
+                homes_made = true;
+            }
+            self.make_home(program);
+            let service = &mut self.services[at];
+            let started =
+                service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
+            match started {
+                Ok(_) => {}
+                Err(StartError::Partition(why)) => {
+                    service.kept.lock().expect("supervisor: a service's state is poisoned").acceptors.clear();
+                    say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
+                }
+                Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
             }
         }
         if !homes_made {
@@ -1903,7 +1928,7 @@ impl Supervisor<'_> {
         let (starts, binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
-                say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
+                say!("supervisor: launcher: {} in {} may not start {}: {why}", caller.row.name, caller.session, program.name);
                 let _ = conn.try_signal(launch::MSG_REFUSED);
                 return;
             }
@@ -2455,6 +2480,7 @@ fn start<'a>(
     }
     let mut view = grants.view(program, launcher.1);
     view.extend(ports);
+    view.extend(grants.netstack(program, launcher.1));
     if let Some(ns) = build_namespace(program, system, connectors, view, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
@@ -2742,11 +2768,12 @@ fn build_namespace(
     // Never the swap port nor the grants port: [`swap_namespace`] and
     // [`grants_namespace`] say why. Never the block port's own connector,
     // which reaches nothing: a holder of `block` holds one minted for what it
-    // reaches, in `view`.
+    // reaches, in `view`; nor netstack's, which nothing holds: a holder of
+    // `netstack` holds one minted for its row and session, in `view` too.
     let receives: Vec<&String> = program
         .receives
         .iter()
-        .filter(|name| *name != toyos_swap::PORT && *name != grants::PORT && *name != toyos_blockring::PORT)
+        .filter(|name| *name != toyos_swap::PORT && *name != grants::PORT && *name != toyos_blockring::PORT && *name != NETSTACK)
         .collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
@@ -2791,13 +2818,16 @@ fn build_namespace(
 ///
 /// **A partition is reached through a connector minted for it**
 /// ([`toyos_blockring::wire::Grant`]), never through the block port's own,
-/// which no program is handed.
+/// which no program is handed. **So is netstack**, through one minted with the
+/// row and session of the program that holds it.
 struct Grants<'a> {
     /// Each role's service, whose kept acceptor is the role's port.
     roles: Vec<(&'a str, Arc<Mutex<Kept>>)>,
     /// The block service the supervisor started, whose kept acceptor is
     /// [`toyos_blockring::PORT`].
     block: Option<Arc<Mutex<Kept>>>,
+    /// The service the supervisor started serving [`NETSTACK`].
+    netstack: Option<Arc<Mutex<Kept>>>,
 }
 
 impl Grants<'_> {
@@ -2814,6 +2844,30 @@ impl Grants<'_> {
             .mint(&grant.encode())
             .map(Some)
             .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
+    }
+
+    /// [`NETSTACK`] minted with `program`'s row and `session`, for a row whose
+    /// `receives` names it: the badge is the view netstack keeps its DNS
+    /// answers in. None once the port has closed for good, as for a role.
+    ///
+    /// The build renders no manifest in which such a row is netstack's own or
+    /// no row `[boot] start` names serves it (`build/build.rs`).
+    fn netstack(&self, program: &Program, session: Session) -> Option<(String, Connector)> {
+        if !program.receives.iter().any(|name| name == NETSTACK) {
+            return None;
+        }
+        let kept = self
+            .netstack
+            .as_ref()
+            .unwrap_or_else(|| panic!("supervisor: {} receives `{NETSTACK}`, which no started row serves", program.name))
+            .lock()
+            .expect("supervisor: a service's state is poisoned");
+        let (_, acceptor) = kept.acceptors.iter().find(|(name, _)| name == NETSTACK)?;
+        let badge = Authority { row: program.name.clone(), session }.encode();
+        let connector = acceptor
+            .mint(&badge)
+            .unwrap_or_else(|e| panic!("supervisor: no netstack connector for {}: {e:?}", program.name));
+        Some((NETSTACK.to_string(), connector))
     }
 
     /// The directory capabilities `program` is endowed for one start in
