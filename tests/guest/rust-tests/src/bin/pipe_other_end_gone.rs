@@ -12,6 +12,10 @@
 //! **The refusal.** A connection and a file have no other end, and a watch that
 //! asks for one is refused whatever else it asks.
 //!
+//! **Its own close.** An end whose holder closes it while the other end lives
+//! answers its watch with `NotFound`: the poll is over, and nothing else would
+//! end it.
+//!
 //! **Not gone.** The other end has a holder while a duplicate of its handle is
 //! held, while the handle sits unreceived in a connection's queue, and after
 //! it moved to a child that still lives: the watch stays armed through each,
@@ -75,6 +79,17 @@ fn test() {
     syscall::close(file);
     println!("  a connection and a file were refused the question");
 
+    for own in [End::Read, End::Write] {
+        let (reader, writer) = pipe("");
+        let (closed, kept) = match own {
+            End::Read => (reader, writer),
+            End::Write => (writer, reader),
+        };
+        assert_eq!(closed_own(closed), [(TOKEN, Err::<u32, _>(SyscallError::NotFound))], "{own:?} end closed by its holder, its other end held");
+        drop(kept);
+    }
+    println!("  an end closed by its own holder answered its watch with NotFound");
+
     let (reader, writer) = pipe("");
     let second = syscall::dup(writer.as_handle()).expect("a second handle to the write end");
     drop(writer);
@@ -103,6 +118,31 @@ fn test() {
     assert!(child.wait().expect("wait the holder").success(), "the holder exited nonzero");
 
     println!("pipe_other_end_gone: an end is told when its other end's last holder goes, and not before");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Read,
+    Write,
+}
+
+/// How long [`closed_own`] waits for the answer its close owes: a close
+/// answers it before it returns, so this is a hang's ceiling.
+const CLOSE_ANSWERED_NANOS: u64 = 10_000_000_000;
+
+/// What one `OTHER_END_GONE` watch of `end`, held by the kernel, is answered
+/// once `end` is closed: every answer a wait bounded by
+/// [`CLOSE_ANSWERED_NANOS`] collects.
+fn closed_own(end: Pipe) -> Vec<(u64, Result<u32, SyscallError>)> {
+    let poller = Poller::new(1);
+    poller.watch(&end, OTHER_END_GONE, TOKEN);
+    let mut answers = Vec::new();
+    // A non-blocking enter, so the watch is the kernel's before the close.
+    poller.wait_answers(0, 0, |token, said| answers.push((token, said)));
+    assert!(answers.is_empty(), "an end was told its other end is gone while it is held: {answers:?}");
+    syscall::close(end.into_raw());
+    poller.wait_answers(1, CLOSE_ANSWERED_NANOS, |token, said| answers.push((token, said)));
+    answers
 }
 
 /// A fresh pipe with `unread` written into it.

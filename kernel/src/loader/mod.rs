@@ -20,7 +20,7 @@ mod start;
 mod tls;
 
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
-pub(crate) use start::{alloc_kernel_stack, Start};
+pub(crate) use start::{alloc_kernel_stack, KernelStack, Start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
 use alloc::string::String;

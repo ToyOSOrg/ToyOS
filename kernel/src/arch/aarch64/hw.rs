@@ -45,7 +45,7 @@ fn check_switch_frame(ctx: &KernelCtx) -> u64 {
     }
     #[cfg(feature = "stack-witness")]
     {
-        let top = match ctx.id {
+        let top = match ctx.runs.id() {
             Some(_) => ctx.kernel_stack_top,
             None => percpu::idle_stack_top(),
         };
@@ -82,9 +82,10 @@ impl Hw for KernelHw {
             let incoming: &KernelCtx = &*restore;
             let sp = check_switch_frame(incoming);
             crate::preempt::set_count(incoming.preempt);
-            percpu::set_current_tid(incoming.id.map(|id| id.1));
-            percpu::set_current_pid(incoming.id.map(|id| id.0));
-            match incoming.id {
+            let incoming_id = incoming.runs.id();
+            percpu::set_current_tid(incoming_id.map(|id| id.1));
+            percpu::set_current_pid(incoming_id.map(|id| id.0));
+            match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
