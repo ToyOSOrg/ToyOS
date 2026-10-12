@@ -432,7 +432,7 @@ mod checks {
         const SIBLING: &str = "Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d";
         const AMD_REFUSED: &str = "Amd signature 0x860f01 found 0x8600106 refused 0x860010d running 0x8600106";
         let t14 = |cpu: u32| (cpu, T14);
-        let amd = |cpu: u32| (cpu, if cpu % 2 == 0 { BSP } else { SIBLING });
+        let amd = |cpu: u32| (cpu, if cpu.is_multiple_of(2) { BSP } else { SIBLING });
 
         let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| match microcode_on_metal(&log(lines), cpus) {
             Ok(()) => Err(format!("{what} was accepted")),

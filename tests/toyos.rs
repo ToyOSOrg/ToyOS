@@ -5488,7 +5488,6 @@ fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
 struct MicrocodeLine {
     cpu: u32,
     signature: u32,
-    found: u32,
     /// `loaded`, `current`, `refused`, or `loads` for one that loads nothing.
     outcome: String,
     running: u32,
@@ -5507,7 +5506,6 @@ fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
         out.push(MicrocodeLine {
             cpu: words.first().and_then(|id| id.parse().ok()).ok_or_else(unreadable)?,
             signature: hex("signature").ok_or_else(unreadable)?,
-            found: hex("found").ok_or_else(unreadable)?,
             outcome: words
                 .iter()
                 .position(|w| *w == "found")
