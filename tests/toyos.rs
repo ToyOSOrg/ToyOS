@@ -5498,48 +5498,60 @@ fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
         return Err(format!("cpu0 is signature {signature:#x} and {other:?} is not"));
     }
     let hex = |word: &str| u32::from_str_radix(word.trim_start_matches("0x"), 16).map_err(|e| format!("{word:?}: {e}"));
-    let held: Box<dyn Fn(&MicrocodeLine) -> Option<String>> = match signature {
+    let linux = match signature {
         T14 => {
-            let linux: Vec<&str> = include_str!("../kernel/cpuvuln/fixtures/t14/cpuinfo.txt")
+            let revisions: Vec<&str> = include_str!("../kernel/cpuvuln/fixtures/t14/cpuinfo.txt")
                 .lines()
                 .filter_map(|line| line.strip_prefix("microcode\t: "))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            let [linux] = linux[..] else {
-                return Err(format!("Linux's reading of the T14 runs more than one revision: {linux:?}"));
+            let [revision] = revisions[..] else {
+                return Err(format!("Linux's reading of the T14 runs more than one revision: {revisions:?}"));
             };
-            let linux = hex(linux)?;
-            Box::new(move |line| {
-                ((line.platform, line.found, line.outcome.as_str(), line.running) != (Some(7), linux, "current", linux))
-                    .then(|| format!("Linux runs {linux:#x} on platform 7, the newest Intel names it"))
-            })
+            Linux::Current(hex(revision)?)
         }
         RENOIR => {
             let linux = include_str!("metal/amd-linux/microcode.txt");
             let said = |label: &str| {
                 linux.lines().find_map(|line| line.strip_prefix(label)).ok_or_else(|| format!("Linux's reading says no {label:?}"))
             };
-            let (firmware, current) =
-                (hex(said("microcode: Updated early from: ")?)?, hex(said("microcode: Current revision: ")?)?);
-            Box::new(move |line| {
-                if line.cpu == 0 && line.found != firmware {
-                    Some(format!("its firmware runs {firmware:#x}, which the BSP finds"))
-                } else if ![firmware, current].contains(&line.found) {
-                    Some(format!("a CPU finds its firmware's {firmware:#x} or its core's {current:#x}"))
-                } else {
-                    ((line.outcome.as_str(), line.running) != ("loaded", current))
-                        .then(|| format!("Linux loads {current:#x} over the firmware's {firmware:#x}"))
-                }
-            })
+            Linux::Loaded {
+                firmware: hex(said("microcode: Updated early from: ")?)?,
+                current: hex(said("microcode: Current revision: ")?)?,
+            }
         }
         other => return Err(format!("no Linux reading of signature {other:#x} is committed")),
     };
-    if let Some((line, why)) = lines.iter().find_map(|line| held(line).map(|why| (line, why))) {
-        return Err(format!("{line:?}: {why}"));
+    for line in &lines {
+        let why = match linux {
+            Linux::Current(linux) => ((line.platform, line.found, line.outcome.as_str(), line.running)
+                != (Some(7), linux, "current", linux))
+                .then(|| format!("Linux runs {linux:#x} on platform 7, the newest Intel names it")),
+            Linux::Loaded { firmware, .. } if line.cpu == 0 && line.found != firmware => {
+                Some(format!("its firmware runs {firmware:#x}, which the BSP finds"))
+            }
+            Linux::Loaded { firmware, current } if ![firmware, current].contains(&line.found) => {
+                Some(format!("a CPU finds its firmware's {firmware:#x} or its core's {current:#x}"))
+            }
+            Linux::Loaded { firmware, current } => ((line.outcome.as_str(), line.running) != ("loaded", current))
+                .then(|| format!("Linux loads {current:#x} over the firmware's {firmware:#x}")),
+        };
+        if let Some(why) = why {
+            return Err(format!("{line:?}: {why}"));
+        }
     }
     eprintln!("  [microcode] {} CPUs of signature {signature:#x} hold Linux's reading", lines.len());
     Ok(())
+}
+
+/// Linux's reading of a machine [`microcode_on_metal`] holds a boot to.
+#[derive(Clone, Copy)]
+enum Linux {
+    /// It runs this revision, which its firmware loaded.
+    Current(u32),
+    /// It loaded `current` early over the firmware's.
+    Loaded { firmware: u32, current: u32 },
 }
 
 /// One `microcode:` line, the fields [`microcode_on_metal`] holds.
