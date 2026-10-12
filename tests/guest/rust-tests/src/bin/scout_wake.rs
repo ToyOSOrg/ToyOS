@@ -220,6 +220,22 @@ fn staged_spinner(stop: Arc<AtomicBool>, at: Arc<AtomicUsize>) -> impl FnOnce() 
     }
 }
 
+/// Where each staged spinner says it spins now, once each has said.
+fn live(spinning: &[Arc<AtomicUsize>]) -> Vec<usize> {
+    let begun = Instant::now();
+    spinning
+        .iter()
+        .map(|at| loop {
+            let on = at.load(Ordering::Relaxed);
+            if on != UNSEEN {
+                break on;
+            }
+            assert!(begun.elapsed() < Duration::from_secs(5), "a kept spinner never said where it spins");
+            std::hint::spin_loop();
+        })
+        .collect()
+}
+
 /// The pair's CPUs: 1 and 2, which are different cores on both benches (the
 /// T14's SMT siblings are four ids apart, the AMD bench's adjacent pairs from
 /// 0), or 5 and 6, also different cores on both, where this thread is on 1 or
@@ -246,18 +262,19 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
     let go = Arc::new(AtomicBool::new(false));
     let partner_thread: Arc<OnceLock<Thread>> = Arc::new(OnceLock::new());
     let mut threads = Vec::new();
-    let mut spinning: Vec<(usize, Arc<AtomicUsize>)> = Vec::new();
+    let mut spinning: Vec<Arc<AtomicUsize>> = Vec::new();
     let mut refused = None;
-    // One spinner on every CPU but this thread's. This thread's CPU is asked
-    // at each decision, because a kernel that hands queued work to idle CPUs
-    // may hand it this thread while CPUs are still idle.
+    // One spinner on every CPU but this thread's, read where each spins now
+    // rather than where it was kept: a kernel that hands queued work to idle
+    // CPUs moves spinners, and this thread, while CPUs are still idle, and
+    // nothing once none is.
     while spinners && spinning.len() + 1 < cpus {
         let at = Arc::new(AtomicUsize::new(UNSEEN));
-        let taken: Vec<usize> = spinning.iter().map(|(on, _)| *on).collect();
+        let taken = live(&spinning);
         match place(|on| on != cpu() && !taken.contains(&on), staged_spinner(stop.clone(), at.clone())) {
-            Ok((spinner, on)) => {
+            Ok((spinner, _)) => {
                 threads.push(spinner);
-                spinning.push((on, at));
+                spinning.push(at);
             }
             Err(landed) => {
                 refused = Some(format!("no spinner landed beside {taken:?}; the candidates ran on {landed:?}"));
@@ -335,21 +352,14 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
             }
         }
     });
-    // Every spinner, and this thread, is still where it was staged.
-    if refused.is_none() {
-        let begun = Instant::now();
-        for (want, at) in &spinning {
-            while at.load(Ordering::Relaxed) == UNSEEN {
-                assert!(begun.elapsed() < Duration::from_secs(5), "a kept spinner never said where it spins");
-                std::hint::spin_loop();
-            }
-            let on = at.load(Ordering::Relaxed);
-            if on != *want {
-                refused = Some(format!("the spinner kept on CPU {want} is on {on}"));
-            }
-        }
-        if cpu() != here || spinning.iter().any(|(on, _)| *on == here) {
-            refused = Some(format!("the coordinator, staged on CPU {here}, is on {} beside {spinning:?}", cpu()));
+    // One spinner on every CPU but this thread's, and this thread where the
+    // pair's CPUs were chosen from.
+    if refused.is_none() && spinners {
+        let mut on = live(&spinning);
+        on.sort_unstable();
+        on.dedup();
+        if on.len() + 1 != cpus || on.contains(&here) || cpu() != here {
+            refused = Some(format!("the spinners are on {:?} and the coordinator, on {here}, is on {}", live(&spinning), cpu()));
         }
     }
     match (&waker, &partner, &refused) {
