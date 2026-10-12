@@ -68,47 +68,61 @@ The design and its roast are PR #863's body.
   A registration arms the want of each direction it names and rings netstack
   if that direction is already ready, and netstack rings back. A fatal `end`,
   any but a FIN, makes the send direction ready to every look, as Linux's
-  `tcp_poll` answers a reset socket writable. std, libc and the mio and
-  socket2 forks read and write the rings through `toyos::net`, and std gains
-  `FromRawFd`, `IntoRawFd` and the `OwnedFd` conversions for `TcpStream`,
-  which take only the process's own ends, with `OwnedFd`'s drop letting a
-  stream's handle go through `toyos::net`. Exit: three loom models that drive
-  the client end and netstack's ringing code as stage 3 lands them, each red
-  under a control that reverts its decision. In one, a stream's reader and
-  writer, each asleep on its own want while netstack's thread releases room
-  and publishes data in either order, end with neither waiting, and the
-  control rings both wants on one doorbell. In another, a blocking call and a
-  `poll` of one direction, the poll's watch answered by the doorbell's level
-  at its look as the kernel's `deliver` answers it and the blocking call
-  leaving bytes, the receive ring's `end` or room behind, end with the poll
-  answered, and the control does not pass the take on. In the third, a source
-  registered while its direction is ready, in both directions, with the
-  receive ring's `end`, and with a fatal `end` while the send ring is full,
-  made ready before the registration or racing it, gets its first event; it is
-  red without the registration's arm and ring, red with either of the two
-  removed, red under stage 2's `want-relaxed`, and red with the fatal `end`
-  where a look reads only the send ring's head. A test: `toyos::net`, handed a
-  stream handle the process holds no end for, refuses it by name and writes
-  nothing on its connection. And a T14 boot of round 3's `internet_download`
-  on stage 3's head reads, in every run, `pipe_copy_bytes` under 0.01 per byte
-  downloaded, its C0, hold and spin per MB posted beside the scout's rows. No
-  tree that lands has that row or that counter: the boot carries the scout's
-  instrument, `git diff 777c96b2b 2f9e090b8` (`wt/toyos-netring-scout` over
-  its base), onto stage 3's head, less the netstack stamps on the pipe writes
-  stage 3 deletes.
+  `tcp_poll` answers a reset socket writable, and a `write` reads it before it
+  copies, answering its error and copying nothing, as Linux checks `sk_err`
+  first. std, libc and the mio and socket2 forks read and write the rings
+  through `toyos::net`, and std gains `FromRawFd`, `IntoRawFd` and the
+  `OwnedFd` conversions for `TcpStream`, which take only the process's own
+  ends, with `OwnedFd`'s drop letting a stream's handle go through
+  `toyos::net`. Exit: three loom models that drive the client end and
+  netstack's ringing code as stage 3 lands them, each red under a control that
+  reverts its decision. In one, a stream's reader and writer, each asleep on
+  its own want while netstack's thread releases room and publishes data in
+  either order, end with neither waiting, and the control rings both wants on
+  one doorbell. In another, a blocking call and a `poll` of one direction, the
+  poll's watch answered by the doorbell's level at its look as the kernel's
+  `deliver` answers it and the blocking call leaving bytes, the receive ring's
+  `end` or room behind, end with the poll answered, and the control does not
+  pass the take on. In the third, a source registered while its direction is
+  ready, in both directions, with the receive ring's `end`, and with a fatal
+  `end` while the send ring is full, made ready before the registration or
+  racing it, gets its first event; it is red without the registration's arm
+  and ring, red with either of the two removed, red under stage 2's
+  `want-relaxed`, and red with the fatal `end` where a look reads only the
+  send ring's head. A test: `toyos::net`, handed a stream handle the process
+  holds no end for, refuses it by name and writes nothing on its connection. A
+  test: a `write` with room after a reset answers `ConnectionReset` and copies
+  nothing, red when `write` copies before it reads the `end`. And a T14 boot
+  of round 3's `internet_download` on stage 3's head reads, in every run,
+  `pipe_copy_bytes` under 0.01 per byte downloaded, its C0, hold and spin per
+  MB posted beside the scout's rows. No tree that lands has that row or that
+  counter: the boot carries the scout's instrument, `git diff 777c96b2b
+  2f9e090b8` (`wt/toyos-netring-scout` over its base), onto stage 3's head,
+  less the netstack stamps on the pipe writes stage 3 deletes.
 - Stage 4: a listener and a datagram socket the same way, and the pipe ABI's
   messages, `SYS_CONNECTION_JOIN` and `toyos::net`'s pipe handles go. A
   passive child's bytes wait in [tcp]'s heap storage, at most
   `limits::RECEIVE_BUFFER_INITIAL` a child and `limits::LISTEN_READY` children
-  a listener, and its accept copies them into the region before it answers.
-  Exit: over the region, `system/netstack/node/tests/listeners.rs`'s
+  a listener, and its accept copies them into the region before it answers. An
+  accept takes one of the wakes netstack writes on the listener's connection
+  for each child that waits before it makes a region, so a nonblocking accept
+  with none answers `WouldBlock` having made nothing, and the accept's answer
+  carries the peer's address and the `nodelay` the child inherited from its
+  listener. netstack copies each datagram record's `len`, `port` and `addr`
+  out of the region once and judges the copy: a `len` past the bytes the
+  record holds ends that socket alone, and one past `MAX_PAYLOAD`, port 0 or
+  an address [udp] refuses is refused by its counter. Exit: over the region,
+  `system/netstack/node/tests/listeners.rs`'s
   `a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends`
   passes, and so does a case in which a child holds, before its accept, text
   in order, text past a hole and its FIN behind that, the hole is filled after
   the accept, and the region reads all of it in order, then its `end`. That
   case is red under each of three controls that drop at the accept one thing
   the child held: its in-order bytes, which also reds the first, its
-  out-of-order range, its FIN.
+  out-of-order range, its FIN. And a datagram record whose `len` is past the
+  bytes it holds, and one whose `len` is past `MAX_PAYLOAD`, are each refused
+  while netstack serves on, each red when netstack takes that `len` as
+  written.
 
 Owner: the orchestrator, who stages it.
 
