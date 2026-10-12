@@ -37,6 +37,11 @@ impl Kicker for KernelHw {
     fn kick(&self, target: CpuId) {
         irqchip::kick_cpu(target.0);
     }
+
+    #[cfg(feature = "scout-wake")]
+    fn scout_wake_posted(&self, target: CpuId, task: kernel::sched::task::TaskKey, sleeping: bool) {
+        crate::scout_wake::posted(target, task, sleeping);
+    }
 }
 
 impl Machine for KernelHw {

@@ -76,6 +76,11 @@ pub enum TraceKind {
 pub trait Kicker: Sync {
     /// Targeted kick IPI. Never broadcast.
     fn kick(&self, target: CpuId);
+
+    /// Scout: an ordinary wake of `task` was posted to `target`, which had
+    /// published SLEEPING before the post when `sleeping`.
+    #[cfg(feature = "scout-wake")]
+    fn scout_wake_posted(&self, _target: CpuId, _task: crate::sched::task::TaskKey, _sleeping: bool) {}
 }
 
 /// The half of the hardware surface that says nothing about tasks: clock,
