@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-10-12
 ---
@@ -27,9 +27,26 @@ every other CPU writes too:
 - **`Frontier`.** One global `AtomicU64`, `fetch_max`ed on every pick
   (`kernel/pure/sched/fair.rs:44-46`, called at `cpu.rs:1827`).
 
-None has been measured. `wt/toyos-scout-clock` holds the measurement: the
-contention each costs on the T14 and the AMD bench.
+**Measured on the T14** (`wt/toyos-scout-clock` at `fa6a2a829`, the
+`internet_download` row's twelve download windows over two boots;
+https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119513916, logs in
+the parts it links):
 
-**Exit**: that measurement, posted; and each of the four either written per
+- The PMM lock's own spin is 0.33 to 0.39 % of C0 time.
+- HITM traffic is bounded at 2.12 to 2.99 % of C0 time: forwarded loads and
+  RFOs, times the 100–101 ns a control's line hop costs. The bound is loose
+  three ways: a control hop is a load plus its loop, so it overstates one
+  HITM; the counters cover every CPU, both rings and every shared line, not
+  only these four; and the load event (D2H/04H) on this CPU also counts clean
+  forwards.
+
+The kill condition fixed before the run, these recorded as structure only if
+both figures are under 1 %, did not fire on its HITM half, so the contention
+is not dismissed. Nothing in the run attributes a miss to the `BITMAP` lock,
+`IN_PASS`, `CpuHandle` or `Frontier`, and the AMD bench was not read. The
+next measurement attributes the HITM count to the lines it lands on, on both
+benches.
+
+**Exit**: that attribution, posted; and each of the four either written per
 CPU on a line no other CPU writes, or kept with its refusal reason at its
 site and its measured cost on both benches in the closing commit.

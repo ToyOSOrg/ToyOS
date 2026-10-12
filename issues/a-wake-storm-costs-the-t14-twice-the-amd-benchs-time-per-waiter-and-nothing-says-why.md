@@ -28,7 +28,12 @@ https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693) and the
 AMD bench in xAPIC (`apic=Xapic`,
 https://github.com/ToyOSOrg/ToyOS/pull/852#issuecomment-6107031099); the T14
 has PCID and the AMD bench does not; the two parts move a line between cores
-differently. None of these has been measured against the gap.
+differently. None of these has been measured against the gap. One part of a
+kick is now timed: an IPI's send is 189 TSC ticks (78 ns) on the T14 and
+under one 18-tick quantum (10 ns) on the AMD bench, and its skew-free delivery
+966 (399 ns) against 1062 (591 ns)
+(https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198). How many
+of the walk's waiters cost a kick is unread.
 
 **Exit**: the per-waiter term split on both benches into its parts, the
 cause of the gap named by that split, and the T14's figure brought to the

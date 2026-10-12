@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-10-12
 ---
@@ -27,18 +27,34 @@ but they are `issues/syscall-preemption-is-incidental.md`'s: that file's step
 of `issues/toyos-beats-linuxs-latency-on-the-t14.md` removes the raise, and
 this file does not.
 
-A null syscall (`SYS_GETPID`, `syscall_cost`) reads 650 TSC cycles on the T14
-at `c126cd9d5` (2419 MHz,
-https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6114829103) and 384 on
-the AMD bench at `fb03703a1` (1796 MHz,
-https://github.com/ToyOSOrg/ToyOS/pull/852#issuecomment-6107031259). How
-much of either is the save and the locked instructions is unmeasured.
+**Measured** (`wt/toyos-scout-sys` at `fbb958b17`, `main`'s `177e72a9e` plus
+the scout, so the FXSAVE64 entry;
+https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119438569). A null
+syscall (`SYS_GETPID`, the minimum rep of 9×20000) in TSC cycles, with each
+change made alone and both together:
 
-`wt/toyos-scout-sys` holds the split: each part of the entry and exit timed on
-both benches.
+| bench | base | no FP save | no `lock` | both | FP share | `lock` share | both, share |
+|---|---|---|---|---|---|---|---|
+| T14 (2419 MHz) | 646 | 560 | 499 | 423 | 13.3 % | 22.8 % | 34.5 % |
+| AMD bench (1796 MHz) | 385 | 274 | 328 | 218 | 28.8 % | 14.8 % | 43.4 % |
 
-**Exit**: that split, posted; the save gone from a syscall that returns to its
-own thread, and the `lock` prefix gone from `preempt_count_up` and
-`preempt_count_down`, or either kept with its refusal reason at its site and
-its measured cost on both benches in the closing commit; and `syscall_cost`
-read on both benches before and after.
+The shares are (base − arm) / base, derived. The kill condition fixed before
+the run, both changes dropped if both together save under about 15 % on both
+benches, did not fire. The FP saving matches the pair's own cost timed in
+Ring 3 (79 cycles on the T14, 111 on the AMD bench).
+
+**Unexplained: where the `lock` saving comes from.** The no-`lock` arm
+stripped the prefix from the stub's raise and lower and from
+`gs::lock_inc_u32`/`lock_dec_u32`, so it covers both files' sites. Timed in
+Ring 3, a prefix costs 7 cycles over a plain `add` on the T14 and 5 on the AMD
+bench, which predicts about 15–30 and 10–12 cycles for the stub's two. The
+arm saved 147 and 57. This run does not say which sites account for the
+rest. The next measurement strips the prefix one site at a time, the stub's
+pair apart from `preempt_count_up`/`_down`, and counts how many of the latter
+a null syscall takes.
+
+**Exit**: the `lock` saving split by site, posted; the save gone from a
+syscall that returns to its own thread, and the `lock` prefix gone from
+`preempt_count_up` and `preempt_count_down`, or either kept with its refusal
+reason at its site and its measured cost on both benches in the closing
+commit; and `syscall_cost` read on both benches before and after.
