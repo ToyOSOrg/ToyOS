@@ -293,7 +293,16 @@ impl Hw for KernelHw {
             // A task's user state area lies above its stack's top (`fpu`); the
             // idle context has none. The task resumes in this frame, so the
             // restore below reads the area its own save wrote.
-            let area = (*save).id.map(|_| (*save).kernel_stack_top);
+            // MUTANT, never lands: the scout's placement. The area is a slot
+            // in this frame, at whatever depth the switch runs, which later
+            // frames overwrite between the restore and the next save; only its
+            // header is zeroed, as a stack slot's must be for a restore.
+            #[repr(C, align(64))]
+            struct Slot([u8; 4096]);
+            let mut slot = core::mem::MaybeUninit::<Slot>::uninit();
+            let at = slot.as_mut_ptr() as u64;
+            core::ptr::write_bytes((at + 512) as *mut u8, 0, 64);
+            let area = (*save).id.map(|_| at);
             (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
