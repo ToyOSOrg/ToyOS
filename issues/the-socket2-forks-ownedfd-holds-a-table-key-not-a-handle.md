@@ -26,17 +26,17 @@ OwnedFd` (1237-1241) hands `OwnedFd::from_raw_fd` that key, taken by
   `kernel/src/syscall/handles.rs`; `HandleTable::remove`,
   `kernel/src/object/handle.rs`). A slot past the table, empty, or at another
   generation is `BadHandle` or `Stale`, and `process::handle_fault` ends the
-  process with exit code 139; a process that never held more than 1000 handles
-  at once has no slot 1000. A process holding a live handle at that slot and
+  process with exit code 139. A process holding a live handle at that slot and
   generation loses it silently, whatever object it names, and the next use of
   that handle by its holder is `Stale` and ends the process there.
 
 The other fd impls cross the same two numbers. `AsFd`, `AsRawFd` (1225-1235)
 and `IntoRawFd` (1243-1247) hand out the key as a descriptor. `From<OwnedFd>`
 and `FromRawFd` (1249-1259) take a kernel handle as a key: it names no entry,
-so every call on the socket is refused "invalid socket fd" and its drop closes
-nothing and leaks the handle; or, where the handle's number is a live key, it
-names another socket's entry, which its drop then closes. An unconnected socket
+so every call on the socket that looks the number up is refused, "invalid
+socket fd" or, from `poll_connect` (538-545), `NotConnected`, and its drop
+closes nothing and leaks the handle; or, where the handle's number is a live
+key, it names another socket's entry, which its drop then closes. An unconnected socket
 (`SocketState::Unconnected`) holds no kernel object at all, so it has no handle
 to give.
 
