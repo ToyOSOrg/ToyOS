@@ -15,10 +15,12 @@
 //! compared on one arrangement rather than on wherever placement and the
 //! balance path left them. Each staged thread asks the kernel which CPU it
 //! first ran on and is kept only where it was wanted, or let go and started
-//! again. Phases 6 to 8 put the pair alone on CPUs 1 and 2, three times over;
-//! phase 9 puts it on CPUs 1 and 2 beside one spinner on every CPU, and phase
-//! 10 puts both on CPU 1 beside the same spinners. The kernel's `moved=` line
-//! says whether the arrangement held.
+//! again; the thread that stages a phase spins while it waits, so no CPU is
+//! idle for a candidate to be handed to. Phases 6 to 8 put the pair alone on
+//! two CPUs of different cores, three times over; phase 9 puts it on the same
+//! two beside one spinner on every CPU (the staging thread is the spinner on
+//! its own), and phase 10 puts both on the first of them beside the same
+//! spinners. The kernel's `moved=` line says whether the arrangement held.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -157,19 +159,18 @@ struct Seat {
 /// Start threads running `body` until one first runs on a CPU `wanted`
 /// accepts, letting every other go; answer it and that CPU, or `None` once
 /// [`TRIES`] were spent. Each candidate parks until it is judged, so the CPU
-/// it is kept on is the one it parked on.
+/// it is kept on is the one it parked on. The caller spins while it waits, so
+/// its own CPU is never idle for a candidate to be handed to.
 fn place(
     wanted: impl Fn(usize) -> bool,
     body: impl FnOnce() + Clone + Send + 'static,
 ) -> Option<(JoinHandle<()>, usize)> {
-    let me = thread::current();
     for _ in 0..TRIES {
         let seat = Arc::new(Seat { on: AtomicUsize::new(UNSEEN), verdict: AtomicU8::new(UNDECIDED) });
         let candidate = {
-            let (seat, me, body) = (seat.clone(), me.clone(), body.clone());
+            let (seat, body) = (seat.clone(), body.clone());
             thread::spawn(move || {
                 seat.on.store(cpu(), Ordering::Release);
-                me.unpark();
                 loop {
                     match seat.verdict.load(Ordering::Acquire) {
                         UNDECIDED => thread::park(),
@@ -187,7 +188,7 @@ fn place(
                 break on;
             }
             assert!(begun.elapsed() < Duration::from_secs(5), "a candidate never said where it ran");
-            thread::park_timeout(Duration::from_millis(100));
+            std::hint::spin_loop();
         };
         let keep = wanted(on);
         seat.verdict.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
@@ -217,13 +218,33 @@ fn staged_spinner(stop: Arc<AtomicBool>, at: Arc<AtomicUsize>) -> impl FnOnce() 
     }
 }
 
-/// One staged phase: a spinner on every CPU when `spinners`, then the waker on
-/// `waker_on` and its partner on `partner_on`. The waker arms the record, runs
-/// the ping-pong for `span` and dumps; a phase that could not be staged says
-/// so and measures nothing.
-fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Duration) {
+/// The pair's CPUs: 1 and 2, which are different cores on both benches (the
+/// T14's SMT siblings are four ids apart, the AMD bench's adjacent pairs from
+/// 0), or 5 and 6, also different cores on both, where this thread is on 1 or
+/// 2. A machine of fewer than seven takes the first two that are not this one.
+fn pair_cpus(here: usize, cpus: usize) -> (usize, usize) {
+    if cpus >= 7 {
+        return if here == 1 || here == 2 { (5, 6) } else { (1, 2) };
+    }
+    let mut others = (0..cpus).filter(|&c| c != here);
+    (others.next().expect("a second CPU"), others.next().unwrap_or(here))
+}
+
+/// One staged phase. With `spinners`, a spinner on every CPU but this
+/// thread's, and this thread spins on its own for the span. Then the waker on
+/// the first of [`pair_cpus`] and its partner on the second, or on the first
+/// too when `together`. The waker arms the record, runs the ping-pong for
+/// `span` and dumps; a phase that could not be staged says so and measures
+/// nothing.
+fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
     let cpus = toyos_abi::syscall::cpu_count() as usize;
+    let here = cpu();
+    let (waker_on, partner_on) = match pair_cpus(here, cpus) {
+        (one, _) if together => (one, one),
+        pair => pair,
+    };
     let stop = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
     let turn = Arc::new(AtomicU32::new(0));
     let go = Arc::new(AtomicBool::new(false));
     let partner_thread: Arc<OnceLock<Thread>> = Arc::new(OnceLock::new());
@@ -231,12 +252,7 @@ fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Dur
     let mut spinning = Vec::new();
     let mut refused = None;
     if spinners {
-        // This thread's CPU last, so that no CPU is left idle beside a spinner
-        // queued behind this one.
-        let here = cpu();
-        let mut wanted: Vec<usize> = (0..cpus).filter(|&c| c != here).collect();
-        wanted.push(here);
-        for want in wanted {
+        for want in (0..cpus).filter(|&c| c != here) {
             let at = Arc::new(AtomicUsize::new(UNSEEN));
             let Some((spinner, _)) = place(|on| on == want, staged_spinner(stop.clone(), at.clone())) else {
                 refused = Some(format!("no spinner landed on CPU {want}"));
@@ -247,7 +263,8 @@ fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Dur
         }
     }
     let waker = refused.is_none().then(|| {
-        let (stop, turn, go, partner_thread) = (stop.clone(), turn.clone(), go.clone(), partner_thread.clone());
+        let (stop, done, turn, go, partner_thread) =
+            (stop.clone(), done.clone(), turn.clone(), go.clone(), partner_thread.clone());
         place(|on| on == waker_on, move || {
             while !go.load(Ordering::Acquire) {
                 thread::park();
@@ -271,12 +288,13 @@ fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Dur
             let took = begun.elapsed();
             assert_eq!(toyos_abi::syscall::debug_with(DUMP, id), 0);
             println!(
-                "scout-wake: phase={id} staged waker={waker_on} partner={partner_on} spinners={} cpus={} \
-                 rounds={rounds} in {} ms",
+                "scout-wake: phase={id} staged waker={waker_on} partner={partner_on} spinners={} \
+                 coordinator={here} cpus={} rounds={rounds} in {} ms",
                 if spinners { cpus } else { 0 },
                 toyos_abi::syscall::cpu_count(),
                 took.as_millis()
             );
+            done.store(true, Ordering::Release);
             stop.store(true, Ordering::Release);
             partner.unpark();
         })
@@ -306,7 +324,7 @@ fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Dur
         }
         placed.map(|(partner, _)| partner)
     });
-    // Every spinner is still where it was staged before the pair starts.
+    // Every spinner, and this thread, is still where it was staged.
     if refused.is_none() {
         let begun = Instant::now();
         for (want, at) in &spinning {
@@ -319,12 +337,24 @@ fn staged(id: u64, spinners: bool, waker_on: usize, partner_on: usize, span: Dur
                 refused = Some(format!("the spinner kept on CPU {want} is on {on}"));
             }
         }
+        if cpu() != here {
+            refused = Some(format!("the coordinator left CPU {here} for {}", cpu()));
+        }
     }
     match (&waker, &partner, &refused) {
         (Some(waker), Some(partner), None) => {
             partner_thread.set(partner.thread().clone()).expect("set once");
             go.store(true, Ordering::Release);
             waker.thread().unpark();
+            if spinners {
+                // This CPU's spinner, for the span.
+                let mut x = 1u64;
+                while !done.load(Ordering::Acquire) {
+                    for _ in 0..1000 {
+                        x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                    }
+                }
+            }
         }
         _ => {
             println!("scout-wake: phase={id} not staged: {}", refused.as_deref().unwrap_or("?"));
@@ -356,12 +386,9 @@ fn main() {
     phase(3, 2 * cpus, Spinners::Here, Duration::from_secs(5));
     phase(4, cpus, Spinners::Apart, Duration::from_secs(5));
     phase(5, 2 * cpus, Spinners::Apart, Duration::from_secs(5));
-    // CPUs 1 and 2 are different cores on both benches: the T14's SMT siblings
-    // are four ids apart, the AMD bench's adjacent pairs from 0.
-    let (one, two) = (1, if cpus > 2 { 2 } else { 0 });
     for id in 6..=8 {
-        staged(id, false, one, two, Duration::from_secs(3));
+        staged(id, false, false, Duration::from_secs(3));
     }
-    staged(9, true, one, two, Duration::from_secs(5));
-    staged(10, true, one, one, Duration::from_secs(5));
+    staged(9, true, false, Duration::from_secs(5));
+    staged(10, true, true, Duration::from_secs(5));
 }
