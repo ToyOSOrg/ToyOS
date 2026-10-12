@@ -632,27 +632,24 @@ fn a_port_answers_as_its_declaration_says() {
     }
 }
 
-/// The ports ACPICA keeps from AML that no declaration holds, the 8259
-/// pair's edge/level control and the PIT, are refused both ways, an access
-/// at either end of a run or across into one as well; the ports beside each
-/// run, and the PCI interrupt router's index and data, pass.
+/// The 8259 pair's edge/level control, which no declaration holds, is
+/// refused both ways, an access at either end of it or across into it as
+/// well; the ports beside it, the PIT, which the kernel neither declares nor
+/// drives, and the PCI interrupt router's index and data, pass.
 #[test]
-fn a_port_acpica_protects_is_refused_though_nothing_declares_it() {
+fn the_8259s_edge_level_control_is_refused_though_nothing_declares_it() {
     for write in [None, Some(0)] {
-        for (at, width) in [
-            (0x40, Width::Byte),
-            (0x43, Width::Byte),
-            (0x42, Width::Word),
-            (0x3E, Width::DWord),
-            (0x48, Width::DWord),
-            (0x4B, Width::Byte),
-            (0x4D0, Width::Byte),
-            (0x4D1, Width::Byte),
-            (0x4CE, Width::DWord),
-        ] {
+        for (at, width) in [(0x4D0, Width::Byte), (0x4D1, Width::Byte), (0x4D0, Width::Word), (0x4CE, Width::DWord)] {
             assert_eq!(port(standing, at, width, write), refused_port(Refused::ProtectedPort), "{width:?} at {at:#x}");
         }
-        for (at, width) in [(0x3C, Width::DWord), (0x44, Width::DWord), (0x4C, Width::Byte), (0x4CC, Width::DWord), (0x4D2, Width::Word), (0xC00, Width::Byte), (0xC01, Width::Byte)] {
+        for (at, width) in [
+            (0x40, Width::DWord),
+            (0x48, Width::DWord),
+            (0x4CC, Width::DWord),
+            (0x4D2, Width::Word),
+            (0xC00, Width::Byte),
+            (0xC01, Width::Byte),
+        ] {
             assert_eq!(through(port(standing, at, width, write)), Some((at, width)), "{width:?} at {at:#x}");
         }
     }

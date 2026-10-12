@@ -54,9 +54,11 @@
 //!
 //! **A port is the kernel's to answer where the kernel declared it**
 //! ([`crate::port::Mediated`]), another claim's where a row names it, refused
-//! where [`PROTECTED`] names it, and passes otherwise, a write as a read: the
-//! owner's "Allow, like Linux", whose `acpi_os_write_port` writes whatever
-//! ACPICA's port protection passes.
+//! where [`PROTECTED`] names it, and passes otherwise, a write as a read, as
+//! the owner ruled on #875: ACPI 6.5 has control methods hold "exclusive
+//! access to any address accessed via fields declared in Operation Regions"
+//! (§5.5.2.4, Operation Regions), which a port of a device the kernel drives
+//! cannot give them.
 //!
 //! **A byte written to the port that commands the firmware is no port write:
 //! it is a call into the firmware, the kernel's to make** ([`FirmwareCall`]).
@@ -361,15 +363,13 @@ pub enum PortVerdict {
 }
 
 /// The ports kept from AML that no declaration of the kernel's holds, each
-/// `(first, last)`, as ACPICA's `AcpiProtectedPorts` writes them
-/// (`source/components/hardware/hwvalid.c`, ACPICA 20260408): the 8259
-/// pair's edge/level control, which ACPICA refuses whatever the firmware
-/// asks `_OSI`, as it refuses the pair the kernel declares; and the PIT,
-/// both of ACPICA's rows for it, which the owner's ruling names among the
-/// ports the kernel owns. ACPICA refuses the PIT, and the rest of its table,
-/// only to a firmware whose newest `_OSI` is Windows XP's, and the rest is
-/// written here as Linux writes it.
-pub const PROTECTED: [(u16, u16); 3] = [(0x40, 0x43), (0x48, 0x4B), (0x4D0, 0x4D1)];
+/// `(first, last)`: the 8259 pair's edge/level control, ELCR1 and ELCR2,
+/// which set each of the pair's lines edge- or level-triggered. Intel lists
+/// them among the pair's own registers (Intel 332691-003, the 100 Series PCH
+/// datasheet, Vol. 2, §28.1, Table 28-1: 4D0h and 4D1h beside 20h-21h and
+/// A0h-A1h); the kernel declares and drives the pair, so it is the kernel's
+/// whole, though the declaration spans only its command and data ports.
+pub const PROTECTED: [(u16, u16); 1] = [(0x4D0, 0x4D1)];
 
 /// Decide an access of `width` at `port`, a write of `write`: every port it
 /// spans is asked of `standing` and of [`PROTECTED`].
