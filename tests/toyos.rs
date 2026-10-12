@@ -992,9 +992,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // A unit handed over translating, remapping and queueing, on real
-        // silicon: each field goes off by its own write before the unit is
-        // programmed, and the boot goes on.
+        // A unit handed over translating, remapping and queueing, or on an
+        // AMD-Vi machine blocking every DMA with its command buffer and event
+        // log running, on real silicon: each field goes off by its own write
+        // before the unit is programmed or left off, and the boot goes on.
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
@@ -5213,8 +5214,11 @@ fn input_merge_ok(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// Every unit this kernel went on to program said it was handed over with what
-/// the actuator left on.
+/// Every unit this kernel went on to program, and every AMD-Vi unit it
+/// switched off, said it was handed over with what the actuator left on.
+///
+/// An AMD-Vi unit's lines are on the boot stick only because the switch-off
+/// let the stick's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
         let mut units = 0;
         for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
@@ -5242,13 +5246,32 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
             }
             units += 1;
         }
+        let amdvi = log
+            .lines()
+            .filter_map(|l| l.split_once("iommu: amdvi ")?.1.split_once(" handed over control="))
+            .map(|(unit, _)| unit);
+        for unit in amdvi {
+            for line in common::iommu::amdvi_left_on(unit) {
+                if !log.contains(&line) {
+                    return Err(format!(
+                        "amdvi {unit} never said {line:?}, so the state the actuator left was \
+                         never switched off:\n{log}"
+                    ));
+                }
+            }
+            let off = format!("iommu: amdvi {unit} @");
+            if !log.lines().any(|l| l.contains(&off) && l.contains(" switched off control=")) {
+                return Err(format!("amdvi {unit} was handed over and never said it was switched off:\n{log}"));
+            }
+            units += 1;
+        }
         if units == 0 {
-            return Err(format!("no unit was programmed, so nothing was handed over:\n{log}"));
+            return Err(format!("no unit was programmed or switched off, so nothing was handed over:\n{log}"));
         }
         let passed = log.matches("handed over with compatibility-format pass-through on").count();
         eprintln!(
-            "  [iommu-firmware-left] {units} unit(s) programmed after switching off what they were \
-             handed over with; {passed} of them reported compatibility format passed"
+            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with; \
+             {passed} of them reported compatibility format passed"
         );
         Ok(())
 }
