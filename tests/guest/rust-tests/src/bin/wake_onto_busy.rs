@@ -15,7 +15,8 @@
 //! spawn placement alone decides nothing a row can rest on. Each staged thread
 //! reads the CPU it first runs on and is kept only where it was wanted, or let
 //! go and started again: the partners on one CPU other than the waker's and
-//! the one device interrupts target, then a spinner there. The waker spins
+//! the one device interrupts target, then a spinner there, and again whenever
+//! the kernel moves the spinner to an idle CPU during the run. The waker spins
 //! rather than parks from the first placement to the last round, so its own
 //! CPU is never idle for a wake to be handed to and it is never woken itself.
 //!
@@ -49,6 +50,10 @@ const BUCKETS: usize = 32_768;
 /// so a machine of `n` needs about `n` of them.
 const TRIES: usize = 256;
 const STAGE_NS: u64 = 5_000_000_000;
+
+/// How many times a run keeps a spinner on the busy CPU again after the
+/// kernel moved one off it, before the run is refused.
+const RESTAGES: usize = 8;
 
 #[derive(Clone, Copy)]
 #[repr(i32)]
@@ -164,98 +169,93 @@ fn partner(seat: &Seat) {
     park_until(seat, &[STOP]);
 }
 
-/// What a run times: the partners parked on `busy`, and a spinner there that
-/// says where it spins in `spinner_at`.
-struct Staged {
-    partners: Vec<(JoinHandle<()>, Arc<Seat>)>,
-    busy: u32,
+/// A thread spinning where it was kept, saying in `at` where it spins.
+struct Spinner {
+    thread: JoinHandle<()>,
     stop: Arc<AtomicBool>,
-    spinner: Option<JoinHandle<()>>,
-    spinner_at: Arc<AtomicU32>,
+    at: Arc<AtomicU32>,
 }
 
-impl Staged {
-    /// Stop the spinner and every partner, and answer where the spinner last
-    /// said it was.
+impl Spinner {
+    /// Keep a spinner on `busy`, once it says it spins there.
+    fn on(busy: u32) -> Result<Spinner, String> {
+        let (stop, at) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU32::new(UNSEEN)));
+        let (thread, _, _) = place(|on| on == busy, {
+            let (stop, at) = (stop.clone(), at.clone());
+            move |_: &Seat| {
+                let mut x = 1u64;
+                loop {
+                    at.store(cpu::x2apic_id(), Ordering::Relaxed);
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    for _ in 0..1000 {
+                        x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                    }
+                }
+            }
+        })?;
+        let spinner = Spinner { thread, stop, at };
+        let seen = || Some(spinner.at()).filter(|at| *at != UNSEEN);
+        match spin_for(nanos_since_boot() + STAGE_NS, seen, "the kept spinner") {
+            Ok(at) if at == busy => Ok(spinner),
+            Ok(at) => {
+                spinner.end();
+                Err(format!("a spinner kept on CPU {busy} spins on {at}"))
+            }
+            Err(why) => {
+                spinner.end();
+                Err(why)
+            }
+        }
+    }
+
+    fn at(&self) -> u32 {
+        self.at.load(Ordering::Relaxed)
+    }
+
+    /// Stop it, and answer where it last said it was.
     fn end(self) -> u32 {
         self.stop.store(true, Ordering::Release);
-        if let Some(spinner) = self.spinner {
-            spinner.join().expect("the spinner panicked");
-        }
-        for (partner, seat) in self.partners {
-            seat.phase.store(STOP, Ordering::Release);
-            partner.thread().unpark();
-            partner.join().expect("a partner panicked");
-        }
-        self.spinner_at.load(Ordering::Relaxed)
+        self.thread.join().expect("a spinner panicked");
+        self.at.load(Ordering::Relaxed)
+    }
+}
+
+/// End every partner, woken or not.
+fn end_partners(partners: Vec<(JoinHandle<()>, Arc<Seat>)>) {
+    for (partner, seat) in partners {
+        seat.phase.store(STOP, Ordering::Release);
+        partner.thread().unpark();
+        partner.join().expect("a partner panicked");
     }
 }
 
 /// Stage `ROUNDS` partners on one CPU other than the waker's and the
-/// interrupts', then a spinner there, and check that the waker is still
-/// elsewhere and the spinner still there.
-fn stage(waker_on: u32) -> Result<Staged, String> {
-    let mut staged = Staged {
-        partners: Vec::with_capacity(ROUNDS),
-        busy: UNSEEN,
-        stop: Arc::new(AtomicBool::new(false)),
-        spinner: None,
-        spinner_at: Arc::new(AtomicU32::new(UNSEEN)),
-    };
-    while staged.partners.len() < ROUNDS {
-        let busy = staged.busy;
+/// interrupts', then a spinner there; answer them and that CPU.
+fn stage(waker_on: u32) -> Result<(Vec<(JoinHandle<()>, Arc<Seat>)>, u32, Spinner), String> {
+    let mut partners = Vec::with_capacity(ROUNDS);
+    let mut busy = UNSEEN;
+    while partners.len() < ROUNDS {
         let wanted = |on| on != waker_on && on != DEVICE_IRQ_CPU && (busy == UNSEEN || on == busy);
         match place(wanted, partner) {
             Ok((thread, seat, on)) => {
-                staged.busy = on;
-                staged.partners.push((thread, seat));
+                busy = on;
+                partners.push((thread, seat));
             }
             Err(why) => {
-                staged.end();
+                end_partners(partners);
                 return Err(why);
             }
         }
     }
-    let busy = staged.busy;
-    let placed = place(|on| on == busy, {
-        let (stop, at) = (staged.stop.clone(), staged.spinner_at.clone());
-        move |_: &Seat| {
-            let mut x = 1u64;
-            loop {
-                at.store(cpu::x2apic_id(), Ordering::Relaxed);
-                if stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                for _ in 0..1000 {
-                    x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
-                }
-            }
-        }
-    });
-    match placed {
-        Ok((spinner, _, _)) => staged.spinner = Some(spinner),
+    match Spinner::on(busy) {
+        Ok(spinner) => Ok((partners, busy, spinner)),
         Err(why) => {
-            staged.end();
-            return Err(why);
+            end_partners(partners);
+            Err(why)
         }
     }
-    let seen = || Some(staged.spinner_at.load(Ordering::Relaxed)).filter(|at| *at != UNSEEN);
-    let at = match spin_for(nanos_since_boot() + STAGE_NS, seen, "the kept spinner") {
-        Ok(at) => at,
-        Err(why) => {
-            staged.end();
-            return Err(why);
-        }
-    };
-    let now_on = cpu::x2apic_id();
-    if now_on != waker_on || at != busy {
-        staged.end();
-        return Err(format!(
-            "the waker moved from CPU {waker_on} to {now_on}, the partners parked on {busy} and \
-             the spinner is on {at}"
-        ));
-    }
-    Ok(staged)
 }
 
 fn main() {
@@ -264,19 +264,36 @@ fn main() {
         refuse(Refusal::NotStaged, "the waker, the busy CPU and the interrupts' CPU need three");
     }
     let waker_on = cpu::x2apic_id();
-    let staged = match stage(waker_on) {
+    let (partners, busy, spinner) = match stage(waker_on) {
         Ok(staged) => staged,
         Err(why) => refuse(Refusal::NotStaged, &format!("not staged: {why}")),
     };
-    let busy = staged.busy;
+    let mut spinner = Some(spinner);
 
     let mut histogram = vec![0u32; BUCKETS];
     let mut overflow = 0u32;
     let mut worst_ns = 0u64;
     let mut rounds = 0usize;
     let mut off_busy = 0usize;
+    let mut restaged = 0usize;
     let begun = nanos_since_boot();
-    for (partner, seat) in &staged.partners {
+    for (partner, seat) in &partners {
+        // A kernel that balances may hand the spinner to an idle CPU; then
+        // the partners' CPU is idle, and a spinner is kept there again.
+        if spinner.as_ref().is_some_and(|spinner| spinner.at() != busy) {
+            let left_for = spinner.take().map_or(UNSEEN, Spinner::end);
+            if restaged == RESTAGES {
+                refuse(Refusal::NotStaged, &format!("the spinner left CPU {busy} {RESTAGES} times"));
+            }
+            restaged += 1;
+            match Spinner::on(busy) {
+                Ok(again) => spinner = Some(again),
+                Err(why) => refuse(
+                    Refusal::NotStaged,
+                    &format!("the spinner left CPU {busy} for {left_for}, and none was kept there again: {why}"),
+                ),
+            }
+        }
         let sent = nanos_since_boot();
         seat.phase.store(RUN, Ordering::Release);
         partner.thread().unpark();
@@ -296,13 +313,10 @@ fn main() {
         }
     }
     let now_on = cpu::x2apic_id();
-    // The spinner is still where it was staged, and so is the waker.
-    let held = staged.end();
-    if held != busy || now_on != waker_on {
-        refuse(
-            Refusal::NotStaged,
-            &format!("the spinner left CPU {busy} for {held}, or the waker CPU {waker_on} for {now_on}"),
-        );
+    spinner.map(Spinner::end);
+    end_partners(partners);
+    if now_on != waker_on {
+        refuse(Refusal::NotStaged, &format!("the waker left CPU {waker_on} for {now_on}"));
     }
 
     let percentile = |want: usize| -> Option<u64> {
@@ -319,8 +333,8 @@ fn main() {
     let p99 = percentile(rounds * 99 / 100);
     println!(
         "wake_onto_busy: {rounds} wakes on {cpus} cpus onto CPU {busy} beside its spinner, waker on \
-         CPU {waker_on}, {off_busy} run off CPU {busy}: p50={}us p90={}us p99={}us max={}us, \
-         {overflow} past the {BUCKETS}us histogram",
+         CPU {waker_on}, {off_busy} run off CPU {busy}, the spinner kept there again {restaged} \
+         time(s): p50={}us p90={}us p99={}us max={}us, {overflow} past the {BUCKETS}us histogram",
         shown(percentile(rounds / 2)),
         shown(percentile(rounds * 9 / 10)),
         shown(p99),
