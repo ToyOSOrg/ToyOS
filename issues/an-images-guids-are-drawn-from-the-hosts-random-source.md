@@ -16,8 +16,8 @@ table; `lay` draws the disk GUID of every disk it lays; `designate_data_disk`
 and `install` draw the DATA partition's.
 
 Measured on six pairs of metal images, each pair one selection staged twice
-by `cargo test --test toyos-build -- --metal --metal-readback` from one clean
-committed tree in one checkout: each pair differs in 391 to 413 bytes, and
+by `cargo test --test toyos-build -- --metal --metal-readback <dir>` from one
+clean committed tree in one checkout: each pair differs in 391 to 413 bytes, and
 kernel, loader, ROOT and LOG are byte-identical in all six. In one pair,
 254 of its 393 bytes are the GUIDs and the GPT CRCs over them, 135 are the
 clock
@@ -37,8 +37,14 @@ per image: the floor's UEFI variable is named by it
 a floor (`build/signing.rs`), and the loader finds the log volume by it
 (`loader/src/loaderlog.rs`). Whatever replaces the draw still gives two
 images that differ two log GUIDs, and decides what a second build of one
-image inherits from the first one's floor.
+image inherits from the first one's floor. The floor half of that ends at
+stage 3 of `issues/the-loader-does-only-what-must-precede-the-handover.md`,
+which deletes `floor::Scope` and names every floor for its key alone.
 
-**Exit**: no GUID `build/image.rs` writes is drawn from a random source, and
-a host test builds one image twice and finds its partition table, slot table
-and `/toyos/log.guid` identical.
+**Owner**: `issues/toyos-builds-itself.md`, whose M4 exits on a guest build
+of the image whose hashes match the host build of the same commit, which no
+image whose GUIDs are drawn meets.
+
+**Exit**: every GUID `build/image.rs` writes is a function of the image's own
+inputs (its sections and its key), and a host test builds one image twice and
+finds its partition table, slot table and `/toyos/log.guid` identical.
