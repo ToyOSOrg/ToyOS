@@ -124,9 +124,14 @@ if it meets the bar above; otherwise it is a NOTE.
   exists, or made smaller? An abstraction with one caller, a parameter with one value, dead code,
   code kept "just in case" or because nobody knows whether it is needed. Size is never bought with
   a weaker check: a test is cut only when it tests nothing or is a measurement, when this prompt
-  takes its rule, or as **Guest tests** says. A compromise the branch found is removed or
-  recorded in `issues/` with an owner, evidence and an exit condition.
-- **Tests.** The refusals and the boundary, not the happy path. A test is hermetic, deterministic
+  takes its rule, when **Tests** cuts it, or as **Guest tests** says. A compromise the branch
+  found is removed or recorded in `issues/` with an owner, evidence and an exit condition.
+- **Tests.** The refusals and the boundary, not the happy path, and integration between modules
+  only for the kernel: outside it, a userspace program is tested as units and modules with at most
+  a very cheap smoke test, and no test installs or launches software and drives it through a
+  sequence of steps. An integration test refused here is cut, and where what it checked matters, a
+  unit or module test of its program holds it, named in the pull request body. A test is
+  hermetic, deterministic
   and makes one claim, in setup, act and assert under a name that says the claim, and it reaches
   no internet. However loaded the host, no guest test goes red: a guest test's only clock is a
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
@@ -144,7 +149,8 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Guest tests.** A behaviour is tested on root `CLAUDE.md`'s cheapest tier that reaches it. A new
   guest test, or one whose behaviour changes, whose pull request body does not say why a type, a
   host test and a metal row cannot reach its behaviour is a BLOCKER, and so is one whose reason a
-  cheaper tier answers. A guest test is cut only where it is a measurement (**Tests**); where a
+  cheaper tier answers. A guest test is cut only where it is a measurement (**Tests**); where
+  **Tests** cuts it; where a
   cheaper tier already holds its behaviour, named in the pull request body; where a stage of a
   track names it, in the same diff, with the behaviour it guarded and an exit a build or test can
   fail; or as root `CLAUDE.md` deletes a red or flaky test. Any other cut is a BLOCKER.
