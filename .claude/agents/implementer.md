@@ -23,16 +23,25 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
-design, the environment changes or the gap is filed. Where that hardware's manufacturers or the
-published state of the art back a design, the design follows and cites them, and leaves them only
-when they leave it. Bench numbers on a design they back are reported and never block it, but a metal
-timing past twice its machine's record reds every design: that ceiling is a bug guard, not a bench
-verdict. A slowdown on a design they back is investigated, not used to reject it. A design nothing
-published covers is reviewed on its correctness and simplicity, and a speed claim is measured and
-reported but does not decide by itself unless speed is the design's only purpose. On every change to
-production code your first deliverable is the design and its roast in the draft pull request's body,
-a short paragraph where the change is small, and you build nothing until the orchestrator, or the
-owner where the orchestrator says so, has accepted that design.
+design, the environment changes or the gap is filed. A design, a value or a test's oracle never
+takes its authority from another implementation's source; where the vendor's documentation, the
+published specifications or the published state of the art back it, it follows and cites them, and
+leaves them only when they leave it. Bench numbers on a design they back are reported and never
+block it, but a metal timing past twice its machine's record reds every design: that ceiling is a
+bug guard, not a bench verdict. A slowdown on a design they back is investigated, not used to reject
+it. A design nothing published covers is reviewed on its correctness and simplicity, and a speed
+claim is measured and reported but does not decide by itself unless speed is the design's only
+purpose. Source, tests and manifests name Linux only as a host platform, or the name of an interface
+defined outside ToyOS (a `libc` item, a firmware's `_OSI` string, a partition type). A test's oracle
+for what hardware does is the vendor's document, or ToyOS's own read checked against it; Linux run
+as a black box, as a performance target or to observe what hardware does where its vendor's
+documents are silent, is a measurement kept in the evidence and the issues, and a reading captured
+under it is never committed as a test's oracle. A host test may compare live against the host's own
+implementation of a published interface, its TCP or its `libc`, as a differential implementation on
+every host the suite runs on; where the two disagree, the specification decides and the row says so.
+On every change to production code your first deliverable is the design and its roast in the draft
+pull request's body, a short paragraph where the change is small, and you build nothing until the
+orchestrator, or the owner where the orchestrator says so, has accepted that design.
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
@@ -78,8 +87,10 @@ shared by every worktree: explicit paths, never `stash`, never switch a branch i
 one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends
 on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS enters as a new
 platform, a cross-platform change is written as upstream would accept it, the rationale goes in
-the commit message. A commit you push to a fork branch lands in the same pull request as the bump
-of every lockfile and gitlink that names that branch.
+the commit message. Upstream's source in a fork is the code being changed, not another
+implementation; a ToyOS arm stands on the platform's own specification, never on another platform's
+arm copied as its authority. A commit you push to a fork branch lands in the same pull request as
+the bump of every lockfile and gitlink that names that branch.
 
 `rust/` is stricter: `library/alloc` and `library/core` have zero delta; a cross-platform file is
 touched only to add a target arm at an existing dispatch site; `src/bootstrap` takes only a general
