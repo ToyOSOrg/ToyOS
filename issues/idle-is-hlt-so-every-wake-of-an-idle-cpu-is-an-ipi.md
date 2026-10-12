@@ -39,17 +39,29 @@ stands in for here, so the share is an upper bound on what the doorbell
 saves. Applied to that bound, the line fixed before the scout, the doorbell
 dropped under 20 % of the wake, fires on the T14 and not on the AMD bench.
 
-**Next: an MWAIT twin**, `main` plus the scout with each idle CPU waiting in
-MWAIT on its doorbell, the doorbell on a line of its own, and the wake's kick
-not sent, timed by the same split beside `main` in the same session. Its kill
-line, fixed here before it runs: the doorbell is worth building only if, on a
-proving machine that enumerates MONITOR/MWAIT, the twin's whole idle wake p50
-is at least 20 % under `main`'s in both directions. The T14's bound is under
-that line, so the twin runs on the AMD bench, and reads CPUID.01H:ECX[3]
-there first; if the AMD bench does not enumerate it, no proving machine can
-clear the line.
+**Next: an MWAIT twin** beside a control arm, both timed by the same split in
+the same session. The control arm is `main` plus the scout with the doorbell
+on a line of its own, which is
+`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`'s
+change. The twin is the control arm with each idle CPU waiting in MWAIT on its
+doorbell's line, hint C1 (EAX = 0), the state `hlt` enters, and the wake's
+kick not sent. The two arms differ only in what ends the wait, which is what
+the bound above covers. Its kill line, fixed here before it runs: the
+doorbell is built ahead of `issues/idle-cpus-enter-the-c-states-cst-names.md`
+only if, on a proving machine that enumerates MONITOR/MWAIT, the twin's whole
+idle wake p50 is at least 20 % under the control arm's in both directions.
+The T14's bound is under that line, so the twin runs on the AMD bench, and
+reads CPUID.01H:ECX[3] there first; if the AMD bench does not enumerate it, no
+proving machine can clear the line. Its clock control, fixed with the line:
+each arm reads APERF and MPERF on CPUs 4 and 5 before and after the split,
+and where the two arms' ratios of APERF's advance to MPERF's differ by more
+than 1 % on either CPU, both arms' readings are void and decide nothing.
 
-**Exit**: the twin's reading, posted. Where it clears the line, an idle CPU
-on every proving machine that enumerates MONITOR/MWAIT is woken by its
-doorbell's store with no IPI. Where it does not, this file becomes `rejected`
-with both readings.
+**Exit**: the twin's reading, posted, and an idle CPU on every proving machine
+that enumerates MONITOR/MWAIT woken by its doorbell's store with no IPI. Where
+the twin clears the line, that is built ahead of the C-states. Where it does
+not, this file stays open behind
+`issues/idle-cpus-enter-the-c-states-cst-names.md`: the 20 % prices an idle
+path beside `hlt`, which that track builds anyway, and once an idle CPU waits
+in MWAIT there, putting its monitor on the doorbell's line and sending no
+kick adds no second path.

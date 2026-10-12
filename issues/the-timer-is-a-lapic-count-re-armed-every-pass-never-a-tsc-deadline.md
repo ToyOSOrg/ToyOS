@@ -39,17 +39,27 @@ On the T14 the re-arm is 11.7 % and 12.1 % of the pass's pick and switch,
 which a pass with no idle wake runs too, and 27.8 % and 31.3 % of the switch
 it sits in; the
 re-arm and the stop together are 5.5 % and 5.6 % of an idle wake (derived).
-Each is an upper bound on what deadline mode saves, which still writes once
-to arm and once to stop; on the AMD bench both sit at its TSC's floor.
+The scout's re-arm opens at `arm_one_shot`'s first statement, after
+`set_timer`'s `now()` (`kernel/src/hw.rs:50`), an `rdtsc` and a u128 multiply
+and divide (`kernel/pure/clock.rs:10-11`): the count reads the clock to turn
+the deadline into a span, and a deadline written as an absolute
+`IA32_TSC_DEADLINE` value reads none. Of what the segment times, each figure
+is an upper bound on what deadline mode saves, which still writes once to arm
+and once to stop; on the AMD bench both sit at its TSC's floor.
 
 **Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
 one-shot armed and stopped through `IA32_TSC_DEADLINE`, timed by the same
-split beside `main` in the same session. Its kill line, fixed here before it
-runs: deadline mode is not worth building for speed if what it takes off a
-pass, `main`'s re-arm p50 less the twin's, is under 5 % of `main`'s pick plus
-switch in either direction (221 and 216 ticks on the scout's figures). Where
-it fires, this file becomes `rejected` with both readings, and the boot's
-10 ms calibration spin stays the count's price.
+split beside `main` in the same session, with the re-arm segment opening at
+`set_timer` (`kernel/src/hw.rs:49`) in both arms. Its kill line, fixed here
+before it runs: deadline mode is not worth building for speed if what it
+takes off a pass, `main`'s re-arm p50 less the twin's, is under 5 % of
+`main`'s pick plus switch in either direction (221 and 216 ticks on the
+scout's figures). Its clock control, fixed with the line: each arm reads
+APERF and MPERF on CPUs 4 and 5 before and after the split, and where the two
+arms' ratios of APERF's advance to MPERF's differ by more than 1 % on either
+CPU, both arms' readings are void and decide nothing. Where the line fires,
+this file becomes `rejected` with both readings, and the boot's 10 ms
+calibration spin stays the count's price.
 
 **Exit**: the twin's reading, posted, and the AMD bench's CPUID.01H:ECX[24]
 read. Where the twin clears the line, a deadline is armed on every CPU that
