@@ -15,13 +15,15 @@ it on `main` as well as with the busy-CPU wake change (PR #874).
 
 Measured with I5's ceiling lifted (`with_fair_allowance(u64::MAX)`), seeds
 0..2000 alternating the seeded and PCT streams as `sim/tests/policy.rs` does,
-by [a scratch test](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/scratch-tests/zz_scratch3.rs)
-([its output](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/i5-2000.txt)):
+by a scratch test ([at `6e323ccf0`](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/scratch-tests/zz_scratch3.rs),
+[its output](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/i5-2000.txt);
+[again at `17c40459d`](https://github.com/ToyOSOrg/evidence/blob/d6d8e852b6e7e249e45d6218c252583ee624b03c/r3/sim/zz_scratch.rs), [its output](https://github.com/ToyOSOrg/evidence/blob/d6d8e852b6e7e249e45d6218c252583ee624b03c/r3/sim/scratch-at-head.log)):
 
 | tree | runs crossing | worst spread | bound in force there |
 |---|---|---|---|
 | `main` at `177e72a9e` | 90 / 2000 | 250 ms | 216 ms |
-| PR #874 | 196 / 2000 | 254 ms | 217 ms |
+| PR #874 at `6e323ccf0` | 196 / 2000 | 254 ms | 217 ms |
+| PR #874 at `17c40459d` | 197 / 2000 | 254 ms | 217 ms |
 
 The policy suite's forty seeds miss every crossing on `main`, and two of them
 (24 and 36) cross with the change, which is why `scenarios::interactive_mix`

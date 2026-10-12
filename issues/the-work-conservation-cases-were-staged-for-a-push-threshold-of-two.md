@@ -15,7 +15,7 @@ kicking a busy target (PR #874), two of their claims stop being shown:
   the extra pass pushes the next sleeper, so the lopsided machine's cursor walk
   ends long before the derivation's one push a round. Over 200 seeds the worst
   stretch is 5 rounds against a bound of 10 on the T14's shape and 6 against
-  18 on the AMD bench's. The bound is still the derivation's worst case; no
+  18 on the AMD bench's ([at `17c40459d`](https://github.com/ToyOSOrg/evidence/blob/d6d8e852b6e7e249e45d6218c252583ee624b03c/r3/sim/scratch-at-head.log)). The bound is still the derivation's worst case; no
   sampled schedule comes near it, so
   `the_push_keeps_an_idle_cpu_beside_work_inside_its_bound` no longer asserts
   that the worst stretch is more than half the bound.
