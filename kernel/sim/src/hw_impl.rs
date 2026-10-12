@@ -26,6 +26,10 @@ pub struct SimHwState {
     pub now: Nanos,
     pub armed: Vec<Option<Nanos>>,
     pub pending_ipi: Vec<u32>,
+    /// Of `pending_ipi`, the ones sent while their target was not halted: a
+    /// kick to a busy CPU, which may halt before it lands, having already
+    /// drained what the kick was for.
+    pub busy_kicks: Vec<u32>,
     pub need_resched: Vec<bool>,
     pub halted: Vec<bool>,
     pub ctx_saved: HashMap<TaskKey, bool>,
@@ -37,6 +41,11 @@ pub struct SimHwState {
     /// Which CPU's pass is running. The core has no `cpu_id()` by design, so
     /// the driver is what knows where a timer or a halt lands.
     pub current: Option<CpuId>,
+    /// Whose code is posting right now, which is what [`Kicker::kick`]'s
+    /// self-route asks: a kick aimed at the poster's own CPU is its
+    /// `need_resched`, as the kernel's is. `None` for a device interrupt, which
+    /// belongs to no CPU in this model.
+    pub poster: Option<CpuId>,
     /// What a scheduler pass is modelled to cost, in nanoseconds — the only
     /// thing [`Machine::now`] is read for in this world.
     ///
@@ -63,6 +72,7 @@ impl SimHw {
                 now: Nanos::ZERO,
                 armed: vec![None; cpus],
                 pending_ipi: vec![0; cpus],
+                busy_kicks: vec![0; cpus],
                 need_resched: vec![false; cpus],
                 halted: vec![false; cpus],
                 ctx_saved: HashMap::new(),
@@ -72,6 +82,7 @@ impl SimHw {
                 kicks: 0,
                 switches: 0,
                 current: None,
+                poster: None,
                 pass_cost_ns: 0,
                 violations: Vec::new(),
             }),
@@ -101,6 +112,12 @@ impl SimHw {
         self.with(|s| s.current = None);
     }
 
+    /// Set [`SimHwState::poster`], answering what it was so a wake hoisted out
+    /// of another CPU's script can post as that CPU and put it back.
+    pub fn posting_from(&self, cpu: Option<CpuId>) -> Option<CpuId> {
+        self.with(|s| core::mem::replace(&mut s.poster, cpu))
+    }
+
     fn cpu(state: &SimHwState) -> usize {
         state
             .current
@@ -116,8 +133,14 @@ impl SimHw {
 impl Kicker for SimHw {
     fn kick(&self, target: CpuId) {
         self.with(|s| {
-            s.pending_ipi[target.0 as usize] += 1;
-            s.kicks += 1;
+            if s.poster == Some(target) {
+                s.need_resched[target.0 as usize] = true;
+            } else {
+                let t = target.0 as usize;
+                s.pending_ipi[t] += 1;
+                s.busy_kicks[t] += u32::from(!s.halted[t]);
+                s.kicks += 1;
+            }
         });
     }
 }

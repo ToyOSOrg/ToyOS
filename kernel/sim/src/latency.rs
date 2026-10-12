@@ -115,8 +115,7 @@ impl Latency {
 /// claims with three different bounds.
 ///
 /// * [`Self::Woken`] is the interactive one: a wake claimed a parked task, and
-///   `mailbox::Urgency::Normal` promises a busy target drains it "at its next
-///   safe point (≤ one quantum)". That sentence is the bound.
+///   what it waits for is where `CpuSched::place` put it.
 /// * [`Self::Preempted`] is the starvation one: a task that lost the CPU at its
 ///   quantum and waits for its next turn behind whatever else the fair band
 ///   holds. Its bound carries the rival count, exactly as invariant I13's does.

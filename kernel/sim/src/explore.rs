@@ -93,6 +93,9 @@ pub struct Outcome {
     /// never runs out finished at exactly the share it was given.
     pub process_service_ns: Vec<u64>,
     pub process_finish_ns: Vec<Option<u64>>,
+    /// Per thread: the instant it was released — see
+    /// [`crate::vm::Vm::thread_finish_ns`].
+    pub thread_finish_ns: std::collections::BTreeMap<kernel::sched::task::TaskKey, u64>,
     /// How many tasks the balance path moved between CPUs.
     pub migrations: u64,
     /// Per CPU: when it first took an execution step — see
@@ -108,6 +111,9 @@ pub struct Outcome {
     /// Per CPU: wakes out of `hlt` that found nothing to do — what a balance
     /// policy costs the idle path. See [`crate::vm::Vm::idle_wakes`].
     pub idle_wakes: Vec<u64>,
+    /// Per CPU: of those, the ones a late kick bought — see
+    /// [`crate::vm::Vm::late_kick_wakes`].
+    pub late_kick_wakes: Vec<u64>,
     /// The longest a halted CPU sat beside a published surplus with no probe
     /// outstanding — see [`crate::vm::Vm::probe_gap_ns`].
     pub probe_gap_ns: u64,
@@ -168,6 +174,11 @@ impl Outcome {
     /// for a rate; `sim/tests/policy.rs` does.
     pub fn idle_wakes_total(&self) -> u64 {
         self.idle_wakes.iter().sum()
+    }
+
+    /// [`Self::late_kick_wakes`], summed over the machine.
+    pub fn late_kick_wakes_total(&self) -> u64 {
+        self.late_kick_wakes.iter().sum()
     }
 
     pub fn report(&self) -> String {
@@ -306,10 +317,12 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         run_wait: vm.run_wait.clone(),
         process_service_ns: vm.service_ns.clone(),
         process_finish_ns: vm.finish_ns.clone(),
+        thread_finish_ns: vm.thread_finish_ns.clone(),
         migrations: vm.migrations,
         first_exec_ns: vm.first_exec_ns.clone(),
         never_ran: vm.spawned.difference(&vm.ran).count(),
         idle_wakes: vm.idle_wakes.clone(),
+        late_kick_wakes: vm.late_kick_wakes.clone(),
         probe_gap_ns: vm.probe_gap_ns,
         pass_costs: (0..vm.handles.len())
             .map(|cpu| {

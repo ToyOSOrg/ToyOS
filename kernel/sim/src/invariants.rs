@@ -284,12 +284,11 @@ fn check_sleeping_cpus(vm: &mut Vm<'_>) {
 /// I14: a retire is prompt, and the balance path does not undo that.
 ///
 /// Two halves of one property, because the protocol's promptness rests on two
-/// different things. **A killed task is never migrated**: `InTransit` is the
-/// one state whose handling is not backed by an interrupt — the destination's
-/// adopt carries `Urgency::Normal`, which by design sends no IPI to a busy CPU
-/// — so a CPU that hands on a task it knows is dead trades an unwind it could
-/// start in this pass for a wait on another CPU's next voluntary one. **And a
-/// retire completes within [`retire_latency_bound`]**.
+/// different things. **A killed task is never migrated**: the retire that would
+/// chase it is dropped by a destination that knows the adopt is coming, so a
+/// CPU that hands on a task it knows is dead trades an unwind it could start
+/// here for a wait on another CPU's pick. **And a retire completes within
+/// [`retire_latency_bound`]**.
 ///
 /// **Both halves survive the cancellable kill and only one of them
 /// changed.** It makes a killed task *run* rather than be reaped where it
@@ -323,8 +322,8 @@ fn check_retires(vm: &mut Vm<'_>) {
         if vm.killed.contains_key(&key) {
             problems.push(format!(
                 "I14: {key:?} was killed and then migrated to cpu{to} — a task in transit is \
-                 dispatched only by the adopt that carries it, and that adopt kicks nobody, so \
-                 the unwind waits for the destination's next voluntary pass",
+                 dispatched only by the adopt that carries it, so the unwind waits for the \
+                 destination's pick",
             ));
         }
     }
@@ -883,10 +882,9 @@ fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
 /// **"Owed a dispatch" spans two containers**, and the second is the half a
 /// naive instrument loses. A task in a run queue is owed one. So is a *parked*
 /// task whose `TaskState::WakeQueued` says a wake has already claimed it and
-/// posted its `Msg::Wake`: the interval `mailbox::Urgency::Normal` puts a bound
-/// on — "a busy target drains at its next safe point (≤ one quantum)" — starts
-/// at that claim, and an instrument that started at the enqueue would measure
-/// the run queue and call the answer a wake latency.
+/// posted its `Msg::Wake`: a wake's latency starts at that claim, and an
+/// instrument that started at the enqueue would measure the run queue and call
+/// the answer a wake latency.
 ///
 /// A task in transit keeps its stamp, because its migration is part of the wait.
 /// A task in the dying list drops it: a corpse's wait for the CPU is invariant

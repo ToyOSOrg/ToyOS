@@ -74,7 +74,8 @@ pub enum TraceKind {
 /// [`Machine`] so a watch's post and the retire protocol — which run at any wake
 /// site, not inside a scheduler pass — depend on nothing else.
 pub trait Kicker: Sync {
-    /// Targeted kick IPI. Never broadcast.
+    /// Targeted kick IPI. Never broadcast. A kick aimed at the calling CPU is
+    /// its own `need_resched`, never an IPI to itself.
     fn kick(&self, target: CpuId);
 }
 

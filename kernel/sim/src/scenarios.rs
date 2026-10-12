@@ -107,6 +107,11 @@ pub fn double_drop_exit_race() -> Scenario {
                     Op::Run(MS),
                     Op::Yield,
                     Op::Run(MS),
+                    // A worker whose adopt is still in flight when the
+                    // teardown runs: a kick bounds how long a CPU leaves one
+                    // undrained, so the window is staged rather than left to
+                    // a schedule that starves the destination of its pass.
+                    Op::Spawn { template: 1 },
                     Op::Teardown,
                 ]),
                 // worker
@@ -135,8 +140,7 @@ pub fn double_drop_exit_race() -> Scenario {
 /// `retire_task: task not released after 1s: InTransit(CpuId(1))`.
 ///
 /// Wide enough that CPUs go idle and probe while the teardown runs, and enough
-/// workers that a victim can be surplus (`fair_len() > 1`) on the CPU the probe
-/// reaches. That is the whole recipe: the thief asks, the victim CPU answers
+/// workers that a victim has surplus on the CPU the probe reaches. That is the whole recipe: the thief asks, the victim CPU answers
 /// from the *back* of its fair band — the end `pick` will not look at for a
 /// long time — and the task it hands over is the one process teardown has just
 /// killed.
@@ -216,10 +220,8 @@ pub fn retire_under_balance() -> Scenario {
 ///
 /// It **must fail** invariant I14. `answer_steal_requests` pops from the back
 /// of the fair band and migrates without reading the kill bit, so a task the
-/// victim CPU would have dispatched at its own next `pick` becomes an
-/// `Urgency::Normal` adopt aimed at a CPU that owes it nothing until its next
-/// voluntary pass. Every other state a killed task can be in has an interrupt
-/// behind the pass that handles it; `InTransit` has none, and this is the code
+/// victim CPU would have dispatched at its own next `pick` becomes an adopt
+/// aimed at a CPU that owes it nothing until its own pick, and this is the code
 /// that put tasks there on purpose.
 pub fn old_migrate_kept_the_corpse() -> Scenario {
     let mut scenario = retire_under_balance().with_migrate(MigrateShape::KeepTheCorpse);
@@ -289,7 +291,7 @@ pub fn rt_saturated_retire() -> Scenario {
 /// is never called, and invariant I14 must say so.
 ///
 /// `old_migrate_kept_the_corpse` is the other direction — a corpse handed away
-/// and left waiting on a voluntary pass. Both are I14's, and a fix for either
+/// and left waiting on another CPU's pick. Both are I14's, and a fix for either
 /// that broke the other is exactly what this pair exists to stop.
 pub fn old_rt_starved_the_corpse() -> Scenario {
     let mut scenario = rt_saturated_retire().with_age(AgeShape::RtOutranksEveryCorpse);
@@ -1067,6 +1069,8 @@ pub fn all() -> Vec<Scenario> {
         share_gain(4, WORK),
         interactive_mix(1, 4),
         wakeup_storm(2, 16),
+        busy_home(),
+        sleep_spin_siblings(),
     ]
 }
 
@@ -1184,7 +1188,11 @@ pub fn lend_then_block() -> Scenario {
                 vec![0],
                 vec![Script::looping(
                     vec![
-                        Op::Run(MS),
+                        // Past the lend's window, so the victim parked inside
+                        // it is dispatched after it: a wake is served at once,
+                        // and only a window that lapsed while parked is one
+                        // the dispatch re-arms.
+                        Op::Run(4 * MS),
                         Op::Wake {
                             queue: 0,
                             all: false,
@@ -1252,11 +1260,10 @@ pub fn share_gain(threads: usize, work: u64) -> Scenario {
 /// that never yield.
 ///
 /// This is the shape every desktop scheduler is judged on, and the claim under
-/// test is `mailbox::Urgency::Normal`'s own sentence — a busy target drains an
-/// ordinary wake "at its next safe point (≤ one quantum)". The sleeper is under
+/// test is how long an ordinary wake to a busy CPU waits. The sleeper is under
 /// its fair share by construction (it uses a quarter of a millisecond per
 /// three), so its stored lag is positive and its re-derived vruntime puts it at
-/// the head of the fair band the moment the running hog gives the CPU up.
+/// the head of the fair band, and below the running hog's key.
 ///
 /// **The waker is a device and not a thread**, as in [`lost_wake_audio`]: a
 /// waker thread would be a third competitor for the CPU whose latency is being
@@ -1306,14 +1313,112 @@ pub fn interactive_mix(cpus: usize, hogs: usize) -> Scenario {
     // Measured over the sweep `sim/tests/policy.rs` runs: 220 steps at one hog,
     // 278 at four, 572 at sixteen, 2,092 at 64.
     scenario.max_steps = 20_000 + 400 * hogs;
+    scenario.fair_allowance_ns = INTERACTIVE_I5_SAMPLE
+        .iter()
+        .find(|(shape, _)| *shape == (cpus, hogs))
+        .map_or(0, |(_, worst)| worst + worst / 4);
     scenario
 }
+
+/// Where [`interactive_mix`] crosses invariant I5's derived bound, and the
+/// worst spread measured there — gated on as [`FAIRNESS_SAMPLE`] is, with its
+/// quarter of margin, and still reported past the derived bound on every run.
+/// `issues/interactive-mix-crosses-the-fairness-bound-at-two-cpus.md` is the
+/// gap and its exit.
+const INTERACTIVE_I5_SAMPLE: &[((usize, usize), u64)] = &[((2, 16), 254 * MS)];
 
 /// How many times the sleeper of [`interactive_mix`] wakes in one run. It is the
 /// sample count per seed, and `sim/tests/policy.rs` divides by it: the spawn
 /// burst delays exactly one of these wakes, so the steady-state claim is about
 /// the other `INTERACTIVE_ROUNDS - 1`.
 pub const INTERACTIVE_ROUNDS: usize = 20;
+
+/// **A thread woken on its busy home CPU, beside a CPU with nothing to do** —
+/// the state `CpuSched::place`'s fair wake-forward is for.
+///
+/// One process, so the woken thread's key ties the running thread's and no cut
+/// can take the CPU for it: only the forward runs it before the hog's quantum
+/// ends. Both threads are spawned onto cpu0 and the balance path is off, so
+/// the forward is the only thing in a run that moves a task, and every
+/// migration counted is one. The sleeper's first wake finds its home busy;
+/// every later one finds it on the CPU the forward gave it, asleep.
+pub fn busy_home() -> Scenario {
+    let mut scenario = scenario(
+        "busy_home",
+        2,
+        vec![queue(WaitClass::Io)],
+        vec![process(
+            "pair",
+            vec![0, 1],
+            vec![
+                Script::looping(
+                    vec![
+                        Op::Block {
+                            queue: 0,
+                            deadline: Some(50 * MS),
+                        },
+                        Op::Run(MS / 4),
+                    ],
+                    BUSY_HOME_ROUNDS,
+                ),
+                // Outlasts every round the sleeper runs.
+                Script::new(vec![Op::Run((BUSY_HOME_ROUNDS as u64 + 4) * 3 * MS)]),
+            ],
+        )],
+    )
+    .with_placement(PlacementShape::AllOn(0))
+    .with_balance(Balance::None);
+    scenario.irqs.push(IrqSpec {
+        period_ns: 3 * MS,
+        queue: 0,
+        boost_ns: None,
+    });
+    scenario
+}
+
+/// How many times [`busy_home`]'s sleeper wakes in one run.
+pub const BUSY_HOME_ROUNDS: usize = 8;
+
+/// **Two threads of one process on one CPU: one that sleeps a microsecond
+/// between millisecond bursts, and one that never sleeps** — the shape
+/// `CpuSched::place`'s strict key comparison is for.
+///
+/// They share a pot and so a key, and a napper whose every wake preempted its
+/// sibling would leave the spinner [`kernel::sched::cpu::PROTECTED_RUN_NS`]
+/// per burst. The spinner is spawned first, so it is the run's first task key.
+pub fn sleep_spin_siblings() -> Scenario {
+    let mut scenario = scenario(
+        "sleep_spin_siblings",
+        1,
+        vec![queue(WaitClass::Other)],
+        vec![process(
+            "pair",
+            vec![0, 1],
+            vec![
+                Script::new(vec![Op::Run(SPINNER_WORK)]),
+                // Nobody posts the queue: every block is a microsecond's
+                // timeout, and the napper outlasts the spinner however the
+                // CPU is split between them.
+                Script::looping(
+                    vec![
+                        Op::Block {
+                            queue: 0,
+                            deadline: Some(1_000),
+                        },
+                        Op::Run(NAP_BURST_NS),
+                    ],
+                    (2 * SPINNER_WORK / NAP_BURST_NS) as usize,
+                ),
+            ],
+        )],
+    );
+    scenario.max_steps = 40_000;
+    scenario
+}
+
+/// [`sleep_spin_siblings`]' spinner's work, and the napper's burst.
+pub const SPINNER_WORK: u64 = 100 * MS;
+pub const NAP_BURST_NS: u64 = MS;
 
 /// A wakeup storm: `waiters` threads parked on one queue, all made runnable at
 /// once, over and over.

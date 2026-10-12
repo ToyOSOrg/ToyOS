@@ -35,7 +35,11 @@ pub(crate) const MIN_ONE_SHOT: Floor =
 
 impl Kicker for KernelHw {
     fn kick(&self, target: CpuId) {
-        irqchip::kick_cpu(target.0);
+        if target.0 == percpu::cpu_id() {
+            crate::preempt::set_need_resched();
+        } else {
+            irqchip::kick_cpu(target.0);
+        }
     }
 }
 
@@ -60,11 +64,7 @@ impl Machine for KernelHw {
 
     /// A kick is how a remote CPU's `need_resched` gets set — there is no way to write it directly.
     fn need_resched(&self, cpu: CpuId) {
-        if cpu.0 == percpu::cpu_id() {
-            crate::preempt::set_need_resched();
-        } else {
-            self.kick(cpu);
-        }
+        self.kick(cpu);
     }
 
     fn trace(&self, ev: TraceEvent) {

@@ -223,11 +223,10 @@ fn old_commit_before_pass_is_caught() {
 /// This is the shape of the panic the owner's T14 took at 949 s of uptime, with
 /// doom exiting — `retire_task: task not released after 1s: InTransit(CpuId(1))`
 /// — and the reason `CpuSched::hand_off` now reads the kill bit. `InTransit` is
-/// the one state whose reap is carried by an adopt rather than by the retire:
-/// the retire is `Urgency::Preempt` and always kicks, the adopt of a non-RT task
-/// is `Urgency::Normal` and by design kicks nobody, and a destination that is
-/// running owes the task nothing until its next voluntary pass. Handing a corpse
-/// there buys the thief a dead task and pays for it with the retirer's deadline.
+/// the one state whose reap is carried by an adopt rather than by the retire,
+/// and a destination that is running owes the task nothing until its pick.
+/// Handing a corpse there buys the thief a dead task and pays for it with the
+/// retirer's deadline.
 ///
 /// It must be caught by **I14** specifically. The failure rate is a rate and not
 /// a certainty — the migration needs a boosted wake to land on the RT daemon's
@@ -454,8 +453,11 @@ fn a_pass_inside_the_registration_window_is_caught() {
              then unfalsifiable, and so is this model of it",
         );
     };
+    // The word reads `Committing`, or `WakeQueued` where a waker claimed the
+    // task inside the window before the pass reached it: both are the window.
     assert!(
-        message.contains("disagrees with its state word") && message.contains("Committing"),
+        message.contains("disagrees with its state word")
+            && (message.contains("Committing") || message.contains("WakeQueued")),
         "expected the running-task word check to be what fires (seed {seed}); got: {message}",
     );
 

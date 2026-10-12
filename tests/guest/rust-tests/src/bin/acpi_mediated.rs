@@ -392,8 +392,12 @@ impl Counted<'_> {
 }
 
 /// One byte for `SMI_CMD`, asked by a thread that read itself off the boot
-/// processor as its first act where the machine has another CPU: the x2APIC
-/// id it read, 0 on a machine of one.
+/// processor as its first act where the machine has another CPU — this one if
+/// it is, or one started for it: the x2APIC id it read, 0 on a machine of one.
+///
+/// This thread is asked first because a thread started from a CPU that is
+/// busy goes to an idle one where there is one, and on a machine of two the
+/// idle one is the boot processor whenever this thread is not on it.
 fn call_off_the_boot_processor(holder: &Holder, smi_cmd: u64, value: u64) -> u32 {
     let claim = holder.handle();
     let ask = || {
@@ -403,6 +407,11 @@ fn call_off_the_boot_processor(holder: &Holder, smi_cmd: u64, value: u64) -> u32
     if syscall::cpu_count() == 1 {
         ask();
         return 0;
+    }
+    let here = cpu::x2apic_id();
+    if here != 0 {
+        ask();
+        return here;
     }
     for _ in 0..STARTS {
         let on = std::thread::scope(|threads| {

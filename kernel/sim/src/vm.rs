@@ -440,8 +440,7 @@ pub struct Vm<'q> {
     /// *parked* task a wake has already claimed (`TaskState::WakeQueued`), whose
     /// `Msg::Wake` is posted and whose home CPU has not drained it yet. Stamping
     /// only the first would measure the queue and call it the wake latency, and
-    /// the interval `mailbox::Urgency::Normal` promises a bound on starts at the
-    /// claim.
+    /// a wake's interval starts at the claim.
     ///
     /// A task in transit between CPUs keeps its stamp: it is still runnable and
     /// still waiting, and its migration is exactly the part of the wait a
@@ -464,6 +463,9 @@ pub struct Vm<'q> {
     /// runs out: `sim/tests/policy.rs`'s share-gain cases read the floor off this
     /// and the workload's own constants, with no bookkeeping in between.
     pub finish_ns: Vec<Option<u64>>,
+    /// Per thread: the wall-clock instant it was released — [`Self::finish_ns`]
+    /// for one thread, where two threads of one share are the question.
+    pub thread_finish_ns: BTreeMap<TaskKey, u64>,
     /// How many tasks the balance path has moved between CPUs. Reported rather
     /// than judged: a wakeup storm that drains in parallel across a machine is
     /// only evidence about the balance path if the balance path ran.
@@ -498,11 +500,19 @@ pub struct Vm<'q> {
     /// again. A wake that dispatched something was worth taking, whoever sent
     /// it.
     pub idle_wakes: Vec<u64>,
+    /// Of [`Self::idle_wakes`], the ones a **late kick** bought: an IPI sent
+    /// while its target was busy, which landed after that CPU had drained what
+    /// the kick was for and halted. A busy target is kicked on the doorbell's
+    /// edge, so this is the one idle wake no balance policy causes — kept
+    /// apart so the others stay a policy's price.
+    pub late_kick_wakes: Vec<u64>,
     /// Per CPU: woken out of `hlt` and not yet through the pass that says
     /// whether the wake was worth anything.
     woken_from_halt: Vec<bool>,
+    /// Per CPU: that wake was a late kick's.
+    woken_by_late_kick: Vec<bool>,
     /// The longest any one CPU sat **halted, with a sibling publishing a surplus
-    /// of two or more, and no probe of its own outstanding**.
+    /// worth a probe, and no probe of its own outstanding**.
     ///
     /// This is the pull path's one-shot defect — a CPU that slept before the
     /// surplus appeared was never probed again, the state the shipped push
@@ -645,10 +655,13 @@ impl<'q> Vm<'q> {
             prev_container: BTreeMap::new(),
             run_wait: vec![RunWait::default(); process_count],
             finish_ns: vec![None; process_count],
+            thread_finish_ns: BTreeMap::new(),
             migrations: 0,
             first_exec_ns: vec![None; n],
             idle_wakes: vec![0; n],
+            late_kick_wakes: vec![0; n],
             woken_from_halt: vec![false; n],
+            woken_by_late_kick: vec![false; n],
             probe_gap_ns: 0,
             probe_gap_since: vec![None; n],
             next_irq,
@@ -749,6 +762,7 @@ impl<'q> Vm<'q> {
             s.ctx_saved.insert(key, true);
         });
         let handle = self.handles.get(CpuId(dst as u32));
+        let kicks_before = self.hw.with(|s| s.kicks);
         if handle.post_owned(
             Msg::Adopt { task },
             Msg::adopt_node,
@@ -757,8 +771,8 @@ impl<'q> Vm<'q> {
         ) == Kick::Send
         {
             self.hw.kick(CpuId(dst as u32));
-            self.arm_ipi(dst);
         }
+        self.note_kicks(kicks_before);
         self.programs.insert(
             key,
             Program {
@@ -969,7 +983,15 @@ impl<'q> Vm<'q> {
                 self.ran.insert(key);
             }
         }
+        // A step on a CPU posts as that CPU, so a kick it aims at itself is its
+        // own `need_resched`; a device interrupt belongs to none.
+        let poster = match step {
+            Step::Exec(cpu) | Step::BlockPass(cpu) | Step::Pass(cpu) => Some(CpuId(cpu as u32)),
+            _ => None,
+        };
+        self.hw.posting_from(poster);
         self.execute_inner(step, choices);
+        self.hw.posting_from(None);
         let owed = self.hw.with(|s| s.need_resched.clone());
         // A CPU number: it reads `owed` and writes `self.resched_at` at the
         // same index, which is the pairing this loop is about.
@@ -1055,12 +1077,17 @@ impl<'q> Vm<'q> {
                 // Whether this ended a `hlt` is read here and judged later: the
                 // pass that follows says whether the wake was worth taking. See
                 // [`Vm::idle_wakes`].
-                let was_halted = self.hw.with(|s| {
+                let (was_halted, late) = self.hw.with(|s| {
                     s.pending_ipi[cpu] -= 1;
                     s.need_resched[cpu] = true;
-                    core::mem::replace(&mut s.halted[cpu], false)
+                    // Oldest first: a kick sent while this CPU ran is older than
+                    // any sent after it halted.
+                    let late = s.busy_kicks[cpu] > 0;
+                    s.busy_kicks[cpu] -= u32::from(late);
+                    (core::mem::replace(&mut s.halted[cpu], false), late)
                 });
                 self.woken_from_halt[cpu] |= was_halted;
+                self.woken_by_late_kick[cpu] |= was_halted && late;
                 self.ipi_due[cpu] = None;
             }
             Step::FireTimer(cpu) => {
@@ -1222,6 +1249,7 @@ impl<'q> Vm<'q> {
                         // held across one; without it that arm is dead code in
                         // every simulator run.
                         if let Some(hoisted) = after {
+                            let blocking = hw.posting_from(Some(CpuId(hoisted.cpu as u32)));
                             wake(
                                 queues,
                                 now,
@@ -1231,6 +1259,7 @@ impl<'q> Vm<'q> {
                                 hoisted.all,
                                 hoisted.boost,
                             );
+                            hw.posting_from(blocking);
                             injected = Some(hoisted.key);
                         }
                         (
@@ -1275,8 +1304,10 @@ impl<'q> Vm<'q> {
         }
         // The verdict on whatever wake ended this CPU's `hlt`: a pass that
         // reaches the idle disposition again found nothing to do with it.
+        let late = core::mem::take(&mut self.woken_by_late_kick[cpu]);
         if core::mem::take(&mut self.woken_from_halt[cpu]) && matches!(action, Action::Idle(_)) {
             self.idle_wakes[cpu] += 1;
+            self.late_kick_wakes[cpu] += u64::from(late);
         }
         self.apply(action);
         self.hw.leave_pass();
@@ -1629,6 +1660,7 @@ impl<'q> Vm<'q> {
                 if q == queue {
                     return Some(HoistedWake {
                         key,
+                        cpu,
                         queue,
                         all,
                         boost,
@@ -1646,7 +1678,9 @@ impl<'q> Vm<'q> {
         let Some(hoisted) = self.hoist_wake(blocking_cpu, queue) else {
             return;
         };
+        let blocking = self.hw.posting_from(Some(CpuId(hoisted.cpu as u32)));
         self.do_wake(hoisted.queue, hoisted.all, hoisted.boost);
+        self.hw.posting_from(blocking);
         self.programs.get_mut(&hoisted.key).expect("live").pc += 1;
     }
 
@@ -1778,6 +1812,7 @@ impl<'q> Vm<'q> {
             if !self.live.remove(&key) {
                 self.violate(format!("I10: {key:?} was finalized twice"));
             }
+            self.thread_finish_ns.insert(key, self.clock.0);
             for (index, process) in self.procs.iter_mut().enumerate() {
                 // The release that empties a process's live set is the instant
                 // its work is done — recorded here rather than derived from the
@@ -1847,6 +1882,8 @@ fn wake(
 pub struct HoistedWake {
     /// Whose script it came from; its program counter advances once it runs.
     pub key: TaskKey,
+    /// The CPU running that task, which the wake posts as.
+    pub cpu: usize,
     pub queue: usize,
     pub all: bool,
     pub boost: Option<u64>,

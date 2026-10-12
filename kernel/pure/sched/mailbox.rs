@@ -421,8 +421,9 @@ pub enum Urgency {
     /// RT wake, boost wake, adopt of an RT task, retire: the target must
     /// preempt, so the IPI is unconditional.
     Preempt,
-    /// Ordinary wake: a busy target drains at its next safe point and needs no
-    /// interrupt; a sleeping target is always kicked.
+    /// Ordinary wake, adopt and probe: the target is kicked on the doorbell's
+    /// 0→1 edge, busy or asleep, so it drains at its next preemption point and
+    /// not at its quantum's end; a target already owed a pass costs nothing.
     Normal,
 }
 
@@ -437,19 +438,21 @@ pub enum Kick {
 const KICK_PENDING: u32 = 1 << 0;
 const SLEEPING: u32 = 1 << 1;
 
-/// The read [`Doorbell::ring`] decides `Send`/`Elide` from, and what it
-/// carries.
+/// The ordering [`Doorbell::ring`]'s read-modify-write carries.
 ///
-/// It reads the bits [`Doorbell::arm_sleep`] published, so this is the edge
-/// that makes SLEEPING-before-the-empty-check reach the producer:
-/// a `ring` that raced a sleeping target and did not see the bit would elide
-/// the IPI the target's own store had just earned.
+/// A ring that elides does so because an earlier ring raised the edge and its
+/// IPI is already sent, and the pass that IPI buys may have begun before this
+/// producer's message was pushed. The release half is what reaches that pass:
+/// [`Doorbell::begin_pass`]'s acquire reads the edge this ring left, so the
+/// message pushed before the ring is in the drain that clears it — and a
+/// producer whose IPI was coalesced into one already spent cannot leave its
+/// message behind a halt.
 ///
 /// **A cargo feature rather than a comment, because a model that has never
 /// failed proves nothing.** `kernel-loom`'s `doorbell-kick-relaxed` makes
 /// it `Relaxed` and `kernel/loom/tests/loom_sleep.rs` must red under it:
 /// `a_halted_cpu_with_queued_work_was_kicked` finds a schedule where the
-/// target halts with both messages queued and no IPI in flight — a
+/// target halts with a message queued and no IPI left to wake it — a
 /// sleep-through. The kernel declares the name only so `cfg` checking knows it.
 #[cfg(not(feature = "doorbell-kick-relaxed"))]
 const KICK: Ordering = Ordering::AcqRel;
@@ -476,11 +479,12 @@ impl Doorbell {
         match urgency {
             // Unconditional: a prior normal-wake edge may have elided its IPI.
             Urgency::Preempt => Kick::Send,
-            // Edge-coalesced: only the producer that raises the 0→1 edge on a
-            // sleeping target kicks it. At 128 cores a normal wake to a busy
-            // CPU costs zero IPIs.
+            // Edge-coalesced: only the producer that raises the 0→1 edge
+            // kicks, so a target pays at most one IPI per pass however many
+            // wakes it is sent. A busy target is kicked too, or what it was
+            // sent waits out its quantum while an idle CPU could have run it.
             Urgency::Normal => {
-                if prev & SLEEPING != 0 && prev & KICK_PENDING == 0 {
+                if prev & KICK_PENDING == 0 {
                     Kick::Send
                 } else {
                     Kick::Elide
@@ -635,13 +639,19 @@ mod tests {
         drop(n);
     }
 
+    /// A busy target is kicked on the edge and not again until its next pass
+    /// clears it; a sleeping one the same.
     #[test]
     fn doorbell_kick_policy() {
         let d = Doorbell::new();
-        // Busy target, ordinary wake: no IPI.
+        // Busy target, ordinary wake: the 0→1 edge kicks, coalesced edges do not.
+        assert_eq!(d.ring(Urgency::Normal), Kick::Send);
         assert_eq!(d.ring(Urgency::Normal), Kick::Elide);
+        // The pass clears the edge, and the next wake kicks again.
         d.begin_pass();
-        // Sleeping target: the 0→1 edge kicks, coalesced edges do not.
+        assert_eq!(d.ring(Urgency::Normal), Kick::Send);
+        d.begin_pass();
+        // Sleeping target: the same edge.
         d.arm_sleep().abandon();
         assert_eq!(d.ring(Urgency::Normal), Kick::Send);
         assert_eq!(d.ring(Urgency::Normal), Kick::Elide);
