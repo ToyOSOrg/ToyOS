@@ -59,18 +59,26 @@ The design and its roast are PR #863's body.
   and send buffers are the region's two rings, and the connection carries the
   connect, then only doorbells and the hang-up. netstack rings a reader on the
   connection and a writer waiting for send room on a pipe of the stream's own,
-  so neither drains a wake rung for the other. std, libc and the mio and
-  socket2 forks read and write the rings through `toyos::net`. Exit: a loom
-  model of one stream's reader and writer, each asleep on its own want while
-  netstack's thread releases room and publishes data in either order, ends
-  with neither waiting, and reds with both wants rung on one doorbell; and a
-  T14 boot of round 3's `internet_download` on stage 3's head reads, in every
-  run, `pipe_copy_bytes` under 0.01 per byte downloaded, its C0, hold and spin
-  per MB posted beside the scout's rows. No tree that lands has that counter,
-  which round 3's b245592a6 added: the boot carries the scout's instrument,
-  the `Measurement only, never lands` commits of `origin/main..2f9e090b8`
-  (`wt/toyos-netring-scout`), onto stage 3's head, less the netstack stamps
-  on the pipe writes stage 3 deletes.
+  so neither drains a wake rung for the other. Within a direction no thread
+  holds the end across its wait, and a thread that took the doorbell while
+  another waits on it passes the take on through netstack. std, libc and the
+  mio and socket2 forks read and write the rings through `toyos::net`. Exit:
+  two loom models that drive the client end and netstack's ringing code as
+  stage 3 lands them, each red under a control that reverts its decision. In
+  one, a stream's reader and writer, each asleep on its own want while
+  netstack's thread releases room and publishes data in either order, end
+  with neither waiting, and the control rings both wants on one doorbell. In
+  the other, a blocking call and a `poll` of one direction, the poll's watch
+  answered by the doorbell's level at its look as the kernel's `deliver`
+  answers it and the blocking call leaving bytes, the receive ring's `end` or
+  room behind, end with the poll answered, and the control does not pass the
+  take on. And a T14 boot of round 3's `internet_download` on stage 3's head
+  reads, in every run, `pipe_copy_bytes` under 0.01 per byte downloaded, its
+  C0, hold and spin per MB posted beside the scout's rows. No tree that lands
+  has that row or that counter: the boot carries the scout's instrument,
+  `git diff 777c96b2b 2f9e090b8` (`wt/toyos-netring-scout` over its base),
+  onto stage 3's head, less the netstack stamps on the pipe writes stage 3
+  deletes.
 - Stage 4: a listener and a datagram socket the same way, and the pipe ABI's
   messages, `SYS_CONNECTION_JOIN` and `toyos::net`'s pipe handles go.
 
