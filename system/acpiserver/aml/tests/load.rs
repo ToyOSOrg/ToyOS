@@ -219,3 +219,102 @@ fn a_loaded_blocks_objects_are_walked_past_what_was_defined_before() {
     }
     assert_eq!(serials, [(true, Kind::Integer), (true, Kind::Method)]);
 }
+
+/// A table the XSDT lists, at [`AT`]: signature `OEM1`, OEM ID `TOYOS `,
+/// OEM Table ID `TABLE1`, defining `\_SB.TBLD` and `MYD` below its root.
+fn listed(m: &mut Machine) -> Vec<u8> {
+    let mut t = ssdt_named("TABLE1", &cat(&[&def_name("TBLD", &int(0x51)), &def_name("MYD", &int(0))]));
+    t[..4].copy_from_slice(b"OEM1");
+    t[9] = 0;
+    t[9] = 0u8.wrapping_sub(t.iter().fold(0u8, |s, &b| s.wrapping_add(b)));
+    m.poke(Address::Memory(AT), &t);
+    m.listed = vec![AT];
+    t
+}
+
+/// `LoadTable (<sig>, <oem id>, <table id>, <root>, <parameter path>, <parameter data>)`.
+fn load_table(ids: [&str; 3], root: &str, parameter: &str, data: &[u8]) -> Vec<u8> {
+    cat(&[&[0x5B, 0x1F], &string(ids[0]), &string(ids[1]), &string(ids[2]), &string(root), &string(parameter), data])
+}
+
+fn table_machine(body: &[u8]) -> (Interpreter, Machine) {
+    let mut m = Machine::default();
+    let mut i = Interpreter::new();
+    i.load_bytes(&mut m, &common::dsdt(body)).expect("the DSDT loads");
+    listed(&mut m);
+    (i, m)
+}
+
+/// §19.6.77: the table found by its three identifiers, a shorter one padded,
+/// loads below the RootPathString; ParameterData is stored to the
+/// ParameterPathString below that root once it has, and the value is true.
+#[test]
+fn load_table_loads_the_listed_table_below_its_root_and_stores_its_parameter() {
+    let main = method("MAIN", 0, &ret(&load_table(["OEM1", "TOYOS", "TABLE1"], "\\_SB", "MYD", &int(0x77))));
+    let (mut i, mut m) = table_machine(&main);
+    assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Ok(Value::Integer(u64::MAX)));
+    assert_eq!(i.evaluate(&mut m, "\\_SB.TBLD", &[]), Ok(Value::Integer(0x51)));
+    assert_eq!(i.evaluate(&mut m, "\\_SB.MYD", &[]), Ok(Value::Integer(0x77)));
+    assert!(m.log.contains(&Event::FindTable(b"OEM1".to_vec(), b"TOYOS".to_vec(), b"TABLE1".to_vec())));
+    assert_eq!(m.loads(), [Event::Loaded("\\MAIN".into(), Some(*b"TABLE1  "), None)]);
+}
+
+/// No table of those identifiers loads false and asks nothing more; one
+/// whose memory the host denies, as Table 15.6 has it, loads false and
+/// keeps nothing; an identifier longer than its field is a run-time error,
+/// and so is a parameter path that names nothing once the table loaded.
+#[test]
+fn load_table_of_no_table_or_denied_memory_is_false_and_a_long_identifier_is_refused() {
+    let call = |ids: [&str; 3], parameter: &str| method("MAIN", 0, &ret(&load_table(ids, "", parameter, &int(1))));
+    let (mut i, mut m) = table_machine(&call(["OEM1", "TOYOS", "TABLE2"], ""));
+    assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Ok(Value::Integer(0)));
+    assert_eq!(m.loads(), []);
+    let (mut i, mut m) = table_machine(&call(["OEM1", "TOYOS", "TABLE1"], ""));
+    m.reclaim = vec![(AT, AT + 0x1000)];
+    assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Ok(Value::Integer(0)));
+    assert_eq!(i.evaluate(&mut m, "\\TBLD", &[]), Err(Error::NotFound("\\TBLD".into())));
+    assert!(matches!(&m.loads()[..], [Event::Loaded(_, None, Some(Error::Host(_)))]), "{:?}", m.loads());
+    for ids in [["OEM12", "TOYOS", "TABLE1"], ["OEM1", "TOYOSXX", "TABLE1"], ["OEM1", "TOYOS", "TABLE123X"]] {
+        let (mut i, mut m) = table_machine(&call(ids, ""));
+        assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Err(Error::Rule("a table's signature, OEM ID or OEM Table ID longer than its field (§19.6.77)")), "{ids:?}");
+    }
+    let (mut i, mut m) = table_machine(&call(["OEM1", "TOYOS", "TABLE1"], "NONE"));
+    assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Err(Error::NotFound("\\NONE".into())));
+}
+
+/// §19.6.25: a Data Table Region is a SystemMemory region over the table
+/// the XSDT lists, its header to its last byte; one naming no table, or a
+/// table in memory the host denies, refuses the definition.
+#[test]
+fn a_data_table_region_is_the_listed_tables_memory() {
+    // DataTableRegion (DTR0, "OEM1", "TOYOS", "TABLE1"); Field (DTR0,
+    // ByteAcc) { SIG, 32, LEN, 32 }.
+    let region = |table: &str| {
+        cat(&[
+            &[0x5B, 0x88],
+            &name("DTR0"),
+            &string("OEM1"),
+            &string("TOYOS"),
+            &string(table),
+            &field("DTR0", 0x01, &[unit("SIG", 32), unit("LEN", 32), skip(8 * 28), unit("LAST", 8)]),
+        ])
+    };
+    let (mut i, mut m) = {
+        let mut m = Machine::default();
+        let t = listed(&mut m);
+        let mut i = Interpreter::new();
+        i.load_bytes(&mut m, &common::dsdt(&region("TABLE1"))).expect("the DSDT loads");
+        assert_eq!(i.evaluate(&mut m, "\\LEN", &[]), Ok(Value::Integer(t.len() as u64)));
+        (i, m)
+    };
+    assert_eq!(i.evaluate(&mut m, "\\SIG", &[]), Ok(Value::Integer(u64::from(u32::from_le_bytes(*b"OEM1")))));
+    assert!(m.accesses().contains(&Event::Read(Address::Memory(AT), toyos_aml::Access::Byte)));
+    let mut m = Machine::default();
+    listed(&mut m);
+    let refused = Interpreter::new().load_bytes(&mut m, &common::dsdt(&region("TABLE2")));
+    assert_eq!(refused, Err(Error::Rule("a DataTableRegion names a table the XSDT does not list (§19.6.25)")));
+    let mut m = Machine::default();
+    listed(&mut m);
+    m.reclaim = vec![(AT, AT + 0x1000)];
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &common::dsdt(&region("TABLE1"))), Err(Error::Host(_))));
+}

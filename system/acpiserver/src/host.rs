@@ -24,6 +24,18 @@
 //! among them, which is counted with every refusal. A write to configuration
 //! space is denied by name.
 //!
+//! **The spaces this server serves are SystemMemory, SystemIO, PCI_Config
+//! and EmbeddedControl.** Every other space of Table 5.182 reaches it and is
+//! denied by name: SystemCMOS, PciBarTarget, PCC, the OEM-defined ones, and
+//! the command- and connection-based ones the interpreter carries whole
+//! (SMBus, IPMI, GeneralPurposeIO, GenericSerialBus, PlatformRtMechanism,
+//! FFixedHW), so `_REG` announces none of them.
+//!
+//! **A table the XSDT lists is found by its three identifiers**
+//! ([`Host::find_table`]) through the kernel's reads, and answered only where
+//! it lies in memory Table 15.6 calls AddressRangeReserved or
+//! AddressRangeNVS, as `LoadTable` and a Data Table Region require.
+//!
 //! **The embedded controller's space is its own transactions'** ([`crate::ec`],
 //! [`Firmware::transaction`]), a byte each, on the controller the server
 //! attached ([`Firmware::ec`]) and through the kernel, which no row holds its
@@ -67,7 +79,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
-use toyos_aml::{Address, Denied, Host, RuntimeLoad};
+use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
 use crate::ec::{Do, Transaction, Wait};
@@ -297,6 +309,8 @@ pub struct Firmware<'k, K> {
     /// Definition blocks loaded at run time, and refused.
     pub loaded: u64,
     pub loads_refused: u64,
+    /// The RSDP the tables were found from, which `LoadTable` searches again.
+    pub rsdp: u64,
 }
 
 impl<'k, K: Kernel> Firmware<'k, K> {
@@ -322,6 +336,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             locked: false,
             loaded: 0,
             loads_refused: 0,
+            rsdp: 0,
         }
     }
 
@@ -371,6 +386,21 @@ impl<'k, K: Kernel> Firmware<'k, K> {
                 Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
             }
         }
+    }
+
+    /// The denial of an access to a space this server serves no AML in.
+    fn unserved(&mut self, at: Address, width: toyos_aml::Access) -> Denied {
+        let space = match at {
+            Address::Memory(_) => "SystemMemory",
+            Address::Io(_) => "SystemIO",
+            Address::PciConfig { .. } => "PCI_Config",
+            Address::EmbeddedControl(_) => "EmbeddedControl",
+            Address::SystemCmos(_) => "SystemCMOS",
+            Address::PciBarTarget { .. } => "PciBarTarget",
+            Address::Pcc { .. } => "PCC",
+            Address::Oem { .. } => "an OEM-defined space",
+        };
+        self.deny(format!("an access to {space}, which this server serves no AML in"), format_args!("{width:?} at {at:x?}"))
     }
 
     fn stopped(&mut self) -> Denied {
@@ -443,6 +473,7 @@ impl<K: Kernel> Host for Firmware<'_, K> {
             Address::Io(port) => (Space::SystemIo, u64::from(port)),
             Address::PciConfig { segment, bus, device, function, offset } => (Space::PciConfig, pci_address(segment, bus, device, function, offset)),
             Address::EmbeddedControl(address) => return self.controller("a read of", at, width, Transaction::read_at(address)).map(u64::from),
+            other => return Err(self.unserved(other, width)),
         };
         match read(self.kernel, space, address, wide(width)) {
             Ok((value, memory_type)) => {
@@ -474,6 +505,7 @@ impl<K: Kernel> Host for Firmware<'_, K> {
                 let byte = u8::try_from(value).expect("a byte access writes a byte");
                 return self.controller("a write to", at, width, Transaction::write_at(address, byte)).map(drop);
             }
+            other => return Err(self.unserved(other, width)),
         };
         Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
     }
@@ -551,6 +583,41 @@ impl<K: Kernel> Host for Firmware<'_, K> {
             }
         }
         Ok(bytes)
+    }
+
+    fn transfer(&mut self, at: &Transfer<'_>, _: Option<&[u8]>) -> Result<Vec<u8>, Denied> {
+        let space = match at.space {
+            0x04 => "SMBus",
+            0x07 => "IPMI",
+            0x08 => "GeneralPurposeIO",
+            0x09 => "GenericSerialBus",
+            0x0B => "PlatformRtMechanism",
+            _ => "FFixedHW",
+        };
+        Err(self.deny(format!("an access to {space}, which this server serves no AML in"), format_args!("{at:x?}")))
+    }
+
+    fn find_table(&mut self, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<(u64, usize)>, Denied> {
+        let tables = crate::tables::Tables::new(self.kernel);
+        let found = toyos_acpi::find_by_id(&tables, self.rsdp, signature, oem_id, oem_table_id);
+        if tables.stopping.get() {
+            return Err(self.stopped());
+        }
+        let ids = format_args!("{:?} {:?} {:?}", signature.escape_ascii().to_string(), oem_id.escape_ascii().to_string(), oem_table_id.escape_ascii().to_string());
+        let table = match found {
+            Ok(Some(table)) => table,
+            Ok(None) => return Ok(None),
+            Err(why) => return Err(self.deny("a table LoadTable or a Data Table Region names: the XSDT was not read".into(), format_args!("{ids}: {why:x?}"))),
+        };
+        match read(self.kernel, Space::SystemMemory, table.base(), Width::Byte) {
+            Ok((_, memory_type)) if reserved_or_nvs(memory_type) => Ok(Some((table.base(), table.len()))),
+            Ok((_, memory_type)) => {
+                let what = format!("a table LoadTable or a Data Table Region names, in {}, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS", type_name(memory_type));
+                Err(self.deny(what, format_args!("{ids}")))
+            }
+            Err(Refusal::Stopping) => Err(self.stopped()),
+            Err(refusal) => Err(self.deny(refusal.to_string(), format_args!("a table {ids}"))),
+        }
     }
 
     fn loaded(&mut self, load: &RuntimeLoad<'_>) {
@@ -878,6 +945,58 @@ pub mod tests {
             assert_eq!(host.write(Address::Memory(0xfe00_0010), DWord, 0), Err(Denied(unlisted.into())));
         }
         assert_eq!(host.refused.counts(), format!("{unlisted} x2; {tables} x1"));
+    }
+
+    /// Every space of Table 5.182 this server serves no AML in is denied by
+    /// name and asks the kernel nothing: SystemCMOS, PciBarTarget, PCC and an
+    /// OEM-defined space by address, and each carried whole.
+    #[test]
+    fn a_space_this_server_serves_no_aml_in_is_denied_by_name() {
+        use toyos_aml::Access::Byte;
+        let kernel = machine();
+        let mut host = Firmware::new(&kernel);
+        for (at, space) in [
+            (Address::SystemCmos(0x40), "SystemCMOS"),
+            (Address::PciBarTarget { segment: 0, bus: 0, device: 2, function: 0, bar: 0x10, offset: 0 }, "PciBarTarget"),
+            (Address::Pcc { subspace: 2, offset: 4 }, "PCC"),
+            (Address::Oem { space: 0x80, offset: 0 }, "an OEM-defined space"),
+        ] {
+            let denied = Err(Denied(format!("an access to {space}, which this server serves no AML in")));
+            assert_eq!(host.read(at, Byte).map(drop), denied.clone());
+            assert_eq!(host.write(at, Byte, 0), denied);
+        }
+        for (space, name) in [(0x04, "SMBus"), (0x07, "IPMI"), (0x08, "GeneralPurposeIO"), (0x09, "GenericSerialBus"), (0x0B, "PlatformRtMechanism"), (0x7F, "FFixedHW")] {
+            let at = Transfer { space, region: 0, bit: 0, bits: 8, attrib: 0, length: 0, connection: None };
+            assert_eq!(host.transfer(&at, None), Err(Denied(format!("an access to {name}, which this server serves no AML in"))));
+        }
+        assert!(kernel.asked.borrow().is_empty());
+    }
+
+    /// LoadTable's and a Data Table Region's table is found in the XSDT by
+    /// its three identifiers and answered only in memory Table 15.6 calls
+    /// reserved or NVS: QEMU's tables are ACPI reclaim memory, and denied.
+    #[test]
+    fn a_table_is_found_by_its_identifiers_only_in_reserved_or_nvs_memory() {
+        use crate::aml::tests::{crafted_with, sealed, CRAFTED_RSDP};
+        let mut oem = sealed(b"OEM1", &[0; 4]);
+        oem[10..16].copy_from_slice(b"TOYOS ");
+        oem[16..24].copy_from_slice(b"TABLE1  ");
+        oem[9] = 0;
+        oem[9] = 0u8.wrapping_sub(oem.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)));
+        let mut kernel = crafted_with(&sealed(b"DSDT", &[]), &[], &[&oem]);
+        let listed = kernel.memory.iter().position(|(_, _, bytes)| bytes.starts_with(b"OEM1")).expect("the table");
+        let at = kernel.memory[listed].0;
+        for (memory_type, found) in [(0, true), (10, true), (6, true), (9, false)] {
+            kernel.memory[listed].1 = memory_type;
+            let mut host = Firmware::new(&kernel);
+            host.rsdp = CRAFTED_RSDP;
+            let answer = host.find_table(b"OEM1", b"TOYOS", b"TABLE1");
+            match found {
+                true => assert_eq!(answer, Ok(Some((at, oem.len()))), "type {memory_type}"),
+                false => assert_eq!(answer, Err(Denied("a table LoadTable or a Data Table Region names, in memory of type 9, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS".into()))),
+            }
+            assert_eq!(host.find_table(b"OEM1", b"TOYOS", b"TABLE2"), Ok(None));
+        }
     }
 
     /// The controller's space is its own transactions', one a byte, through

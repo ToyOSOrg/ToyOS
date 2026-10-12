@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
 
-use crate::field::{flags, BufField, Field, Kind, Region};
+use crate::field::{attrib, flags, BufField, Connection, Field, Kind, Region};
 use crate::name::{text, Path, Seg};
 use crate::namespace::{Arena, Namespace, NodeId};
 use crate::object::{
@@ -369,7 +369,7 @@ impl<'a> Machine<'a> {
     }
 
     /// The object a reference refers to (§19.6.30).
-    fn deref(&mut self, r: &Ref) -> Result<Object, Error> {
+    pub(crate) fn deref(&mut self, r: &Ref) -> Result<Object, Error> {
         match r {
             Ref::Node(id) => self.node_value(*id),
             Ref::Slot(s) => Ok(slot_of(s)?.borrow().clone()),
@@ -524,7 +524,7 @@ impl<'a> Machine<'a> {
                 0x80 => self.def_region(f, c),
                 0x81 | 0x86 | 0x87 => self.def_field(f, c),
                 0x82..=0x85 => self.def_scoped(f, c),
-                0x88 => Err(Error::Unsupported("DataTableRegion")),
+                0x88 => self.def_data_region(f, c),
                 0x20 => {
                     c.byte()?;
                     c.byte()?;
@@ -641,6 +641,82 @@ impl<'a> Machine<'a> {
         let v = Object::Int(self.w.bool(loaded));
         self.store(f, t, v.clone())?;
         Ok(v)
+    }
+
+    /// A String argument, one of a table's identifiers, no longer than
+    /// `most` bytes (§19.6.77: "a run-time error is generated").
+    fn table_id(&mut self, f: &mut Frame, c: &mut Cursor<'_>, most: usize) -> Result<Vec<u8>, Error> {
+        let v = self.arg(f, c)?;
+        let s = to_str(&v, self.w)?;
+        if s.len() > most {
+            return Err(Error::Rule("a table's signature, OEM ID or OEM Table ID longer than its field (§19.6.77)"));
+        }
+        Ok(s)
+    }
+
+    /// DataTableRegion (§19.6.25): a SystemMemory region over the table the
+    /// XSDT lists with this signature, OEM ID and OEM Table ID, its header
+    /// to its last byte.
+    fn def_data_region(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
+        c.byte()?;
+        c.byte()?;
+        let p = self.name(c)?;
+        let ids = [self.table_id(f, c, 4)?, self.table_id(f, c, 6)?, self.table_id(f, c, 8)?];
+        let found = self.host.find_table(&ids[0], &ids[1], &ids[2]).map_err(|d| Error::Host(d.0))?;
+        let (base, len) = found.ok_or(Error::Rule("a DataTableRegion names a table the XSDT does not list (§19.6.25)"))?;
+        let r = self.meter.hold(Region { space: 0, base, len: len as u64, scope: f.scope })?;
+        self.define(f, &p, Object::Region(r))?;
+        Ok(Flow::Next)
+    }
+
+    /// LoadTable (§19.6.77): the table the XSDT lists with this signature,
+    /// OEM ID and OEM Table ID loaded below the RootPathString, resolved from
+    /// the current scope, or the root where it is empty; then, where it
+    /// loaded and a ParameterPathString is given, ParameterData stored to
+    /// that object, below the root path unless it begins with `\` or `^`.
+    /// False where no table matches or the block is refused.
+    fn load_table(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
+        let ids = [self.table_id(f, c, 4)?, self.table_id(f, c, 6)?, self.table_id(f, c, 8)?];
+        let root_text = {
+            let v = self.arg(f, c)?;
+            to_str(&v, self.w)?
+        };
+        let parameter_text = {
+            let v = self.arg(f, c)?;
+            to_str(&v, self.w)?
+        };
+        let data = self.arg(f, c)?;
+        let path = |m: &mut Self, text: &[u8]| -> Result<Path, Error> {
+            m.charge(text.len())?;
+            Path::text(text).ok_or(Error::Rule("a LoadTable path that is no name (§19.6.77)"))
+        };
+        let root = match root_text.as_slice() {
+            b"" | b"\\" => self.ns.root(),
+            text => {
+                let p = path(self, text)?;
+                self.resolve(f, &p)?
+            }
+        };
+        let found = match self.host.find_table(&ids[0], &ids[1], &ids[2]) {
+            Ok(found) => found,
+            Err(d) => {
+                let by = self.path_of(f.by, None)?;
+                self.host.loaded(&RuntimeLoad { by: &by, header: None, refused: Some(&Error::Host(d.0)) });
+                return Ok(Object::Int(0));
+            }
+        };
+        let Some((at, len)) = found else { return Ok(Object::Int(0)) };
+        let loaded = self.load_block(f.by, Source::Memory { at, len: len as u64 }, root)?;
+        if loaded && !parameter_text.is_empty() {
+            let mut p = path(self, &parameter_text)?;
+            if !(p.root || p.up > 0) {
+                let base = path(self, &root_text)?;
+                p = Path { root: base.root || root_text.is_empty(), up: base.up, segs: [base.segs, p.segs].concat() };
+            }
+            let id = self.resolve(f, &p)?;
+            self.store(f, Target::Node(id), data)?;
+        }
+        Ok(Object::Int(self.w.bool(loaded)))
     }
 
     /// A definition block loaded below `root` from `source` by the method
@@ -885,6 +961,8 @@ impl<'a> Machine<'a> {
         };
         let (mut access, lock, update) = flags(l.byte()?);
         let mut bit = 0u64;
+        let mut protocol = (0, 0);
+        let mut connection = None;
         while !l.done() {
             self.step()?;
             match l.peek()? {
@@ -894,22 +972,27 @@ impl<'a> Machine<'a> {
                 }
                 0x01 | 0x03 => {
                     let ext = l.byte()? == 0x03;
-                    access = flags(l.byte()?).0;
-                    l.byte()?;
-                    if ext {
-                        l.byte()?;
-                    }
+                    let access_type = l.byte()?;
+                    access = flags(access_type).0;
+                    let access_attrib = l.byte()?;
+                    let length = if ext { Some(l.byte()?) } else { None };
+                    protocol = attrib(access_type, access_attrib, length);
                 }
                 0x02 => {
-                    // ConnectField: the connection of a GeneralPurposeIO or
-                    // GenericSerialBus field, which this interpreter does not
-                    // access.
+                    // ConnectField (§20.2.5.2): a resource descriptor the
+                    // units after it reach a GeneralPurposeIO pin or a
+                    // GenericSerialBus device by.
                     l.byte()?;
-                    if l.peek()? == 0x11 {
-                        self.data_object(f, &mut l)?;
+                    let named = if l.peek()? == 0x11 {
+                        match self.data_object(f, &mut l)? {
+                            Object::Buf(b) => Connection::Bytes(b),
+                            _ => return Err(l.malformed("a ConnectField's BufferData is no Buffer")),
+                        }
                     } else {
-                        self.name(&mut l)?;
-                    }
+                        let p = self.name(&mut l)?;
+                        Connection::Named(self.resolve(f, &p)?)
+                    };
+                    connection = Some((named, bit));
                 }
                 _ => {
                     let seg = l.seg()?;
@@ -918,7 +1001,7 @@ impl<'a> Machine<'a> {
                         return Err(l.malformed("a field unit of zero bits"));
                     }
                     let to = bit.checked_add(len).filter(|&e| e <= 1 << 62).ok_or(l.malformed("a FieldList overflows"))?;
-                    let unit = self.meter.hold(Field { kind: kind.clone(), bit, len, access, lock, update })?;
+                    let unit = self.meter.hold(Field { kind: kind.clone(), bit, len, access, lock, update, attrib: protocol, connection: connection.clone() })?;
                     self.define(f, &Path { root: false, up: 0, segs: vec![seg] }, Object::Field(unit))?;
                     bit = to;
                 }
@@ -1468,9 +1551,17 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// Store (§19.6.128): its value is its source's, or, for a field whose
+    /// BufferAcc write is bidirectional, the response the write became
+    /// (§5.5.2.4.5.1, §5.5.2.4.7.1).
     fn store_op(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
         let v = self.arg(f, c)?;
         let t = self.super_name(f, c)?;
+        if let Target::Node(id) = t
+            && let Object::Field(x) = self.node_object(id)?
+        {
+            return Ok(self.write_field_answering(&x, v.clone())?.unwrap_or(v));
+        }
         self.store(f, t, v.clone())?;
         Ok(v)
     }
@@ -1619,7 +1710,7 @@ impl<'a> Machine<'a> {
             0x28 => self.bcd_in(f, c),
             0x29 => self.bcd_out(f, c),
             0x33 => Ok(Object::Int(self.host.timer() & self.w.ones())),
-            0x1F => Err(Error::Unsupported("LoadTable")),
+            0x1F => self.load_table(f, c),
             0x20 => self.load_op(f, c),
             _ => Err(Error::Malformed { at, why: "not an expression (§20.2.5.4)" }),
         }

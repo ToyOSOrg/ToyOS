@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use toyos_acpi::{Phys, Table};
-use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, RuntimeLoad, Value};
+use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, RuntimeLoad, Transfer, Value};
 
 /// PkgLength (§20.2.4) of `n` bytes that follow it: the length counts its
 /// own encoding.
@@ -315,6 +315,12 @@ pub enum Event {
     /// A run-time load told: the method that made it, the block's OEM Table
     /// ID where its header was read, and why it was refused.
     Loaded(String, Option<[u8; 8]>, Option<Error>),
+    /// A carried field's transfer: its space, region, bit and bits, its
+    /// protocol and count, its connection's descriptor and start, and what
+    /// was written.
+    Transfer { space: u8, region: u64, bit: u64, bits: u64, attrib: (u8, u8), connection: Option<(Vec<u8>, u64)>, write: Option<Vec<u8>> },
+    /// A table asked for by its signature, OEM ID and OEM Table ID.
+    FindTable(Vec<u8>, Vec<u8>, Vec<u8>),
 }
 
 /// A machine of bytes: every address space a sparse map, every request
@@ -329,6 +335,11 @@ pub struct Machine {
     /// Memory Table 15.6 calls neither AddressRangeReserved nor
     /// AddressRangeNVS, as `(start, end)`: a block there is refused.
     pub reclaim: Vec<(u64, u64)>,
+    /// What a carried field's transfer answers; an empty one answers what
+    /// was written, or a zero byte for a read.
+    pub answer: Vec<u8>,
+    /// The tables the XSDT lists, as the addresses of their bytes in memory.
+    pub listed: Vec<u64>,
 }
 
 fn key(a: Address) -> (u8, u64) {
@@ -344,6 +355,12 @@ fn key(a: Address) -> (u8, u64) {
                 | u64::from(offset),
         ),
         Address::EmbeddedControl(x) => (3, u64::from(x)),
+        Address::SystemCmos(x) => (5, u64::from(x)),
+        Address::PciBarTarget { segment, bus, device, function, bar, offset } => {
+            (6, (u64::from(segment) << 56) | (u64::from(bus) << 48) | (u64::from(device) << 43) | (u64::from(function) << 40) | (u64::from(bar) << 32) | offset)
+        }
+        Address::Pcc { subspace, offset } => (0x0A, (u64::from(subspace) << 32) | u64::from(offset)),
+        Address::Oem { space, offset } => (space, offset),
     }
 }
 
@@ -439,6 +456,43 @@ impl Host for Machine {
         let id = load.header.map(|h| h[16..24].try_into().expect("a header's OEM Table ID"));
         self.log.push(Event::Loaded(load.by.into(), id, load.refused.cloned()));
     }
+
+    fn transfer(&mut self, at: &Transfer<'_>, write: Option<&[u8]>) -> Result<Vec<u8>, Denied> {
+        self.log.push(Event::Transfer {
+            space: at.space,
+            region: at.region,
+            bit: at.bit,
+            bits: at.bits,
+            attrib: (at.attrib, at.length),
+            connection: at.connection.map(|(b, from)| (b.to_vec(), from)),
+            write: write.map(<[u8]>::to_vec),
+        });
+        if self.refuse {
+            return Err(Denied("refused".into()));
+        }
+        Ok(match (self.answer.is_empty(), write) {
+            (false, _) => self.answer.clone(),
+            (true, Some(w)) => w.to_vec(),
+            (true, None) => vec![0],
+        })
+    }
+
+    /// Each listed table's header compared field by field, a shorter
+    /// identifier padded with NULs or spaces; one in `reclaim` is denied.
+    fn find_table(&mut self, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<(u64, usize)>, Denied> {
+        self.log.push(Event::FindTable(signature.to_vec(), oem_id.to_vec(), oem_table_id.to_vec()));
+        let same = |field: &[u8], id: &[u8]| field.starts_with(id) && field[id.len()..].iter().all(|&b| b == 0 || b == b' ');
+        for &at in &self.listed {
+            let head = self.peek(Address::Memory(at), 36);
+            if same(&head[..4], signature) && same(&head[10..16], oem_id) && same(&head[16..24], oem_table_id) {
+                if self.reclaim.iter().any(|&(start, end)| (start..end).contains(&at)) {
+                    return Err(Denied("a table in memory Table 15.6 calls neither reserved nor NVS".into()));
+                }
+                return Ok(Some((at, u32::from_le_bytes(head[4..8].try_into().expect("four bytes")) as usize)));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl Machine {
@@ -531,4 +585,10 @@ impl Host for Sink {
         Ok(vec![0; len])
     }
     fn loaded(&mut self, _: &RuntimeLoad<'_>) {}
+    fn transfer(&mut self, _: &Transfer<'_>, _: Option<&[u8]>) -> Result<Vec<u8>, Denied> {
+        Ok(vec![0])
+    }
+    fn find_table(&mut self, _: &[u8], _: &[u8], _: &[u8]) -> Result<Option<(u64, usize)>, Denied> {
+        Ok(None)
+    }
 }

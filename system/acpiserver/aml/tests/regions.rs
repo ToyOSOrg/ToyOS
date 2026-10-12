@@ -442,16 +442,18 @@ fn a_lock_field_holds_the_global_lock_across_its_access() {
 }
 
 #[test]
-fn a_host_refusal_and_a_space_not_carried_are_refused_by_name() {
+fn a_host_refusal_and_a_reserved_space_are_refused_by_name() {
     let (mut i, mut m) = loaded(&memory_region(BYTE, &[unit("A", 8)]));
     m.refuse = true;
     assert_eq!(i.evaluate(&mut m, "\\A", &[]), Err(Error::Host("refused".into())));
-    let smbus = cat(&[&op_region("SMB0", 0x04, &int(0), &int(0x100)), &field("SMB0", BYTE, &[unit("S", 8)])]);
-    assert_eq!(read(&smbus, &[], "\\S").1, Err(Error::Unsupported("the SMBus address space")));
+    let smbus = cat(&[&op_region("SMB0", 0x04, &int(0), &int(0x100)), &field("SMB0", 0x05, &[unit("S", 8)])]);
+    let (mut i, mut m) = loaded(&smbus);
+    m.refuse = true;
+    assert_eq!(i.evaluate(&mut m, "\\S", &[]), Err(Error::Host("refused".into())), "a carried space the host denies");
     // A reserved space or flag loads, and is refused where an access needs
     // its meaning; reserved bit 7 means nothing and is ignored.
     let reserved = cat(&[&op_region("RSV", 0x0C, &int(0), &int(1)), &field("RSV", BYTE, &[unit("R", 8)])]);
-    assert_eq!(read(&reserved, &[], "\\R").1, Err(Error::Unsupported("a reserved address space (Table 5.182)")));
+    assert_eq!(read(&reserved, &[], "\\R").1, Err(Error::Rule("a region of a reserved address space (Table 5.182)")));
     assert!(matches!(read(&memory_region(0x06, &[unit("A", 8)]), &[], "\\A").1, Err(Error::Rule(_))));
     let (m, r) = store_into(&memory_region(BYTE | 0x60, &[unit("A", 4)]), "A", &int(1));
     assert!(matches!(r, Err(Error::Rule(_))));

@@ -25,10 +25,13 @@
 //! to it ([`Host::loaded`]).
 //!
 //! The library touches no hardware. An operation region's field is read and
-//! written through the [`Host`] the caller passes, in SystemMemory,
-//! SystemIO, PCI_Config and EmbeddedControl space; an access in any other
-//! space is refused as [`Error::Unsupported`], as are `LoadTable` and
-//! `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
+//! written through the [`Host`] the caller passes, in every address space of
+//! Table 5.182: a space addressed by offset as an [`Address`] an access unit
+//! at a time, and a space whose protocol is command- or connection-based
+//! (§5.5.2.4) as one [`Transfer`] of the field whole. Which spaces it serves
+//! is the host's to say, and it denies the rest by name. A table the XSDT
+//! lists is found through it too, for `LoadTable` and `DataTableRegion`.
+//! Only one invocation runs at a time, so a Mutex is
 //! never contended and an Event is never signalled by anyone else; `\_GL`'s
 //! other owner is the firmware, whose side the [`Host`] waits out.
 //!
@@ -57,6 +60,7 @@ mod namespace;
 mod object;
 mod stream;
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -143,9 +147,6 @@ pub enum Error {
     Fatal { kind: u8, code: u32, arg: u64 },
     /// What this interpreter bounds was exceeded.
     Bound(&'static str),
-    /// Something the specification defines that this interpreter does not
-    /// carry.
-    Unsupported(&'static str),
     /// The [`Host`] refused an access.
     Host(String),
     /// A function between a PCI_Config region's device and its host bridge
@@ -169,7 +170,8 @@ pub enum Access {
     QWord,
 }
 
-/// Where an access to an operation region lands (Table 5.182).
+/// Where an access to an operation region of a space addressed by offset
+/// lands (Table 5.182).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
     Memory(u64),
@@ -177,6 +179,42 @@ pub enum Address {
     Io(u16),
     PciConfig { segment: u16, bus: u8, device: u8, function: u8, offset: u16 },
     EmbeddedControl(u8),
+    /// A byte of the RTC/CMOS device's non-volatile memory (§5.5.2.4.3).
+    SystemCmos(u8),
+    /// `offset` into the space the BAR at `bar` in the function's
+    /// configuration space decodes (§5.5.2.4.4): its size, I/O or memory,
+    /// is the BAR's.
+    PciBarTarget { segment: u16, bus: u8, device: u8, function: u8, bar: u8, offset: u64 },
+    /// `offset` into the shared memory after the signature of PCC subspace
+    /// `subspace` (§5.5.2.4.8).
+    Pcc { subspace: u8, offset: u32 },
+    /// An OEM-defined space, 0x80 to 0xFF.
+    Oem { space: u8, offset: u64 },
+}
+
+/// A field of a space whose protocol is command- or connection-based:
+/// SMBus, IPMI, GeneralPurposeIO, GenericSerialBus, PlatformRtMechanism and
+/// FFixedHW (§5.5.2.4), accessed whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transfer<'a> {
+    /// The space (Table 5.182).
+    pub space: u8,
+    /// The region's offset: SMBus's and IPMI's device and initial command,
+    /// GenericSerialBus's initial command, a PCC-like subspace's number.
+    pub region: u64,
+    /// The field's place in its region, in bits from its start, and its
+    /// length: a command value is its byte offset, and a GeneralPurposeIO
+    /// field's pins are its bits.
+    pub bit: u64,
+    pub bits: u64,
+    /// The protocol its AccessAs names (Table 5.184), 0 where none does, and
+    /// the byte count an AttribBytes, AttribRawBytes or
+    /// AttribRawProcessBytes carries.
+    pub attrib: u8,
+    pub length: u8,
+    /// The resource descriptor its Connection names (§19.6.15), and the bit
+    /// of the region at which the units that connection reaches begin.
+    pub connection: Option<(&'a [u8], u64)>,
 }
 
 /// What the interpreter asks of the operating system.
@@ -209,6 +247,18 @@ pub trait Host {
     fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied>;
     /// A definition block an evaluation loaded at run time, or refused.
     fn loaded(&mut self, load: &RuntimeLoad<'_>);
+    /// A field of a space whose protocol is the host's, read where `write`
+    /// is `None` and written with it otherwise: what it answers is the
+    /// field's value, or the response a write's buffer becomes (§5.5.2.4.5,
+    /// §5.5.2.4.7), whatever its length.
+    fn transfer(&mut self, at: &Transfer<'_>, write: Option<&[u8]>) -> Result<Vec<u8>, Denied>;
+    /// The table the XSDT lists with this signature, OEM ID and OEM Table ID
+    /// (§19.6.77, §19.6.25), each compared byte for byte and a shorter one
+    /// padded: its address and length, `None` where none matches. "Any table
+    /// referenced by LoadTable must be in memory marked by
+    /// AddressRangeReserved or AddressRangeNVS", as by a Data Table Region,
+    /// and one elsewhere is denied.
+    fn find_table(&mut self, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<(u64, usize)>, Denied>;
 }
 
 /// A definition block an evaluation loaded at run time (§19.6.76), or tried
@@ -234,6 +284,10 @@ pub enum Value {
     Package(Vec<Value>),
     /// A reference to the named object at this absolute path.
     Reference(String),
+    /// A reference to an unnamed object — a package's element, a byte or
+    /// field of a buffer, a LocalX or ArgX — as what it referred to when it
+    /// was handed over. Only AML makes one, so it is refused as an argument.
+    Unnamed(Box<Value>),
 }
 
 /// What a load or an evaluation took of its bounds, a refused one as well.
@@ -466,6 +520,7 @@ impl Interpreter {
                 self.meter.list(p.iter().map(|e| self.object_of(e, w, depth + 1)).collect::<Result<_, _>>()?)?,
             ),
             Value::Reference(path) => Object::Ref(Ref::Node(self.named(path)?)),
+            Value::Unnamed(_) => return Err(Error::Type("an argument that is a reference to an unnamed object, which only AML makes")),
         })
     }
 
@@ -522,6 +577,11 @@ fn value_of(m: &mut Machine<'_>, meter: &Meter, handed: &mut usize, o: Object, d
             hand(meter, handed, path.capacity())?;
             Value::Reference(path)
         }
-        _ => return Err(Error::Unsupported("a reference to an unnamed object, handed to the caller")),
+        Object::Ref(r) => {
+            hand(meter, handed, core::mem::size_of::<Value>())?;
+            let referred = m.deref(&r)?;
+            Value::Unnamed(Box::new(value_of(m, meter, handed, referred, depth + 1)?))
+        }
+        _ => return Err(Error::Type("an object handed to the caller that is no value (§19.6.101)")),
     })
 }

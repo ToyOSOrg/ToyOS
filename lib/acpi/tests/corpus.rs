@@ -12,7 +12,7 @@ use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    definition_blocks, dsdt_address, ecam_allocations, find_by_id, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
     Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Reset, SourceOverride, Table, TableError, Trigger,
@@ -582,6 +582,33 @@ fn the_xsdt_walk_answers_with_its_first_match_and_tries_no_second() {
         Some(TableError::Checksum),
         "the second HPET is never reached, and that is the decode's choice"
     );
+}
+
+/// A table found by its signature, OEM ID and OEM Table ID (ACPI 6.5
+/// §19.6.77): an identifier shorter than its field matches where the rest is
+/// NULs or spaces, a longer one or another byte does not, and an entry that
+/// does not open is passed over.
+#[test]
+fn a_table_is_found_by_its_three_identifiers() {
+    let named = |signature: &[u8; 4], oem: &[u8; 6], table: &[u8; 8]| {
+        let mut t = sdt(signature, 1, &[0u8; 4]);
+        t[10..16].copy_from_slice(oem);
+        t[16..24].copy_from_slice(table);
+        common::reseal(&mut t);
+        t
+    };
+    let first = named(b"OEM1", b"TOYOS ", b"TABLE1\0\0");
+    let second = named(b"OEM1", b"TOYOS ", b"TABLE2  ");
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[0x9000_0000, TABLE_AT, TABLE_AT + 0x1000]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &first), (TABLE_AT + 0x1000, &second)];
+    let m = Machine { regions };
+    let found = |sig: &[u8], oem: &[u8], table: &[u8]| find_by_id(m, RSDP_AT, sig, oem, table).map(|t| t.map(|t| t.base()));
+    assert_eq!(found(b"OEM1", b"TOYOS", b"TABLE1"), Ok(Some(TABLE_AT)));
+    assert_eq!(found(b"OEM1", b"TOYOS ", b"TABLE2"), Ok(Some(TABLE_AT + 0x1000)));
+    assert_eq!(found(b"OEM1", b"TOYO", b"TABLE1"), Ok(None), "a shorter identifier the field does not end in padding after");
+    assert_eq!(found(b"OEM1", b"TOYOS", b"TABLE3"), Ok(None));
+    assert_eq!(found(b"OEM1", b"TOYOS  X", b"TABLE1"), Ok(None), "an identifier longer than its field");
 }
 
 #[test]

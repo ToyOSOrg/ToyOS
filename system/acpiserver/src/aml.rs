@@ -71,7 +71,6 @@ pub fn kind(why: &Error) -> String {
         Error::Type(why) => format!("a type its operator refuses: {why}"),
         Error::Rule(why) | Error::Table(why) | Error::Bound(why) => (*why).into(),
         Error::Fatal { .. } => "the firmware executed Fatal".into(),
-        Error::Unsupported(why) => format!("not carried by this interpreter: {why}"),
         Error::Host(why) => format!("denied by this server: {why}"),
         Error::Bridge { .. } => BRIDGE.into(),
     }
@@ -107,6 +106,7 @@ pub const NO_S5_HANDED: &str =
 /// evaluate `\_S5`; the namespace, where its DSDT loaded, is kept.
 pub fn load<K: Kernel>(kernel: &K, rsdp: u64) -> (Loaded, Option<Aml<'_, K>>) {
     let mut host = Firmware::new(kernel);
+    host.rsdp = rsdp;
     let mut interpreter = Interpreter::new();
     let loaded = load_into(kernel, &mut interpreter, &mut host, rsdp);
     let kept = loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) && !host.stopping;
