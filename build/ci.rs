@@ -651,10 +651,22 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &[Fails("a_published_entry_is_read_whole")]),
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &[
+        Fails("a_published_entry_is_read_whole"),
+        Fails("a_published_byte_is_read_as_written"),
+    ]),
     red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
         "a_hostile_producer_yields_entries_or_a_violation",
     )]),
+    red(TRANSPORT, "no-clamp", None, &[Fails(
+        "stream::tests::a_hostile_producer_hands_the_consumer_at_most_the_ring",
+    )]),
+    // The stream's lost wake: a sleeper whose exchange read the waker's clear
+    // looks at a cursor from before it, and sleeps with nobody to ring.
+    red(TRANSPORT, "want-relaxed", Some("loom"), &[
+        Fails("a_consumer_that_looked_again_is_rung_for_bytes_it_missed"),
+        Fails("a_producer_that_looked_again_is_rung_for_room_it_missed"),
+    ]),
     red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
         "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),

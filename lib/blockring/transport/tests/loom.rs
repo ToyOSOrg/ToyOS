@@ -12,8 +12,8 @@
 use core::sync::atomic::Ordering;
 
 use loom::sync::atomic::AtomicU32;
-use loom::sync::Arc;
-use toyos_transport::{Consumer, Place, Producer, Untrusted, Violation, Word};
+use loom::sync::{Arc, Notify};
+use toyos_transport::{stream, Consumer, Place, Producer, Untrusted, Violation, Word};
 
 /// A loom atomic as a region word: the trait is this crate's and the type is
 /// loom's, so the two meet through a wrapper.
@@ -25,6 +25,9 @@ impl Word for Shared {
     }
     fn store(&self, value: u32, order: Ordering) {
         self.0.store(value, order)
+    }
+    fn swap(&self, value: u32, order: Ordering) -> u32 {
+        self.0.swap(value, order)
     }
 }
 
@@ -137,5 +140,132 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
         }
         hostile.join().unwrap();
         assert!(pushed <= D, "pushed {pushed} into a ring of {D} nobody released");
+    });
+}
+
+/// A stream's four words, its bytes as words of their own, and a doorbell each
+/// way. The bytes are stored and loaded `Relaxed`, so only the cursors order
+/// them; a doorbell is loom's `Notify`, which keeps one ring and may wake its
+/// waiter for nothing, and loom fails a run that ends with a thread waiting on
+/// one. It is held in std's `Arc`: loom's panics again in its drop when
+/// that failure unwinds the model, which aborts the run before it says which
+/// test failed.
+struct Stream {
+    page: [Shared; 4],
+    bytes: [Shared; RING as usize],
+    to_consumer: Notify,
+    to_producer: Notify,
+}
+
+const RING: u32 = 1;
+const STREAM: stream::Place<RING, 4> = stream::Place::new::<0, 1, 2, 3, 0>();
+type StreamEnds = (stream::Producer<RING, 4>, stream::Consumer<RING, 4>);
+
+fn stream() -> (std::sync::Arc<Stream>, StreamEnds) {
+    let s = std::sync::Arc::new(Stream {
+        page: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
+        bytes: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
+        to_consumer: Notify::new(),
+        to_producer: Notify::new(),
+    });
+    let ends = (stream::Producer::new(&s.page, STREAM), stream::Consumer::new(&s.page, STREAM));
+    (s, ends)
+}
+
+/// Writes `byte` into the room the producer was last shown and publishes it,
+/// ringing a consumer that armed.
+fn send(s: &Stream, tx: &mut stream::Producer<RING, 4>, byte: u32) {
+    for span in tx.span(0, 1).expect("a byte of room") {
+        for at in span.offset..span.offset + span.len {
+            s.bytes[at].store(byte, Ordering::Relaxed);
+        }
+    }
+    assert!(tx.advance(1));
+    if tx.publish(&s.page) {
+        s.to_consumer.notify();
+    }
+}
+
+/// Reads the byte the consumer was last shown and releases it, ringing a
+/// producer that armed.
+fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
+    let mut read = Vec::new();
+    for span in rx.span(0, 1).expect("a byte ready") {
+        read.extend((span.offset..span.offset + span.len).map(|at| s.bytes[at].load(Ordering::Relaxed)));
+    }
+    assert!(rx.advance(1));
+    if rx.release(&s.page) {
+        s.to_producer.notify();
+    }
+    read[0]
+}
+
+/// A consumer that polls reads each byte as the producer wrote it, through a
+/// ring that wraps under it. `publish-relaxed` lets it read the tail before
+/// the byte.
+#[test]
+fn a_published_byte_is_read_as_written() {
+    loom::model(|| {
+        let (s, (mut tx, mut rx)) = stream();
+        let producer_side = std::sync::Arc::clone(&s);
+        let producer = loom::thread::spawn(move || {
+            for byte in [0x5A, 0xA5] {
+                while tx.room(&producer_side.page).expect("the consumer keeps the protocol") == 0 {
+                    loom::thread::yield_now();
+                }
+                send(&producer_side, &mut tx, byte);
+            }
+        });
+        let mut read = Vec::new();
+        while read.len() < 2 {
+            match rx.ready(&s.page).expect("the producer keeps the protocol") {
+                0 => loom::thread::yield_now(),
+                _ => read.push(receive(&s, &mut rx)),
+            }
+        }
+        producer.join().expect("the producer thread");
+        assert_eq!(read, [0x5A, 0xA5], "a byte was read before it was written");
+    });
+}
+
+/// A consumer sleeps whenever the look after arming finds the ring empty, and
+/// the byte published around its sleep still reaches it. `want-relaxed` lets
+/// it miss the tail stored before the want it read cleared.
+#[test]
+fn a_consumer_that_looked_again_is_rung_for_bytes_it_missed() {
+    loom::model(|| {
+        let (s, (mut tx, mut rx)) = stream();
+        let producer_side = std::sync::Arc::clone(&s);
+        let producer = loom::thread::spawn(move || send(&producer_side, &mut tx, 0x5A));
+        while rx.ready(&s.page).expect("the producer keeps the protocol") == 0 {
+            if rx.arm(&s.page).expect("the producer keeps the protocol") == 0 {
+                s.to_consumer.wait();
+            }
+        }
+        assert_eq!(receive(&s, &mut rx), 0x5A);
+        producer.join().expect("the producer thread");
+    });
+}
+
+/// A producer sleeps whenever the look after arming finds the ring full, and
+/// the room released around its sleep still reaches it. `want-relaxed` lets
+/// it miss the head stored before the want it read cleared.
+#[test]
+fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
+    loom::model(|| {
+        let (s, (mut tx, mut rx)) = stream();
+        send(&s, &mut tx, 0x5A);
+        let consumer_side = std::sync::Arc::clone(&s);
+        let consumer = loom::thread::spawn(move || {
+            assert_eq!(rx.ready(&consumer_side.page), Ok(1), "published before the consumer started");
+            receive(&consumer_side, &mut rx)
+        });
+        while tx.room(&s.page).expect("the consumer keeps the protocol") == 0 {
+            if tx.arm(&s.page).expect("the consumer keeps the protocol") == 0 {
+                s.to_producer.wait();
+            }
+        }
+        send(&s, &mut tx, 0xA5);
+        assert_eq!(consumer.join().expect("the consumer thread"), 0x5A);
     });
 }
