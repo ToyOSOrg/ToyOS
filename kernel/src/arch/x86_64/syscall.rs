@@ -3,7 +3,7 @@
 //! `STAR` names the selectors, `LSTAR` is the one address `syscall` can reach, and `FMASK` masks the `RFLAGS` bits a Ring 3 thread may not hand the kernel; [`crate::syscall::dispatch`] is the first code that interprets the syscall number.
 
 use crate::arch::cpu;
-use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state, Ring3Entry};
+use crate::arch::entry::ring3_naked_asm;
 use crate::arch::percpu;
 
 use crate::syscall::dispatch::syscall_dispatch;
@@ -20,7 +20,7 @@ pub fn init() {
     // All three `wrmsr` writes stay in one `unsafe` block because they are one declaration: a CPU holding only some of them has its `SYSCALL` gate aimed by something this file did not decide, and no point between the writes is a state the machine may be left in.
     unsafe {
         cpu::wrmsr(MSR_STAR, star);
-        cpu::wrmsr(MSR_LSTAR, Ring3Entry::new(syscall_entry).addr());
+        cpu::wrmsr(MSR_LSTAR, syscall_entry as *const () as u64);
         // `SYSCALL` clears exactly the bits named here; every bit left out carries a Ring 3 thread's flag into Ring 0.
         // The pre-mask `RFLAGS` survives in `r11` and `sysretq` restores it to the thread regardless — `FMASK` only decides what the kernel itself runs with.
         const TF: u64 = 1 << 8;
@@ -29,7 +29,7 @@ pub fn init() {
         const AC: u64 = 1 << 18;
         // TF must stay masked: an unmasked single-step trap taken between entry and the stack switch takes `#DB` on the user stack, which SMAP refuses and which escalates to a double fault.
         // `debug_trap`'s `tf-syscall` arm is the check that catches `TF` being left unmasked.
-        // `IF` stays masked until `syscall_handler` opens it, past the stack switch and the user-state save; `RFLAGS.AC` clear is what makes SMAP bind at all.
+        // `IF` stays masked until `syscall_handler` opens it, past the stack switch; `RFLAGS.AC` clear is what makes SMAP bind at all.
         // `DF` is cleared to match `arch::entry::ring3_naked_asm`'s `cld`.
         // `entry-df-unclean` takes out only `DF`, never another bit — a control that removed two bits would be measuring two things.
         let df = if cfg!(feature = "entry-df-unclean") { 0 } else { DF };
@@ -57,24 +57,21 @@ extern "sysv64" fn syscall_entry() {
         "push r8",
         "push r9",
         "push r10",
+        // Nine words below a 16-byte-aligned top: the pad aligns `rsp` for
+        // both calls, and parks the return value across `exit_to_user`.
+        "sub rsp, 8",
 
-        save_user_state!(),
-
-        "lock add dword ptr gs:[{preempt_count}], 1",
+        "add dword ptr gs:[{preempt_count}], 1",
 
         "call {handler}",
 
-        "lock sub dword ptr gs:[{preempt_count}], 1",
+        "sub dword ptr gs:[{preempt_count}], 1",
         // The helper called before `pop rsp`/`sysretq` (`exit_to_user`) preserves `IF=0` across its return.
         // Runs before GPR restore: the sysv64 call would otherwise clobber rcx/r11 (sysretq's RIP/RFLAGS) and the restored args.
-        // The 16 bytes both park the syscall return value and keep `rsp` aligned for the `call`.
-        "sub rsp, 16",
         "mov [rsp], rax",
         "call {exit_to_user}",
         "mov rax, [rsp]",
-        "add rsp, 16",
-
-        restore_user_state!(),
+        "add rsp, 8",
 
         "pop r10",
         "pop r9",
