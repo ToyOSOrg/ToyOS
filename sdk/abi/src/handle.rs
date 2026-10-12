@@ -57,6 +57,58 @@ impl RawHandle {
 /// any table issues.
 pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 
+/// Every kind of kernel object a handle can name, as the word
+/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ObjectKind {
+    PipeRead = 0,
+    PipeWrite = 1,
+    Connection = 2,
+    Device = 3,
+    Acceptor = 4,
+    Inbox = 5,
+    SharedMem = 6,
+    Connector = 7,
+    Namespace = 8,
+    File = 9,
+    Console = 10,
+    SysCap = 11,
+    Process = 12,
+}
+
+impl ObjectKind {
+    pub const ALL: [ObjectKind; 13] = [
+        Self::PipeRead,
+        Self::PipeWrite,
+        Self::Connection,
+        Self::Device,
+        Self::Acceptor,
+        Self::Inbox,
+        Self::SharedMem,
+        Self::Connector,
+        Self::Namespace,
+        Self::File,
+        Self::Console,
+        Self::SysCap,
+        Self::Process,
+    ];
+
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if (word as usize) < Self::ALL.len() { Some(Self::ALL[word as usize]) } else { None }
+    }
+}
+
+// `from_word` indexes `ALL` by the word: a row out of order would count a
+// kind's neighbour.
+const _: () = {
+    let mut i = 0;
+    while i < ObjectKind::ALL.len() {
+        assert!(ObjectKind::ALL[i] as usize == i, "ObjectKind::ALL is out of word order");
+        i += 1;
+    }
+};
+
 /// What the holder of a handle may do with the object behind it.
 ///
 /// Rights only ever shrink: a duplicate may ask for a subset and nothing

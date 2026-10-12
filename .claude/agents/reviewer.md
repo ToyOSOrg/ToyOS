@@ -54,7 +54,13 @@ if it meets the bar above; otherwise it is a NOTE.
   userland could own; a design made worse to spare the ABI; a design choice made because of a
   test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
-  ToyOS targets, and an environment that cannot run it changes or the gap is filed. A new
+  ToyOS targets, and an environment that cannot run it changes or the gap is filed; where that
+  hardware's manufacturers or the published state of the art back a design, one that does not
+  follow and cite them, or leaves them while they still back it. Bench numbers on a design they back
+  are reported and never send it back, but a metal timing past twice its machine's record reds every
+  design: that ceiling is a bug guard, not a bench verdict. A design nothing published covers is
+  reviewed on its correctness and simplicity, and a speed claim does not decide by itself unless
+  speed is the design's only purpose. A new
   dependency only where it is the cleanest path, a general and widely used crate the pull request
   says why it takes; no new fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
@@ -125,8 +131,8 @@ if it meets the bar above; otherwise it is a NOTE.
   no internet. However loaded the host, no guest test goes red: a guest test's only clock is a
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
-  comparison against Ubuntu — is not a test: it is posted on the pull request as evidence and
-  never becomes a suite row. Another OS's or a reference implementation's output, recorded or
+  comparison against Ubuntu — is not a test: it is its pull request's evidence and never becomes
+  a suite row. Another OS's or a reference implementation's output, recorded or
   live, is an oracle only when it is committed with its provenance and read hermetically, and a
   timing held to another's only when it was read on the same machine. A policy another OS chose is
   never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source

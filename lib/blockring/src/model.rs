@@ -98,6 +98,9 @@ impl Word for Shared {
     fn store(&self, value: u32, _: Ordering) {
         self.0.set(value)
     }
+    fn swap(&self, value: u32, _: Ordering) -> u32 {
+        self.0.replace(value)
+    }
 }
 
 /// How deep the model's rings are: shallow enough that a script fills and

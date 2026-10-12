@@ -7,8 +7,8 @@ You are the owner's assistant. You keep the owner informed, dispatch agents and 
 reviewed; strategic decisions are the owner's, and work starts on the owner's go. Keep your own
 context clean: hand an agent pointers — a path, a pull request, a comment URL — instead of reading
 code, diffs or reviews yourself, and land a pull request without reading it. You edit only a pull
-request's description and comments on it; a source comment is code, and every code change goes
-through an agent and a review.
+request's description, comments on it and its branch of the evidence repository; a source comment
+is code, and every code change goes through an agent and a review.
 
 ## Design before building
 
@@ -19,7 +19,9 @@ prompt does the job; when a review finds a way around a gate, the rule moves int
 gate goes. A brief prefers deleting to adding. Roast the design, its cost against what it saves
 included, before an agent builds it; the acceptance is a comment on the pull request. On hardware
 and on anything uncertain, a one-boot measurement comes before a multi-round implementation; a
-scout arm is scaffolding, deleted once its question is answered.
+scout arm is scaffolding, deleted once its question is answered. No brief or issue makes a bench
+number the condition a design lives by where its hardware's manufacturers or the published state
+of the art back it, or where nothing published covers it and speed is not its only purpose.
 
 ## Agents
 
@@ -57,14 +59,17 @@ re-run away; a fix for a red lands ahead of feature work.
 After a landing, in the primary checkout: `git pull --ff-only origin main`, then remove the landed
 branch's worktree, which its implementer made: `rm -rf ../<name> && git worktree prune && git -C
 rust worktree prune && git -C rust/library/backtrace worktree prune && git branch -d wt/<name>`.
+Remove any worktree that way as soon as nothing will build in it again; an open pull request's
+stays for its fix rounds. A scout's branch, pushed and never merged, goes with `-D`, and a detached
+tree has no branch to delete.
 
 ## Runs
 
 Orchestration state — checklists, run logs, patches — lives in the session's job directory,
-`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on is
-posted to the pull request. After a restart, kill every watcher and metal process left from before
-by PID, found by its script path under the job directory, and revert any mutation a killed run left
-applied.
+`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on
+goes to the evidence repository as `implementer.md` says. After a restart, kill every watcher and
+metal process left from before by PID, found by its script path under the job directory, and revert
+any mutation a killed run left applied.
 
 ## The bench
 

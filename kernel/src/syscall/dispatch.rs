@@ -608,20 +608,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // The two leaks this object model accepts — a stranded Arc, the cross-pair
             // connection cycle — are visible in no other way than this census.
             // Per kind, not total: a total would hide one kind's leak behind another's churn.
-            // Names are checked against OBJECT_KINDS rather than order assumed: this is
-            // the one place the two declarations meet.
-            DA::CENSUS_KIND => {
-                assert!(
-                    crate::object::census::live()
-                        .map(|(kind, _)| kind)
-                        .eq(toyos_abi::syscall::OBJECT_KINDS.iter().copied()),
-                    "kobject! and toyos_abi::syscall::OBJECT_KINDS declare different objects",
-                );
-                match crate::object::census::live().nth(a2 as usize) {
-                    Some((_, live)) => live,
-                    None => SyscallError::InvalidArgument.to_u64(),
-                }
-            }
+            DA::CENSUS_KIND => match u32::try_from(a2).ok().and_then(toyos_abi::handle::ObjectKind::from_word) {
+                Some(kind) => crate::object::census::live(kind),
+                None => SyscallError::InvalidArgument.to_u64(),
+            },
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {

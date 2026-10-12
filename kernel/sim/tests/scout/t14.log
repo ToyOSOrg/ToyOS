@@ -1,0 +1,40 @@
+[2026-10-12 06:42:47 11.460 cpu0 kernel] ACPI: MADT cpus=[0, 2, 4, 6, 1, 3, 5, 7]
+[2026-10-12 06:42:47 11.558 cpu0 kernel] scout-topo: cpu0 hw=0x0 GenuineIntel max=0x1b/0x80000008 1= 806c1:100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.558 cpu0 kernel] scout-topo: cpu0 levels B=[ 1:2:100:0 4:8:201:0 0:0:2:0 ]
+[2026-10-12 06:42:47 11.558 cpu0 kernel] scout-topo: cpu0 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.569 cpu1 kernel] scout-topo: cpu1 hw=0x2 GenuineIntel max=0x1b/0x80000008 1= 806c1:2100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.569 cpu1 kernel] scout-topo: cpu1 levels B=[ 1:2:100:2 4:8:201:2 0:0:2:2 ]
+[2026-10-12 06:42:47 11.569 cpu1 kernel] scout-topo: cpu1 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.569 cpu0 kernel] SMP: cpu1 tsc=27986034133 inside the BSP's 27961797498..27989101253 (27303755 cycles wide)
+[2026-10-12 06:42:47 11.569 cpu0 kernel] SMP: AP cpu1 lapic=2 online
+[2026-10-12 06:42:47 11.580 cpu2 kernel] scout-topo: cpu2 hw=0x4 GenuineIntel max=0x1b/0x80000008 1= 806c1:4100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.580 cpu2 kernel] scout-topo: cpu2 levels B=[ 1:2:100:4 4:8:201:4 0:0:2:4 ]
+[2026-10-12 06:42:47 11.580 cpu2 kernel] scout-topo: cpu2 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.580 cpu0 kernel] SMP: cpu2 tsc=28013386024 inside the BSP's 27989159128..28015779152 (26620024 cycles wide)
+[2026-10-12 06:42:47 11.580 cpu0 kernel] SMP: AP cpu2 lapic=4 online
+[2026-10-12 06:42:47 11.591 cpu3 kernel] scout-topo: cpu3 hw=0x6 GenuineIntel max=0x1b/0x80000008 1= 806c1:6100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.591 cpu3 kernel] scout-topo: cpu3 levels B=[ 1:2:100:6 4:8:201:6 0:0:2:6 ]
+[2026-10-12 06:42:47 11.591 cpu3 kernel] scout-topo: cpu3 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.591 cpu0 kernel] SMP: cpu3 tsc=28040058334 inside the BSP's 28015827591..28042483655 (26656064 cycles wide)
+[2026-10-12 06:42:47 11.591 cpu0 kernel] SMP: AP cpu3 lapic=6 online
+[2026-10-12 06:42:47 11.602 cpu4 kernel] scout-topo: cpu4 hw=0x1 GenuineIntel max=0x1b/0x80000008 1= 806c1:1100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.602 cpu4 kernel] scout-topo: cpu4 levels B=[ 1:2:100:1 4:8:201:1 0:0:2:1 ]
+[2026-10-12 06:42:47 11.602 cpu4 kernel] scout-topo: cpu4 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.602 cpu0 kernel] SMP: cpu4 tsc=28066737651 inside the BSP's 28042537058..28069162155 (26625097 cycles wide)
+[2026-10-12 06:42:47 11.602 cpu0 kernel] SMP: AP cpu4 lapic=1 online
+[2026-10-12 06:42:47 11.613 cpu5 kernel] scout-topo: cpu5 hw=0x3 GenuineIntel max=0x1b/0x80000008 1= 806c1:3100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.613 cpu5 kernel] scout-topo: cpu5 levels B=[ 1:2:100:3 4:8:201:3 0:0:2:3 ]
+[2026-10-12 06:42:47 11.613 cpu5 kernel] scout-topo: cpu5 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.613 cpu0 kernel] SMP: cpu5 tsc=28093417832 inside the BSP's 28069213915..28096506772 (27292857 cycles wide)
+[2026-10-12 06:42:47 11.613 cpu0 kernel] SMP: AP cpu5 lapic=3 online
+[2026-10-12 06:42:47 11.625 cpu6 kernel] scout-topo: cpu6 hw=0x5 GenuineIntel max=0x1b/0x80000008 1= 806c1:5100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.625 cpu6 kernel] scout-topo: cpu6 levels B=[ 1:2:100:5 4:8:201:5 0:0:2:5 ]
+[2026-10-12 06:42:47 11.625 cpu6 kernel] scout-topo: cpu6 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.625 cpu0 kernel] SMP: cpu6 tsc=28120768891 inside the BSP's 28096564259..28123708707 (27144448 cycles wide)
+[2026-10-12 06:42:47 11.625 cpu0 kernel] SMP: AP cpu6 lapic=5 online
+[2026-10-12 06:42:47 11.636 cpu7 kernel] scout-topo: cpu7 hw=0x7 GenuineIntel max=0x1b/0x80000008 1= 806c1:7100800:77fafbbf:bfebfbff 1A= 0:0:0:0 80000001= 0:0:121:2c100800 80000008= 3027:0:0:0
+[2026-10-12 06:42:47 11.636 cpu7 kernel] scout-topo: cpu7 levels B=[ 1:2:100:7 4:8:201:7 0:0:2:7 ]
+[2026-10-12 06:42:47 11.636 cpu7 kernel] scout-topo: cpu7 caches 4=[ 1c004121:2c0003f:3f:0 1c004122:1c0003f:3f:0 1c004143:4c0003f:3ff:0 1c03c163:1c0003f:3fff:4 0:0:0:0 ]
+[2026-10-12 06:42:47 11.636 cpu0 kernel] SMP: cpu7 tsc=28147963000 inside the BSP's 28123759514..28151135967 (27376453 cycles wide)
+[2026-10-12 06:42:47 11.636 cpu0 kernel] SMP: AP cpu7 lapic=7 online
+[2026-10-12 06:42:47 11.636 cpu0 kernel] SMP: 8 of 8 MADT cpus online, 7 of 7 APs inside the BSP's TSC bracket

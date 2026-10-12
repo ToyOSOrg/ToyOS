@@ -270,13 +270,11 @@ pub fn keyed_idle(store: &Path, kind: Keyed, key: &Key) -> Option<Guard> {
     try_lock(&file, LOCK_EX).then_some(Guard { file, records_holder: false })
 }
 
-impl Guard {
-    /// Whether the key this holds was used or made less than `kept` ago. A key
-    /// nothing had locked before is dated by the lock that asks.
-    pub(crate) fn used_within(&self, kept: Duration) -> bool {
-        let used = self.file.metadata().and_then(|meta| meta.modified()).unwrap_or_else(|e| panic!("build lock: stat: {e}"));
-        !used.elapsed().is_ok_and(|unused| unused >= kept)
-    }
+/// When `kind`'s `key` in `store` was last used or made. A key nothing has
+/// locked yet is dated by the lock this makes for it, which is now.
+pub(crate) fn keyed_used(store: &Path, kind: Keyed, key: &Key) -> SystemTime {
+    let path = keyed_lock_path(store, kind, key);
+    open_lock_file(&path).metadata().and_then(|meta| meta.modified()).unwrap_or_else(|e| panic!("build lock: stat {}: {e}", path.display()))
 }
 
 /// The lock of `kind`'s `key`: in the store, where every checkout on the host
