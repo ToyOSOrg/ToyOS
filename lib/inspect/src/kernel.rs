@@ -59,7 +59,9 @@ mod tests {
     use super::*;
     use crate::check_path;
 
-    fn record(cpu: u32, stale: bool, values: [Option<u64>; Counter::COUNT]) -> Record {
+    fn record(cpu: u32, stale: bool, first: [Option<u64>; 10]) -> Record {
+        let mut values = [None; Counter::COUNT];
+        values[..10].copy_from_slice(&first);
         Record { cpu, hardware_id: cpu * 2, stale, values }
     }
 
@@ -67,7 +69,9 @@ mod tests {
     /// calls on the boot processor, which makes them.
     fn whole(cpu: u32) -> Record {
         let (calls, nanos) = if cpu == 0 { (Some(1), Some(15_968)) } else { (None, None) };
-        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls, nanos])
+        let mut r = record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6), calls, nanos]);
+        r.values[10..].fill(Some(1));
+        r
     }
 
     #[test]
@@ -97,7 +101,9 @@ mod tests {
     /// whose answer was not read says that alone.
     #[test]
     fn a_stale_cpu_says_so_and_an_unread_one_says_only_that() {
-        let got = render(&[record(1, true, whole(1).values), record(2, true, [None; Counter::COUNT])]).unwrap();
+        let mut first = [None; 10];
+        first.copy_from_slice(&whole(1).values[..10]);
+        let got = render(&[record(1, true, first), record(2, true, [None; 10])]).unwrap();
         assert_eq!(got["kernel.cpu.1.stale"], Value::Bool(true));
         assert_eq!(got["kernel.cpu.1.mperf"], Value::U64(200));
         assert_eq!(got.keys().filter(|p| p.starts_with("kernel.cpu.2.")).count(), 1);

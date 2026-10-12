@@ -90,7 +90,7 @@ fn main() {
             }
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
-            match run_one(job, &[], cap.as_ref()) {
+            match run_one(job, &[], Some(bound_ms), cap.as_ref()) {
                 Ran::No => {
                     give_the_machine_back(&format!("job {job:?} did not run"))
                 }
@@ -212,7 +212,7 @@ fn command(line: &str, cap: Option<&SysCap>) {
     let mut words = name.split_whitespace();
     let Some(name) = words.next() else { return };
     let args: Vec<&str> = words.collect();
-    run_one(name, &args, cap);
+    run_one(name, &args, None, cap);
 }
 
 enum Ran {
@@ -221,8 +221,9 @@ enum Ran {
     Spawned,
 }
 
-/// Run `/system/bin/<name>` between the host's markers.
-fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
+/// Run `/system/bin/<name>` between the host's markers, telling it the bound
+/// of the list it is in, where it is in one (`toyos_tco::LIST_BOUND_ENV`).
+fn run_one(name: &str, args: &[&str], list_bound_ms: Option<u64>, cap: Option<&SysCap>) -> Ran {
     let path = format!("/system/bin/{name}");
 
     println!("===TEST_START {name}===");
@@ -231,6 +232,9 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     // Piped stdin so the child does not consume the serial commands.
     let mut command = Command::new(&path);
     command.args(args).stdin(Stdio::piped());
+    if let Some(ms) = list_bound_ms {
+        command.env(toyos_tco::LIST_BOUND_ENV, ms.to_string());
+    }
     // **A refused dup is an answer and not a failure — but only one
     // refusal is.** `duplicate` needs `DUP` on the capability, which a
     // manifest grants by name, so `PermissionDenied` says this cap is one

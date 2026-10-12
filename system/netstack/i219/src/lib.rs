@@ -454,6 +454,8 @@ pub struct Counters {
     /// Frames the part filled a receive descriptor with and this driver handed
     /// up.
     pub received: u32,
+    /// MEASUREMENT ONLY: writes of `RDT`.
+    pub rdt_writes: u32,
 }
 
 impl Counters {
@@ -462,7 +464,7 @@ impl Counters {
     /// ring, which move on their own on a working card, so a diagnostic keyed
     /// on them would print on nothing having gone wrong.
     pub fn anomalies(&self) -> Self {
-        Self { spurious: 0, sent: 0, received: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
+        Self { spurious: 0, sent: 0, received: 0, rdt_writes: 0, tx_full: 0, tx_wake_armed: 0, tx_wake_taken: 0, ..*self }
     }
 }
 
@@ -1090,6 +1092,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// its filters dropped and the ones it had no descriptor for — which is
     /// what separates "nothing arrived" from "something arrived and went
     /// nowhere" on a boot with no other record.
+    /// MEASUREMENT ONLY, round 4: [`Self::wire`]'s missed frames, `MPC` alone read.
+    pub fn missed(&mut self) -> u64 {
+        self.wire.missed = self.wire.missed.saturating_add(u64::from(self.regs.read32(regs::MPC)));
+        self.wire.missed
+    }
+
     pub fn wire(&mut self) -> Wire {
         let take = |reg| u64::from(self.regs.read32(reg));
         let read = Wire {
@@ -1339,6 +1347,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // to be there before the write is.
         self.dma.publish();
         self.regs.write32(regs::RDT, tail as u32);
+        self.counters.rdt_writes = self.counters.rdt_writes.wrapping_add(1);
     }
 
     /// How many frames the transmit ring takes now, every descriptor the part
