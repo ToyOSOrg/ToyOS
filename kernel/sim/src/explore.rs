@@ -11,6 +11,7 @@ use kernel::sched::hw::CpuId;
 use crate::choice::ChoiceStream;
 use crate::invariants;
 use crate::latency::{ReadyCause, RunWait};
+use crate::topology::LevelCounts;
 use crate::vm::{build_queues, Step, Vm};
 use crate::workload::Scenario;
 
@@ -117,6 +118,12 @@ pub struct Outcome {
     /// The longest a halted CPU sat beside a published surplus with no probe
     /// outstanding — see [`crate::vm::Vm::probe_gap_ns`].
     pub probe_gap_ns: u64,
+    /// Invariant I15's measurement: the most rounds a CPU stayed idle beside
+    /// stealable work, and the most a ready task waited to run.
+    pub wc_rounds: u64,
+    pub rounds_to_run: u64,
+    /// What the run did at each level of its machine's cache tree.
+    pub levels: LevelCounts,
     /// What each CPU's passes cost, as the core's `feature = "check"` recorder
     /// measured them — the on-target instrument, driven here by the scenario's
     /// modelled `pass_cost_ns`.
@@ -324,6 +331,9 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         idle_wakes: vm.idle_wakes.clone(),
         late_kick_wakes: vm.late_kick_wakes.clone(),
         probe_gap_ns: vm.probe_gap_ns,
+        wc_rounds: vm.wc_rounds,
+        rounds_to_run: vm.rounds_to_run,
+        levels: vm.levels.clone(),
         pass_costs: (0..vm.handles.len())
             .map(|cpu| {
                 let cpu = CpuId(cpu as u32);

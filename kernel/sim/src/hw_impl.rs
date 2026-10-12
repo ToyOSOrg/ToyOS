@@ -37,6 +37,9 @@ pub struct SimHwState {
     pub released: Vec<(TaskKey, TaskAccounting)>,
     pub trace: Vec<TraceEvent>,
     pub kicks: u64,
+    /// Each kick's target since the VM last drained it, which it does once a
+    /// step to say what level each one crossed.
+    pub kicked: Vec<CpuId>,
     pub switches: u64,
     /// Which CPU's pass is running. The core has no `cpu_id()` by design, so
     /// the driver is what knows where a timer or a halt lands.
@@ -80,6 +83,7 @@ impl SimHw {
                 released: Vec::new(),
                 trace: Vec::new(),
                 kicks: 0,
+                kicked: Vec::new(),
                 switches: 0,
                 current: None,
                 poster: None,
@@ -140,6 +144,7 @@ impl Kicker for SimHw {
                 s.pending_ipi[t] += 1;
                 s.busy_kicks[t] += u32::from(!s.halted[t]);
                 s.kicks += 1;
+                s.kicked.push(target);
             }
         });
     }

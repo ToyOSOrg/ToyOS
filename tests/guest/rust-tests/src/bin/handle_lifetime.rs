@@ -28,6 +28,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::census::Census;
 use toyos::{namespace, port, AsHandle};
+use toyos_abi::handle::ObjectKind;
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
 
@@ -228,7 +229,7 @@ fn kill_releases_ring() {
     // Non-vacuity: an instrument that cannot see eight rings arrive cannot see
     // them leave either, and the reclaim assertion would pass on a kernel that
     // frees nothing.
-    let taken = held.kind("Inbox").saturating_sub(before.kind("Inbox"));
+    let taken = held.kind(ObjectKind::Inbox).saturating_sub(before.kind(ObjectKind::Inbox));
     assert!(
         taken >= HOLDER_RINGS as u64,
         "the holder made {HOLDER_RINGS} rings and the live Inbox count moved {taken}: \

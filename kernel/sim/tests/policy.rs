@@ -127,7 +127,7 @@ fn stream(scenario: &Scenario, seed: u64) -> ChoiceStream {
     if seed.is_multiple_of(2) {
         ChoiceStream::from_seed(seed)
     } else {
-        ChoiceStream::pct(seed, scenario.cpus, 3)
+        ChoiceStream::pct(seed, scenario.cpus(), 3)
     }
 }
 
@@ -1350,7 +1350,7 @@ fn a_runnable_task_waits_at_most_one_dispatch_per_rival() {
         // its own exit, and every one of them is on the one CPU.
         let threads: u64 = scenario.procs.iter().map(|p| p.initial.len() as u64).sum();
         assert_eq!(
-            scenario.cpus, 1,
+            scenario.cpus(), 1,
             "{name}: the bound below is one run queue's"
         );
         let bound = (threads + 1) * DISPATCH_NS;

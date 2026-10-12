@@ -1,3 +1,10 @@
 # scenario: old_migrate_kept_the_corpse
 # expect: fail
-2 2 0 1 1 1 1 1 1 1 2 
+# note: the T14's panic, minimized — retire_task: task not released after 1s:
+# note: InTransit(CpuId(1)). soundserver boost-wakes a client thread whose process
+# note: has just been torn down, on the CPU soundserver itself is running, with a
+# note: sibling asleep: place() forwards the corpse instead of reaping it.
+# note: re-shrunk after an awake CPU with nothing loaded came to owe its pass at
+# note: once, which renumbers every decision.
+1 1 1 2 0 0 0 0 1 2 2 2 0 1 1 2 0 1 2 0 1 0 1 0 0 3 1 2 0 0 2 0
+2 0 0 0 2 0 2 2 1 1 0 3 

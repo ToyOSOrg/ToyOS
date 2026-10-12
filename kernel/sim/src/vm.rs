@@ -16,7 +16,7 @@ use std::sync::Arc as StdArc;
 
 use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
 use kernel::sched::fair::{FairShare, Frontier, ShareState};
-use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
+use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
 use kernel::sched::mailbox::{mailbox, Kick, Urgency};
 use kernel::sched::msg::Msg;
@@ -34,9 +34,10 @@ use crate::hw_impl::SimHw;
 use crate::latency::{ReadyCause, RunWait};
 use crate::msg::{SimHandles, SimMsg, SimQueue};
 use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, SimShareLock, StdLock};
+use crate::topology::LevelCounts;
 use crate::workload::{
     AgeShape, BlockShape, ChargeShape, MigrateShape, Op, ParkShape, PlacementShape,
-    Protocol, Scenario, Script, ShareShape, WindowShape,
+    Protocol, Scenario, Script, ShareShape, SurplusShape, WindowShape,
 };
 
 /// How finely a `Run(ns)` op is chopped. Small enough that a 10 ms quantum
@@ -285,10 +286,12 @@ pub struct Vm<'q> {
     pub busy_ns: Vec<u64>,
     /// When each CPU's pending IPI must be taken.
     pub ipi_due: Vec<Option<Nanos>>,
-    /// When each CPU last acquired an unserved `need_resched`. A CPU that
-    /// owes a rescheduling pass takes it at IRQ exit, i.e. essentially at
-    /// once; letting the explorer defer it while the clock ran would measure
-    /// the explorer's freedom rather than the protocol's latency.
+    /// When each CPU began to owe a pass: an unserved `need_resched`, or being
+    /// awake with no task loaded. A CPU that owes a rescheduling pass takes it
+    /// at IRQ exit, and one on its idle context is running the idle loop, so
+    /// either takes it essentially at once; letting the explorer defer it while
+    /// the clock ran would measure the explorer's freedom rather than the
+    /// protocol's latency.
     pub resched_at: Vec<Option<Nanos>>,
     /// When each CPU last acquired — or last discharged and re-acquired — an
     /// unfinished unwind on its loaded task.
@@ -352,8 +355,9 @@ pub struct Vm<'q> {
     /// `RUN_CHUNK_NS` at a time, so the unwind is preemptible at exactly the
     /// granularity every other run is.
     pub unwind_left: BTreeMap<TaskKey, u64>,
-    /// How far into `SimHwState::trace` invariant I14 has read.
-    pub trace_cursor: usize,
+    /// What the last step traced, drained out of `SimHwState::trace` once per
+    /// step: invariant I14 and the per-level counts read the same events.
+    pub step_trace: Vec<TraceEvent>,
     /// I14's measurement: the longest a retire has taken to reach `release`,
     /// and the bound in force when that happened. A number as well as a
     /// verdict, because the kernel's own guard is a wall clock and the honest
@@ -433,8 +437,9 @@ pub struct Vm<'q> {
     pub thread_bound: u64,
     pub thread_over_bound: u64,
     /// Every task currently owed a dispatch and not getting one, with the
-    /// instant it became owed one and why — the measured policy suite's
-    /// instrument (`crate::latency`, `sim/tests/policy.rs`).
+    /// instant it became owed one, why, and the [`Vm::round`] it was in — the
+    /// measured policy suite's instrument (`crate::latency`,
+    /// `sim/tests/policy.rs`).
     ///
     /// "Owed a dispatch" is two states and not one: a task in a run queue, and a
     /// *parked* task a wake has already claimed (`TaskState::WakeQueued`), whose
@@ -447,7 +452,7 @@ pub struct Vm<'q> {
     /// per-CPU instrument would lose. A task in the *dying* list drops it — a
     /// corpse's wait for the CPU is invariant I14's quantity, measured on I14's
     /// clock against I14's bound.
-    pub awaiting: BTreeMap<TaskKey, (Nanos, ReadyCause)>,
+    pub awaiting: BTreeMap<TaskKey, (Nanos, ReadyCause, u64)>,
     /// Where each task sat at the end of the previous step, which is what says
     /// whether an arrival in a run queue is a wake, a preemption or a spawn.
     pub prev_container: BTreeMap<TaskKey, Container>,
@@ -530,12 +535,42 @@ pub struct Vm<'q> {
     /// Per CPU: when its current probe gap opened, or `None` if it is not in
     /// one.
     probe_gap_since: Vec<Option<Nanos>>,
+    /// **Protocol rounds completed.** A round opens on the CPUs that owe a
+    /// pass — awake, or halted with an IPI on its way, and not stopped — and
+    /// completes when each of them has run one scheduler pass, the only point
+    /// at which a CPU drains, answers a probe, publishes and pushes.
+    ///
+    /// Counted in passes and not in time because the model's clock measures the
+    /// explorer as much as the protocol: a CPU whose pass the explorer defers
+    /// holds its round open, and no work-conservation bound runs while it does.
+    /// An IPI's latency is time too, so a CPU rung before a round opens holds
+    /// that round open until its pass.
+    pub round: u64,
+    /// Which CPUs the open round still waits on, and how many; a count of zero
+    /// is no round open.
+    round_owed: Vec<bool>,
+    round_owed_count: usize,
+    /// Per CPU: how many rounds it has spent idle beside stealable work since
+    /// it last was not (invariant I15), or `None`; and the [`Vm::round`] I15
+    /// last read, which says whether a round completed since.
+    pub wc_idle: Vec<Option<u64>>,
+    pub wc_round_seen: u64,
+    /// I15's measurement: the most rounds any CPU stayed idle beside stealable
+    /// work, and the most any ready task waited to be dispatched.
+    pub wc_rounds: u64,
+    pub rounds_to_run: u64,
+    /// What the run did at each level of [`Scenario::topology`].
+    pub levels: LevelCounts,
+    /// Per CPU: a steal probe outstanding before the step being executed, so a
+    /// probe the step consumed without handing a task over is a failed steal.
+    probing: Vec<bool>,
 }
 
 /// The surplus at which a victim is worth probing —
 /// `SchedPass::post_steal_probe`'s own inequality, the core's constant because
-/// [`Vm::probe_gap_ns`] has to ask the same question from outside the core.
-const PROBE_WORTH_IT: u32 = kernel::sched::cpu::PUSH_THRESHOLD;
+/// [`Vm::probe_gap_ns`] and invariant I15 have to ask the same question from
+/// outside the core.
+pub const PROBE_WORTH_IT: u32 = kernel::sched::cpu::PUSH_THRESHOLD;
 
 /// One contention window: a maximal interval over which the same set of
 /// fair-band processes was continuously runnable.
@@ -576,7 +611,7 @@ pub struct FairEpoch {
 
 impl<'q> Vm<'q> {
     pub fn new(scenario: Scenario, queues: &'q [QueueState]) -> Self {
-        let n = scenario.cpus;
+        let n = scenario.cpus();
         let hw = SimHw::new(n);
         let mut handles = Vec::with_capacity(n);
         let mut cpus = Vec::with_capacity(n);
@@ -664,6 +699,17 @@ impl<'q> Vm<'q> {
             woken_by_late_kick: vec![false; n],
             probe_gap_ns: 0,
             probe_gap_since: vec![None; n],
+            // Every CPU starts awake and owes its first pass; the stopped one
+            // never takes one.
+            round: 0,
+            round_owed: (0..n).map(|cpu| scenario.stopped != Some(cpu)).collect(),
+            round_owed_count: n - usize::from(scenario.stopped.is_some()),
+            wc_idle: vec![None; n],
+            wc_round_seen: 0,
+            wc_rounds: 0,
+            rounds_to_run: 0,
+            levels: LevelCounts::default(),
+            probing: vec![false; n],
             next_irq,
             next_key: 1,
             next_spawn_cpu: 0,
@@ -674,7 +720,7 @@ impl<'q> Vm<'q> {
             killed_at_park: 0,
             killed: BTreeMap::new(),
             unwind_left: BTreeMap::new(),
-            trace_cursor: 0,
+            step_trace: Vec::new(),
             retire_latency: 0,
             retire_bound: 0,
             scenario,
@@ -684,6 +730,8 @@ impl<'q> Vm<'q> {
                 vm.spawn(index, template);
             }
         }
+        // Spawned before any CPU took a step, so sent by none of them.
+        vm.levels.device_ipis += vm.hw.with(|s| std::mem::take(&mut s.kicked)).len() as u64;
         vm
     }
 
@@ -740,10 +788,11 @@ impl<'q> Vm<'q> {
             .handles
             .place(CpuId(self.next_spawn_cpu as u32), self.clock)
             .0 as usize;
-        self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus;
+        self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus();
         let dst = match self.scenario.placement {
             PlacementShape::LeastLoadedRotating => least_loaded,
             PlacementShape::AllOn(cpu) => cpu,
+            PlacementShape::Listed(cpus) => cpus[self.spawned.len()],
         };
         let builder = TaskBuilder {
             key,
@@ -812,14 +861,12 @@ impl<'q> Vm<'q> {
         // this the explorer could hold one CPU at its interrupt while another
         // ran for milliseconds, and invariant I4 would be measuring the
         // explorer's freedom rather than the protocol's latency.
-        let delivery_owed = (0..self.scenario.cpus)
+        let delivery_owed = (0..self.scenario.cpus())
             .filter(|cpu| !self.is_stopped(*cpu))
             .any(|cpu| {
                 (pending_ipi[cpu] > 0 && self.ipi_due[cpu].is_some_and(|at| at <= self.clock))
                     || armed[cpu].is_some_and(|at| at <= self.clock)
-                    || (need_resched[cpu]
-                        && self.resched_at[cpu]
-                            .is_some_and(|at| at.after(RUN_CHUNK_NS) <= self.clock))
+                    || self.resched_at[cpu].is_some_and(|at| at.after(RUN_CHUNK_NS) <= self.clock)
             });
 
         // The same device one step further in: a CPU that has held an unwinding
@@ -840,7 +887,7 @@ impl<'q> Vm<'q> {
         // one chunk of grace, the chunk that carries the clock past it, and the
         // chunk that discharges it. [`Vm::unwind_gate_ns`] is the instrument and
         // `the_unwind_gate_lasts_one_chunk_and_not_one_unwind` is the gate.
-        let unwind_owed = (0..self.scenario.cpus)
+        let unwind_owed = (0..self.scenario.cpus())
             .filter_map(|cpu| {
                 self.unwind_at[cpu]
                     .filter(|at| at.after(RUN_CHUNK_NS) <= self.clock)
@@ -849,7 +896,7 @@ impl<'q> Vm<'q> {
             .min()
             .map(|(_, cpu)| cpu);
 
-        for cpu in 0..self.scenario.cpus {
+        for cpu in 0..self.scenario.cpus() {
             // A stopped CPU is offered nothing at all — not its interrupts, not
             // its passes, not its execution steps. What it has already been
             // given stays where it is, which is the state this dimension exists
@@ -912,7 +959,7 @@ impl<'q> Vm<'q> {
             // A CPU number, not a walk of `halted`: it indexes three containers
             // and names the `Step` this builds.
             #[allow(clippy::needless_range_loop)]
-            for thief in 0..self.scenario.cpus {
+            for thief in 0..self.scenario.cpus() {
                 if halted[thief] {
                     continue;
                 }
@@ -923,7 +970,7 @@ impl<'q> Vm<'q> {
                 if self.cpus[thief].running().is_some() || !self.cpus[thief].rq().is_empty() {
                     continue;
                 }
-                for victim in 0..self.scenario.cpus {
+                for victim in 0..self.scenario.cpus() {
                     if victim != thief && self.cpus[victim].rq().fair_len() > 0 {
                         steps.push(Step::OldSteal { thief, victim });
                     }
@@ -983,6 +1030,13 @@ impl<'q> Vm<'q> {
                 self.ran.insert(key);
             }
         }
+        for cpu in 0..self.scenario.cpus() {
+            self.probing[cpu] = self.cpus[cpu].probe_outstanding();
+        }
+        let actor = crate::explore::actor(&step);
+        // Only a CPU's own step takes a task out of its parked set.
+        let parked: Vec<TaskKey> =
+            actor.map_or_else(Vec::new, |cpu| self.cpus[cpu].parked().map(|p| p.key()).collect());
         // A step on a CPU posts as that CPU, so a kick it aims at itself is its
         // own `need_resched`; a device interrupt belongs to none.
         let poster = match step {
@@ -992,12 +1046,21 @@ impl<'q> Vm<'q> {
         self.hw.posting_from(poster);
         self.execute_inner(step, choices);
         self.hw.posting_from(None);
-        let owed = self.hw.with(|s| s.need_resched.clone());
-        // A CPU number: it reads `owed` and writes `self.resched_at` at the
+        self.step_trace = self.hw.with(|s| std::mem::take(&mut s.trace));
+        self.note_levels(actor, parked);
+        let (resched, halted) = self.hw.with(|s| (s.need_resched.clone(), s.halted.clone()));
+        // A CPU number: it reads `resched` and writes `self.resched_at` at the
         // same index, which is the pairing this loop is about.
         #[allow(clippy::needless_range_loop)]
-        for cpu in 0..self.scenario.cpus {
-            match (owed[cpu], self.resched_at[cpu]) {
+        for cpu in 0..self.scenario.cpus() {
+            // Under the old protocol an idle CPU's idle loop is its steal, which
+            // the explorer schedules as `OldSteal` whenever it likes: that
+            // freedom is the defect `old_steal_port` reproduces.
+            let idle = self.scenario.protocol == Protocol::New
+                && !halted[cpu]
+                && self.cpus[cpu].running().is_none();
+            let owed = resched[cpu] || idle;
+            match (owed, self.resched_at[cpu]) {
                 (true, None) => self.resched_at[cpu] = Some(self.clock),
                 (false, _) => self.resched_at[cpu] = None,
                 (true, Some(_)) => {}
@@ -1031,6 +1094,90 @@ impl<'q> Vm<'q> {
             }
         }
         self.note_probe_gaps();
+        self.open_round();
+    }
+
+    /// A pass on `cpu` pays the pass it owed, and is its part of the open
+    /// round; the last one owed completes it.
+    fn note_pass(&mut self, cpu: usize) {
+        self.resched_at[cpu] = None;
+        if std::mem::take(&mut self.round_owed[cpu]) {
+            self.round_owed_count -= 1;
+            if self.round_owed_count == 0 {
+                self.round += 1;
+            }
+        }
+    }
+
+    /// With no round open, open one on every CPU that owes a pass now. A
+    /// machine with every CPU halted and no IPI on its way opens none until one
+    /// wakes.
+    fn open_round(&mut self) {
+        if self.round_owed_count > 0 {
+            return;
+        }
+        let (halted, pending) = self.hw.with(|s| (s.halted.clone(), s.pending_ipi.clone()));
+        for cpu in 0..self.scenario.cpus() {
+            let owes = (!halted[cpu] || pending[cpu] > 0) && !self.is_stopped(cpu);
+            self.round_owed[cpu] = owes;
+            self.round_owed_count += usize::from(owes);
+        }
+    }
+
+    /// Fold the step into [`Vm::levels`]: the level each kick, migration and
+    /// wake crossed, and each probe the step consumed with no task handed back,
+    /// from `actor`, the CPU whose step it was, and `parked`, its parked set
+    /// before the step.
+    fn note_levels(&mut self, actor: Option<usize>, parked: Vec<TaskKey>) {
+        let topology = &self.scenario.topology;
+        let at = |a: usize, b: CpuId| crate::topology::slot(topology.level(a, b.0 as usize));
+        for target in self.hw.with(|s| std::mem::take(&mut s.kicked)) {
+            match actor {
+                Some(from) => self.levels.ipis[at(from, target)] += 1,
+                None => self.levels.device_ipis += 1,
+            }
+        }
+        for event in &self.step_trace {
+            if let TraceKind::Migrate { to, .. } = event.kind {
+                self.levels.migrations[at(event.cpu.0 as usize, to)] += 1;
+            }
+        }
+        // A wake is a task leaving its CPU's parked set, whatever took it out —
+        // a message, its deadline or a retire — including one this step parked.
+        if let Some(home) = actor {
+            let parked_in_step = self.step_trace.iter().filter_map(|event| match event.kind {
+                TraceKind::ParkCommit { task, .. } => Some(task),
+                _ => None,
+            });
+            let woken: Vec<TaskKey> = parked
+                .into_iter()
+                .chain(parked_in_step)
+                .filter(|&task| self.cpus[home].parked_task(task).is_none())
+                .collect();
+            for task in woken {
+                let placed = match self.shared[&task].state() {
+                    TaskState::Ready(cpu) | TaskState::Running(cpu) | TaskState::InTransit(cpu) => {
+                        cpu
+                    }
+                    state => unreachable!("{task:?} left the parked set as {state:?}"),
+                };
+                self.levels.wakes[at(home, placed)] += 1;
+            }
+        }
+        // A probe is consumed only by its victim's drain, so the step that
+        // consumed it is that victim's.
+        for thief in 0..self.scenario.cpus() {
+            if !self.probing[thief] || self.cpus[thief].probe_outstanding() {
+                continue;
+            }
+            let answered = self.step_trace.iter().any(|event| {
+                matches!(event.kind, TraceKind::Migrate { to, .. } if to.0 as usize == thief)
+            });
+            if !answered {
+                let victim = actor.expect("a probe is consumed inside its victim's pass");
+                self.levels.failed_steals[at(victim, CpuId(thief as u32))] += 1;
+            }
+        }
     }
 
     /// [`Vm::probe_gap_ns`]: how long a halted CPU has sat next to a surplus it
@@ -1041,14 +1188,16 @@ impl<'q> Vm<'q> {
     /// with a gap standing still reports it.
     fn note_probe_gaps(&mut self) {
         let halted = self.hw.with(|s| s.halted.clone());
+        let worth = |cpu: usize| self.handles.get(CpuId(cpu as u32)).surplus() >= PROBE_WORTH_IT;
+        // Counted once, so a step costs one walk of the machine and not one per
+        // CPU: at 768 CPUs that is the difference.
+        let surpluses = (0..self.scenario.cpus()).filter(|&cpu| worth(cpu)).count();
         // A CPU number, for [`Vm::execute`]'s reason: it reads `halted`, asks
         // `self.cpus` and writes `self.probe_gap_since` at one index, and the
         // pairing across those three is what this loop is about.
         #[allow(clippy::needless_range_loop)]
-        for cpu in 0..self.scenario.cpus {
-            let surplus_next_door = (0..self.scenario.cpus).any(|victim| {
-                victim != cpu && self.handles.get(CpuId(victim as u32)).surplus() >= PROBE_WORTH_IT
-            });
+        for cpu in 0..self.scenario.cpus() {
+            let surplus_next_door = surpluses > usize::from(worth(cpu));
             let blind = halted[cpu] && surplus_next_door && !self.cpus[cpu].probe_outstanding();
             match (blind, self.probe_gap_since[cpu]) {
                 (true, None) => self.probe_gap_since[cpu] = Some(self.clock),
@@ -1121,7 +1270,7 @@ impl<'q> Vm<'q> {
             ChargeShape::Honest => None,
             ChargeShape::Double { process } => self.scenario.process_index(process),
         };
-        for cpu in 0..self.scenario.cpus {
+        for cpu in 0..self.scenario.cpus() {
             let Some(task) = self.cpus[cpu].running() else {
                 continue;
             };
@@ -1177,7 +1326,7 @@ impl<'q> Vm<'q> {
         if self.hw.with(|s| s.kicks) == before {
             return;
         }
-        for cpu in 0..self.scenario.cpus {
+        for cpu in 0..self.scenario.cpus() {
             if self.hw.with(|s| s.pending_ipi[cpu]) > 0 {
                 self.arm_ipi(cpu);
             }
@@ -1311,7 +1460,11 @@ impl<'q> Vm<'q> {
         }
         self.apply(action);
         self.hw.leave_pass();
+        if self.scenario.surplus == SurplusShape::Withheld {
+            self.handles.get(CpuId(cpu as u32)).publish_surplus(0);
+        }
         self.note_kicks(kicks_before);
+        self.note_pass(cpu);
         end
     }
 
@@ -1640,7 +1793,7 @@ impl<'q> Vm<'q> {
     /// one that was going to happen anyway, so issuing it early perturbs the
     /// *timing* of the workload and not its token accounting.
     fn hoist_wake(&self, blocking_cpu: usize, queue: usize) -> Option<HoistedWake> {
-        for cpu in 0..self.scenario.cpus {
+        for cpu in 0..self.scenario.cpus() {
             if cpu == blocking_cpu {
                 continue;
             }
@@ -1758,7 +1911,7 @@ impl<'q> Vm<'q> {
     }
 
     fn scan_containers(&self, key: TaskKey) -> bool {
-        (0..self.scenario.cpus)
+        (0..self.scenario.cpus())
             .any(|cpu| kernel::sched::invariants::residents(&self.cpus[cpu]).any(|(k, _)| k == key))
     }
 

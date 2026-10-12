@@ -164,7 +164,7 @@ pub fn seed_sweep(scenario: &Scenario, seeds: u64, keep_failures: usize) -> Swee
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         result.runs += 1;
@@ -190,7 +190,7 @@ pub fn abort_gate(scenario: &Scenario, seeds: u64) -> Option<(u64, String)> {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         if let Err(message) = run_catching(scenario.clone(), &mut choices) {
             return Some((seed, message));

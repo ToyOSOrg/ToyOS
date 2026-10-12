@@ -140,7 +140,7 @@ fn old_steal_port_is_caught() {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
@@ -188,7 +188,7 @@ fn old_commit_before_pass_is_caught() {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
@@ -241,7 +241,7 @@ fn old_migrate_keeping_the_corpse_is_caught() {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
@@ -284,7 +284,7 @@ fn rt_starving_the_corpse_is_caught() {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         if outcome.passed() {
@@ -320,7 +320,7 @@ fn a_retire_completes_inside_its_derived_bound() {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         assert!(outcome.passed(), "{}", outcome.report());
@@ -369,13 +369,13 @@ fn a_retire_completes_inside_its_derived_bound() {
 #[test]
 fn the_unwind_gate_lasts_one_chunk_and_not_one_unwind() {
     let scenario = scenarios::retire_under_balance();
-    let bound = (2 + scenario.cpus as u64) * kernel_sim::vm::RUN_CHUNK_NS;
+    let bound = (2 + scenario.cpus() as u64) * kernel_sim::vm::RUN_CHUNK_NS;
     let mut worst = 0;
     for seed in 0..SEEDS {
         let mut choices = if seed % 2 == 0 {
             ChoiceStream::from_seed(seed)
         } else {
-            ChoiceStream::pct(seed, scenario.cpus, 3)
+            ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
         assert!(outcome.passed(), "{}", outcome.report());
@@ -591,7 +591,7 @@ fn corpus_traces_still_do_what_they_were_committed_for() {
 #[test]
 fn a_run_replays_exactly() {
     for scenario in scenarios::all() {
-        let mut original = ChoiceStream::pct(42, scenario.cpus, 3);
+        let mut original = ChoiceStream::pct(42, scenario.cpus(), 3);
         let first = run(scenario.clone(), &mut original);
         let mut replay = ChoiceStream::replay(first.decisions.clone());
         let again = run(scenario.clone(), &mut replay);
