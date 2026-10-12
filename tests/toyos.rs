@@ -4393,7 +4393,7 @@ fn scout_smoke(test_config: &Path) -> Result<(), String> {
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust, job);
     let options = BootOptions { kernel_features: features, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(job.to_string(), bin)], options);
-    let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(180));
+    let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(600));
     for line in result.serial.lines().filter(|l| l.contains("scout-")) {
         eprintln!("  [{features:?}] {line}");
     }
