@@ -22,6 +22,10 @@ publish = false
 # A producer publishes its tail `Relaxed`, so a consumer can see the index
 # before the entry's words, or a stream's tail before its bytes.
 publish-relaxed = []
+# A stream's consumer stores its head `Relaxed` and its producer loads it
+# `Relaxed`, so the producer can copy into a byte the consumer is still
+# copying out.
+head-relaxed = []
 # A peer's cursor is believed however far it claims to be, so a hostile
 # producer hands the consumer more entries, or bytes, than the ring holds.
 no-clamp = []

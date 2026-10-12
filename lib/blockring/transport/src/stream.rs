@@ -38,6 +38,10 @@ const ARM: Ordering = Ordering::Acquire;
 const WAKE: Ordering = Ordering::Release;
 #[cfg(feature = "want-relaxed")]
 const WAKE: Ordering = Ordering::Relaxed;
+/// The head's edge: a producer that loads the head copies into a byte only
+/// after the consumer's copy out of it, which the consumer's store carries.
+const GIVE_BACK: Ordering = if cfg!(feature = "head-relaxed") { Ordering::Relaxed } else { Ordering::Release };
+const TAKE_BACK: Ordering = if cfg!(feature = "head-relaxed") { Ordering::Relaxed } else { Ordering::Acquire };
 
 /// `n` as an offset into the region; `Place::new` holds `usize` to every `u32`.
 #[allow(clippy::as_conversions)]
@@ -139,7 +143,7 @@ impl<const C: u32, const N: usize> Producer<C, N> {
     /// How many bytes past the tail may be written, the consumer's head read
     /// again.
     pub fn room<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
-        let head = Untrusted::new(word(page, self.place.head).load(Ordering::Acquire));
+        let head = Untrusted::new(word(page, self.place.head).load(TAKE_BACK));
         let published = self.published;
         let unreleased =
             Place::<C, N>::reach(head, |head| Place::<C, N>::distance(head, published), Violation::HeadPastTail)?;
@@ -238,7 +242,7 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
         if self.released == self.local {
             return false;
         }
-        word(page, self.place.head).store(self.local, Ordering::Release);
+        word(page, self.place.head).store(self.local, GIVE_BACK);
         self.released = self.local;
         word(page, self.place.room).swap(0, WAKE) != 0
     }

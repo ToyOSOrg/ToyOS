@@ -655,6 +655,7 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_published_entry_is_read_whole"),
         Fails("a_published_byte_is_read_as_written"),
     ]),
+    red(TRANSPORT, "head-relaxed", Some("loom"), &[Fails("a_published_byte_is_read_as_written")]),
     red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
         "a_hostile_producer_yields_entries_or_a_violation",
     )]),
