@@ -279,6 +279,16 @@ pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
     }
 }
 
+/// [`shootdown`], answering whether this CPU's own answers inside it reached
+/// wide: a kernel-half generation another CPU issued meanwhile widens them.
+#[cfg(feature = "test-actuators")]
+pub fn debug_shootdown_answered_wide(origin: Origin, half: Half) -> bool {
+    let me = percpu::cpu_id() as usize;
+    let before = SHOOTDOWN.widened(me);
+    shootdown(origin, half);
+    SHOOTDOWN.widened(me) != before
+}
+
 /// Give the machine its ordinary latency back before the window lapses.
 #[cfg(feature = "test-actuators")]
 pub fn debug_disarm_ack_delay() -> u64 {

@@ -22,7 +22,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use toyos_cpuvuln::{HwpFacts, InvlpgFacts, Vendor};
+use toyos_cpuvuln::HwpFacts;
 
 use super::cpu;
 use crate::log;
@@ -536,38 +536,17 @@ fn supported(cpu_id: u32) -> u64 {
             have |= flag;
         }
     }
-    // PCID without INVPCID is not worth having: nothing could flush by ASID.
-    if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 && !invlpg_misses_global(cpu_id, ecx1) {
-        have |= cr4::PCIDE;
+    // PCID without INVPCID is refused: with `PCIDE` set every global discharge
+    // is `INVPCID` type 2 (`paging::Owed::discharge`), Intel's workaround for
+    // ADL063/RPL043's `INVLPG`, and nothing else could flush by PCID.
+    if ecx1 & (1 << 17) != 0 {
+        if ebx7 & (1 << 10) != 0 {
+            have |= cr4::PCIDE;
+        } else {
+            log!("control_regs: cpu{cpu_id} has PCID but no INVPCID: PCIDE refused");
+        }
     }
     have
-}
-
-/// Whether this CPU's `INVLPG` leaves another PCID's global translation
-/// (`toyos_cpuvuln::invlpg_misses_global`), which every global discharge is
-/// (`paging::Owed::discharge`): PCID is withheld where it does. The facts are
-/// logged where a revision was read, so a reader can hold the read to another's.
-fn invlpg_misses_global(cpu_id: u32, cpuid_1_ecx: u32) -> bool {
-    let vendor = cpu::vendor();
-    let facts = InvlpgFacts {
-        vendor,
-        signature: cpu::cpuid(1, 0).0,
-        cpuid_1_ecx,
-        microcode: (vendor == Vendor::Intel).then(cpu::intel_microcode_revision),
-    };
-    let misses = toyos_cpuvuln::invlpg_misses_global(&facts);
-    if let Some(microcode) = facts.microcode {
-        log!(
-            "control_regs: cpu{cpu_id} signature {:#x} microcode {microcode:#x}{}",
-            facts.signature,
-            if misses {
-                ": PCID withheld, Intel's erratum ADL063/RPL043 leaves another PCID's global translation"
-            } else {
-                ""
-            },
-        );
-    }
-    misses
 }
 
 /// Logs what this CPU holds, then asserts it against the declaration —

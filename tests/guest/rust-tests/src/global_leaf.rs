@@ -11,9 +11,10 @@
 
 use toyos_abi::syscall::{self, debug_action as da};
 
-/// The frame the third read saw after `how`, refused where the control saw the
-/// second frame: that CPU held no translation to go stale, and what it read
-/// after `how` would be no evidence of `how`.
+/// The frame the third read saw after `how`, refused where what it read after
+/// `how` would be no evidence of `how`: the control saw the second frame, so
+/// that CPU held no translation to go stale; or a user-half shootdown answered
+/// wide, covering a kernel-half one another CPU issued inside it.
 pub fn rewritten(how: u64) -> u64 {
     let saw = syscall::debug_with(da::GLOBAL_LEAF_REWRITE, how);
     assert_ne!(
@@ -21,6 +22,12 @@ pub fn rewritten(how: u64) -> u64 {
         da::GLOBAL_LEAF_UNHELD,
         "the control: with nothing invalidated the second read did not see the first frame, so \
          this CPU held no translation to go stale and the row judges nothing",
+    );
+    assert_ne!(
+        saw,
+        da::GLOBAL_LEAF_WIDENED,
+        "the user-half shootdown's answer covered another CPU's kernel-half one, which drops \
+         global translations, so the row judges nothing",
     );
     saw
 }

@@ -210,10 +210,13 @@ impl Owed {
     fn discharge(self, target: Cr3) {
         match self {
             Self::Nothing => {}
-            // `INVLPG` drops the page's global translation in every PCID, but
-            // on a CPU with Intel's ADL063/RPL043, which `control_regs` declares
-            // without PCID.
-            Self::Address { va, prior } if prior & PAGE_GLOBAL != 0 => crate::arch::cpu::invlpg(va),
+            // With PCID, `INVPCID` type 2: Intel's ADL063 and RPL043 let an
+            // `INVLPG` keep the global translation in every PCID but the current
+            // one, and name type 2 "instead of INVLPG" as the software workaround.
+            Self::Address { va, prior } if prior & PAGE_GLOBAL != 0 => match pcid_active() {
+                Some(have) => crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0),
+                None => crate::arch::cpu::invlpg(va),
+            },
             Self::Address { va, .. } => {
                 if let Some(have) = pcid_active() {
                     crate::arch::cpu::invpcid(have, Invpcid::Address, target.pcid(), va);
@@ -935,8 +938,10 @@ const SCRATCH: u64 = 0u64.wrapping_sub(PAGE_2M);
 /// `SYS_DEBUG`'s `GLOBAL_LEAF_REWRITE`: a [`kernel_leaf`] at [`SCRATCH`] over one
 /// frame, read so this CPU caches it global; the leaf pointed at a second frame
 /// and read again with nothing invalidated, the control; invalidated as `how`
-/// asks; read a third time. Answers which frame the third read saw, or that the
-/// control already saw the second. The kernel's lock keeps it on one CPU and
+/// asks; read a third time. Answers which frame the third read saw, or refuses:
+/// where the control already saw the second frame, or where a user-half
+/// shootdown's answer here reached wide because another CPU's kernel-half
+/// generation landed inside it. The kernel's lock keeps it on one CPU and
 /// interrupts stay closed, so no flush but `how`'s lands between the reads.
 #[cfg(feature = "test-actuators")]
 pub fn debug_global_leaf(how: u64) -> u64 {
@@ -969,7 +974,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
     // frames this call owns, or a translation of one of them.
     let read = || unsafe { core::ptr::read_volatile(SCRATCH as *const u64) };
 
-    let (held, seen) = {
+    let (held, widened, seen) = {
         let mut space = kernel().lock();
         let _closed = crate::arch::IrqGuard::close();
         let target = space.root();
@@ -983,17 +988,20 @@ pub fn debug_global_leaf(how: u64) -> u64 {
         assert!(first == old_phys, "debug_global_leaf: a fresh leaf over {old_phys:#x} read {first:#x}");
         let owed = pd.write_pde(idx, SCRATCH, new_phys | leaf);
         let held = read();
-        match how {
-            How::Discharged => owed.discharge(target),
+        let widened = match how {
+            How::Discharged => {
+                owed.discharge(target);
+                false
+            }
             // The write's own invalidation is withheld: the arm asks what the shootdown drops.
             How::ShotDown(half) => {
                 let _ = owed;
-                crate::arch::tlb::shootdown(Origin::Staged, half);
+                crate::arch::tlb::debug_shootdown_answered_wide(Origin::Staged, half) && matches!(half, Half::User)
             }
-        }
+        };
         let seen = read();
         pd.write_pde(idx, SCRATCH, 0).discharge(target);
-        (held, seen)
+        (held, widened, seen)
     };
     // No CPU keeps a translation of either frame past its free.
     crate::arch::tlb::shootdown(Origin::Staged, Half::Kernel);
@@ -1003,10 +1011,11 @@ pub fn debug_global_leaf(how: u64) -> u64 {
         _ if at == new_phys => false,
         _ => panic!("debug_global_leaf: the leaf over {old_phys:#x} then {new_phys:#x} read {at:#x}"),
     };
-    match (old_frame(held), old_frame(seen)) {
-        (false, _) => da::GLOBAL_LEAF_UNHELD,
-        (true, true) => da::GLOBAL_LEAF_SAW_OLD,
-        (true, false) => da::GLOBAL_LEAF_SAW_NEW,
+    match (old_frame(held), widened, old_frame(seen)) {
+        (false, _, _) => da::GLOBAL_LEAF_UNHELD,
+        (true, true, _) => da::GLOBAL_LEAF_WIDENED,
+        (true, false, true) => da::GLOBAL_LEAF_SAW_OLD,
+        (true, false, false) => da::GLOBAL_LEAF_SAW_NEW,
     }
 }
 

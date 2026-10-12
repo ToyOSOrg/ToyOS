@@ -99,6 +99,12 @@ impl Shootdown {
         self.flushed[cpu].fetch_max(owed, Ordering::Release);
     }
 
+    /// `wide` as `cpu`'s last wide answer read it: a change across a span is a wide answer inside it.
+    #[cfg(feature = "test-actuators")]
+    pub fn widened(&self, cpu: usize) -> u64 {
+        self.widened[cpu].load(Ordering::Relaxed)
+    }
+
     /// Does `cpu` owe anyone a flush?
     pub fn owes(&self, cpu: usize) -> bool {
         // A hint: `serve` carries the real ordering, so a stale `false` costs nothing.

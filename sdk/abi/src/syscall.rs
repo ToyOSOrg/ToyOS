@@ -900,10 +900,12 @@ pub mod debug_action {
     /// [`GLOBAL_LEAF_KERNEL_SHOT_DOWN`], the machine-wide shootdown a
     /// kernel-half change asks, or [`GLOBAL_LEAF_USER_SHOT_DOWN`], the one a
     /// user-half change asks. Answers [`GLOBAL_LEAF_SAW_OLD`] or
-    /// [`GLOBAL_LEAF_SAW_NEW`], the frame the third read saw, or
+    /// [`GLOBAL_LEAF_SAW_NEW`], the frame the third read saw;
     /// [`GLOBAL_LEAF_UNHELD`] where the control already saw the second frame;
-    /// `NotSupported` on AArch64, `AlreadyExists` where something is already
-    /// mapped where the leaf goes.
+    /// [`GLOBAL_LEAF_WIDENED`] where the user-half shootdown's answer on this
+    /// CPU covered another CPU's kernel-half one and so dropped global
+    /// translations; `NotSupported` on AArch64, `AlreadyExists` where
+    /// something is already mapped where the leaf goes.
     pub const GLOBAL_LEAF_REWRITE: u64 = 28;
     pub const GLOBAL_LEAF_DISCHARGED: u64 = 0;
     pub const GLOBAL_LEAF_KERNEL_SHOT_DOWN: u64 = 1;
@@ -911,6 +913,7 @@ pub mod debug_action {
     pub const GLOBAL_LEAF_SAW_OLD: u64 = 0;
     pub const GLOBAL_LEAF_SAW_NEW: u64 = 1;
     pub const GLOBAL_LEAF_UNHELD: u64 = 2;
+    pub const GLOBAL_LEAF_WIDENED: u64 = 3;
 }
 
 /// Create a pipe. Returns the read and write ends.
