@@ -556,7 +556,7 @@ mod tests {
     use super::*;
     use crate::buildlock;
     use crate::compiler::tests::{estate, git, write, LLVM_A, LLVM_B, LLVM_URL};
-    use crate::keystore::tests::{last_used, used_lately, LONG_AGO};
+    use crate::keystore::tests::{last_used, used_hourly, LONG_AGO};
 
     /// A scratch directory whose read-only LLVMs are made writable again before
     /// it goes.
@@ -1188,7 +1188,7 @@ mod tests {
         let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
         drop(choose(&store, &fork, fake_build));
-        used_lately(&store, Keyed::Llvm);
+        used_hourly(&store, Keyed::Llvm, keystore::kept(Keyed::Llvm));
         let unused = key(&fork);
         let swept = Cell::new(None);
         let then_swept = |dir: &Path| {
@@ -1217,7 +1217,7 @@ mod tests {
         let unused = key(&a.join("rust"));
         let first = Keyed::Llvm.store(&store).join(&unused);
         last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
-        used_lately(&store, Keyed::Llvm);
+        used_hourly(&store, Keyed::Llvm, keystore::kept(Keyed::Llvm));
 
         let fork = a.join("rust");
         pin_llvm(&fork, "B");
@@ -1243,7 +1243,7 @@ mod tests {
         let unused = key(&a.join("rust"));
         let dir = Keyed::Llvm.store(&store).join(&unused);
         last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
-        used_lately(&store, Keyed::Llvm);
+        used_hourly(&store, Keyed::Llvm, keystore::kept(Keyed::Llvm));
         // In a process of its own: this one never holds the key's lock.
         let mut sweep = buildlock::tests::rerun("llvm::tests::child_role");
         let stopped = sweep.env(ROLE, "stop-a-sweep").env(WORKTREE, &a).env(STORE, &store).output().unwrap();

@@ -1244,7 +1244,7 @@ fn git_run(dir: &Path, args: &[&str]) {
 pub(crate) mod tests {
     use super::*;
     use crate::compiler::tests::compiler as placed_compiler;
-    use crate::keystore::tests::{last_used, used_lately, LONG_AGO};
+    use crate::keystore::tests::{last_used, used_hourly, LONG_AGO};
     use toyos_tmpdir::TempDir;
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -2083,7 +2083,7 @@ pub(crate) mod tests {
         let orphan = sysroots.join(&unused);
         fs::create_dir_all(&orphan).unwrap();
         last_used(&base, Keyed::Sysroot, &unused, LONG_AGO);
-        used_lately(&base, Keyed::Sysroot);
+        used_hourly(&base, Keyed::Sysroot, keystore::kept(Keyed::Sysroot));
         let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
         assert!(!orphan.exists(), "placing a sysroot left one used before those kept");

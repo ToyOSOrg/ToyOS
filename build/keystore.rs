@@ -71,11 +71,11 @@ impl AsRef<Path> for Key {
 
 /// How many of `kind`'s products a sweep keeps by date, the last used, in use
 /// or not.
-const fn kept(kind: Keyed) -> usize {
+pub(crate) const fn kept(kind: Keyed) -> usize {
     match kind {
         Keyed::Sysroot => 24,
-        Keyed::Freestanding => 4,
-        Keyed::Compiler | Keyed::Llvm | Keyed::HostedClang => 2,
+        Keyed::Freestanding | Keyed::Compiler => 4,
+        Keyed::Llvm | Keyed::HostedClang => 2,
     }
 }
 
@@ -161,23 +161,32 @@ pub(crate) fn sweep_by(store: &Path, kind: Keyed, remove: impl Fn(&Path) + Copy)
     let cut = whole.len().checked_sub(kept(kind)).map(|older| (whole[older].0, whole[older].1.clone()));
     let mut removed = Vec::new();
     for (_, key, mut names) in by_use {
-        let Some(_idle) = buildlock::keyed_idle(store, kind, &key) else { continue };
+        let Some(idle) = buildlock::keyed_idle(store, kind, &key) else { continue };
         // Read again under the key's lock: a use since the ranking has dated the key past the cut.
         let used = buildlock::keyed_used(store, kind, &key);
         if cut.as_ref().is_none_or(|(at, last)| (used, &key) >= (*at, last)) {
             names.retain(|name| name != key.as_str());
         }
-        // The whole one last: its `retire` goes where a stopped one's remains were.
-        names.sort_by_key(|name| name == key.as_str());
-        for name in names {
-            let path = dir.join(&name);
-            if name == key.as_str() {
-                retire_by(&path, remove);
-            } else {
-                remove(&path);
-            }
-            removed.push(path);
+        removed.extend(remove_idle(&dir, &key, names, &idle, remove));
+    }
+    removed
+}
+
+/// Remove `names`, `key`'s in `dir`, while `_idle`, the key's lock
+/// [`buildlock::keyed_idle`] took, keeps everyone from making or using it.
+/// The whole one goes last: its [`retire`] goes where a stopped one's remains
+/// were.
+fn remove_idle(dir: &Path, key: &Key, mut names: Vec<String>, _idle: &Guard, remove: impl Fn(&Path) + Copy) -> Vec<PathBuf> {
+    names.sort_by_key(|name| name == key.as_str());
+    let mut removed = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        if name == key.as_str() {
+            retire_by(&path, remove);
+        } else {
+            remove(&path);
         }
+        removed.push(path);
     }
     removed
 }
@@ -269,19 +278,9 @@ pub(crate) mod tests {
 
     const HOUR: Duration = Duration::from_secs(60 * 60);
 
-    /// Place in `store` the [`kept`] products of `kind` a sweep keeps by date,
-    /// each used now, so that one of `kind` last used before them is not.
-    pub(crate) fn used_lately(store: &Path, kind: Keyed) {
-        for n in 0..kept(kind) {
-            let key = Key::of(format!("used lately, {n}").as_bytes());
-            fs::create_dir_all(kind.store(store).join(&key)).unwrap();
-            last_used(store, kind, &key, Duration::ZERO);
-        }
-    }
-
     /// `n` products of `kind` in `store`, each used an hour before the one
     /// before it, the first an hour ago.
-    fn used_hourly(store: &Path, kind: Keyed, n: usize) -> Vec<Key> {
+    pub(crate) fn used_hourly(store: &Path, kind: Keyed, n: usize) -> Vec<Key> {
         let keys: Vec<Key> = (0..n).map(|n| Key::of(format!("used {n} hours ago").as_bytes())).collect();
         for (hours, key) in (1..).zip(&keys) {
             fs::create_dir_all(kind.store(store).join(key)).unwrap();
@@ -392,7 +391,7 @@ pub(crate) mod tests {
         }
         fs::create_dir_all(orphan.join("sub")).unwrap();
         last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
-        used_lately(&store, Keyed::Sysroot);
+        used_hourly(&store, Keyed::Sysroot, kept(Keyed::Sysroot));
         assert_eq!(sweep(&store, Keyed::Sysroot), std::slice::from_ref(&orphan));
         for path in &hidden {
             assert!(path.is_file(), "{} was swept", path.display());
