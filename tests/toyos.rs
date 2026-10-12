@@ -80,6 +80,9 @@ const RUST_SKIP: &[&str] = &[
     // Its exit code is a round trip's p99 in microseconds, which a guest's host
     // sets: the `wake_onto_busy` metal row runs it on the T14.
     "wake_onto_busy",
+    // Scout, never landed: needs the `scout-wake` kernel; the `scout_wake`
+    // metal row runs it.
+    "scout_wake",
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
@@ -439,6 +442,9 @@ const MACHINE_TESTS: &[&str] = &[
     // the T14 boots from a stick, so no disk diskserver drives holds a
     // partition the loader named.
     "block_grants_reach_their_partitions",
+    // Scout, never landed: the scout kernel boots and runs its job clean
+    // before a T14 boot is spent on it.
+    "scout_smoke",
     // The supervisor reading the slot table through a block session and
     // minting `update` the idle slot's partitions, which `update` writes and
     // marks through diskserver: the supervisor, the launcher and diskserver
@@ -799,6 +805,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         "wake_onto_busy",
         metal::Metal { arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
     ),
+    (
+        // Scout, never landed: an ordinary wake's latency by its target's state.
+        "scout_wake",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: &["scout-wake"],
+                ..metal::once("scout-wake", "tests/images/testcases.toml", &[], &["test_rs_scout_wake"])
+            }],
+            judge: |b| scout_said(b, "test_rs_scout_wake", "scout-wake: "),
+        },
+    ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
@@ -1113,6 +1130,22 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         claims::RECLAIM,
     ],
 )];
+
+/// Scout: every boot ran `job` clean; its lines carrying `prefix`, printed.
+fn scout_said(b: &[&metal::Readback], job: &str, prefix: &str) -> Result<(), String> {
+    for back in b {
+        back.job_passed(job)?;
+        let log = back.log();
+        let lines: Vec<&str> = log.text().lines().filter(|l| l.contains(prefix)).collect();
+        if lines.is_empty() {
+            return Err(format!("{}: {job} said no {prefix:?} line", back.label));
+        }
+        for line in lines {
+            eprintln!("  [{}] {line}", back.label);
+        }
+    }
+    Ok(())
+}
 
 /// The same boot, its rows ended on the hold: the count it waits for comes
 /// thirty seconds after the server arms, and a row's job behind it would wait
@@ -3930,6 +3963,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
+        "scout_smoke" => scout_smoke(test_config),
         "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
@@ -4350,6 +4384,28 @@ fn toyfetch_reports(test_config: &Path) -> Result<(), String> {
 /// that disk, and what one boot wrote to `/home` and said into `/log` the next
 /// boot reads back: a file under a name of this run's, line for line, and a
 /// line of this run's in a log file the first boot listed.
+/// Scout, never landed: the scout kernel boots `tests/images/testcases.toml`
+/// and its job ends clean, each line it printed shown.
+fn scout_smoke(test_config: &Path) -> Result<(), String> {
+    let rust = compile::repo_root().join("tests/guest/rust-tests");
+    let features: &'static [&'static str] = &["scout-wake"];
+    let job = "scout_wake";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust, job);
+    let options = BootOptions { kernel_features: features, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(job.to_string(), bin)], options);
+    let result = qemu.run_test(&format!("test_rs_{job}"), Duration::from_secs(180));
+    for line in result.serial.lines().filter(|l| l.contains("scout-")) {
+        eprintln!("  [{features:?}] {line}");
+    }
+    if let Some(why) = &result.error {
+        return Err(format!("{features:?}: {why}\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("{features:?}: the job ended {:?}:\n{}", result.exit_code, result.serial));
+    }
+    Ok(())
+}
+
 fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, qmp: true, ..Default::default() };
     if let Some(usb) = qemu::profile_argv(&options).iter().find(|arg| arg.contains("usb") || arg.contains("xhci")) {

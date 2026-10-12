@@ -158,7 +158,7 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// entry and masking primitive, where a parameter would be a branch on the path
 /// they measure. Interactive debug mode is separate: it builds
 /// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 3] =
+pub const DECLARED_KERNEL_BUILDS: [&str; 4] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// The fastest boot-to-ready this run has seen, in milliseconds.
