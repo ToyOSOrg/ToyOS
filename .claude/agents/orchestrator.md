@@ -61,10 +61,10 @@ rust worktree prune && git -C rust/library/backtrace worktree prune && git branc
 ## Runs
 
 Orchestration state — checklists, run logs, patches — lives in the session's job directory,
-`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on is
-posted to the pull request. After a restart, kill every watcher and metal process left from before
-by PID, found by its script path under the job directory, and revert any mutation a killed run left
-applied.
+`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on
+goes to the evidence repository as `implementer.md` says. After a restart, kill every watcher and
+metal process left from before by PID, found by its script path under the job directory, and revert
+any mutation a killed run left applied.
 
 ## The bench
 
