@@ -36,9 +36,9 @@ dispatch on the kernel clock; quantiles are bucket upper bounds, accurate to
 | AMD bench | 8 | — | ≤2.62 ms / ≤7.86 ms / 7.55 ms |
 
 With 7 spinners every wake to a busy target waited out a whole quantum on
-both machines, while the wakes to a sleeping one ran within 2.6 µs, and the
-pair fell from about 181,600 (T14) and 205,200 (AMD bench) rounds a second
-with no spinners to 100. The kill condition fixed before the run, the change
+both machines, while the slowest wake to a sleeping one took 2.16 µs (T14)
+and 3.17 µs (AMD bench), and the pair fell from about 181,600 (T14) and
+205,200 (AMD bench) rounds a second with no spinners to 100. The kill condition fixed before the run, the change
 dropped if the busy-target p99 is under about 100 µs with 7 and with 8
 spinners on both benches, did not fire: it reads 68 to 105 times that.
 

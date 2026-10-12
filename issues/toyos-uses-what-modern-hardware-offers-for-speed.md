@@ -42,15 +42,20 @@ and contention).
   68 to 105 times a 100 µs bar:
   `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`.
 
-**Killed.**
+**Bounded, and judged next by a twin** whose kill line its issue fixes
+before it runs.
 
-- `issues/an-mwait-doorbell-for-idle-cpus-is-not-worth-building.md`: the IPI
-  is under a fifth of an idle wake on both benches.
-- `issues/a-tsc-deadline-timer-is-not-worth-building-for-speed.md`: the
-  re-arm is about 4 % of an idle wake on the T14 and below the AMD bench's
-  TSC resolution.
-- PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there is
-  nothing to enable.
+- An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
+  at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
+  AMD bench; next, an MWAIT twin on the AMD bench
+  (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
+- A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
+  switch on the T14, and at the AMD bench's TSC floor; next, a TSC-deadline
+  twin on the T14
+  (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
+
+**Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
+is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
@@ -105,6 +110,8 @@ that order.
 - `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
+- `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
+- `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
 - `issues/user-programs-use-avx-under-xsave.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
