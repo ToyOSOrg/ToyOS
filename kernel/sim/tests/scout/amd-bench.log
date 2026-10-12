@@ -1,0 +1,41 @@
+[---------- -------- --.--- cpu0 kernel] ACPI: MADT cpus=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+[2026-10-12 02:42:53  9.395 cpu0 kernel] scout-topo: cpu0 hw=0x0 AuthenticAMD max=0x10/0x80000020 1= 860f01:100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 0:100:0:0
+[2026-10-12 02:42:53  9.395 cpu0 kernel] scout-topo: cpu0 levels B=[ 1:2:100:0 7:10:201:0 0:0:2:0 ]
+[2026-10-12 02:42:53  9.395 cpu0 kernel] scout-topo: cpu0 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.406 cpu1 kernel] scout-topo: cpu1 hw=0x1 AuthenticAMD max=0x10/0x80000020 1= 860f01:1100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 1:100:0:0
+[2026-10-12 02:42:53  9.406 cpu1 kernel] scout-topo: cpu1 levels B=[ 1:2:100:1 7:10:201:1 0:0:2:1 ]
+[2026-10-12 02:42:53  9.406 cpu1 kernel] scout-topo: cpu1 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.407 cpu0 kernel] SMP: cpu1 tsc=16898130846 inside the BSP's 16880159772..16899922224 (19762452 cycles wide)
+[2026-10-12 02:42:53  9.407 cpu0 kernel] SMP: AP cpu1 lapic=1 online
+[2026-10-12 02:42:53  9.417 cpu2 kernel] scout-topo: cpu2 hw=0x2 AuthenticAMD max=0x10/0x80000020 1= 860f01:2100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 2:101:0:0
+[2026-10-12 02:42:53  9.417 cpu2 kernel] scout-topo: cpu2 levels B=[ 1:2:100:2 7:10:201:2 0:0:2:2 ]
+[2026-10-12 02:42:53  9.417 cpu2 kernel] scout-topo: cpu2 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.418 cpu0 kernel] SMP: cpu2 tsc=16918013268 inside the BSP's 16900041240..16919804142 (19762902 cycles wide)
+[2026-10-12 02:42:53  9.418 cpu0 kernel] SMP: AP cpu2 lapic=2 online
+[2026-10-12 02:42:53  9.428 cpu3 kernel] scout-topo: cpu3 hw=0x3 AuthenticAMD max=0x10/0x80000020 1= 860f01:3100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 3:101:0:0
+[2026-10-12 02:42:53  9.428 cpu3 kernel] scout-topo: cpu3 levels B=[ 1:2:100:3 7:10:201:3 0:0:2:3 ]
+[2026-10-12 02:42:53  9.428 cpu3 kernel] scout-topo: cpu3 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.429 cpu0 kernel] SMP: cpu3 tsc=16937897634 inside the BSP's 16919928234..16939690506 (19762272 cycles wide)
+[2026-10-12 02:42:53  9.429 cpu0 kernel] SMP: AP cpu3 lapic=3 online
+[2026-10-12 02:42:53  9.439 cpu4 kernel] scout-topo: cpu4 hw=0x4 AuthenticAMD max=0x10/0x80000020 1= 860f01:4100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 4:102:0:0
+[2026-10-12 02:42:53  9.439 cpu4 kernel] scout-topo: cpu4 levels B=[ 1:2:100:4 7:10:201:4 0:0:2:4 ]
+[2026-10-12 02:42:53  9.439 cpu4 kernel] scout-topo: cpu4 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.440 cpu0 kernel] SMP: cpu4 tsc=16957797876 inside the BSP's 16939827864..16959590280 (19762416 cycles wide)
+[2026-10-12 02:42:53  9.440 cpu0 kernel] SMP: AP cpu4 lapic=4 online
+[2026-10-12 02:42:53  9.450 cpu5 kernel] scout-topo: cpu5 hw=0x5 AuthenticAMD max=0x10/0x80000020 1= 860f01:5100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 5:102:0:0
+[2026-10-12 02:42:53  9.450 cpu5 kernel] scout-topo: cpu5 levels B=[ 1:2:100:5 7:10:201:5 0:0:2:5 ]
+[2026-10-12 02:42:53  9.450 cpu5 kernel] scout-topo: cpu5 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.451 cpu0 kernel] SMP: cpu5 tsc=16977694824 inside the BSP's 16959725388..16979487660 (19762272 cycles wide)
+[2026-10-12 02:42:53  9.451 cpu0 kernel] SMP: AP cpu5 lapic=5 online
+[2026-10-12 02:42:53  9.461 cpu6 kernel] scout-topo: cpu6 hw=0x6 AuthenticAMD max=0x10/0x80000020 1= 860f01:6100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 6:103:0:0
+[2026-10-12 02:42:53  9.461 cpu6 kernel] scout-topo: cpu6 levels B=[ 1:2:100:6 7:10:201:6 0:0:2:6 ]
+[2026-10-12 02:42:53  9.461 cpu6 kernel] scout-topo: cpu6 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.462 cpu0 kernel] SMP: cpu6 tsc=16997585616 inside the BSP's 16979615568..16999377858 (19762290 cycles wide)
+[2026-10-12 02:42:53  9.462 cpu0 kernel] SMP: AP cpu6 lapic=6 online
+[2026-10-12 02:42:53  9.472 cpu7 kernel] scout-topo: cpu7 hw=0x7 AuthenticAMD max=0x10/0x80000020 1= 860f01:7100800:76d8320b:178bfbff 80000001= 860f01:0:75c237ff:2fd3fbff 80000008= 3030:90cf757:700f:10000 8000001E= 7:103:0:0
+[2026-10-12 02:42:53  9.472 cpu7 kernel] scout-topo: cpu7 levels B=[ 1:2:100:7 7:10:201:7 0:0:2:7 ]
+[2026-10-12 02:42:53  9.472 cpu7 kernel] scout-topo: cpu7 caches 4=[ 0:0:0:0 ] 8000001D=[ 4121:1c0003f:3f:0 4122:1c0003f:3f:0 4143:1c0003f:3ff:2 1c163:3c0003f:fff:1 0:0:0:0 ]
+[2026-10-12 02:42:53  9.473 cpu0 kernel] SMP: cpu7 tsc=17017476138 inside the BSP's 16999505820..17019268146 (19762326 cycles wide)
+[2026-10-12 02:42:53  9.473 cpu0 kernel] SMP: AP cpu7 lapic=7 online
+[2026-10-12 02:42:53  9.473 cpu0 kernel] SMP: roster full at 8 CPUs; ignoring further MADT entries
+[2026-10-12 02:42:53  9.473 cpu0 kernel] SMP: 8 of 16 MADT cpus online, 7 of 7 APs inside the BSP's TSC bracket

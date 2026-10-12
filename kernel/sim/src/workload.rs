@@ -15,6 +15,8 @@ use kernel::sched::cpu::Balance;
 use kernel::sched::queue::FairOrder;
 use kernel::sched::task::WaitClass;
 
+use crate::topology::Shape;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Op {
     /// Consume CPU time. The VM splits it into chunks so that a quantum can
@@ -250,6 +252,25 @@ pub enum PlacementShape {
     /// one is a measurement rather than a belief. See
     /// `scenarios::lopsided_placement`.
     AllOn(usize),
+    /// Spawn `i` onto the `i`th CPU listed, whatever the counters say: an
+    /// adversary like [`PlacementShape::AllOn`], for a machine no workload
+    /// stages. See `scenarios::group_imbalance`.
+    Listed(&'static [usize]),
+}
+
+/// What a pass's published surplus says to a CPU choosing whom to probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurplusShape {
+    /// The core's own: every pass publishes the fair band it could give away,
+    /// the number its push rang on.
+    Published,
+    /// Every pass's published surplus is overwritten with zero once it ends,
+    /// after its push rang a sleeper on the real one: the CPU it rang wakes,
+    /// finds nothing worth a probe and sleeps again. An adversary like
+    /// [`PlacementShape::AllOn`] — the defect two spellings of one inequality
+    /// write (`SchedPass::best_victim`), staged from outside the core, where a
+    /// rung CPU declines to probe.
+    Withheld,
 }
 
 /// Which teardown/balance algorithm the VM drives the core with.
@@ -268,7 +289,8 @@ pub enum Protocol {
 #[derive(Clone, Debug)]
 pub struct Scenario {
     pub name: &'static str,
-    pub cpus: usize,
+    /// The machine: its CPUs, and the cache tree they sit in.
+    pub topology: Shape,
     pub queues: Vec<QueueSpec>,
     pub procs: Vec<ProcSpec>,
     pub irqs: Vec<IrqSpec>,
@@ -303,6 +325,7 @@ pub struct Scenario {
     /// core implements, so the simulator drives the real code whichever one a
     /// scenario names.
     pub balance: Balance,
+    pub surplus: SurplusShape,
     /// How the fair band picks between two ready threads of one share. A
     /// scenario dimension for the same reason [`ShareShape`] is, and the type is
     /// the core's own rather than a parallel copy of it: the broken orderings
@@ -331,6 +354,10 @@ pub struct Scenario {
 }
 
 impl Scenario {
+    pub fn cpus(&self) -> usize {
+        self.topology.cpus()
+    }
+
     /// The longest preempt-off section any thread of this scenario runs. It
     /// is a *term* of invariant I4's RT latency bound, not an excuse for it:
     /// making the budget visible is what stops "the sim cannot see kernel
@@ -355,8 +382,9 @@ impl Scenario {
         self
     }
 
-    pub fn with_cpus(mut self, cpus: usize) -> Self {
-        self.cpus = cpus;
+    /// The same workload on another machine.
+    pub fn with_topology(mut self, topology: Shape) -> Self {
+        self.topology = topology;
         self
     }
 
@@ -400,12 +428,17 @@ impl Scenario {
     /// wrong, and a panic at the first spawn of a sweep would name the VM
     /// instead of the scenario that asked for it.
     pub fn with_placement(mut self, placement: PlacementShape) -> Self {
-        if let PlacementShape::AllOn(cpu) = placement {
+        let named: &[usize] = match &placement {
+            PlacementShape::LeastLoadedRotating => &[],
+            PlacementShape::AllOn(cpu) => std::slice::from_ref(cpu),
+            PlacementShape::Listed(cpus) => cpus,
+        };
+        for cpu in named {
             assert!(
-                cpu < self.cpus,
+                *cpu < self.cpus(),
                 "{}: placement names cpu{cpu} on a {}-cpu machine",
                 self.name,
-                self.cpus,
+                self.cpus(),
             );
         }
         self.placement = placement;
@@ -417,10 +450,10 @@ impl Scenario {
     /// sweep is the wrong place to find out.
     pub fn with_stopped(mut self, cpu: usize) -> Self {
         assert!(
-            cpu < self.cpus,
+            cpu < self.cpus(),
             "{}: stopping cpu{cpu} on a {}-cpu machine",
             self.name,
-            self.cpus,
+            self.cpus(),
         );
         self.stopped = Some(cpu);
         self
@@ -428,6 +461,11 @@ impl Scenario {
 
     pub fn with_balance(mut self, balance: Balance) -> Self {
         self.balance = balance;
+        self
+    }
+
+    pub fn with_surplus(mut self, surplus: SurplusShape) -> Self {
+        self.surplus = surplus;
         self
     }
 
