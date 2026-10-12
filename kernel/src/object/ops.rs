@@ -670,7 +670,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Console(_) => plain(FileType::Serial),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
-            file_type: FileType::SharedMemory as u64,
+            // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
+            file_type: if m.ram().is_some() { FileType::SharedMemory } else { FileType::DeviceMemory } as u64,
             size: m.size(),
             mtime: 0,
             volume: 0,

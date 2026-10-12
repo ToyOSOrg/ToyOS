@@ -14,7 +14,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::endow::{self, EndowError};
 use toyos::surface;
 use toyos::Connection;
-use toyos::shm::SharedMemory;
+use toyos::shm::{Lent, SharedMemory};
 /// Re-exported because [`KeyPress`] is made of them and a client that holds
 /// its own translator — `console`, a test that stands in for a surface —
 /// should not have to name a second crate to do what this one does.
@@ -127,9 +127,10 @@ pub enum CreateError {
     NotEndowed,
     /// The compositor exited: its port is closed for good.
     CompositorGone,
-    /// The kernel refused a call of the exchange: the connection, a frame, or
-    /// the map of the region the compositor sent.
+    /// The kernel refused a call of the exchange: the connection or a frame.
     Kernel(SyscallError),
+    /// The region the compositor sent is refused ([`SharedMemory::lent`]).
+    Lent(Lent),
     /// The exchange broke off: the compositor closed the connection, having
     /// exited or refused (its log says which), or sent a frame this client
     /// cannot read.
@@ -157,6 +158,7 @@ impl std::fmt::Display for CreateError {
             Self::Kernel(e) => {
                 write!(f, "the kernel refused the exchange with the compositor ({e:?})")
             }
+            Self::Lent(why) => write!(f, "the compositor's region is refused: {why}"),
             Self::BrokenOff => write!(f, "the compositor broke off the exchange"),
             Self::NoHandle => write!(f, "the compositor's answer arrived without its handle"),
             Self::AtCapacity => write!(f, "the compositor is at its window limit"),
@@ -464,7 +466,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
         return Err(CreateError::Protocol(header.msg_type));
     }
     let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
-    let mut region = SharedMemory::adopt(region, bytes.len()).map_err(CreateError::Kernel)?;
+    let mut region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.as_mut_slice().copy_from_slice(bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
 }
@@ -550,7 +552,7 @@ impl Window {
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
         let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
-        let shm = SharedMemory::adopt(buffer, buf_size).map_err(CreateError::Kernel)?;
+        let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
         Ok(Self {
@@ -653,7 +655,7 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
                     return Event::Close;
                 };
-                let Ok(shm) = SharedMemory::adopt(buffer, buf_size) else {
+                let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
                     return Event::Close;
                 };
                 self.shm = shm;
@@ -676,7 +678,7 @@ impl Window {
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
                     return Event::ClipboardPaste(Vec::new());
                 };
-                let Ok(shm) = SharedMemory::adopt(buffer, info.len as usize) else {
+                let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 Event::ClipboardPaste(shm.as_slice().to_vec())
