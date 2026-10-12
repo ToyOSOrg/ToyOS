@@ -17,6 +17,12 @@
 //! being served is said once, by kind; what the firmware chose — a path, a
 //! number — goes under [`OWN`].
 //!
+//! **The controller is attached to AML under the lock rule its `_GLK`
+//! names** ([`attach`], §6.5.7): none where it is absent or 0, the Global
+//! Lock around each transaction where it is 1, and unattached otherwise;
+//! then `_REG(3, 1)` runs in each scope that declares a region of its space,
+//! after every `_INI` (§6.5.4).
+//!
 //! **Buttons are looked for only where the FADT says the power button is a
 //! control method device**; on a machine whose button is the fixed one, a
 //! PNP0C0C the firmware lists anyway is not another way to press it.

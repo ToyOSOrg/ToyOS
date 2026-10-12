@@ -26,9 +26,11 @@
 //! not hold — and that is said once, loudly ([`NO_S5_HANDED`]); the server
 //! goes on serving. **A namespace whose DSDT loaded is kept** ([`Aml`]),
 //! with the host that answered its load, for what the server evaluates in it
-//! after: the devices it serves ([`crate::devices`]), the power sources
-//! ([`crate::battery`]), and, where the power button is a control method
-//! device, each embedded-controller query's method.
+//! after: its initialisation ([`crate::init`]), `_OSC` ([`crate::osc`]), the
+//! devices it serves ([`crate::devices`]), the power sources
+//! ([`crate::battery`]), the runtime GPEs' methods ([`crate::gpe`]), and,
+//! where the power button is a control method device, each
+//! embedded-controller query's method.
 //!
 //! A table's line says its place, whether it is the DSDT or an SSDT, and a
 //! refusal by its kind; what the firmware chose — a name, an offset, an

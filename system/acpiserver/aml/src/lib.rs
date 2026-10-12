@@ -5,7 +5,8 @@
 //! A definition block is firmware's, and so untrusted: whatever its bytes,
 //! [`Interpreter::load`] and [`Interpreter::evaluate`] return a value or a
 //! named [`Error`], never panic, and never run unbounded — every evaluation
-//! is bounded in steps, nesting, object size and time asked to sleep, and
+//! is bounded in steps, nesting, object size, Mutexes held and time asked to
+//! sleep, and
 //! what an interpreter holds of tables, namespace and objects is bounded in
 //! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
 //! without anything that table created, and the interpreter holding what it

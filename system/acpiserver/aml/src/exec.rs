@@ -10,7 +10,8 @@
 //!
 //! Every evaluation is bounded: in steps, in nesting (terms, invocations and
 //! field accesses together, each a frame of this walk), in the size of any
-//! object, and in time asked to sleep. A bound reached is a refusal.
+//! object, in Mutexes held at once, and in time asked to sleep. A bound
+//! reached is a refusal.
 //!
 //! The bytes of a string or buffer that an operator makes, at a size its
 //! table chooses, are made after its operands are evaluated, and are let go

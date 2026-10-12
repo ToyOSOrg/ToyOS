@@ -13,8 +13,10 @@
 //! the batteries' and adapters' own methods alone: the controller's `_REG`
 //! and the walk that named the devices ran before it, and are not theirs.
 //!
-//! **Every [`POLL`]** each battery's `_BST` and each adapter's `_PSR` are
-//! evaluated ([`Power::read`]), and a line is said on the first reading and
+//! **Every [`POLL`]**, and on a Notify of a status change (§10.2.1), each
+//! battery's `_BST` and each adapter's `_PSR` are evaluated
+//! ([`Power::read`]); on a battery's Notify of an information change they are
+//! found again. A line is said on the first reading and
 //! wherever a battery's whole percent or state, or the adapter's, moved since
 //! the line before: a draining battery says a line a percent, never one a
 //! poll.
