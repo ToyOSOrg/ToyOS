@@ -1,6 +1,6 @@
 use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 
-use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
+use crate::arch::entry::ring3_naked_asm;
 use crate::hw::HW;
 
 // A Ring 0 fire re-arms one quantum on, or leaves a stopped timer stopped, and never writes `last_armed_ticks`: what the scheduler planned is re-armed by its next pass, and a syscall that outlasts a quantum takes one expiry per quantum.
@@ -12,37 +12,33 @@ pub(super) extern "sysv64" fn timer_entry() {
         "test dword ptr [rsp + 8], 3",
         "jz 2f",
 
-        "push 0", // dummy error code for stack layout consistency
+        // Fifteen words on the CPU's five, below a 16-byte-aligned top:
+        // `rsp` is aligned for the calls.
         "push r15", "push r14", "push r13", "push r12",
         "push r11", "push r10", "push r9",  "push r8",
         "push rbp", "push rdi", "push rsi", "push rdx",
         "push rcx", "push rbx", "push rax",
-
-        save_user_state!(),
 
         // Re-arm before the handler runs so the timer survives even if the handler path panics before scheduler::do_preempt → arm_one_shot.
         "call {rearm_last}",
 
         "call {handler}",
 
-        // IF is 0 here (interrupt gate, no sti), the epilogue's entry contract; user state stays parked on this kernel stack across it, as `device_irq` also parks it.
+        // IF is 0 here (interrupt gate, no sti), the epilogue's entry contract.
         "call {exit_to_user}",
-
-        restore_user_state!(),
 
         "pop rax",  "pop rbx",  "pop rcx",  "pop rdx",
         "pop rsi",  "pop rdi",  "pop rbp",
         "pop r8",   "pop r9",   "pop r10",  "pop r11",
         "pop r12",  "pop r13",  "pop r14",  "pop r15",
-        "add rsp, 8", // pop dummy error code
         "iretq",
 
         "2:",
         // This `add` inlines what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
         "add qword ptr gs:[{irq_timer}], 1",
         // The caller-saved set, then the stack realigned for a `sysv64` call —
-        // no target touches an `xmm`, since the kernel's own target has no
-        // hardware float (`build/build.rs`'s check).
+        // no target touches an `xmm`, since the kernel touches no user
+        // vector state (`build/fpgate.rs`'s check).
         "push rax", "push rcx", "push rdx",
         "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
         "push rbp",

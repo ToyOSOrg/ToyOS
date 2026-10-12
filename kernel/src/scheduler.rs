@@ -292,7 +292,7 @@ pub fn global_min_vruntime() -> u64 {
 /// Build and place a new task; returns the CPU it was placed on.
 pub fn enqueue_new(
     id: TaskId,
-    kernel_stack: crate::process::OwnedAlloc,
+    kernel_stack: crate::loader::KernelStack,
     entry_sp: u64,
     address_space: crate::process::PageTables,
     thread_pointer: u64,

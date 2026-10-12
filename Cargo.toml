@@ -190,6 +190,13 @@ toyos-abi = { path = "sdk/abi" }
 # segments, and its symbol table where the kernel's own backtrace finds it.
 toyos-elf = { path = "lib/elf" }
 toyos-symbols = { path = "lib/symbols" }
+# What `build::fpgate` decodes the linked x86-64 kernel with, to refuse an
+# instruction that touches the user FP or vector state outside `arch::fpu`:
+# rustc refuses no instruction written as `asm!` text, so only the image says.
+# A general, widely used x86 decoder in Rust alone, with the CPUID feature and
+# register-use tables the refusal needs; the only other decoder at hand,
+# `llvm-objdump`, is a C++ tool where a Rust one does the job.
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 toyos-fat32 = { path = "lib/fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
