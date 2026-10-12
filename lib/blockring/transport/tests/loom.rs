@@ -11,6 +11,7 @@
 
 use core::sync::atomic::Ordering;
 
+use loom::cell::Cell;
 use loom::sync::atomic::AtomicU32;
 use loom::sync::{Arc, Notify};
 use toyos_transport::{stream, Consumer, Place, Producer, Untrusted, Violation, Word};
@@ -143,16 +144,17 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
     });
 }
 
-/// A stream's four words, its bytes as words of their own, and a doorbell each
-/// way. The bytes are stored and loaded `Relaxed`, so only the cursors order
-/// them; a doorbell is loom's `Notify`, which keeps one ring and may wake its
-/// waiter for nothing, and loom fails a run that ends with a thread waiting on
-/// one. It is held in std's `Arc`: loom's panics again in its drop when
-/// that failure unwinds the model, which aborts the run before it says which
-/// test failed.
+/// A stream's four words, its bytes, and a doorbell each way. A byte is a loom
+/// cell, as the adapter's copy is no atomic: a copy into or out of it that the
+/// cursors do not order after the other end's last copy of it is loom's own
+/// `Causality violation`. A doorbell is loom's `Notify`, which keeps one ring
+/// and may wake its waiter for nothing, and loom fails a run that ends with a
+/// thread waiting on one. It is held in std's `Arc`: loom's panics again in
+/// its drop when that failure unwinds the model, which aborts the run before
+/// it says which test failed.
 struct Stream {
     page: [Shared; 4],
-    bytes: [Shared; RING as usize],
+    bytes: [Cell<u32>; RING as usize],
     to_consumer: Notify,
     to_producer: Notify,
 }
@@ -164,7 +166,7 @@ type StreamEnds = (stream::Producer<RING, 4>, stream::Consumer<RING, 4>);
 fn stream() -> (std::sync::Arc<Stream>, StreamEnds) {
     let s = std::sync::Arc::new(Stream {
         page: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
-        bytes: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
+        bytes: core::array::from_fn(|_| Cell::new(0)),
         to_consumer: Notify::new(),
         to_producer: Notify::new(),
     });
@@ -177,7 +179,7 @@ fn stream() -> (std::sync::Arc<Stream>, StreamEnds) {
 fn send(s: &Stream, tx: &mut stream::Producer<RING, 4>, byte: u32) {
     for span in tx.span(0, 1).expect("a byte of room") {
         for at in span.offset..span.offset + span.len {
-            s.bytes[at].store(byte, Ordering::Relaxed);
+            s.bytes[at].set(byte);
         }
     }
     assert!(tx.advance(1));
@@ -191,7 +193,7 @@ fn send(s: &Stream, tx: &mut stream::Producer<RING, 4>, byte: u32) {
 fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
     let mut read = Vec::new();
     for span in rx.span(0, 1).expect("a byte ready") {
-        read.extend((span.offset..span.offset + span.len).map(|at| s.bytes[at].load(Ordering::Relaxed)));
+        read.extend((span.offset..span.offset + span.len).map(|at| s.bytes[at].get()));
     }
     assert!(rx.advance(1));
     if rx.release(&s.page) {
@@ -201,8 +203,9 @@ fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
 }
 
 /// A consumer that polls reads each byte as the producer wrote it, through a
-/// ring that wraps under it. `publish-relaxed` lets it read the tail before
-/// the byte.
+/// ring that wraps under it: its copy out follows the producer's copy in, and
+/// the producer's next copy into that byte follows its copy out.
+/// `publish-relaxed` takes the first edge away.
 #[test]
 fn a_published_byte_is_read_as_written() {
     loom::model(|| {
