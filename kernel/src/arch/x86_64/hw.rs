@@ -52,6 +52,14 @@ pub mod slot_probe {
         /// The shallowest and deepest slot (stack top minus slot address) over `same` saves.
         depth_min: AtomicU64,
         depth_max: AtomicU64,
+        /// `same` saves whose area from byte 576 on was overwritten with [`CANARY`] just before the save.
+        scribbled: AtomicU64,
+        /// Per line, the scribbled saves after which the line still held [`CANARY`] whole: written by no save.
+        kept: [AtomicU64; LINES],
+        /// The union of `XSTATE_BV` over those saves, as each save wrote it.
+        xstate_bv: AtomicU64,
+        /// Of the scribbled saves, those whose `XSTATE_BV` has every extended component of `XCR0` in use; `kept` counts these alone.
+        in_use: AtomicU64,
     }
 
     impl Counts {
@@ -62,6 +70,10 @@ pub mod slot_probe {
                 line: [const { AtomicU64::new(0) }; LINES],
                 depth_min: AtomicU64::new(u64::MAX),
                 depth_max: AtomicU64::new(0),
+                scribbled: AtomicU64::new(0),
+                kept: [const { AtomicU64::new(0) }; LINES],
+                xstate_bv: AtomicU64::new(0),
+                in_use: AtomicU64::new(0),
             }
         }
 
@@ -74,13 +86,24 @@ pub mod slot_probe {
                     let _ = write!(lines, " {i}:{n}");
                 }
             }
+            let mut kept = alloc::string::String::new();
+            for (i, n) in self.kept.iter().enumerate() {
+                let n = n.load(Relaxed);
+                if n != 0 {
+                    let _ = write!(kept, " {i}:{n}");
+                }
+            }
             alloc::format!(
-                "{who}: saves={} same={} same_depth={}..{} changed_lines(line:saves):{}",
+                "{who}: saves={} same={} same_depth={}..{} changed_lines(line:saves):{} | scribbled={} xstate_bv={:#x} all_in_use={} canary_kept_lines(line:saves):{}",
                 self.saves.load(Relaxed),
                 self.same.load(Relaxed),
                 self.depth_min.load(Relaxed),
                 self.depth_max.load(Relaxed),
-                lines
+                lines,
+                self.scribbled.load(Relaxed),
+                self.xstate_bv.load(Relaxed),
+                self.in_use.load(Relaxed),
+                kept
             )
         }
     }
@@ -88,7 +111,17 @@ pub mod slot_probe {
     static TOTAL: Counts = Counts::new();
     static PER_PID: [Counts; PIDS] = [const { Counts::new() }; PIDS];
 
-    pub unsafe fn before_save(area: u64, top: u64, pid: u32) {
+    /// The byte the area from 576 on holds just before a save from the address of the CPU's last restore.
+    const CANARY: u8 = 0xA5;
+    /// The first byte past the legacy region and the header: every extended component, in either format.
+    const EXTENDED: usize = 576;
+
+    /// Counts the slot's changed lines and, for a save from the address of
+    /// this CPU's last restore, overwrites every extended component's bytes
+    /// with [`CANARY`]: a save that writes a component replaces them, and one
+    /// that skips it under the modified optimisation leaves them for the
+    /// restore. Answers whether it did.
+    pub unsafe fn before_save(area: u64, top: u64, pid: u32) -> bool {
         let cpu = super::percpu::cpu_id() as usize;
         let last = unsafe { (*(&raw const LAST))[cpu] };
         let mut changed = [false; LINES];
@@ -116,6 +149,45 @@ pub mod slot_probe {
             }
         }
         unsafe { (*(&raw mut LAST))[cpu] = 0 };
+        if last == area {
+            let bytes = crate::arch::fpu::area_bytes();
+            unsafe { core::ptr::write_bytes((area as usize + EXTENDED) as *mut u8, CANARY, bytes - EXTENDED) };
+            for counts in core::iter::once(&TOTAL).chain(pid_counts) {
+                counts.scribbled.fetch_add(1, Relaxed);
+            }
+        }
+        last == area
+    }
+
+    /// After a save that followed [`before_save`]'s overwrite: the lines from
+    /// byte 576 on that still hold [`CANARY`] whole, which no save wrote.
+    pub unsafe fn after_save(area: u64, pid: u32) {
+        let bytes = crate::arch::fpu::area_bytes();
+        let now = unsafe { core::slice::from_raw_parts(area as *const u8, bytes) };
+        let xstate_bv = u64::from_le_bytes(now[512..520].try_into().unwrap());
+        let (lo, hi): (u32, u32);
+        // SAFETY: reads XCR0, which `control_regs` set; touches no memory.
+        unsafe { core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+        let extended = (u64::from(hi) << 32 | u64::from(lo)) & !0b11;
+        // Only a save with every extended component in use says anything: one
+        // in its initial configuration is written by no save, and loaded by
+        // no restore.
+        let all_in_use = xstate_bv & extended == extended;
+        let pid_counts = PER_PID.get(pid as usize);
+        for counts in core::iter::once(&TOTAL).chain(pid_counts) {
+            counts.xstate_bv.fetch_or(xstate_bv, Relaxed);
+            if !all_in_use {
+                continue;
+            }
+            counts.in_use.fetch_add(1, Relaxed);
+            for line in EXTENDED / 64..bytes.div_ceil(64) {
+                let at = line * 64;
+                let end = (at + 64).min(bytes);
+                if now[at..end].iter().all(|&b| b == CANARY) {
+                    counts.kept[line].fetch_add(1, Relaxed);
+                }
+            }
+        }
     }
 
     pub unsafe fn after_restore(area: u64) {
@@ -128,16 +200,19 @@ pub mod slot_probe {
 
     /// The exiting process's counts and the total; a panic carrying both
     /// when `name` is a probed job, since a guest test keeps the panic's words.
-    pub fn report(name: &str, pid: u32) {
+    pub fn report(name: &str, pid: u32, code: i32) {
         let own = match PER_PID.get(pid as usize) {
-            Some(counts) => counts.line(&alloc::format!("slot-probe {name} pid={pid}")),
+            Some(counts) => counts.line(&alloc::format!("slot-probe {name} pid={pid} code={code}")),
             None => alloc::format!("slot-probe {name} pid={pid}: not counted"),
         };
         let total = TOTAL.line("slot-probe total");
         let area = crate::arch::fpu::area_bytes();
         crate::log!("{own} | area={area}");
         crate::log!("{total}");
-        if name.contains("vector_state") || name.contains("syscall_cost") {
+        // Under a hypervisor only: a guest test keeps a panic's words, and a
+        // metal boot keeps the log above.
+        let hypervisor = core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0;
+        if hypervisor && (name.contains("vector_state") || name.contains("syscall_cost")) {
             panic!("{own} | area={area} || {total}");
         }
     }
@@ -464,8 +539,12 @@ impl Hw for KernelHw {
                 options(nomem, nostack, preserves_flags),
             );
             if let Some(area) = area {
-                slot_probe::before_save(area, (*save).kernel_stack_top, (*save).id.map_or(u32::MAX, |id| id.0.raw()));
+                let pid = (*save).id.map_or(u32::MAX, |id| id.0.raw());
+                let scribbled = slot_probe::before_save(area, (*save).kernel_stack_top, pid);
                 super::fpu::save(area);
+                if scribbled {
+                    slot_probe::after_save(area, pid);
+                }
             }
             context_switch(&raw mut (*save).sp, rsp);
             // The preempt count is still raised: nothing switches this task
