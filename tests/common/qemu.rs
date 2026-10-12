@@ -1601,14 +1601,9 @@ impl QemuInstance {
         }
     }
 
-    /// Every console line the guest printed before the ready marker.
-    ///
-    /// The kernel's own boot lines sit in the log ring until the scheduler
-    /// drains them, by which time the virtio-console is the backend — so the
-    /// 16550 file holds only the bootloader, and this is the only place a
-    /// host test can read what the kernel said while booting. Under
-    /// [`Profile::Metal`] the 16550 is the console and carries everything;
-    /// empty when [`BootOptions::mute`] takes it away.
+    /// Every console line the guest printed up to the ready marker, the
+    /// marker's own last. Under [`Profile::Metal`] the 16550 is the console
+    /// and carries everything; empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
     }
@@ -2736,16 +2731,11 @@ fn wait_for_ready(
                 seen.push('\n');
                 continue;
             }
-            // A guest that dies before virtio-console init never reaches
-            // stdio at all; the UART file is the only channel it has.
-            Err(RecvTimeoutError::Timeout) => {
-                if !panic_aborts
-                    && fs::read_to_string(uart_log).is_ok_and(|s| s.contains(ready))
-                {
-                    break;
-                }
-                continue;
-            }
+            // The 16550's file is never read for the marker: it carries the
+            // kernel's records until virtio-console arrives and replays them
+            // here, so a marker found there first ends the wait with a boot
+            // log that holds none of them.
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 let status = child.wait();
                 let uart = fs::read_to_string(uart_log).unwrap_or_default();
