@@ -298,6 +298,9 @@ pub struct Firmware<'k, K> {
     /// and gives back.
     pub takes: u64,
     pub contended: u64,
+    /// The longest a take waited for the firmware's release: the firmware's
+    /// longest hold of the lock, as far as a take saw it.
+    pub longest_hold: Duration,
     pub given_back: u64,
     pub notifies: u64,
     /// The controller whose space AML reaches, once the server attached it.
@@ -341,6 +344,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             pages: Pages::default(),
             takes: 0,
             contended: 0,
+            longest_hold: Duration::ZERO,
             given_back: 0,
             notifies: 0,
             ec: None,
@@ -455,10 +459,16 @@ impl<'k, K: Kernel> Firmware<'k, K> {
     fn take(&mut self, until: Instant) -> Result<bool, Denied> {
         self.takes += 1;
         let mut contended = false;
+        let asked = Instant::now();
         loop {
             match self.kernel.lock_take() {
                 Err(Stopping) => return Err(self.stopped()),
-                Ok(Take::Taken) => return Ok(true),
+                Ok(Take::Taken) => {
+                    if contended {
+                        self.longest_hold = self.longest_hold.max(asked.elapsed());
+                    }
+                    return Ok(true);
+                }
                 Ok(Take::Unusable) => {
                     let what = "the Global Lock: the kernel exchanges no lock word in this machine's FACS";
                     return Err(self.deny(what.into(), format_args!("a take")));

@@ -51,6 +51,15 @@ pub(crate) struct Machine<'a> {
     global: u32,
 }
 
+/// The heap a frame and what runs in it hold beside the meter: its locals'
+/// and seven arguments' shared slots and the arguments' vector, a name of
+/// 255 segments read, and a PCI_Config walk's devices, 257 of them in a
+/// vector that doubles.
+pub(crate) const FRAME_HEAP: usize = 15 * (2 * core::mem::size_of::<usize>() + core::mem::size_of::<RefCell<Object>>())
+    + 7 * core::mem::size_of::<Slot>()
+    + 255 * core::mem::size_of::<Seg>()
+    + 512 * core::mem::size_of::<NodeId>();
+
 pub(crate) struct Frame {
     locals: [Slot; 8],
     args: Vec<Slot>,
@@ -1111,6 +1120,9 @@ impl<'a> Machine<'a> {
     /// `false` where `\_GL`'s firmware side held it past `within`
     /// milliseconds, and nothing was acquired.
     fn acquire(&mut self, m: &Kept<Mutex>, within: Option<u16>) -> Result<bool, Error> {
+        if self.held.len() >= crate::MAX_HELD {
+            return Err(Error::Bound("more Mutexes held at once than one evaluation holds"));
+        }
         // §19.6.88: an Acquire's SyncLevel is equal to or above the current one.
         if m.held.get() == 0 && self.levels.last().is_some_and(|&l| m.sync < l) {
             return Err(Error::Rule("Acquire of a Mutex below the current SyncLevel (§19.6.88)"));

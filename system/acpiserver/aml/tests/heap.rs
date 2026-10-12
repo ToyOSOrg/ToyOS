@@ -60,6 +60,7 @@ fn heap() -> isize {
 }
 
 const BOUND: isize = MAX_LIVE as isize;
+const RUNNING: isize = toyos_aml::MAX_RUNNING as isize;
 
 /// The refusal that is this bound's, and not the step bound's.
 const FULL: &str = "more held live than one interpreter holds";
@@ -91,9 +92,11 @@ impl Filled {
         Filled { held: HELD.get() - before, peak: PEAK.get() - before, refused }
     }
 
-    /// The harm first: the heap held, then that the bound is what ended the fill.
+    /// The harm first: the heap held, and the most held while it ran, then
+    /// that the bound is what ended the fill.
     fn within_the_bound(&self) {
         assert!(self.held <= BOUND, "{} bytes held, {} at most on the way", self.held, self.peak);
+        assert!(self.peak <= RUNNING, "{} bytes held on the way, past the {RUNNING} a running interpreter holds", self.peak);
         assert_eq!(self.refused, Some(Error::Bound(FULL)), "nothing filled the interpreter");
     }
 }
@@ -475,4 +478,19 @@ fn a_full_interpreter_reads_a_field_that_fits_an_integer() {
     assert_eq!(refused, Some(Error::Bound(FULL)));
     assert_eq!(i.evaluate(&mut Sink, "\\NARW", &[]), Ok(Value::Integer(0)));
     assert_eq!(i.evaluate(&mut Sink, "\\WIDE", &[]), Err(Error::Bound(FULL)));
+}
+
+/// One evaluation holds at most 256 Mutex acquisitions at once: the 257th of
+/// one Mutex acquired again and again is refused at the bound, and the
+/// evaluation holds nothing at its end.
+#[test]
+fn an_evaluation_holds_at_most_256_mutexes() {
+    let acquires = |n: usize| {
+        let acquire = cat(&[&[0x5B, 0x23], &name("MUT0"), &0xFFFFu16.to_le_bytes()]);
+        cat(&[&[0x5B, 0x01], &name("MUT0"), &[0x00], &method("MAIN", 0, &cat(&[&acquire.repeat(n), &ret(&int(1))]))])
+    };
+    let (mut i, _) = start(&acquires(256));
+    assert_eq!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Rule("a method exits holding a Mutex it acquired (§19.6.88)")));
+    let (mut i, _) = start(&acquires(257));
+    assert_eq!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Bound("more Mutexes held at once than one evaluation holds")));
 }

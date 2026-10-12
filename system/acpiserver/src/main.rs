@@ -400,11 +400,14 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
         let names = self.settle(before, names)?;
         let aml = self.aml.as_ref()?;
         println!(
-            "acpiserver: {} table(s) loaded at run time and {} refused; the namespace holds {} objects in {} slots",
+            "acpiserver: {} table(s) loaded at run time and {} refused; the namespace holds {} objects in {} slots, and the interpreter {} bytes of heap, of the {} it holds between evaluations and the {} while one runs",
             aml.host.loaded,
             aml.host.loads_refused,
             aml.interpreter.defined(),
-            aml.interpreter.slots()
+            aml.interpreter.slots(),
+            aml.interpreter.usage().live,
+            toyos_aml::MAX_LIVE,
+            toyos_aml::MAX_RUNNING
         );
         Some(names)
     }

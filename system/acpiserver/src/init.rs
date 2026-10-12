@@ -97,6 +97,9 @@ pub struct Census {
     pub reg: BTreeMap<u8, u64>,
     /// Each refusal, by the method's name and its kind.
     pub refused: Ledger,
+    /// The longest time an evaluation asked to wait, refused or not, in µs
+    /// (`toyos_aml::Usage::waited_us`).
+    pub longest_wait_us: u64,
 }
 
 impl Census {
@@ -110,10 +113,11 @@ impl Census {
         let reg: Vec<String> = self.reg.iter().map(|(space, n)| format!("_REG({space}, 1) in {n} scope(s)")).collect();
         let refused = if self.refused.is_empty() { "none".to_string() } else { self.refused.counts() };
         format!(
-            "acpiserver: the namespace initialised: \\_SB._INI {sb}; {} _STA read, {} _INI run, {}; evaluations refused, by kind: {refused}",
+            "acpiserver: the namespace initialised: \\_SB._INI {sb}; {} _STA read, {} _INI run, {}; the longest wait an evaluation asked {} µs; evaluations refused, by kind: {refused}",
             self.sta,
             self.ini,
-            if reg.is_empty() { "no _REG run".to_string() } else { reg.join(", ") }
+            if reg.is_empty() { "no _REG run".to_string() } else { reg.join(", ") },
+            self.longest_wait_us
         )
     }
 
@@ -128,7 +132,9 @@ impl Census {
 
 /// Evaluate `path`, counted in `census` under `method` where refused.
 fn evaluate<K: Kernel>(aml: &mut Aml<'_, K>, census: &mut Census, method: &str, path: &str, args: &[Value]) -> Option<Value> {
-    match aml.interpreter.evaluate(&mut aml.host, path, args) {
+    let answer = aml.interpreter.evaluate(&mut aml.host, path, args);
+    census.longest_wait_us = census.longest_wait_us.max(aml.interpreter.usage().waited_us);
+    match answer {
         Ok(value) => Some(value),
         Err(_) if aml.host.stopping => None,
         Err(why) => {
@@ -356,7 +362,8 @@ mod tests {
                         &device("DEVD", &cat(&[&def_name("_STA", &int(0)), &method("_INI", 0, &tagged(0xDD)), &device("DEVE", &method("_INI", 0, &tagged(0xEE)))])),
                     ]),
                 ),
-                &device("DEVF", &cat(&[&def_name("_STA", &int(0x0F)), &method("_INI", 0, &tagged(4))])),
+                // Sleep (5) before its tag: the longest wait the census reads.
+                &device("DEVF", &cat(&[&def_name("_STA", &int(0x0F)), &method("_INI", 0, &cat(&[&[0x5B, 0x22, 0x0A, 0x05], &tagged(4)]))])),
             ]),
         );
         let (kernel, census) = initialised(&dsdt);
@@ -365,7 +372,7 @@ mod tests {
         assert!(census.refused.is_empty(), "{}", census.refused.counts());
         assert_eq!(
             census.line(),
-            "acpiserver: the namespace initialised: \\_SB._INI run; 3 _STA read, 3 _INI run, no _REG run; evaluations refused, by kind: none"
+            "acpiserver: the namespace initialised: \\_SB._INI run; 3 _STA read, 3 _INI run, no _REG run; the longest wait an evaluation asked 5000 µs; evaluations refused, by kind: none"
         );
     }
 

@@ -90,6 +90,29 @@ pub(crate) const MAX_ELEMENTS: usize = 1 << 16;
 /// record, string, buffer and package; what one holds beyond it while it
 /// runs is `object::Meter`'s to say.
 pub const MAX_LIVE: usize = 16 << 20;
+/// The most heap one load or evaluation holds while it runs: [`MAX_LIVE`],
+/// and what it holds beyond the meter's count, each part bounded by another
+/// of this interpreter's bounds:
+/// - an arena's old slots while a doubling moves it, at most half what the
+///   meter admits;
+/// - one operator's bytes before the meter holds them, Concatenate's the
+///   most at its two operands' copies and their sum, four of the largest
+///   object, one level's of them however deep they nest;
+/// - a table's or a loaded block's bytes while they are read in, the
+///   largest object;
+/// - for each frame of the deepest nest, its locals' and arguments' slots,
+///   a name of 255 segments and a PCI_Config region's walk of 257 devices;
+/// - a record and a level for each Mutex held, at most [`MAX_HELD`];
+/// - a node's path for a Notify, a reference or a refusal, a segment and a
+///   separator for each level as deep as the meter admits a node.
+pub const MAX_RUNNING: usize = MAX_LIVE
+    + MAX_LIVE / 2
+    + 5 * MAX_BYTES
+    + MAX_DEPTH as usize * exec::FRAME_HEAP
+    + MAX_HELD * (core::mem::size_of::<object::Kept<object::Mutex>>() + 1) * 2
+    + namespace::DEEPEST * (2 * core::mem::size_of::<name::Seg>() + 5);
+/// The most Mutex acquisitions one evaluation holds at once.
+pub(crate) const MAX_HELD: usize = 256;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;

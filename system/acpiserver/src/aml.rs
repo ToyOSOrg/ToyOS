@@ -192,13 +192,14 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
         println!("acpiserver: reads of the tables' bytes the kernel refused: {}", refusals.counts());
     }
     println!(
-        "acpiserver: the tables' AML read SystemMemory {} times, SystemIO {} and PCI_Config {}, its memory in pages: {}; took the Global Lock {} times, {} of them from the firmware; and ran Notify {} times",
+        "acpiserver: the tables' AML read SystemMemory {} times, SystemIO {} and PCI_Config {}, its memory in pages: {}; took the Global Lock {} times, {} of them from the firmware, which held it {:?} at the longest; and ran Notify {} times",
         host.reads[0],
         host.reads[1],
         host.reads[2],
         host.pages.by_type(),
         host.takes,
         host.contended,
+        host.longest_hold,
         host.notifies
     );
 

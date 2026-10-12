@@ -57,6 +57,10 @@ const ENTRY: usize = (core::mem::size_of::<usize>() + 4 + 11 * core::mem::size_o
 /// The slots an arena starts with.
 const SLOTS: usize = 16;
 
+/// The deepest a node lies: each level a slot and an entry its parent holds
+/// it at, against the meter.
+pub(crate) const DEEPEST: usize = crate::MAX_LIVE / (SLOT + ENTRY);
+
 /// Which arena a node is in, and so what ends it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Arena {
