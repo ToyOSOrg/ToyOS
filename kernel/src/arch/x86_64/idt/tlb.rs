@@ -17,28 +17,29 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "push rbp",
         "lock add dword ptr gs:[{preempt_count}], 1",
         "mov rbp, rsp",
+        "test dword ptr [rbp + 88], 3",
+        "jz 2f",
+        // Before `flush`'s frames, which land where the last restore read:
+        // the modified optimisation's invariant (`arch::entry`).
+        save_user_state!(),
+        "2:",
         "and rsp, -16",
         #[cfg(feature = "mask-windows")]
         "call {windows_entered}",
         "call {flush}",
-        "mov rsp, rbp",
         #[cfg(feature = "mask-windows")]
-        "mov rdi, [rsp + 88]",
-        #[cfg(feature = "mask-windows")]
-        "and rsp, -16",
+        "mov rdi, [rbp + 88]",
         #[cfg(feature = "mask-windows")]
         "call {windows_leaving}",
-        #[cfg(feature = "mask-windows")]
-        "mov rsp, rbp",
         "lock sub dword ptr gs:[{preempt_count}], 1",
-        // Only this branch can context-switch; user state is saved and restored around it alone.
-        "test dword ptr [rsp + 88], 3",
+        // Only this branch can context-switch.
+        "test dword ptr [rbp + 88], 3",
         "jz 1f",
         "cli",
-        save_user_state!(),
         "call {exit_to_user}",
         restore_user_state!(),
         "1:",
+        "mov rsp, rbp",
         "pop rbp",
         "pop r11",
         "pop r10",

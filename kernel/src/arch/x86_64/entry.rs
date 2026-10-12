@@ -3,19 +3,35 @@
 //! A transition out of Ring 3 that can reach another task must save and
 //! restore the whole user machine state, as the last act before returning to
 //! Ring 3, after any point the task could have switched. [`save_user_state`]
-//! leaves `rsp` aligned to [`UserFpState`]; [`restore_user_state`] restores it
-//! exactly, and `r11` is scratch between them.
+//! parks it in [`fpu::AREA_BYTES`](super::fpu::AREA_BYTES) on this kernel
+//! stack, leaving `rsp` 64-byte aligned on the slot that holds the `rsp` it
+//! found; [`restore_user_state`] restores both. Each clobbers `rax`, `rdx` and
+//! the flags, and the save leaves `r11` the `rsp` it found. Both branch on
+//! [`fpu::FORM`](super::fpu::FORM): `XSAVES` with `XRSTORS`, `XSAVEC` with
+//! `XRSTOR`, or `XSAVEOPT` with `XRSTOR`.
+//!
+//! **The modified optimisation's invariant.** `XSAVEOPT` and `XSAVES` skip a
+//! component unmodified since the last `XRSTOR` or `XRSTORS` from the same
+//! address, so between the restore that returns a thread to Ring 3 and that
+//! thread's next save on the same CPU nothing may write the area. The area lies just below the frame, where a
+//! handler's own frames go, and an arrival whose frame is as deep saves at
+//! the same address; so every arrival from Ring 3 on the thread's kernel
+//! stack saves after its own pushes and before anything else writes below
+//! them, whether or not its handler can reach another task. Every
+//! restore is followed only by pops and `iretq`/`sysretq` with `IF` clear,
+//! and the IST stacks that save (`#DF`, `#MC`) never return to Ring 3. A save
+//! and restore nested in Ring 0 is undone by the outer restore before Ring 3
+//! runs.
 
-use core::mem::{align_of, size_of};
-
-use super::fpu::UserFpState;
-
-/// A gate whose handler can reach another task before returning to Ring 3,
-/// and therefore brackets the user machine state.
+/// A gate that brackets the user machine state on a Ring 3 arrival: its
+/// handler can reach another task, or runs on the interrupted thread's kernel
+/// stack, which the modified optimisation's invariant lets nothing write
+/// before the save.
 #[derive(Clone, Copy)]
 pub struct Ring3Entry(unsafe extern "sysv64" fn());
 
-/// A gate whose handler cannot reach another task, so it saves nothing.
+/// A gate that saves nothing: it never returns, or takes its frame on an IST
+/// stack, so it writes no kernel stack a Ring 3 thread returns to.
 #[derive(Clone, Copy)]
 pub struct Ring0Entry(unsafe extern "sysv64" fn());
 
@@ -39,14 +55,8 @@ impl Ring0Entry {
     }
 }
 
-// `fp_bytes + fp_align`, aligned down, fits any incoming `rsp` alignment,
-// with room in the slack above it to stash the caller's `rsp`.
-const _: () = assert!(size_of::<UserFpState>().is_multiple_of(align_of::<UserFpState>()));
-const _: () = assert!(align_of::<UserFpState>() >= 8);
-
-/// `naked_asm!` for an entry that can reach another task: supplies the save
-/// area's size and alignment from [`UserFpState`], and prepends `cld`. The
-/// body must end with a trailing comma.
+/// `naked_asm!` for a [`Ring3Entry`]: supplies the save area's size and form,
+/// and prepends `cld`. The body must end with a trailing comma.
 #[cfg(not(feature = "entry-df-unclean"))]
 macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
@@ -56,8 +66,8 @@ macro_rules! ring3_naked_asm {
             // interrupts a copy with `DF` set.
             "cld",
             $($body)*
-            fp_bytes = const core::mem::size_of::<$crate::arch::fpu::UserFpState>(),
-            fp_align = const core::mem::align_of::<$crate::arch::fpu::UserFpState>(),
+            fp_area = sym $crate::arch::fpu::AREA_BYTES,
+            fp_form = sym $crate::arch::fpu::FORM,
         )
     };
 }
@@ -69,27 +79,54 @@ macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
         core::arch::naked_asm!(
             $($body)*
-            fp_bytes = const core::mem::size_of::<$crate::arch::fpu::UserFpState>(),
-            fp_align = const core::mem::align_of::<$crate::arch::fpu::UserFpState>(),
+            fp_area = sym $crate::arch::fpu::AREA_BYTES,
+            fp_form = sym $crate::arch::fpu::FORM,
         )
     };
 }
 
 /// `naked_asm!` for a trampoline into Ring 3 for the first time: supplies
-/// the declared state's address from `fpu::INITIAL_IMAGE`.
+/// the form and the declared state's two images from `fpu`.
 macro_rules! ring3_trampoline_asm {
     ($($body:tt)*) => {
         core::arch::naked_asm!(
             $($body)*
-            fp_initial = sym $crate::arch::fpu::INITIAL_IMAGE,
+            fp_form = sym $crate::arch::fpu::FORM,
+            fp_standard = sym $crate::arch::fpu::INITIAL_STANDARD,
+            fp_compacted = sym $crate::arch::fpu::INITIAL_COMPACTED,
         )
     };
 }
 
-/// The state a task that has never been in Ring 3 starts from.
+// The numbers `FORM` is compared against are `kernel::xsave::Form`'s
+// discriminants, which `fpu` asserts: 1 `XSAVES`, 2 `XSAVEC`, 3 `XSAVEOPT`;
+// any other is `ud2`. The local labels are 7x, which no stub uses for its own.
+
+/// The state a task that has never been in Ring 3 starts from: every
+/// component `XCR0` enables, so no upper half of a register is left from the
+/// CPU's last tenant. Clobbers `rax`, `rdx` and the flags.
 macro_rules! initial_user_state {
     () => {
-        "fxrstor64 [rip + {fp_initial}]\n"
+        concat!(
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "cmp byte ptr [rip + {fp_form}], 1\n",
+            "je 71f\n",
+            "cmp byte ptr [rip + {fp_form}], 2\n",
+            "je 72f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
+            "71:\n",
+            "xrstors64 [rip + {fp_compacted}]\n",
+            "jmp 73f\n",
+            "72:\n",
+            "xrstor64 [rip + {fp_compacted}]\n",
+            "jmp 73f\n",
+            "79:\n",
+            "xrstor64 [rip + {fp_standard}]\n",
+            "73:\n",
+        )
     };
 }
 
@@ -99,13 +136,42 @@ macro_rules! save_user_state {
     () => {
         concat!(
             "mov r11, rsp\n",
-            "sub rsp, {fp_bytes}\n",
-            "sub rsp, {fp_align}\n",
-            "and rsp, -{fp_align}\n",
-            "mov [rsp + {fp_bytes}], r11\n",
-            // fxsave64, not fsave/fxsave: non-waiting (won't trap a pending x87
-            // exception) and REX.W-wide (fxsave truncates FIP/FDP to 32 bits).
-            "fxsave64 [rsp]\n",
+            "sub rsp, qword ptr [rip + {fp_area}]\n",
+            "and rsp, -64\n",
+            "sub rsp, 64\n",
+            "mov [rsp], r11\n",
+            // The whole header, for every form: a stack holds whatever was
+            // last there. `XSAVEOPT` writes only `XCR0`'s bits of
+            // `XSTATE_BV`, and `XSAVEC` and `XSAVES` write no byte past
+            // `XCOMP_BV`; the standard restore is `#GP` on a stray
+            // `XSTATE_BV` bit or nonzero bytes 8 to 23, the compacted one on
+            // nonzero bytes 16 to 63 (SDM Vol. 1 §13.8.1, §13.8.2, §13.12).
+            "mov qword ptr [rsp + 64 + 512], 0\n",
+            "mov qword ptr [rsp + 64 + 520], 0\n",
+            "mov qword ptr [rsp + 64 + 528], 0\n",
+            "mov qword ptr [rsp + 64 + 536], 0\n",
+            "mov qword ptr [rsp + 64 + 544], 0\n",
+            "mov qword ptr [rsp + 64 + 552], 0\n",
+            "mov qword ptr [rsp + 64 + 560], 0\n",
+            "mov qword ptr [rsp + 64 + 568], 0\n",
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "cmp byte ptr [rip + {fp_form}], 1\n",
+            "je 74f\n",
+            "cmp byte ptr [rip + {fp_form}], 2\n",
+            "je 75f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
+            "74:\n",
+            "xsaves64 [rsp + 64]\n",
+            "jmp 76f\n",
+            "75:\n",
+            "xsavec64 [rsp + 64]\n",
+            "jmp 76f\n",
+            "79:\n",
+            "xsaveopt64 [rsp + 64]\n",
+            "76:\n",
         )
     };
 }
@@ -114,8 +180,22 @@ macro_rules! save_user_state {
 macro_rules! restore_user_state {
     () => {
         concat!(
-            "fxrstor64 [rsp]\n",
-            "mov rsp, [rsp + {fp_bytes}]\n",
+            "mov eax, -1\n",
+            "mov edx, -1\n",
+            "cmp byte ptr [rip + {fp_form}], 1\n",
+            "je 77f\n",
+            "cmp byte ptr [rip + {fp_form}], 2\n",
+            "je 79f\n",
+            "cmp byte ptr [rip + {fp_form}], 3\n",
+            "je 79f\n",
+            "ud2\n",
+            "77:\n",
+            "xrstors64 [rsp + 64]\n",
+            "jmp 78f\n",
+            "79:\n",
+            "xrstor64 [rsp + 64]\n",
+            "78:\n",
+            "mov rsp, [rsp]\n",
         )
     };
 }

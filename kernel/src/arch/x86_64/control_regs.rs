@@ -1,9 +1,12 @@
-//! What `CR0`, `CR4`, `IA32_EFER`, `IA32_APIC_BASE` and the performance
-//! request hold on every CPU in this machine. One declaration, applied by the
-//! BSP and every AP and checked on each; nothing else may write any of them.
-//! Each register is written whole: `CR0` and `EFER` are constants, `CR4` is
-//! required bits plus whatever optional bits this CPU offers, and
-//! `IA32_APIC_BASE` is the local APIC at its architectural address in the one
+//! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form,
+//! `IA32_APIC_BASE` and the performance request hold on every CPU in this
+//! machine. One declaration,
+//! applied by the BSP and every AP and checked on each; nothing else may write
+//! any of them. Each register is written whole: `CR0` and `EFER` are
+//! constants, `CR4` is required bits plus whatever optional bits this CPU
+//! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
+//! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
+//! is enabled), and `IA32_APIC_BASE` is the local APIC at its architectural address in the one
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
 //! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
 //! ([`Prot`](crate::mm::policy::Prot)).
@@ -35,6 +38,15 @@ mod efer {
     pub const NXE: u64 = 1 << 11;
 }
 
+/// `IA32_XSS`, the supervisor components `XSAVES` and `XRSTORS` move: SDM
+/// Vol. 4 Table 2-2. It exists exactly where `CPUID.(0DH,1):EAX[3]` is set.
+mod xss {
+    pub const MSR: u32 = 0xDA0;
+}
+
+/// `IA32_XSS` on every CPU that has it: no supervisor component.
+const XSS: u64 = 0;
+
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
     pub const PE: u64 = 1 << 0;
@@ -54,6 +66,7 @@ mod cr4 {
     pub const MCE: u64 = 1 << 6;
     pub const OSFXSR: u64 = 1 << 9;
     pub const OSXMMEXCPT: u64 = 1 << 10;
+    pub const OSXSAVE: u64 = 1 << 18;
     pub const LA57: u64 = 1 << 12;
     pub const UMIP: u64 = 1 << 11;
     pub const FSGSBASE: u64 = 1 << 16;
@@ -128,7 +141,7 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
 /// touches no debug register. `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
 const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT;
+    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT | cr4::OSXSAVE;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
@@ -149,6 +162,9 @@ pub const EFER: u64 = efer::SCE | efer::LME | efer::LMA | efer::NXE;
 
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
+
+/// `XCR0` as the BSP computed it; zero until then, a value no CPU may hold.
+static DECLARED_XCR0: AtomicU64 = AtomicU64::new(0);
 
 /// CPUs that have run [`self_check`] against the declaration and survived it.
 /// Counted rather than inferred from the roster, so [`report`]'s line is
@@ -216,11 +232,14 @@ fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
     verdict.ok()
 }
 
-/// Puts this CPU's `CR4` and `EFER` into the declaration and checks both
-/// against it. Must run after [`init_cr0`] and before `arch::syscall::init`,
-/// which needs `SCE` set.
+/// Puts this CPU's `CR4`, `EFER`, `XCR0` and `IA32_XSS` into the declaration,
+/// checks them against it, and declares the save form and the area they imply. Must run
+/// after [`init_cr0`], before `arch::syscall::init`, which needs `SCE` set,
+/// and before the first Ring 3 entry stub can run, which saves by `XCR0`.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
+    let (xcr0, form) = xsave_declaration(cpu_id);
+    let has_xss = has_xss();
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
@@ -230,6 +249,15 @@ pub fn init(cpu_id: u32) {
         unsafe {
             cpu::write_cr4(declared);
             cpu::wrmsr(efer::MSR, EFER);
+            // SAFETY: `CR4.OSXSAVE` is set by the write above, and
+            // `xcr0_declaration` took only components this CPU enumerates,
+            // AVX-512's three together and with AVX (SDM Vol. 1 §13.3).
+            cpu::xsetbv0(xcr0);
+            // SAFETY: the MSR exists where `has_xss` says, and zero sets no
+            // component.
+            if has_xss {
+                cpu::wrmsr(xss::MSR, XSS);
+            }
         }
         if declared & cr4::SMAP != 0 {
             // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
@@ -237,7 +265,8 @@ pub fn init(cpu_id: u32) {
             cpu::clac();
         }
     }
-    self_check(cpu_id, declared);
+    self_check(cpu_id, declared, xcr0, form, has_xss);
+    super::fpu::declare_area(cpu_id, xcr0, form);
 }
 
 /// Puts this CPU's performance request into the declaration and checks it.
@@ -404,6 +433,43 @@ fn declaration(cpu_id: u32) -> u64 {
     }
 }
 
+/// What this CPU says `XCR0` and the save form come to, `XCR0` checked
+/// against what the BSP said for [`declaration`]'s reason; the form is checked
+/// where `fpu::declare_area` publishes it.
+fn xsave_declaration(cpu_id: u32) -> (u64, kernel::xsave::Form) {
+    let (eax1, _, ecx1, _) = cpu::cpuid(1, 0);
+    let (d0_eax, _, _, d0_edx) = cpu::leaf_d(0);
+    let facts = kernel::xsave::Facts {
+        cpuid_1_ecx: ecx1,
+        cpuid_d0_eax: d0_eax,
+        cpuid_d0_edx: d0_edx,
+        cpuid_d1_eax: cpu::leaf_d(1).0,
+    };
+    let refused = |refusal: kernel::xsave::Refusal| -> ! {
+        panic!("control_regs: cpu{cpu_id} cannot run user state: {} ({refusal:?})", refusal.reason())
+    };
+    let declared = kernel::xsave::xcr0(&facts).unwrap_or_else(|r| refused(r));
+    let form = kernel::xsave::form(&facts, toyos_cpuvuln::erratum_1386(cpu::vendor(), eax1))
+        .unwrap_or_else(|r| refused(r));
+    match DECLARED_XCR0.compare_exchange(0, declared, Ordering::Release, Ordering::Acquire) {
+        Ok(_) => (declared, form),
+        Err(published) => {
+            assert!(
+                published == declared,
+                "control_regs: cpu{cpu_id} computes xcr0={declared:#x} and the machine declared \
+                 {published:#x} — its CPUs do not offer the same state components",
+            );
+            (declared, form)
+        }
+    }
+}
+
+/// Whether this CPU has `IA32_XSS`: wherever it enumerates `XSAVES`, whichever
+/// form it saves with.
+fn has_xss() -> bool {
+    cpu::leaf_d(1).0 & (1 << 3) != 0
+}
+
 /// The `CR4` bits this CPU will accept, as CPUID reports them.
 fn supported() -> u64 {
     const CPUID_1_EDX: [(u32, u64); 5] = [
@@ -413,6 +479,7 @@ fn supported() -> u64 {
         (24, cr4::OSFXSR),
         (25, cr4::OSXMMEXCPT),
     ];
+    const CPUID_1_ECX: [(u32, u64); 1] = [(26, cr4::OSXSAVE)];
     const CPUID_7_EBX: [(u32, u64); 3] =
         [(0, cr4::FSGSBASE), (7, cr4::SMEP), (20, cr4::SMAP)];
     const CPUID_7_ECX: [(u32, u64); 1] = [(2, cr4::UMIP)];
@@ -423,6 +490,11 @@ fn supported() -> u64 {
     let mut have = 0;
     for (bit, flag) in CPUID_1_EDX {
         if edx1 & (1 << bit) != 0 {
+            have |= flag;
+        }
+    }
+    for (bit, flag) in CPUID_1_ECX {
+        if ecx1 & (1 << bit) != 0 {
             have |= flag;
         }
     }
@@ -445,16 +517,22 @@ fn supported() -> u64 {
 
 /// Logs what this CPU holds, then asserts it against the declaration —
 /// logged first so a failing CPU still leaves its value in the log.
-fn self_check(cpu_id: u32, declared_cr4: u64) {
+fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::xsave::Form, has_xss: bool) {
     let live_cr0 = cpu::read_cr0();
     let live_cr4 = cpu::read_cr4();
     let live_efer = cpu::rdmsr(efer::MSR);
+    // SAFETY: gated on `CR4.OSXSAVE`, without which `xgetbv` is `#UD`; a CPU
+    // missing it reads as holding no `XCR0`, which no declaration is.
+    let live_xcr0 = if live_cr4 & cr4::OSXSAVE != 0 { unsafe { cpu::xgetbv0() } } else { 0 };
+    let live_xss = has_xss.then(|| cpu::rdmsr(xss::MSR));
     log!(
-        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x}{}{}{}{}{}",
+        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={}{}{}{}{}{}",
         cpu_id,
         live_cr0,
         live_cr4,
         live_efer,
+        live_xcr0,
+        form.name(),
         opt(live_cr4, cr4::SMEP, " smep"),
         opt(live_cr4, cr4::SMAP, " smap"),
         opt(live_cr4, cr4::PCIDE, " pcid"),
@@ -476,6 +554,13 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
         live_efer == EFER,
         "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is {EFER:#06x}",
     );
+    assert!(
+        live_xcr0 == declared_xcr0,
+        "control_regs: cpu{cpu_id} holds xcr0={live_xcr0:#x}, the declaration is {declared_xcr0:#x}",
+    );
+    if let Some(live_xss) = live_xss {
+        assert!(live_xss == XSS, "control_regs: cpu{cpu_id} holds ia32_xss={live_xss:#x}, the declaration is {XSS:#x}");
+    }
     CHECKED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -525,11 +610,13 @@ fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
 /// the CPUs it got rather than to crash on that one.
 pub fn report(cpus: u32) {
     log!(
-        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x} apic={:?}",
+        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={} apic={:?}",
         CHECKED.load(Ordering::Relaxed),
         CR0,
         DECLARED_CR4.load(Ordering::Acquire),
         EFER,
+        DECLARED_XCR0.load(Ordering::Acquire),
+        super::fpu::form().name(),
         apic_mode(),
     );
 }

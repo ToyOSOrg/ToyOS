@@ -96,12 +96,12 @@ impl IdtEntry {
         reserved: 0,
     };
 
-    /// A gate for a handler that can reach another task.
+    /// A gate that brackets the user machine state on a Ring 3 arrival.
     fn ring3(entry: Ring3Entry) -> Self {
         Self::at(entry.addr())
     }
 
-    /// A gate for one that cannot.
+    /// A gate that writes no kernel stack a Ring 3 thread returns to.
     fn ring0(entry: Ring0Entry) -> Self {
         Self::at(entry.addr())
     }
@@ -274,7 +274,7 @@ idt_vectors! {
         ControlProtection  = 0x15, stub_cp, error_code;
     }
     direct {
-        // ring0: reschedules nothing. ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
+        // ring0: on its own stack, so no thread's. ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
@@ -293,8 +293,8 @@ idt_vectors! {
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;
-        // Named via the SVR, not Intel's vector list; ring0 because the handler reaches no task.
-        ring0 Spurious     = 0xFF, spurious::spurious_entry;
+        // Named via the SVR, not Intel's vector list.
+        ring3 Spurious     = 0xFF, spurious::spurious_entry;
     }
 }
 
@@ -348,7 +348,7 @@ extern "sysv64" fn common_entry() {
         "call {dispatch}",
         "lock sub dword ptr gs:[{preempt_count}], 1",
         // Exit-to-user epilogue runs before the GPR pops: the call clobbers scratch regs that must not leak into user state.
-        "mov r11, [rsp + {fp_bytes}]",
+        "mov r11, [rsp]",
         "test dword ptr [r11 + 144], 3",
         "jz 9f",
         "cli",
@@ -486,7 +486,7 @@ pub fn init() {
     let mut unclaimed = 0u32;
     for entry in IDT.lock().entries.iter_mut() {
         if entry.type_attr == 0 {
-            *entry = IdtEntry::ring0(Ring0Entry::declare(unclaimed::unclaimed_entry));
+            *entry = IdtEntry::ring3(Ring3Entry::new(unclaimed::unclaimed_entry));
             unclaimed += 1;
         }
     }
