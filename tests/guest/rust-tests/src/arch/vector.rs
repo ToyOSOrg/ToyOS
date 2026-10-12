@@ -8,6 +8,8 @@ mod x86_64 {
     use core::arch::asm;
     use core::arch::x86_64::__cpuid_count;
 
+    use toyos_abi::syscall::{Stat, SYS_STAT};
+
     /// Which vector registers this machine gives a thread. Only [`width`]
     /// makes one, so holding one is having checked what std reports.
     #[derive(Clone, Copy, Debug)]
@@ -107,36 +109,78 @@ mod x86_64 {
         );
     }
 
+    /// Turns of the hold loop between two of its `stat`s.
+    const BURST: u64 = 100_000;
+
+    /// The hold loop: `r12` runs of [`BURST`] turns, each ending in a `stat`
+    /// whose arguments `rdi`, `rsi`, `rdx`, `r8` and `r9` keep across every
+    /// `syscall`, and the `stat`s' results ORed into `r13`.
+    macro_rules! bursts {
+        () => {
+            concat!(
+                "2:\n",
+                "mov rcx, {burst}\n",
+                "3:\n",
+                "dec rcx\n",
+                "jnz 3b\n",
+                "syscall\n",
+                "or r13, rax\n",
+                "dec r12\n",
+                "jnz 2b\n",
+            )
+        };
+    }
+
     #[target_feature(enable = "avx")]
-    unsafe fn hold_avx(p: *mut u8, spins: u64) {
+    unsafe fn hold_avx(p: *mut u8, bursts: u64, path: &[u8], stat: *mut Stat) -> u64 {
+        let refused;
         asm!(
             ymm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15),
-            "2:",
-            "dec rcx",
-            "jnz 2b",
+            bursts!(),
             ymm!(store 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15),
             p = in(reg) p,
-            inout("rcx") spins => _,
+            inout("r12") bursts => _,
+            inout("r13") 0u64 => refused,
+            burst = const BURST,
+            in("rdi") SYS_STAT,
+            in("rsi") path.as_ptr(),
+            in("rdx") path.len(),
+            in("r8") stat,
+            in("r9") 1u64,
+            out("rax") _,
+            out("rcx") _,
+            out("r11") _,
             clobber_abi("C"),
             options(nostack),
         );
+        refused
     }
 
     #[target_feature(enable = "avx512f")]
-    unsafe fn hold_avx512(p: *mut u8, spins: u64) {
+    unsafe fn hold_avx512(p: *mut u8, bursts: u64, path: &[u8], stat: *mut Stat) -> u64 {
+        let refused;
         asm!(
             zmm!(load 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
             zmm!(kload 1 2 3 4 5 6 7),
-            "2:",
-            "dec rcx",
-            "jnz 2b",
+            bursts!(),
             zmm!(store 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31),
             zmm!(kstore 1 2 3 4 5 6 7),
             p = in(reg) p,
-            inout("rcx") spins => _,
+            inout("r12") bursts => _,
+            inout("r13") 0u64 => refused,
+            burst = const BURST,
+            in("rdi") SYS_STAT,
+            in("rsi") path.as_ptr(),
+            in("rdx") path.len(),
+            in("r8") stat,
+            in("r9") 1u64,
+            out("rax") _,
+            out("rcx") _,
+            out("r11") _,
             clobber_abi("C"),
             options(nostack),
         );
+        refused
     }
 
     /// This thread's vector registers, as they are.
@@ -153,20 +197,25 @@ mod x86_64 {
         file
     }
 
-    /// `file` loaded into every vector register, held there through `spins`
-    /// turns of a loop that touches nothing else, and read back.
-    pub fn hold(width: Width, file: &[u8], spins: u64) -> Vec<u8> {
+    /// `file` loaded into every vector register, held there through `bursts`
+    /// runs of [`BURST`] turns of a loop that touches no vector register, each
+    /// ending in a `stat` of `path` that the kernel runs on this thread's own
+    /// kernel stack, and read back.
+    pub fn hold(width: Width, file: &[u8], bursts: u64, path: &[u8]) -> Vec<u8> {
         assert_eq!(file.len(), width.bytes());
-        assert!(spins > 0, "`dec` from zero would spin 2^64 times");
+        assert!(bursts > 0, "`dec` from zero would loop 2^64 times");
         let mut held = file.to_vec();
+        let mut stat = Stat::default();
         // SAFETY: as `read`'s; the loads and stores are `width.bytes()` long,
-        // and every vector register the block writes is declared clobbered.
-        unsafe {
+        // every vector register the block writes is declared clobbered, and
+        // `stat` reads `path` and writes `stat`, both live across the block.
+        let refused = unsafe {
             match width.0 {
-                Kind::Avx => hold_avx(held.as_mut_ptr(), spins),
-                Kind::Avx512 => hold_avx512(held.as_mut_ptr(), spins),
+                Kind::Avx => hold_avx(held.as_mut_ptr(), bursts, path, &mut stat),
+                Kind::Avx512 => hold_avx512(held.as_mut_ptr(), bursts, path, &mut stat),
             }
-        }
+        };
+        assert_eq!(refused, 0, "a `stat` of {} was refused", String::from_utf8_lossy(path));
         held
     }
 }

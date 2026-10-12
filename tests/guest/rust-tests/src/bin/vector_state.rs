@@ -1,9 +1,15 @@
 //! A thread's vector registers are its own: a new thread starts with every one
 //! above `xmm0`-`xmm15` zero, and what it loads into all of them survives
-//! being switched out for threads holding other values.
+//! being switched out for threads holding other values, whatever the kernel
+//! wrote on the thread's own kernel stack in between.
 //!
 //! More threads than CPUs, each spinning with its registers loaded, so every
 //! CPU is time-shared and each switch puts a thread with other values on it.
+//! The spin stops every so often for a `stat`, whose path walk the kernel runs
+//! on the thread's own kernel stack, below the frame of the switch that
+//! preempts the spin. A CPU whose save skips a component unmodified since its
+//! restore from the same address (SDM Vol. 1 §13.6) keeps it only where
+//! nothing wrote the thread's save area in between.
 
 #[path = "../arch/vector.rs"]
 mod vector;
@@ -12,8 +18,9 @@ mod vector;
 /// the thread's own previous round is caught as surely as another thread's.
 const ROUNDS: u64 = 3;
 
-/// Turns of the hold loop: past a quantum on the T14 and under TCG alike.
-const SPINS: u64 = 100_000_000;
+/// Bursts of the hold loop, each ending in a `stat`: past a quantum on the
+/// T14 and under TCG alike.
+const BURSTS: u64 = 1_000;
 
 /// The bytes `thread` loads in `round`: no two threads or rounds alike.
 fn pattern(thread: u64, round: u64, len: usize) -> Vec<u8> {
@@ -31,6 +38,8 @@ fn pattern(thread: u64, round: u64, len: usize) -> Vec<u8> {
 
 fn main() {
     let width = vector::width();
+    let exe = std::env::current_exe().expect("this program's own path");
+    let path: &'static [u8] = exe.into_os_string().into_encoded_bytes().leak();
     let threads = 2 * toyos_abi::syscall::cpu_count() as u64 + 1;
     let workers: Vec<_> = (0..threads)
         .map(|thread| {
@@ -41,7 +50,7 @@ fn main() {
                 }
                 for round in 0..ROUNDS {
                     let want = pattern(thread, round, width.bytes());
-                    let got = vector::hold(width, &want, SPINS);
+                    let got = vector::hold(width, &want, BURSTS, path);
                     if let Some(register) = width.first_difference(&got, &want) {
                         panic!("thread {thread} round {round}: {register} changed while it was switched out");
                     }
