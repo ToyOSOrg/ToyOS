@@ -440,6 +440,13 @@ const NO_DOMAIN: &str = "iommu: no domain of its own for a device: no unit on th
 /// which only DMA the unit lets through can do.
 const STICK_BOUND: &str = "usb-storage: 1 device(s)";
 
+/// What the actuator leaves on an AMD-Vi unit, in the kernel's words for
+/// `unit`: one line per field the hand-over switches off by its own write.
+pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
+    ["CmdBufEn", "EventLogEn", "IommuEn"]
+        .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
+}
+
 /// **A unit an AMD machine's firmware left on is switched off, and the boot
 /// stick's DMA reaches memory.** QEMU's `amd-iommu` is the only AMD-Vi unit
 /// the merge queue runs: the T14 is an Intel machine, and the hand-over's
@@ -478,12 +485,12 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         log.must_not_say("no DMAR or IVRS table")?;
         let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
         if left {
-            // `CmdBufEn`, `EventLogEn` and `IommuEn`, as the actuator wrote them.
+            // [`amdvi_left_on`]'s fields, as the actuator wrote them.
             if !handed.contains("control=0x0000000000001005") {
                 return Err(format!("the actuator's unit was handed over as {handed:?}"));
             }
-            for field in ["CmdBufEn", "EventLogEn", "IommuEn"] {
-                log.must_say(&format!("iommu: amdvi unit0 was handed over with {field} on; it goes off"))?;
+            for line in amdvi_left_on("unit0") {
+                log.must_say(&line)?;
             }
             for field in ["EventIntEn", "GALogEn", "GAIntEn", "PPRLogEn", "PPRIntEn"] {
                 log.must_not_say(&format!("with {field} on"))?;

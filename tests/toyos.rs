@@ -5251,11 +5251,11 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
             .filter_map(|l| l.split_once("iommu: amdvi ")?.1.split_once(" handed over control="))
             .map(|(unit, _)| unit);
         for unit in amdvi {
-            for field in ["CmdBufEn", "EventLogEn", "IommuEn"] {
-                if !log.contains(&format!("iommu: amdvi {unit} was handed over with {field} on; it goes off")) {
+            for line in common::iommu::amdvi_left_on(unit) {
+                if !log.contains(&line) {
                     return Err(format!(
-                        "amdvi {unit} never said it was handed over with {field} on, so the state \
-                         the actuator left was never switched off:\n{log}"
+                        "amdvi {unit} never said {line:?}, so the state the actuator left was \
+                         never switched off:\n{log}"
                     ));
                 }
             }
