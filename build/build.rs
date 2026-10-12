@@ -676,19 +676,23 @@ fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), Stri
 /// What a row receives reaches a server that runs: a port the supervisor
 /// serves, one a row `[boot] start` names serves, since a launch starts no row
 /// that serves ([`starts_name_what_a_launch_can_start`]), or one a row
-/// provides; and never a port the row serves itself. `[apps] receives` is
-/// narrower: nobody makes a `provides` port for a package.
+/// provides, never `netstack`; and never a port the row serves itself.
+/// `[apps] receives` is narrower: nobody makes a `provides` port for a package.
 ///
 /// **Checked on every manifest rendered**: the supervisor mints `netstack`
 /// from its running server's acceptor, under the lock that server's own start
-/// holds, so a row receiving it where none runs is endowed nothing, and the
-/// server's own row receiving it waits at boot for ever.
+/// holds, and never from a provider, so a row receiving it where none runs is
+/// endowed nothing, and the server's own row receiving it waits at boot for
+/// ever.
 fn receives_reach_a_running_server(config: &SystemConfig) -> Result<(), String> {
     let running = |port: &String| {
         SUPERVISOR_SERVED.contains(&port.as_str())
             || config.boot.start.iter().any(|key| config.programs.get(key).is_some_and(|row| row.serves.contains(port)))
     };
     for (name, program) in &config.programs {
+        if program.provides.iter().any(|port| port == "netstack") {
+            return Err(format!("`{name}` provides `netstack`, which the supervisor mints from its started server alone"));
+        }
         for port in &program.receives {
             if program.serves.contains(port) {
                 return Err(format!("`{name}` receives `{port}`, which it serves itself"));
@@ -3056,6 +3060,10 @@ mod tests {
             (
                 "[boot]\nstart = [\"netstack\"]\n[programs.netstack]\nserves = [\"netstack\"]\nreceives = [\"netstack\"]\n",
                 "`netstack` receives `netstack`, which it serves itself",
+            ),
+            (
+                "[programs.relay]\nprovides = [\"netstack\"]\n[programs.host]\nreceives = [\"netstack\"]\n",
+                "`relay` provides `netstack`, which the supervisor mints from its started server alone",
             ),
             ("[apps]\nreceives = [\"ghost\"]\n", "`[apps] receives` names `ghost`"),
             ("[programs.netstack]\nserves = [\"netstack\"]\n[apps]\nreceives = [\"netstack\"]\n", "`[apps] receives` names `netstack`"),
