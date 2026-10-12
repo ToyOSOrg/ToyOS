@@ -46,9 +46,14 @@ asleep wakes on an overloaded core while other cores are idle. Its fix
 wakes the thread on the core it last ran on if that core is idle, and
 otherwise on the core idle longest, where one is; the paper applies it only
 where the power policy keeps cores out of low-power states, since waking a
-core from one costs power. With 8 spinners no core idles, so §3.3 does not
-reach that arm and nothing published covers it; latency is its whole purpose,
-so under the track's rule the 100 µs bound below decides its design.
+core from one costs power. With 8 spinners no core idles, and a wake onto a
+CPU running a task is what wakeup preemption decides: Linux's fair class has
+preempted the running task for a woken one since CFS (`check_preempt_curr_fair`,
+`kernel/sched_fair.c` at v2.6.23), and since v6.6 by virtual deadline
+(147f3efaa241, "wakeup preemption is driven by the deadline"), the
+vruntime/lag family of ToyOS's fair band (`kernel/pure/sched/fair.rs:1-3`).
+That arm follows it. The 100 µs bound below is the exit's test that the stage
+works, not the judge of its design.
 
 **Exit**: a metal row on the T14 and the AMD bench that wakes a task onto a
 CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs, and

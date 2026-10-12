@@ -43,9 +43,18 @@ the parts it links):
 Intel's optimization manual has critical data and locks allocated apart,
 aligned to no less than the false-sharing threshold, the CLFLUSH line size of
 CPUID.01H:EBX[15:8] (248966-051, Vol. 1 §11.4.5, User/Source Coding Rule
-17). AMD's APM Vol. 2 (24593 rev. 3.42) and its optimization guide for
-family 17h models 30h and greater (56305 rev. 3.02) say nothing on false
-sharing. Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
+17). Linux keeps each CPU's run queue on lines of its own,
+`DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues)` (`kernel/sched/core.c`
+at v7.2), which aligns it by `____cacheline_aligned_in_smp` to
+`SMP_CACHE_BYTES`, x86's L1 line (`include/linux/percpu-defs.h`,
+`include/linux/cache.h`, `include/vdso/cache.h`,
+`arch/x86/include/asm/cache.h`). AMD documents the line through the same CPUID
+field (APM 24594 rev. 3.36, Vol. 3, CLFLUSH) and gives it as 64 bytes on
+family 17h models 30h and greater (56305 rev. 3.02, §2.6.1, §2.6.2), and none
+of APM Vol. 2 (24593 rev. 3.42), Vol. 3 and 56305 says anything on false
+sharing. So the stage is backed on both benches.
+
+Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
 `CpuHandle` or `Frontier`, and the AMD bench was not read. The next
 measurement attributes the HITM count to the lines it lands on, on both
 benches.

@@ -46,8 +46,7 @@ and contention).
   AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
 - A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
   switch on the T14, and at the AMD bench's TSC floor; next, a TSC-deadline
-  twin on the T14, whose reading decides the stage, since speed is its only
-  purpose
+  twin on the T14, its reading reported
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there
