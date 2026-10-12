@@ -28,6 +28,13 @@
 //! the lease's router that serves nothing, and each phase says
 //! `https_download: phase name=<name> from=<ns> to=<ns>`, all on
 //! `netperf::now_ns`'s clock, which netstack's `stamp` lines are on too.
+//!
+//! MEASUREMENT ONLY, #883's DNS cache: before the downloads, [`UNCACHED`]
+//! lookups of names nobody asked before (`phase name=uncached`), the same in
+//! both arms; after them, its K4 step: the file's host looked up once to warm
+//! this job's view (`k4_warm`), then again (`k4_a`), then by `host`, which the
+//! launcher starts as a row of its own (`k4_host`, and `k4 host exit=<code>`),
+//! then again (`k4_b`).
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -80,6 +87,25 @@ fn lan_probe() -> f64 {
     let at = Instant::now();
     let _ = (HOST, 443).to_socket_addrs().unwrap_or_else(|e| panic!("look up {HOST}: {e}"));
     at.elapsed().as_secs_f64() * 1e3
+}
+
+/// MEASUREMENT ONLY, #883: lookups of names no view holds, each asked once:
+/// `.invalid` is never a name (RFC 6761 §6.4).
+const UNCACHED: usize = 10;
+
+/// MEASUREMENT ONLY, #883's K4: `host`'s exit code, started as its own row
+/// through the launcher the runner hands this job. Its output names the
+/// host's addresses, so it is read and dropped.
+fn k4_host() -> i32 {
+    let mut child = std::process::Command::new("/system/bin/host")
+        .arg(HOST)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn host: {e}"));
+    let mut out = Vec::new();
+    let mut stdout = child.stdout.take().expect("host's stdout is piped");
+    std::io::Read::read_to_end(&mut stdout, &mut out).unwrap_or_else(|e| panic!("read host's output: {e}"));
+    child.wait().unwrap_or_else(|e| panic!("wait for host: {e}")).code().unwrap_or(-1)
 }
 
 /// MEASUREMENT ONLY: min, median, 90th percentile and max of `ms`, and how many.
@@ -226,6 +252,15 @@ fn main() {
         lan_control(router);
         phase("lan_control", from);
 
+        // MEASUREMENT ONLY, #883: lookups no cache can answer, at the idle
+        // lookups' pace. Each is said by its stamps; its answer is no address.
+        let from = netperf::now_ns();
+        for k in 1..=UNCACHED {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = (format!("dnscache-gate-{k}.invalid").as_str(), 443).to_socket_addrs();
+        }
+        phase("uncached", from);
+
         // MEASUREMENT ONLY: the file [`RUNS`] times, back to back.
         let mut previous: Option<SocketAddr> = None;
         for run in 1..=RUNS {
@@ -272,6 +307,22 @@ fn main() {
             );
             println!("https_download: perf run={run} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
         }
+
+        // MEASUREMENT ONLY, #883's K4: two of this job's lookups around
+        // `host`'s, the first after one that warms this job's view.
+        let from = netperf::now_ns();
+        lan_probe();
+        phase("k4_warm", from);
+        let from = netperf::now_ns();
+        lan_probe();
+        phase("k4_a", from);
+        let from = netperf::now_ns();
+        let exit = k4_host();
+        phase("k4_host", from);
+        println!("https_download: k4 host exit={exit}");
+        let from = netperf::now_ns();
+        lan_probe();
+        phase("k4_b", from);
         drop(transferring);
     });
 }

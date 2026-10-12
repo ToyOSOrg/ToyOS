@@ -20,10 +20,17 @@ devices = ["pci:8086:15fc"]
 # `netstack` for the job's lookup and connection, `log` for netstack's word on
 # its lease; `counters` and `trace` for every CPU's MPERF and stamp either
 # side of the transfer, MPERF being answered only beside `trace`; `dup`
-# because the runner hands the job a duplicate.
+# because the runner hands the job a duplicate. MEASUREMENT ONLY, #883's K4:
+# `starts` so the job's `host` is a row of its own.
 [programs.test-runner]
 receives = ["netstack", "log"]
 syscap = ["counters", "trace", "dup"]
+starts = ["host"]
+
+# MEASUREMENT ONLY, #883's K4: a name's addresses, asked of netstack by a row
+# that is not the job's.
+[programs.host]
+receives = ["netstack"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
