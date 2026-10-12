@@ -508,56 +508,37 @@ fn stage_artifact(root: &Path, built: &Path, stem: &str, key: u64) -> PathBuf {
 /// with them off.
 const OVERFLOW_CHECK_MARKER: &[u8] = b"attempt to add with overflow";
 
-/// Refuse to build a kernel whose target has hardware float.
+/// Refuse to build an AArch64 kernel whose target has FP/SIMD.
 ///
-/// The kernel's entry saves the user machine state at the ring transition and
-/// nowhere else, which is sound only because kernel code cannot disturb it:
-/// the FP/SIMD registers may be left dirty for a whole kernel excursion because
-/// nothing in the kernel reads or writes them. That rests on the target spec —
-/// `RustcAbi::Softfloat` and `+soft-float` in
-/// `rust/compiler/rustc_target/src/spec/targets/x86_64_unknown_none.rs`, and
-/// `aarch64_unknown_none_softfloat.rs`'s `-fp-armv8,-neon` — and an edit
-/// turning it off would make every bracket in the kernel insufficient without
-/// changing a byte of `kernel/`.
+/// A thread's FP/SIMD state stays in the registers across every entry from
+/// EL0 and is saved only at a switch (`kernel/src/arch/aarch64/fpu.rs`), which
+/// is sound only because kernel code cannot disturb it. That rests on the
+/// target spec, `aarch64_unknown_none_softfloat.rs`'s `-fp-armv8,-neon`, and an
+/// edit turning it off would corrupt every thread without changing a byte of
+/// `kernel/`. x86-64's kernel is judged by its instructions instead
+/// (`crate::fpgate`).
 ///
-/// Asked of the compiler rather than of the manifest, and once per process and
-/// architecture: it is a property of the toolchain rather than of any one image.
-fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
-    static CHECKED: std::sync::Mutex<BTreeSet<Arch>> = std::sync::Mutex::new(BTreeSet::new());
-    let mut checked = CHECKED.lock().expect("a softfloat check panicked");
-    if checked.contains(&arch) {
-        return;
-    }
-    let out = Command::new("rustc")
-        .args(["--print", "cfg", "--target", arch.kernel()])
-        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
-        .env_remove("RUSTFLAGS")
-        .env_remove("RUSTC")
-        .output()
-        .expect("rustc --print cfg failed to launch");
-    assert!(out.status.success(), "rustc --print cfg failed for the kernel target");
-    let cfg = String::from_utf8_lossy(&out.stdout);
-    let has = |feature: &str| cfg.lines().any(|l| l == format!(r#"target_feature="{feature}""#));
-    match arch {
-        Arch::X86_64 => {
-            assert!(
-                has("x87"),
-                "the kernel target no longer reports x87, so `arch::fpu`'s FXSAVE64 image is \
-                 not the state this machine has:\n{cfg}"
-            );
-            assert!(
-                !has("sse"),
-                "the kernel target has hardware float, so kernel code may now clobber the user \
-                 machine state between the entry's save and its restore:\n{cfg}"
-            );
-        }
-        Arch::Aarch64 => assert!(
+/// Asked of the compiler rather than of the manifest, and once per process: it
+/// is a property of the toolchain rather than of any one image.
+fn assert_aarch64_kernel_is_softfloat(env: &GuestEnv) {
+    static CHECKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CHECKED.get_or_init(|| {
+        let out = Command::new("rustc")
+            .args(["--print", "cfg", "--target", Arch::Aarch64.kernel()])
+            .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
+            .env_remove("RUSTFLAGS")
+            .env_remove("RUSTC")
+            .output()
+            .expect("rustc --print cfg failed to launch");
+        assert!(out.status.success(), "rustc --print cfg failed for the kernel target");
+        let cfg = String::from_utf8_lossy(&out.stdout);
+        let has = |feature: &str| cfg.lines().any(|l| l == format!(r#"target_feature="{feature}""#));
+        assert!(
             !has("neon") && !has("fp-armv8"),
-            "the kernel target has FP/SIMD, so kernel code may now clobber the user machine \
-             state between the entry's save and its restore:\n{cfg}"
-        ),
-    }
-    checked.insert(arch);
+            "the kernel target has FP/SIMD, so kernel code may now clobber a thread's FP/SIMD \
+             state while it is in the kernel:\n{cfg}"
+        );
+    });
 }
 
 /// Whether `haystack` contains `needle` as a contiguous subslice.
@@ -1694,14 +1675,16 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
     match arch {
         Arch::X86_64 => {
             assert_entry_window_matches_features(features, &bytes);
+            if let Err(refused) = crate::fpgate::judge(&bytes) {
+                panic!("{refused}");
+            }
         }
         // Taking an exception to EL1 sets `PSTATE.SP`, so its handler's first
         // instruction already runs on `SP_EL1`: no instruction runs at EL1 on a
         // user's stack, and there is no window to judge.
-        Arch::Aarch64 => {}
+        Arch::Aarch64 => assert_aarch64_kernel_is_softfloat(env),
     }
     assert_sched_check_matches_features(features, &bytes);
-    assert_kernel_is_softfloat(env, arch);
     bytes
 }
 

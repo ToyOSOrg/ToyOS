@@ -98,7 +98,8 @@ pub struct PerCpu {
     pub syscall_rbp: u64,
     /// The task whose syscall this CPU is inside: packed pid:tid, or [`NO_SYSCALL`].
     syscall_task: u64,
-    /// `lock add/sub`: IRQ entry/exit and kernel code both mutate it on this CPU.
+    /// Written by this CPU alone, through `gs:`, each write one instruction,
+    /// which no interrupt or NMI splits (SDM Vol. 3A §7.6): no `lock`.
     pub preempt_count: AtomicU32,
     pub need_resched: AtomicU8,
     _pad_after_need_resched: [u8; 3],
@@ -296,21 +297,22 @@ pub(crate) mod gs {
         }
     }
 
-    /// One `lock`-prefixed increment of a per-CPU `u32`; required since an IRQ can split a plain `add`'s load/store on this CPU.
+    /// One increment of a per-CPU `u32`, in one instruction, which an
+    /// interrupt on this CPU cannot split; no `lock`, since no other CPU writes it.
     #[inline]
-    pub fn lock_inc_u32<const OFF: u32>() {
-        // SAFETY: `write_u32`'s argument; no `preserves_flags` — `lock add` writes OF/SF/ZF/AF/CF/PF.
+    pub fn inc_u32<const OFF: u32>() {
+        // SAFETY: `write_u32`'s argument; no `preserves_flags` — `add` writes OF/SF/ZF/AF/CF/PF.
         unsafe {
-            asm!("lock add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
+            asm!("add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
     }
 
-    /// One `lock`-prefixed decrement of a per-CPU `u32`. See [`lock_inc_u32`].
+    /// One decrement of a per-CPU `u32`. See [`inc_u32`].
     #[inline]
-    pub fn lock_dec_u32<const OFF: u32>() {
-        // SAFETY: `lock_inc_u32`'s argument exactly.
+    pub fn dec_u32<const OFF: u32>() {
+        // SAFETY: `inc_u32`'s argument exactly.
         unsafe {
-            asm!("lock sub dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
+            asm!("sub dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
     }
 }
@@ -509,9 +511,6 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
-    // INVARIANT: the control registers precede the IDT. Every entry stub saves
-    // SSE state, and `fxsave` without `CR4.OSFXSR` is `#UD`, so a fault taken
-    // between the two would fault again inside its own handler.
     super::control_regs::init(0);
     // Then the IDT, before the first step that can fault. Until `lidt` runs the
     // loaded table is the one firmware left across `ExitBootServices`, whose
@@ -789,7 +788,7 @@ pub fn set_preempt_count(value: u32) {
 /// One increment, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_up() {
-    gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
+    gs::inc_u32::<OFF_PREEMPT_COUNT>();
     #[cfg(feature = "mask-windows")]
     crate::windows::preempt_raised();
 }
@@ -799,7 +798,7 @@ pub fn preempt_count_up() {
 pub fn preempt_count_down() {
     #[cfg(feature = "mask-windows")]
     crate::windows::preempt_lowering();
-    gs::lock_dec_u32::<OFF_PREEMPT_COUNT>();
+    gs::dec_u32::<OFF_PREEMPT_COUNT>();
 }
 
 /// Whether this CPU owes a reschedule.
