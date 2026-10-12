@@ -33,7 +33,7 @@ use core::marker::PhantomData;
 
 use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::{CpuId, Kicker};
-use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg, Urgency};
+use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg};
 use crate::sched::sync::Arc;
 use crate::sched::task::{Gen, Notify, ParkOutcome, Refused, TaskShared, WaitClass, WakeCause};
 
@@ -125,9 +125,7 @@ fn deliver<M: SchedMsg>(
         // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
         // own next pass drains it, so the poster pays no pass for it now, and
         // no edge stands with no pass owed to elide other CPUs' kicks.
-        if cause.urgency() == Urgency::Normal && kicker.runs_on(cpu) {
-            handle.post_unrung(slot, msg, preempt);
-        } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
+        if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
             kicker.kick(cpu);
         }
     }
