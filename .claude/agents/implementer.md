@@ -48,7 +48,7 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
   [ $((n+=1)) -gt 50 ]; do sleep 2; done`, print a line, repeat; a long `sleep` is refused. Ten
   minutes of silence kills you, and ending a turn to announce a wait strands the work.
 - Nothing a pull request's evidence rests on, mutation patches and run logs included, lives only in
-  a temporary directory: `/tmp` is wiped when the CLI restarts. Evidence lives only in
+  a temporary directory: `/tmp` is wiped when the CLI restarts. What it rests on lives only in
   `https://github.com/ToyOSOrg/evidence`, whose branches are append-only, on `pr-<N>` for pull
   request `<N>`. Your clone of it is no ToyOS worktree: `git clone --filter=blob:none` it into your
   scratchpad, `git switch` to `pr-<N>`, `--orphan` for its first file, and set the clone's `user.*`
