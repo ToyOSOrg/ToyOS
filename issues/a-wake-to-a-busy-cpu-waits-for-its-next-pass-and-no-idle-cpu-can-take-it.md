@@ -38,11 +38,17 @@ dispatch on the kernel clock; quantiles are bucket upper bounds, accurate to
 With 7 spinners every wake to a busy target waited out a whole quantum on
 both machines, while the slowest wake to a sleeping one took 2.16 µs (T14)
 and 3.17 µs (AMD bench), and the pair fell from about 181,600 (T14) and
-205,200 (AMD bench) rounds a second with no spinners to 100. A woken task
-waiting in a busy CPU's mailbox while another CPU idles breaks the invariant
-published work holds a scheduler to: ready threads run on available cores,
-and no core stays idle while another is overloaded (Lozi et al., "The Linux
-Scheduler: a Decade of Wasted Cores", EuroSys 2016).
+205,200 (AMD bench) rounds a second with no spinners to 100.
+
+With 7 spinners this is the Overload-on-Wakeup bug of Lozi et al., "The Linux
+Scheduler: a Decade of Wasted Cores" (EuroSys 2016, §3.3): a thread that was
+asleep wakes on an overloaded core while other cores are idle. Its fix
+wakes the thread on the core it last ran on if that core is idle, and
+otherwise on the core idle longest, where one is; the paper applies it only
+where the power policy keeps cores out of low-power states, since waking a
+core from one costs power. With 8 spinners no core idles, so §3.3 does not
+reach that arm and nothing published covers it; latency is its whole purpose,
+so under the track's rule the 100 µs bound below decides its design.
 
 **Exit**: a metal row on the T14 and the AMD bench that wakes a task onto a
 CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs, and

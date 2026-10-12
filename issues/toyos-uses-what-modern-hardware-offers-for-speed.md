@@ -18,13 +18,14 @@ each that has its feature. A figure is the T14's, and the AMD bench's too
 where the stage's path differs there, since the EPYC guests are shared CI
 runners: the median of 11 runs with its spread, taken by the program of
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md`.
-A stage cites what its hardware's manufacturers document and the published
-state of the art. Where they back it, its figure is reported and never blocks
-it: a slowdown, or a gap to that program's Linux figure, is filed as a defect
-carrying both figures and investigated. A stage they do not cover is reviewed
-on its correctness and simplicity, its figure reported and deciding nothing by
-itself unless speed is the stage's only purpose. What no proving machine is
-known to offer is `issues/features-no-proving-machine-is-known-to-offer.md`.
+A stage that its hardware's manufacturers or the published state of the art
+back follows and cites them, and its figure is reported and never blocks it: a
+slowdown, or a gap to that program's Linux figure, is filed as a defect
+carrying both figures and investigated. A stage nothing published covers is
+reviewed on its correctness and simplicity, its figure reported and deciding
+nothing by itself unless speed is the stage's only purpose. What no proving
+machine is known to offer is
+`issues/features-no-proving-machine-is-known-to-offer.md`.
 
 **Measurement first.** Each design round starts from a posted measurement,
 never a guess. Three scouts on `main`'s `177e72a9e` have read both benches,
@@ -47,7 +48,9 @@ and contention).
   at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
   AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
 - A TSC deadline: the re-arm is at most 11.7 to 12.1 % of a pass's pick and
-  switch on the T14, and at the AMD bench's TSC floor
+  switch on the T14, and at the AMD bench's TSC floor; next, a TSC-deadline
+  twin on the T14, whose reading decides the stage, since speed is its only
+  purpose
   (`issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`).
 
 **Moot.** PCID on the AMD bench: its CPUs read `pcid=0 invpcid=0`, so there

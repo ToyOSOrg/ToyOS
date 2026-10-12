@@ -16,9 +16,14 @@ by the store alone and takes no interrupt. The SDM names the IPI a halted CPU
 needs as a delay in serving new work and has an OS consider MONITOR/MWAIT in
 place of `hlt` in its C1 idle loop (325462-093, Vol. 3A §11.10.4,
 §11.10.6.4), and Intel's optimization manual names the C1 loop's
-responsiveness as what that buys (248966-051, Vol. 1 §11.4). The T14
-enumerates MONITOR/MWAIT (`monitor`, `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`);
-whether the AMD bench does is unread. `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the
+responsiveness as what that buys (248966-051, Vol. 1 §11.4). AMD documents
+MWAIT as a wait for another processor's store to the range MONITOR set up,
+sized by CPUID 0000_0005h, and recommends it for no idle loop (APM 24594 rev.
+3.36, Vol. 3, MONITOR and MWAIT); neither its APM Vol. 2 (24593 rev. 3.42) nor
+its optimization guide for family 17h models 30h and greater (56305 rev.
+3.02) speaks to it. The T14 enumerates MONITOR/MWAIT (`monitor`,
+`kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether the AMD bench does is
+unread. `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the
 wait enters; this file is what ends it. The doorbell shares a line with its
 neighbours' published counters
 (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`),

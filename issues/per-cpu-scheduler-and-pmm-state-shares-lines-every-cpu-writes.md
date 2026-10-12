@@ -43,7 +43,9 @@ the parts it links):
 Intel's optimization manual has critical data and locks allocated apart,
 aligned to no less than the false-sharing threshold, the CLFLUSH line size of
 CPUID.01H:EBX[15:8] (248966-051, Vol. 1 §11.4.5, User/Source Coding Rule
-17). Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
+17). AMD's APM Vol. 2 (24593 rev. 3.42) and its optimization guide for
+family 17h models 30h and greater (56305 rev. 3.02) say nothing on false
+sharing. Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
 `CpuHandle` or `Frontier`, and the AMD bench was not read. The next
 measurement attributes the HITM count to the lines it lands on, on both
 benches.
