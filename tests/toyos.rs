@@ -171,10 +171,14 @@ const RUST_SKIP: &[&str] = &[
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/images/acpicase.toml.
     "acpi_release",
+    // It waits for the ACPI server's power sources, and no guest's machine
+    // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
+    // `battery_read` metal rows end their boot on it.
+    "acpi_hold",
     // It waits for the ACPI server's count of its embedded controller's
     // queries, and no guest's machine has that controller: the
     // `acpi_server_events` metal row runs it.
-    "acpi_hold",
+    "acpi_counted",
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
     // i8042's row another claim's, which need the test kernel and its
@@ -620,11 +624,11 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The ACPI server on the machine its stage is for: the row the kernel
         // filled from the T14's own tables, the server armed on it, and the
-        // embedded controller's events taken and counted, on a boot held open
+        // embedded controller's events taken and counted, its job waiting
         // past the server's count interval.
         "acpi_server_events",
         metal::Metal {
-            arms: TESTCASES_HELD,
+            arms: &[metal::Arm { jobs: &["test_rs_acpi_counted"], ..TESTCASES_HELD[0] }],
             judge: |b| acpi_events_on_metal(b[0]),
         },
     ),
@@ -642,7 +646,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The T14's battery and AC adapter as the server read them through
         // its AML and its embedded controller: `battery_on_metal` says what
         // is held, and prints the readings for Linux's on the same machine.
-        // The same boot as `acpi_server_events`, held past several polls.
+        // The same boot as `acpi_server_events`, held to the server's power
+        // sources, which follow the first reading.
         "battery_read",
         metal::Metal {
             arms: TESTCASES_HELD,
@@ -1103,10 +1108,10 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     ],
 )];
 
-/// The same boot, its rows ended on the hold: the count it waits for comes
-/// thirty seconds after the server arms, and a row's job behind it would wait
-/// that out too. The members run behind it: the hold gives up at a time since
-/// boot, which a list of members before it would spend.
+/// The same boot, its rows ended on the hold, which waits for the ACPI
+/// server's power sources, the last line of its start. The members run
+/// behind it: the hold gives up at a time since boot, which a list of
+/// members before it would spend.
 const TESTCASES_HELD: &[metal::Arm] = &[metal::Arm {
     last: Some("test_rs_acpi_hold"),
     ..metal::once("testcases", "tests/images/testcases.toml", &[], &[])
@@ -5838,6 +5843,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// `GPE=0x6e`), at least one of its queries taken and a count of them
 /// logged, and no guard of the server's fired.
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_counted")?;
     back.job_passed("test_rs_acpi_hold")?;
     let (log, kernel) = (back.log(), back.kernel());
     let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
@@ -5875,12 +5881,12 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// What one bench's tables are, as a reading of them under another OS and
-/// the check outside the tree on their dump (#875) found them.
+/// What one bench's tables are, as the check outside the tree read them on
+/// their dump and the bench's own boots on this row (#875) found them.
 struct Bench {
     /// The kernel's line for the ACPI row the FADT names, to its SCI.
     row: &'static str,
-    /// How many definition blocks the XSDT and the FADT name: Linux's count.
+    /// How many definition blocks the XSDT and the FADT name.
     blocks: usize,
     /// Each block refused, by its place and its refusal's kind: a firmware
     /// defect the tracker records.
@@ -5891,16 +5897,17 @@ struct Bench {
     /// The blocks the processors' `_OSC` load under ToyOS's claims, by
     /// signature and length.
     loaded: &'static [&'static str],
-    /// The host's refusals the owner ruled, which the namespace's
-    /// initialisation meets on this machine and which are said, not red.
+    /// The host's refusals the owner ruled, which this machine's AML meets:
+    /// each is met, and said, not red.
     ruled: &'static [&'static str],
+    /// What the census says of `_REG(3, 1)`, after every `_INI`.
+    reg: &'static str,
 }
 
-/// The T14: Linux says `14 ACPI AML tables successfully acquired and loaded`;
-/// its `\_S5`'s `SLP_TYPa` read by a byte scan of its DSDT, with no
-/// interpreter; the first processor's commit loads one block, of 459 bytes;
-/// and a device's `_INI` may write memory outside every range the map lists,
-/// which the owner ruled refused and recorded.
+/// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
+/// DSDT, with no interpreter; the first processor's commit loads one block,
+/// of 459 bytes; and the controller's `_INI` writes memory outside every
+/// range the map lists, which the owner ruled refused and recorded.
 const T14: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
     blocks: 14,
@@ -5908,30 +5915,36 @@ const T14: Bench = Bench {
     s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
     loaded: &["SSDT, 459 bytes"],
     ruled: &["a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory"],
+    reg: "_REG(3, 1) in 1 scope(s)",
 };
 
-/// The AMD bench: Linux counts 17 tables; its SSDT8 ends in a `Scope` of an
-/// `EC0` no table defines, refused whole as the owner ruled
+/// The AMD bench: 17 blocks; its SSDT8 ends in a `Scope` of an `EC0` no
+/// table defines, refused whole as the owner ruled
 /// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
 /// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
-/// processor names an `_OSC`.
+/// processor names an `_OSC`; and the controller's `_REG(3, 1)` and the
+/// adapter's `_PSR` each write the root complex's index, a configuration
+/// write the owner ruled refused
+/// (`issues/the-amd-benchs-ec-reg-and-psr-are-refused-for-a-write-to-the-root-complexs-index.md`).
 const AMD: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x400+4, GPE0 0x420+8, SCI gsi 9 level/low",
     blocks: 17,
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
-    ruled: &[],
+    ruled: &["a SystemMemory write the kernel refused ConfigWrite, in memory of type 11"],
+    reg: "no _REG run",
 };
 
 /// The server's load of a bench's tables, every access the kernel's to make
-/// for it: each of the machine's definition blocks, as many as Linux names
-/// there, fetched through `SYS_ACPI`, summing to zero as its firmware sealed
+/// for it, read in the log up to the server's power sources line, which the
+/// boot was held for: each of the machine's definition blocks, fetched through `SYS_ACPI`, summing to zero as its firmware sealed
 /// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
 /// handed to the kernel, which says it powers this machine off with that
 /// value, and never does on this row. Then the namespace initialised (ACPI
 /// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused but by a
-/// ruled refusal, and the controller's `_REG(3, 1)` after them; `\_SB._OSC`
+/// ruled refusal, each of which is met, and the controller's `_REG(3, 1)`
+/// after them as the bench says; `\_SB._OSC`
 /// negotiated, and on an Intel machine each processor's, none refused; every
 /// block they load loaded, none refused. Every other CPU of the machine said
 /// how its range registers stand beside the boot processor's, and none holds
@@ -5941,7 +5954,12 @@ const AMD: Bench = Bench {
 /// the pages of memory by type, the longest wait an evaluation asked, the
 /// GPEs enabled, the interpreter's heap and the namespace's slots.
 fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let (log, kernel) = (back.log(), back.kernel());
+    back.job_passed("test_rs_acpi_hold")?;
+    let (whole, kernel) = (back.log(), back.kernel());
+    let text = whole.text();
+    let at = text.find(acpiserver_api::POWER_SOURCES).ok_or("the server never said its power sources, which the hold waited for")?;
+    let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    let log = serial::Serial::named("the log up to the server's power sources", &text[..end]);
     let lines: Vec<&str> = log
         .text()
         .lines()
@@ -5988,6 +6006,9 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
+    if let Some(unmet) = bench.ruled.iter().find(|ruled| !lines.iter().any(|l| l.contains(*ruled))) {
+        return Err(format!("this bench's AML meets the refusal the owner ruled, and the server never said it: {unmet}"));
+    }
     for line in lines.iter().filter(ruled) {
         eprintln!("  [acpi] a refusal the owner ruled: {}", line.trim());
     }
@@ -5996,8 +6017,8 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !(refusals == "none" || refusals.split("; ").all(|kind| bench.ruled.iter().any(|ruled| kind.contains(ruled)))) {
         return Err(format!("the namespace's initialisation refused an evaluation: {census}"));
     }
-    if !census.contains("_REG(3, 1) in 1 scope(s)") {
-        return Err(format!("the controller's space was not announced after every _INI: {census}"));
+    if !census.contains(&format!("_INI run, {}; ", bench.reg)) {
+        return Err(format!("the census says other than {:?} of the controller's _REG(3, 1): {census}", bench.reg));
     }
     log.must_say("acpiserver: \\_SB._OSC negotiated: ")?;
     if bench.loaded.is_empty() {

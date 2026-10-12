@@ -360,7 +360,7 @@ impl Power {
         if present == 0 {
             return (None, Some(format!("acpiserver: no battery: {found}")));
         }
-        let line = format!("acpiserver: power sources: {found}, the first reading's included; each read every {} s", POLL.as_secs());
+        let line = format!("{}{found}, the first reading's included; each read every {} s", acpiserver_api::POWER_SOURCES, POLL.as_secs());
         (Some(power), Some(line))
     }
 

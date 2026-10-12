@@ -14,6 +14,11 @@ pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
 pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
 
+/// The server's census of the batteries and adapters it found, written once
+/// at the end of its start where a battery is present, after their first
+/// reading.
+pub const POWER_SOURCES: &str = "acpiserver: power sources: ";
+
 /// A present battery's static information, once after the controller is
 /// armed: `battery <n> of <count>`, then its numbers.
 pub const BATTERY_INFO: &str = "battery information: ";
