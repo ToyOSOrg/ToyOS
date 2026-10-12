@@ -26,8 +26,8 @@
 //! then, to build, this worktree's exclusively, because its fork build
 //! directory is written; then the LLVM key's, held shared while it is linked.
 //!
-//! A compiler nothing has used for the store's keep time is removed by
-//! `keystore::sweep`, which every placement runs.
+//! A compiler that is not among the store's last used and that nobody uses is
+//! removed by `keystore::sweep`, which every placement runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -361,8 +361,8 @@ pub(crate) mod tests {
     /// worktree naming one `compiler/` share one compiler, built once and found
     /// again; worktrees naming others each get their own, side by side; an
     /// uncommitted file in `compiler/` is a new compiler and committing it is
-    /// not another; and a sweep takes a compiler only once nothing has used it
-    /// for the store's keep time and nobody uses it.
+    /// not another; and a sweep takes a compiler only once it is not among the
+    /// store's last used and nobody uses it.
     #[test]
     fn one_compiler_per_key_whichever_checkout_names_it() {
         let scratch = TempDir::new("compiler");
@@ -409,7 +409,7 @@ pub(crate) mod tests {
         assert_eq!((committed.stage2, builds.get()), (ca2.stage2.clone(), 4), "a commit rebuilt the compiler");
         git(&a.join("rust"), &["checkout", "-q", &pinned]);
 
-        // A sweep takes the compiler nothing has used for the keep time, and
+        // A sweep takes the compiler used before the four this test holds, and
         // only that one — and not while it is still in use.
         let spec = a.join("rust/compiler/rustc_target/src/orphan.rs");
         write(&spec, "pub fn o() {}\n");
@@ -422,11 +422,11 @@ pub(crate) mod tests {
         assert_eq!(sweep(), Vec::<PathBuf>::new(), "the sweep took a compiler still in use");
         assert!(orphan.is_dir());
         user.release();
-        assert_eq!(sweep(), [orphan], "the sweep took a compiler in use, or left one nothing had used for the keep time");
+        assert_eq!(sweep(), [orphan], "the sweep took a compiler in use, or left one used before those kept");
         assert!(ca.stage2.is_dir() && ca2.stage2.is_dir() && mine.stage2.is_dir());
 
-        // A placement sweeps too: the compiler an edit replaces goes once
-        // nothing has used it for the keep time.
+        // A placement sweeps too: the compiler an edit replaces goes once it
+        // is not among the last used.
         let spec = a.join("rust/compiler/rustc_target/src/another.rs");
         write(&spec, "pub fn u() {}\n");
         let replaced = key(&a.join("rust"));
@@ -434,7 +434,7 @@ pub(crate) mod tests {
         last_used(&store, Keyed::Compiler, &replaced, LONG_AGO);
         write(&spec, "pub fn v() {}\n");
         let ca3 = chosen(&a, &store, &a.join("rust"), fake);
-        assert!(!compilers.join(&replaced).exists(), "placing a compiler left one nothing had used for the keep time");
+        assert!(!compilers.join(&replaced).exists(), "placing a compiler left one used before those kept");
         assert!(ca3.stage2.is_dir() && cb.stage2.is_dir());
     }
 

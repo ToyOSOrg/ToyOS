@@ -46,8 +46,9 @@
 //! written); then the key of the compiler's LLVM, held in use while the C++
 //! runtime is built from its sources.
 //!
-//! A sysroot or freestanding libraries nothing has used for the store's keep
-//! time are removed by `keystore::sweep`, which every placement runs.
+//! A sysroot or freestanding libraries that are not among the store's last used
+//! and that nobody uses are removed by `keystore::sweep`, which every placement
+//! runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1243,7 +1244,7 @@ fn git_run(dir: &Path, args: &[&str]) {
 pub(crate) mod tests {
     use super::*;
     use crate::compiler::tests::compiler as placed_compiler;
-    use crate::keystore::tests::{last_used, LONG_AGO};
+    use crate::keystore::tests::{last_used, used_hourly, LONG_AGO};
     use toyos_tmpdir::TempDir;
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -2049,8 +2050,7 @@ pub(crate) mod tests {
     /// **A sysroot is whole, or it is made again**: a compiler without cargo is
     /// refused by name and nothing is published, and a sysroot found with its
     /// `SOURCES` and without its cargo is rebuilt rather than trusted, once.
-    /// Placing one removes a sysroot nothing has used for the store's keep
-    /// time.
+    /// Placing one removes a sysroot that is not among the store's last used.
     #[test]
     fn a_sysroot_is_whole_or_it_is_made_again() {
         let base = TempDir::new("whole");
@@ -2079,13 +2079,14 @@ pub(crate) mod tests {
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
-        let unused = Key::of(b"unused for the keep time");
+        let unused = Key::of(b"used before those kept");
         let orphan = sysroots.join(&unused);
         fs::create_dir_all(&orphan).unwrap();
         last_used(&base, Keyed::Sysroot, &unused, LONG_AGO);
+        used_hourly(&base, Keyed::Sysroot, keystore::kept(Keyed::Sysroot));
         let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
-        assert!(!orphan.exists(), "placing a sysroot left one nothing had used for the keep time");
+        assert!(!orphan.exists(), "placing a sysroot left one used before those kept");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);

@@ -164,8 +164,8 @@ pub struct Origin {
 impl Origin {
     /// Map a ring the supervisor sent, under the name and pid it sent with it.
     pub fn open(tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) -> Result<Self, String> {
-        let region = SharedMemory::adopt(ring, RING_BYTES)
-            .map_err(|e| format!("{}'s ring will not map: {e:?}", tag.as_str()))?;
+        let region = SharedMemory::lent(ring, RING_BYTES)
+            .map_err(|why| format!("{}'s ring is refused: {why}", tag.as_str()))?;
         let base = core::ptr::NonNull::new(region.as_ptr()).ok_or("a mapped ring at null")?;
         // SAFETY: `region` maps `RING_BYTES` and lives as long as this origin,
         // which is as long as the view is used.
