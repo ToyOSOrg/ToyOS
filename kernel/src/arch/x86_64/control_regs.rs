@@ -20,7 +20,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use toyos_cpuvuln::HwpFacts;
+use toyos_cpuvuln::{HwpFacts, InvlpgFacts, Vendor};
 
 use super::cpu;
 use crate::log;
@@ -389,7 +389,7 @@ impl PcidActive {
 /// against what the BSP said. Recomputed per CPU rather than trusted from
 /// the BSP, so a divergent machine names the CPU instead of faulting blind.
 fn declaration(cpu_id: u32) -> u64 {
-    let have = supported();
+    let have = supported(cpu_id);
     let missing = CR4_REQUIRED & !have;
     assert!(
         missing == 0,
@@ -433,7 +433,7 @@ fn declaration(cpu_id: u32) -> u64 {
 }
 
 /// The `CR4` bits this CPU will accept, as CPUID reports them.
-fn supported() -> u64 {
+fn supported(cpu_id: u32) -> u64 {
     const CPUID_1_EDX: [(u32, u64); 6] = [
         (2, cr4::DE),
         (6, cr4::PAE),
@@ -466,10 +466,37 @@ fn supported() -> u64 {
         }
     }
     // PCID without INVPCID is not worth having: nothing could flush by ASID.
-    if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 {
+    if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 && !invlpg_misses_global(cpu_id, ecx1) {
         have |= cr4::PCIDE;
     }
     have
+}
+
+/// Whether this CPU's `INVLPG` leaves another PCID's global translation
+/// (`toyos_cpuvuln::invlpg_misses_global`), which every global discharge is
+/// (`paging::Owed::discharge`): PCID is withheld where it does. The facts are
+/// logged where a revision was read, so a reader can hold the read to another's.
+fn invlpg_misses_global(cpu_id: u32, cpuid_1_ecx: u32) -> bool {
+    let vendor = cpu::vendor();
+    let facts = InvlpgFacts {
+        vendor,
+        signature: cpu::cpuid(1, 0).0,
+        cpuid_1_ecx,
+        microcode: (vendor == Vendor::Intel).then(cpu::intel_microcode_revision),
+    };
+    let misses = toyos_cpuvuln::invlpg_misses_global(&facts);
+    if let Some(microcode) = facts.microcode {
+        log!(
+            "control_regs: cpu{cpu_id} signature {:#x} microcode {microcode:#x}{}",
+            facts.signature,
+            if misses {
+                ": PCID withheld, Intel's erratum ADL063/RPL043 leaves another PCID's global translation"
+            } else {
+                ""
+            },
+        );
+    }
+    misses
 }
 
 /// Logs what this CPU holds, then asserts it against the declaration —

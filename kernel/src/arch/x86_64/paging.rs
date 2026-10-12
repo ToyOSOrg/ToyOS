@@ -210,7 +210,9 @@ impl Owed {
     fn discharge(self, target: Cr3) {
         match self {
             Self::Nothing => {}
-            // `INVLPG` drops the page's global translation in every PCID.
+            // `INVLPG` drops the page's global translation in every PCID, but
+            // on a CPU with Intel's ADL063/RPL043, which `control_regs` declares
+            // without PCID.
             Self::Address { va, prior } if prior & PAGE_GLOBAL != 0 => crate::arch::cpu::invlpg(va),
             Self::Address { va, .. } => {
                 if let Some(have) = pcid_active() {
@@ -225,7 +227,7 @@ impl Owed {
                 if let Some(have) = pcid_active() {
                     crate::arch::cpu::invpcid(have, Invpcid::SinglePcid, target.pcid(), 0);
                 } else if Cr3::current().phys() == target.phys() {
-                    flush_tlb_all();
+                    flush_tlb_user();
                 }
             }
         }
@@ -273,12 +275,25 @@ pub fn pcid_active() -> Option<PcidActive> {
     crate::arch::control_regs::PcidActive::ask()
 }
 
-/// Flush all TLB entries on this CPU, all PCIDs, global ones included.
+/// Flush all TLB entries on this CPU, all PCIDs, global ones included: what a
+/// kernel-half change owes.
 pub fn flush_tlb_all() {
     if let Some(have) = pcid_active() {
         crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0);
     } else {
         crate::arch::control_regs::flush_global();
+    }
+}
+
+/// Flush every TLB entry on this CPU but the global ones, all PCIDs: what a
+/// user-half change owes, since no user leaf is global.
+pub fn flush_tlb_user() {
+    if let Some(have) = pcid_active() {
+        crate::arch::cpu::invpcid(have, Invpcid::AllButGlobal, 0, 0);
+    } else {
+        // SAFETY: the value is exactly what `read_cr3` just read on this CPU,
+        // so writing it back is a valid CR3 write that only flushes the TLB.
+        unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
     }
 }
 
@@ -362,7 +377,7 @@ fn alloc_pcid() -> Option<PcidGuard> {
         match pool.alloc() {
             Alloc::Ready(p) => return Some(PcidGuard(p)),
             Alloc::NeedsFlush => {
-                crate::arch::tlb::shootdown(crate::invalidation::Origin::Pcid);
+                crate::arch::tlb::shootdown(crate::invalidation::Origin::Pcid, crate::invalidation::Half::User);
                 pool.reclaim();
             }
             Alloc::Exhausted => return None,
@@ -899,7 +914,7 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
             driven.push((phys, phys + size));
         }
     }
-    crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio);
+    crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio, crate::invalidation::Half::Kernel);
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.
     let installed =
@@ -919,23 +934,24 @@ const SCRATCH: u64 = 0u64.wrapping_sub(PAGE_2M);
 
 /// `SYS_DEBUG`'s `GLOBAL_LEAF_REWRITE`: a [`kernel_leaf`] at [`SCRATCH`] over one
 /// frame, read so this CPU caches it global; the leaf pointed at a second frame
-/// and invalidated as `how` asks; read again. Answers which frame that read
-/// saw. The kernel's lock keeps it on one CPU and interrupts stay closed, so no
-/// flush but `how`'s lands between the two reads.
+/// and read again with nothing invalidated, the control; invalidated as `how`
+/// asks; read a third time. Answers which frame the third read saw, or that the
+/// control already saw the second. The kernel's lock keeps it on one CPU and
+/// interrupts stay closed, so no flush but `how`'s lands between the reads.
 #[cfg(feature = "test-actuators")]
 pub fn debug_global_leaf(how: u64) -> u64 {
+    use crate::invalidation::{Half, Origin};
     use toyos_abi::syscall::debug_action as da;
     use toyos_abi::syscall::SyscallError;
 
     enum How {
-        Withheld,
         Discharged,
-        ShotDown,
+        ShotDown(Half),
     }
     let how = match how {
-        da::GLOBAL_LEAF_WITHHELD => How::Withheld,
         da::GLOBAL_LEAF_DISCHARGED => How::Discharged,
-        da::GLOBAL_LEAF_SHOT_DOWN => How::ShotDown,
+        da::GLOBAL_LEAF_KERNEL_SHOT_DOWN => How::ShotDown(Half::Kernel),
+        da::GLOBAL_LEAF_USER_SHOT_DOWN => How::ShotDown(Half::User),
         _ => return SyscallError::InvalidArgument.to_u64(),
     };
     let (Some(old), Some(new)) = (crate::mm::pmm::alloc_page(), crate::mm::pmm::alloc_page()) else {
@@ -953,7 +969,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
     // frames this call owns, or a translation of one of them.
     let read = || unsafe { core::ptr::read_volatile(SCRATCH as *const u64) };
 
-    let seen = {
+    let (held, seen) = {
         let mut space = kernel().lock();
         let _closed = crate::arch::IrqGuard::close();
         let target = space.root();
@@ -966,26 +982,31 @@ pub fn debug_global_leaf(how: u64) -> u64 {
         let first = read();
         assert!(first == old_phys, "debug_global_leaf: a fresh leaf over {old_phys:#x} read {first:#x}");
         let owed = pd.write_pde(idx, SCRATCH, new_phys | leaf);
+        let held = read();
         match how {
-            // The control: what this CPU still holds with nothing invalidated.
-            How::Withheld => {}
             How::Discharged => owed.discharge(target),
-            How::ShotDown => {
-                owed.subsumed_by_flush();
-                crate::arch::tlb::shootdown(crate::invalidation::Origin::Staged);
+            // The write's own invalidation is withheld: the arm asks what the shootdown drops.
+            How::ShotDown(half) => {
+                let _ = owed;
+                crate::arch::tlb::shootdown(Origin::Staged, half);
             }
         }
         let seen = read();
         pd.write_pde(idx, SCRATCH, 0).discharge(target);
-        seen
+        (held, seen)
     };
     // No CPU keeps a translation of either frame past its free.
-    crate::arch::tlb::shootdown(crate::invalidation::Origin::Staged);
+    crate::arch::tlb::shootdown(Origin::Staged, Half::Kernel);
     drop((old, new));
-    match seen {
-        _ if seen == old_phys => da::GLOBAL_LEAF_SAW_OLD,
-        _ if seen == new_phys => da::GLOBAL_LEAF_SAW_NEW,
-        _ => panic!("debug_global_leaf: the leaf over {old_phys:#x} then {new_phys:#x} read {seen:#x}"),
+    let old_frame = |at: u64| match at {
+        _ if at == old_phys => true,
+        _ if at == new_phys => false,
+        _ => panic!("debug_global_leaf: the leaf over {old_phys:#x} then {new_phys:#x} read {at:#x}"),
+    };
+    match (old_frame(held), old_frame(seen)) {
+        (false, _) => da::GLOBAL_LEAF_UNHELD,
+        (true, true) => da::GLOBAL_LEAF_SAW_OLD,
+        (true, false) => da::GLOBAL_LEAF_SAW_NEW,
     }
 }
 

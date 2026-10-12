@@ -885,20 +885,24 @@ pub mod debug_action {
     pub const RING0_FIRE_NEVER: u64 = 1;
     pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
     /// Map a global 2 MiB kernel leaf over one frame and read through it, point
-    /// the leaf at a second frame, invalidate as the argument says, and read
-    /// again, all on one CPU with interrupts closed. The argument is
-    /// [`GLOBAL_LEAF_WITHHELD`], which invalidates nothing,
-    /// [`GLOBAL_LEAF_DISCHARGED`], the write's own discharge, or
-    /// [`GLOBAL_LEAF_SHOT_DOWN`], a machine-wide shootdown. Answers
-    /// [`GLOBAL_LEAF_SAW_OLD`] or [`GLOBAL_LEAF_SAW_NEW`], the frame the second
-    /// read saw; `NotSupported` on AArch64, `AlreadyExists` where something is
-    /// already mapped where the leaf goes.
+    /// the leaf at a second frame and read again with nothing invalidated, the
+    /// control, invalidate as the argument says, and read a third time, all on
+    /// one CPU with interrupts closed. The argument is
+    /// [`GLOBAL_LEAF_DISCHARGED`], the write's own discharge,
+    /// [`GLOBAL_LEAF_KERNEL_SHOT_DOWN`], the machine-wide shootdown a
+    /// kernel-half change asks, or [`GLOBAL_LEAF_USER_SHOT_DOWN`], the one a
+    /// user-half change asks. Answers [`GLOBAL_LEAF_SAW_OLD`] or
+    /// [`GLOBAL_LEAF_SAW_NEW`], the frame the third read saw, or
+    /// [`GLOBAL_LEAF_UNHELD`] where the control already saw the second frame;
+    /// `NotSupported` on AArch64, `AlreadyExists` where something is already
+    /// mapped where the leaf goes.
     pub const GLOBAL_LEAF_REWRITE: u64 = 28;
-    pub const GLOBAL_LEAF_WITHHELD: u64 = 0;
-    pub const GLOBAL_LEAF_DISCHARGED: u64 = 1;
-    pub const GLOBAL_LEAF_SHOT_DOWN: u64 = 2;
+    pub const GLOBAL_LEAF_DISCHARGED: u64 = 0;
+    pub const GLOBAL_LEAF_KERNEL_SHOT_DOWN: u64 = 1;
+    pub const GLOBAL_LEAF_USER_SHOT_DOWN: u64 = 2;
     pub const GLOBAL_LEAF_SAW_OLD: u64 = 0;
     pub const GLOBAL_LEAF_SAW_NEW: u64 = 1;
+    pub const GLOBAL_LEAF_UNHELD: u64 = 2;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`

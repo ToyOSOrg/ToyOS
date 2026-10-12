@@ -1,5 +1,6 @@
-//! Why a machine-wide translation invalidation was asked for: the census every
-//! architecture's shootdown (`arch::tlb`) counts its callers by.
+//! Why a machine-wide translation invalidation was asked for, the census every
+//! architecture's shootdown (`arch::tlb`) counts its callers by, and which half
+//! of the address space it answers for.
 
 /// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
 /// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
@@ -22,6 +23,17 @@ pub enum Origin {
     // Ports are x86-64's alone, so AArch64 builds a variant it never issues.
     #[allow(dead_code)]
     Stop,
+}
+
+/// Which half of every address space a shootdown's write changed: x86-64's
+/// kernel-half leaves are global, so only a change there asks a flush that
+/// drops global translations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    User,
+    // The kernel half is global on x86-64 alone, so AArch64 builds a variant it never issues.
+    #[allow(dead_code)]
+    Kernel,
 }
 
 impl Origin {

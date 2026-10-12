@@ -89,10 +89,12 @@ const RUST_SKIP: &[&str] = &[
     "tlb_shootdown_waits",
     // Each reads a global translation its kernel may leave stale, which a TCG
     // guest's TLB drops on any `CR3` write and the T14's keeps: the
-    // `a_global_kernel_leafs_discharge_drops_it` and
-    // `the_machine_flush_drops_a_global_kernel_translation` metal rows run them.
+    // `a_global_kernel_leafs_discharge_drops_it`,
+    // `a_kernel_half_shootdown_drops_a_global_kernel_translation` and
+    // `a_user_half_shootdown_keeps_a_global_kernel_translation` metal rows run them.
     "global_leaf_discharge",
     "global_leaf_flush",
+    "global_leaf_user_flush",
     // Its product is the windows a `mask-windows` kernel reports under it, and
     // its 256 threads' stacks would crowd every member after it in one boot.
     // The `mask_windows` metal row runs it.
@@ -715,13 +717,23 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        "the_machine_flush_drops_a_global_kernel_translation",
+        "a_kernel_half_shootdown_drops_a_global_kernel_translation",
         metal::Metal {
             arms: &[metal::Arm {
                 features: ACTUATOR_KERNEL,
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_flush"])
             }],
             judge: |b| b[0].job_passed("test_rs_global_leaf_flush"),
+        },
+    ),
+    (
+        "a_user_half_shootdown_keeps_a_global_kernel_translation",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_user_flush"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_user_flush"),
         },
     ),
     (

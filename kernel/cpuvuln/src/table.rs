@@ -1,7 +1,8 @@
 //! Linux's five CPU tables, row for row: `cpu_vuln_whitelist` and
 //! `cpu_vuln_blacklist` (`common.c:1182-1344`), `spectre_bad_microcodes`
 //! (`intel.c:141-163`), `amd_check_tsa_microcode`'s (`amd.c:472-515`) and
-//! `test_intel`'s (`arch/x86/events/msr.c:40-122`). A
+//! `test_intel`'s (`arch/x86/events/msr.c:40-122`); and one of Intel's,
+//! [`invlpg_fixed_at`]'s. A
 //! lookup in the first two is `x86_match_cpu` (`match.c:36-57`): the
 //! first row whose vendor, family, model and stepping all match, `0` matching
 //! any.
@@ -354,6 +355,35 @@ pub(crate) fn tsa_microcode(id: &Ident, microcode: u32) -> bool {
     // `union zen_patch_rev` (`asm/cpu.h:80-90`) above its `rev` byte.
     let key = (id.family - 0xf) << 16 | (id.model >> 4) << 12 | (id.model & 0xf) << 4 | id.stepping;
     ROWS.iter().find(|&&(k, _)| k == key).is_some_and(|&(_, min)| microcode >= min)
+}
+
+/// The microcode revision from which `INVLPG` drops a global translation in
+/// every PCID, on a CPU Intel names for "INVLPG May Invalidate Global TLB
+/// Entries Only For The Current PCID": ADL063 (682436-040), on every signature
+/// of its Table 2-1; RPL043 (740518-031), on every signature of its Table 2-1
+/// but the 6P+0E die's, where its summary reads N/A; and Alder Lake-N, which
+/// its own specification update (764616-004) does not list and whose fix Intel
+/// names beside the others. The revisions are Intel's, posted to linux-kernel
+/// in Message-ID `20240325231300.qrltbzf6twm43ftb@desk`, one per model: no
+/// specification update carries a revision.
+pub(crate) fn invlpg_fixed_at(id: &Ident) -> Option<i32> {
+    const ROWS: &[(u32, u32, i32)] = &[
+        (ALDERLAKE, 0x2, 0x2e),
+        (ALDERLAKE, 0x5, 0x2e),
+        (ALDERLAKE_L, 0x3, 0x42c),
+        (ALDERLAKE_L, 0x4, 0x42c),
+        (ATOM_GRACEMONT, 0x0, 0x11),
+        (RAPTORLAKE, 0x1, 0x118),
+        (RAPTORLAKE_P, 0x2, 0x4117),
+        (RAPTORLAKE_P, 0x3, 0x4117),
+        (RAPTORLAKE_S, 0x2, 0x2e),
+    ];
+    if id.vendor != Vendor::Intel || id.family != 6 {
+        return None;
+    }
+    ROWS.iter()
+        .find(|&&(model, stepping, _)| model == id.model && stepping == id.stepping)
+        .map(|&(_, _, fixed)| fixed)
 }
 
 /// `test_intel` for `PERF_MSR_SMI` (`arch/x86/events/msr.c:40-122`): an Intel

@@ -134,6 +134,18 @@ pub fn vendor() -> toyos_cpuvuln::Vendor {
     toyos_cpuvuln::Vendor::from_id(&core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]))
 }
 
+/// This CPU's microcode revision as Intel defines its read: `IA32_BIOS_SIGN_ID`
+/// (MSR 8BH) written 0, CPUID.01H run, and the MSR's upper dword read (SDM
+/// Vol. 3A §12.11.7.1). An Intel CPU's alone: the procedure is Intel's.
+pub fn intel_microcode_revision() -> u32 {
+    const IA32_BIOS_SIGN_ID: u32 = 0x8B;
+    // SAFETY: MSR 8BH is architectural on every Intel 64 processor (SDM Vol. 4
+    // Table 2-2), and 0 is the value the procedure writes before its read.
+    unsafe { wrmsr(IA32_BIOS_SIGN_ID, 0) };
+    let _ = cpuid(1, 0);
+    (rdmsr(IA32_BIOS_SIGN_ID) >> 32) as u32
+}
+
 /// CPUID.6's EAX and ECX, the thermal and power leaf; zero where CPUID.0
 /// does not reach it, as `init_scattered_cpuid_features` reads it: a level
 /// past the range's own is no level.
@@ -248,6 +260,8 @@ pub enum Invpcid {
     SinglePcid = 1,
     /// Every entry in every PCID, global pages included.
     AllIncludingGlobal = 2,
+    /// Every entry in every PCID, global pages excepted.
+    AllButGlobal = 3,
 }
 
 /// Discard TLB entries by descriptor type; both instruction faults are excluded by the signature ([`Invpcid`], [`PcidActive`]).
