@@ -157,14 +157,15 @@ struct Seat {
 }
 
 /// Start threads running `body` until one first runs on a CPU `wanted`
-/// accepts, letting every other go; answer it and that CPU, or `None` once
-/// [`TRIES`] were spent. Each candidate parks until it is judged, so the CPU
+/// accepts, letting every other go; answer it and that CPU, or where each
+/// candidate ran once [`TRIES`] were spent. Each candidate parks until it is judged, so the CPU
 /// it is kept on is the one it parked on. The caller spins while it waits, so
 /// its own CPU is never idle for a candidate to be handed to.
 fn place(
     wanted: impl Fn(usize) -> bool,
     body: impl FnOnce() + Clone + Send + 'static,
-) -> Option<(JoinHandle<()>, usize)> {
+) -> Result<(JoinHandle<()>, usize), Vec<usize>> {
+    let mut landed = Vec::new();
     for _ in 0..TRIES {
         let seat = Arc::new(Seat { on: AtomicUsize::new(UNSEEN), verdict: AtomicU8::new(UNDECIDED) });
         let candidate = {
@@ -194,11 +195,12 @@ fn place(
         seat.verdict.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
         candidate.thread().unpark();
         if keep {
-            return Some((candidate, on));
+            return Ok((candidate, on));
         }
         candidate.join().unwrap();
+        landed.push(on);
     }
-    None
+    Err(landed)
 }
 
 /// A staged spinner: spins until `stop`, saying where it runs every few
@@ -254,12 +256,16 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
     if spinners {
         for want in (0..cpus).filter(|&c| c != here) {
             let at = Arc::new(AtomicUsize::new(UNSEEN));
-            let Some((spinner, _)) = place(|on| on == want, staged_spinner(stop.clone(), at.clone())) else {
-                refused = Some(format!("no spinner landed on CPU {want}"));
-                break;
-            };
-            threads.push(spinner);
-            spinning.push((want, at));
+            match place(|on| on == want, staged_spinner(stop.clone(), at.clone())) {
+                Ok((spinner, _)) => {
+                    threads.push(spinner);
+                    spinning.push((want, at));
+                }
+                Err(landed) => {
+                    refused = Some(format!("no spinner landed on CPU {want}; the candidates ran on {landed:?}"));
+                    break;
+                }
+            }
         }
     }
     let waker = refused.is_none().then(|| {
@@ -300,9 +306,9 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
         })
     });
     let waker = match waker {
-        Some(Some((waker, _))) => Some(waker),
-        Some(None) => {
-            refused = Some(format!("no waker landed on CPU {waker_on}"));
+        Some(Ok((waker, _))) => Some(waker),
+        Some(Err(landed)) => {
+            refused = Some(format!("no waker landed on CPU {waker_on}; the candidates ran on {landed:?}"));
             None
         }
         None => None,
@@ -319,10 +325,13 @@ fn staged(id: u64, spinners: bool, together: bool, span: Duration) {
             turn.store(0, Ordering::Release);
             waker.unpark();
         });
-        if placed.is_none() {
-            refused = Some(format!("no partner landed on CPU {partner_on}"));
+        match placed {
+            Ok((partner, _)) => Some(partner),
+            Err(landed) => {
+                refused = Some(format!("no partner landed on CPU {partner_on}; the candidates ran on {landed:?}"));
+                None
+            }
         }
-        placed.map(|(partner, _)| partner)
     });
     // Every spinner, and this thread, is still where it was staged.
     if refused.is_none() {
