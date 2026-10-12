@@ -562,6 +562,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_query_modules(&mut buf)
         }
+        #[cfg(all(feature = "scout-wake", not(feature = "test-actuators")))]
+        SYS_DEBUG => crate::scout_wake::debug(a1, a2),
         // Feature-gated, not capability-checked: a shipping kernel has no SYS_DEBUG
         // arm, so the number falls to the same default InvalidArgument as any unassigned one.
         #[cfg(feature = "test-actuators")]

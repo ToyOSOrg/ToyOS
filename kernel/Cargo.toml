@@ -257,6 +257,9 @@ sched-check = []
 # count crossing zero, on every entry and exit: a kernel being measured for
 # anything else must not carry it.
 mask-windows = []
+# Measurement scout, never landed: post-to-dispatch latency of an ordinary
+# wake, split by the target CPU's state, read out through `SYS_DEBUG`.
+scout-wake = []
 # The stray-write tripwire on the per-CPU `CpuSched` record: a shadow copy of its
 # bytes, taken when the driver's exclusive region is left and compared when it is
 # next entered, so a word that changed while nothing was allowed to change it is
