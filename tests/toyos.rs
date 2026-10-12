@@ -800,8 +800,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // A ping-pong beside a spinner on every other CPU: each wake lands on a
-        // busy CPU and is served by the one its waker leaves idle.
+        // A ping-pong whose partner parks beside a spinner, with idle CPUs
+        // beside them: the partner's wake lands on a busy CPU.
         "wake_onto_busy",
         metal::Metal { arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
     ),
@@ -6338,9 +6338,9 @@ fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
     boot.measured("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
 }
 
-/// What `wake_onto_busy`'s round trip may take at its 99th percentile: two
-/// wakes onto busy CPUs, each served within microseconds by the CPU its waker
-/// leaves idle, against the quantum a wake to a busy CPU used to wait out.
+/// What `wake_onto_busy`'s round trip may take at its 99th percentile: the
+/// partner's wake served within microseconds by an idle CPU, against the
+/// spinner's quantum a wake left on the busy CPU waits out every round.
 const WAKE_ONTO_BUSY_P99_US: u64 = 1_000;
 
 /// `wake_onto_busy`'s exit code is its p99 in microseconds, or a refusal.
