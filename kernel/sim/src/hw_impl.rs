@@ -243,3 +243,19 @@ impl Hw for SimHw {
 pub fn idle_ctx() -> SimCtx {
     SimCtx::default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The core asks whose code posts through `runs_on`, and the model's
+    /// answer is its poster: a CPU's own script, never a device interrupt.
+    #[test]
+    fn runs_on_answers_the_poster_alone() {
+        let hw = SimHw::new(2);
+        hw.posting_from(Some(CpuId(1)));
+        assert!(hw.runs_on(CpuId(1)) && !hw.runs_on(CpuId(0)));
+        hw.posting_from(None);
+        assert!(!hw.runs_on(CpuId(1)));
+    }
+}
