@@ -48,13 +48,12 @@ The design and its roast are PR #863's body.
 
 - Stage 0, done: the scout boot on the T14 that splits the lock's hold into
   its two copies (PR #863).
-- Stage 1, PR #867: the kernel's one new answer is `SYS_FSTAT`'s
+- Stage 1, done (PR #867): the kernel's one new answer is `SYS_FSTAT`'s
   `DeviceMemory`, and a receiver judges a lent region through `fstat` before
-  it maps it (closes
-  `issues/a-file-server-maps-a-lent-window-at-the-size-it-expects.md`).
-- Stage 2, PR #878: a byte ring with untrusted cursors and want words in
-  `toyos-transport` (`lib/blockring/transport`), host-tested and modelled in
-  loom.
+  it maps it.
+- Stage 2, done (PR #878): a byte ring with untrusted cursors and want words
+  in `toyos-transport` (`lib/blockring/transport`), host-tested and modelled
+  in loom.
 - Stage 3: a TCP stream is one region and one connection: netstack's receive
   and send buffers are the region's two rings, and the connection carries the
   connect, then only doorbells and the hang-up. netstack rings a reader on the
