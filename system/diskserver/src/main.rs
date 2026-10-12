@@ -66,7 +66,7 @@ use toyos_blockring::entry::{Completion, Op};
 use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Grant, Opened, Refusal};
-use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
+use toyos_blockring::{BLOCK_BYTES, PORT};
 
 /// How long a command may go unanswered before the controller is reset to
 /// take it back. Policy: NVMe defines no per-command bound, and a flush of a
@@ -353,22 +353,14 @@ impl Service {
     /// What an open answers: a session to admit, or its refusal. `region` is
     /// the client's and is consumed either way.
     fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle, grant: Option<Grant>) -> Result<Opening, Refusal> {
-        let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
+        // A region the kernel did not allocate, or longer than a session, which would spend the claim's bound on the kernel's side for every other client, is refused whole.
+        let region = Region::lent(region).map_err(|_| Refusal::Malformed)?;
         let (first, blocks) = self.place(guid, grant)?;
         let writes = grant.expect("placed through a grant").writes;
         match self.ctrl.up().claim().dma_map(region.handle()) {
-            Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
+            Ok(mapping) => {
                 let (rings, opened) = Opened::over(region.words(), blocks, guid);
                 Ok(Opening { region, rings, opened, device_addr: mapping.device_addr, first, writes })
-            }
-            // A region longer than a session would spend the claim's bound on
-            // the kernel's side for every other client: refused whole.
-            Ok(mapping) => {
-                if let Err(why) = self.ctrl.up().claim().dma_unmap(mapping.device_addr) {
-                    panic!("diskserver: the kernel would not take an oversized region back: {why:?}");
-                }
-                self.holds.release(first);
-                Err(Refusal::Malformed)
             }
             Err(why) => {
                 self.holds.release(first);
