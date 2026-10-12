@@ -2,7 +2,7 @@
 //! files the kernel loads it from, pure.
 //!
 //! [`intel`] reads Intel's update files as SDM Vol. 3A §12.11 defines them,
-//! [`amd`] AMD's containers as AMD's own parser and Linux's `amd.c` read them.
+//! [`amd`] AMD's containers as AMD's own parser reads them.
 //! Each validates the whole file, refuses it by name and offset where any
 //! part is malformed, and answers with the update a CPU loads, or why it loads
 //! none. Only the documented headers are read: an update's body is its
@@ -13,14 +13,11 @@
 //!
 //! [`INTEL`] and [`AMD`] are the files the kernel embeds, one per CPU ToyOS
 //! has a bench for, each as its maker publishes it and pinned by its digest
-//! in `NOTICE`. **On AMD's families 0x17 and 0x19 and part of 0x1a that pin
-//! is the only check**: at or below a per-CPU cutoff revision the CPU's own
-//! signature check can be forged (EntrySign; Linux's `cpu_has_entrysign`).
-//! Linux hashes a patch at run time against `amd_shas.c` because it loads a
-//! file the kernel did not ship; these are inside the kernel image, so the
-//! hash moves to build time, where a host test holds every patch
-//! [`amd::select`] can return out of [`AMD`] to Linux's digest. A microcode
-//! source outside the kernel image brings the runtime check with it.
+//! in `NOTICE`. **On an AMD CPU whose own signature check can be made to take
+//! a patch AMD did not sign (CVE-2024-36347, AMD-SB-7033), that pin is the
+//! only check**: the files are inside the kernel image, so no other patch
+//! reaches the loader, and a microcode source outside the image brings a
+//! check of its own.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
 //!
@@ -61,7 +58,7 @@ pub struct Aligned<Bytes: ?Sized>(pub Bytes);
 /// `intel-ucode/06-8c-01`, the T14's i5-1135G7.
 pub static INTEL: &Aligned<[u8]> = &Aligned(*include_bytes!("../intel-ucode/06-8c-01"));
 
-/// AMD's container for the CPUs ToyOS has a bench for: linux-firmware's
+/// AMD's container for the CPUs ToyOS has a bench for:
 /// `amd-ucode/microcode_amd_fam17h.bin`, the AMD bench's Ryzen 7 4800U among
 /// them.
 pub static AMD: &Aligned<[u8]> = &Aligned(*include_bytes!("../amd-ucode/microcode_amd_fam17h.bin"));
@@ -71,14 +68,12 @@ pub static AMD: &Aligned<[u8]> = &Aligned(*include_bytes!("../amd-ucode/microcod
 pub struct Signature(pub u32);
 
 /// A microcode revision: Intel's update revision, AMD's patch level, each the
-/// dword its maker reports it in `IA32_BIOS_SIGN_ID` (MSR 8BH), compared
-/// unsigned as Linux compares both.
+/// dword its maker reports it in MSR 8BH, compared unsigned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revision(pub u32);
 
 impl Revision {
-    /// What a CPU whose loading is disabled, by a hypervisor or by a firmware
-    /// toggle, reports (Xen's `rev == ~0`).
+    /// The highest revision, which no update loads over.
     pub const DISABLED: Self = Self(u32::MAX);
 
     /// Intel's: MSR 8BH read after writing it 0 and executing CPUID.01H, whose
@@ -87,7 +82,7 @@ impl Revision {
         Self((msr >> 32) as u32)
     }
 
-    /// AMD's: MSR 8BH's lower dword, the patch level (Linux `amd.c:336`).
+    /// AMD's: MSR 8BH's lower dword, the patch level (55922, MSR0000_008B).
     pub const fn from_patch_level(msr: u64) -> Self {
         Self(msr as u32)
     }
@@ -137,8 +132,9 @@ impl Maker {
 pub enum Unloaded {
     /// No embedded file is from this vendor, so nothing of its CPU is read.
     Vendor(Vendor),
-    /// CPUID.01H:ECX[31]: a hypervisor owns this CPU's microcode (Linux
-    /// `core.c:114-139`).
+    /// CPUID.01H:ECX[31], which a hypervisor sets for its guest (AMD's APM
+    /// Vol. 3, 24594 rev 3.36, §E.3.2): the guest's microcode is the
+    /// hypervisor's.
     Hypervisor,
     /// The CPU reports [`Revision::DISABLED`].
     Disabled,
@@ -149,7 +145,7 @@ impl fmt::Display for Unloaded {
         f.write_str(match self {
             Self::Vendor(_) => "no embedded file is from this vendor",
             Self::Hypervisor => "a hypervisor owns this CPU's microcode",
-            Self::Disabled => "revision 0xffffffff says loading is disabled",
+            Self::Disabled => "revision 0xffffffff, which no update loads over",
         })
     }
 }

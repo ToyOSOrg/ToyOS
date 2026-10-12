@@ -20,9 +20,6 @@ fn a_guest_loads_nothing_whatever_revision_it_reports() {
     }
 }
 
-/// Xen's reading of a revision of `~0`: loading is disabled, by a hypervisor
-/// or a firmware toggle; an Intel CPU handed an update over it would refuse
-/// it at the read-back.
 #[test]
 fn revision_0xffffffff_loads_nothing() {
     assert_eq!(may_load(0, Revision::DISABLED), Err(Unloaded::Disabled));

@@ -1,4 +1,4 @@
-//! linux-firmware's container as AMD publishes it, and containers built here
+//! The embedded container as AMD publishes it, and containers built here
 //! to its layout for every refusal and every arm the real one does not reach.
 
 #![allow(
@@ -20,9 +20,8 @@ use super::*;
 /// The AMD bench's Ryzen 7 4800U: family 0x17, model 0x60, stepping 1.
 const RENOIR: Signature = Signature(0x0086_0f01);
 
-/// Its firmware's revision, and the one linux-firmware's container holds for
-/// it, which Linux loads early on the same machine
-/// (`tests/metal/amd-linux/microcode.txt`).
+/// The revision its firmware runs, and the one the embedded container holds
+/// for it.
 const FIRMWARE: Revision = Revision(0x0860_0106);
 const CONTAINER: Revision = Revision(0x0860_010d);
 
@@ -154,10 +153,10 @@ fn a_chipset_specific_patch_is_refused() {
 }
 
 #[test]
-fn a_patch_naming_a_minimum_revision_is_refused() {
-    let mut minimum = patch(0x0860_010d);
-    put(&mut minimum, 12, 0x0860_0100);
-    assert_eq!(refusal(&container(&[(PATCH, &minimum)])).why, Refusal::MinimumRevision(0x0860_0100));
+fn a_patch_with_a_data_checksum_is_refused() {
+    let mut checksum = patch(0x0860_010d);
+    put(&mut checksum, 12, 0x0860_0100);
+    assert_eq!(refusal(&container(&[(PATCH, &checksum)])).why, Refusal::DataChecksum(0x0860_0100));
 }
 
 #[test]
@@ -167,42 +166,4 @@ fn a_malformed_section_after_the_cpus_own_refuses_the_container() {
     let built = container(&[(PATCH, &patch(0x0860_010d)), (PATCH, &chipset)]);
     let at = HEADER + 16 + SECTION + 3200;
     assert_eq!(refusal(&built), Refused { at, why: Refusal::Chipset { north: 1, south: 0 } });
-}
-
-/// Linux v7.2's `amd_shas.c` (`tests/linux/`, outside every shipped package's
-/// directory; `NOTICE`): each patch ID's SHA-256, by its rows.
-fn linux_digests() -> std::collections::BTreeMap<u32, [u8; 32]> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/linux/amd_shas.c");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let hex = |word: &str| u32::from_str_radix(word.trim_start_matches("0x"), 16).expect("a hex word");
-    text.split(" { 0x")
-        .skip(1)
-        .map(|row| {
-            let mut words = row.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty());
-            let id = hex(words.next().expect("the row's patch ID"));
-            let digest: Vec<u8> = words.take(32).map(|w| hex(w) as u8).collect();
-            (id, digest.try_into().unwrap_or_else(|d| panic!("patch {id:#x}'s digest is {d:?}")))
-        })
-        .collect()
-}
-
-/// Every patch the embedded container holds, and so every patch `select` can
-/// return out of it, is the patch Linux records: the build-time form of the
-/// hash Linux checks at run time below EntrySign's cutoff.
-#[test]
-fn every_patch_in_the_embedded_container_has_linuxs_digest() {
-    let linux = linux_digests();
-    let container = &crate::AMD.0;
-    let table = u32::from_le_bytes(container[8..HEADER].try_into().unwrap()) as usize;
-    let mut rest = &container[HEADER + table..];
-    let mut patches = 0;
-    while !rest.is_empty() {
-        let (patch, after) = section(rest).expect("the embedded container is valid");
-        let id = patch.revision().0;
-        let want = linux.get(&id).unwrap_or_else(|| panic!("amd_shas.c records no patch {id:#x}"));
-        assert_eq!(&toyos_sha2::Sha256::digest(patch.bytes()), want, "patch {id:#x}");
-        patches += 1;
-        rest = after;
-    }
-    assert_eq!(patches, 7, "the container's README names seven patches");
 }

@@ -124,7 +124,8 @@ Inc." and "Copyright(C) 2005-2014 Simon Howard" over GPL "version 2 ... or any
 later version" — id's Doom source release by way of Chocolate Doom. The crate
 declares `GPL-2.0-only`, which is a narrowing a distributor may make.
 
-No GPL code is linked into the kernel, the SDK, or any other program.
+Nothing else in this repository is GPL, and no GPL code is linked into the
+kernel, the SDK, or any other program.
 
 
 assets/JetBrainsMono-Regular.ttf — SIL Open Font License 1.1
@@ -460,22 +461,6 @@ certified it; no reverse engineering, decompilation or disassembly; the rights
 to third-party technologies the software may implement are the
 redistributor's to obtain, AMD conveying none; and U.S. and European export
 law binds whoever uses it.
-
-
-tests/linux/amd_shas.c — Linux's digests of AMD's microcode patches, GPL-2.0-only
----------------------------------------------------------------------------------
-
-    amd_shas.c  sha256 98af9ffb8a6e39e9dc37c86028a88853a75b74f229bcb1dabf84b72f6700a156
-    Upstream: https://github.com/torvalds/linux,
-    `arch/x86/kernel/cpu/microcode/amd_shas.c` at tag v7.2
-    (commit 8d3ae59288f1e7d58d76558a6ee96d533bc5019f), byte for byte
-    SPDX-License-Identifier: GPL-2.0-only
-
-The SHA-256 of every AMD patch Linux loads on a CPU whose own signature check
-EntrySign broke: the independent record `toyos-microcode`'s tests hold every
-patch the kernel embeds to. The file carries no licence line of its own, so
-the kernel's `COPYING` decides it. Test input only: nothing built from this
-repository carries it, and no shipped package's directory holds it.
 
 
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS

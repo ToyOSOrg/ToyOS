@@ -4465,7 +4465,6 @@ name = "toyos-microcode"
 version = "0.1.0"
 dependencies = [
  "toyos-cpuvuln",
- "toyos-sha2",
 ]
 
 [[package]]

@@ -1,5 +1,7 @@
-//! AMD's microcode containers, as AMD's own parser (`amd_ucode_info.py`) and
-//! Linux v7.2's `amd.c` read them; AMD's APM documents no patch loader.
+//! AMD's microcode containers, as AMD's own parser (`amd_ucode_info.py`)
+//! reads them. AMD's PPR for family 17h model 60h (55922 rev 3.06) documents
+//! the patch level a CPU reports, MSR0000_008B, one per core; it documents
+//! neither the container nor the loader.
 //!
 //! A container is a 12-byte header — [`MAGIC`], the type of its first
 //! section (0, the equivalence table) and that section's length — then the
@@ -7,32 +9,21 @@
 //! patch of that many bytes: a 64-byte header and its signed body. [`select`]
 //! validates every section and answers with the patch a CPU loads, or why it
 //! loads none. One malformed section refuses the whole container. A second
-//! container behind the first is refused, by its magic standing where a
-//! section's type does.
+//! container behind the first, which AMD's parser reads on into, is refused
+//! here, by its magic standing where a section's type does.
 //!
-//! **A Zen patch names its CPU in its patch ID** (Linux `94838d230a6c`): a
-//! patch names the CPU whose CPUID.01H:EAX its family, model and stepping
-//! decode to, and the equivalence table is skipped, as Linux skips it from
-//! family 0x17 up.
+//! **A patch names its CPU in its patch ID**: the CPU whose CPUID.01H:EAX its
+//! family, model and stepping decode to. The equivalence table, through which
+//! AMD's parser names a patch's CPU, is not read.
 //!
 //! **Refused as unmodelled**, so that a container embedded later cannot load
-//! what this loader does not understand: a chipset-specific patch, as Linux
-//! refuses one; and a nonzero word at offset 12, which from Zen 3 on is the
-//! lowest revision a patch may be loaded over (Xen's `check_min_rev`).
+//! what this loader does not understand: a patch whose `nb_dev_id` or
+//! `sb_dev_id` names a chipset, and one whose `mc_patch_data_checksum` is not
+//! 0, AMD's parser's names for header words AMD documents no use of.
 //!
 //! **A patch at or above the revision the CPU runs loads**, an equal one
-//! again on every thread, as Linux's early loader does (`amd.c:813-819,996`;
-//! `e7ad18d1169c`: "there are microcode patches which do per-thread
-//! modification … This is what the BIOS does too"). Xen refuses an equal
-//! revision unless forced.
-//!
-//! **EntrySign's cutoff rule holds at build time.** Linux offers a CPU at or
-//! below its cutoff revision only patches at or below that cutoff, and one
-//! above it only patches above (`amd.c:554-572`). A patch below the running
-//! revision never loads here, and every patch [`select`] can return out of
-//! [`crate::AMD`] is held by a host test to its digest in Linux's
-//! `amd_shas.c`, which records none above its CPU's cutoff: that test is the
-//! rule's form here, and a container that drops it drops the rule.
+//! again on every thread. No AMD document states either rule; the read-back
+//! is the CPU's verdict on both.
 
 use crate::{dwords, Choice, Revision, Signature};
 
@@ -64,15 +55,13 @@ impl<'a> Patch<'a> {
     }
 
     /// The patch as its section holds it, header first. MSR C001_0020 is
-    /// written the linear address of its first byte (Linux `amd.c:700-705`).
+    /// written the linear address of its first byte.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
-    /// Whether the CPU that loads it must then drop the translations of its
-    /// first and last byte: family 0x17's loader leaves the mapping of a
-    /// patch's bytes in the TLB as uncacheable (Linux `c809b0d0e52d` and
-    /// `amd.c:707-718`, Xen at AMD's instruction).
+    /// Whether the CPU that loads it then drops the translations of its first
+    /// and last byte: on family 0x17 alone. No AMD document names the step.
     pub fn leaves_its_mapping_uncached(&self) -> bool {
         family(self.revision.0) == 0x17
     }
@@ -101,8 +90,8 @@ pub enum Refusal {
     Short(u32),
     /// The patch is for one chipset (`nb_dev_id`, `sb_dev_id`).
     Chipset { north: u32, south: u32 },
-    /// The patch names the lowest revision it may be loaded over.
-    MinimumRevision(u32),
+    /// The patch's `mc_patch_data_checksum` is not 0.
+    DataChecksum(u32),
 }
 
 /// The patch in `container` a CPU with `signature` running `found` loads, or
@@ -157,18 +146,18 @@ fn section(bytes: &[u8]) -> Result<(Patch<'_>, &[u8]), Refusal> {
     let need = SECTION.saturating_add(size as usize);
     let (bytes, rest) = rest.split_at_checked(size as usize).ok_or(Refusal::Truncated { need, have })?;
     let (patch, _) = bytes.split_first_chunk::<PATCH_HEADER>().ok_or(Refusal::Short(size))?;
-    let [_, id, _, minimum, north, south, ..]: [u32; 16] = dwords(patch);
+    let [_, id, _, checksum, north, south, ..]: [u32; 16] = dwords(patch);
     if north != 0 || south != 0 {
         return Err(Refusal::Chipset { north, south });
     }
-    if minimum != 0 {
-        return Err(Refusal::MinimumRevision(minimum));
+    if checksum != 0 {
+        return Err(Refusal::DataChecksum(checksum));
     }
     Ok((Patch { revision: Revision(id), bytes }, rest))
 }
 
-/// The CPUID.01H:EAX a Zen patch ID names (Linux's `ucode_rev_to_cpuid`): its
-/// stepping, model, extended model and extended family, over base family 0xf.
+/// The CPUID.01H:EAX a Zen patch ID names: its stepping, model, extended model
+/// and extended family, over base family 0xf.
 const fn named(id: u32) -> u32 {
     let (stepping, model) = (id >> 8 & 0xf, id >> 12 & 0xf);
     let (ext_model, ext_family) = (id >> 20 & 0xf, id >> 24);

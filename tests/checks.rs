@@ -421,7 +421,7 @@ mod checks {
     }
 
     /// [`microcode_on_metal`] against both benches' machines and the ways a
-    /// boot of either could fall short of Linux's reading, with no guest.
+    /// boot of either could fall short of its embedded update, with no guest.
     #[test]
     fn microcode_verdict() -> Result<(), String> {
         fn log(lines: &[(u32, &str)]) -> String {
@@ -430,8 +430,9 @@ mod checks {
         const T14: &str = "Intel signature 0x806c1 platform 7 found 0xbe current 0xbe running 0xbe";
         const BSP: &str = "Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d";
         const SIBLING: &str = "Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d";
+        const AMD_REFUSED: &str = "Amd signature 0x860f01 found 0x8600106 refused 0x860010d running 0x8600106";
         let t14 = |cpu: u32| (cpu, T14);
-        let amd = |cpu: u32| (cpu, if cpu == 0 || cpu % 2 == 1 { BSP } else { SIBLING });
+        let amd = |cpu: u32| (cpu, if cpu % 2 == 0 { BSP } else { SIBLING });
 
         let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| match microcode_on_metal(&log(lines), cpus) {
             Ok(()) => Err(format!("{what} was accepted")),
@@ -440,33 +441,37 @@ mod checks {
         };
 
         microcode_on_metal(&log(&(0..8).map(t14).collect::<Vec<_>>()), 8)
-            .map_err(|e| format!("the T14 as Linux reads it was refused: {e}"))?;
+            .map_err(|e| format!("the T14 at Intel's 0xbe was refused: {e}"))?;
         microcode_on_metal(&log(&(0..16).map(amd).collect::<Vec<_>>()), 16)
-            .map_err(|e| format!("the AMD bench as Linux reads it was refused: {e}"))?;
+            .map_err(|e| format!("the AMD bench at the container's 0x860010d was refused: {e}"))?;
 
         refused("seven lines for eight CPUs", &(0..7).map(t14).collect::<Vec<_>>(), 8, "one microcode line")?;
         let mut twice: Vec<_> = (0..8).map(t14).collect();
         twice[7] = t14(6);
         refused("cpu6 twice and cpu7 never", &twice, 8, "one microcode line")?;
+        let mut resealed: Vec<_> = (0..8).map(t14).collect();
+        resealed[0] = (0, "Intel signature 0x806c1 platform 7 found 0xbe refused 0xbf running 0xbe");
+        refused("a T14 BSP that refused its update", &resealed, 8, "cpu0 refused")?;
+        refused("an AMD bench that refused its patch", &(0..16).map(|cpu| (cpu, AMD_REFUSED)).collect::<Vec<_>>(), 16, "cpu0 refused")?;
         let mut below: Vec<_> = (0..8).map(t14).collect();
         below[3] = (3, "Intel signature 0x806c1 platform 7 found 0xbd current 0xbd running 0xbd");
-        refused("a T14 CPU below Linux", &below, 8, "Linux runs 0xbe")?;
+        refused("a T14 CPU below Intel's update", &below, 8, "holds 0xbe")?;
         let mut unloaded: Vec<_> = (0..16).map(amd).collect();
         unloaded[5] = (5, "Amd signature 0x860f01 found 0x8600106 current 0x860010d running 0x8600106");
-        refused("an AMD CPU left on its firmware's", &unloaded, 16, "Linux loads 0x860010d")?;
-        let mut no_load: Vec<_> = (0..16).map(amd).collect();
-        no_load[0] = (0, SIBLING);
-        refused("a BSP that found the patch already", &no_load, 16, "which the BSP finds")?;
+        refused("an AMD CPU left on its firmware's", &unloaded, 16, "holds 0x860010d")?;
+        let mut guest: Vec<_> = (0..8).map(t14).collect();
+        guest[1] = (1, "Intel signature 0x806c1 found 0xbe loads nothing: a hypervisor owns this CPU's microcode running 0xbe");
+        refused("a T14 CPU that loads nothing", &guest, 8, "holds 0xbe")?;
         let mut other: Vec<_> = (0..8).map(t14).collect();
         other[2] = (2, "Intel signature 0x806c2 platform 7 found 0xbe current 0xbe running 0xbe");
         refused("two signatures in one machine", &other, 8, "is not")?;
         refused(
-            "a machine nobody read under Linux",
+            "a machine that is no bench",
             &[(0, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4"), (1, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4")],
             2,
-            "no Linux reading",
+            "no bench",
         )?;
-        eprintln!("  [microcode] the verdict refuses 7 machines and accepts both benches");
+        eprintln!("  [microcode] the verdict refuses 9 machines and accepts both benches");
         Ok(())
     }
 

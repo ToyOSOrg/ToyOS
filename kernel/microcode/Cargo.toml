@@ -11,8 +11,3 @@ publish = false
 
 [dependencies]
 toyos-cpuvuln = { path = "../cpuvuln" }
-
-[dev-dependencies]
-# Hashes the embedded container's patches for the test that holds them to
-# Linux's digests.
-toyos-sha2 = { path = "../../lib/sha2" }

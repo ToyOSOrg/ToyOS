@@ -10,16 +10,23 @@
 //! **Both run before this kernel's IDT**, so a fault inside a trigger reports
 //! nothing: the BSP's vectors into firmware's table, an AP's into the kernel's
 //! with `CR4.OSFXSR` still clear, a triple fault. Neither maker documents a
-//! fault for a valid update at a present, canonical address, and every
-//! failure this loader can see is a panic, which reports before the IDT.
+//! fault for a valid update at a present, canonical address.
+//!
+//! **A CPU's verdict on an update is the revision it reads back, and a
+//! refusal is reported, not a panic.** Intel judges a load by MSR 8BH read
+//! after it, equal to the update's revision or a failure (SDM Vol. 3A
+//! §12.11.7.2, Example 12-10), and the register reports "the currently
+//! functioning revision" (§12.11.7.1). AMD's PPR for family 17h model 60h
+//! (55922 rev 3.06, MSR0000_008B) has it return "an identification number for
+//! the microcode patch that has been loaded". So a CPU that does not take an
+//! update runs the revision it reads back: its line says `refused` with the
+//! update it was handed, its `running` is that read-back, and it is held to
+//! the machine's like any other.
 //!
 //! One line per CPU says what it found, what the file holds for it and what
-//! it runs; a CPU that loads nothing says why. A load is read back (SDM
-//! Example 12-10; Linux `amd.c:723-729`) and a revision other than the
-//! update's panics naming both, rather than run behind a log line below the
-//! revision this image pins. Every CPU that reads a revision runs the one the
-//! first did, or the boot stops naming it: whatever reads the revision
-//! assumes one.
+//! it runs; a CPU that loads nothing says why. Every CPU that reads a revision
+//! runs the one the first did, or the boot stops naming it: whatever reads the
+//! revision assumes one.
 //!
 //! INIT keeps an update and a hard reset clears it (§12.11.6.1): a resume
 //! path, when one exists, loads again.
@@ -37,9 +44,9 @@ use crate::log;
 const PLATFORM_ID: u32 = 0x17;
 /// `IA32_BIOS_UPDT_TRIG`.
 const INTEL_TRIGGER: u32 = 0x79;
-/// `IA32_BIOS_SIGN_ID`, AMD's `MSR_AMD64_PATCH_LEVEL`.
+/// `IA32_BIOS_SIGN_ID`; AMD's `PATCH_LEVEL` (55922, MSR0000_008B).
 const SIGN_ID: u32 = 0x8b;
-/// `MSR_AMD64_PATCH_LOADER`.
+/// AMD's patch loader, which no AMD document in hand describes.
 const AMD_TRIGGER: u32 = 0xc001_0020;
 
 /// The revision every CPU runs, as the first to read one published it.
@@ -68,11 +75,12 @@ pub fn load(cpu_id: u32) {
                 let cpu = intel::Cpu { signature, platform, revision: found };
                 (Some(platform), load_intel(cpu_id, &cpu))
             }
-            Maker::Amd => (None, load_amd(cpu_id, signature, found)),
+            Maker::Amd => (None, load_amd(signature, found)),
         },
     };
     let running = match outcome {
         Outcome::Loaded(loaded) => loaded,
+        Outcome::Refused { running, .. } => running,
         Outcome::Unloaded(_) | Outcome::NoMatch | Outcome::Current(_) => found,
     };
     let platform = Platform(platform);
@@ -88,6 +96,8 @@ enum Outcome {
     Current(Revision),
     /// The update it loaded and read back.
     Loaded(Revision),
+    /// The update it was handed and did not take, and what it reads back.
+    Refused { update: Revision, running: Revision },
 }
 
 impl fmt::Display for Outcome {
@@ -97,6 +107,7 @@ impl fmt::Display for Outcome {
             Self::NoMatch => f.write_str("loads nothing: no embedded update names it"),
             Self::Current(newest) => write!(f, "current {newest:#x}"),
             Self::Loaded(loaded) => write!(f, "loaded {loaded:#x}"),
+            Self::Refused { update, .. } => write!(f, "refused {update:#x}"),
         }
     }
 }
@@ -139,13 +150,12 @@ fn load_intel(cpu_id: u32, cpu: &intel::Cpu) -> Outcome {
             // every update's 1024-byte granule start 16-byte aligned, inside
             // the kernel image and so canonical and present (§12.11.6).
             unsafe { trigger(INTEL_TRIGGER, update.data().as_ptr()) };
-            verified(cpu_id, Maker::Intel, cpu.revision, update.revision());
-            Outcome::Loaded(update.revision())
+            taken(Maker::Intel, update.revision())
         }
     }
 }
 
-fn load_amd(cpu_id: u32, signature: Signature, found: Revision) -> Outcome {
+fn load_amd(signature: Signature, found: Revision) -> Outcome {
     let choice = amd::select(&toyos_microcode::AMD.0, signature, found).unwrap_or_else(|refused| {
         panic!("microcode: the embedded AMD container is refused at byte {}: {:?}", refused.at, refused.why)
     });
@@ -155,14 +165,13 @@ fn load_amd(cpu_id: u32, signature: Signature, found: Revision) -> Outcome {
         Choice::Load(patch) => {
             let bytes = patch.bytes().as_ptr_range();
             // SAFETY: a validated patch inside the kernel image, so its
-            // address is canonical and present (Linux `amd.c:700-705`).
+            // address is canonical and present.
             unsafe { trigger(AMD_TRIGGER, bytes.start) };
             if patch.leaves_its_mapping_uncached() {
                 cpu::invlpg(bytes.start as u64);
                 cpu::invlpg(bytes.end as u64 - 1);
             }
-            verified(cpu_id, Maker::Amd, found, patch.revision());
-            Outcome::Loaded(patch.revision())
+            taken(Maker::Amd, patch.revision())
         }
     }
 }
@@ -181,14 +190,13 @@ unsafe fn trigger(msr: u32, at: *const u8) {
     }
 }
 
-/// The revision read back after a load is the update's, or the boot stops.
-fn verified(cpu_id: u32, maker: Maker, found: Revision, loaded: Revision) {
-    let read = revision(maker);
-    assert!(
-        read == loaded,
-        "microcode: cpu{cpu_id} found {found:#x}, was handed {maker:?}'s update {loaded:#x} and \
-         reads back {read:#x}",
-    );
+/// What the CPU made of the update of revision `update` it was handed: the
+/// revision it reads back, which it runs.
+fn taken(maker: Maker, update: Revision) -> Outcome {
+    match revision(maker) {
+        running if running == update => Outcome::Loaded(update),
+        running => Outcome::Refused { update, running },
+    }
 }
 
 /// Every CPU that reads a revision runs the first one's.
@@ -205,7 +213,7 @@ fn agree(cpu_id: u32, running: Revision) {
 
 /// `microcode-reseal`: the BSP is handed the T14's update with its header's
 /// revision raised by one and its checksum sealed again, while Intel's payload
-/// still says 0xbe, so the read-back must stop the boot.
+/// still says 0xbe, so its line must say `refused`.
 #[cfg(feature = "boot-actuators")]
 mod reseal {
     use toyos_microcode::Aligned;
