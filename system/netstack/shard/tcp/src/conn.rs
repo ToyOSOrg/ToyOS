@@ -543,6 +543,7 @@ impl Sync {
                 text = if seq.after(limit) { &[] } else { text.get(..room).unwrap_or_default() };
             }
         }
+        self.rx.at.set(now);
         if !text.is_empty() {
             let placed = self.rx.place(seq, text);
             if placed == Placed::RangeLimit {
@@ -581,6 +582,7 @@ impl Sync {
         let keepalive = seg.seq == next.sub(1) && seg.text() <= 1;
         let probe = self.rx.window() == 0 && seg.seq == next;
         if old && seg.text() > 0 && self.sack_ok {
+            self.rx.at.set(ctx.now);
             self.rx.duplicate(seg.seq.add(u32::from(seg.syn())), seg.text());
         } else if old || keepalive || probe {
             self.rx.ack_now = true;
@@ -1128,6 +1130,29 @@ impl Sync {
         let out = Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack };
         let offset = self.tx.offset(seq).min(self.tx.buf.len());
         exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)));
+        // MEASUREMENT ONLY: what this segment tells the sender, and how long after the last
+        // segment that moved the ack point.
+        {
+            use toyos_net_wire::prof::{add, gap, stretch, Slot};
+            add(Slot::AckSegs, 1);
+            if sack.1 > 0 {
+                add(Slot::SackSent, 1);
+            }
+            if sack.1 > 0 && self.rx.has_dsack() {
+                add(Slot::DsackSent, 1);
+            }
+            self.rx.note_sent(now, sack.0.get(..sack.1).unwrap_or_default());
+            let acked = u64::from(self.rx.next.since(self.rx.last_ack_sent));
+            if acked == 0 {
+                add(Slot::AckZero, 1);
+            } else {
+                add(Slot::AckBytes, acked);
+                stretch(acked.div_ceil(u64::from(self.rx.rcv_mss().max(1))));
+                if let Some(last) = self.rx.last_ack_at.replace(Some(now)) {
+                    gap(u64::try_from(now.since(last).as_nanos()).unwrap_or(u64::MAX));
+                }
+            }
+        }
         Ok(())
     }
 

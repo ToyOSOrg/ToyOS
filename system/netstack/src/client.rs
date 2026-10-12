@@ -117,6 +117,8 @@ pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
     pub since: Instant,
+    /// MEASUREMENT ONLY: when the wait that accepted it returned.
+    pub n1: u64,
 }
 
 /// A whole request, off the connection and in memory.
@@ -130,6 +132,8 @@ pub struct Request {
     pub msg_type: u32,
     pub payload: [u8; MAX_KEPT_REQUEST],
     pub payload_len: usize,
+    /// MEASUREMENT ONLY.
+    pub asked: crate::stamps::Asked,
 }
 
 impl Request {

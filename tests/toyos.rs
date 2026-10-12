@@ -2,6 +2,10 @@
 extern crate toyos_build;
 
 mod common;
+#[path = "guest/rust-tests/src/netperf_table.rs"]
+mod netperf_table;
+#[path = "guest/rust-tests/src/setup_table.rs"]
+mod setup_table;
 #[path = "guest/rust-tests/src/stream_ends.rs"]
 mod stream_ends;
 
@@ -160,6 +164,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs a host peer that ends each stream as the stream asks:
     // `libc_sockets` runs it on `tests/images/netcase.toml`.
     "stream_ends_std",
+    // It downloads from the internet, inside a job list's bound alone: the
+    // `internet_download` metal row runs it.
+    "https_download",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
@@ -360,6 +367,9 @@ const MACHINE_TESTS: &[&str] = &[
     // certificate by and the sockets under it exist in a ToyOS guest alone,
     // and the T14's row is the next stage's, against a server on the bench.
     "https_fetch",
+    // MEASUREMENT ONLY, never lands: `https_download`'s counters and table
+    // against a server on the host.
+    "netperf_qemu",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -1081,7 +1091,67 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/images/downloadcase.toml, the internet download ----
+    (
+        // A public file over HTTPS through netstack on the I219, for as long as
+        // the list's bound leaves it: its rate is reported, never judged. A boot
+        // of its own, so the transfer has the machine alone.
+        "internet_download",
+        metal::Metal {
+            arms: &[metal::once("download", "tests/images/downloadcase.toml", &[], &["test_rs_https_download"])],
+            judge: |b| https_download_on_metal(b[0]),
+        },
+    ),
 ];
+
+/// What `https_download` said of its transfer, printed as it said it: green
+/// for a job that ended 0 having read some of the body, and, where it read
+/// all of it, a body of the file's length and hash. Its busy fraction is
+/// read: the T14 counts MPERF on every CPU (`counters_on_metal`), so one it
+/// could not read is the job's defect.
+fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
+    /// The job's file's length, and the SHA-256 its publisher states beside it
+    /// (`<url>.sha256`).
+    const DOWNLOAD_BYTES: &str = "170439044";
+    const DOWNLOAD_SHA256: &str = "1a9ee8caaa18a3e433fef93cea8a55dc1ebd478ed761b2fef69d4565f9d00e7f";
+    const SAID: &str = "https_download: ";
+    let log = back.log();
+    let said = log.text().lines().filter_map(|line| line.find(SAID).map(|at| line[at + SAID.len()..].trim())).find(|s| s.starts_with("whole ") || s.starts_with("cut "));
+    // MEASUREMENT ONLY: every run's line, and what netstack said of each connection it closed.
+    for line in log.text().lines() {
+        if let Some(at) = line.find(SAID) {
+            eprintln!("  [download] {}", line[at + SAID.len()..].trim());
+        }
+        if let Some(at) = line.find("netstack: tcp closed: ") {
+            eprintln!("  [tcp] {}", &line[at + "netstack: tcp closed: ".len()..]);
+        }
+        if let Some(at) = line.find("netstack: prof ") {
+            eprintln!("  [prof] {}", &line[at + "netstack: prof ".len()..]);
+        }
+        if let Some(at) = line.find("netstack: stamp ") {
+            eprintln!("  [stamp] {}", &line[at + "netstack: stamp ".len()..]);
+        }
+    }
+    // MEASUREMENT ONLY: the per-MB table, and the connection-setup scout's rows.
+    eprint!("{}", netperf_table::table(log.text()));
+    eprint!("{}", setup_table::table(log.text()));
+    back.job_passed("test_rs_https_download")?;
+    let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
+    let field = |name: &str| said.split_whitespace().find_map(|word| word.strip_prefix(name)?.strip_prefix('='));
+    match said.split_whitespace().next() {
+        Some("whole") if field("bytes") == Some(DOWNLOAD_BYTES) && field("sha256") == Some(DOWNLOAD_SHA256) => {}
+        Some("whole") => {
+            return Err(format!("https_download's body is not {DOWNLOAD_BYTES} bytes hashing {DOWNLOAD_SHA256}: {said}"))
+        }
+        // A cut says its bytes only where the body's first read came.
+        Some("cut") if field("bytes").is_some() => {}
+        _ => return Err(format!("https_download read none of the body: {said}")),
+    }
+    if field("busy") == Some("unread") {
+        return Err(format!("https_download read no MPERF on the T14: {said}"));
+    }
+    Ok(())
+}
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.
@@ -3688,13 +3758,12 @@ fn boot_netcase(
     rust_bins: &[(String, Vec<u8>)],
     options: BootOptions,
 ) -> Result<QemuInstance, String> {
-    const LEASED: &str = "netstack: DHCP: lease ";
     /// `system/netstack/src/serve.rs`'s line for a probing no host answered.
     const CLAIMED: &str = "netstack: mDNS: no host answered for ";
     let case = compile::repo_root().join("tests/images/netcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
     let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    await_marker(&mut qemu, &mut console, toyos_tco::LEASE_SAID, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
     await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
     Ok(qemu)
 }
@@ -3899,6 +3968,59 @@ fn https_fetch() -> Result<(), String> {
     Ok(())
 }
 
+/// MEASUREMENT ONLY, never lands: `https_download` on `tests/images/netperfcase.toml`
+/// against a server on this host, its lines and netstack's printed, and the
+/// per-MB table rendered from them: green when the job ended 0 having said a
+/// line of each kind and netstack a prof line of each download.
+fn netperf_qemu() -> Result<(), String> {
+    use common::https::{self, Authority, Server};
+    let host: std::net::IpAddr = https::HOST.parse().expect("an address");
+    let trusted = Authority::new("ToyOS harness test authority");
+    let body: Vec<u8> = (0..16).flat_map(|_| https::body()).collect();
+    let server = Server::start(trusted.leaf(host), std::sync::Arc::new(body))?;
+    const ROOTS: &str = "etc/ssl/harness-cert.pem";
+    let mut roots = toyos_build::build::trust_roots();
+    roots.extend_from_slice(trusted.pem().as_bytes());
+    let crate_path = compile::repo_root().join("tests/guest/rust-tests");
+    let bins = [("https_download".to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, "https_download"))];
+    let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
+    let case = compile::repo_root().join("tests/images/netperfcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&case, &[], &bins, options);
+    let mut console = qemu.boot_log().to_string();
+    await_marker(&mut qemu, &mut console, toyos_tco::LEASE_SAID, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
+    let url = format!("https://{}:{}/body", https::HOST, server.port);
+    let result = qemu.run_test(&format!("test_rs_https_download {url} /system/{ROOTS}"), Duration::from_secs(900));
+    for line in result.stdout.lines() {
+        eprintln!("  [netperf] {line}");
+    }
+    eprint!("{}", netperf_table::table(&result.stdout));
+    eprint!("{}", setup_table::table(&result.stdout));
+    if let Some(why) = &result.error {
+        return Err(format!("https_download: {why}"));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("https_download ended {:?}", result.exit_code));
+    }
+    for said in [
+        "https_download: perf idle ",
+        "https_download: bench ",
+        "https_download: perf run=2 ",
+        "netstack: prof ",
+        // The connection-setup scout's: every kind of stamp, and the LAN control's last connect.
+        "https_download: setup run=6 ",
+        "https_download: lan control i=5 ",
+        "netstack: stamp lookup ",
+        "netstack: stamp connect ",
+        "netstack: stamp setopt ",
+        "netstack: stamp data ",
+    ] {
+        if !result.stdout.contains(said) {
+            return Err(format!("nothing said {said:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
@@ -3910,6 +4032,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
         "https_fetch" => https_fetch(),
+        "netperf_qemu" => netperf_qemu(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),

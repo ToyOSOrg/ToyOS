@@ -40,7 +40,7 @@ why, and the boot still leases.
   `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` waits on it.
 - **Throughput** is measured against Ubuntu on the same machine and cable, with
   line rate (about 940 Mb/s of TCP) as the target: interrupt moderation (a
-  fixed 128 µs throttle today, not adaptive), ring sizes, checksum and
+  fixed throttle today, not adaptive), ring sizes, checksum and
   segmentation offload.
 - **The part is handed back** in the state the next operating system and the
   management firmware that shares it expect. Ubuntu has had link after every
@@ -87,7 +87,8 @@ of real traffic with no error, leak or stall.
 ## Standing
 
 The bench tests that prove each exit run in the T14 suite on every change to
-the path, not once. Today none does: no T14 row reads the wired card
+the path, not once. Today none does: the one T14 row that reads the wired
+card, `internet_download`, judges none of these exits
 (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). The bench itself stays honest: the boot stick's first
 command still sometimes goes unanswered on the USB2 half of its receptacle
 (runs 84, 103, 104, 105), and everything above rests on the record it carries.

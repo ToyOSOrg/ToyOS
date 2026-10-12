@@ -117,6 +117,10 @@ struct Pipe {
     /// poll registration can clone one out from under the table lock and hold it across its own park.
     read_watch: Arc<Watch>,
     write_watch: Arc<Watch>,
+    /// Each end's leaving watch, by [`End`]: an `OTHER_END_GONE` poll on that
+    /// end sits on it, and only the other end's last holder posts it — a byte
+    /// moved through the pipe wakes no poll that asked about a leaving.
+    left: [Arc<Watch>; 2],
     /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
 }
@@ -132,6 +136,7 @@ impl Pipe {
             holders: Holders::new(),
             read_watch: Arc::new(Watch::new()),
             write_watch: Arc::new(Watch::new()),
+            left: [Arc::new(Watch::new()), Arc::new(Watch::new())],
             rt_boost_pending: false,
         }
     }
@@ -173,13 +178,27 @@ impl Pipe {
 static PIPES: Lock<Option<IdMap<PipeId, Pipe>>> = Lock::new(None);
 
 fn with_pipes<R>(f: impl FnOnce(&IdMap<PipeId, Pipe>) -> R) -> R {
+    use crate::counters::soft;
+    use toyos_abi::counters::Counter;
+    let t0 = soft::now();
     let guard = PIPES.lock();
-    f(guard.as_ref().expect("pipes not initialized"))
+    let t1 = soft::now();
+    soft::add(Counter::PipeLockSpinCycles, t1.wrapping_sub(t0));
+    let r = f(guard.as_ref().expect("pipes not initialized"));
+    soft::since(Counter::PipeLockHoldCycles, t1);
+    r
 }
 
 fn with_pipes_mut<R>(f: impl FnOnce(&mut IdMap<PipeId, Pipe>) -> R) -> R {
+    use crate::counters::soft;
+    use toyos_abi::counters::Counter;
+    let t0 = soft::now();
     let mut guard = PIPES.lock();
-    f(guard.as_mut().expect("pipes not initialized"))
+    let t1 = soft::now();
+    soft::add(Counter::PipeLockSpinCycles, t1.wrapping_sub(t0));
+    let r = f(guard.as_mut().expect("pipes not initialized"));
+    soft::since(Counter::PipeLockHoldCycles, t1);
+    r
 }
 
 pub fn init() {
@@ -217,6 +236,7 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
                 .expect("available() > 0 implies a ring")
                 .ring
                 .read(len, |off, src| buf.write_run(off, &src));
+            crate::counters::soft::add(toyos_abi::counters::Counter::PipeCopyBytes, n as u64);
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
             (Some(n), boost)
@@ -250,7 +270,9 @@ pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
             return Some(PipeWrite::NoMemory);
         };
         if backing.ring.space() > 0 {
-            Some(PipeWrite::Wrote(backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst))))
+            let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
+            crate::counters::soft::add(toyos_abi::counters::Counter::PipeCopyBytes, n as u64);
+            Some(PipeWrite::Wrote(n))
         } else {
             None
         }
@@ -283,22 +305,32 @@ pub fn set_rt_boost_pending(pipe_id: PipeId) {
     });
 }
 
-/// One reference to `end` lets go; its end's last posts the other end's watch.
+/// One reference to `end` lets go; its end's last posts the other end's watch
+/// and its leaving watch.
 fn release(pipe_id: PipeId, end: End) {
-    let released = with_pipes_mut(|pipes| {
+    let (released, left) = with_pipes_mut(|pipes| {
         let pipe = pipes.get_mut(pipe_id).expect("release: pipe not found");
         let released = pipe.holders.release(end);
         pipe.publish_ends();
+        let left = pipe.left[slot(end.other())].clone();
         if released == Released::PipeGone {
             let pipe = pipes.remove(pipe_id).unwrap();
             free_pipe(pipe);
         }
-        released
+        (released, left)
     });
     match (released, end) {
-        (Released::Held | Released::PipeGone, _) => {}
+        (Released::Held | Released::PipeGone, _) => return,
         (Released::EndGone, End::Read) => crate::scheduler::wake_pipe_writers(pipe_id),
         (Released::EndGone, End::Write) => crate::scheduler::wake_pipe_readers(pipe_id),
+    }
+    left.post();
+}
+
+fn slot(end: End) -> usize {
+    match end {
+        End::Read => 0,
+        End::Write => 1,
     }
 }
 
@@ -314,4 +346,10 @@ pub fn read_watch(pipe_id: PipeId) -> Option<Arc<Watch>> {
 /// The write end's watch, the same way.
 pub fn write_watch(pipe_id: PipeId) -> Option<Arc<Watch>> {
     with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.write_watch.clone()))
+}
+
+/// `end`'s leaving watch, the same way: posted once, by the other end's last
+/// holder.
+pub fn left_watch(pipe_id: PipeId, end: End) -> Option<Arc<Watch>> {
+    with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.left[slot(end)].clone()))
 }

@@ -1,6 +1,5 @@
-//! An HTTPS client as any Rust program writes one: `ureq` on `rustls` on
-//! `ring`, as published, trusting the authorities of one roots file and no
-//! others, and naming itself with the project's `User-Agent`.
+//! An HTTPS client as any Rust program writes one (`https_client`), reading
+//! one URL.
 //!
 //! argv: the URL, then the roots file. It says one line and ends:
 //! `https_get: ok bytes=<n> sha256=<hex>` and 0 for a body read to its end,
@@ -10,25 +9,15 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use ureq::tls::{PemItem, RootCerts, TlsConfig};
-
-/// Root `CLAUDE.md`'s: the only `User-Agent` ToyOS sends.
-const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
+#[path = "../https_client.rs"]
+mod https_client;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [url, roots] = args.as_slice() else {
         panic!("usage: https_get <url> <roots file>, not {args:?}");
     };
-    let pem = std::fs::read(roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
-    let certs: Vec<_> = ureq::tls::parse_pem(&pem)
-        .map(|item| match item.unwrap_or_else(|e| panic!("{roots}: {e}")) {
-            PemItem::Certificate(cert) => cert,
-            _ => panic!("{roots} holds a PEM block that is not a certificate"),
-        })
-        .collect();
-    let tls = TlsConfig::builder().root_certs(RootCerts::new_with_certs(&certs)).build();
-    let agent = ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).build().new_agent();
+    let agent = https_client::agent(roots);
 
     let response = match agent.get(url).call() {
         Ok(response) => response,
@@ -57,8 +46,7 @@ fn main() -> ExitCode {
         digest.update(&chunk[..n]);
         bytes += n;
     }
-    let hex: String = digest.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    println!("https_get: ok bytes={bytes} sha256={hex}");
+    println!("https_get: ok bytes={bytes} sha256={}", https_client::hex(digest.finish()));
     ExitCode::SUCCESS
 }
 

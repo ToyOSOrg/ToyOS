@@ -158,7 +158,9 @@ impl VirtioNet {
     /// refusal is handed up as the kernel worded it: what it means is
     /// `Card::begin_pass`'s call, made once for both drivers.
     pub fn take_interrupt(&self) -> Result<u32, SyscallError> {
-        match self.dev.irq() {
+        let record = self.dev.irq();
+        crate::stamps::irq(record.as_ref().ok());
+        match record {
             Ok(record) => Ok(record.count),
             Err(SyscallError::WouldBlock) => Ok(0),
             Err(why) => Err(why),
