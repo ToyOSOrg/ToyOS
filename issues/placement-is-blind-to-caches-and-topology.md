@@ -27,3 +27,10 @@ placement story has three parts none of which we have:
 Composes with the reservation model (placement decides *where*, reservations
 decide *how much*) and with the scheduler simulator (`kernel/sim`), which would need a topology
 model to gate any of this.
+
+The simulator models the tree before the kernel has one, so it compares the
+keys itself: `Shape::level` (`kernel/sim/src/topology.rs`), and the CPUID
+decoding of `scouted` (`kernel/sim/tests/topology.rs`), which reads the benches'
+recorded words. The stage that lands the kernel's `Topology::from_keys` and its
+CPUID decoder moves both onto them in the same change, or the simulator keeps a
+second tree and a second decoder beside the kernel's.

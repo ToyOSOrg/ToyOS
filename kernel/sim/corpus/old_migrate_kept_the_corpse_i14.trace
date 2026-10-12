@@ -4,5 +4,7 @@
 # note: InTransit(CpuId(1)). soundserver boost-wakes a client thread whose process
 # note: has just been torn down, on the CPU soundserver itself is running, with a
 # note: sibling asleep: place() forwards the corpse instead of reaping it.
-1 2 2 0 1 1 1 1 2 0 0 1 1 1 1 1 0 0 2 1 2 1 2 1 0 1 0 0 2 2 1 2
-0 1 3 1 1 1 0 3 
+# note: re-shrunk after an awake CPU with nothing loaded came to owe its pass at
+# note: once, which renumbers every decision.
+1 1 1 2 0 0 0 0 1 2 2 2 0 1 1 2 0 1 2 0 1 0 1 0 0 3 1 2 0 0 2 0
+2 0 0 0 2 0 2 2 1 1 0 3 

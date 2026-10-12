@@ -33,5 +33,6 @@ pub mod payload;
 pub mod scenarios;
 pub mod shrink;
 pub mod sweep;
+pub mod topology;
 pub mod vm;
 pub mod workload;

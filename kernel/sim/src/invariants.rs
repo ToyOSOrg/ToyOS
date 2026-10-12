@@ -18,10 +18,10 @@ use kernel::sched::fair::{MAX_VRUNTIME_LAG_NS, QUANTUM_NS};
 use kernel::sched::invariants::{residents, Container};
 use kernel::sched::task::{TaskKey, TaskState};
 
-use kernel::sched::cpu::{DYING_AGE_NS, DYING_CHUNK_NS};
+use kernel::sched::cpu::{Balance, DYING_AGE_NS, DYING_CHUNK_NS};
 
 use crate::latency::ReadyCause;
-use crate::vm::{FairEpoch, Vm, IPI_LATENCY_NS, RUN_CHUNK_NS, UNWIND_NS};
+use crate::vm::{FairEpoch, Vm, IPI_LATENCY_NS, PROBE_WORTH_IT, RUN_CHUNK_NS, UNWIND_NS};
 
 /// How long a CPU may keep running a normal task while an RT task is ready on
 /// it (invariant I4): the interrupt's own delivery bound, plus the preempt-off
@@ -127,6 +127,7 @@ pub fn check_all(vm: &mut Vm<'_>) {
     check_share_refcounts(vm);
     check_address_spaces(vm);
     check_boost_windows(vm);
+    check_work_conservation(vm);
     note_run_latency(vm);
 }
 
@@ -140,7 +141,7 @@ pub fn check_all(vm: &mut Vm<'_>) {
 /// share's refcount, and it is exactly a thread whose competition is changing,
 /// which is the one thing I13 declines to measure across.
 fn runnable_now(vm: &Vm<'_>) -> (Vec<u32>, Vec<u32>, BTreeSet<TaskKey>) {
-    let cpus = vm.scenario.cpus;
+    let cpus = vm.scenario.cpus();
     let mut counted = vec![0u32; vm.procs.len()];
     let mut per_cpu = vec![0u32; vm.procs.len() * cpus];
     let mut threads = BTreeSet::new();
@@ -166,7 +167,7 @@ fn runnable_now(vm: &Vm<'_>) -> (Vec<u32>, Vec<u32>, BTreeSet<TaskKey>) {
 /// and I6 both need it and it is the more expensive half of either.
 fn runnable_per_process(vm: &Vm<'_>) -> Vec<u32> {
     let mut counted = vec![0u32; vm.procs.len()];
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         for (key, container) in residents(&vm.cpus[cpu]) {
             if !matches!(
                 container,
@@ -192,7 +193,7 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
     let mut seen: BTreeMap<TaskKey, (usize, Container)> = BTreeMap::new();
     let mut problems = Vec::new();
 
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         for (key, container) in residents(&vm.cpus[cpu]) {
             if let Some((other, other_container)) = seen.insert(key, (cpu, container)) {
                 problems.push(format!(
@@ -257,7 +258,7 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
 fn check_sleeping_cpus(vm: &mut Vm<'_>) {
     let mut problems = Vec::new();
     let (halted, pending) = vm.hw.with(|s| (s.halted.clone(), s.pending_ipi.clone()));
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         // The stopped CPU is the modelled fault, not a protocol break: it is
         // *given* work it never takes, which is the whole of what the scenario
         // stages. Every other CPU still answers for itself.
@@ -304,17 +305,14 @@ fn check_sleeping_cpus(vm: &mut Vm<'_>) {
 fn check_retires(vm: &mut Vm<'_>) {
     let mut problems = Vec::new();
 
-    let migrated: Vec<(TaskKey, u32)> = vm.hw.with(|s| {
-        let fresh = s.trace[vm.trace_cursor..]
-            .iter()
-            .filter_map(|ev| match ev.kind {
-                kernel::sched::hw::TraceKind::Migrate { task, to, .. } => Some((task, to.0)),
-                _ => None,
-            })
-            .collect();
-        vm.trace_cursor = s.trace.len();
-        fresh
-    });
+    let migrated: Vec<(TaskKey, u32)> = vm
+        .step_trace
+        .iter()
+        .filter_map(|ev| match ev.kind {
+            kernel::sched::hw::TraceKind::Migrate { task, to, .. } => Some((task, to.0)),
+            _ => None,
+        })
+        .collect();
     // Counted on the same walk that judges them: the policy suite's wakeup-storm
     // case claims a machine drains in parallel, and that claim is only about the
     // balance path if the balance path moved something.
@@ -409,7 +407,7 @@ fn retire_elapsed(vm: &Vm<'_>, key: TaskKey) -> u64 {
 /// thing the CPU owes. Delegated to the core's own checker, which
 /// is the same code a kernel `feature="check"` build runs.
 fn check_timers(vm: &mut Vm<'_>) {
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         let armed = vm.cpus[cpu].armed();
         let quantum = vm.cpus[cpu].running().map(|_| vm.cpus[cpu].quantum_end());
         let deadline = vm.cpus[cpu].parked().filter_map(|p| p.deadline()).min();
@@ -435,7 +433,7 @@ fn check_timers(vm: &mut Vm<'_>) {
 fn check_rt_latency(vm: &mut Vm<'_>) {
     let bound = rt_latency_bound(vm.max_kernel_section());
     let mut problems = Vec::new();
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         // `serves_rt_band` and not `is_rt`, for the reason that method's own doc
         // gives: a killed thread that holds the RT right is unwinding, not doing
         // real-time work, so a real-time sibling waiting behind it **is** being
@@ -477,7 +475,7 @@ fn check_rt_latency(vm: &mut Vm<'_>) {
 fn note_rt_service(vm: &mut Vm<'_>) -> bool {
     let mut rt = Vec::new();
     let mut occupied = false;
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         let sched = &vm.cpus[cpu];
         if let Some(task) = sched.running() {
             if task.rt().is_rt() {
@@ -572,7 +570,7 @@ fn check_fairness(vm: &mut Vm<'_>, rt_present: bool) {
     vm.fair_window_open = false;
     vm.thread_window_open = false;
     let (runnable, per_cpu, live_threads) = runnable_now(vm);
-    let saturated = (0..vm.scenario.cpus).all(|cpu| vm.cpus[cpu].running().is_some());
+    let saturated = (0..vm.scenario.cpus()).all(|cpu| vm.cpus[cpu].running().is_some());
     let mut members: Vec<usize> = if rt_present || !saturated {
         Vec::new()
     } else {
@@ -588,7 +586,7 @@ fn check_fairness(vm: &mut Vm<'_>, rt_present: bool) {
     // can still fill the machine.
     if members
         .iter()
-        .any(|&p| runnable[p] as usize * members.len() < vm.scenario.cpus)
+        .any(|&p| runnable[p] as usize * members.len() < vm.scenario.cpus())
     {
         members.clear();
     }
@@ -603,14 +601,14 @@ fn check_fairness(vm: &mut Vm<'_>, rt_present: bool) {
     // them sharing a CPU with a solo thread that is catching up, which is I5's
     // entitlement being honoured and not a sibling being cheated.
     let balanced = members.iter().all(|&process| {
-        let row = &per_cpu[process * vm.scenario.cpus..(process + 1) * vm.scenario.cpus];
+        let row = &per_cpu[process * vm.scenario.cpus()..(process + 1) * vm.scenario.cpus()];
         row.iter().min() == row.iter().max()
     });
     let threads: u32 = members.iter().map(|&p| runnable[p]).sum();
     // What one CPU's fair band holds. Read off CPU 0 rather than divided out of
     // the machine-wide total, so it is the quantity itself and not an average
     // that happens to equal it; `balanced` is what makes every CPU's the same.
-    let rivals: u32 = members.iter().map(|&p| per_cpu[p * vm.scenario.cpus]).sum();
+    let rivals: u32 = members.iter().map(|&p| per_cpu[p * vm.scenario.cpus()]).sum();
 
     if members != vm.fair_epoch.members {
         vm.fair_epoch = FairEpoch {
@@ -852,7 +850,7 @@ fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
                 // Which run queue each thread is in, because that is the first
                 // question a per-thread spread raises and the answer is one
                 // scan on a path that has already failed.
-                let at = (0..vm.scenario.cpus)
+                let at = (0..vm.scenario.cpus())
                     .find(|&cpu| residents(&vm.cpus[cpu]).any(|(k, _)| k == *key))
                     .map_or_else(|| "?".to_string(), |cpu| cpu.to_string());
                 Some(format!("{}@cpu{at}={served}", key.0))
@@ -868,6 +866,99 @@ fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
     }
     for problem in problems {
         vm.violate(problem);
+    }
+}
+
+/// I15: **work conservation.** No CPU spends more than
+/// [`work_conservation_bound`] protocol rounds ([`crate::vm::Vm::round`]) idle
+/// while another holds a task a probe would be handed — a fair band at least
+/// [`PROBE_WORTH_IT`] deep.
+///
+/// The bounded form of the rule rather than a predicate over one step, and the
+/// reason is what a step lets the simulator see. Its safety form — no CPU parks
+/// unprobed beside stealable work that nobody rang it for — turns on whether a
+/// victim's push rang a parked CPU, and a ring on a doorbell whose edge is
+/// already raised changes nothing outside the core: it reads exactly as no ring.
+/// What is visible is the outcome, an idle CPU and a queue that stays stealable,
+/// and a protocol that leaves work unannounced or refuses it keeps that outcome
+/// standing round after round. So the bound is on the outcome, and every
+/// failure the safety form names fails it: an idle CPU nobody rings, one that is
+/// rung and declines to probe, a probe that is never answered.
+///
+/// **Nothing pauses the count.** A ring or a task on its way to the idle CPU
+/// lands after an interrupt's latency, a matter of time, which the rest of the
+/// machine could fill with rounds that take none; a round waits on every CPU an
+/// IPI is on its way to ([`crate::vm::Vm::round`]), so an answer in flight costs
+/// at most the round it was sent in. A CPU that is rung and declines to probe,
+/// or whose probe is never answered, accrues every round it stays idle however
+/// often it is rung.
+///
+/// Rounds and not nanoseconds, because the clock measures the explorer as much
+/// as the protocol; and a stopped CPU is neither idle nor a victim, its numbers
+/// being the modelled fault `stopped_cpu` measures.
+fn check_work_conservation(vm: &mut Vm<'_>) {
+    let cpus = vm.scenario.cpus();
+    let victim = (0..cpus).find(|&cpu| {
+        !vm.is_stopped(cpu) && vm.cpus[cpu].rq().fair_len() as u32 >= PROBE_WORTH_IT
+    });
+    let bound = work_conservation_bound(vm.scenario.balance, cpus).unwrap_or(u64::MAX);
+    let completed = vm.round - std::mem::replace(&mut vm.wc_round_seen, vm.round);
+    let mut problems = Vec::new();
+    for cpu in 0..cpus {
+        let idle = !vm.is_stopped(cpu) && vm.cpus[cpu].running().is_none();
+        let Some(victim) = victim.filter(|_| idle) else {
+            vm.wc_idle[cpu] = None;
+            continue;
+        };
+        let rounds = vm.wc_idle[cpu].get_or_insert(0);
+        *rounds += completed;
+        let rounds = *rounds;
+        vm.wc_rounds = vm.wc_rounds.max(rounds);
+        if rounds > bound {
+            problems.push(format!(
+                "I15: cpu{cpu} has been idle for {rounds} rounds while cpu{victim} holds {} \
+                 queued fair task(s) (bound {bound} rounds)",
+                vm.cpus[victim].rq().fair_len(),
+            ));
+        }
+    }
+    for problem in problems {
+        vm.violate(problem);
+    }
+}
+
+/// How many rounds a CPU may spend idle beside stealable work: `cpus + 2` under
+/// [`Balance::PushOnSurplus`], and no bound under a policy that claims none —
+/// the pull alone, no balance path and the declined re-arm, the controls
+/// `sim/tests/policy.rs` prices the push against.
+///
+/// **Derived for one victim.** An idle CPU `p` beside a victim `v`'s stealable
+/// work counts:
+///
+/// 1. `cpus` rounds until `p` is rung: the round open when `p` began counting,
+///    whose pass of `v` may have come before it, and `cpus − 1` more. `v` runs
+///    a task, so it is awake when every round opens and passes in each; every
+///    such pass that leaves it stealable rings the first sleeping CPU at or
+///    after its cursor and moves the cursor past it, so `p` is reached within
+///    `cpus − 1` of them. A `p` the cursor passes because it is awake owes the
+///    next round its pass, which probes as term 2's does.
+/// 2. One round for `p`'s idle pass. A ring still in flight when the next round
+///    opens holds that round open until `p` has passed, so `p` has probed `v`,
+///    the only CPU publishing a surplus worth a probe, before it completes.
+/// 3. One round for `v`'s answer: `v` passes in the round after the probe was
+///    posted, and answers. The answer hands over a task unless that leaves `v`
+///    with none to spare — and then nothing is stealable and the count is over
+///    — and its post leaves `p` awake or rung, so the next round waits on the
+///    pass in which `p` takes it and runs it.
+///
+/// With several victims the derivation does not hold: each walks its own
+/// cursor, and a probe sent to one that runs dry before it answers leaves `p`
+/// to wait for a ring again — the flat push's weakness, recorded in
+/// `issues/the-push-bounds-an-idle-cpus-wait-only-for-one-victim.md`.
+fn work_conservation_bound(balance: Balance, cpus: usize) -> Option<u64> {
+    match balance {
+        Balance::PushOnSurplus { .. } => Some(cpus as u64 + 2),
+        Balance::None | Balance::Pull | Balance::PullWithRearm { .. } => None,
     }
 }
 
@@ -895,7 +986,7 @@ fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
 fn note_run_latency(vm: &mut Vm<'_>) {
     let now = vm.clock;
     let mut seen: BTreeMap<TaskKey, Container> = BTreeMap::new();
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         for (key, container) in residents(&vm.cpus[cpu]) {
             seen.insert(key, container);
         }
@@ -925,10 +1016,11 @@ fn note_run_latency(vm: &mut Vm<'_>) {
                         | Container::Zombie,
                     ) => ReadyCause::Fresh,
                 };
-                vm.awaiting.insert(key, (now, cause));
+                vm.awaiting.insert(key, (now, cause, vm.round));
             }
         } else if container == Container::Running {
-            if let Some((since, cause)) = vm.awaiting.remove(&key) {
+            if let Some((since, cause, round)) = vm.awaiting.remove(&key) {
+                vm.rounds_to_run = vm.rounds_to_run.max(vm.round - round);
                 dispatched.push((key, cause, now.since(since)));
             }
         } else {
@@ -1091,7 +1183,7 @@ pub fn check_final(vm: &mut Vm<'_>) {
             stuck.join(", "),
         ));
     }
-    for cpu in 0..vm.scenario.cpus {
+    for cpu in 0..vm.scenario.cpus() {
         if vm.is_stopped(cpu) {
             continue;
         }
