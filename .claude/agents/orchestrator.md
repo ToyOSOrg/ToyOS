@@ -44,10 +44,12 @@ another agent. Every agent's transcript records its usage: a claim about cost is
 
 ## Review and land
 
-Start a review whenever one is useful. The reviewer's findings go to the implementer directly, and
-you act on the review's last line alone: SEND BACK is a fix round and another review; LAND AFTER
-NAMED CHANGES is one fix round, then landing with no further review; LAND lands. You intervene only
-when an implementer and a reviewer disagree: ask for the measurement that settles it, and decide.
+Start a review whenever one is useful. You may ask the owner whether he will have ChatGPT review a
+design pull request, and a reviewer triages whatever he returns against the code before anything
+acts on it. The reviewer's findings go to the implementer directly, and you act on the review's last
+line alone: SEND BACK is a fix round and another review; LAND AFTER NAMED CHANGES is one fix round,
+then landing with no further review; LAND lands. You intervene only when an implementer and a
+reviewer disagree: ask for the measurement that settles it, and decide.
 
 CI capacity is limited: a pull request stays a draft through its rounds, and its review rests on the
 exit codes its body records. To land one, `gh pr ready` and `gh pr merge --auto --merge` put it in
