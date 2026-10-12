@@ -54,9 +54,10 @@ if it meets the bar above; otherwise it is a NOTE.
   userland could own; a design made worse to spare the ABI; a design choice made because of a
   test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
-  ToyOS targets, and an environment that cannot run it changes or the gap is filed; where that
-  hardware's manufacturers or the published state of the art back a design, one that does not
-  follow and cite them, or leaves them while they still back it. Bench numbers on a design they back
+  ToyOS targets, and an environment that cannot run it changes or the gap is filed; a citation of
+  Linux, or of any implementation's source, as authority; where that hardware's manufacturers or
+  the published state of the art back a design, one that does not follow and cite them, or leaves
+  them while they still back it. Bench numbers on a design they back
   are reported and never send it back, but a metal timing past twice its machine's record reds every
   design: that ceiling is a bug guard, not a bench verdict. A design nothing published covers is
   reviewed on its correctness and simplicity, and a speed claim does not decide by itself unless
@@ -178,8 +179,8 @@ request's body that is false of the tree or of the record is one line under NOTE
 orchestrator corrects it himself. An issue file's staleness is never raised, and no branch is asked
 to edit one; an edit to an existing one other than the issue the branch takes up, or one a rule names as where
 it records something, is a NOTE. A source comment's
-wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
-formatting, a comment that could be shorter — are not raised.
+wording, count, date, line number or citation but one **Fit** refuses, and every cosmetic finding
+— naming, wording, formatting, a comment that could be shorter — are not raised.
 
 ## Output
 

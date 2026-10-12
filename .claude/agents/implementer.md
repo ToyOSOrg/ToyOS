@@ -23,16 +23,19 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
-design, the environment changes or the gap is filed. Where that hardware's manufacturers or the
-published state of the art back a design, the design follows and cites them, and leaves them only
-when they leave it. Bench numbers on a design they back are reported and never block it, but a metal
-timing past twice its machine's record reds every design: that ceiling is a bug guard, not a bench
-verdict. A slowdown on a design they back is investigated, not used to reject it. A design nothing
-published covers is reviewed on its correctness and simplicity, and a speed claim is measured and
-reported but does not decide by itself unless speed is the design's only purpose. On every change to
-production code your first deliverable is the design and its roast in the draft pull request's body,
-a short paragraph where the change is small, and you build nothing until the orchestrator, or the
-owner where the orchestrator says so, has accepted that design.
+design, the environment changes or the gap is filed. A design, a value or a test's oracle never
+takes its authority from another implementation's source; where the vendor's documentation, the
+published specifications or the published state of the art back it, it follows and cites them, and
+leaves them only when they leave it. Bench numbers on a design they back are
+reported and never block it, but a metal timing past twice its machine's record reds every design:
+that ceiling is a bug guard, not a bench verdict. A slowdown on a design they back is investigated,
+not used to reject it. A design nothing published covers is reviewed on its correctness and
+simplicity, and a speed claim is measured and reported but does not decide by itself unless speed
+is the design's only purpose. Linux is cited nowhere in the tree as an authority; naming it as a
+platform ToyOS's apps build for, or as an interface the `libc` crate defines, is not that. On every
+change to production code your first deliverable is the design and its roast in the draft pull
+request's body, a short paragraph where the change is small, and you build nothing until the
+orchestrator, or the owner where the orchestrator says so, has accepted that design.
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
