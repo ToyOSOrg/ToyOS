@@ -6,22 +6,37 @@ opened: 2026-10-12
 
 # A stream cannot move between processes
 
-A program that hands a TCP stream to another process, as socket activation or
-an inetd-style child does, cannot do so on ToyOS, though root `CLAUDE.md` says
-existing Rust just works. A process holds a stream only by connecting or
-accepting it. At ab655a115 nothing in the tree takes a stream handle another
-process made: std on ToyOS has no socket `FromRawFd` or `From<OwnedFd>` (the
-`rust/` fork's `library/std/src/os/fd/mod.rs` compiles `net` out for `toyos`),
-libc's and socket2's sockets are keys in their own process's tables
-(`SOCKET_FD_BASE`, `sdk/libc/src/socket.rs`; socket2's `NEXT_FD`), and the mio
-fork's ToyOS stream has no `from_std`.
+Today a TCP stream's handle reads and writes the stream in any process that
+holds it. The handle is the stream's two data pipes joined into one
+connection (`make_socket_fd`, `sdk/std/sys/net/connection.rs`), which
+`TcpStream` reads and writes with `syscall::read` and `write`.
+`File::from_raw_fd` takes any handle (`sdk/std/os/io.rs`) and reads and writes
+it with the same calls (`sdk/std/sys/fs.rs`), and `Stdio::from(File)` hands
+it to a child, whose slot the kernel fills with a duplicate
+(`sdk/std/sys/process.rs`; `build_child_handles`,
+`kernel/src/loader/start.rs`). So an inetd-style child serves the stream on
+its stdin and stdout for as long as the process that connected it holds its
+`TcpStream`.
 
-The session design keeps it so
+The session design takes that away
 (`issues/netstack-moves-every-byte-through-two-kernel-pipes.md`, stage 3; PR
-#863, amendment E): after its answer a stream's connection carries only
-doorbells, so a process handed the handle has no channel on which to ask
-netstack for the stream's region, and `toyos::net` refuses by name a handle the
-process holds no end for, std's `FromRawFd` included once stage 3 adds it.
+#863, amendment E). After its answer, a stream's connection carries only
+doorbells, and the region that holds the stream's bytes is mapped only by
+the process that connected or accepted it. Read through a `File` or a
+child's stdio, the handle would wait for ever or read doorbells as data, and
+netstack would drain what the child writes as doorbells, with no error on
+either side. Stage 3 makes std refuse both loudly instead.
+`File::from_raw_fd` of a stream's handle panics with `toyos::net`'s refusal.
+A spawn that would put a stream's handle in a child's stdio slot answers that
+refusal and starts no child. And `toyos::net` refuses by name a handle the
+process holds no end for, std's `TcpStream::from_raw_fd` included. A program
+that hands a stream to another process through a `File` or a child's stdio,
+as an inetd-style server does, then fails loudly on ToyOS where today it
+works, and one that takes a moved stream back as a `TcpStream`, as socket
+activation does and as no ToyOS std builds today, is refused, though root
+`CLAUDE.md` says existing Rust just works. ToyOS's own
+`CommandExt::inherit_handle` past the stdio slots and `CommandExt::endow`
+still hand a child a stream's handle with no refusal.
 
 Owner: the orchestrator, who stages
 `issues/netstack-moves-every-byte-through-two-kernel-pipes.md`.
