@@ -56,8 +56,8 @@ if it meets the bar above; otherwise it is a NOTE.
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
   ToyOS targets, and an environment that cannot run it changes or the gap is filed; where that
   hardware's manufacturers or the published state of the art back a design, one that does not
-  follow and cite them, or leaves them while they still back it. Bench numbers on a design they
-  back are reported and never send it back, but a T14 timing past twice its record reds every
+  follow and cite them, or leaves them while they still back it. Bench numbers on a design they back
+  are reported and never send it back, but a metal timing past twice its machine's record reds every
   design: that ceiling is a bug guard, not a bench verdict. A design nothing published covers is
   reviewed on its correctness and simplicity, and a speed claim does not decide by itself unless
   speed is the design's only purpose. A new
