@@ -463,10 +463,9 @@ const MACHINE_TESTS: &[&str] = &[
     // kernel did not make.
     "toyfetch_reports",
     // Every vector register a thread holds, across switches to threads holding
-    // others: the bracket's `XSAVEOPT` and `XRSTOR` against a scheduler, which
-    // no host build has. The shared boot's run is the benches'; this is TCG's,
-    // whose XSAVE is QEMU's own reading of the SDM, and the KVM runner's CPU,
-    // and the one machine a mutation of the bracket can be run on unattended.
+    // others, against a scheduler, which no host build has. The shared boot's
+    // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
+    // the SDM, and the KVM runner's CPU.
     "vector_state_survives_a_switch",
 ];
 

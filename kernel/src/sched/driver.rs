@@ -43,7 +43,7 @@ pub fn preempt_off<R>(f: impl FnOnce(&PreemptOff) -> R) -> R {
     result
 }
 
-/// The same proof, bought with `cli`: `log::emit` must pay neither of [`preempt_off`]'s locked read-modify-writes.
+/// The same proof, bought with `cli`.
 pub struct IrqOff(());
 
 // SAFETY: `do_preempt` needs `IF` set or a voluntary pass; `irq_off` masks `IF` and calls nothing that yields one.
