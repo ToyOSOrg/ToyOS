@@ -1,8 +1,8 @@
 //! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form,
 //! `IA32_APIC_BASE` and the performance request hold on every CPU in this
-//! machine. One declaration,
-//! applied by the BSP and every AP and checked on each; nothing else may write
-//! any of them. Each register is written whole: `CR0` and `EFER` are
+//! machine. One declaration, applied by the BSP and every AP and checked on
+//! each; nothing else may write any of them but [`flush_global`], which puts
+//! back the `CR4` it read. Each register is written whole: `CR0` and `EFER` are
 //! constants, `CR4` is required bits plus whatever optional bits this CPU
 //! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
 //! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
@@ -64,6 +64,7 @@ mod cr4 {
     pub const DE: u64 = 1 << 3;
     pub const PAE: u64 = 1 << 5;
     pub const MCE: u64 = 1 << 6;
+    pub const PGE: u64 = 1 << 7;
     pub const OSFXSR: u64 = 1 << 9;
     pub const OSXMMEXCPT: u64 = 1 << 10;
     pub const OSXSAVE: u64 = 1 << 18;
@@ -139,9 +140,10 @@ const ENERGY_PERF_BIAS: u64 = 6;
 pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
-/// touches no debug register. `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
+/// touches no debug register. `PGE` makes a kernel leaf global
+/// (`paging::kernel_leaf`). `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
 const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT | cr4::OSXSAVE;
+    cr4::DE | cr4::PAE | cr4::MCE | cr4::PGE | cr4::OSFXSR | cr4::OSXMMEXCPT | cr4::OSXSAVE;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
@@ -243,10 +245,13 @@ pub fn init(cpu_id: u32) {
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
-        // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
-        // bits `declaration` has just confirmed this CPU defines and whose `LMA`
-        // is the one this CPU, in long mode, already holds.
+        // the first two for both values and both callers use PCID 0; `wrmsr`
+        // writes [`EFER`], whose bits `declaration` has just confirmed this CPU
+        // defines and whose `LMA` is the one this CPU, in long mode, already holds.
         unsafe {
+            // Through `PGE` clear: only a change of `PGE` drops the global
+            // translations a firmware that left it set may still hold.
+            cpu::write_cr4(declared & !cr4::PGE);
             cpu::write_cr4(declared);
             cpu::wrmsr(efer::MSR, EFER);
             // SAFETY: `CR4.OSXSAVE` is set by the write above, and
@@ -374,6 +379,28 @@ pub fn pcid_active() -> bool {
     DECLARED_CR4.load(Ordering::Acquire) & cr4::PCIDE != 0
 }
 
+/// Drops every translation this CPU holds, global ones included (SDM Vol. 3A
+/// §4.10.4.1, APM Vol. 2 §5.5): `PGE` cleared and put back where it is set;
+/// where it is not, nothing is global and a `CR3` reload drops the rest. For a
+/// CPU whose `PCIDE` is clear, which is every CPU before its declaration.
+///
+/// The live register and not the declaration, because it runs before any
+/// declaration exists. No interrupt guard: a nested call leaves `CR4` as it
+/// found it.
+pub fn flush_global() {
+    let live = cpu::read_cr4();
+    // SAFETY: `live` and `live` without `PGE` are both values this CPU holds or
+    // held, which fault nowhere; a `CR3` write of the `CR3` just read is valid.
+    unsafe {
+        if live & cr4::PGE != 0 {
+            cpu::write_cr4(live & !cr4::PGE);
+            cpu::write_cr4(live);
+        } else {
+            cpu::write_cr3(cpu::read_cr3());
+        }
+    }
+}
+
 /// Proof that this machine's declaration carries `PCIDE`, so `INVPCID` is
 /// not `#UD` here. Zero-sized: an `Option<PcidActive>` costs nothing extra.
 /// Never stales: `PCIDE`, once declared, is never cleared.
@@ -390,7 +417,7 @@ impl PcidActive {
 /// against what the BSP said. Recomputed per CPU rather than trusted from
 /// the BSP, so a divergent machine names the CPU instead of faulting blind.
 fn declaration(cpu_id: u32) -> u64 {
-    let have = supported();
+    let have = supported(cpu_id);
     let missing = CR4_REQUIRED & !have;
     assert!(
         missing == 0,
@@ -471,11 +498,12 @@ fn has_xss() -> bool {
 }
 
 /// The `CR4` bits this CPU will accept, as CPUID reports them.
-fn supported() -> u64 {
-    const CPUID_1_EDX: [(u32, u64); 5] = [
+fn supported(cpu_id: u32) -> u64 {
+    const CPUID_1_EDX: [(u32, u64); 6] = [
         (2, cr4::DE),
         (6, cr4::PAE),
         (7, cr4::MCE),
+        (13, cr4::PGE),
         (24, cr4::OSFXSR),
         (25, cr4::OSXMMEXCPT),
     ];
@@ -508,9 +536,15 @@ fn supported() -> u64 {
             have |= flag;
         }
     }
-    // PCID without INVPCID is not worth having: nothing could flush by ASID.
-    if ecx1 & (1 << 17) != 0 && ebx7 & (1 << 10) != 0 {
-        have |= cr4::PCIDE;
+    // PCID without INVPCID is refused: with `PCIDE` set every global discharge
+    // is `INVPCID` type 2 (`paging::Owed::discharge`), Intel's workaround for
+    // ADL063/RPL043's `INVLPG`, and nothing else could flush by PCID.
+    if ecx1 & (1 << 17) != 0 {
+        if ebx7 & (1 << 10) != 0 {
+            have |= cr4::PCIDE;
+        } else {
+            log!("control_regs: cpu{cpu_id} has PCID but no INVPCID: PCIDE refused");
+        }
     }
     have
 }

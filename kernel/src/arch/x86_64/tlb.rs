@@ -9,17 +9,22 @@
 //! **The target set is every other CPU the machine brought up**, not the CPUs
 //! sharing the initiator's address space: nothing a process does puts a CPU
 //! into it or takes one out.
+//!
+//! **A user-half change keeps global translations**: its flush is `INVPCID`
+//! type 3 or a `CR3` reload, and only a kernel-half change, whose leaves are
+//! global, asks the flush that drops them (SDM Vol. 3A §4.10.4.1, APM Vol. 2
+//! §5.5.2). An answer covering both is the wider.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::shootdown::{Generation, Shootdown};
+use crate::shootdown::{Generation, Reach, Shootdown};
 
 use super::{apic, percpu};
 use crate::smp;
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-use crate::invalidation::Origin;
+use crate::invalidation::{Half, Origin};
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
 /// delivery the two disagree on is an uncounted issuing path.
@@ -58,20 +63,25 @@ pub fn census(say: &mut impl FnMut(core::fmt::Arguments<'_>)) {
 const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 
 /// Write the page table, then call this, then free — it returns only once every
-/// CPU has flushed. The local-flush early return is uncounted: no IPI, no wait.
-pub fn shootdown(origin: Origin) {
+/// CPU has flushed what a change to `half` owes. The local-flush early return
+/// is uncounted: no IPI, no wait.
+pub fn shootdown(origin: Origin, half: Half) {
+    let reach = match half {
+        Half::User => Reach::Narrow,
+        Half::Kernel => Reach::Wide,
+    };
     let cpus = smp::cpu_count();
     if !smp::answering() || cpus <= 1 {
-        crate::mm::paging::flush_tlb_all();
+        flush(reach);
         return;
     }
     // Counted before the IPI, so a delivery can never precede its issue's count.
     ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
     let began = crate::clock::nanos_since_boot();
     let me = percpu::cpu_id() as usize;
-    let generation = SHOOTDOWN.issue();
+    let generation = SHOOTDOWN.issue(reach);
     // This CPU answers itself locally instead of by self-IPI.
-    SHOOTDOWN.serve(me, crate::mm::paging::flush_tlb_all);
+    SHOOTDOWN.serve(me, flush);
     apic::tlb_ipi();
     for cpu in 0..cpus {
         if cpu as usize != me {
@@ -103,7 +113,7 @@ pub fn bench() {
     let mut took = [0u64; ROUNDS];
     for sample in took.iter_mut() {
         let began = crate::clock::nanos_since_boot();
-        shootdown(Origin::Bench);
+        shootdown(Origin::Bench, Half::User);
         *sample = crate::clock::nanos_since_boot().saturating_sub(began);
     }
     took.sort_unstable();
@@ -123,7 +133,7 @@ pub fn bench() {
 fn wait_for(me: usize, cpu: u32, generation: Generation) {
     let mut spins = 0u32;
     let mut deadline = None;
-    while !SHOOTDOWN.wait_turn(me, cpu as usize, generation, crate::mm::paging::flush_tlb_all) {
+    while !SHOOTDOWN.wait_turn(me, cpu as usize, generation, flush) {
         core::hint::spin_loop();
         spins += 1;
         if spins == SPINS_PER_DEADLINE_CHECK {
@@ -142,11 +152,20 @@ fn wait_for(me: usize, cpu: u32, generation: Generation) {
     }
 }
 
+/// What `reach` asks of this CPU: every translation, or every one but the
+/// global ones a user-half change leaves.
+fn flush(reach: Reach) {
+    match reach {
+        Reach::Wide => crate::mm::paging::flush_tlb_all(),
+        Reach::Narrow => crate::mm::paging::flush_tlb_user(),
+    }
+}
+
 /// Vector 0xFE's whole body: flush this CPU and say which generation it covers.
 pub fn serve_ipi() {
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve(cpu, || {
-        crate::mm::paging::flush_tlb_all();
+    SHOOTDOWN.serve(cpu, |reach| {
+        flush(reach);
         stage_ack_delay();
     });
 }
@@ -161,17 +180,18 @@ pub fn poll() {
         return;
     }
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve_if_owed(cpu, || {
-        crate::mm::paging::flush_tlb_all();
+    SHOOTDOWN.serve_if_owed(cpu, |reach| {
+        flush(reach);
         stage_ack_delay();
     });
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called
-/// once after the machine is released.
+/// once after the machine is released. Wide whatever is owed: a kernel-half
+/// change made before the machine answered issued no generation to say so.
 pub fn join() {
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve(cpu, crate::mm::paging::flush_tlb_all);
+    SHOOTDOWN.serve(cpu, |_| crate::mm::paging::flush_tlb_all());
 }
 
 #[cfg(not(feature = "test-actuators"))]
@@ -244,7 +264,7 @@ pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
             delay::TARGET.store(cpu, Ordering::Relaxed);
             open_arm_window();
             let began = crate::clock::nanos_since_boot();
-            shootdown(Origin::Staged);
+            shootdown(Origin::Staged, Half::User);
             least = least.min(crate::clock::nanos_since_boot().saturating_sub(began));
         }
     });
@@ -257,6 +277,16 @@ pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
     } else {
         least
     }
+}
+
+/// [`shootdown`], answering whether this CPU's own answers inside it reached
+/// wide: a kernel-half generation another CPU issued meanwhile widens them.
+#[cfg(feature = "test-actuators")]
+pub fn debug_shootdown_answered_wide(origin: Origin, half: Half) -> bool {
+    let me = percpu::cpu_id() as usize;
+    let before = SHOOTDOWN.widened(me);
+    shootdown(origin, half);
+    SHOOTDOWN.widened(me) != before
 }
 
 /// Give the machine its ordinary latency back before the window lapses.
