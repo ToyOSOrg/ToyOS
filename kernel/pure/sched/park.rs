@@ -121,6 +121,11 @@ fn deliver<M: SchedMsg>(
             .claim()
             .expect("the wake claim admits one poster: node must be free");
         let handle = cpus.get(cpu);
+        // Stamped before the post, so the target cannot dispatch ahead of it.
+        #[cfg(feature = "scout-wake")]
+        if cause.urgency() == crate::sched::mailbox::Urgency::Normal {
+            kicker.scout_wake_posted(cpu, shared.key(), handle.doorbell().sleeping());
+        }
         if handle.post(slot, M::wake(shared.key(), cause), cause.urgency(), preempt) == Kick::Send {
             kicker.kick(cpu);
         }
