@@ -783,13 +783,14 @@ const ONE_TAKE_CONTENDED: &str = "; took the Global Lock 1 times, 1 of them from
 /// `\_SB.GLW` and, as it loads, waits for `PWRBTN_STS` (Table 4.13) in the
 /// PM1a event block at `pm1`, then Acquires `\_GL` within `ms`, giving it
 /// back where that took it and Notifying `\_SB.GLW` with 0x80 where it timed
-/// out:
+/// out. It waits by Stall, which keeps the processor: a Sleep serves the SCI
+/// (`sci::await_sleep`) and would take the press it waits for.
 ///
 /// ```text
 /// Device (\_SB.GLW) {}
 /// OperationRegion (PM1S, SystemIO, pm1, 2)
 /// Field (PM1S, WordAcc, NoLock, Preserve) { Offset (1), PBST, 1 }
-/// While (!PBST) { Sleep (1) }
+/// While (!PBST) { Stall (100) }
 /// If (Acquire (\_GL, ms)) { Notify (\_SB.GLW, 0x80) } Else { Release (\_GL) }
 /// ```
 fn ssdt_acquiring_the_global_lock(pm1: u16, ms: u16) -> Vec<u8> {
@@ -804,8 +805,8 @@ fn ssdt_acquiring_the_global_lock(pm1: u16, ms: u16) -> Vec<u8> {
     let region = [&[0x5B, 0x80], PM1S, &[0x01, 0x0B], &pm1.to_le_bytes(), &[0x0A, 0x02]].concat();
     // WordAcc (2); a ReservedField (0) of 8 bits, then PBST of 1.
     let field = package(&[0x5B, 0x81], &[PM1S, &[0x02, 0x00, 0x08], PBST, &[0x01]].concat());
-    // LNot (0x92) of PBST; Sleep of One (0x01).
-    let wait = package(&[0xA2], &[&[0x92], PBST, &[0x5B, 0x22, 0x01]].concat());
+    // LNot (0x92) of PBST; Stall of a ByteConst 100.
+    let wait = package(&[0xA2], &[&[0x92], PBST, &[0x5B, 0x21, 0x0A, 0x64]].concat());
     let acquire = [&[0x5B, 0x23], GL, &ms.to_le_bytes()].concat();
     let notify = [&[0x86], GLW, &[0x0A, 0x80]].concat();
     let release = [&[0x5B, 0x27], GL].concat();

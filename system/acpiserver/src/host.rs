@@ -56,7 +56,15 @@
 //! **A Notify of 0x80 to a control-method power button is a press** (ACPI
 //! 6.5 §4.8.2.2.1.2), counted in [`Firmware::presses`] for the server to
 //! serve, once [`Firmware::buttons`] names the button; every other Notify is
-//! said the first time and served by nothing.
+//! kept, once a value and an object, for the server to deliver after the
+//! evaluation that made it ([`Firmware::notified`]).
+//!
+//! **An evaluation's Sleep serves the SCI to its deadline**
+//! ([`Kernel::sleep`], `sci::await_sleep`): a press of the fixed button and
+//! the controller's GPE are taken as they latch and kept
+//! ([`Firmware::latched`]) for the server to serve after the evaluation, so a
+//! press during a table's load is taken then, and powers the machine off once
+//! the load has handed `\_S5` over.
 //!
 //! **A definition block AML loads at run time is read through the kernel
 //! only from memory Table 15.6 calls AddressRangeReserved or
@@ -84,6 +92,7 @@ use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 use crate::devices::Ec;
 use crate::ec::{Do, Transaction, Wait};
 use crate::ledger::Ledger;
+use crate::sci::Latched;
 
 /// What opens a line that carries an address, a PCI function or a name the
 /// firmware chose: this machine's own, and quoted in no record.
@@ -144,6 +153,10 @@ pub trait Kernel {
     /// once under a claim: `false` where it is wider than the register's
     /// field, and the kernel kept nothing.
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+    /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
+    /// the fixed power button where the claim serves it and the controller's
+    /// GPE `ec_gpe`: what latched and was taken.
+    fn sleep(&self, until: Instant, ec_gpe: Option<u16>) -> Latched;
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -293,13 +306,19 @@ pub struct Firmware<'k, K> {
     /// for the server to serve it no more.
     pub ended: Option<String>,
     pub refused: Ledger,
-    notified: Ledger,
+    /// The presses said, by button.
+    said: Ledger,
     /// The port writes asked of the kernel, by port and width.
     written: Ledger,
     /// The FADT's `SMI_CMD`, a byte to which is a call into the firmware.
     pub smi_cmd: Option<u16>,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
+    /// What a Sleep took of the SCI, for the server to serve.
+    pub latched: Latched,
+    /// Each Notify but a press, once a value and an object, for the server
+    /// to deliver.
+    pub notified: std::collections::BTreeSet<(String, u64)>,
     /// Presses of one of them notified and not yet served.
     pub presses: u64,
     /// The kernel answered that the machine is stopping.
@@ -327,10 +346,12 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             ec: None,
             ended: None,
             refused: Ledger::default(),
-            notified: Ledger::default(),
+            said: Ledger::default(),
             written: Ledger::default(),
             smi_cmd: None,
             buttons: Vec::new(),
+            latched: Latched::default(),
+            notified: Default::default(),
             presses: 0,
             stopping: false,
             locked: false,
@@ -512,8 +533,10 @@ impl<K: Kernel> Host for Firmware<'_, K> {
 
     fn sleep(&mut self, ms: u64) {
         // The firmware's own delay (§19.6.125), bounded by the interpreter in
-        // what one evaluation may ask for.
-        std::thread::sleep(Duration::from_millis(ms));
+        // what one evaluation may ask for, the SCI served through it.
+        let latched = self.kernel.sleep(Instant::now() + Duration::from_millis(ms), self.ec.as_ref().map(|ec| ec.gpe));
+        self.latched.presses += latched.presses;
+        self.latched.ec |= latched.ec;
     }
 
     fn stall(&mut self, us: u64) {
@@ -530,14 +553,14 @@ impl<K: Kernel> Host for Firmware<'_, K> {
     fn notify(&mut self, object: &str, value: u64) {
         self.notifies += 1;
         // §5.6.6's notification values of a power button: 0x80 is a press in S0.
-        let press = value == 0x80 && self.buttons.iter().any(|button| button == object);
-        if press {
+        if value == 0x80 && self.buttons.iter().any(|button| button == object) {
             self.presses += 1;
+            if self.said.see(object) {
+                println!("{OWN}Notify({object}, {value:#x}) for the first time: a press of the power button");
+            }
+            return;
         }
-        if self.notified.see(&format!("{object} {value:#x}")) {
-            let served = if press { "a press of the power button" } else { "served by nothing" };
-            println!("{OWN}Notify({object}, {value:#x}) for the first time: {served}");
-        }
+        self.notified.insert((object.to_owned(), value));
     }
 
     fn global_take(&mut self) -> Result<(), Denied> {
@@ -689,6 +712,10 @@ pub mod tests {
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// What each Sleep's wait takes, in turn; nothing once it runs out.
+        /// Each served set a Sleep was asked to serve.
+        pub sleeps: RefCell<VecDeque<Latched>>,
+        pub slept: RefCell<Vec<Option<u16>>>,
     }
 
     impl Scripted {
@@ -787,6 +814,11 @@ pub mod tests {
             assert!(!self.held.get(), "a release waited for under a lock already held");
             self.waited.borrow_mut().push(until);
             self.releases.borrow_mut().pop_front().unwrap_or(false)
+        }
+
+        fn sleep(&self, _: Instant, ec_gpe: Option<u16>) -> Latched {
+            self.slept.borrow_mut().push(ec_gpe);
+            self.sleeps.borrow_mut().pop_front().unwrap_or_default()
         }
 
         fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {

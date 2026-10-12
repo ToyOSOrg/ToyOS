@@ -1,8 +1,10 @@
 //! What one SCI carried: every event whose status and enable bits are both
 //! set, read off the PM1 event block and the GPE0 block, and refused by name
 //! where it is one this server never enabled; what a press is whose
-//! power-off came back refused ([`unstopped`]); and the wait for the
-//! firmware's release of the Global Lock ([`await_release`]).
+//! power-off came back refused ([`unstopped`]); the wait for the firmware's
+//! release of the Global Lock ([`await_release`]); and the wait an
+//! evaluation's Sleep makes, which takes a press and the controller's GPE as
+//! they latch ([`await_sleep`]).
 
 use std::time::Instant;
 
@@ -27,12 +29,25 @@ pub enum Event {
     PowerButton,
     /// The embedded controller's GPE.
     Ec,
+    /// A runtime GPE, whose `\_GPE._Lxx` or `_Exx` serves it.
+    Gpe(u16),
+}
+
+/// How a GPE's status is cleared around its method (ACPI 6.5 §5.6.4): an
+/// edge's before it runs, a level's once it has.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trigger {
+    Edge,
+    Level,
 }
 
 /// What this server enabled, and so serves.
+#[derive(Default)]
 pub struct Served {
     pub power_button: bool,
     pub ec_gpe: Option<u16>,
+    /// Each runtime GPE enabled, and its method's trigger.
+    pub gpes: std::collections::BTreeMap<u16, Trigger>,
 }
 
 /// An event enabled and set that this server never enabled: the firmware, or
@@ -61,6 +76,7 @@ pub fn events(served: &Served, pm1: (u16, u16), gpe0: &[(u8, u8)]) -> Result<Vec
             let n = (byte * 8 + bit) as u16;
             events.push(match n {
                 n if served.ec_gpe == Some(n) => Event::Ec,
+                n if served.gpes.contains_key(&n) => Event::Gpe(n),
                 n => return Err(Unserved::Gpe(n)),
             });
         }
@@ -81,6 +97,8 @@ pub trait Fixed {
     fn status(&mut self) -> Bits;
     /// Write `bits` to PM1 status, which clears each one set (Table 4.13).
     fn pm1_clear(&mut self, bits: u16);
+    /// Clear GPE `n`'s status, a one written to its bit (§4.8.4.1).
+    fn gpe_clear(&mut self, n: u16);
     fn enables(&mut self) -> Bits;
     fn enable(&mut self, enables: &Bits);
     /// Waits for the SCI until `until` and takes its record: `false` is the
@@ -127,6 +145,55 @@ pub fn await_release(fixed: &mut impl Fixed, until: Instant) -> bool {
     released
 }
 
+/// What latched while an evaluation slept, taken off the hardware.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Latched {
+    /// Presses of the fixed power button.
+    pub presses: u32,
+    /// The controller's GPE: its queries are waiting to be drained.
+    pub ec: bool,
+}
+
+/// Waits until `until`, an evaluation's Sleep (ACPI 6.5 §19.6.125), serving
+/// the SCI meanwhile: a press of the fixed power button where `served`
+/// serves it and the controller's GPE where it is served are taken, their
+/// status cleared, and handed back; anything else that latches keeps its
+/// status for whoever serves it after, and loses its enable until the wait
+/// ends, so the level SCI it raised falls. The wait lasts until `until`
+/// whatever latches.
+pub fn await_sleep(fixed: &mut impl Fixed, until: Instant, served: &Served) -> Latched {
+    let kept = fixed.enables();
+    let mut enabled = kept.clone();
+    let mut latched = Latched::default();
+    loop {
+        let status = fixed.status();
+        if served.power_button && status.pm1 & enabled.pm1 & PWRBTN != 0 {
+            fixed.pm1_clear(PWRBTN);
+            latched.presses += 1;
+        }
+        let ec = served.ec_gpe.filter(|&n| {
+            let (byte, bit) = (usize::from(n / 8), n % 8);
+            status.gpe0.get(byte).zip(enabled.gpe0.get(byte)).is_some_and(|(s, e)| s & e & 1 << bit != 0)
+        });
+        if let Some(n) = ec {
+            fixed.gpe_clear(n);
+            latched.ec = true;
+        }
+        let status = fixed.status();
+        enabled.pm1 &= !status.pm1;
+        for (enable, status) in enabled.gpe0.iter_mut().zip(&status.gpe0) {
+            *enable &= !status;
+        }
+        fixed.enable(&enabled);
+        fixed.ack();
+        if !fixed.sci(until) {
+            break;
+        }
+    }
+    fixed.enable(&kept);
+    latched
+}
+
 /// SCIs in a row that carried no event this server serves, past which the
 /// line is a storm and not a machine with something to say.
 pub const EMPTY_SCIS: u32 = 64;
@@ -157,7 +224,7 @@ mod tests {
     use super::*;
 
     fn served() -> Served {
-        Served { power_button: true, ec_gpe: Some(0x6e) }
+        Served { power_button: true, ec_gpe: Some(0x6e), ..Default::default() }
     }
 
     #[test]
@@ -239,6 +306,9 @@ mod tests {
         fn pm1_clear(&mut self, bits: u16) {
             self.status &= !bits;
         }
+        fn gpe_clear(&mut self, n: u16) {
+            self.gpe0[usize::from(n / 8)] &= !(1 << (n % 8));
+        }
         fn enables(&mut self) -> Bits {
             self.enables.clone()
         }
@@ -298,6 +368,28 @@ mod tests {
         assert!(!await_release(&mut block, Instant::now()));
         assert_eq!(block.enables, kept);
         assert_eq!(block.status, PWRBTN);
+    }
+
+    /// A Sleep serves the SCI to its deadline: each press and the
+    /// controller's GPE are taken and cleared as they latch, a runtime GPE
+    /// that latches keeps its status and loses its enable until the wait
+    /// ends, and every enable is put back.
+    #[test]
+    fn a_sleep_takes_presses_and_the_controllers_gpe_and_leaves_the_rest_latched() {
+        // The block's controller is GPE 6 (byte 0's 0x40) and a runtime
+        // GPE is 16 (byte 2's 0x01).
+        let served = Served { power_button: true, ec_gpe: Some(6), ..Default::default() };
+        let mut block = Block::new(&[Set::Pm1(PWRBTN), Set::Gpe(0, 0x40), Set::Gpe(2, 0x01), Set::Pm1(PWRBTN)]);
+        let kept = block.enables.clone();
+        let latched = await_sleep(&mut block, Instant::now(), &served);
+        assert_eq!(latched, Latched { presses: 2, ec: true });
+        assert_eq!((block.status, block.gpe0.clone()), (0, vec![0, 0, 0x01]), "a press or the controller's GPE left latched, or the runtime GPE taken");
+        assert_eq!(block.enables, kept, "an enable was not put back");
+        assert_eq!(block.sets, 4, "the wait ended before its deadline");
+        // A machine whose button is a control method device takes no press.
+        let mut block = Block::new(&[Set::Pm1(PWRBTN)]);
+        let latched = await_sleep(&mut block, Instant::now(), &Served { power_button: false, ..served });
+        assert_eq!((latched, block.status), (Latched::default(), PWRBTN));
     }
 
     #[test]

@@ -66,6 +66,7 @@ mod aml;
 mod battery;
 mod devices;
 mod ec;
+mod gpe;
 mod host;
 mod init;
 mod ledger;
@@ -91,7 +92,7 @@ use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
 use ec::Transaction;
-use host::{port_in, Answer, Kernel, Stopping, Take, Unmade};
+use host::{port_in, Answer, Kernel, Stopping, Take, Unmade, OWN};
 use init::{Census, Names};
 use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
@@ -128,6 +129,13 @@ struct Server<'a, K, P> {
     /// The processor is Intel's, whose `_OSC` interface a processor object
     /// speaks ([`toyos_abi::processor_is_intel`]).
     intel: bool,
+    /// The batteries and adapters the namespace names, which a Notify of an
+    /// information change reads again.
+    sources: (Vec<String>, Vec<String>),
+    /// Each runtime GPE's methods run, by GPE.
+    gpe_runs: BTreeMap<u16, u64>,
+    /// Each Notify delivered, by object and value.
+    delivered: ledger::Ledger,
 }
 
 fn main() {
@@ -144,10 +152,13 @@ fn main() {
     server.aml = kept;
     let names = server.initialise();
     let (batteries, adapters) = server.arm_controller(names.as_ref());
-    if server.negotiate(names).is_some() {
+    if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
+        server.arm_gpes(&names);
     }
+    server.sources = (batteries.clone(), adapters.clone());
     server.find_power(batteries, adapters);
+    server.served_aml();
     server.serve();
 }
 
@@ -236,6 +247,11 @@ impl Kernel for Claim<'_> {
         sci::await_release(&mut Waiting(self), until)
     }
 
+    fn sleep(&self, until: Instant, ec_gpe: Option<u16>) -> sci::Latched {
+        let served = Served { power_button: self.info.flags & FIXED_POWER_BUTTON != 0, ec_gpe, ..Default::default() };
+        sci::await_sleep(&mut Waiting(self), until, &served)
+    }
+
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
         match self.dev.s5(slp_typ_a) {
             Err(SyscallError::InvalidArgument) => Ok(false),
@@ -254,6 +270,11 @@ impl Fixed for Waiting<'_, '_> {
 
     fn pm1_clear(&mut self, bits: u16) {
         out16(self.0.info.pm1_event.port, bits);
+    }
+
+    fn gpe_clear(&mut self, n: u16) {
+        let (status, _) = bytes(self.0.info.gpe0).nth(usize::from(n / 8)).expect("a GPE this server serves is in the block");
+        out8(status, 1 << (n % 8));
     }
 
     fn enables(&mut self) -> Bits {
@@ -294,7 +315,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             kernel,
             ports,
             info,
-            served: Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ec_gpe: None },
+            served: Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ..Default::default() },
             ec: None,
             aml: None,
             power: None,
@@ -308,6 +329,9 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             census: Census::default(),
             negotiated: osc::Negotiated::default(),
             intel: toyos_abi::processor_is_intel(),
+            sources: (Vec::new(), Vec::new()),
+            gpe_runs: BTreeMap::new(),
+            delivered: ledger::Ledger::default(),
         }
     }
 
@@ -515,9 +539,133 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
                     self.ports.out8(status, 1 << (n % 8));
                     self.drain();
                 }
+                Event::Gpe(n) => self.gpe(n),
             }
         }
         self.run_queued();
+        self.served_aml();
+    }
+
+    /// Enable each runtime GPE the namespace names ([`gpe::runtime`]), its
+    /// status cleared first.
+    fn arm_gpes(&mut self, names: &Names) {
+        let Some(aml) = &mut self.aml else { return };
+        let runtime = gpe::runtime(aml, names, self.info.gpe0, self.served.ec_gpe);
+        for &n in runtime.keys() {
+            let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("a runtime GPE is in GPE0");
+            self.ports.out8(status, 1 << (n % 8));
+            self.ports.out8(enable, self.ports.in8(enable) | 1 << (n % 8));
+        }
+        self.served.gpes = runtime;
+    }
+
+    /// GPE `n` served by its method (ACPI 6.5 §5.6.4): its enable cleared,
+    /// an edge's status cleared, the method run, a level's status cleared,
+    /// and its enable set again; a method refused leaves it disabled, said
+    /// by name, and served no more.
+    fn gpe(&mut self, n: u16) {
+        let trigger = self.served.gpes[&n];
+        let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("a runtime GPE is in GPE0");
+        let bit = 1 << (n % 8);
+        self.ports.out8(enable, self.ports.in8(enable) & !bit);
+        if trigger == sci::Trigger::Edge {
+            self.ports.out8(status, bit);
+        }
+        let method = format!("\\_GPE._{}{n:02X}", if trigger == sci::Trigger::Edge { 'E' } else { 'L' });
+        let aml = self.aml.as_mut().expect("a GPE is served only in a namespace");
+        let ran = aml.interpreter.evaluate(&mut aml.host, &method, &[]);
+        if trigger == sci::Trigger::Level {
+            self.ports.out8(status, bit);
+        }
+        let runs = self.gpe_runs.entry(n).or_insert(0);
+        *runs += 1;
+        match ran {
+            Ok(_) => {
+                self.ports.out8(enable, self.ports.in8(enable) | bit);
+                if *runs == 1 {
+                    println!("acpiserver: GPE {n:#x} taken for the first time; its method ran");
+                }
+            }
+            Err(_) if aml.host.stopping => {}
+            Err(why) => {
+                self.served.gpes.remove(&n);
+                println!("acpiserver: GPE {n:#x}'s method was refused, so the GPE is served no more: {}", aml::kind(&why));
+                println!("{OWN}that was {method}, refused {why:x?}");
+            }
+        }
+        self.ended();
+    }
+
+    /// What the namespace's evaluations left to serve: each press a Sleep
+    /// took, the controller's queries a Sleep found waiting, and each Notify
+    /// delivered ([`Server::deliver`]). What these evaluations leave in turn
+    /// waits for the next SCI or poll.
+    fn served_aml(&mut self) {
+        let Some(aml) = &mut self.aml else { return };
+        let latched = std::mem::take(&mut aml.host.latched);
+        let notified = std::mem::take(&mut aml.host.notified);
+        if latched.ec {
+            self.drain();
+            self.run_queued();
+        }
+        self.deliver(notified);
+        for _ in 0..latched.presses {
+            self.press();
+        }
+    }
+
+    /// Each Notify to its owner (ACPI 6.5 §5.6.6): a battery's or adapter's
+    /// status change (0x80) reads the power sources again, and a battery's
+    /// information change (0x81) finds them again; `\_SB`'s or a negotiated
+    /// processor's 0x08 negotiates its `_OSC` again with the same claim
+    /// (§6.2.11); a processor's performance, idle or throttling change
+    /// (0x80, 0x81, 0x82, §8.4) is counted, since nothing reads those states
+    /// yet; anything else is served by nothing and counted.
+    fn deliver(&mut self, notified: std::collections::BTreeSet<(String, u64)>) {
+        let (mut status, mut info) = (false, false);
+        for (object, value) in notified {
+            let source = self.sources.0.contains(&object) || self.sources.1.contains(&object);
+            let processor = self.negotiated.processors.iter().any(|(path, _)| *path == object);
+            let served = match value {
+                0x80 if source => {
+                    status = true;
+                    "the power sources read again"
+                }
+                0x81 if self.sources.0.contains(&object) => {
+                    info = true;
+                    "the power sources found again"
+                }
+                0x08 if object == "\\_SB_" || processor => {
+                    self.renegotiate(&object);
+                    "its _OSC negotiated again"
+                }
+                0x80..=0x82 if processor => "counted: nothing reads the processors' performance, idle or throttling states",
+                _ => "served by nothing",
+            };
+            if self.delivered.see(&format!("{object} {value:#x}")) {
+                println!("{OWN}Notify({object}, {value:#x}) for the first time: {served}");
+            }
+        }
+        if info {
+            let (batteries, adapters) = self.sources.clone();
+            self.find_power(batteries, adapters);
+        } else if status {
+            self.read_power();
+        }
+    }
+
+    /// `object`'s `_OSC` negotiated again with its claim.
+    fn renegotiate(&mut self, object: &str) {
+        let Some(aml) = &mut self.aml else { return };
+        let claim = if object == "\\_SB_" { &osc::PLATFORM } else { &osc::PROCESSOR };
+        let before = aml.interpreter.defined();
+        match osc::negotiate(aml, &format!("{object}._OSC"), claim) {
+            Ok(answered) => println!("{OWN}{object}._OSC negotiated again: {answered:x?}"),
+            Err(why) => println!("{OWN}{object}._OSC was refused again: {why}"),
+        }
+        if let Ok(names) = Names::read(&aml.interpreter) {
+            self.settle(before, names);
+        }
     }
 
     /// A press: the machine stops, and this comes back only where it has no
@@ -663,9 +811,11 @@ mod tests {
     use crate::host::tests::Scripted;
     use std::cell::RefCell;
 
-    /// The row's registers as bytes a write leaves as written.
+    /// The row's registers as bytes a write leaves as written, but those in
+    /// `.1`, status registers, where a one written clears its bit (ACPI 6.5
+    /// §4.8.4.1) once something has set them.
     #[derive(Default)]
-    struct Bytes(RefCell<BTreeMap<u16, u8>>);
+    struct Bytes(RefCell<BTreeMap<u16, u8>>, std::collections::BTreeSet<u16>);
 
     impl Ports for Bytes {
         fn in8(&self, port: u16) -> u8 {
@@ -673,15 +823,22 @@ mod tests {
         }
 
         fn out8(&self, port: u16, byte: u8) {
-            self.0.borrow_mut().insert(port, byte);
+            let mut bytes = self.0.borrow_mut();
+            let written = match bytes.get(&port) {
+                Some(&was) if self.1.contains(&port) => was & !byte,
+                _ => byte,
+            };
+            bytes.insert(port, written);
         }
 
         fn in16(&self, port: u16) -> u16 {
-            panic!("a PM1 read of {port:#x}, which no test here makes")
+            u16::from_le_bytes([self.in8(port), self.in8(port + 1)])
         }
 
-        fn out16(&self, port: u16, _: u16) {
-            panic!("a PM1 write of {port:#x}, which no test here makes")
+        fn out16(&self, port: u16, word: u16) {
+            let [lo, hi] = word.to_le_bytes();
+            self.out8(port, lo);
+            self.out8(port + 1, hi);
         }
     }
 
@@ -925,6 +1082,145 @@ mod tests {
             assert_eq!(server.negotiated.processors.len(), usize::from(intel));
             assert_eq!(server.census.ini, u64::from(loaded), "the loaded device's _INI");
         }
+    }
+
+    /// The POST port as a word field, `\\P80`, and a method `name` that writes
+    /// `tag` to it: what the kernel's stand-in was asked to write there is
+    /// which methods ran, in order.
+    fn posting(name: &str, tag: u64) -> Vec<u8> {
+        use crate::common::{int, method, store};
+        method(name, 0, &store(&int(tag), &crate::common::name("\\P80")))
+    }
+
+    fn post() -> Vec<u8> {
+        use crate::common::{cat, field, int, op_region, unit};
+        cat(&[&op_region("P80R", 0x01, &int(0x80), &int(2)), &field("P80R", 0x02, &[unit("P80", 16)])])
+    }
+
+    fn posted(kernel: &Scripted) -> Vec<u64> {
+        kernel.asked.borrow().iter().filter(|access| access.write == 1 && access.space == Space::SystemIo as u8 && access.address == 0x80).map(|access| access.value).collect()
+    }
+
+    /// A server over `dsdt`, its namespace loaded and initialised, its GPE0
+    /// and PM1 registers all clear.
+    fn served(kernel: &Scripted, flags: u16) -> (Server<'_, Scripted, Bytes>, Option<Names>) {
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block { port: 0x400, len: 4 }, gpe0: GPE0, flags, reserved: [0; 3] };
+        let statuses = bytes(GPE0).map(|(status, _)| status).chain([0x400, 0x401]).collect();
+        let mut server = Server::new(kernel, Bytes(RefCell::default(), statuses), info);
+        for port in 0x400..0x404 {
+            server.ports.0.borrow_mut().insert(port, 0);
+        }
+        for (status, enable) in bytes(GPE0) {
+            server.ports.0.borrow_mut().insert(status, 0);
+            server.ports.out8(enable, 0);
+        }
+        server.aml = load(kernel, CRAFTED_RSDP).1;
+        let names = server.initialise();
+        (server, names)
+    }
+
+    /// §5.6.4: each `\\_GPE._Lxx` and `_Exx` in GPE0 is a runtime GPE and
+    /// enabled, but one the `_PRW` of a device other than the buttons and the
+    /// PCI host bridge names (§5.6.4.2), the controller's, and one past
+    /// GPE0. On its SCI its method runs, its status is cleared and its enable
+    /// set again; a method refused leaves it disabled and served no more.
+    #[test]
+    fn runtime_gpes_are_enabled_and_served_by_their_methods() {
+        use crate::common::{cat, def_name, device, int, method, package, scope};
+        use crate::devices::tests::PNP0C0C;
+        let gpe = scope(
+            "\\_GPE",
+            &cat(&[
+                &posting("_L10", 0x10),
+                &posting("_E11", 0x11),
+                // A Divide by zero.
+                &method("_L12", 0, &[0x78, 0x01, 0x00, 0x00, 0x00]),
+                &posting("_L13", 0x13),
+                &posting("_L14", 0x14),
+                &posting("_L50", 0x50),
+                &posting("_L03", 0x03),
+            ]),
+        );
+        let devices = scope(
+            "\\_SB",
+            &cat(&[
+                &device("WAKE", &cat(&[&def_name("_HID", &int(0x0105_D041)), &def_name("_PRW", &package(&[int(0x13), int(3)]))])),
+                &device("LID0", &cat(&[&def_name("_HID", &int(u64::from(PNP0C0C))), &def_name("_PRW", &package(&[int(0x14), int(4)]))])),
+            ]),
+        );
+        let mut kernel = crafted(&sealed(b"DSDT", &cat(&[&post(), &gpe, &devices, &crate::devices::tests::laptop(&[])])), &[]);
+        kernel.ports = vec![(0x80, 0), (0x66, 0)];
+        *kernel.controller.borrow_mut() = Some(crate::ec::tests::Emulated::new([0; 256]));
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        let names = server.negotiate(names).expect("the namespace stands");
+        server.arm_gpes(&names);
+        use sci::Trigger::{Edge, Level};
+        assert_eq!(server.served.gpes, BTreeMap::from([(0x10, Level), (0x11, Edge), (0x12, Level), (0x14, Level)]));
+        let enables: Vec<u8> = bytes(GPE0).map(|(_, enable)| server.ports.in8(enable)).collect();
+        assert_eq!(enables, [0b1000, 0, 0b0001_0111, 0], "the controller's GPE 3 and the runtime GPEs");
+        let (status, _) = bytes(GPE0).nth(2).expect("byte 2");
+        server.ports.0.borrow_mut().insert(status, 0b0000_0111);
+        kernel.asked.borrow_mut().clear();
+        server.take();
+        assert_eq!(posted(&kernel), [0x10, 0x11]);
+        assert_eq!(server.ports.in8(status), 0, "a status left set");
+        assert_eq!(server.served.gpes.keys().copied().collect::<Vec<_>>(), [0x10, 0x11, 0x14], "a GPE whose method was refused is still served");
+        let (_, enable) = bytes(GPE0).nth(2).expect("byte 2");
+        assert_eq!(server.ports.in8(enable), 0b0001_0011, "the refused GPE left enabled, or a served one disabled");
+    }
+
+    /// §5.6.6: a battery's status change reads the power sources again, a
+    /// battery's information change finds them again, `\\_SB`'s 0x08
+    /// negotiates its `_OSC` again, and anything else is served by nothing:
+    /// each said once and nothing evaluated for it.
+    #[test]
+    fn a_notify_is_delivered_to_its_owner() {
+        let kernel = crate::battery::tests::laptop_machine(None);
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        let (batteries, adapters) = server.arm_controller(names.as_ref());
+        server.sources = (batteries.clone(), adapters.clone());
+        server.find_power(batteries.clone(), adapters);
+        let done = || kernel.controller.borrow().as_ref().expect("a controller").done.len();
+        let before = done();
+        server.deliver([(batteries[0].clone(), 0x80)].into());
+        assert!(done() > before, "a battery's status change read no battery");
+        let before = done();
+        server.deliver([("\\_SB_.NONE".to_string(), 0x80), (batteries[0].clone(), 0x02)].into());
+        assert_eq!(done(), before, "a Notify nobody owns evaluated something");
+        server.deliver([(batteries[0].clone(), 0x81)].into());
+        assert!(done() > before, "a battery's information change found no battery");
+        assert_eq!(server.delivered.counts().matches(" x1").count(), 4);
+
+        let kernel = osc_machine(0);
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        server.negotiate(names).expect("the namespace stands");
+        let nvs = || kernel.asked.borrow().iter().filter(|access| access.write == 1 && access.address == 0x7700_0000).count();
+        let before = nvs();
+        server.deliver([("\\_SB_".to_string(), 0x08)].into());
+        assert_eq!(nvs(), before + 2, "the platform's _OSC queried and committed again");
+    }
+
+    /// What a Sleep took of the SCI is served after its evaluation: the
+    /// controller's queries it found waiting are drained and counted, and
+    /// the Sleep served the controller's GPE.
+    #[test]
+    fn what_a_sleep_took_is_served_after_its_evaluation() {
+        use crate::common::{cat, method};
+        let sleeps = method("SLP", 0, &[0x5B, 0x22, 0x01]);
+        let kernel = crafted(&sealed(b"DSDT", &cat(&[&crate::devices::tests::laptop(&[]), &sleeps])), &[]);
+        *kernel.controller.borrow_mut() = Some(crate::ec::tests::Emulated::new([0; 256]));
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        kernel.controller.borrow_mut().as_mut().expect("a controller").queries.push(0x1C);
+        kernel.sleeps.borrow_mut().push_back(sci::Latched { presses: 0, ec: true });
+        let aml = server.aml.as_mut().expect("the namespace");
+        aml.interpreter.evaluate(&mut aml.host, "\\SLP_", &[]).expect("SLP runs");
+        assert_eq!(*kernel.slept.borrow(), [Some(3)], "the Sleep did not serve the controller's GPE");
+        assert_eq!(server.counts.get(&0x1C), None);
+        server.served_aml();
+        assert_eq!(server.counts.get(&0x1C), Some(&1), "the query a Sleep found waiting was not drained");
     }
 
     /// The owner's ruling: a machine whose power button is a control method
