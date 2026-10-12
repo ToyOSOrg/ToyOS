@@ -16,11 +16,19 @@
 //! nothing of it: which objects a caller then evaluates, and in which order,
 //! is the caller's.
 //!
+//! A definition block a method loads (`Load`, §19.6.76) lives as long as
+//! the namespace, and what the method itself defined dies at its exit: the
+//! namespace keeps the two apart (`namespace`). A block refused loads false
+//! and keeps nothing; a bound it reaches refuses the evaluation, whose
+//! bounds it shares. Its bytes come through the [`Host`], which reads them
+//! only from memory Table 15.6 calls reserved or NVS, and each load is told
+//! to it ([`Host::loaded`]).
+//!
 //! The library touches no hardware. An operation region's field is read and
 //! written through the [`Host`] the caller passes, in SystemMemory,
 //! SystemIO, PCI_Config and EmbeddedControl space; an access in any other
-//! space is refused as [`Error::Unsupported`], as are `Load`, `LoadTable`
-//! and `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
+//! space is refused as [`Error::Unsupported`], as are `LoadTable` and
+//! `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
 //! never contended and an Event is never signalled by anyone else; `\_GL`'s
 //! other owner is the firmware, whose side the [`Host`] waits out.
 //!
@@ -54,7 +62,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use exec::{Frame, Machine};
+use exec::Machine;
 use name::{Path, Seg};
 use namespace::Namespace;
 use object::{Body, Meter, Method, Mutex, Object, Ref};
@@ -193,6 +201,27 @@ pub trait Host {
     fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied>;
     /// Gives back the Global Lock a take took.
     fn global_release(&mut self) -> Result<(), Denied>;
+    /// `len` bytes of memory at `at`, of a definition block `Load` reads
+    /// from a SystemMemory region or a field of one (§19.6.76): "Any table
+    /// loaded via an operation region must be in memory marked as
+    /// AddressRangeReserved or AddressRangeNVS", which Table 15.6 maps the
+    /// firmware's memory types to, and any other is refused.
+    fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied>;
+    /// A definition block an evaluation loaded at run time, or refused.
+    fn loaded(&mut self, load: &RuntimeLoad<'_>);
+}
+
+/// A definition block an evaluation loaded at run time (§19.6.76), or tried
+/// to.
+#[derive(Debug)]
+pub struct RuntimeLoad<'a> {
+    /// The absolute path of the method that loaded it, `\` for a table's
+    /// load.
+    pub by: &'a str,
+    /// Its header (§5.2.6), where it was read.
+    pub header: Option<&'a [u8]>,
+    /// Why it was refused, and nothing of it kept.
+    pub refused: Option<&'a Error>,
 }
 
 /// An object as the caller receives or passes it.
@@ -328,7 +357,7 @@ impl Interpreter {
         let root = ns.root();
         let mut put = |name: &[u8; 4], o: Object| {
             let p = Path { root: true, up: 0, segs: alloc::vec![Seg(*name)] };
-            ns.create(root, &p, o, &mut || Ok(())).expect("the root is empty and every predefined name differs");
+            ns.create(namespace::Arena::Static, root, &p, o, &mut || Ok(())).expect("the root is empty and every predefined name differs");
         };
         for scope in [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"] {
             put(scope, Object::Scope);
@@ -362,22 +391,12 @@ impl Interpreter {
             (b"SSDT", None) => return Err(Error::Table("an SSDT before the DSDT, whose revision sets every integer's width")),
             _ => return Err(Error::Table("not a DSDT or SSDT (§5.2.11)")),
         };
-        // Held for as long as a method it defines refers to it.
-        let table = self.meter.bytes(bytes)?;
-        let (root, made) = (self.ns.root(), self.ns.mark());
-        let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
+        let root = self.ns.root();
         let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
-        let bytes = table.borrow();
-        let mut c = stream::Cursor::new(&bytes, toyos_acpi::SDT_HEADER_LEN, bytes.len());
-        let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
-            exec::Flow::Next => Ok(()),
-            _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),
-        });
+        let r = m.run_block(bytes, root);
         let r = m.finish(r, &mut self.last);
         if r.is_ok() {
             self.width = Some(w);
-        } else {
-            self.ns.unwind(made);
         }
         r
     }
@@ -414,6 +433,13 @@ impl Interpreter {
     /// predefined: what a [`Walk`] entry's `serial` is read against.
     pub fn defined(&self) -> u32 {
         self.ns.defined()
+    }
+
+    /// The slots the namespace's static arena holds, which the meter holds
+    /// it at: what the tables' objects have made it, read rather than
+    /// derived.
+    pub fn slots(&self) -> usize {
+        self.ns.slots()
     }
 
     /// Every object the loaded tables and this interpreter defined, read-only

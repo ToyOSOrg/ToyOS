@@ -210,16 +210,16 @@ fn devices_of_one_child_each_fill_it_to_the_bound() {
 }
 
 /// A device nothing is named below holds no map, and none again once a
-/// method has named an object below it and exited: 40,000 such devices, two
+/// method has named an object below it and exited: 30,000 such devices, two
 /// evaluations that each name an object below half of them, then empty
 /// buffers to the bound.
 #[test]
 fn a_parent_whose_last_child_is_unwound_holds_no_map() {
-    let devices: Vec<Vec<u8>> = (0..40_000).map(|d| device(&seg(d), &[])).collect();
+    let devices: Vec<Vec<u8>> = (0..30_000).map(|d| device(&seg(d), &[])).collect();
     let devices = table(b"SSDT", 2, &devices.concat());
-    let (fill, fills) = fillers(8, &buffer(&int(0), &[]));
+    let (fill, fills) = fillers(16, &buffer(&int(0), &[]));
     let below = |half: usize| {
-        let names: Vec<Vec<u8>> = (0..20_000).map(|d| def_name(&format!("\\{}.T", seg(half * 20_000 + d)), &int(0))).collect();
+        let names: Vec<Vec<u8>> = (0..15_000).map(|d| def_name(&format!("\\{}.T", seg(half * 15_000 + d)), &int(0))).collect();
         method(&format!("M{half}"), 0, &names.concat())
     };
     let methods = table(b"SSDT", 2, &cat(&[&below(0), &below(1)]));
@@ -235,7 +235,7 @@ fn a_parent_whose_last_child_is_unwound_holds_no_map() {
     let maps = PEAK.get() - before - held;
     let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
     Filled::of(before, refused).within_the_bound();
-    // The names were made: 20,000 parents each held a map while one ran.
+    // The names were made: 15,000 parents each held a map while one ran.
     assert!(maps >= 1 << 20, "{maps} bytes held by an evaluation while it ran");
     assert_eq!(kept, held, "bytes held after the two evaluations, and before them");
 }

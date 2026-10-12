@@ -46,6 +46,13 @@
 //! serve, once [`Firmware::buttons`] names the button; every other Notify is
 //! said the first time and served by nothing.
 //!
+//! **A definition block AML loads at run time is read through the kernel
+//! only from memory Table 15.6 calls AddressRangeReserved or
+//! AddressRangeNVS** ([`Host::table`], ACPI 6.5 §19.6.76), each read's type
+//! the kernel's answer; every load is said, its signature and length on a
+//! line anyone may quote, its OEM Table ID and the method that loaded it
+//! under [`OWN`].
+//!
 //! **The power-off's sleep type is the one thing handed to the kernel**
 //! ([`Kernel::s5`]): the kernel writes the register, and reads no AML.
 //!
@@ -60,7 +67,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
-use toyos_aml::{Address, Denied, Host};
+use toyos_aml::{Address, Denied, Host, RuntimeLoad};
 
 use crate::devices::Ec;
 use crate::ec::{Do, Transaction, Wait};
@@ -193,6 +200,13 @@ fn space_name(space: Space) -> &'static str {
     }
 }
 
+/// Whether memory of a UEFI type is AddressRangeReserved or AddressRangeNVS
+/// by Table 15.6: types 0, 5, 6, 8, 11, 12, 13 and 15 up, and 10. An address
+/// firmware's map does not list is neither.
+fn reserved_or_nvs(memory_type: u8) -> bool {
+    memory_type != UNLISTED && matches!(memory_type, 0 | 5 | 6 | 8 | 10..=13 | 15..)
+}
+
 /// What memory of a UEFI type is called: an address firmware's map does not
 /// list has no type, and a name of its own.
 fn type_name(memory_type: u8) -> String {
@@ -280,6 +294,9 @@ pub struct Firmware<'k, K> {
     pub stopping: bool,
     /// AML holds the Global Lock, which a transaction it makes runs under.
     locked: bool,
+    /// Definition blocks loaded at run time, and refused.
+    pub loaded: u64,
+    pub loads_refused: u64,
 }
 
 impl<'k, K: Kernel> Firmware<'k, K> {
@@ -303,6 +320,8 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             presses: 0,
             stopping: false,
             locked: false,
+            loaded: 0,
+            loads_refused: 0,
         }
     }
 
@@ -508,6 +527,51 @@ impl<K: Kernel> Host for Firmware<'_, K> {
         self.kernel.lock_release().map_err(|Stopping| self.stopped())?;
         self.given_back += 1;
         Ok(())
+    }
+
+    fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied> {
+        let mut bytes = Vec::with_capacity(len);
+        while bytes.len() < len {
+            let width = if len - bytes.len() >= 8 { Width::QWord } else { Width::Byte };
+            let Some(address) = at.checked_add(bytes.len() as u64) else {
+                return Err(self.deny("a definition block past the end of memory".into(), format_args!("{at:#x}+{len:#x}")));
+            };
+            match read(self.kernel, Space::SystemMemory, address, width) {
+                Ok((value, memory_type)) if reserved_or_nvs(memory_type) => {
+                    self.reads[Space::SystemMemory as usize] += 1;
+                    self.pages.read(address, memory_type);
+                    bytes.extend_from_slice(&value.to_le_bytes()[..width.bytes() as usize]);
+                }
+                Ok((_, memory_type)) => {
+                    let what = format!("a definition block in {}, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS", type_name(memory_type));
+                    return Err(self.deny(what, format_args!("{at:#x}+{len:#x}")));
+                }
+                Err(Refusal::Stopping) => return Err(self.stopped()),
+                Err(refusal) => return Err(self.deny(refusal.to_string(), format_args!("a definition block at {at:#x}+{len:#x}"))),
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn loaded(&mut self, load: &RuntimeLoad<'_>) {
+        let header = load.header.map(|header| {
+            let text = |bytes: &[u8]| bytes.escape_ascii().to_string();
+            (text(&header[..4]), u32::from_le_bytes(header[4..8].try_into().expect("four bytes")), text(&header[16..24]))
+        });
+        let said = header.as_ref().map_or("its header unread".into(), |(signature, length, _)| format!("{signature}, {length} bytes"));
+        let oem = header.as_ref().map_or(String::new(), |(_, _, oem)| format!(", OEM Table ID {oem:?}"));
+        match load.refused {
+            None => {
+                self.loaded += 1;
+                println!("acpiserver: a table loaded at run time: {said}");
+                println!("{OWN}{} loaded it{oem}", load.by);
+            }
+            Some(why) => {
+                self.loads_refused += 1;
+                println!("acpiserver: a table loaded at run time was refused: {said}: {}", crate::aml::kind(why));
+                println!("{OWN}{} loaded it{oem}, refused {why:x?}", load.by);
+            }
+        }
     }
 }
 

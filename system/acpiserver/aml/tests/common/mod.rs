@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use toyos_acpi::{Phys, Table};
-use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, Value};
+use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, RuntimeLoad, Value};
 
 /// PkgLength (§20.2.4) of `n` bytes that follow it: the length counts its
 /// own encoding.
@@ -285,6 +285,18 @@ pub fn table(signature: &[u8; 4], revision: u8, body: &[u8]) -> Vec<u8> {
     t
 }
 
+/// An SSDT of `body` whose OEM Table ID is `id`, padded with spaces.
+pub fn ssdt_named(id: &str, body: &[u8]) -> Vec<u8> {
+    let mut t = table(b"SSDT", 2, body);
+    let mut field = [b' '; 8];
+    field[..id.len()].copy_from_slice(id.as_bytes());
+    t[16..24].copy_from_slice(&field);
+    t[9] = 0;
+    let sum = t.iter().fold(0u8, |s, &b| s.wrapping_add(b));
+    t[9] = 0u8.wrapping_sub(sum);
+    t
+}
+
 pub fn dsdt(body: &[u8]) -> Vec<u8> {
     table(b"DSDT", 2, body)
 }
@@ -298,6 +310,11 @@ pub enum Event {
     Notify(String, u64),
     GlobalTake(Option<u16>),
     GlobalRelease,
+    /// A definition block's bytes asked for, at and long.
+    Table(u64, usize),
+    /// A run-time load told: the method that made it, the block's OEM Table
+    /// ID where its header was read, and why it was refused.
+    Loaded(String, Option<[u8; 8]>, Option<Error>),
 }
 
 /// A machine of bytes: every address space a sparse map, every request
@@ -309,6 +326,9 @@ pub struct Machine {
     pub refuse: bool,
     /// The firmware holds the Global Lock past every bound a take names.
     pub firmware_holds: bool,
+    /// Memory Table 15.6 calls neither AddressRangeReserved nor
+    /// AddressRangeNVS, as `(start, end)`: a block there is refused.
+    pub reclaim: Vec<(u64, u64)>,
 }
 
 fn key(a: Address) -> (u8, u64) {
@@ -406,6 +426,26 @@ impl Host for Machine {
         self.log.push(Event::GlobalRelease);
         Ok(())
     }
+
+    fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied> {
+        self.log.push(Event::Table(at, len));
+        if self.reclaim.iter().any(|&(start, end)| at < end && start < at + len as u64) {
+            return Err(Denied("a definition block in memory Table 15.6 calls neither reserved nor NVS".into()));
+        }
+        Ok(self.peek(Address::Memory(at), len))
+    }
+
+    fn loaded(&mut self, load: &RuntimeLoad<'_>) {
+        let id = load.header.map(|h| h[16..24].try_into().expect("a header's OEM Table ID"));
+        self.log.push(Event::Loaded(load.by.into(), id, load.refused.cloned()));
+    }
+}
+
+impl Machine {
+    /// Every run-time load told, in order.
+    pub fn loads(&self) -> Vec<Event> {
+        self.log.iter().filter(|e| matches!(e, Event::Loaded(..))).cloned().collect()
+    }
 }
 
 /// A table's bytes as physical memory at address 0, for
@@ -487,4 +527,8 @@ impl Host for Sink {
     fn global_release(&mut self) -> Result<(), Denied> {
         Ok(())
     }
+    fn table(&mut self, _: u64, len: usize) -> Result<Vec<u8>, Denied> {
+        Ok(vec![0; len])
+    }
+    fn loaded(&mut self, _: &RuntimeLoad<'_>) {}
 }

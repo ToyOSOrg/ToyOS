@@ -27,13 +27,13 @@ use core::cmp::Ordering;
 
 use crate::field::{flags, BufField, Field, Kind, Region};
 use crate::name::{text, Path, Seg};
-use crate::namespace::{Namespace, NodeId};
+use crate::namespace::{Arena, Namespace, NodeId};
 use crate::object::{
     bounded, decimal, fit, hex2, joined, slot_of, to_buf, to_int, to_str, Body, Bytes, Elems, Kept, Meter, Method, Mutex,
     Object, Ref, Slot, Unresolved, Width,
 };
 use crate::stream::{starts_name, Cursor};
-use crate::{Error, Host, Usage, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
+use crate::{Error, Host, RuntimeLoad, Usage, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
 
 pub(crate) struct Machine<'a> {
     pub(crate) ns: &'a mut Namespace,
@@ -57,6 +57,11 @@ pub(crate) struct Frame {
     scope: NodeId,
     table: Bytes,
     held: usize,
+    /// Where what this frame defines lives: a table's load's, or its method's.
+    arena: Arena,
+    /// The method this frame runs, or the root for a table's load: what a
+    /// `Load` it makes is said to have been made by.
+    by: NodeId,
 }
 
 pub(crate) enum Flow {
@@ -64,6 +69,13 @@ pub(crate) enum Flow {
     Break,
     Continue,
     Return(Object),
+}
+
+/// Where a definition block `Load` reads comes from.
+pub(crate) enum Source {
+    /// Memory at `at`, `len` bytes long, which the block must lie in.
+    Memory { at: u64, len: u64 },
+    Bytes(Vec<u8>),
 }
 
 enum Target {
@@ -80,13 +92,15 @@ fn slot(o: Object) -> Slot {
 }
 
 impl Frame {
-    pub(crate) fn new(scope: NodeId, args: Vec<Object>, table: Bytes, held: usize) -> Frame {
+    pub(crate) fn new(scope: NodeId, args: Vec<Object>, table: Bytes, held: usize, arena: Arena) -> Frame {
         Frame {
             locals: core::array::from_fn(|_| slot(Object::Uninit)),
             args: args.into_iter().map(slot).collect(),
             scope,
             table,
             held,
+            arena,
+            by: scope,
         }
     }
 }
@@ -301,7 +315,7 @@ impl<'a> Machine<'a> {
 
     fn define(&mut self, f: &Frame, p: &Path, o: Object) -> Result<NodeId, Error> {
         let steps = &mut self.steps;
-        self.ns.create(f.scope, p, o, &mut || tick(steps))
+        self.ns.create(f.arena, f.scope, p, o, &mut || tick(steps))
     }
 
     fn resolve(&mut self, f: &Frame, p: &Path) -> Result<NodeId, Error> {
@@ -412,8 +426,8 @@ impl<'a> Machine<'a> {
             }
             self.levels.push(m.sync);
         }
-        let made = self.ns.mark();
-        let mut f = Frame::new(node, args, table.clone(), self.held.len());
+        let made = self.ns.mark(Arena::Method);
+        let mut f = Frame::new(node, args, table.clone(), self.held.len(), Arena::Method);
         let bytes = table.borrow();
         let mut c = Cursor::new(&bytes, start, end);
         let flow = self.term_list(&mut f, &mut c);
@@ -511,7 +525,11 @@ impl<'a> Machine<'a> {
                 0x81 | 0x86 | 0x87 => self.def_field(f, c),
                 0x82..=0x85 => self.def_scoped(f, c),
                 0x88 => Err(Error::Unsupported("DataTableRegion")),
-                0x20 => Err(Error::Unsupported("Load")),
+                0x20 => {
+                    c.byte()?;
+                    c.byte()?;
+                    self.load_op(f, c).map(|_| Flow::Next)
+                }
                 0x21 | 0x22 => self.delay(f, c),
                 0x24 | 0x26 | 0x27 => self.sync_statement(f, c),
                 0x32 => self.fatal(f, c),
@@ -574,6 +592,118 @@ impl<'a> Machine<'a> {
         Ok(Flow::Next)
     }
 
+    // ---- definition blocks (§5.4.2, §19.6.76) ----------------------------
+
+    /// A definition block's term list run in the static arena below `root`,
+    /// in this evaluation's integer width and under its bounds: what it
+    /// defines lives as long as the namespace, and a refusal takes all of it
+    /// off again.
+    pub(crate) fn run_block(&mut self, bytes: Vec<u8>, root: NodeId) -> Result<(), Error> {
+        // Held for as long as a method it defines refers to it.
+        let table = self.bytes(bytes)?;
+        let made = self.ns.mark(Arena::Static);
+        let mut f = Frame::new(root, Vec::new(), table.clone(), self.held.len(), Arena::Static);
+        let bytes = table.borrow();
+        let mut c = Cursor::new(&bytes, toyos_acpi::SDT_HEADER_LEN, bytes.len());
+        let r = self.term_list(&mut f, &mut c).and_then(|flow| match flow {
+            Flow::Next => Ok(()),
+            _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),
+        });
+        if r.is_err() {
+            self.ns.unwind(made);
+        }
+        r
+    }
+
+    /// Load (§19.6.76): a definition block from a SystemMemory region, a
+    /// field unit of one at whole bytes, or a Buffer, loaded at the root. Its
+    /// Boolean is stored to the target and is the value.
+    fn load_op(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
+        let p = self.name(c)?;
+        let t = self.target(f, c)?;
+        let id = self.resolve(f, &p)?;
+        let source = match self.node_object(id)? {
+            Object::Region(r) if r.space == 0 => Source::Memory { at: r.base, len: r.len },
+            Object::Field(u) => match &u.kind {
+                Kind::Region(r) if r.space == 0 && u.bit % 8 == 0 && u.len % 8 == 0 => {
+                    let (offset, len) = (u.bit / 8, u.len / 8);
+                    // The block lies wholly in the field, and the field in its region.
+                    let len = len.min(r.len.saturating_sub(offset));
+                    Source::Memory { at: r.base.checked_add(offset).ok_or(Error::Rule("a field unit past the end of memory"))?, len }
+                }
+                _ => return Err(Error::Type("Load of a field unit that is no whole bytes of a SystemMemory region (§19.6.76)")),
+            },
+            Object::Buf(b) => Source::Bytes(b.borrow().clone()),
+            _ => return Err(Error::Type("Load of an object that is no SystemMemory region, field unit or Buffer (§19.6.76)")),
+        };
+        let root = self.ns.root();
+        let loaded = self.load_block(f.by, source, root)?;
+        let v = Object::Int(self.w.bool(loaded));
+        self.store(f, t, v.clone())?;
+        Ok(v)
+    }
+
+    /// A definition block loaded below `root` from `source` by the method
+    /// `by`, told to the host: `Ok(false)` where the block is refused —
+    /// malformed, colliding, failing its header, length or checksum, or
+    /// denied by the host while it loads — and nothing of it kept. A bound
+    /// of the evaluation, and Fatal, refuse the evaluation instead.
+    pub(crate) fn load_block(&mut self, by: NodeId, source: Source, root: NodeId) -> Result<bool, Error> {
+        let by = self.path_of(by, None)?;
+        let mut header = None;
+        let r = self.block(source, &mut header).and_then(|bytes| self.run_block(bytes, root));
+        let refused = r.as_ref().err();
+        self.host.loaded(&RuntimeLoad { by: &by, header: header.as_ref().map(|h: &[u8; toyos_acpi::SDT_HEADER_LEN]| &h[..]), refused });
+        match r {
+            Ok(()) => Ok(true),
+            Err(e @ (Error::Bound(_) | Error::Fatal { .. })) => Err(e),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// A definition block's bytes, its header first, checked whole before
+    /// any of it runs (§5.2.6): a length that holds its header and lies
+    /// wholly in its source, and bytes that sum to zero.
+    fn block(&mut self, source: Source, header: &mut Option<[u8; toyos_acpi::SDT_HEADER_LEN]>) -> Result<Vec<u8>, Error> {
+        const HEADER: usize = toyos_acpi::SDT_HEADER_LEN;
+        let length = |head: &[u8]| u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let bytes = match source {
+            Source::Bytes(bytes) => {
+                if bytes.len() < HEADER {
+                    return Err(Error::Table("a definition block shorter than its header (§5.2.6)"));
+                }
+                *header = bytes[..HEADER].try_into().ok();
+                let declared = length(&bytes);
+                if declared > bytes.len() {
+                    return Err(Error::Table("a definition block longer than the Buffer it is loaded from (§19.6.76)"));
+                }
+                bytes[..declared].to_vec()
+            }
+            Source::Memory { at, len } => {
+                if len < HEADER as u64 {
+                    return Err(Error::Table("a definition block's region shorter than its header (§5.2.6)"));
+                }
+                let head = self.host.table(at, HEADER).map_err(|d| Error::Host(d.0))?;
+                *header = head.get(..HEADER).and_then(|h| h.try_into().ok());
+                let declared = length(&head);
+                if declared as u64 > len {
+                    return Err(Error::Table("a definition block longer than the region it is loaded from (§19.6.76)"));
+                }
+                bounded(declared)?;
+                self.charge(declared)?;
+                self.host.table(at, declared.max(HEADER)).map_err(|d| Error::Host(d.0))?
+            }
+        };
+        if bytes.len() < HEADER || length(&bytes) != bytes.len() {
+            return Err(Error::Table("a definition block whose length does not hold its header, or is not what was read (§5.2.6)"));
+        }
+        self.charge(bytes.len())?;
+        if bytes.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)) != 0 {
+            return Err(Error::Table("a definition block whose bytes do not sum to zero (§5.2.6)"));
+        }
+        Ok(bytes)
+    }
+
     // ---- named objects (§20.2.5.1, §20.2.5.2) ------------------------------
 
     fn def_alias(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
@@ -582,7 +712,7 @@ impl<'a> Machine<'a> {
         let alias = self.name(c)?;
         let target = self.resolve(f, &source)?;
         let steps = &mut self.steps;
-        self.ns.alias(f.scope, &alias, target, &mut || tick(steps))?;
+        self.ns.alias(f.arena, f.scope, &alias, target, &mut || tick(steps))?;
         Ok(Flow::Next)
     }
 
@@ -1490,7 +1620,7 @@ impl<'a> Machine<'a> {
             0x29 => self.bcd_out(f, c),
             0x33 => Ok(Object::Int(self.host.timer() & self.w.ones())),
             0x1F => Err(Error::Unsupported("LoadTable")),
-            0x20 => Err(Error::Unsupported("Load")),
+            0x20 => self.load_op(f, c),
             _ => Err(Error::Malformed { at, why: "not an expression (§20.2.5.4)" }),
         }
     }

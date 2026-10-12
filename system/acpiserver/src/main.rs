@@ -38,6 +38,10 @@
 //! is run as its method ([`run_query`]): a Notify of a press is a press.
 //! Elsewhere no query's method runs.
 //!
+//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC`, and each
+//! processor's on an Intel processor, query then commit, claiming what ToyOS
+//! honours; whatever a table they loaded added is initialised in turn.
+//!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, or is said and dropped on a machine with
 //! no power-off, and the controller's GPE drains the
@@ -65,6 +69,7 @@ mod ec;
 mod host;
 mod init;
 mod ledger;
+mod osc;
 mod sci;
 mod tables;
 
@@ -118,6 +123,11 @@ struct Server<'a, K, P> {
     power_off: bool,
     /// What the namespace's initialisation ran.
     census: Census,
+    /// What `_OSC` answered.
+    negotiated: osc::Negotiated,
+    /// The processor is Intel's, whose `_OSC` interface a processor object
+    /// speaks ([`toyos_abi::processor_is_intel`]).
+    intel: bool,
 }
 
 fn main() {
@@ -134,7 +144,7 @@ fn main() {
     server.aml = kept;
     let names = server.initialise();
     let (batteries, adapters) = server.arm_controller(names.as_ref());
-    if names.is_some() {
+    if server.negotiate(names).is_some() {
         println!("{}", server.census.line());
     }
     server.find_power(batteries, adapters);
@@ -296,6 +306,8 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             empty: 0,
             power_off: false,
             census: Census::default(),
+            negotiated: osc::Negotiated::default(),
+            intel: toyos_abi::processor_is_intel(),
         }
     }
 
@@ -351,6 +363,25 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             since = aml.interpreter.defined();
             init::loaded(aml, &names, added, &mut self.census);
         }
+        Some(names)
+    }
+
+    /// Negotiate `_OSC` ([`osc`]), then initialise what the tables it loaded
+    /// added; what comes back is the namespace as it then stands, and its
+    /// size is said, after the machine's last table.
+    fn negotiate(&mut self, names: Option<Names>) -> Option<Names> {
+        let (names, aml) = (names?, self.aml.as_mut()?);
+        let before = aml.interpreter.defined();
+        self.negotiated = osc::negotiate_all(aml, &names, self.intel);
+        let names = self.settle(before, names)?;
+        let aml = self.aml.as_ref()?;
+        println!(
+            "acpiserver: {} table(s) loaded at run time and {} refused; the namespace holds {} objects in {} slots",
+            aml.host.loaded,
+            aml.host.loads_refused,
+            aml.interpreter.defined(),
+            aml.interpreter.slots()
+        );
         Some(names)
     }
 
@@ -646,6 +677,11 @@ fn run_query<K: Kernel>(aml: Option<&mut Aml<'_, K>>, ec: Option<&Ec>, q: u8) ->
     }
 }
 
+/// The interpreter's own test encodings of §20.2.
+#[cfg(test)]
+#[path = "../aml/tests/common/mod.rs"]
+mod common;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +868,91 @@ mod tests {
             }
             assert_eq!((server.census.ini, server.census.reg.get(&3).copied()), (u64::from(with_ecdt), Some(1)));
             assert_eq!(server.served.ec_gpe, Some(3));
+        }
+    }
+
+    /// A platform `_OSC` and an Intel processor's that record what they are
+    /// passed in firmware memory and offer every bit to a query; the
+    /// processor's commit loads a block from reserved memory, whose device's
+    /// `_INI` sets a byte.
+    fn osc_machine(block_type: u8) -> Scripted {
+        use crate::common::{arg, buffer, cat, device, else_, field, if_, int, method, name, op_region, pkg, ret, scope, ssdt_named, store, unit};
+        const NVS: u64 = 0x7700_0000;
+        const BLOCK: u64 = 0x7800_0000;
+        let block = ssdt_named("CPU0PSD", &device("\\_SB.NEWD", &method("_INI", 0, &store(&int(0x77), &name("\\NEWI")))));
+        let dword = |n: &str| unit(n, 32);
+        let nvs = cat(&[
+            &op_region("NVSR", 0x00, &int(NVS), &int(0x30)),
+            &field("NVSR", 0x03, &["PUU", "PQ1", "PQ2", "PC1", "PC2", "CUU", "CQ1", "CQ2", "CC1", "CC2", "NEWI"].map(dword)),
+            &op_region("BLKR", 0x00, &int(BLOCK), &int(block.len() as u64)),
+        ]);
+        // CreateDWordField (Arg3, n, CDWn) (§19.6.20).
+        let created = |at: u64, n: &str| cat(&[&[0x8A], &arg(3), &int(at), &name(n)]);
+        let osc = |p: &str, uuid: &[u8; 16], commit: &[u8]| {
+            method(
+                "_OSC",
+                4,
+                &cat(&[
+                    &created(0, "CDW1"),
+                    &created(4, "CDW2"),
+                    &if_(&cat(&[&[0x93], &arg(0), &buffer(&int(16), uuid)]), &store(&int(1), &name(&format!("\\{p}UU")))),
+                    &if_(
+                        &cat(&[&[0x7B], &name("CDW1"), &int(1), &[0x00]]),
+                        &cat(&[
+                            &store(&name("CDW1"), &name(&format!("\\{p}Q1"))),
+                            &store(&name("CDW2"), &name(&format!("\\{p}Q2"))),
+                            &store(&int(0x10), &name("CDW1")),
+                            &store(&int(0xFFFF_FFFF), &name("CDW2")),
+                        ]),
+                    ),
+                    &else_(&cat(&[&store(&name("CDW1"), &name(&format!("\\{p}C1"))), &store(&name("CDW2"), &name(&format!("\\{p}C2"))), commit])),
+                    &ret(&arg(3)),
+                ]),
+            )
+        };
+        let load = cat(&[&[0x5B, 0x20], &name("\\BLKR"), &[0x60]]);
+        // Processor (\_PR.CPU0, 0, 0x410, 6) (ACPI 6.3A §19.6.108).
+        let processor = cat(&[&[0x5B, 0x83], &pkg(&cat(&[&name("\\_PR.CPU0"), &[0x00], &0x410u32.to_le_bytes(), &[0x06], &osc("C", &osc::PROCESSOR.uuid, &load)]))]);
+        let dsdt = cat(&[&nvs, &scope("\\_SB", &osc("P", &osc::PLATFORM.uuid, &[])), &processor]);
+        let mut kernel = crafted(&sealed(b"DSDT", &dsdt), &[]);
+        kernel.memory.push((NVS, 10, vec![0; 0x30]));
+        kernel.memory.push((BLOCK, block_type, block));
+        kernel
+    }
+
+    /// §6.2.11: `\_SB._OSC` and, on an Intel processor, each processor's are
+    /// queried with what ToyOS claims, nothing, and committed with what the
+    /// query granted of it, nothing, though the firmware offered every bit;
+    /// the block the processor's commit loads from reserved memory loads, and
+    /// its device's `_INI` runs. On another vendor's processor its `_OSC` is
+    /// not evaluated, and a block in ACPI reclaim memory, which Table 15.6
+    /// calls neither reserved nor NVS, is refused and keeps nothing.
+    #[test]
+    fn osc_commits_only_what_toyos_claims_and_what_its_load_adds_is_initialised() {
+        for (intel, block_type, loaded) in [(true, 0, true), (false, 0, false), (true, 9, false)] {
+            let kernel = osc_machine(block_type);
+            let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+            let mut server = Server::new(&kernel, Bytes::default(), info);
+            server.intel = intel;
+            server.aml = load(&kernel, CRAFTED_RSDP).1;
+            let names = server.initialise();
+            server.arm_controller(names.as_ref());
+            server.negotiate(names).expect("the namespace stands");
+            let aml = server.aml.as_mut().expect("the namespace");
+            let mut read = |path: &str| match aml.interpreter.evaluate(&mut aml.host, path, &[]) {
+                Ok(Value::Integer(v)) => v,
+                other => panic!("{path}: {other:?}"),
+            };
+            let platform: Vec<u64> = ["\\PUU", "\\PQ1", "\\PQ2", "\\PC1", "\\PC2"].map(&mut read).to_vec();
+            assert_eq!(platform, [1, 1, 0, 0, 0], "the platform's UUID, the query flag and nothing claimed, then the commit of nothing");
+            let processor: Vec<u64> = ["\\CUU", "\\CQ1", "\\CQ2", "\\CC1", "\\CC2"].map(&mut read).to_vec();
+            assert_eq!(processor, if intel { [1, 1, 0, 0, 0] } else { [0; 5] }, "intel {intel}");
+            assert_eq!(read("\\NEWI"), if loaded { 0x77 } else { 0 }, "intel {intel}, block in type {block_type}");
+            assert_eq!((aml.host.loaded, aml.host.loads_refused), (u64::from(loaded), u64::from(intel && !loaded)));
+            let answered = osc::Answered { query: 0x10, offered: 0, commit: Some((0, 0)) };
+            assert_eq!(server.negotiated.platform, Some(Ok(answered)));
+            assert_eq!(server.negotiated.processors.len(), usize::from(intel));
+            assert_eq!(server.census.ini, u64::from(loaded), "the loaded device's _INI");
         }
     }
 
