@@ -328,8 +328,3 @@ fn acpi_summary(text: &str) -> Result<(), String> {
     eprintln!("  [s1] {summary}");
     Ok(())
 }
-
-/// The kernel's read-out lines of a boot, for two boots of one machine to agree on.
-pub fn kernel_lines(text: &str) -> Vec<&str> {
-    after(text, "pci-readout: ").collect()
-}

@@ -1093,16 +1093,14 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The radio's and the NVMe's place, windows, BARs and message
         // capabilities, the DMAR's scope and regions reaching the radio, and
-        // the names under its ACPI device; both boots read the same.
+        // the names under its ACPI device, off B alone: the job holds the boot
+        // open until acpiserver's read-out is in the log.
         "wifi_s1_readout",
         metal::Metal {
-            arms: WIFI_S1,
+            arms: &[WIFI_S1_B],
             judge: |b| {
-                let (a, b) = (b[0].log(), b[1].log());
-                if common::wifis1::kernel_lines(a.text()) != common::wifis1::kernel_lines(b.text()) {
-                    return Err("A and B, one machine in one session, read out differently".to_string());
-                }
-                common::wifis1::readout(b.text(), true)
+                b[0].job_passed("test_rs_scout_compat_format")?;
+                common::wifis1::readout(b[0].log().text(), true)
             },
         },
     ),
@@ -1127,13 +1125,16 @@ const WIFI_S1: &[metal::Arm] = &[
         &["xhci-leave=8086:9a13", "pci-readout", "claim-compat-format"],
         &["test_rs_scout_compat_format"],
     ),
-    metal::once(
-        "wifi-s1-b",
-        "tests/images/wifis1case.toml",
-        &["xhci-leave=8086:9a13", "pci-readout"],
-        &["test_rs_scout_compat_format"],
-    ),
+    WIFI_S1_B,
 ];
+
+/// The S1 boot without the actuator, which also carries the read-out.
+const WIFI_S1_B: metal::Arm = metal::once(
+    "wifi-s1-b",
+    "tests/images/wifis1case.toml",
+    &["xhci-leave=8086:9a13", "pci-readout"],
+    &["test_rs_scout_compat_format"],
+);
 
 /// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
 /// free: the ports' job first, since its last holder keeps them until it ends.

@@ -7,6 +7,10 @@
 //! which the harness reads. This job says what usbd said and how it ended,
 //! ends it if it is still running, and exits 0 either way: it is the stimulus,
 //! not the verdict.
+//!
+//! Then it holds the boot open until acpiserver's read-out (`--pci-readout`)
+//! has said its last line and the log has it: the boot ends with this job, and
+//! on the T14 acpiserver has not loaded its tables by the time usbd is done.
 
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
@@ -19,6 +23,10 @@ use toyos::syscap::SysCap;
 use toyos::PciDev;
 use toyos_abi::syscall::{DeviceRequest, PciId, SyscallError};
 use toyos_inspect::USB;
+use toyos_logstream::program_line;
+
+#[path = "../served_log.rs"]
+mod served_log;
 
 const USBD: &str = "/system/bin/usbd";
 
@@ -27,6 +35,14 @@ const SPARES: [PciId; 2] = [PciId { vendor: 0x1b36, device: 0x000d }, PciId { ve
 
 /// How long usbd has to settle or end: `usbd_spare`'s bound, a liveness guard.
 const BOUND: Duration = Duration::from_secs(30);
+
+/// How long after boot the hold gives up: the runner's bound less a tenth, as
+/// `acpi_hold`'s.
+const UNTIL_MS: u64 = toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10;
+
+/// How each of the read-out's possible last lines begins, its summary and its
+/// two refusals alike (`system/acpiserver/src/readout.rs`).
+const READOUT_SAID: &str = "acpiserver: acpi-readout: ";
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
@@ -83,4 +99,11 @@ fn main() {
     }
     let status = child.wait().expect("scout_compat_format: wait for usbd");
     println!("scout_compat_format: usbd ended {status:?}");
+
+    let since_boot = toyos_abi::clock::nanos_since_boot() / 1_000_000;
+    let bound = Duration::from_millis(UNTIL_MS.saturating_sub(since_boot));
+    served_log::Log::open().until("acpiserver's read-out's last line", bound, |line| {
+        program_line(line).is_some_and(|said| said.tag == "acpiserver" && said.text.starts_with(READOUT_SAID))
+    });
+    println!("scout_compat_format: acpiserver's read-out is in the log");
 }
