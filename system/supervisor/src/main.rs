@@ -2849,11 +2849,19 @@ impl Grants<'_> {
     /// [`NETSTACK`] minted with `program`'s row and `session`, for a row whose
     /// `receives` names it: the badge is the view netstack keeps its DNS
     /// answers in. None once the port has closed for good, as for a role.
+    ///
+    /// The build renders no manifest in which such a row is netstack's own or
+    /// no row `[boot] start` names serves it (`build/build.rs`).
     fn netstack(&self, program: &Program, session: Session) -> Option<(String, Connector)> {
         if !program.receives.iter().any(|name| name == NETSTACK) {
             return None;
         }
-        let kept = self.netstack.as_ref()?.lock().expect("supervisor: a service's state is poisoned");
+        let kept = self
+            .netstack
+            .as_ref()
+            .unwrap_or_else(|| panic!("supervisor: {} receives `{NETSTACK}`, which no started row serves", program.name))
+            .lock()
+            .expect("supervisor: a service's state is poisoned");
         let (_, acceptor) = kept.acceptors.iter().find(|(name, _)| name == NETSTACK)?;
         let badge = Authority { row: program.name.clone(), session }.encode();
         let connector = acceptor
