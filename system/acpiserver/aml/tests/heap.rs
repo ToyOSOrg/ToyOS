@@ -497,19 +497,17 @@ fn an_evaluation_holds_at_most_256_mutexes() {
 
 /// A method refused at the bound ends as ACPICA ends one refused for memory
 /// (`AE_NO_MEMORY`), as any other: what it made, a named object and its
-/// locals' buffers, is given back to the byte, the Mutex it held is released,
-/// and it is refused by the bound's name; the next method builds a buffer of
-/// a mebibyte. What a method stores into an object that outlives it stays,
-/// as ACPICA keeps it (`what_is_held_live_is_bounded_in_sum`).
+/// locals' buffers, is given back to the byte, the Global Lock it held is
+/// let go, so the next Acquire of it takes it from the firmware again, and
+/// it is refused by the bound's name; the next method builds a buffer of a
+/// mebibyte. What a method stores into an object that outlives it stays, as
+/// ACPICA keeps it (`what_is_held_live_is_bounded_in_sum`).
 #[test]
 fn a_method_refused_at_the_bound_gives_back_what_it_made() {
-    let acquire = cat(&[&[0x5B, 0x23], &name("MUT0"), &0xFFFFu16.to_le_bytes()]);
+    let acquire = cat(&[&[0x5B, 0x23], &name("\\_GL"), &0xFFFFu16.to_le_bytes()]);
     let body = cat(&[
-        &[0x5B, 0x01],
-        &name("MUT0"),
-        &[0x00],
         &method("MAKE", 0, &ret(&buffer(&int(0x10_0000), &[]))),
-        &method("TAKE", 0, &cat(&[&acquire, &[0x5B, 0x27], &name("MUT0"), &ret(&int(1))])),
+        &method("TAKE", 0, &cat(&[&acquire, &[0x5B, 0x27], &name("\\_GL"), &ret(&int(1))])),
         &method(
             "FILL",
             0,
@@ -527,6 +525,8 @@ fn a_method_refused_at_the_bound_gives_back_what_it_made() {
     assert_eq!(i.evaluate(&mut Sink, "\\FILL", &[]), Err(Error::Bound(FULL)));
     assert_eq!((i.usage().live, HELD.get()), (live, held), "what the refused method made is held");
     assert_eq!(i.evaluate(&mut Sink, "\\FILL.MINE", &[]), Err(Error::NotFound("\\FILL.MINE".into())));
-    assert_eq!(i.evaluate(&mut Sink, "\\TAKE", &[]), Ok(Value::Integer(1)), "the refused method's Mutex is held");
+    let mut firmware = Machine::default();
+    assert_eq!(i.evaluate(&mut firmware, "\\TAKE", &[]), Ok(Value::Integer(1)));
+    assert_eq!(firmware.log, [Event::GlobalTake(None), Event::GlobalRelease], "the refused method's hold of the Global Lock is kept");
     assert_eq!(i.evaluate(&mut Sink, "\\MAKE", &[]), Ok(Value::Buffer(vec![0; 0x10_0000])));
 }
