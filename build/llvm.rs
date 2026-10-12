@@ -31,8 +31,8 @@
 //! worktree lock that covers the fork build directory its maker writes,
 //! `build/toyos-llvm/`, which is removed once the LLVM is placed.
 //!
-//! An LLVM nothing has used for the store's keep time is removed by
-//! `keystore::sweep`, which every placement runs.
+//! An LLVM that is not among the store's last used and that nobody uses is
+//! removed by `keystore::sweep`, which every placement runs.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -556,7 +556,7 @@ mod tests {
     use super::*;
     use crate::buildlock;
     use crate::compiler::tests::{estate, git, write, LLVM_A, LLVM_B, LLVM_URL};
-    use crate::keystore::tests::{last_used, LONG_AGO};
+    use crate::keystore::tests::{last_used, used_lately, LONG_AGO};
 
     /// A scratch directory whose read-only LLVMs are made writable again before
     /// it goes.
@@ -1179,7 +1179,7 @@ mod tests {
     }
 
     /// **A sweep that lands once a held build has found its LLVM whole fails no
-    /// build**: the stored LLVM, unused for the keep time, is swept by a
+    /// build**: the stored LLVM, not among the last used, is swept by a
     /// placement elsewhere right after it is found whole, and the build goes on
     /// with a whole LLVM.
     #[test]
@@ -1188,6 +1188,7 @@ mod tests {
         let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let fork = a.join("rust");
         drop(choose(&store, &fork, fake_build));
+        used_lately(&store, Keyed::Llvm);
         let unused = key(&fork);
         let swept = Cell::new(None);
         let then_swept = |dir: &Path| {
@@ -1204,18 +1205,19 @@ mod tests {
         assert!(swept.get().is_some(), "the stand-in sweep never ran");
     }
 
-    /// **A sweep takes an LLVM only once nothing has used it for the store's
-    /// keep time and nobody uses it**: `a` moves to another LLVM while a
-    /// process of its own still uses the first, which placing the second
-    /// leaves, and which goes once that process has let go.
+    /// **A sweep takes an LLVM only once it is not among the store's last used
+    /// and nobody uses it**: `a` moves to another LLVM while a process of its
+    /// own still uses the first, which placing the second leaves, and which
+    /// goes once that process has let go.
     #[test]
-    fn an_llvm_is_swept_once_nothing_used_it_for_the_keep_time() {
+    fn an_llvm_is_swept_once_others_were_used_since_and_nobody_uses_it() {
         let scratch = Scratch::new("llvm-sweep");
         let (_primary, store, [_same, a, _b]) = estate_built(&scratch);
         let user = elsewhere("use", &a, &store);
         let unused = key(&a.join("rust"));
         let first = Keyed::Llvm.store(&store).join(&unused);
         last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
+        used_lately(&store, Keyed::Llvm);
 
         let fork = a.join("rust");
         pin_llvm(&fork, "B");
@@ -1226,7 +1228,7 @@ mod tests {
         // The first one's lock was only ever its user's: the placement's sweep
         // found it held, and this one is the first here to take it.
         user.release();
-        assert_eq!(keystore::sweep(&store, Keyed::Llvm), [first], "the sweep kept an LLVM nothing had used for the keep time");
+        assert_eq!(keystore::sweep(&store, Keyed::Llvm), [first], "the sweep kept an LLVM used before those it keeps");
         assert!(second.dir.is_dir());
     }
 
@@ -1241,6 +1243,7 @@ mod tests {
         let unused = key(&a.join("rust"));
         let dir = Keyed::Llvm.store(&store).join(&unused);
         last_used(&store, Keyed::Llvm, &unused, LONG_AGO);
+        used_lately(&store, Keyed::Llvm);
         // In a process of its own: this one never holds the key's lock.
         let mut sweep = buildlock::tests::rerun("llvm::tests::child_role");
         let stopped = sweep.env(ROLE, "stop-a-sweep").env(WORKTREE, &a).env(STORE, &store).output().unwrap();

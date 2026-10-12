@@ -57,6 +57,9 @@ re-run away; a fix for a red lands ahead of feature work.
 After a landing, in the primary checkout: `git pull --ff-only origin main`, then remove the landed
 branch's worktree, which its implementer made: `rm -rf ../<name> && git worktree prune && git -C
 rust worktree prune && git -C rust/library/backtrace worktree prune && git branch -d wt/<name>`.
+Remove a worktree that way as soon as nothing will build in it again — a landed branch's, a
+finished scout's, judge's, base or mutation tree, a measurement tree a later one superseded — so its
+`target/` and fork build directories go with it; an open pull request's stays for its fix rounds.
 
 ## Runs
 
