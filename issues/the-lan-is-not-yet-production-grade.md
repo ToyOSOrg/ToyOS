@@ -40,7 +40,7 @@ why, and the boot still leases.
   `issues/no-machine-has-read-an-intel-nic-across-a-link-change.md` waits on it.
 - **Throughput** is measured against Ubuntu on the same machine and cable, with
   line rate (about 940 Mb/s of TCP) as the target: interrupt moderation (a
-  fixed 128 µs throttle today, not adaptive), ring sizes, checksum and
+  fixed throttle today, not adaptive), ring sizes, checksum and
   segmentation offload.
 - **The part is handed back** in the state the next operating system and the
   management firmware that shares it expect. Ubuntu has had link after every
