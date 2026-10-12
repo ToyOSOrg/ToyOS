@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     /// A platform `_OSC` and an Intel processor's that record what they are
-    /// passed in firmware memory and offer every bit to a query; the
+    /// passed in firmware memory and offer bit 0 alone to a query; the
     /// processor's commit loads a block from reserved memory, whose device's
     /// `_INI` sets a byte.
     fn osc_machine(block_type: u8) -> Scripted {
@@ -1033,7 +1033,7 @@ mod tests {
                             &store(&name("CDW1"), &name(&format!("\\{p}Q1"))),
                             &store(&name("CDW2"), &name(&format!("\\{p}Q2"))),
                             &store(&int(0x10), &name("CDW1")),
-                            &store(&int(0xFFFF_FFFF), &name("CDW2")),
+                            &store(&int(1), &name("CDW2")),
                         ]),
                     ),
                     &else_(&cat(&[&store(&name("CDW1"), &name(&format!("\\{p}C1"))), &store(&name("CDW2"), &name(&format!("\\{p}C2"))), commit])),
@@ -1053,7 +1053,7 @@ mod tests {
 
     /// §6.2.11: `\_SB._OSC` and, on an Intel processor, each processor's are
     /// queried with what ToyOS claims, nothing, and committed with what the
-    /// query granted of it, nothing, though the firmware offered every bit;
+    /// query granted of it, nothing, though the firmware offered a bit;
     /// the block the processor's commit loads from reserved memory loads, and
     /// its device's `_INI` runs. On another vendor's processor its `_OSC` is
     /// not evaluated, and a block in ACPI reclaim memory, which Table 15.6
@@ -1224,6 +1224,24 @@ mod tests {
         assert_eq!(server.counts.get(&0x1C), None);
         server.served_aml();
         assert_eq!(server.counts.get(&0x1C), Some(&1), "the query a Sleep found waiting was not drained");
+    }
+
+    /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a
+    /// bit claimed that the query did not offer is dropped; what the commit
+    /// grants is read of what it sent.
+    #[test]
+    fn a_commit_sends_only_what_the_query_offered_of_the_claim() {
+        let kernel = osc_machine(0);
+        let (mut server, _) = served(&kernel, FIXED_POWER_BUTTON);
+        let aml = server.aml.as_mut().expect("the namespace");
+        let claim = osc::Claim { uuid: osc::PLATFORM.uuid, capabilities: 0b11 };
+        let answered = osc::negotiate(aml, "\\_SB_._OSC", &claim);
+        assert_eq!(answered, Ok(osc::Answered { query: 0x10, offered: 0b01, commit: Some((0, 0b01)) }));
+        let mut read = |path: &str| match aml.interpreter.evaluate(&mut aml.host, path, &[]) {
+            Ok(Value::Integer(v)) => v,
+            other => panic!("{path}: {other:?}"),
+        };
+        assert_eq!((read("\\PQ2"), read("\\PC2")), (0b11, 0b01), "the query asks the claim, the commit sends the offer");
     }
 
     /// The owner's ruling: a machine whose power button is a control method
