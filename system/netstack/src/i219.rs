@@ -267,16 +267,6 @@ impl Nic {
         self.driver.borrow_mut().rx_flush();
     }
 
-    /// Receive descriptors the part holds empty.
-    pub fn rx_free(&self) -> usize {
-        self.driver.borrow().rx_free()
-    }
-
-    /// Hold the part's interrupts at least `nanos` apart.
-    pub fn throttle(&self, nanos: u64) {
-        self.driver.borrow_mut().throttle(nanos);
-    }
-
     /// How many frames the transmit ring takes now.
     pub fn tx_room(&self) -> usize {
         self.driver.borrow_mut().tx_room()

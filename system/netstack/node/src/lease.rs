@@ -107,10 +107,6 @@ impl Stack {
         self.shard.receive(now, frame);
     }
 
-    pub(crate) fn take_least_rtt(&mut self) -> Option<core::time::Duration> {
-        self.shard.take_least_rtt()
-    }
-
     pub(crate) fn transmit(&mut self, now: Instant, credit: usize, sink: impl FnMut(&[u8])) -> usize {
         self.shard.transmit(now, credit, sink)
     }

@@ -123,11 +123,12 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     assert_eq!(nic.peek(regs::TDLEN) as usize, TX_RING * tx_desc::BYTES);
     assert_eq!(nic.peek(regs::TDT), 0);
 
-    // Both timers off, and the throttle the caller's to set: the first frame
-    // after a quiet spell is not held back.
+    // Both timers off and the throttle on: the first frame after a quiet
+    // spell is not held back, and no peer's frames wake the reader more often
+    // than the throttle.
     assert_eq!(nic.peek(regs::RDTR), 0);
     assert_eq!(nic.peek(regs::RADV), 0);
-    assert_eq!(nic.peek(regs::ITR), 0);
+    assert_eq!(u64::from(nic.peek(regs::ITR)) * 256, 131_072, "§10.2.4.2 counts in 256 ns");
 
     assert_eq!(driver.mac(), NVM_MAC);
 }
@@ -683,38 +684,6 @@ fn the_tail_moves_once_a_batch_and_sooner_only_once_held_max_wait() {
     );
     driver.rx_flush();
     assert_eq!(writes_of(&nic, regs::RDT), writes + 2, "{}", nic.because("a flush with nothing held wrote RDT"));
-    assert_eq!(driver.rx_free(), RX_RING - 1, "{}", nic.because("the part does not hold the whole ring"));
-}
-
-/// §10.2.4.2's `ITR` takes its 256 ns units at or below what the caller
-/// asked, inside its sixteen bits, to three leading bits, and is written only
-/// when that changes: an interval recomputed every pass costs no write unless
-/// it moves by a step of an eighth to a quarter.
-#[test]
-fn the_throttle_is_written_only_when_its_three_leading_bits_change() {
-    let nic = Nic::new(25);
-    let mut driver = open(&nic);
-    let opened = writes_of(&nic, regs::ITR);
-    for (nanos, units, written) in [
-        // 390 units, 0b110000110: 0b110 << 6.
-        (100_000, 384, 1),
-        (99_000, 384, 1),
-        (98_303, 320, 2),
-        (65_536, 256, 3),
-        (65_535, 224, 4),
-        (7 * 256, 7, 5),
-        (0, 1, 6),
-        (255, 1, 6),
-        (u64::MAX, 0b111 << 13, 7),
-    ] {
-        driver.throttle(nanos);
-        assert_eq!(
-            (nic.peek(regs::ITR), writes_of(&nic, regs::ITR) - opened),
-            (units, written),
-            "{}",
-            nic.because(&format!("asked for {nanos} ns"))
-        );
-    }
 }
 
 // --- transmit ---

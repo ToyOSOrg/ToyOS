@@ -150,11 +150,6 @@ impl Rx {
         self.buf.capacity()
     }
 
-    /// The receiver's round-trip estimate, once one has been sampled.
-    pub const fn rtt(&self) -> Option<Duration> {
-        self.rtt
-    }
-
     /// After in-order text of `len` bytes arrived at `now`, with its TSecr and that echo's age
     /// where it is one this end sent.
     pub fn sample_rtt(&mut self, len: u32, echo: Option<(u32, Option<Duration>)>, now: Instant) {

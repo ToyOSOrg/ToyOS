@@ -1,10 +1,6 @@
-use std::num::NonZeroU32;
-use std::time::Duration;
-
 use toyos_i219::Part;
 use toyos_inspect::Snapshot;
 
-use crate::cadence::{cadence, Ring, FLOOR};
 use crate::i219;
 use crate::virtio_net::VirtioNet;
 
@@ -25,14 +21,9 @@ impl Card {
         panic!("netstack: the NIC this program was given is not one it can drive — {why}")
     }
 
-    /// Paced from the start, before any batch has said what it moved.
     pub fn intel(claim: toyos::PciDev, part: Part) -> Self {
         match i219::Nic::open(claim, part) {
-            Ok(nic) => {
-                let card = Self::Intel(nic);
-                card.pace(None);
-                card
-            }
+            Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
         }
     }
@@ -152,23 +143,6 @@ impl Card {
             nic.rx_flush();
         }
         took
-    }
-
-    /// Hold the card's interrupts after a batch that moved streams whose least round trip is
-    /// `least_rtt`, by [`cadence`] over the ring the batch left. virtio's device has no throttle.
-    pub fn pace(&self, least_rtt: Option<Duration>) {
-        let Self::Intel(nic) = self else { return };
-        let interval = match nic.link() {
-            toyos_i219::Link::Up { speed, .. } => cadence(
-                least_rtt,
-                Ring {
-                    room: nic.rx_free().saturating_sub(toyos_i219::RX_SHORT),
-                    mbps: NonZeroU32::new(speed.mbps().into()).expect("a link's rate is not zero"),
-                },
-            ),
-            toyos_i219::Link::Down => FLOOR,
-        };
-        nic.throttle(u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX));
     }
 
     /// Hands the next received frame to `take` and gives its buffer back to

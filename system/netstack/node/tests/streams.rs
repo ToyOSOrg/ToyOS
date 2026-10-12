@@ -679,14 +679,13 @@ fn a_batch_stops_at_its_budget_and_says_a_pass_is_owed() {
         sink(&frame);
         true
     };
-    let took = net.node.receive(net.now, BUDGET, endless, draw(&mut net.draws));
-    assert_eq!((took.frames, took.owed, handed), (BUDGET, true, BUDGET), "the batch is the budget, and a pass is owed");
+    let owed = net.node.receive(net.now, BUDGET, endless, draw(&mut net.draws));
+    assert_eq!((owed, handed), (true, BUDGET), "the batch is the budget, and a pass is owed");
     assert_eq!(client.borrow().inbox, b"again", "the rest of the batch was the same segment again");
 
     let next = net.far.text(b"once");
     let short: Vec<&[u8]> = vec![&next; BUDGET - 1];
-    let took = net.node.receive(net.now, BUDGET, batch(&short), draw(&mut net.draws));
-    assert_eq!((took.frames, took.owed), (BUDGET - 1, false), "the ring was emptied");
+    assert!(!net.node.receive(net.now, BUDGET, batch(&short), draw(&mut net.draws)), "the ring was emptied");
     assert_eq!(client.borrow().inbox, b"againonce");
 }
 

@@ -164,37 +164,23 @@ pub const RX_RING: usize = 1000;
 pub const TX_RING: usize = 16;
 /// Free receive descriptors at which the part reports itself short:
 /// `RCTL.RDMTS = 00b`, "1/2" of `RDLEN` (§10.2.5.1), raising `RXDMT0`.
-pub const RX_SHORT: usize = RX_RING / 2;
+const RX_SHORT: usize = RX_RING / 2;
 /// Receive buffers given back and not yet handed to the part at most: the
 /// tail moves once a batch ([`I219::rx_flush`]), and sooner once this many
-/// wait. A quarter of the [`RX_SHORT`] descriptors a pacing caller keeps in
-/// reserve, so what a batch holds back never brings the part to its report
-/// alone.
+/// wait. A quarter of [`RX_SHORT`], so what a batch holds back never brings
+/// the part to its report alone.
 pub const HELD_MAX: usize = RX_SHORT / 4;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
 /// Bytes per transmit buffer, and therefore the longest frame [`I219::tx_reserve`]
 /// takes.
 pub const TX_BUF_BYTES: usize = 2048;
-/// `ITR` (§10.2.4.2) counts the least interval between two of the function's
-/// interrupts in units of this many nanoseconds, in sixteen bits; zero is no
-/// throttle at all.
-pub const THROTTLE_UNIT_NANOS: u64 = 256;
-
-/// What [`I219::throttle`] writes `ITR` with for an interval of `nanos`: its
-/// units at or below `nanos`, between one and the field's largest, kept to
-/// their three leading bits.
-///
-/// **Rounded down**, so the interval never exceeds what the caller bounded it
-/// by, and **to three leading bits**, so an interval the caller recomputes
-/// every pass moves the register only on a step of an eighth to a quarter, and
-/// loses at most a fifth of what was asked.
-pub const fn throttle_units(nanos: u64) -> u32 {
-    let units = nanos / THROTTLE_UNIT_NANOS;
-    let units = if units < 1 { 1 } else if units > u16::MAX as u64 { u16::MAX as u32 } else { units as u32 };
-    let low = units.ilog2().saturating_sub(2);
-    units >> low << low
-}
+/// `ITR` (§10.2.4.2): the least interval between two of the function's
+/// interrupts, in 256 ns units — 131 µs. It runs from the last interrupt, so a
+/// frame after a quiet spell that long interrupts at once, and a gigabit
+/// stream's full-sized frames, one each 12.3 µs, wake their reader about ten at
+/// a time.
+const THROTTLE: u32 = 512;
 
 const _: () = {
     // §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
@@ -805,8 +791,6 @@ pub struct I219<R: Registers, C, D, I> {
     rx_tail: usize,
     /// Buffers given back since the tail last moved.
     rx_held: usize,
-    /// What `ITR` holds, in its own units.
-    throttle: u32,
     /// Next transmit descriptor to hand out, which is also `TDT`.
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
@@ -956,7 +940,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             rx_next: 0,
             rx_tail: RX_RING - 1,
             rx_held: 0,
-            throttle: 0,
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
@@ -974,10 +957,10 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
         nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
 
-        // The throttle alone, and the caller's to set ([`Self::throttle`]):
-        // the two receive timers hold back every frame's interrupt, the first
-        // after a quiet spell too, and the throttle none of those.
-        nic.regs.write32(regs::ITR, 0);
+        // The throttle alone: the two receive timers hold back every frame's
+        // interrupt, the first after a quiet spell too, and the throttle none
+        // of those.
+        nic.regs.write32(regs::ITR, THROTTLE);
         nic.regs.write32(regs::RDTR, 0);
         nic.regs.write32(regs::RADV, 0);
         nic.regs.write32(regs::TIDV, 0);
@@ -1309,13 +1292,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.move_tail();
     }
 
-    /// Receive descriptors the device holds empty, every buffer given back
-    /// handed to it: what it can take before the next pass without running
-    /// short. Read after [`Self::rx_flush`], with nothing left to poll.
-    pub fn rx_free(&self) -> usize {
-        (self.rx_tail + RX_RING - self.rx_next) % RX_RING
-    }
-
     /// Republish descriptor `index`, and move the tail once [`HELD_MAX`]
     /// buffers wait for it.
     ///
@@ -1329,18 +1305,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.rx_held += 1;
         if self.rx_held >= HELD_MAX {
             self.move_tail();
-        }
-    }
-
-    /// Hold the function's interrupts at least `nanos` apart (§10.2.4.2's
-    /// `ITR`), as [`throttle_units`] puts it; the register is written only
-    /// when that changes. The throttle runs from the last interrupt, so a frame
-    /// after a quiet spell that long interrupts at once.
-    pub fn throttle(&mut self, nanos: u64) {
-        let units = throttle_units(nanos);
-        if units != self.throttle {
-            self.throttle = units;
-            self.regs.write32(regs::ITR, units);
         }
     }
 
