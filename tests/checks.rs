@@ -1153,7 +1153,7 @@ mod checks {
     #[test]
     fn a_shared_chunk_stages_every_binary_its_members_name() {
         let source = "const CHILD: &str = \"/system/bin/test_rs_child\";\n";
-        let bins: Vec<(String, Vec<u8>)> = ["parent", "child", "fs_large_file", "libfoo.so"]
+        let bins: Vec<(String, Vec<u8>)> = ["parent", "child", "stranger", "libfoo.so"]
             .iter()
             .map(|name| ((*name).to_string(), Vec::new()))
             .collect();

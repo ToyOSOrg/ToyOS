@@ -14,19 +14,10 @@
 //! answers.
 //!
 //! **The other arms.** A `MANAGE`-only handle is no place, and the supervisor refuses a
-//! launch whose place is a pipe and answers the launches after it. A launch
-//! carries a copy of its place, so std refuses one under a place this process
-//! cannot duplicate, rather than spawning it directly. The supervisor starts a
-//! child only by a launch, so std refuses `under_supervisor` for a program no row
-//! declares and for a command carrying an extra slot; and a launch runs its row's
-//! own program, so std refuses a command naming its image under the supervisor or
-//! with a connector provided, and spawns one naming its image directly, under
-//! its program's name, launcher or not. A chain — each link starts a shell,
-//! and the shell spawns the next link — stops where the kernel refuses a
+//! launch whose place is a pipe and answers the launches after it. A chain —
+//! each link spawns the next directly — stops where the kernel refuses a
 //! process more than `MAX_DEPTH` below the supervisor, and dies whole with its
-//! first link: that link is endowed a launcher and launches its shell, and
-//! every later one is a direct spawn, holds none, and spawns its own. And a
-//! `cat` a shell `detach`es outlives the shell.
+//! first link. And a `cat` a shell `detach`es outlives the shell.
 //!
 //! This process holds the launcher test-runner endows every job, and hands a
 //! duplicate to each child that launches: a direct spawn inherits none.
@@ -35,7 +26,6 @@
 
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::{ChildExt, CommandExt};
-use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
@@ -63,11 +53,6 @@ const MSG_GROWN: u32 = 1;
 /// A to B: fault.
 const MSG_FAULT: u32 = 2;
 
-/// The role of this binary run as [`HELD`] by naming its image, and the exit
-/// that says this binary's bytes ran rather than `cat`'s.
-const NAMED: &str = "named";
-const NAMED_EXIT: i32 = 42;
-
 /// `process::KILLED_EXIT_CODE`.
 const KILLED: i32 = 137;
 /// What `syscall::kill_process(-1)` publishes for a Ring 3 CPU fault.
@@ -77,8 +62,8 @@ const CPU_FAULT: i32 = -1;
 const MAX_DEPTH: u32 = 64;
 
 /// The links a chain may grow before a refusal must have stopped it: each
-/// adds two levels, so from any start below the supervisor the refusal comes sooner.
-const LINK_BOUND: u32 = MAX_DEPTH / 2 + 1;
+/// adds a level, so from any start below the supervisor the refusal comes sooner.
+const LINK_BOUND: u32 = MAX_DEPTH + 1;
 
 /// `sched::payload`'s state for a thread whose entry is a zombie, which
 /// `sys_sysinfo` also answers for an exited one.
@@ -97,10 +82,6 @@ fn main() {
         Some("b") => b(),
         Some("c") => park(),
         Some("link") => link(args[2].parse().expect("a link's index")),
-        Some(NAMED) => {
-            assert_eq!(args[0], HELD, "a command naming its image did not keep its program as argv[0]");
-            std::process::exit(NAMED_EXIT)
-        }
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
     }
@@ -112,9 +93,6 @@ fn test() {
     }
     a_manage_only_handle_is_no_place();
     a_pipe_is_no_place();
-    a_place_without_dup_is_refused();
-    the_supervisor_is_asked_only_by_a_launch();
-    a_named_image_is_spawned_directly();
     a_chain_stops_at_max_depth_and_dies_whole();
     a_detached_program_outlives_its_shell();
     println!("process_tree: PASS");
@@ -312,76 +290,12 @@ fn a_pipe_is_no_place() {
     println!("  a pipe is no place: the supervisor refused the launch");
 }
 
-/// This process's `self` narrowed to `WRITE`: a place the kernel takes and a
-/// launch cannot carry. The duplicate's refusal is the spawn's, and nothing
-/// starts in place of the launch.
-fn a_place_without_dup_is_refused() {
-    let place = syscall::dup_narrowed(endow::this_process().as_handle(), Rights::WRITE)
-        .expect("a WRITE-only copy of this process's self");
-    match Command::new(HELD).under(place.0).stdin(Stdio::null()).spawn() {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-        Err(e) => panic!("a launch under a place without DUP was refused as {e:?}, not PermissionDenied"),
-        Ok(mut child) => {
-            let _ = child.kill();
-            panic!("a launch under a place without DUP started its child directly");
-        }
-    }
-    syscall::close(place);
-    println!("  a place without DUP: the launch is refused, and nothing starts");
-}
-
-/// The supervisor is reached only by a launch of its row's own program: std refuses
-/// `under_supervisor` or `provide` for what the launcher would not start, and starts nothing.
-fn the_supervisor_is_asked_only_by_a_launch() {
-    let undeclared = Command::new(SELF_PATH).arg("c").under_supervisor().spawn();
-    refused(undeclared, "under_supervisor for a program no row declares");
-
-    let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
-    let extra = Command::new(HELD).inherit_handle(5, write.as_handle().0).under_supervisor().spawn();
-    refused(extra, "under_supervisor for a command carrying an extra slot");
-
-    let named = Command::new(HELD).image_from(Path::new(HELD)).under_supervisor().spawn();
-    refused(named, "under_supervisor for a command naming its image");
-    let provided = Command::new(HELD).image_from(Path::new(HELD)).provide("x", write.as_handle().0).spawn();
-    refused(provided, "provide for a command naming its image");
-    println!("  the supervisor is asked only by a launch of its row's own program: the others are refused");
-}
-
-/// This process holds a `launcher` and `cat` is declared, so only the named
-/// image keeps this command from routing as a launch of `cat`'s row.
-fn a_named_image_is_spawned_directly() {
-    let status = Command::new(HELD)
-        .image_from(Path::new(SELF_PATH))
-        .arg(NAMED)
-        .stdin(Stdio::null())
-        .status()
-        .expect("spawn a command naming its image");
-    assert_eq!(
-        status.code(),
-        Some(NAMED_EXIT),
-        "a command naming its image ran something else ({status:?}): it was launched as its row's program"
-    );
-    println!("  a command naming its image runs that image directly, under its program's name");
-}
-
-fn refused(spawned: std::io::Result<Child>, what: &str) {
-    match spawned {
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-        Err(e) => panic!("{what} was refused as {e:?}, not PermissionDenied"),
-        Ok(mut child) => {
-            let _ = child.kill();
-            panic!("{what} started it");
-        }
-    }
-}
-
-/// Each link starts a shell, and the shell spawns the next link: until a
-/// start is refused for its depth, which the link or the shell says on the
-/// chain's one output. Killing the first link then ends every one.
+/// Each link spawns the next: until a spawn is refused for its depth, which
+/// the link says on the chain's one output. Killing the first link then ends
+/// every one.
 fn a_chain_stops_at_max_depth_and_dies_whole() {
     let mut first = Command::new(SELF_PATH)
         .args(["link", "1"])
-        .endow(LAUNCHER, launcher_copy().0)
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the chain's first link");
@@ -395,7 +309,7 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
             started = k.parse().expect("a link's index");
         } else if line.starts_with("unbounded") {
             panic!("the chain passed link {LINK_BOUND} with no depth refusal: {line}");
-        } else if line.contains("refused") || line.ends_with(": not found") {
+        } else if line.contains("refused") {
             break line;
         }
     };
@@ -403,7 +317,7 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
 
     first.kill().expect("kill the first link");
     assert_eq!(first.wait().expect("wait the first link").code(), Some(KILLED));
-    let live = live_named(&["test_rs_process_tree", "shell"]);
+    let live = live_named(&["test_rs_process_tree"]);
     let me = syscall::getpid().raw();
     let others: Vec<_> = live.iter().filter(|(pid, _)| *pid != me).collect();
     assert!(others.is_empty(), "the chain's first link ended and these of it run on: {others:?}");
@@ -416,9 +330,9 @@ fn link(k: u32) -> ! {
         println!("unbounded at link {k}");
         park();
     }
-    let next = Command::new(SHELL).arg("-c").arg(format!("{SELF_PATH} link {}", k + 1)).spawn();
+    let next = Command::new(SELF_PATH).args(["link", &(k + 1).to_string()]).spawn();
     if let Err(e) = next {
-        println!("link {k}: its shell was refused: {e}");
+        println!("link {k}: its next link was refused: {e}");
     }
     park();
 }

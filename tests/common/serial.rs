@@ -30,7 +30,7 @@ use super::qemu::{is_kernel_line, QemuInstance};
 /// Whose death a console line reports.
 ///
 /// The distinction is not decoration — it is the whole of what
-/// [`QemuInstance::run_test_paced`] was missing. A machine that has halted
+/// [`QemuInstance::run_test`] was missing. A machine that has halted
 /// answers nothing else the run asks; a process that died is what half this
 /// suite is *for*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,7 +130,7 @@ pub(crate) const DEATHS: &[(&str, Died, Died)] = &[
 /// What this console line says died, if anything.
 ///
 /// The one answer. `wait_for_ready` ends a boot on a death of any kind the
-/// machine cannot come back from; `run_test_paced` and `await_guest` end a run
+/// machine cannot come back from; `run_test` and `await_guest` end a run
 /// on [`Died::Kernel`] alone, because a program is allowed to die without
 /// taking the machine with it; and [`Serial::must_be_clean`] refuses a capture
 /// carrying one. Four questions, one vocabulary, and no way for them to
