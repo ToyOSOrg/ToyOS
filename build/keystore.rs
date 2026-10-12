@@ -1,6 +1,6 @@
 //! What every content-addressed product of the host ([`Keyed`]) shares: the
-//! store it lives in ([`host`]), its [`Key`], and the sweep that removes a
-//! product nobody has used for [`KEPT`] and nobody is making or using.
+//! store it lives in ([`host`]), its [`Key`], and the sweep that keeps, of each
+//! kind, what is in use and the [`kept`] last used, and removes every other.
 //!
 //! **One store per host, outside every checkout** ([`host`]). Whichever
 //! checkout or clone first needs a product makes it, and every other finds it:
@@ -31,7 +31,6 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::buildlock::{self, Guard, Keyed};
 
@@ -70,8 +69,15 @@ impl AsRef<Path> for Key {
     }
 }
 
-/// How long a product nobody uses stays in a store.
-const KEPT: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// How many of `kind`'s products a sweep keeps by date, the last used, in use
+/// or not.
+pub(crate) const fn kept(kind: Keyed) -> usize {
+    match kind {
+        Keyed::Sysroot => 24,
+        Keyed::Freestanding | Keyed::Compiler => 4,
+        Keyed::Llvm | Keyed::HostedClang => 2,
+    }
+}
 
 /// This host's store: `~/.cache/toyos`. Nothing else in the environment names
 /// another, so no build makes a second toolchain beside the first; a home that
@@ -87,8 +93,9 @@ pub fn host() -> PathBuf {
 
 /// `kind`'s `key` in `store`, held in use: made by `make` first when `defect`
 /// says it is not whole (`buildlock::keyed_made`), and then the store swept of
-/// that kind, so what nobody has used for [`KEPT`] goes when something is
-/// placed beside it.
+/// that kind. Only a placement adds to a kind, so once one is placed its kind
+/// holds no more than [`kept`] products but those in use or used while it was
+/// swept.
 pub fn made(store: &Path, kind: Keyed, key: &Key, defect: impl Fn() -> Option<String>, mut make: impl FnMut()) -> Guard {
     let mut placed = false;
     let using = buildlock::keyed_made(store, kind, key, defect, || {
@@ -98,20 +105,21 @@ pub fn made(store: &Path, kind: Keyed, key: &Key, defect: impl Fn() -> Option<St
     if placed {
         for gone in sweep(store, kind) {
             eprintln!(
-                "Removed {} {}: nothing used it for {} days, or it was never whole",
+                "Removed {} {}: it is not among the {} last used, or it was never whole",
                 kind.name(),
                 gone.display(),
-                KEPT.as_secs() / 86_400
+                kept(kind)
             );
         }
     }
     using
 }
 
-/// Remove from `store` every `kind` nothing has used for [`KEPT`] and nobody is
-/// making or using, and every half-made or half-removed one nobody is making.
-/// Returns what went. A `store` holding a name that is neither a key's nor
-/// hidden is refused before anything goes.
+/// Remove from `store` every `kind` that is not among the [`kept`] last used
+/// and that nobody is making or using, and every half-made or half-removed one
+/// nobody is making, the least lately used first. Returns what went. A `store`
+/// holding a name that is neither a key's nor hidden is refused before anything
+/// goes.
 pub fn sweep(store: &Path, kind: Keyed) -> Vec<PathBuf> {
     sweep_by(store, kind, remove)
 }
@@ -146,24 +154,39 @@ pub(crate) fn sweep_by(store: &Path, kind: Keyed, remove: impl Fn(&Path) + Copy)
         };
         by_key.entry(key).or_default().push(name);
     }
+    let mut by_use: Vec<_> = by_key.into_iter().map(|(key, names)| (buildlock::keyed_used(store, kind, &key), key, names)).collect();
+    by_use.sort();
+    let whole: Vec<_> = by_use.iter().filter(|(_, key, names)| names.iter().any(|name| name == key.as_str())).collect();
+    // The least lately used of the whole products kept by date: any older one goes.
+    let cut = whole.len().checked_sub(kept(kind)).map(|older| (whole[older].0, whole[older].1.clone()));
     let mut removed = Vec::new();
-    for (key, mut names) in by_key {
+    for (_, key, mut names) in by_use {
         let Some(idle) = buildlock::keyed_idle(store, kind, &key) else { continue };
-        // Read under the key's lock: a use that came before it has dated the key.
-        if idle.used_within(KEPT) {
+        // Read again under the key's lock: a use since the ranking has dated the key past the cut.
+        let used = buildlock::keyed_used(store, kind, &key);
+        if cut.as_ref().is_none_or(|(at, last)| (used, &key) >= (*at, last)) {
             names.retain(|name| name != key.as_str());
         }
-        // The whole one last: its `retire` goes where a stopped one's remains were.
-        names.sort_by_key(|name| name == key.as_str());
-        for name in names {
-            let path = dir.join(&name);
-            if name == key.as_str() {
-                retire_by(&path, remove);
-            } else {
-                remove(&path);
-            }
-            removed.push(path);
+        removed.extend(remove_idle(&dir, &key, names, &idle, remove));
+    }
+    removed
+}
+
+/// Remove `names`, `key`'s in `dir`, while `_idle`, the key's lock
+/// [`buildlock::keyed_idle`] took, keeps everyone from making or using it.
+/// The whole one goes last: its [`retire`] goes where a stopped one's remains
+/// were.
+fn remove_idle(dir: &Path, key: &Key, mut names: Vec<String>, _idle: &Guard, remove: impl Fn(&Path) + Copy) -> Vec<PathBuf> {
+    names.sort_by_key(|name| name == key.as_str());
+    let mut removed = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        if name == key.as_str() {
+            retire_by(&path, remove);
+        } else {
+            remove(&path);
         }
+        removed.push(path);
     }
     removed
 }
@@ -234,7 +257,8 @@ pub(crate) fn writable(dir: &Path) {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::time::SystemTime;
+    use std::cell::Cell;
+    use std::time::{Duration, SystemTime};
 
     use toyos_tmpdir::TempDir;
 
@@ -249,38 +273,53 @@ pub(crate) mod tests {
         lock.set_modified(SystemTime::now() - ago).unwrap();
     }
 
-    /// Longer ago than a store keeps what nobody uses.
-    pub(crate) const LONG_AGO: Duration = Duration::from_secs(KEPT.as_secs() + 3600);
+    /// Longer ago than any use a test makes.
+    pub(crate) const LONG_AGO: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-    /// **A product goes once nothing has used it for [`KEPT`] and nobody is
-    /// using it**, read-only or not, and so does a half-made or half-removed
-    /// one however lately its key was used; one used since stays, one somebody
-    /// is using stays however long ago that use began, and one no lock ever
-    /// dated is dated by the sweep that finds it, and stays.
+    const HOUR: Duration = Duration::from_secs(60 * 60);
+
+    /// `n` products of `kind` in `store`, each used an hour before the one
+    /// before it, the first an hour ago.
+    pub(crate) fn used_hourly(store: &Path, kind: Keyed, n: usize) -> Vec<Key> {
+        let keys: Vec<Key> = (0..n).map(|n| Key::of(format!("used {n} hours ago").as_bytes())).collect();
+        for (hours, key) in (1..).zip(&keys) {
+            fs::create_dir_all(kind.store(store).join(key)).unwrap();
+            last_used(store, kind, key, HOUR * hours);
+        }
+        keys
+    }
+
+    /// **A sweep keeps the [`kept`] last used and what is in use, and removes
+    /// every other, the least lately used first**: of products all used within
+    /// the week, those older than the newest `kept` go, read-only or not, one
+    /// no lock ever dated is dated by the sweep that finds it and stays; one
+    /// somebody uses stays however long ago that use began, and goes once let
+    /// go; and a half-made or half-removed one goes however lately its key was
+    /// used.
     #[test]
-    fn a_sweep_removes_what_nobody_used_for_the_keep_time_and_nobody_uses() {
+    fn a_sweep_keeps_the_last_used_and_what_is_in_use() {
         let store = TempDir::new("sweep");
         let dir = Keyed::Sysroot.store(&store);
-        let [used, in_use, undated, unused, gone] =
-            ["used", "in-use", "undated", "unused", "gone"].map(|name| Key::of(name.as_bytes()));
         let at = |key: &Key, rest: &str| dir.join(format!("{key}{rest}"));
-        for (key, rest) in [(&used, ""), (&in_use, ""), (&undated, ""), (&unused, ""), (&used, ".partial"), (&gone, ".swept"), (&unused, ".swept")] {
+        let recent = used_hourly(&store, Keyed::Sysroot, kept(Keyed::Sysroot) - 1);
+        let [undated, older, oldest, in_use, gone] =
+            ["undated", "older", "oldest", "in use", "gone"].map(|name| Key::of(name.as_bytes()));
+        let names = [(&undated, ""), (&older, ""), (&oldest, ""), (&in_use, ""), (&recent[0], ".partial"), (&gone, ".swept"), (&oldest, ".swept")];
+        for (key, rest) in names {
             fs::create_dir_all(at(key, rest).join("sub")).unwrap();
         }
-        for read_only in [at(&unused, "/sub"), at(&unused, ""), at(&used, ".partial")] {
+        for read_only in [at(&oldest, "/sub"), at(&oldest, ""), at(&recent[0], ".partial")] {
             fs::set_permissions(read_only, fs::Permissions::from_mode(0o555)).unwrap();
         }
-        last_used(&store, Keyed::Sysroot, &used, Duration::from_secs(KEPT.as_secs() - 3600));
-        last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
+        last_used(&store, Keyed::Sysroot, &older, HOUR * 48);
+        last_used(&store, Keyed::Sysroot, &oldest, HOUR * 72);
         let user = buildlock::tests::sysroot_used_elsewhere(&store, &in_use);
         last_used(&store, Keyed::Sysroot, &in_use, LONG_AGO);
 
-        let mut removed = sweep(&store, Keyed::Sysroot);
-        removed.sort();
-        let mut want = [at(&gone, ".swept"), at(&used, ".partial"), at(&unused, ""), at(&unused, ".swept")];
-        want.sort();
-        assert_eq!(removed, want);
-        for stays in [&used, &in_use, &undated] {
+        let removed = sweep(&store, Keyed::Sysroot);
+        let want = [at(&oldest, ".swept"), at(&oldest, ""), at(&older, ""), at(&recent[0], ".partial"), at(&gone, ".swept")];
+        assert_eq!(removed, want, "the sweep kept more than {} idle products, or took them out of the order of their use", kept(Keyed::Sysroot));
+        for stays in recent.iter().chain([&undated, &in_use]) {
             assert!(dir.join(stays).is_dir(), "{stays} was swept");
         }
         for gone in want {
@@ -290,24 +329,41 @@ pub(crate) mod tests {
         assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&in_use)]);
     }
 
-    /// **A use dates its key**: of two products last used longer ago than
-    /// [`KEPT`], the one used again stays and the other goes, and a sweep of
-    /// another kind takes neither.
+    /// **A use dates its key**: of one product more than a sweep keeps by
+    /// date, the least lately used is used again and stays, and the next goes;
+    /// a sweep of another kind takes none of them.
     #[test]
     fn a_product_used_again_is_kept() {
         let store = TempDir::new("sweep-used");
         let dir = Keyed::Sysroot.store(&store);
-        let [again, never] = ["used again", "never again"].map(|name| Key::of(name.as_bytes()));
-        for key in [&again, &never] {
-            fs::create_dir_all(dir.join(key)).unwrap();
-            last_used(&store, Keyed::Sysroot, key, LONG_AGO);
-        }
+        let keys = used_hourly(&store, Keyed::Sysroot, kept(Keyed::Sysroot) + 1);
+        let [.., next, again] = &keys[..] else { unreachable!() };
         assert_eq!(sweep(&store, Keyed::Compiler), Vec::<PathBuf>::new());
-        // The use is another process's, and one sweep decides both products:
+        // The use is another process's, and one sweep decides every product:
         // none here takes a key whose lock this process has held.
-        buildlock::tests::sysroot_used_elsewhere(&store, &again).release();
-        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(&never)], "a product was swept after a use, or one nothing used was kept");
-        assert!(dir.join(&again).is_dir());
+        buildlock::tests::sysroot_used_elsewhere(&store, again).release();
+        assert_eq!(sweep(&store, Keyed::Sysroot), [dir.join(next)], "a product was swept after a use, or one more than the sweep keeps was kept");
+        assert!(dir.join(again).is_dir());
+    }
+
+    /// **A use between a sweep's ranking and its key's lock keeps the key**:
+    /// of two products the ranking leaves out, the second is used by another
+    /// process while the first is removed, and stays.
+    #[test]
+    fn a_product_used_while_the_sweep_runs_is_kept() {
+        let store = TempDir::new("sweep-race");
+        let dir = Keyed::Sysroot.store(&store);
+        let keys = used_hourly(&store, Keyed::Sysroot, kept(Keyed::Sysroot) + 2);
+        let [.., next, oldest] = &keys[..] else { unreachable!() };
+        let used = Cell::new(false);
+        let removing = |path: &Path| {
+            if !used.replace(true) {
+                buildlock::tests::sysroot_used_elsewhere(&store, next).release();
+            }
+            remove(path);
+        };
+        assert_eq!(sweep_by(&store, Keyed::Sysroot, removing), [dir.join(oldest)], "a product used after the sweep ranked it was removed");
+        assert!(dir.join(next).is_dir());
     }
 
     /// **A key is the 16 lowercase hex digits [`Key::of`] gives, and no other
@@ -335,6 +391,7 @@ pub(crate) mod tests {
         }
         fs::create_dir_all(orphan.join("sub")).unwrap();
         last_used(&store, Keyed::Sysroot, &unused, LONG_AGO);
+        used_hourly(&store, Keyed::Sysroot, kept(Keyed::Sysroot));
         assert_eq!(sweep(&store, Keyed::Sysroot), std::slice::from_ref(&orphan));
         for path in &hidden {
             assert!(path.is_file(), "{} was swept", path.display());

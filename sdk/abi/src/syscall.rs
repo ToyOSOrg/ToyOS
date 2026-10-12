@@ -179,12 +179,15 @@ pub const SYS_NAMESPACE_OPEN: u64 = 102;
 pub const SYS_HANDLE_SEND: u64 = 103;
 /// Take the oldest batch of handles the peer sent. See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
-/// Make a shared-memory region, sized up to whole 2 MiB pages.
+/// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
 /// Map a region into the caller. Idempotent: a second call answers the first
 /// call's address. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
+
+/// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
+pub const SHM_PAGE: usize = 2 << 20;
 
 /// Wait for the process a handle names and take its exit code, gated by
 /// [`Rights::WAIT`]. See [`process_wait`].
@@ -554,13 +557,17 @@ pub enum FileType {
     // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
     // A claim on a PCI function reports `Unknown`: what it is, is the driver's
     // to know, and this kernel does not know it.
-    /// A shared-memory region; `size` is its length. A program's stdout and
-    /// stderr are one when they are its log ring (`toyos::log`).
+    /// A shared-memory region of memory the kernel allocated to it and maps
+    /// write-back, as [`shm_create`] makes; `size` is its length. A program's
+    /// stdout and stderr are one when they are its log ring (`toyos::log`).
     SharedMemory = 10,
     /// A directory, which only [`stat`] answers.
     Directory = 11,
     /// A symbolic link, which only [`stat`] answers; `size` is its target's length.
     Symlink = 12,
+    /// Any other shared-memory region, such as a device's registers; `size`
+    /// is its length. A peer's buffer is never one.
+    DeviceMemory = 13,
 }
 
 impl FileType {
@@ -578,6 +585,7 @@ impl FileType {
             10 => Some(Self::SharedMemory),
             11 => Some(Self::Directory),
             12 => Some(Self::Symlink),
+            13 => Some(Self::DeviceMemory),
             _ => None,
         }
     }
@@ -815,7 +823,7 @@ pub mod debug_action {
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
     /// How many kernel objects of one kind are alive right now. The argument is
-    /// an [`OBJECT_KINDS`](super::OBJECT_KINDS) index.
+    /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///
     /// **Per kind and not a total**: an object of one kind that is never
     /// released is invisible behind ordinary churn in another.
@@ -885,31 +893,6 @@ pub mod debug_action {
     pub const RING0_FIRE_NEVER: u64 = 1;
     pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
 }
-
-/// Every kind of kernel object, in the order the kernel's own `kobject!`
-/// declares them — so an index into this is the index
-/// [`debug_action::CENSUS_KIND`] takes.
-///
-/// In the ABI rather than in the kernel alone, because a census nobody can read
-/// per kind is a total. The kernel checks this list against its own declaration
-/// order when the action is called, so a row added to `kobject!` without a row
-/// here is a named refusal rather than an index that quietly names its
-/// neighbour.
-pub const OBJECT_KINDS: &[&str] = &[
-    "PipeRead",
-    "PipeWrite",
-    "Connection",
-    "Device",
-    "Acceptor",
-    "Inbox",
-    "SharedMem",
-    "Connector",
-    "Namespace",
-    "File",
-    "Console",
-    "SysCap",
-    "Process",
-];
 
 /// Create a pipe. Returns the read and write ends.
 ///

@@ -7,7 +7,7 @@
 
 use core::sync::atomic::AtomicU32;
 
-use toyos::shm::SharedMemory;
+use toyos::shm::{Lent, SharedMemory};
 use toyos_abi::syscall::SyscallError;
 use toyos_blockring::layout::{RING_WORDS, SESSION_BYTES};
 use toyos_blockring::Run;
@@ -24,10 +24,10 @@ impl Region {
         Ok(Self { memory: SharedMemory::create(SESSION_BYTES)? })
     }
 
-    /// A region a client sent. Shared memory comes in whole 2 MiB pages and
-    /// never less, so every region a peer can send is at least a session long.
-    pub fn adopt(handle: toyos::RawHandle) -> Result<Self, SyscallError> {
-        Ok(Self { memory: SharedMemory::adopt(handle, SESSION_BYTES)? })
+    /// A region a client sent, refused unless it is memory the kernel
+    /// allocated and exactly a session long.
+    pub fn lent(handle: toyos::RawHandle) -> Result<Self, Lent> {
+        Ok(Self { memory: SharedMemory::lent(handle, SESSION_BYTES)? })
     }
 
     /// The ring words, as the rings take them.

@@ -1,16 +1,16 @@
 # A member of the host workspace (root `Cargo.toml`). The one transport every
-# client/server session runs over: the rings, the arena's runs and the tag
-# table, as decisions over words an adapter hands in. Nothing here maps, copies
-# or blocks.
+# client/server session runs over: the rings, the byte streams and their wants,
+# the arena's runs and the tag table, as decisions over words an adapter hands
+# in. Nothing here maps, copies or blocks.
 #
-# Its defects are orders and hostile peers, so `tests/loom.rs` holds the
-# publication edge and a hostile peer.
+# Its defects are orders, lost wakes and hostile peers, so `tests/loom.rs`
+# holds the publication edge, the wake handshake and a hostile peer.
 
 [package]
 name = "toyos-transport"
 version = "0.1.0"
 edition = "2021"
-description = "The transport every client/server session runs over: rings, an arena of runs and a tag table, decided over words an adapter hands in."
+description = "The transport every client/server session runs over: entry rings, byte streams and their wakes, an arena of runs and a tag table, decided over words an adapter hands in."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -20,11 +20,19 @@ publish = false
 # `CONTROLS` runs each and demands the named test's own FAILED line.
 #
 # A producer publishes its tail `Relaxed`, so a consumer can see the index
-# before the entry's words.
+# before the entry's words, or a stream's tail before its bytes.
 publish-relaxed = []
+# A stream's consumer stores its head `Relaxed` and its producer loads it
+# `Relaxed`, so the producer can copy into a byte the consumer is still
+# copying out.
+head-relaxed = []
 # A peer's cursor is believed however far it claims to be, so a hostile
-# producer hands the consumer more entries than the ring holds.
+# producer hands the consumer more entries, or bytes, than the ring holds.
 no-clamp = []
+# A stream's waker clears the peer's want `Relaxed`, so a sleeper whose
+# exchange reads the clear need not see the cursor stored before it, and
+# sleeps over bytes or room nobody rings for.
+want-relaxed = []
 # `Inflight::end` answers nothing and keeps every tag in flight, so a session's
 # requests outlive it unanswered and a late completion answers one.
 end-keeps-inflight = []
