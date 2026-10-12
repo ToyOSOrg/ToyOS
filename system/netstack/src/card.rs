@@ -130,9 +130,24 @@ impl Card {
         snap.put("errors.crc", wire.crc_errors);
     }
 
+    /// One batch of received frames: `batch` is given the most it may take — the card's ring,
+    /// all of what one wait can bring — and the card's next frame on each call, and every buffer
+    /// it gave back reaches the card once it returns.
+    pub fn receive<R>(&self, batch: impl FnOnce(usize, &mut dyn FnMut(&mut dyn FnMut(&[u8])) -> bool) -> R) -> R {
+        let budget = match self {
+            Self::Virtio(_) => crate::virtio_net::RX_BUF_COUNT,
+            Self::Intel(_) => toyos_i219::RX_RING - 1,
+        };
+        let took = batch(budget, &mut |sink| self.rx(sink));
+        if let Self::Intel(nic) = self {
+            nic.rx_flush();
+        }
+        took
+    }
+
     /// Hands the next received frame to `take` and gives its buffer back to
     /// the card once `take` returns; `false` when none waits.
-    pub fn rx(&self, take: impl FnOnce(&[u8])) -> bool {
+    fn rx(&self, take: &mut dyn FnMut(&[u8])) -> bool {
         match self {
             Self::Virtio(nic) => {
                 let Some((index, len)) = nic.poll_rx() else { return false };

@@ -39,9 +39,6 @@ and contention).
 
 **Measured.** Each issue carries its reading.
 
-- The syscall's FP save and the `lock` prefixes it takes are 34.5 % of a null
-  syscall on the T14 and 43.4 % on the AMD bench:
-  `issues/every-syscall-saves-the-fp-state-and-every-preemption-disable-is-locked.md`.
 - A wake to a busy CPU waits out a whole 10 ms quantum on both benches:
   `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`.
 - An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
@@ -78,8 +75,6 @@ is nothing to enable.
   an IPC of 0.94 against about 1.26 (Ubuntu's instructions derived from
   turbostat; ratios of medians). Next: cycles and instructions per MB split
   by where they run, app, network stack and kernel, on both systems.
-- **The syscall's `lock` saving** exceeds what its prefixes cost in Ring 3;
-  next, the prefix stripped one site at a time (its issue).
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
@@ -96,7 +91,6 @@ that order.
 
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
-- `issues/every-syscall-saves-the-fp-state-and-every-preemption-disable-is-locked.md`
 - `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
@@ -110,3 +104,5 @@ that order.
 - `issues/fsgsbase-is-taken.md`
 - `issues/idle-cpus-enter-the-c-states-cst-names.md`
 - `issues/diskserver-drives-nvme-apst.md`
+- `issues/every-syscall-takes-the-process-table-lock-twice-to-count-itself.md`
+- `issues/a-thread-resuming-on-the-cpu-that-holds-its-state-restores-it-again.md`

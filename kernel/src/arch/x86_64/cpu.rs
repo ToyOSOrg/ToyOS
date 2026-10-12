@@ -153,6 +153,12 @@ pub fn leaf_7() -> (u32, u32, u32, u32) {
     if cpuid(0, 0).0 >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) }
 }
 
+/// CPUID.(0DH,`subleaf`)'s four registers, the extended state leaf; zero
+/// where CPUID.0 does not reach it, for [`leaf_7`]'s reason.
+pub fn leaf_d(subleaf: u32) -> (u32, u32, u32, u32) {
+    if cpuid(0, 0).0 >= 0xD { cpuid(0xD, subleaf) } else { (0, 0, 0, 0) }
+}
+
 /// CPUID with both index registers, as `(eax, ebx, ecx, edx)`.
 ///
 /// `core`'s intrinsic and not an `asm!` of our own: `rbx` is CPUID's output
@@ -192,6 +198,33 @@ pub unsafe fn write_cr0(value: u64) {
 #[inline]
 pub unsafe fn write_cr4(value: u64) {
     asm!("mov cr4, {}", in(reg) value, options(nostack));
+}
+
+/// `XCR0`: which state components `XSAVE` and `XRSTOR` move.
+///
+/// # Safety
+/// `CR4.OSXSAVE` must be set; `xgetbv` is `#UD` otherwise.
+#[inline]
+pub unsafe fn xgetbv0() -> u64 {
+    let low: u32;
+    let high: u32;
+    asm!("xgetbv", in("ecx") 0u32, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    (high as u64) << 32 | low as u64
+}
+
+/// # Safety
+/// `#UD` without `CR4.OSXSAVE`; `#GP` on a bit this CPU does not support or
+/// a combination SDM Vol. 1 §13.3 forbids. The caller owns what every save
+/// area on this CPU holds from here on.
+#[inline]
+pub unsafe fn xsetbv0(value: u64) {
+    asm!(
+        "xsetbv",
+        in("ecx") 0u32,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nomem, nostack, preserves_flags),
+    );
 }
 
 /// # Safety

@@ -22,10 +22,13 @@ use kernel::sched::task::Refused;
 
 use crate::arch::percpu;
 use crate::hw::HW;
-use crate::process::{OwnedAlloc, PageTables, TaskId, KERNEL_STACK_SIZE};
+use crate::loader::KernelStack;
+use crate::process::{OwnedAlloc, PageTables, TaskId};
+#[cfg(feature = "heap-tripwire")]
+use crate::process::KERNEL_STACK_SIZE;
 
 use super::payload::{
-    KMsg, KShare, KShared, KernelCtx, KernelPayload, RawTicket, TaskHandle, ThreadSched,
+    KMsg, KShare, KShared, KernelCtx, KernelPayload, RawTicket, Runs, TaskHandle, ThreadSched,
 };
 use super::MAX_CPUS;
 
@@ -43,7 +46,7 @@ pub fn preempt_off<R>(f: impl FnOnce(&PreemptOff) -> R) -> R {
     result
 }
 
-/// The same proof, bought with `cli`: `log::emit` must pay neither of [`preempt_off`]'s locked read-modify-writes.
+/// The same proof, bought with `cli`.
 pub struct IrqOff(());
 
 // SAFETY: `do_preempt` needs `IF` set or a voluntary pass; `irq_off` masks `IF` and calls nothing that yields one.
@@ -376,7 +379,7 @@ fn idle_ctx() -> KernelCtx {
         root: crate::mm::paging::kernel_root(),
         thread_pointer: 0,
         kernel_stack_top: 0,
-        id: None,
+        runs: Runs::Idle,
         // Never read: the idle loop is entered by jump, not switch, and
         // a switch away from idle always writes the real depth first.
         preempt: 0,
@@ -397,7 +400,7 @@ fn placement(now: Nanos) -> CpuId {
 /// decides `cr3`.
 pub struct NewTask {
     pub id: TaskId,
-    pub kernel_stack: OwnedAlloc,
+    pub kernel_stack: KernelStack,
     pub entry_sp: u64,
     pub address_space: PageTables,
     pub thread_pointer: u64,
@@ -412,13 +415,12 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     // sits in between user threads — why `idle_ctx` names the same `cr3`.
     // Nothing is released at teardown: this `Arc` clones a leaked, permanent kernel mapping.
     let root = new.address_space.lock().root();
-    let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
         sp: new.entry_sp,
         root,
         thread_pointer: new.thread_pointer,
-        kernel_stack_top,
-        id: Some(new.id),
+        kernel_stack_top: new.kernel_stack.top(),
+        runs: if new.kernel_stack.is_user() { Runs::User(new.id) } else { Runs::Kernel(new.id) },
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
     };
@@ -786,14 +788,6 @@ const STACK_FILL: u8 = 0xA5;
 #[cfg(feature = "heap-tripwire")]
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
-/// The layout `alloc_kernel_stack` asks for, named once so the tripwire reads
-/// back the bands that request was given.
-#[cfg(feature = "heap-tripwire")]
-fn stack_layout() -> core::alloc::Layout {
-    core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE, 4096)
-        .expect("the kernel stack layout")
-}
-
 /// Rungs of the depth ladder, in bytes above the bottom of the stack, descending so the depths they report
 /// ascend. Touched is monotone up the stack, so the first still-filled rung ends the walk. Read rather than
 /// walked: nine bounded reads stand in for an exact `partition_point`.
@@ -832,7 +826,7 @@ pub fn write_stack_canary(stack: &OwnedAlloc) {
 
 fn check_stack_canary(payload: &KernelPayload) {
     // SAFETY: `payload.kernel_stack` is the allocation `write_stack_canary` painted, alive as long as the task is.
-    let canary = unsafe { *(payload.kernel_stack.ptr() as *const u64) };
+    let canary = unsafe { *(payload.kernel_stack.bottom() as *const u64) };
     if canary != STACK_CANARY {
         panic!(
             "KERNEL STACK OVERFLOW: tid={} canary={:#x} expected={:#x}",
@@ -851,8 +845,8 @@ fn check_stack_canary(payload: &KernelPayload) {
 /// after.
 #[cfg(feature = "stack-witness")]
 fn check_stack_ownership(payload: &KernelPayload) {
-    let bottom = payload.kernel_stack.ptr() as u64;
-    let top = bottom + KERNEL_STACK_SIZE as u64;
+    let bottom = payload.kernel_stack.bottom() as u64;
+    let top = payload.kernel_stack.top();
     // SAFETY: a pass runs on the CPU whose GS base is its own `PerCpu`.
     let (entry, interrupt) = unsafe { percpu::entry_stacks() };
     let sp = crate::arch::cpu::stack_pointer();
@@ -878,10 +872,10 @@ fn check_stack_ownership(payload: &KernelPayload) {
 /// a write at the bottom, this reads the head and tail band words for a frame that stepped over it.
 #[cfg(feature = "heap-tripwire")]
 fn stack_depth(payload: &KernelPayload) {
-    let bottom = payload.kernel_stack.ptr();
-    // SAFETY: the running task's own stack, allocated with exactly
-    // `stack_layout()`; running on this CPU, so nothing is freeing it.
-    unsafe { crate::mm::check_heap_bands(bottom, stack_layout(), "kernel stack") };
+    let bottom = payload.kernel_stack.bottom();
+    // SAFETY: the running task's own stack, allocated with exactly its
+    // `layout()`; running on this CPU, so nothing is freeing it.
+    unsafe { crate::mm::check_heap_bands(bottom, payload.kernel_stack.layout(), "kernel stack") };
     let mut used = 0;
     for rung in DEPTH_RUNGS {
         // SAFETY: `rung < KERNEL_STACK_SIZE`, so this reads a word of that

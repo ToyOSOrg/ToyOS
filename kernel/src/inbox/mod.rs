@@ -536,9 +536,10 @@ fn arm(
     let ready = readiness_of(object, flags).any();
     let read = if flags.readable() { ops::read_watch(object) } else { None };
     let write = if flags.writable() { ops::write_watch(object) } else { None };
-    // A pipe end's own watch is the one its other end's last holder posts;
-    // an object with no other end is refused the question, whatever else the
-    // watch asks. A direction asked above has taken that watch already.
+    // A pipe end's leaving watch is posted by its other end's last holder
+    // alone; an object with no other end is refused the question, whatever
+    // else the watch asks. A direction asked above needs no second entry: that
+    // last holder posts the end's own data watch too.
     let own = match flags.other_end_gone().then(|| ops::pipe_end_watch(object)) {
         Some(None) => return Err(SyscallError::NotSupported),
         Some(Some(_)) if read.is_some() || write.is_some() => None,
