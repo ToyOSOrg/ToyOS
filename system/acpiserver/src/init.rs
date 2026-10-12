@@ -397,13 +397,16 @@ mod tests {
                 // A Divide by zero.
                 &device("DEVA", &method("_INI", 0, &cat(&[&[0x78], &int(1), &int(0), &[0x00, 0x00]]))),
                 &device("DEVB", &cat(&[&def_name("_STA", &string("ON")), &device("DEVC", &method("_INI", 0, &tagged(0xCC)))])),
-                &device("DEVD", &cat(&[&method("_STA", 0, &ret(&name("NONE"))), &method("_INI", 0, &tagged(0xDD))])),
+                &device(
+                    "DEVD",
+                    &cat(&[&method("_STA", 0, &ret(&name("NONE"))), &method("_INI", 0, &tagged(0xDD)), &device("DEVF", &method("_INI", 0, &tagged(0xDF)))]),
+                ),
                 &device("DEVE", &method("_INI", 0, &tagged(5))),
             ]),
         );
         let (kernel, census) = initialised(&dsdt);
-        assert_eq!(posted(&kernel), [0xCC, 5]);
-        assert_eq!((census.sb_ini, census.sta, census.ini), (None, 0, 2));
+        assert_eq!(posted(&kernel), [0xCC, 0xDF, 5]);
+        assert_eq!((census.sb_ini, census.sta, census.ini), (None, 0, 3));
         assert_eq!(
             census.refused.counts(),
             "_INI: Divide by zero (§19.6.32) x1; _STA: a name that does not resolve x1; _STA: a type its operator refuses: a _STA that is no Integer (§6.3.7) x1"
