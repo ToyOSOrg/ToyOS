@@ -47,3 +47,10 @@ types `EfiMemoryMappedIO` is ruled, `firmware::decide` holds to it with a
 host test of each arm, and an AMD bench boot reads all 17 tables loaded and
 `\_S5` handed to the kernel; or the ruling refuses such reads, and this bench's
 lost power-off is recorded as the ruled state.
+
+**Ruled** (owner, 2026-10-12, on #875): such a read is a register's, read
+as an unlisted one is (comment 6120173372), built in #875 with a host test
+of each arm; and SSDT8 is refused whole (comment 6121646183,
+`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`), so
+the boot's reading is 16 of 17 tables loaded, SSDT8 the one refused, and
+`\_S5` handed: the bench's `acpi_tables_loaded` reads it.

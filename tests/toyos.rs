@@ -5855,7 +5855,13 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
+    if let Some(refused) = lines.iter().find(|l| l.contains("method was refused, so the GPE is served no more")) {
+        return Err(format!("a runtime GPE's method was refused: {refused}"));
+    }
+    for gpe in lines.iter().filter(|l| l.contains("acpiserver: GPE ") && l.contains(" taken for the first time; its method ran")) {
+        eprintln!("  [acpi] {}", gpe.trim());
+    }
+    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("query") && l.contains("taken for the first time")).collect();
     let counts = lines.iter().rfind(|l| l.contains(acpiserver_api::QUERIES_COUNTED));
     let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
         return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
@@ -5867,32 +5873,71 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// How many definition blocks the T14 has: Linux on the same machine says
-/// `14 ACPI AML tables successfully acquired and loaded`.
-const T14_DEFINITION_BLOCKS: usize = 14;
+/// What one bench's tables are, as a reading of them under another OS and
+/// the check outside the tree on their dump (#875) found them.
+struct Bench {
+    /// The kernel's line for the ACPI row the FADT names, to its SCI.
+    row: &'static str,
+    /// How many definition blocks the XSDT and the FADT name: Linux's count.
+    blocks: usize,
+    /// Each block refused, by its place and its refusal's kind: a firmware
+    /// defect the tracker records.
+    refused: &'static [(usize, &'static str)],
+    /// The kernel's line for the sleep type the server handed it, whole to
+    /// the value, read some way that is not this server's evaluation.
+    s5: &'static str,
+    /// The blocks the processors' `_OSC` load under ToyOS's claims, by
+    /// signature and length.
+    loaded: &'static [&'static str],
+    /// The host's refusals the owner ruled, which the namespace's
+    /// initialisation meets on this machine and which are said, not red.
+    ruled: &'static [&'static str],
+}
 
-/// The kernel's line for the sleep type its server handed it, whole to the
-/// value, on the T14: that machine's PM1a control block, and its `\_S5`'s
-/// `SLP_TYPa` as a byte scan of its DSDT reads it, with no interpreter.
-const T14_S5_SUPPLIED: &str = "power: S5 is PM1a 0x1804 with SLP_TYPa=7,";
+/// The T14: Linux says `14 ACPI AML tables successfully acquired and loaded`;
+/// its `\_S5`'s `SLP_TYPa` read by a byte scan of its DSDT, with no
+/// interpreter; the first processor's commit loads one block, of 459 bytes;
+/// and a device's `_INI` may write memory outside every range the map lists,
+/// which the owner ruled refused and recorded.
+const T14: Bench = Bench {
+    row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
+    blocks: 14,
+    refused: &[],
+    s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
+    loaded: &["SSDT, 459 bytes"],
+    ruled: &["a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory"],
+};
 
-/// The server's load of the T14's tables, every access the kernel's to make
-/// for it: all of the machine's definition blocks, as many as Linux loads
-/// there, each fetched through `SYS_ACPI`, summing to zero as its firmware
-/// sealed it, and loaded; `\_S5`'s `SLP_TYPa` handed to the kernel, which
-/// says it powers this machine off with that value on its own PM1a block,
-/// both as [`T14_S5_SUPPLIED`] holds them, and never does on this row; and
-/// nothing refused, so no bridge answered
-/// what the interpreter refuses, no address was `Unmapped`, and no access
-/// the load makes is one the policy keeps from it. The load's AML read
-/// memory, read configuration space and took the Global Lock, which is the
-/// real lock word exchanged and given back each time. Every other CPU of the
-/// machine said how its range registers stand beside the boot processor's,
-/// which typed the load's unlisted read a register's, and none holds registers
-/// that are on and not those. What it prints beside
-/// that is the first measurement of each: the load's time, the reads by
-/// address space, the takes that found the firmware holding the lock, and
-/// the pages of memory by the type the firmware's map gives them.
+/// The AMD bench: Linux counts 17 tables; its SSDT8 ends in a `Scope` of an
+/// `EC0` no table defines, refused whole as the owner ruled
+/// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
+/// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
+/// processor names an `_OSC`.
+const AMD: Bench = Bench {
+    row: "acpi: the ACPI row: PM1a events 0x400+4, GPE0 0x420+8, SCI gsi 9 level/low",
+    blocks: 17,
+    refused: &[(9, "a name that does not resolve")],
+    s5: "with SLP_TYPa=5,",
+    loaded: &[],
+    ruled: &[],
+};
+
+/// The server's load of a bench's tables, every access the kernel's to make
+/// for it: each of the machine's definition blocks, as many as Linux names
+/// there, fetched through `SYS_ACPI`, summing to zero as its firmware sealed
+/// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
+/// handed to the kernel, which says it powers this machine off with that
+/// value, and never does on this row. Then the namespace initialised (ACPI
+/// 6.5 §6.5.1): every `_STA` and `_INI` run and none refused but by a ruled
+/// refusal, and the controller's `_REG(3, 1)` after them; `\_SB._OSC`
+/// negotiated, and on an Intel machine each processor's, none refused; every
+/// block they load loaded, none refused. Every other CPU of the machine said
+/// how its range registers stand beside the boot processor's, and none holds
+/// registers that are on and not those. What it prints beside that is the
+/// first measurement of each: the load's time, the reads by address space,
+/// the takes that found the firmware holding the lock and its longest hold,
+/// the pages of memory by type, the longest wait an evaluation asked, the
+/// GPEs enabled, the interpreter's heap and the namespace's slots.
 fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (log, kernel) = (back.log(), back.kernel());
     let lines: Vec<&str> = log
@@ -5903,10 +5948,26 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let blocks = power::acpi_tables_loaded(&log, &kernel, T14_S5_SUPPLIED)?;
-    if blocks != T14_DEFINITION_BLOCKS {
-        return Err(format!("the server found {blocks} definition blocks where Linux loads {T14_DEFINITION_BLOCKS}"));
+    let bench = [T14, AMD].into_iter().find(|bench| kernel.text().contains(bench.row)).ok_or("no bench of this row's names its ACPI row so")?;
+    let said: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: table ").map(|(_, said)| said.trim())).filter(|said| said.contains(" of ")).collect();
+    let expected: Vec<String> = (1..=bench.blocks)
+        .map(|place| {
+            let name = if place == 1 { "DSDT" } else { "SSDT" };
+            match bench.refused.iter().find(|(at, _)| *at == place) {
+                Some((_, kind)) => format!("{place} of {} ({name}) refused: {kind}", bench.blocks),
+                None => format!("{place} of {} ({name}) loaded", bench.blocks),
+            }
+        })
+        .collect();
+    if said != expected {
+        return Err(format!("the server's tables are {said:#?}, where this bench's are {expected:#?}"));
     }
+    let handed = log.must_say("acpiserver: \\_S5 handed to the kernel: ")?;
+    let kept = kernel.must_say("power: S5 is PM1a ")?;
+    if !kept.contains(bench.s5) {
+        return Err(format!("the kernel keeps {kept:?}, where this bench's \\_S5 is {:?}", bench.s5));
+    }
+    eprintln!("  [acpi] {}; {}", handed.trim(), kept.trim());
     let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
     let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
     if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {
@@ -5916,20 +5977,54 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let off = compared.iter().filter(|l| l.contains("range registers are off")).count();
     eprintln!("  [acpi] {others} other CPUs' range registers compared with the boot processor's: {off} off, none on and different");
-    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
+    let ruled = |l: &&&str| bench.ruled.iter().any(|ruled| l.contains(ruled));
+    let refused: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ") || l.contains("was refused for the first time"))
+        .filter(|l| !l.contains("acpiserver: table ") && !ruled(l))
+        .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    let took = log.must_say(&format!("acpiserver: {blocks} of {blocks} tables loaded in "))?;
+    for line in lines.iter().filter(ruled) {
+        eprintln!("  [acpi] a refusal the owner ruled: {}", line.trim());
+    }
+    let census = log.must_say("acpiserver: the namespace initialised: ")?;
+    let refusals = census.split_once("evaluations refused, by kind: ").map_or("", |(_, kinds)| kinds.trim());
+    if !(refusals == "none" || refusals.split("; ").all(|kind| bench.ruled.iter().any(|ruled| kind.contains(ruled)))) {
+        return Err(format!("the namespace's initialisation refused an evaluation: {census}"));
+    }
+    if !census.contains("_REG(3, 1) in 1 scope(s)") {
+        return Err(format!("the controller's space was not announced after every _INI: {census}"));
+    }
+    log.must_say("acpiserver: \\_SB._OSC negotiated: ")?;
+    if bench.loaded.is_empty() {
+        if let Some(processors) = lines.iter().find(|l| l.contains("processors' _OSC")) {
+            return Err(format!("this bench's processors name no _OSC: {processors}"));
+        }
+    } else {
+        let processors = log.must_say("acpiserver: the processors' _OSC negotiated, Intel's: ")?;
+        if !processors.contains(", 0 refused;") {
+            return Err(format!("a processor's _OSC was refused: {processors}"));
+        }
+        eprintln!("  [acpi] {}", processors.trim());
+    }
+    let loads: Vec<&str> = lines.iter().filter_map(|l| l.split_once("acpiserver: a table loaded at run time: ").map(|(_, said)| said.trim())).collect();
+    if loads != bench.loaded {
+        return Err(format!("the tables loaded at run time are {loads:?}, where this bench's claims load {:?}", bench.loaded));
+    }
+    let blocks = bench.blocks - bench.refused.len();
+    let took = log.must_say(&format!("acpiserver: {blocks} of {} tables loaded in ", bench.blocks))?;
     let bytes = log.must_say("acpiserver: the tables' bytes took ")?;
     let aml = log.must_say("acpiserver: the tables' AML read SystemMemory ")?;
     let memory = number_between(aml, "AML read SystemMemory ", " times, SystemIO ")?;
-    let config = number_between(aml, " and PCI_Config ", ", its memory in pages: ")?;
     let takes = number_between(aml, "; took the Global Lock ", " times, ")?;
-    if memory == 0 || config == 0 || takes == 0 {
-        return Err(format!("this machine's tables read memory and configuration space and take the Global Lock as they load, and the server's did not: {aml}"));
+    if bench.blocks == T14.blocks && (memory == 0 || takes == 0) {
+        return Err(format!("this machine's tables read memory and take the Global Lock as they load, and the server's did not: {aml}"));
     }
-    for line in [took, bytes, aml] {
+    let size = log.must_say(" table(s) loaded at run time and 0 refused; the namespace holds ")?;
+    let gpes = log.must_say("acpiserver: GPEs: ")?;
+    for line in [took, bytes, aml, census, size, gpes] {
         eprintln!("  [acpi] {}", line.trim());
     }
     Ok(())

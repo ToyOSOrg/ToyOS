@@ -12,11 +12,8 @@ every CPU every 2.2 s
 
 The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
-has from nowhere else. Beyond that it evaluates only the devices it serves:
-the walk's `_HID`, `_STA`, `_CRS` and `_GPE`, the embedded controller's
-`_GLK` and `_REG`, its query methods where the power button is a control
-method device, and the batteries' and AC adapters' `_STA`, `_BIX` or
-`_BIF`, `_BST` and `_PSR`. What else
+has from nowhere else. It initialises the namespace, negotiates `_OSC`,
+serves the runtime GPEs and delivers Notifies (#875). What else
 ToyOS takes from them it takes another way: the loader asks UEFI for the root
 bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). Nothing
 reads `_CST`, which names a CPU's C-states.
@@ -196,8 +193,11 @@ otherwise pay to find again:
   refusal.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
   opcodes, none run while a table loads, and Linux lists eight tables loaded
-  that way; the interpreter refuses them as unsupported. Owner: S1, below.
-  **Exit**: its.
+  that way. `Load` is built (#875): outside the tree, on the T14's dump,
+  every capability bit loads the eight, by OEM Table ID and length, and
+  ToyOS's claims load one, of 459 bytes. Owner: S1, below. **Exit**: the
+  T14's `acpi_tables_loaded` reads both `_OSC`s negotiated and that block
+  loaded, nothing refused.
 - **A refused evaluation keeps what it stored**, and nothing gives an
   interpreter's 16 MiB back: after one method has filled it, an Integer
   still evaluates, a field that fits one among them, and every method that
@@ -207,7 +207,8 @@ otherwise pay to find again:
   (`what_is_held_live_is_bounded_in_sum`, `system/acpiserver/aml/tests/hostile.rs`;
   `a_full_interpreter_reads_a_field_that_fits_an_integer`, `system/acpiserver/aml/tests/heap.rs`).
   Owner: this stage, which decides
-  what the server does with an interpreter that is full. **Exit**: a test
+  what the server does with an interpreter that is full; #875 proposes it
+  in its body, unbuilt. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
 - **The interpreter's 16 MiB bounds the heap it holds from one call to the
@@ -245,11 +246,14 @@ otherwise pay to find again:
   capacity: by its doubling it is 8,192 slots, 1,301 of them free, and a
   method that defines more names than are free moves the arena each time
   it runs, at a step for every 64 bytes of it. Owner: this stage,
-  which gives the server its memory. **Exit**: the server states its
-  interpreter's bound in heap bytes, and a host test under a counting
-  allocator holds the most a load and an evaluation hold while they run to
-  it; and the arena's capacity after the real machine's last table is
-  read, not derived.
+  which gives the server its memory. **Exit, met by #875**: the server
+  states its interpreter's bounds in heap bytes (`MAX_LIVE` between
+  evaluations, `MAX_RUNNING` while one runs), and every hostile fill of
+  `system/acpiserver/aml/tests/heap.rs` holds its peak under the counting
+  allocator to `MAX_RUNNING`; the static arena's capacity after the T14's
+  last table and the block its commit loads is read outside the tree on its
+  dump, 8,192 slots for 6,989 objects, and the server says it on the
+  machine.
 - **The T14's tables are not in name order.** The interpreter's walk of
   the namespace (`Interpreter::walk`, `system/acpiserver/aml/src/lib.rs`)
   reads siblings as their tables declared them. Of the 267 objects of the
@@ -260,30 +264,26 @@ otherwise pay to find again:
   two of them writing anything, the PCI root bridge's and the embedded
   controller's; and that controller's device is below that bridge, so
   under those answers the two run parent before child whichever order
-  siblings take. What the 45 do under the machine's own answers, and
-  whether any hangs on a sibling's, nothing has read.
+  siblings take. Outside the tree on the T14's dump, the server's walk
+  reads 56 `_STA` and runs 37 `_INI`, two refused at the ten-second wait
+  for an SMI answered by nothing a dump holds (#875); what they do under
+  the machine's own answers the T14's `acpi_tables_loaded` reads.
 - **An evaluation may ask to wait ten seconds, and no caller names another
   limit.** The limit counts the time asked of Sleep, Stall and Wait, a
   load's too (`MAX_WAIT_US`, `system/acpiserver/aml/src/lib.rs`), and
   `Interpreter::usage` says what a call asked, the request that was refused
-  included. The T14's 14 tables asked for none while they loaded, and no
-  method of them has been read refused at it. Owner: this stage. **Exit**:
+  included. The T14's 14 tables asked for none while they loaded. Outside
+  the tree on its dump, the controller's `_INI` and one more are refused at
+  it, each calling the firmware through `SMI_CMD` and answered by nothing a
+  dump holds; on the machine the census says the longest wait an
+  evaluation asked (`system/acpiserver/src/init.rs`), which the T14's
+  `acpi_tables_loaded` prints. Owner: this stage. **Exit**:
   the slice that carries a reading of a method refused at ten seconds, on
   the T14 and by `usage`, brings the limit its caller names with that
   reading; until one does, ten seconds stands and nothing names more.
 
 What the server's load of the tables, on the T14 and through the kernel's
 mediated access, leaves open:
-
-- **The controller's `_REG(3, 1)` runs on a namespace no `_INI` has run in.**
-  The server tells the controller its space is there as it attaches it to
-  AML (`attach`, `system/acpiserver/src/main.rs`), before the battery's
-  read, and runs no `_INI`: the T14's controller `_INI` calls the firmware
-  through `SMI_CMD`, which the host does not write. The scouts' dry run read that
-  the T14's `_REG` takes another branch before its `_INI` than after it,
-  reading and writing controller offset 0x03 where after it touches the
-  controller not at all; Linux runs it after. Owner: this stage. **Exit**:
-  the slice that runs the `_STA` and `_INI` walk runs it before `_REG`.
 
 - **A take of the Global Lock that the AML sets no bound on ends the server
   where the firmware holds the lock past 1 s** (`RELEASE`,
@@ -297,27 +297,24 @@ mediated access, leaves open:
   after a longer session is still owed. A Lock field and an `Acquire(\_GL,
   0xFFFF)` take with no bound. An Acquire with a TimeoutValue waits that
   long, at most what the evaluation has left of its 10 s, and the
-  TimeoutValue is charged to it. Owner: this
+  TimeoutValue is charged to it. The server measures how long a take
+  waited for the firmware's release, its longest hold as a take saw it, and
+  the load's line says it beside the contended count (#875). Owner: this
   stage. **Exit**: a hold measured on the T14, either by a contended take
   in the count the server logs, which covers the load and the power
   sources' census alone, or by `ff_gbl_lock` after a long Linux session.
   That measurement sets the bound, or replaces it with no bound if the
   firmware never holds the lock.
 
-- **A press during the load waits for it, and a power-off asked during it is
-  refused.** The server arms the power button
-  and then loads the tables before it serves an SCI, so a press in that time
-  latches and is served when the load ends: 77 ms on the T14, measured once,
-  and bounded only by what the interpreter lets each table sleep, 10 s. The
-  kernel has `\_S5`'s sleep type only once the load has handed it over, and
-  until then refuses `SYS_SHUTDOWN` by name, stopping nothing
+- **A power-off asked during the load is refused.** A press during the load
+  is taken by the Sleep it falls in (`sci::await_sleep`), but the kernel has
+  `\_S5`'s sleep type only once the load has handed it over, and until then
+  refuses `SYS_SHUTDOWN` by name, stopping nothing
   (`kernel/src/arch/x86_64/power.rs`); the asker is told and may ask again.
-  Owner: this stage. **Exit**, of the press's wait: the slice that keeps the
-  namespace serves the SCI while a table loads. The refusal has no exit and
-  stays: `\_S5` is evaluated in a namespace the load has built, so no
-  power-off is made before the load ends, and what bounds the refusal is the
-  load's time. That time is held on the T14 once the `acpi_tables_loaded` row
-  reads it under a bound the owner names.
+  The refusal has no exit and stays: `\_S5` is evaluated in a namespace the
+  load has built, so no power-off is made before the load ends, and what
+  bounds the refusal is the load's time. That time is held on the T14 once
+  the `acpi_tables_loaded` row reads it under a bound the owner names.
 - **A control-method power button's press powers the machine off unruled.**
   The claim is no longer refused for a missing ECDT or a control-method
   button, so such a machine has a server to evaluate `\_S5`, and the
@@ -386,10 +383,13 @@ write only the POST port.
 - **A port write outside the three ends what made it.** A machine whose
   AML writes another port at its load has that table refused by name, and
   a method that does has its evaluation refused. The T14's load writes
-  none: it loaded with every write denied. Owner: this stage. **Exit**: a
-  machine's reading of a write outside the three, which the list takes or
-  the owner refuses, and a slice that runs a method which stores to
-  `SMI_CMD` takes the call with the readings below.
+  none: it loaded with every write denied. A byte to the FADT's `SMI_CMD`
+  is asked of the kernel since the owner's ruling (#875). Outside the tree
+  on the AMD bench's dump, its eight interrupt links' `_STA` each write a
+  byte to port 0xC00, the PCI interrupt router's index, and are refused:
+  that reading goes to the owner. Owner: this stage. **Exit**: the owner
+  rules that write in the list or refused for good, and the T14's
+  `counters` row reads a call `SMI_CMD` took with the readings below.
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:
@@ -499,50 +499,21 @@ T14's processors' `_OSC` read `\OSYS`, which `\_SB.PC00._INI` writes, so S3's
 `_STA`/`_INI` walk runs before S1's `_OSC`. That walk writes `SMI_CMD`, and
 memory outside the map, so S2's ruling on those writes comes before both.
 
-- **S1: `Load`, and `_OSC` negotiated.**
-  - `Load` per §19.6.76: its objects outlive the method that loaded it, and
-    its bytes come only from memory Table 15.6 calls reserved or NVS.
-  - `\_SB._OSC` and each Intel processor's `_OSC`, query then commit. The
-    capability set holds only what ToyOS honours, which today is nothing.
-  - Takes up the `Load` bullet above, and the arena's capacity in the heap
-    bullet.
-  - **Exit**:
-    - host tests of `Load` from a region, a field and a buffer;
-    - outside the tree, under every capability bit, the eight blocks Linux
-      lists, by OEM table ID and length;
-    - `acpi_tables_loaded` reads both `_OSC`s evaluated, with nothing
-      refused.
-- **S2: what AML may reach, ruled.**
-  - The policy for memory the firmware types `EfiMemoryMappedIO`.
-  - Whether the kernel's bound stays address-only.
-  - Any write, outside what passes now, that a machine's measured AML makes.
-  - **Exit**:
-    `issues/acpiserver-refuses-the-amd-benchs-dsdt-for-a-read-in-memory-mapped-io.md`'s.
-- **S3: the namespace initialised.**
-  - `\_SB._INI`, then the `_STA`/`_INI` walk by Table 6.67 over each block a
-    load added, then `_REG`.
-  - A root bridge without `_BBN`, found by `_HID` or `_CID`.
-  - `_GLK`.
-  - Takes up the `_REG` bullet above. QEMU's interrupt links, refused for a
-    host bridge named by `_HID` alone, and the controller reached without the
-    Global Lock its `_GLK` asks for, are closed by their host tests
-    (`qemus_interrupt_link_reads_its_routing_register_below_a_bridge_named_by_its_hid`,
-    `a_controller_that_wants_the_global_lock_is_reached_under_it_alone`).
-  - **Exit**: the `_REG` bullet's, and every device's `_STA` on the T14
-    equal to Linux's.
-- **S4: the grammar whole.**
-  - `LoadTable`, `DataTableRegion`, and every space's protocol.
-  - **Exit**:
-    - `Error::Unsupported` deleted;
-    - a host test for each construct;
-    - both benches' tables loaded outside the tree, none refused for a
-      construct.
-- **S5: every event served.**
-  - Each runtime GPE's `_Lxx` or `_Exx`, and each Notify to its owner.
-  - The SCI served while a table loads.
-  - Takes up the press-wait bullet above.
-  - **Exit**: that bullet's exit, and a held T14 boot reading every enabled
-    GPE's method run with none refused.
-- **S6: the bounds measured.**
-  - The heap, full-interpreter, ten-second and Global Lock bullets above,
-    each by its own exit.
+All six are built in #875. What each still waits on is a reading of the
+machines:
+
+- **S1**: the T14's `acpi_tables_loaded` reads both `_OSC`s negotiated and
+  the one block ToyOS's claims load loaded, nothing refused.
+- **S2**: the AMD bench's `acpi_tables_loaded` reads 16 of its 17 tables
+  loaded and `\_S5` handed, SSDT8 refused as the owner ruled
+  (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`),
+  which meets
+  `issues/acpiserver-refuses-the-amd-benchs-dsdt-for-a-read-in-memory-mapped-io.md`'s
+  exit.
+- **S3**: the T14's `acpi_tables_loaded` reads every `_INI` run, none refused
+  but by the owner's ruling, and `_REG(3, 1)` after them; every device's
+  `_STA` there equal to Linux's, compared outside the tree.
+- **S5**: the T14's held boot reads every runtime GPE that fired served
+  with its method, none refused.
+- **S6**: the full-interpreter bullet above, by the design #875 proposes;
+  the ten-second and Global Lock bullets, each by its T14 reading.
