@@ -121,7 +121,7 @@ fn killer() -> ! {
     let header = conn.recv_header().expect("the arming frame");
     assert_eq!(header.msg_type, ARM, "an unexpected frame");
     let [word_handle, victim] = conn.recv_handles_exact::<2>().expect("the word and the victim");
-    let go = SharedMemory::adopt(word_handle, WORD_BYTES).expect("map the word");
+    let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
     // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
     let victim = unsafe { Process::from_raw(victim) };
 

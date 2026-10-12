@@ -294,6 +294,9 @@ pub fn echo_request(destination: Ipv4Addr, id: u16, seq: u16, data: &[u8]) -> Ve
 /// What [`Node::receive`] hands each frame to.
 type Sink<'s> = dyn FnMut(&[u8]) + 's;
 
+/// The most frames a test's [`Node::receive`] takes: a ring of a device's size.
+pub const BUDGET: usize = 256;
+
 /// `frames`, in order, as the batch [`Node::receive`] takes.
 pub fn batch<'a>(frames: &'a [&'a [u8]]) -> impl FnMut(&mut Sink<'_>) -> bool + 'a {
     let mut left = frames.iter();
@@ -350,7 +353,7 @@ impl Wire {
             }
             let asked = self.sent[from..].iter().filter(|seen| matches!(seen, Seen::Arp { request: true, sender, target, .. } if *target == R && *sender == A)).count();
             for _ in 0..asked {
-                self.node.receive(self.now, batch(&[&arp(MAC, false, MAC_R, R, A)]), draw(&mut self.draws));
+                self.node.receive(self.now, BUDGET, batch(&[&arp(MAC, false, MAC_R, R, A)]), draw(&mut self.draws));
             }
         }
     }
@@ -361,7 +364,7 @@ impl Wire {
     }
 
     pub fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 

@@ -20,6 +20,9 @@ use crate::{DirectMap, UserAddr};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
+// The ABI's word for what `create` rounds to, which a receiver checks a lent region's length against.
+const _: () = assert!(toyos_abi::syscall::SHM_PAGE as u64 == PAGE_2M);
+
 /// Physical pages a region keeps alive; behind an `Arc` since one page set
 /// can back several objects.
 // Unread by design: the vector's job is only to stay alive.

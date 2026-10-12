@@ -188,7 +188,7 @@ pub fn close(
     // Only a watch this handle's object ends is answered: one it shares (every `Console` and a
     // `Device(Keyboard)` name the keyboard's) cannot cancel another's poll.
     if close_ends_polls(&object) {
-        for watch in [read_watch(&object), write_watch(&object)].into_iter().flatten() {
+        for watch in [read_watch(&object), write_watch(&object), pipe_end_watch(&object)].into_iter().flatten() {
             watch.cancel_polls();
         }
     }
@@ -315,12 +315,12 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     }
 }
 
-/// The watch of a pipe end, which its other end's last holder posts as it
-/// lets go; `None` for an object that is no pipe end.
+/// A pipe end's leaving watch, which only its other end's last holder posts as
+/// it lets go; `None` for an object that is no pipe end.
 pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
-        KObjectRef::PipeRead(_) => read_watch(object),
-        KObjectRef::PipeWrite(_) => write_watch(object),
+        KObjectRef::PipeRead(r) => pipe::left_watch(r.id(), End::Read).map(WatchRef::Shared),
+        KObjectRef::PipeWrite(w) => pipe::left_watch(w.id(), End::Write).map(WatchRef::Shared),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
@@ -670,7 +670,8 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Console(_) => plain(FileType::Serial),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
-            file_type: FileType::SharedMemory as u64,
+            // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
+            file_type: if m.ram().is_some() { FileType::SharedMemory } else { FileType::DeviceMemory } as u64,
             size: m.size(),
             mtime: 0,
             volume: 0,

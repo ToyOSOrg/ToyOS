@@ -440,15 +440,26 @@ const NO_DOMAIN: &str = "iommu: no domain of its own for a device: no unit on th
 /// which only DMA the unit lets through can do.
 const STICK_BOUND: &str = "usb-storage: 1 device(s)";
 
+/// What the actuator leaves on an AMD-Vi unit, in the kernel's words for
+/// `unit`: one line per field the hand-over switches off by its own write.
+pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
+    ["CmdBufEn", "EventLogEn", "IommuEn"]
+        .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
+}
+
 /// **A unit an AMD machine's firmware left on is switched off, and the boot
 /// stick's DMA reaches memory.** QEMU's `amd-iommu` is the only AMD-Vi unit
-/// in reach: the T14 is an Intel machine, and the hand-over's register
-/// sequence and the DMA it frees are neither of them a host test's. Two
-/// boots: the shipped kernel finds a unit nothing left on and switches
+/// the merge queue runs: the T14 is an Intel machine, and the hand-over's
+/// register sequence and the DMA it frees are neither of them a host test's.
+/// Two boots: the shipped kernel finds a unit nothing left on and switches
 /// nothing; the test kernel's `iommu-firmware-left` leaves the unit blocking
 /// every device's DMA with its command buffer and event log running, and
 /// each goes off by its own write before the stick is driven. With the
-/// switch-off reverted that boot's stick never binds.
+/// switch-off reverted that boot reds on the fields' lines and on `control`
+/// reading back zero, and its stick still binds: QEMU 11.1.1 moves no
+/// function to translation on `INVALIDATE_IOMMU_ALL`
+/// (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
+/// so the AMD bench's `iommu_firmware_left` row holds the DMA half.
 pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
     let profile = Profile::MetalAmdVi;
     let argv = qemu::profile_argv(&BootOptions { profile, ..Default::default() });
@@ -474,12 +485,12 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         log.must_not_say("no DMAR or IVRS table")?;
         let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
         if left {
-            // `CmdBufEn`, `EventLogEn` and `IommuEn`, as the actuator wrote them.
+            // [`amdvi_left_on`]'s fields, as the actuator wrote them.
             if !handed.contains("control=0x0000000000001005") {
                 return Err(format!("the actuator's unit was handed over as {handed:?}"));
             }
-            for field in ["CmdBufEn", "EventLogEn", "IommuEn"] {
-                log.must_say(&format!("iommu: amdvi unit0 was handed over with {field} on; it goes off"))?;
+            for line in amdvi_left_on("unit0") {
+                log.must_say(&line)?;
             }
             for field in ["EventIntEn", "GALogEn", "GAIntEn", "PPRLogEn", "PPRIntEn"] {
                 log.must_not_say(&format!("with {field} on"))?;

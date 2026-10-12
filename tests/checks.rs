@@ -340,19 +340,24 @@ mod checks {
     /// Every value is one this tree has printed or one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
-        const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
-        const DECLARED: (u64, u64) = (0x8001_0033, 0x0030_06e8);
+        // `xcr0=0x0` is what the kernel prints for a CPU without `CR4.OSXSAVE`.
+        const AP_BEFORE: (u64, u64, u64) = (0xe000_0011, 0x0031_0620, 0);
+        const DECLARED: (u64, u64, u64) = (0x8001_0033, 0x0034_06e8, 0x7);
+        const AVX512: u64 = 0xe0;
 
-        fn log(cpus: &[(u64, u64)]) -> String {
+        fn log(cpus: &[(u64, u64, u64)]) -> String {
             cpus.iter()
                 .enumerate()
-                .map(|(i, (cr0, cr4))| {
-                    format!("[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x}\n")
+                .map(|(i, (cr0, cr4, xcr0))| {
+                    format!(
+                        "[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x} \
+                         efer=0xd01 xcr0={xcr0:#x} save=xsaveopt smep nx\n"
+                    )
                 })
                 .collect()
         }
 
-        let refused = |what: &str, cpus: &[(u64, u64)], says: &str| match control_regs(&log(cpus), 4) {
+        let refused = |what: &str, cpus: &[(u64, u64, u64)], says: &str| match control_regs(&log(cpus), 4) {
             Ok(()) => Err(format!("{what} was accepted")),
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
@@ -362,6 +367,8 @@ mod checks {
         // defect too, and would prove nothing below.
         control_regs(&log(&[DECLARED; 4]), 4)
             .map_err(|e| format!("the declared machine was refused: {e}"))?;
+        control_regs(&log(&[(DECLARED.0, DECLARED.1, DECLARED.2 | AVX512); 4]), 4)
+            .map_err(|e| format!("the declared AVX-512 machine was refused: {e}"))?;
 
         refused("the machine this tree booted", &[DECLARED, AP_BEFORE, AP_BEFORE, AP_BEFORE], "CD")?;
         // The case a "do all the CPUs agree?" test passes: they agree, on INIT's
@@ -369,37 +376,48 @@ mod checks {
         refused("four CPUs agreeing on INIT's CR0", &[AP_BEFORE; 4], "CD")?;
         refused(
             "one CPU without WP",
-            &[DECLARED, (DECLARED.0 & !(1 << 16), DECLARED.1), DECLARED, DECLARED],
+            &[DECLARED, (DECLARED.0 & !(1 << 16), DECLARED.1, DECLARED.2), DECLARED, DECLARED],
             "WP",
         )?;
         refused(
             "one CPU without NE",
-            &[DECLARED, DECLARED, (DECLARED.0 & !(1 << 5), DECLARED.1), DECLARED],
+            &[DECLARED, DECLARED, (DECLARED.0 & !(1 << 5), DECLARED.1, DECLARED.2), DECLARED],
             "NE",
         )?;
-        // The bit that must be *absent*: with it set, XCR0 can name components
-        // FXSAVE64 does not save.
-        refused("OSXSAVE set", &[(DECLARED.0, DECLARED.1 | (1 << 18)); 4], "OSXSAVE")?;
+        refused("OSXSAVE clear", &[(DECLARED.0, DECLARED.1 & !(1 << 18), 0); 4], "OSXSAVE")?;
+        refused("XCR0 without AVX", &[(DECLARED.0, DECLARED.1, 0x3); 4], "xcr0.AVX")?;
+        refused("XCR0 with opmask alone", &[(DECLARED.0, DECLARED.1, 0x27); 4], "part of AVX-512")?;
+        // PKRU: a component this kernel's save area is not declared to hold.
+        refused("XCR0 with PKRU", &[(DECLARED.0, DECLARED.1, 0x207); 4], "never named")?;
+        refused(
+            "one CPU with AVX-512 and three without",
+            &[DECLARED, (DECLARED.0, DECLARED.1, DECLARED.2 | AVX512), DECLARED, DECLARED],
+            "cpu1",
+        )?;
         // Two bits a machine could hold uniformly, each one line of kernel diff
         // away, and neither reachable by an actuator. `AM` is named clear above and
         // answers by name; `PKE` is named nowhere, which is the case the whole
         // never-named rule exists for — `TSD` is the same case.
-        refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1); 4], "AM")?;
+        refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1, DECLARED.2); 4], "AM")?;
         refused(
             "every CPU with PKE set",
-            &[(DECLARED.0, DECLARED.1 | (1 << 22)); 4],
+            &[(DECLARED.0, DECLARED.1 | (1 << 22), DECLARED.2); 4],
             "never named",
         )?;
-        refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20)); 4], "SMEP")?;
-        refused("every CPU without PGE", &[(DECLARED.0, DECLARED.1 & !(1 << 7)); 4], "PGE")?;
+        refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20), DECLARED.2); 4], "SMEP")?;
+        refused("every CPU without PGE", &[(DECLARED.0, DECLARED.1 & !(1 << 7), DECLARED.2); 4], "PGE")?;
         // A CPU that agrees about every named bit and differs in one the CPU is
         // allowed to withhold, so nothing above it can object.
-        refused("one CPU with PCID and three without", &[DECLARED, DECLARED, DECLARED, (DECLARED.0, DECLARED.1 | (1 << 17))], "cpu3")?;
+        refused(
+            "one CPU with PCID and three without",
+            &[DECLARED, DECLARED, DECLARED, (DECLARED.0, DECLARED.1 | (1 << 17), DECLARED.2)],
+            "cpu3",
+        )?;
         // And an AP that never printed at all, which is what a machine whose AP
         // died before the check looks like.
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
-        eprintln!("  [control_regs] the verdict refuses 11 machines and accepts the declared one");
+        eprintln!("  [control_regs] the verdict refuses 15 machines and accepts the two declared ones");
         Ok(())
     }
 

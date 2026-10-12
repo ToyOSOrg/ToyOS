@@ -3,7 +3,7 @@
 
 [package]
 name = "toyos-cpuvuln"
-description = "Linux's verdicts from a CPU's CPUID and MSR facts, pure: each speculative-execution vulnerability and its mitigation choice, which model-specific counters the CPU has, and the HWP request intel_pstate asks of it; and Intel's, whether its INVLPG drops a global translation in every PCID."
+description = "Verdicts from a CPU's CPUID and MSR facts, pure: Linux's on each speculative-execution vulnerability and its mitigation choice, which model-specific counters the CPU has and the HWP request intel_pstate asks of it; AMD's revision guides' on whether erratum 1386 forbids the CPU XSAVES; and Intel's specification updates' on whether its INVLPG drops a global translation in every PCID."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -1,5 +1,6 @@
 use crate::rect::Rect;
 use crate::window::Level;
+use toyos_abi::syscall::SHM_PAGE;
 
 /// Share of physical memory the compositor will hold in window buffers.
 ///
@@ -9,22 +10,19 @@ use crate::window::Level;
 /// eighths for the kernel, the other daemons, and the clients' own heaps.
 pub const WINDOW_BUDGET_SHARE: u64 = 8;
 
-/// The kernel rounds every shared region up to one of these
-/// (`shared_memory::alloc` calls `align_2m`), so this and not the pixel count
-/// is what a window costs.
-const PAGE_2M: u64 = 2 * 1024 * 1024;
-
 /// Most physical memory one window can cost at this screen size.
 ///
 /// A screen-sized content buffer is the largest the compositor ever hands out:
 /// `MSG_CREATE_WINDOW` refuses a request bigger than the screen, and every
 /// path that grows a window afterwards — maximize, snap, drag-resize — is
-/// bounded by the screen too. A one-pixel window still costs a whole page.
+/// bounded by the screen too. A buffer costs whole [`SHM_PAGE`]s, so a
+/// one-pixel window still costs one.
 ///
 /// Deliberately a function of the screen — a bigger screen means bigger
 /// windows means fewer of them — which no bare constant expresses.
 pub fn window_bytes(screen: Rect) -> u64 {
-    (screen.area() * 4).div_ceil(PAGE_2M).max(1) * PAGE_2M
+    let page = SHM_PAGE as u64;
+    (screen.area() * 4).div_ceil(page).max(1) * page
 }
 
 /// How many windows the compositor will hold at this screen size.
@@ -101,10 +99,11 @@ mod tests {
 
     #[test]
     fn a_window_costs_whole_pages() {
-        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), PAGE_2M);
+        let page = SHM_PAGE as u64;
+        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), page);
         // 1920*1080*4 = 8_294_400, which is three pages and most of a fourth.
-        assert_eq!(window_bytes(HD), 4 * PAGE_2M);
-        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 8 * PAGE_2M);
+        assert_eq!(window_bytes(HD), 4 * page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 8 * page);
     }
 
     #[test]

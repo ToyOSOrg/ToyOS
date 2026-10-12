@@ -18,8 +18,9 @@
 //! [`counters`] is the same tag's other verdict on a CPU: which of its
 //! model-specific counters exist. [`hwp`] is the third: whether its
 //! performance request is declared, and [`hwp_request`] the request.
-//! [`invlpg_misses_global`] is Intel's: whether its `INVLPG` leaves another
-//! PCID's global translation.
+//! [`erratum_1386`] is AMD's, not Linux's: whether its `XSAVES` erratum names
+//! the CPU. [`invlpg_misses_global`] is Intel's: whether its `INVLPG` leaves
+//! another PCID's global translation.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the facts.
 
@@ -29,11 +30,13 @@
 use core::fmt;
 
 mod counters;
+mod erratum;
 mod hwp;
 mod invlpg;
 mod table;
 
 pub use counters::{counters, CounterFacts, Counters};
+pub use erratum::erratum_1386;
 pub use hwp::{hwp, hwp_request, Hwp, HwpFacts, HwpRefusal, HWP_EPP};
 pub use invlpg::{invlpg_misses_global, InvlpgFacts};
 #[cfg(test)]

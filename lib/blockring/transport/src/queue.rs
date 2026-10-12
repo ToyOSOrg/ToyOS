@@ -8,26 +8,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{Untrusted, Violation, Word};
-
-#[cfg(not(feature = "publish-relaxed"))]
-const PUBLISH: Ordering = Ordering::Release;
-#[cfg(feature = "publish-relaxed")]
-const PUBLISH: Ordering = Ordering::Relaxed;
-
-/// Word `at` of an end's words, and the one index into them: every `at` an end
-/// forms is below `N`, because its [`Place`] is and a ring position is masked
-/// below the depth.
-#[allow(clippy::indexing_slicing)]
-fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
-    &page[at]
-}
-
-/// A distance the peer's cursor claims, believed only up to `cap`.
-fn clamp(claimed: Untrusted<u32>, cap: u32, broken: Violation) -> Result<u32, Violation> {
-    let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
-    claimed.at_most(u64::from(cap)).ok().and_then(|n| u32::try_from(n).ok()).ok_or(broken)
-}
+use crate::{clamp, word, Untrusted, Violation, Word, PUBLISH};
 
 /// Where a queue of `E`-word entries, `D` deep, is among `N` words: the word
 /// its consumer stores its head in, the word its producer stores its tail in,

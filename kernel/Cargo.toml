@@ -435,8 +435,8 @@ df-witness-mutate = ["df-witness"]
 # carrying this inherits a set direction flag from whatever it interrupted
 # exactly as every kernel before 2026-08-21 did.
 #
-# It replaces the *behaviour* and not a verdict: everything else about the entry — the pushes, the FP
-# bracket, the preempt count, the exit-to-user check — is the shipped one, and
+# It replaces the *behaviour* and not a verdict: everything else about the entry — the pushes,
+# the preempt count, the exit-to-user check — is the shipped one, and
 # what is absent is one instruction. A control that flipped an assertion would
 # make its own gate vacuous.
 #
