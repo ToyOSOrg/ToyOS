@@ -23,9 +23,9 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
-design, the environment changes or the gap is filed. Where that hardware's manufacturers document a
-design or the published state of the art backs one, a design follows and cites them, and leaves them
-only when they leave it: bench numbers on a design they back are reported and never block it, and a
+design, the environment changes or the gap is filed. Where that hardware's manufacturers or the
+published state of the art back a design, the design follows and cites them, and leaves them only
+when they leave it: bench numbers on a design they back are reported and never block it, and a
 slowdown on it is investigated, not used to reject it. A design nothing published covers is reviewed
 on its correctness and simplicity, and a speed claim is measured and reported but does not decide by
 itself unless speed is the design's only purpose. On every change to production code your first

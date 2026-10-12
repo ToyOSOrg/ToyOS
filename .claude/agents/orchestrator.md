@@ -21,7 +21,7 @@ included, before an agent builds it; the acceptance is a comment on the pull req
 and on anything uncertain, a one-boot measurement comes before a multi-round implementation; a
 scout arm is scaffolding, deleted once its question is answered. No brief or issue makes a bench
 number the condition a design lives by where its hardware's manufacturers or the published state
-of the art back it.
+of the art back it, or where nothing published covers it and speed is not its only purpose.
 
 ## Agents
 
