@@ -18,6 +18,13 @@
 //! bounded: one receive a socket, a second refused `ERR_RESOURCE_EXHAUSTED`.
 //! Nothing a client sends panics netstack.
 //!
+//! **A lookup's view is the badge on its connection**, which the supervisor
+//! minted with the row and session of the program it endowed the connector,
+//! and which is bytes here: what the node keeps of one view's answers answers
+//! no other. A lookup on a connection with no badge is refused
+//! `ERR_PERMISSION_DENIED`. Neither the name a lookup asks nor anything kept is
+//! said in the log or to `inspect`, which every holder of `netstack` reads.
+//!
 //! **An id is a number any client can name**
 //! (`issues/netstack-socket-ids-are-ambient.md`): the table starts at a
 //! random one so that an id a client kept across a replaced netstack names
@@ -29,12 +36,13 @@ use std::time::Duration;
 
 use toyos::net::*;
 use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE};
+use toyos::port::Acceptor;
 use toyos::{ipc, say, AsHandle, Pipe};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 use toyos_inspect::Snapshot;
 use toyos_net_node::{
     AcceptRefused, ConnectRefused, DatagramId, Ended, Event, ListenRefused, ListenerId, LookupId, Node, NotStarted,
-    PipeEnd, Pipes, Refused, StreamEvent, StreamId, WriteRefusal,
+    PipeEnd, Pipes, Refused, Resolving, StreamEvent, StreamId, WriteRefusal,
 };
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Endpoint, Failure};
@@ -107,7 +115,7 @@ pub struct Sockets {
     /// The client each unanswered connect is answered to, and the id it is
     /// told.
     connecting: BTreeMap<StreamId, (Client, u32)>,
-    lookups: Vec<(LookupId, Client, toyos_dns::Name)>,
+    lookups: Vec<(LookupId, Client)>,
     /// At most one receive waits on a socket, so a client's requests alone
     /// hold no more of netstack's handles than its sockets do.
     receiving: BTreeMap<u32, Receiving>,
@@ -207,6 +215,30 @@ fn answer_lookup(client: &Client, addrs: &[[u8; 4]]) {
     client.result_bytes(&answer);
 }
 
+/// How a lookup ended, kept or asked, in the pipe ABI's words.
+fn answer_resolved(client: &Client, result: Result<Vec<[u8; 4]>, Ended>) {
+    use toyos_dns::Failure as Dns;
+    match result {
+        Ok(addrs) => answer_lookup(client, &addrs),
+        // The protocol's one answer for a name with no address, whether the
+        // name or only its address is missing.
+        Err(Ended::Failed(Dns::NoSuchName | Dns::NoAddress)) => answer_lookup(client, &[]),
+        Err(Ended::Failed(Dns::TimedOut)) => client.error(ERR_TIMED_OUT),
+        // No query found a way out, or the lease the lookup asked under went:
+        // this machine is on no network that answers the name, which a lease
+        // clears. Neither is that word's (see `connect_failed`).
+        Err(Ended::Failed(Dns::Unreachable) | Ended::LeaseChanged) => client.error(ERR_NOT_CONNECTED),
+        Err(Ended::Failed(why @ (Dns::Truncated | Dns::ServerFailed(_) | Dns::TooManyAliases))) => {
+            say!("netstack: a lookup ended without an answer: {why:?}");
+            client.error(ERR_OTHER);
+        }
+        Err(Ended::NoPort) => {
+            say!("netstack: a lookup ended with every dynamic port bound, none left for its next query");
+            client.error(ERR_RESOURCE_EXHAUSTED);
+        }
+    }
+}
+
 impl Sockets {
     pub fn new(first_id: u32, places: usize) -> Self {
         Self {
@@ -269,7 +301,7 @@ impl Sockets {
     /// One whole request. A call that answers at once drops its client where
     /// it answers; a connect, a lookup and a receive with nothing to hand
     /// over keep theirs until the node has the answer ([`Self::settle`]).
-    pub fn request(&mut self, node: &mut Node, now: Instant, req: Request, draw: fn() -> u32) {
+    pub fn request(&mut self, node: &mut Node, now: Instant, req: Request, acceptor: &Acceptor, draw: fn() -> u32) {
         match MsgType::from_u32(req.msg_type) {
             Some(MsgType::TcpClose) => self.close(node, now, &req),
             Some(MsgType::TcpShutdown) => self.shutdown(node, now, &req),
@@ -277,7 +309,7 @@ impl Sockets {
             Some(MsgType::UdpSendTo) => self.udp_send_to(node, now, &req),
             Some(MsgType::UdpRecvFrom) => self.udp_recv_from(node, now, req),
             Some(MsgType::UdpClose) => self.udp_close(node, now, &req),
-            Some(MsgType::DnsLookup) => self.lookup(node, now, req, draw),
+            Some(MsgType::DnsLookup) => self.lookup(node, now, req, acceptor, draw),
             Some(MsgType::TcpSetOption) => self.set_option(node, now, &req),
             Some(MsgType::TcpListenerSetOption) => self.listener_set_option(node, &req),
             Some(MsgType::UdpSetOption) => self.udp_set_option(node, &req),
@@ -604,9 +636,10 @@ impl Sockets {
         msg.client.done();
     }
 
-    /// Starts resolving the name `msg` carries, or answers at once where
-    /// there is nothing to ask: an address written as one.
-    fn lookup(&mut self, node: &mut Node, now: Instant, msg: Request, draw: fn() -> u32) {
+    /// Starts resolving the name `msg` carries for the view its connection's
+    /// badge names, or answers at once where there is nothing to ask: an
+    /// address written as one, or a name the view keeps an answer for.
+    fn lookup(&mut self, node: &mut Node, now: Instant, msg: Request, acceptor: &Acceptor, draw: fn() -> u32) {
         let Ok(hostname) = std::str::from_utf8(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
@@ -619,8 +652,18 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        match node.resolve(now, name.clone(), draw) {
-            Ok(id) => self.lookups.push((id, msg.client, name)),
+        let mut badge = [0u8; MAX_BADGE];
+        let view = match acceptor.badge(&msg.client.conn, &mut badge) {
+            Ok(view) => view,
+            Err(SyscallError::NotFound) => {
+                msg.client.error(ERR_PERMISSION_DENIED);
+                return;
+            }
+            Err(why) => panic!("netstack: the kernel refused the badge of a connection its acceptor accepted: {why:?}"),
+        };
+        match node.resolve(now, view, name, draw) {
+            Ok(Resolving::Kept(result)) => answer_resolved(&msg.client, result),
+            Ok(Resolving::Asking(id)) => self.lookups.push((id, msg.client)),
             Err(NotStarted::NotConnected) => msg.client.error(ERR_NOT_CONNECTED),
             Err(NotStarted::ResourceExhausted) => msg.client.error(ERR_RESOURCE_EXHAUSTED),
         }
@@ -659,31 +702,11 @@ impl Sockets {
         }
 
         for resolved in node.take_resolved() {
-            let Some(at) = self.lookups.iter().position(|(id, ..)| *id == resolved.id) else {
+            let Some(at) = self.lookups.iter().position(|(id, _)| *id == resolved.id) else {
                 unreachable!("the node ended a lookup nobody waits for")
             };
-            let (_, client, name) = self.lookups.swap_remove(at);
-            use toyos_dns::Failure as Dns;
-            match resolved.result {
-                Ok(addrs) => answer_lookup(&client, &addrs),
-                // The protocol's one answer for a name with no address,
-                // whether the name or only its address is missing.
-                Err(Ended::Failed(Dns::NoSuchName | Dns::NoAddress)) => answer_lookup(&client, &[]),
-                Err(Ended::Failed(Dns::TimedOut)) => client.error(ERR_TIMED_OUT),
-                // No query found a way out, or the lease the lookup asked
-                // under went: this machine is on no network that answers the
-                // name, which a lease clears. Neither is that word's (see
-                // `connect_failed`).
-                Err(Ended::Failed(Dns::Unreachable) | Ended::LeaseChanged) => client.error(ERR_NOT_CONNECTED),
-                Err(Ended::Failed(why @ (Dns::Truncated | Dns::ServerFailed(_) | Dns::TooManyAliases))) => {
-                    say!("netstack: a lookup of {name} ended without an answer: {why:?}");
-                    client.error(ERR_OTHER);
-                }
-                Err(Ended::NoPort) => {
-                    say!("netstack: a lookup of {name} ended with every dynamic port bound, none left for its next query");
-                    client.error(ERR_RESOURCE_EXHAUSTED);
-                }
-            }
+            let (_, client) = self.lookups.swap_remove(at);
+            answer_resolved(&client, resolved.result);
         }
 
         let ended: Vec<(ListenerId, WriteRefusal)> = node.drain_ended_listeners().collect();
@@ -763,7 +786,7 @@ impl Sockets {
                 Socket::Stream(_) => {}
             }
         }
-        for (_, client, _) in &self.lookups {
+        for (_, client) in &self.lookups {
             poller.watch(&client.conn, READABLE, TOKEN_LOOKUP | u64::from(client.conn.as_handle().0));
         }
     }
@@ -822,7 +845,7 @@ impl Sockets {
                 // A lookup whose client has left ends now: its sockets and
                 // its place are another client's.
                 let spoke = |client: &Client| u64::from(client.conn.as_handle().0) == u64::from(socket_id);
-                self.lookups.retain(|(id, client, _)| {
+                self.lookups.retain(|(id, client)| {
                     let left = spoke(client) && client.gone();
                     if left {
                         node.let_go(now, *id);

@@ -33,10 +33,10 @@ use crate::client::{
     HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
-use crate::stats::{FrameStats, FrameTotals};
+use crate::stats::FrameTotals;
 use crate::{
     launcher_apps, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES, STATS_INTERVAL,
+    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
 };
 
 const _: () = assert!(
@@ -148,16 +148,11 @@ pub struct Session {
     /// Tokens the last `wait` reported ready.
     ready: Vec<u64>,
 
-    stats: FrameStats,
-    /// Every window `stats` has reported, summed, for `inspect`.
     totals: FrameTotals,
     cached_stats: SystemStats,
     prev_busy_ticks: u64,
     prev_total_ticks: u64,
     last_taskbar_update: Instant,
-    next_stats_report: Instant,
-    reported_traffic: (u64, u64),
-    reported_composed: window::Traffic,
 }
 
 impl Session {
@@ -265,8 +260,6 @@ impl Session {
 
         let now = Instant::now();
         Self {
-            reported_traffic: screen.traffic(),
-            reported_composed: back.surface.traffic(),
             acceptor,
             prompts,
             prompt: None,
@@ -303,13 +296,11 @@ impl Session {
             max_windows,
             dead: Vec::new(),
             ready: Vec::new(),
-            stats: FrameStats::default(),
             totals: FrameTotals::default(),
             cached_stats: SystemStats { used_mb: 0, total_mb: 0, cpu_pct: 0 },
             prev_busy_ticks: 0,
             prev_total_ticks: 0,
             last_taskbar_update: now,
-            next_stats_report: now + STATS_INTERVAL,
         }
     }
 
@@ -1144,7 +1135,7 @@ impl Session {
         snap.put("cursor", if self.hw_cursor { "hardware" } else { "software" });
         snap.put("windows.open", self.stack.len());
         snap.put("windows.max", self.max_windows);
-        self.totals.plus(&self.stats).inspect(&mut snap);
+        self.totals.inspect(&mut snap);
         let encoded =
             snap.encode().unwrap_or_else(|why| panic!("compositor: its snapshot: {why}"));
         if let Err(e) = ipc::try_send_bytes(handle, toyos_inspect::MSG_SNAPSHOT, &encoded) {
@@ -1169,10 +1160,6 @@ impl Session {
         );
         self.back =
             BackBuffer::new(self.screen.width(), self.screen.height(), self.pixel_format());
-        // The counters belong to the mapping, and this is a new one starting at
-        // zero.
-        self.reported_traffic = self.screen.traffic();
-        self.reported_composed = self.back.surface.traffic();
         self.desk = desk_of(&self.screen, &self.font, self.apps.len());
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
@@ -1321,7 +1308,6 @@ impl Session {
             );
             if regions.iter().any(|r| r.overlaps(rect)) {
                 render::draw_software_cursor(&self.back.surface, sprite, self.cursor);
-                self.stats.cursor_draws += 1;
             }
         }
 
@@ -1337,12 +1323,7 @@ impl Session {
             );
             damage_px += region.area();
         }
-        let composited_at = Instant::now();
-        self.stats.record(
-            composited_at.duration_since(started).as_nanos() as u64,
-            regions.len(),
-            damage_px,
-        );
+        self.totals.record(started.elapsed().as_nanos() as u64, regions.len(), damage_px);
 
         for region in &regions {
             self.fb_dev
@@ -1356,21 +1337,6 @@ impl Session {
         }
 
         self.frame_callbacks(&regions);
-
-        if composited_at >= self.next_stats_report {
-            let traffic = self.screen.traffic();
-            let composed = self.back.surface.traffic();
-            self.stats.report(
-                (traffic.0 - self.reported_traffic.0, traffic.1 - self.reported_traffic.1),
-                composed.since(self.reported_composed),
-                self.stack.len(),
-            );
-            self.totals.fold(&self.stats);
-            self.stats = FrameStats::default();
-            self.reported_traffic = traffic;
-            self.reported_composed = composed;
-            self.next_stats_report = composited_at + STATS_INTERVAL;
-        }
     }
 
     /// Tell every window that presented and was composited that its frame is
