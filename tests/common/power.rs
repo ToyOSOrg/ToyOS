@@ -784,10 +784,15 @@ const ONE_TAKE_CONTENDED: &str = "; took the Global Lock 1 times, 1 of them from
 /// PM1a event block at `pm1`, then Acquires `\_GL` within `ms`, giving it
 /// back where that took it and Notifying `\_SB.GLW` with 0x80 where it timed
 /// out. It waits by Stall, which keeps the processor: a Sleep serves the SCI
-/// (`sci::await_sleep`) and would take the press it waits for.
+/// (`sci::await_sleep`) and would take the press it waits for. It declares
+/// the device `\_SB.GLI` too, whose `_INI`, run by the namespace's
+/// initialisation after the load, Acquires `\_GL` with no bound: a server
+/// that initialised before serving the press would end at the firmware's
+/// hold.
 ///
 /// ```text
 /// Device (\_SB.GLW) {}
+/// Device (\_SB.GLI) { Method (_INI) { Acquire (\_GL, 0xFFFF) Release (\_GL) } }
 /// OperationRegion (PM1S, SystemIO, pm1, 2)
 /// Field (PM1S, WordAcc, NoLock, Preserve) { Offset (1), PBST, 1 }
 /// While (!PBST) { Stall (100) }
@@ -797,6 +802,7 @@ fn ssdt_acquiring_the_global_lock(pm1: u16, ms: u16) -> Vec<u8> {
     const GL: &[u8] = b"\\_GL_";
     // `\` and a DualNamePrefix (§20.2.2).
     const GLW: &[u8] = b"\\\x2E_SB_GLW_";
+    const GLI: &[u8] = b"\\\x2E_SB_GLI_";
     const PM1S: &[u8] = b"PM1S";
     const PBST: &[u8] = b"PBST";
     // A PkgLength of one byte (§20.2.4): itself and what follows, under 64.
@@ -810,8 +816,12 @@ fn ssdt_acquiring_the_global_lock(pm1: u16, ms: u16) -> Vec<u8> {
     let acquire = [&[0x5B, 0x23], GL, &ms.to_le_bytes()].concat();
     let notify = [&[0x86], GLW, &[0x0A, 0x80]].concat();
     let release = [&[0x5B, 0x27], GL].concat();
+    // An Acquire of no bound (0xFFFF, §19.6.2), then a Release, as a method of no arguments (MethodFlags 0).
+    let unbounded = [&[0x5B, 0x23], GL, &0xFFFFu16.to_le_bytes(), &release].concat();
+    let ini = package(&[0x14], &[b"_INI".as_slice(), &[0x00], &unbounded].concat());
     let aml = [
         package(&[0x5B, 0x82], GLW),
+        package(&[0x5B, 0x82], &[GLI, &ini].concat()),
         region,
         field,
         wait,
@@ -844,7 +854,9 @@ fn hex_after(line: &str, after: &str) -> Result<u64, String> {
 /// claim; the table QEMU adds waits as it loads for the press, sent once the
 /// server has armed, and only then Acquires the lock within [`ACQUIRE_MS`].
 /// Then the press must power the machine off, after the Acquire said it timed
-/// out.
+/// out, and before the namespace's initialisation, whose `\_SB.GLI._INI`
+/// takes the lock with no bound and would end the server at the firmware's
+/// hold.
 pub fn acpi_press_across_a_lock_wait(probe: (String, Vec<u8>)) -> Result<(), String> {
     let case = super::compile::repo_root().join("tests/images/acpicase.toml");
     let mut qemu = QemuInstance::boot_with_options(
