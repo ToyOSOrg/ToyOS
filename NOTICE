@@ -124,8 +124,7 @@ Inc." and "Copyright(C) 2005-2014 Simon Howard" over GPL "version 2 ... or any
 later version" — id's Doom source release by way of Chocolate Doom. The crate
 declares `GPL-2.0-only`, which is a narrowing a distributor may make.
 
-Nothing else in this repository is GPL, and no GPL code is linked into the
-kernel, the SDK, or any other program.
+No GPL code is linked into the kernel, the SDK, or any other program.
 
 
 assets/JetBrainsMono-Regular.ttf — SIL Open Font License 1.1
@@ -427,6 +426,56 @@ kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     Licence text: licenses/Intel-microcode-license.txt (upstream's `license`,
     sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
+
+The kernel embeds 06-8c-01 and loads it on the CPU it names; 06-cc-02 is
+`toyos-microcode`'s test input. The licence permits redistribution in binary
+form, unmodified, on three conditions: the copyright notice and the
+disclaimer are reproduced with the distribution, which every x86-64 image does
+as /system/share/licenses/Intel-microcode-license.txt; Intel's name endorses
+nothing derived from it; and no reverse engineering, decompilation or
+disassembly.
+
+
+kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
+------------------------------------------------------------------------
+
+    microcode_amd_fam17h.bin  22,596 bytes, a container of seven patches for
+              family 0x17 CPUs, 0x0860010d for CPUID 0x00860f01 (Renoir, the
+              AMD bench's Ryzen 7 4800U) among them
+      sha256 966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `amd-ucode/` at tag 20260916
+    (commit ab23307cfe7f9366c819025ca3e4778299bc2db2), byte for byte
+    Licence text: licenses/AMD-ucode-license.txt (upstream's
+    `LICENSES/LICENSE.amd-ucode`, sha256
+    2103bd999f77522c5ab5fd35df0579ed00e2a6b885f6f8ebd444e97ffa482991)
+    SPDX-License-Identifier: LicenseRef-AMD-ucode
+
+The kernel embeds it whole and loads, on a CPU one of its patches names, that
+patch. The licence grants redistribution free of fees on five terms: the
+copyright notice and the licence travel with the software, which every x86-64
+image does as /system/share/licenses/AMD-ucode-license.txt; AMD is not
+referenced in promoting a product in a way that implies AMD endorses or
+certified it; no reverse engineering, decompilation or disassembly; the rights
+to third-party technologies the software may implement are the
+redistributor's to obtain, AMD conveying none; and U.S. and European export
+law binds whoever uses it.
+
+
+tests/linux/amd_shas.c — Linux's digests of AMD's microcode patches, GPL-2.0-only
+---------------------------------------------------------------------------------
+
+    amd_shas.c  sha256 98af9ffb8a6e39e9dc37c86028a88853a75b74f229bcb1dabf84b72f6700a156
+    Upstream: https://github.com/torvalds/linux,
+    `arch/x86/kernel/cpu/microcode/amd_shas.c` at tag v7.2
+    (commit 8d3ae59288f1e7d58d76558a6ee96d533bc5019f), byte for byte
+    SPDX-License-Identifier: GPL-2.0-only
+
+The SHA-256 of every AMD patch Linux loads on a CPU whose own signature check
+EntrySign broke: the independent record `toyos-microcode`'s tests hold every
+patch the kernel embeds to. The file carries no licence line of its own, so
+the kernel's `COPYING` decides it. Test input only: nothing built from this
+repository carries it, and no shipped package's directory holds it.
 
 
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS

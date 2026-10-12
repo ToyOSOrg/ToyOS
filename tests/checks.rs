@@ -402,6 +402,56 @@ mod checks {
         Ok(())
     }
 
+    /// [`microcode_on_metal`] against both benches' machines and the ways a
+    /// boot of either could fall short of Linux's reading, with no guest.
+    #[test]
+    fn microcode_verdict() -> Result<(), String> {
+        fn log(lines: &[(u32, &str)]) -> String {
+            lines.iter().map(|(cpu, said)| format!("[ 0.050 cpu{cpu} kernel] microcode: cpu{cpu} {said}\n")).collect()
+        }
+        const T14: &str = "Intel signature 0x806c1 platform 7 found 0xbe current 0xbe running 0xbe";
+        const BSP: &str = "Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d";
+        const SIBLING: &str = "Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d";
+        let t14 = |cpu: u32| (cpu, T14);
+        let amd = |cpu: u32| (cpu, if cpu == 0 || cpu % 2 == 1 { BSP } else { SIBLING });
+
+        let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| match microcode_on_metal(&log(lines), cpus) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+
+        microcode_on_metal(&log(&(0..8).map(t14).collect::<Vec<_>>()), 8)
+            .map_err(|e| format!("the T14 as Linux reads it was refused: {e}"))?;
+        microcode_on_metal(&log(&(0..16).map(amd).collect::<Vec<_>>()), 16)
+            .map_err(|e| format!("the AMD bench as Linux reads it was refused: {e}"))?;
+
+        refused("seven lines for eight CPUs", &(0..7).map(t14).collect::<Vec<_>>(), 8, "one microcode line")?;
+        let mut twice: Vec<_> = (0..8).map(t14).collect();
+        twice[7] = t14(6);
+        refused("cpu6 twice and cpu7 never", &twice, 8, "one microcode line")?;
+        let mut below: Vec<_> = (0..8).map(t14).collect();
+        below[3] = (3, "Intel signature 0x806c1 platform 7 found 0xbd current 0xbd running 0xbd");
+        refused("a T14 CPU below Linux", &below, 8, "Linux runs 0xbe")?;
+        let mut unloaded: Vec<_> = (0..16).map(amd).collect();
+        unloaded[5] = (5, "Amd signature 0x860f01 found 0x8600106 current 0x860010d running 0x8600106");
+        refused("an AMD CPU left on its firmware's", &unloaded, 16, "Linux loads 0x860010d")?;
+        let mut no_load: Vec<_> = (0..16).map(amd).collect();
+        no_load[0] = (0, SIBLING);
+        refused("a BSP that found the patch already", &no_load, 16, "which the BSP finds")?;
+        let mut other: Vec<_> = (0..8).map(t14).collect();
+        other[2] = (2, "Intel signature 0x806c2 platform 7 found 0xbe current 0xbe running 0xbe");
+        refused("two signatures in one machine", &other, 8, "is not")?;
+        refused(
+            "a machine nobody read under Linux",
+            &[(0, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4"), (1, "Intel signature 0x906a3 platform 7 found 0x4 current 0x4 running 0x4")],
+            2,
+            "no Linux reading",
+        )?;
+        eprintln!("  [microcode] the verdict refuses 7 machines and accepts both benches");
+        Ok(())
+    }
+
     /// [`mask_windows`] and `irqcensus::windows_under` against captures no
     /// boot has to produce: two CPUs and the T14 row's three exits, a report
     /// each, with cpu1 holding at the first.

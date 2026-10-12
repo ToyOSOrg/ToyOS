@@ -908,6 +908,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
+        // Every CPU's microcode, held to Linux's reading of the same machine:
+        // `microcode_on_metal` says which machine is held to what.
+        "microcode",
+        metal::Metal { arms: METALCASE, judge: |b| microcode_on_metal(b[0].kernel().text(), b[0].cpus()?) },
+    ),
+    (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
         // with no job behind it.
@@ -5464,6 +5470,113 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
     }
     eprintln!("  [ioapic] {} unit(s), overrides {isos}", units.len());
     Ok(())
+}
+
+/// What each CPU's `microcode:` line says: one line from each CPU this
+/// machine brought up, all of one signature, and each held to Linux's reading
+/// of the same machine, which is the exit's "at least as current as Linux's".
+///
+/// - **The T14** (`kernel/cpuvuln/fixtures/t14/cpuinfo.txt`): Linux runs 0xbe
+///   on all eight CPUs, the update its firmware loads and Intel's newest for
+///   it, so every CPU reads platform 7 and finds that revision current.
+/// - **The AMD bench** (`tests/metal/amd-linux/microcode.txt`): Linux updated
+///   early from the firmware's revision to linux-firmware's patch, so the BSP
+///   finds the firmware's, and every CPU loads the patch and runs it. A thread
+///   whose core-mate loaded before it finds either, whether one engine or two
+///   serve the core.
+fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const RENOIR: u32 = 0x0086_0f01;
+    let lines = microcode_lines(log)?;
+    let ids: BTreeSet<u32> = lines.iter().map(|line| line.cpu).collect();
+    let want: BTreeSet<u32> = (0..cpus).collect();
+    if ids != want || lines.len() != want.len() {
+        return Err(format!("expected one microcode line from each of {want:?}, got {lines:?}"));
+    }
+    let signature = lines[0].signature;
+    if let Some(other) = lines.iter().find(|line| line.signature != signature) {
+        return Err(format!("cpu0 is signature {signature:#x} and {other:?} is not"));
+    }
+    let hex = |word: &str| u32::from_str_radix(word.trim_start_matches("0x"), 16).map_err(|e| format!("{word:?}: {e}"));
+    let held: Box<dyn Fn(&MicrocodeLine) -> Option<String>> = match signature {
+        T14 => {
+            let linux: Vec<&str> = include_str!("../kernel/cpuvuln/fixtures/t14/cpuinfo.txt")
+                .lines()
+                .filter_map(|line| line.strip_prefix("microcode\t: "))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let [linux] = linux[..] else {
+                return Err(format!("Linux's reading of the T14 runs more than one revision: {linux:?}"));
+            };
+            let linux = hex(linux)?;
+            Box::new(move |line| {
+                ((line.platform, line.found, line.outcome.as_str(), line.running) != (Some(7), linux, "current", linux))
+                    .then(|| format!("Linux runs {linux:#x} on platform 7, the newest Intel names it"))
+            })
+        }
+        RENOIR => {
+            let linux = include_str!("metal/amd-linux/microcode.txt");
+            let said = |label: &str| {
+                linux.lines().find_map(|line| line.strip_prefix(label)).ok_or_else(|| format!("Linux's reading says no {label:?}"))
+            };
+            let (firmware, current) =
+                (hex(said("microcode: Updated early from: ")?)?, hex(said("microcode: Current revision: ")?)?);
+            Box::new(move |line| {
+                if line.cpu == 0 && line.found != firmware {
+                    Some(format!("its firmware runs {firmware:#x}, which the BSP finds"))
+                } else if ![firmware, current].contains(&line.found) {
+                    Some(format!("a CPU finds its firmware's {firmware:#x} or its core's {current:#x}"))
+                } else {
+                    ((line.outcome.as_str(), line.running) != ("loaded", current))
+                        .then(|| format!("Linux loads {current:#x} over the firmware's {firmware:#x}"))
+                }
+            })
+        }
+        other => return Err(format!("no Linux reading of signature {other:#x} is committed")),
+    };
+    if let Some((line, why)) = lines.iter().find_map(|line| held(line).map(|why| (line, why))) {
+        return Err(format!("{line:?}: {why}"));
+    }
+    eprintln!("  [microcode] {} CPUs of signature {signature:#x} hold Linux's reading", lines.len());
+    Ok(())
+}
+
+/// One `microcode:` line, the fields [`microcode_on_metal`] holds.
+#[derive(Debug)]
+struct MicrocodeLine {
+    cpu: u32,
+    signature: u32,
+    platform: Option<u32>,
+    found: u32,
+    /// `loaded`, `current`, or `loads` for one that loads nothing.
+    outcome: String,
+    running: u32,
+}
+
+fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
+    let mut out = Vec::new();
+    for line in log.lines() {
+        let Some(rest) = line.split("microcode: cpu").nth(1) else { continue };
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let field = |name: &str| words.iter().position(|w| *w == name).and_then(|at| words.get(at + 1));
+        let hex = |name: &str| -> Option<u32> { u32::from_str_radix(field(name)?.trim_start_matches("0x"), 16).ok() };
+        let unreadable = || format!("unreadable microcode line: {line:?}");
+        out.push(MicrocodeLine {
+            cpu: words.first().and_then(|id| id.parse().ok()).ok_or_else(unreadable)?,
+            signature: hex("signature").ok_or_else(unreadable)?,
+            platform: field("platform").map(|p| p.parse().map_err(|_| unreadable())).transpose()?,
+            found: hex("found").ok_or_else(unreadable)?,
+            outcome: words
+                .iter()
+                .position(|w| *w == "found")
+                .and_then(|at| words.get(at + 2))
+                .ok_or_else(unreadable)?
+                .to_string(),
+            running: hex("running").ok_or_else(unreadable)?,
+        });
+    }
+    Ok(out)
 }
 
 /// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must

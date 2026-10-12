@@ -3,8 +3,16 @@
 
 [package]
 name = "toyos-microcode"
-description = "Intel microcode update files validated and matched to a CPU as the SDM's Microcode Update Facilities define them, pure."
+description = "Intel's microcode update files and AMD's containers validated and matched to a CPU as each maker reads them, whether a CPU loads at all, and the files the kernel embeds, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
+
+[dependencies]
+toyos-cpuvuln = { path = "../cpuvuln" }
+
+[dev-dependencies]
+# Hashes the embedded container's patches for the test that holds them to
+# Linux's digests.
+toyos-sha2 = { path = "../../lib/sha2" }

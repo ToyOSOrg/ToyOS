@@ -770,6 +770,12 @@ pub const FLASHABLE: &[&str] = &[
     // without interrupt remapping. It writes no register a reset does not
     // return to firmware.
     "iommu-no-remap",
+    // The BSP is handed the T14's Intel update with its header's revision
+    // raised by one and its checksum sealed again, whose payload is the
+    // revision the CPU already runs, so the boot stops at the read-back. An
+    // update lasts until a hard reset (SDM Vol. 3A §12.11.6.1), and the panic's
+    // reset is one, so the machine is what it was.
+    "microcode-reseal",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.

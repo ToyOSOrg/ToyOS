@@ -1,0 +1,8 @@
+microcode: Current revision: 0x0860010d
+microcode: Updated early from: 0x08600106
+microcode	: 0x860010d
+cpu family	: 23
+model		: 96
+stepping	: 1
+amd-ucode-firmware-20260810-1.fc44.noarch
+7.2.4-ogc3.1.fc44.x86_64
