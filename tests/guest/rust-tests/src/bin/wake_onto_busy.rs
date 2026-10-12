@@ -23,8 +23,7 @@
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle, Thread};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
 
 use toyos_abi::clock::nanos_since_boot;
 use toyos_abi::syscall;
@@ -82,19 +81,18 @@ struct Seat {
 /// accepts, letting every other go; answer it and that CPU. Each candidate
 /// says where it is and parks until it is judged, so the CPU it is kept on is
 /// the one it parked on.
-fn place(
-    waker: &Thread,
-    wanted: impl Fn(u32) -> bool,
-    body: impl FnOnce() + Clone + Send + 'static,
-) -> (JoinHandle<()>, u32) {
+///
+/// **The caller spins while it waits rather than parking**, so its own CPU is
+/// never idle: a kernel that hands work to idle CPUs would otherwise hand it
+/// a candidate, or hand the caller, woken, to another CPU.
+fn place(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Clone + Send + 'static) -> (JoinHandle<()>, u32) {
     let deadline = nanos_since_boot() + STAGE_NS;
     for _ in 0..TRIES {
         let seat = Arc::new(Seat { on: AtomicU32::new(UNSEEN), verdict: AtomicU8::new(UNDECIDED) });
         let candidate = {
-            let (seat, waker, body) = (seat.clone(), waker.clone(), body.clone());
+            let (seat, body) = (seat.clone(), body.clone());
             thread::spawn(move || {
                 seat.on.store(cpu::apic_id(), Ordering::Release);
-                waker.unpark();
                 loop {
                     match seat.verdict.load(Ordering::Acquire) {
                         UNDECIDED => thread::park(),
@@ -110,11 +108,10 @@ fn place(
             if on != UNSEEN {
                 break on;
             }
-            let now = nanos_since_boot();
-            if now >= deadline {
+            if nanos_since_boot() >= deadline {
                 refuse(Refusal::NotStaged, "a candidate never said which CPU it ran on");
             }
-            thread::park_timeout(Duration::from_nanos(deadline - now));
+            std::hint::spin_loop();
         };
         let keep = wanted(on);
         seat.verdict.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
@@ -136,7 +133,7 @@ fn main() {
     let turn = Arc::new(AtomicU32::new(0));
     let main = thread::current();
 
-    let (partner, partner_on) = place(&main, |on| on != cpu::apic_id(), {
+    let (partner, partner_on) = place(|on| on != cpu::apic_id(), {
         let (stop, turn, main) = (stop.clone(), turn.clone(), main.clone());
         move || loop {
             while turn.load(Ordering::Acquire) != 1 {
@@ -150,7 +147,7 @@ fn main() {
         }
     });
     let spinner_at = Arc::new(AtomicU32::new(UNSEEN));
-    let (spinner, _) = place(&main, |on| on == partner_on, {
+    let (spinner, _) = place(|on| on == partner_on, {
         let (stop, at) = (stop.clone(), spinner_at.clone());
         move || {
             let mut x = 1u64;
