@@ -198,19 +198,22 @@ otherwise pay to find again:
   ToyOS's claims load one, of 459 bytes. Owner: S1, below. **Exit**: the
   T14's `acpi_tables_loaded` reads both `_OSC`s negotiated and that block
   loaded, nothing refused.
-- **A refused evaluation keeps what it stored**, and nothing gives an
-  interpreter's 16 MiB back: after one method has filled it, an Integer
-  still evaluates, a field that fits one among them, and every method that
-  must hold anything new is refused; so is a String, Buffer or Package
-  handed to the caller, `\_S5`'s among them, where the bound has no room
-  for the caller's copy while it is built
+- **A method refused at the heap bound ends as ACPICA ends one refused
+  for memory**, the owner's "follow Linux/ACPICA" (#875): everything it
+  made and every Mutex it held is given back, and it is refused by the
+  bound's name. **Exit, met by #875**:
+  `a_method_refused_at_the_bound_gives_back_what_it_made`
+  (`system/acpiserver/aml/tests/heap.rs`) fills the bound through one
+  method and then evaluates a method that builds a buffer of a mebibyte.
+
+  What a method stores into an object that outlives it stays, as ACPICA
+  keeps it, so an interpreter filled that way stays full: an Integer still
+  evaluates, a field that fits one among them, and every method that must
+  hold anything new is refused, as is a String, Buffer or Package handed to
+  the caller, `\_S5`'s among them
   (`what_is_held_live_is_bounded_in_sum`, `system/acpiserver/aml/tests/hostile.rs`;
-  `a_full_interpreter_reads_a_field_that_fits_an_integer`, `system/acpiserver/aml/tests/heap.rs`).
-  Owner: this stage, which decides
-  what the server does with an interpreter that is full; #875 proposes it
-  in its body, unbuilt. **Exit**: a test
-  fills the budget through one method, and the server then evaluates a
-  method that builds a buffer.
+  `a_full_interpreter_reads_a_field_that_fits_an_integer`). That is the
+  ruled state and no weakness with an exit.
 - **The interpreter's 16 MiB bounds the heap it holds from one call to the
   next, not what one call holds while it runs.** The meter counts what an
   interpreter's allocations ask for (`object::Meter`,
@@ -264,8 +267,9 @@ otherwise pay to find again:
   two of them writing anything, the PCI root bridge's and the embedded
   controller's; and that controller's device is below that bridge, so
   under those answers the two run parent before child whichever order
-  siblings take. Outside the tree on the T14's dump, the server's walk
-  reads 56 `_STA` and runs 37 `_INI`, two refused at the ten-second wait
+  siblings take. Outside the tree on the T14's dump, the server's walk,
+  which examines what ACPICA's does, reads 12 `_STA` and runs 37 `_INI`,
+  two refused at the ten-second wait
   for an SMI answered by nothing a dump holds (#875); what they do under
   the machine's own answers the T14's `acpi_tables_loaded` reads.
 - **An evaluation may ask to wait ten seconds, and no caller names another
@@ -369,27 +373,12 @@ mediated access, leaves open:
   then supplies a sleep type that is not the machine's and reads it refused.
 
 What the firmware call, which the kernel makes for the server where its AML
-stores a byte to `SMI_CMD`, leaves open. No AML the server runs makes one
-now: its host asks the kernel for three port writes, and for the embedded
-controller's transactions where AML reaches its space, and denies every other
-write by name (`FORWARDED` in `system/acpiserver/src/host.rs`), the
-index registers 0x72 and 0xCD6, a byte each, and the POST port's word.
-Those are what an AMD laptop's AML wrote, measured outside the tree on its
-tables with nothing cleared between the load, the device search and all
-102 of its query methods (#845): its DSDT writes both indexes at its load
-and is refused without either, the search writes nothing, and the queries
-write only the POST port.
-
-- **A port write outside the three ends what made it.** A machine whose
-  AML writes another port at its load has that table refused by name, and
-  a method that does has its evaluation refused. The T14's load writes
-  none: it loaded with every write denied. A byte to the FADT's `SMI_CMD`
-  is asked of the kernel since the owner's ruling (#875). Outside the tree
-  on the AMD bench's dump, its eight interrupt links' `_STA` each write a
-  byte to port 0xC00, the PCI interrupt router's index, and are refused:
-  that reading goes to the owner. Owner: this stage. **Exit**: the owner
-  rules that write in the list or refused for good, and the T14's
-  `counters` row reads a call `SMI_CMD` took with the readings below.
+stores a byte to `SMI_CMD`, leaves open. The server asks the kernel for
+every port write its AML makes, the owner's "Allow, like Linux" (#875), and
+the kernel refuses the ports it declares and those ACPICA keeps from AML
+(`PROTECTED` in `lib/userbound/src/firmware.rs`). Outside the tree on the
+T14's dump, two of its `_INI`s call the firmware through `SMI_CMD`; on
+neither bench's dump does AML write a port the kernel refuses.
 
 - **What a call does there is the firmware's**, and the kernel bounds who,
   when, where, which byte and how often:
