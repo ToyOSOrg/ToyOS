@@ -1,18 +1,23 @@
-//! How long a ping-pong round trip takes when the partner parks on a CPU that a
-//! spinner of the same program holds, beside CPUs with nothing to run — so the
-//! partner's wake lands on a busy CPU while an idle one could serve it.
+//! How long a wake takes to run when it lands on a CPU a spinner holds, beside
+//! CPUs with nothing to run.
+//!
+//! **Every timed wake lands on the busy CPU**, because a woken thread that is
+//! handed to an idle CPU parks there afterwards and its next wake finds that
+//! CPU idle. So each round wakes a partner it has never woken: all of them were
+//! parked on one CPU before a spinner was kept there, and each, once woken,
+//! says where it ran and parks again where it is, which leaves that CPU idle
+//! sooner than an exit would. A kernel that leaves the wake on the busy CPU
+//! until that CPU's own quantum ends waits up to a quantum every round; one
+//! that drains it at once and hands it to an idle CPU waits an interrupt or
+//! two.
 //!
 //! **The arrangement is staged and checked before anything is timed**, because
 //! spawn placement alone decides nothing a row can rest on. Each staged thread
 //! reads the CPU it first runs on and is kept only where it was wanted, or let
-//! go and started again: the partner on a CPU other than the waker's and the
-//! one device interrupts target, then a spinner on the partner's. A kernel
-//! that leaves the partner's wake on the busy CPU waits out the spinner's
-//! quantum every round; one that hands it to an idle CPU pays that once.
-//!
-//! Two threads hand a turn back and forth through `park`/`unpark`, each round
-//! two wakes, timed in this program on the kernel's clock and histogrammed at
-//! 1 µs.
+//! go and started again: the partners on one CPU other than the waker's and
+//! the one device interrupts target, then a spinner there. The waker spins
+//! rather than parks from the first placement to the last round, so its own
+//! CPU is never idle for a wake to be handed to and it is never woken itself.
 //!
 //! **Boundary contract: this program's exit code is its p99, in microseconds**,
 //! as `cyclictest`'s is and for its reason — on the T14 the kernel's
@@ -23,7 +28,7 @@
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle, Thread};
+use std::thread::{self, JoinHandle};
 
 use toyos_abi::clock::nanos_since_boot;
 use toyos_abi::syscall;
@@ -31,26 +36,19 @@ use toyos_abi::syscall;
 #[path = "../arch/cpu.rs"]
 mod cpu;
 
-/// Rounds measured, and the span that ends the run first if the machine is
-/// slow enough to need it — a wake that waits out a quantum is ten
-/// milliseconds a round.
-const ROUNDS: usize = 20_000;
-const SPAN_NS: u64 = 2_000_000_000;
-
-/// Discarded before the histogram opens: the first rounds pay for the
-/// threads' own start.
-const WARMUP: usize = 20;
+/// Rounds timed, one partner each, and the span that ends the run first if
+/// the machine is slow enough to need it — a wake left behind the spinner
+/// waits up to a quantum, ten milliseconds.
+const ROUNDS: usize = 200;
+const SPAN_NS: u64 = 5_000_000_000;
 
 const BUCKETS: usize = 32_768;
 
 /// How many threads one placement may start, and how long it may take: a
 /// candidate lands where spawn placement puts it, which rotates over the CPUs,
-/// so a machine of `n` needs about `n` of them. And how many times the whole
-/// arrangement is staged again before the run is refused: a thread can be
-/// moved while staging is still under way.
-const TRIES: usize = 64;
+/// so a machine of `n` needs about `n` of them.
+const TRIES: usize = 256;
 const STAGE_NS: u64 = 5_000_000_000;
-const ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy)]
 #[repr(i32)]
@@ -69,20 +67,24 @@ fn refuse(why: Refusal, said: &str) -> ! {
 }
 
 /// The CPU every device interrupt targets (`MSG_DEST` in
-/// `kernel/src/arch/x86_64/apic.rs`). The partner is never staged there: a
-/// pass run for an interrupt's wake would serve its wake early on any kernel.
+/// `kernel/src/arch/x86_64/apic.rs`). The partners are never staged there: a
+/// pass run for an interrupt would drain their wakes early on any kernel.
 const DEVICE_IRQ_CPU: u32 = 0;
 
 const UNSEEN: u32 = u32::MAX;
 const UNDECIDED: u8 = 0;
 const KEPT: u8 = 1;
 const LET_GO: u8 = 2;
+const RUN: u8 = 3;
+const DONE: u8 = 4;
+const STOP: u8 = 5;
 
-/// A thread started to be placed: the CPU it first ran on, and whether it
-/// stays.
+/// A thread started to be placed: the CPU it first ran on, the CPU it ran on
+/// when it was woken to run, and how far it has got.
 struct Seat {
     on: AtomicU32,
-    verdict: AtomicU8,
+    ran_on: AtomicU32,
+    phase: AtomicU8,
 }
 
 /// Wait, spinning, for `seen` to answer something, or say why not.
@@ -99,98 +101,128 @@ fn spin_for(deadline: u64, seen: impl Fn() -> Option<u32>, what: &str) -> Result
 }
 
 /// Start threads running `body` until one first runs on a CPU `wanted`
-/// accepts, letting every other go; answer it and that CPU. Each candidate
-/// says where it is and parks until it is judged, so the CPU it is kept on is
-/// the one it parked on.
-///
-/// **The caller spins while it waits rather than parking**, so its own CPU is
-/// never idle: a kernel that hands work to idle CPUs would otherwise hand it
-/// a candidate, or hand the caller, woken, to another CPU.
+/// accepts, letting every other go; answer it, its seat and that CPU. Each
+/// candidate says where it is and parks until it is judged, so the CPU it is
+/// kept on is the one it parked on.
 fn place(
     wanted: impl Fn(u32) -> bool,
-    body: impl FnOnce() + Clone + Send + 'static,
-) -> Result<(JoinHandle<()>, u32), String> {
+    body: impl FnOnce(&Seat) + Clone + Send + 'static,
+) -> Result<(JoinHandle<()>, Arc<Seat>, u32), String> {
     let deadline = nanos_since_boot() + STAGE_NS;
     for _ in 0..TRIES {
-        let seat = Arc::new(Seat { on: AtomicU32::new(UNSEEN), verdict: AtomicU8::new(UNDECIDED) });
+        let seat = Arc::new(Seat {
+            on: AtomicU32::new(UNSEEN),
+            ran_on: AtomicU32::new(UNSEEN),
+            phase: AtomicU8::new(UNDECIDED),
+        });
         let candidate = {
             let (seat, body) = (seat.clone(), body.clone());
             thread::spawn(move || {
-                seat.on.store(cpu::apic_id(), Ordering::Release);
+                seat.on.store(cpu::x2apic_id(), Ordering::Release);
                 loop {
-                    match seat.verdict.load(Ordering::Acquire) {
+                    match seat.phase.load(Ordering::Acquire) {
                         UNDECIDED => thread::park(),
                         KEPT => break,
                         _ => return,
                     }
                 }
-                body();
+                body(&seat);
             })
         };
         let seen = || Some(seat.on.load(Ordering::Acquire)).filter(|on| *on != UNSEEN);
         let on = spin_for(deadline, seen, "a candidate")?;
         let keep = wanted(on);
-        seat.verdict.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
+        seat.phase.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
         candidate.thread().unpark();
         if keep {
-            return Ok((candidate, on));
+            return Ok((candidate, seat, on));
         }
         candidate.join().expect("a candidate let go panicked");
     }
     Err(format!("{TRIES} threads started and none where it was wanted"))
 }
 
-/// The arrangement a run times: the partner parked on `partner_on`, and a
-/// spinner there that says where it spins in `spinner_at`.
+/// Park until the phase is one of `until`, and answer it.
+fn park_until(seat: &Seat, until: &[u8]) -> u8 {
+    loop {
+        let phase = seat.phase.load(Ordering::Acquire);
+        if until.contains(&phase) {
+            return phase;
+        }
+        thread::park();
+    }
+}
+
+/// A partner's whole life once kept: park on the CPU it was kept on until its
+/// round, then say where it ran and park there until the run ends.
+fn partner(seat: &Seat) {
+    if park_until(seat, &[RUN, STOP]) == STOP {
+        return;
+    }
+    seat.ran_on.store(cpu::x2apic_id(), Ordering::Relaxed);
+    seat.phase.store(DONE, Ordering::Release);
+    park_until(seat, &[STOP]);
+}
+
+/// What a run times: the partners parked on `busy`, and a spinner there that
+/// says where it spins in `spinner_at`.
 struct Staged {
+    partners: Vec<(JoinHandle<()>, Arc<Seat>)>,
+    busy: u32,
     stop: Arc<AtomicBool>,
-    turn: Arc<AtomicU32>,
-    partner: JoinHandle<()>,
-    partner_on: u32,
     spinner: Option<JoinHandle<()>>,
     spinner_at: Arc<AtomicU32>,
 }
 
 impl Staged {
-    /// Stop both threads, and answer where the spinner last said it was.
+    /// Stop the spinner and every partner, and answer where the spinner last
+    /// said it was.
     fn end(self) -> u32 {
         self.stop.store(true, Ordering::Release);
-        self.partner.thread().unpark();
-        self.partner.join().expect("the partner panicked");
         if let Some(spinner) = self.spinner {
             spinner.join().expect("the spinner panicked");
+        }
+        for (partner, seat) in self.partners {
+            seat.phase.store(STOP, Ordering::Release);
+            partner.thread().unpark();
+            partner.join().expect("a partner panicked");
         }
         self.spinner_at.load(Ordering::Relaxed)
     }
 }
 
-/// Stage the partner on a CPU other than this thread's and the interrupts',
-/// then a spinner on the partner's, and check that this thread is still
+/// Stage `ROUNDS` partners on one CPU other than the waker's and the
+/// interrupts', then a spinner there, and check that the waker is still
 /// elsewhere and the spinner still there.
-fn stage(waker: &Thread) -> Result<Staged, String> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let turn = Arc::new(AtomicU32::new(0));
-    let (partner, partner_on) = place(|on| on != cpu::apic_id() && on != DEVICE_IRQ_CPU, {
-        let (stop, turn, waker) = (stop.clone(), turn.clone(), waker.clone());
-        move || loop {
-            while turn.load(Ordering::Acquire) != 1 {
-                if stop.load(Ordering::Acquire) {
-                    return;
-                }
-                thread::park();
+fn stage(waker_on: u32) -> Result<Staged, String> {
+    let mut staged = Staged {
+        partners: Vec::with_capacity(ROUNDS),
+        busy: UNSEEN,
+        stop: Arc::new(AtomicBool::new(false)),
+        spinner: None,
+        spinner_at: Arc::new(AtomicU32::new(UNSEEN)),
+    };
+    while staged.partners.len() < ROUNDS {
+        let busy = staged.busy;
+        let wanted = |on| on != waker_on && on != DEVICE_IRQ_CPU && (busy == UNSEEN || on == busy);
+        match place(wanted, partner) {
+            Ok((thread, seat, on)) => {
+                staged.busy = on;
+                staged.partners.push((thread, seat));
             }
-            turn.store(0, Ordering::Release);
-            waker.unpark();
+            Err(why) => {
+                staged.end();
+                return Err(why);
+            }
         }
-    })?;
-    let spinner_at = Arc::new(AtomicU32::new(UNSEEN));
-    let mut staged = Staged { stop, turn, partner, partner_on, spinner: None, spinner_at };
-    let placed = place(|on| on == partner_on && cpu::apic_id() != partner_on, {
+    }
+    let busy = staged.busy;
+    let placed = place(|on| on == busy, {
         let (stop, at) = (staged.stop.clone(), staged.spinner_at.clone());
-        move || {
+        move |_: &Seat| {
             let mut x = 1u64;
             loop {
-                at.store(cpu::apic_id(), Ordering::Relaxed);
+                at.store(cpu::x2apic_id(), Ordering::Relaxed);
                 if stop.load(Ordering::Relaxed) {
                     return;
                 }
@@ -201,7 +233,7 @@ fn stage(waker: &Thread) -> Result<Staged, String> {
         }
     });
     match placed {
-        Ok((spinner, _)) => staged.spinner = Some(spinner),
+        Ok((spinner, _, _)) => staged.spinner = Some(spinner),
         Err(why) => {
             staged.end();
             return Err(why);
@@ -215,11 +247,12 @@ fn stage(waker: &Thread) -> Result<Staged, String> {
             return Err(why);
         }
     };
-    let waker_on = cpu::apic_id();
-    if waker_on == partner_on || at != partner_on {
+    let now_on = cpu::x2apic_id();
+    if now_on != waker_on || at != busy {
         staged.end();
         return Err(format!(
-            "the waker is on CPU {waker_on}, the partner parked on {partner_on} and the spinner on {at}"
+            "the waker moved from CPU {waker_on} to {now_on}, the partners parked on {busy} and \
+             the spinner is on {at}"
         ));
     }
     Ok(staged)
@@ -228,33 +261,31 @@ fn stage(waker: &Thread) -> Result<Staged, String> {
 fn main() {
     let cpus = syscall::cpu_count() as usize;
     if cpus < 3 {
-        refuse(Refusal::NotStaged, "the waker, the partner and the interrupts' CPU need three");
+        refuse(Refusal::NotStaged, "the waker, the busy CPU and the interrupts' CPU need three");
     }
-    let main = thread::current();
-    let mut why = String::new();
-    let Some(staged) = (0..ATTEMPTS).find_map(|_| stage(&main).map_err(|said| why = said).ok()) else {
-        refuse(Refusal::NotStaged, &format!("not staged in {ATTEMPTS} attempts, the last: {why}"));
+    let waker_on = cpu::x2apic_id();
+    let staged = match stage(waker_on) {
+        Ok(staged) => staged,
+        Err(why) => refuse(Refusal::NotStaged, &format!("not staged: {why}")),
     };
-    let (waker_on, partner_on) = (cpu::apic_id(), staged.partner_on);
-    let (turn, partner) = (staged.turn.clone(), staged.partner.thread().clone());
+    let busy = staged.busy;
 
     let mut histogram = vec![0u32; BUCKETS];
     let mut overflow = 0u32;
     let mut worst_ns = 0u64;
     let mut rounds = 0usize;
+    let mut off_busy = 0usize;
     let begun = nanos_since_boot();
-    for round in 0..WARMUP + ROUNDS {
+    for (partner, seat) in &staged.partners {
         let sent = nanos_since_boot();
-        turn.store(1, Ordering::Release);
-        partner.unpark();
-        while turn.load(Ordering::Acquire) != 0 {
-            thread::park();
+        seat.phase.store(RUN, Ordering::Release);
+        partner.thread().unpark();
+        while seat.phase.load(Ordering::Acquire) != DONE {
+            std::hint::spin_loop();
         }
         let took = nanos_since_boot() - sent;
-        if round < WARMUP {
-            continue;
-        }
         rounds += 1;
+        off_busy += usize::from(seat.ran_on.load(Ordering::Relaxed) != busy);
         worst_ns = worst_ns.max(took);
         match usize::try_from(took / 1_000).ok().filter(|us| *us < BUCKETS) {
             Some(us) => histogram[us] += 1,
@@ -264,10 +295,14 @@ fn main() {
             break;
         }
     }
-    // The spinner is still where it was staged.
+    let now_on = cpu::x2apic_id();
+    // The spinner is still where it was staged, and so is the waker.
     let held = staged.end();
-    if held != partner_on {
-        refuse(Refusal::NotStaged, &format!("the spinner left CPU {partner_on} for {held}"));
+    if held != busy || now_on != waker_on {
+        refuse(
+            Refusal::NotStaged,
+            &format!("the spinner left CPU {busy} for {held}, or the waker CPU {waker_on} for {now_on}"),
+        );
     }
 
     let percentile = |want: usize| -> Option<u64> {
@@ -283,9 +318,9 @@ fn main() {
     let shown = |p: Option<u64>| p.map_or_else(|| format!(">{}", BUCKETS - 1), |us| us.to_string());
     let p99 = percentile(rounds * 99 / 100);
     println!(
-        "wake_onto_busy: {rounds} rounds on {cpus} cpus, waker on CPU {waker_on}, partner parked \
-         beside a spinner on CPU {partner_on}: p50={}us p90={}us p99={}us max={}us, {overflow} past \
-         the {BUCKETS}us histogram",
+        "wake_onto_busy: {rounds} wakes on {cpus} cpus onto CPU {busy} beside its spinner, waker on \
+         CPU {waker_on}, {off_busy} run off CPU {busy}: p50={}us p90={}us p99={}us max={}us, \
+         {overflow} past the {BUCKETS}us histogram",
         shown(percentile(rounds / 2)),
         shown(percentile(rounds * 9 / 10)),
         shown(p99),
