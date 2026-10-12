@@ -28,14 +28,16 @@ after its connect returns, and netstack's next pass of its loop up to that
 read. The step after the answer, to the client's return, read 0.131–0.209 ms
 over the twelve downloads' lookups, the same order as the slow mode's excess.
 
-Both arms predate pull request #861, after which netstack's wait returns only
-on a change (`system/netstack/src/watches.rs`), which moves what a pass waits
-on inside this span.
+Both arms ran pull request #861's netstack, whose wait returns only on a
+change (`system/netstack/src/watches.rs`): each descends from its head
+`443fb5d10`. Both predate #871's kernel, which saves user FP/vector state only
+at a switch instead of at every system call, and the span holds system calls
+on both sides.
 
-**Exit**: a T14 run on a tree with #861, whose stamps on both sides of the
-IPC, the client's write and its return beside netstack's wake and read, name
-what the slow mode waits on; then it is removed, or recorded as a defect in
-the file that owns that step, and this file goes.
+**Exit**: a T14 run whose stamps on both sides of the IPC, the client's write
+and its return beside netstack's wake and read, name what the slow mode waits
+on; then it is removed, or recorded as a defect in the file that owns that
+step, and this file goes.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`, whose
 server's loop and stamps the span crosses.
