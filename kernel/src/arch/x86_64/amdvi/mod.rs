@@ -88,7 +88,7 @@ pub fn init(rsdp_addr: u64) -> bool {
                 if let Some(regs) = present(units, &unit) {
                     #[cfg(feature = "boot-actuators")]
                     if crate::actuator::iommu_firmware_left() {
-                        leave_on(regs, &ivrs, &unit);
+                        leave_on(regs);
                     }
                     switch_off(units, &unit, regs);
                     off += 1;
@@ -261,15 +261,14 @@ fn switch_off(index: usize, unit: &Unit, regs: Mmio) {
 /// protecting memory before the operating system runs may leave it — every
 /// requester's device table entry translating through a table that maps
 /// nothing, so every DMA is blocked, with its command buffer and event log
-/// running. The entry of every requester the unit's IVHD names is
-/// invalidated, which is what a unit reads a changed entry on, and a
-/// completion wait says each was.
+/// running. One `INVALIDATE_IOMMU_ALL` empties every cache the unit holds,
+/// so it reads every entry as written, and a completion wait says it did.
 ///
 /// The tables are leaked, as firmware's are its own: the unit reads them
 /// until it is switched off, and freed they could read back as an entry that
 /// passes DMA untranslated.
 #[cfg(feature = "boot-actuators")]
-fn leave_on(regs: Mmio, ivrs: &Ivrs<impl Phys>, unit: &Unit) {
+fn leave_on(regs: Mmio) {
     use crate::mm::{pmm, DirectMap};
 
     const DEVICE_TABLE: u64 = 0x0000;
@@ -281,16 +280,25 @@ fn leave_on(regs: Mmio, ivrs: &Ivrs<impl Phys>, unit: &Unit) {
     const EVENT_TAIL: u64 = 0x2018;
     /// 2^8 entries of 16 bytes, 4 KiB, in bits 59:56 of either base.
     const LOG_LEN: u64 = 8 << 56;
-    const RING: usize = 1 << 8;
     const DEVICE_IDS: u64 = 1 << 16;
     const ENTRY: u64 = 32;
     /// `V`, `TV`, and a four-level table: `Mode` 100b at 11:9; `IR` and `IW`
     /// clear.
     const BLOCKED: u64 = 1 | (1 << 1) | (4 << 9);
-    const INVALIDATE_ENTRY: u64 = 2 << 60;
+    /// `IASup`, set where the unit takes `INVALIDATE_IOMMU_ALL`.
+    const IA_SUP: u64 = 1 << 6;
+    /// The opcode alone: every other bit of the command is reserved.
+    const INVALIDATE_IOMMU_ALL: u64 = 8 << 60;
     /// The opcode, and `S`: store the second word at the address.
     const COMPLETION_WAIT: u64 = (1 << 60) | 1;
     const DONE: u64 = 0x600d_f00d;
+
+    let efr = regs.read_u64(EXTENDED_FEATURES);
+    assert!(
+        efr & IA_SUP != 0,
+        "amdvi: the unit's EFR {efr:#018x} has IASup clear, so it takes no INVALIDATE_IOMMU_ALL and the actuator \
+         cannot make it read the entries it leaves"
+    );
 
     let window = |phys: u64, bytes: u64| {
         // SAFETY: `phys` is inside a page `pmm::alloc_page` handed out and
@@ -318,31 +326,12 @@ fn leave_on(regs: Mmio, ivrs: &Ivrs<impl Phys>, unit: &Unit) {
     }
     regs.write_u64(CONTROL, regs.read_u64(CONTROL) | CMD_BUF_EN | EVENT_LOG_EN | IOMMU_EN);
 
-    let commands = window(commands_at, RING as u64 * 16);
-    let mut tail = 0;
-    let mut push = |low: u64, high: u64| {
-        // A ring holds one entry fewer than it has.
-        assert!(tail < (RING as u64 - 1) * 16, "amdvi: the unit's requesters overflow the actuator's {RING}-entry ring");
-        commands.write_u64(tail, low);
-        commands.write_u64(tail + 8, high);
-        tail += 16;
-    };
-    for entry in ivrs.devices(unit) {
-        let (first, last) = match entry.expect("amdvi: the actuator's unit has a device list it can walk") {
-            DeviceEntry::All { .. } => (0, u16::MAX),
-            DeviceEntry::Select { id, .. } | DeviceEntry::Extended { id, .. } | DeviceEntry::Hid { id, .. } => (id, id),
-            DeviceEntry::Range { first, last, .. } | DeviceEntry::ExtendedRange { first, last, .. } => (first, last),
-            DeviceEntry::Alias { used, .. }
-            | DeviceEntry::AliasRange { used, .. }
-            | DeviceEntry::Special { used, .. } => (used, used),
-            DeviceEntry::Other(_) => continue,
-        };
-        for id in first..=last {
-            push(INVALIDATE_ENTRY | u64::from(id), 0);
-        }
+    let commands = [INVALIDATE_IOMMU_ALL, 0, COMPLETION_WAIT | done_at, DONE];
+    let ring = window(commands_at, commands.len() as u64 * 8);
+    for (word, value) in (0..).zip(commands) {
+        ring.write_u64(word * 8, value);
     }
-    push(COMPLETION_WAIT | done_at, DONE);
-    regs.write_u64(COMMAND_TAIL, tail);
+    regs.write_u64(COMMAND_TAIL, commands.len() as u64 * 8);
     let done = window(done_at, 8);
     spin_until(
         || done.read_u64(0) == DONE,
