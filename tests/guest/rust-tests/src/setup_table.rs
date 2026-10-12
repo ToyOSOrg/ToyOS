@@ -8,6 +8,13 @@
 //! stamps: the lookup's inside J1..J2, the connect's inside J3..J4, the
 //! `TCP_NODELAY` option's inside the connect's answer..J4, and the first data
 //! exchange's `n3` inside J4..J5. `-` is a stamp that was not there.
+//!
+//! #883's DNS cache: a lookup stamp with no `n3` sent no query (the cache arm
+//! says `hit=1`), and the cache arm's stamps name the view's `row` and a
+//! miss's `keep_s`. Its rows: K2, the fetches whose lookup sent a query; K1,
+//! `lookup (J2-J1)`; K3, the same over the hits, beside B-(R+W+A); the
+//! no-regression gate's `uncached span`, read->query + reply->answer of each
+//! lookup in phase `uncached`; and K4 off the `k4_*` phases.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -117,6 +124,9 @@ pub fn table(log: &str) -> String {
 
     let mut toyos = Rows::default();
     let mut by_addr = Rows::default();
+    // #883: the fetches' lookups by whether they sent a query.
+    let mut cached = Rows::default();
+    let (mut fetches, mut asked, mut unstamped) = (0, 0, 0);
     let mut linux: BTreeMap<String, Rows> = BTreeMap::new();
     for line in said(log, JOB).filter_map(|l| l.strip_prefix("setup ")) {
         let w = words(line);
@@ -153,6 +163,15 @@ pub fn table(log: &str) -> String {
             continue;
         }
         let l = find("lookup", "n1", j1, j2);
+        fetches += 1;
+        match l.map(|l| l.n("n3") != 0) {
+            Some(true) => {
+                asked += 1;
+                cached.put("lookup (J2-J1), asked", ms(j1, j2));
+            }
+            Some(false) => cached.put("lookup (J2-J1), hit", ms(j1, j2)),
+            None => unstamped += 1,
+        }
         let c = find("connect", "n1", j3, j4);
         let c6 = c.map_or(j3, |c| c.n("n6"));
         let s = find("setopt", "n1", c6, j4);
@@ -175,6 +194,15 @@ pub fn table(log: &str) -> String {
             cell(tls_phase)
         );
         row(&mut out, "ureq", ureq, &[("call->resolve", ms(j0, j1)), ("resolved->connector", ms(j2, j3))]);
+        let _ = writeln!(
+            out,
+            "setup:   {:<14} {:>8}  query {}, row {}, keep_s {}",
+            "lookup asked",
+            "",
+            l.map_or("-", |l| if l.n("n3") != 0 { "yes" } else { "no" }),
+            l.and_then(|l| l.w.get("row")).map_or("-", String::as_str),
+            l.and_then(|l| l.w.get("keep_s")).map_or("-", String::as_str),
+        );
         row(
             &mut out,
             "lookup",
@@ -231,6 +259,8 @@ pub fn table(log: &str) -> String {
         toyos.put("lookup_wire", lookup_wire);
         toyos.put("lookup_local", sub(lookup, lookup_wire));
         toyos.put("lookup wake", l.and_then(Stamp::wake));
+        toyos.put("lookup read->query", ms(n(l, "n2"), n(l, "n3")));
+        toyos.put("lookup reply->answer", ms(n(l, "n5"), n(l, "n6")));
         toyos.put("connect (N6c-J3)", connect);
         toyos.put("syn_wire", syn_wire);
         toyos.put("connect_local", sub(connect, syn_wire));
@@ -292,7 +322,45 @@ pub fn table(log: &str) -> String {
     let unowned = stamps.iter().filter(|s| s.kind != "setopt" && !s.own_irq()).count();
     let shared = stamps.iter().filter(|s| s.kind != "setopt" && s.own_irq() && s.n("irqs") > 1).count();
 
+    // #883's no-regression gate: the local span of each lookup no cache could
+    // answer, the same names in both arms.
+    let mut uncached = Rows::default();
+    let (mut gate_lookups, mut gate_asked) = (0, 0);
+    for s in stamps.iter().filter(|s| s.kind == "lookup" && in_phase("uncached", s.n("n1"))) {
+        gate_lookups += 1;
+        gate_asked += usize::from(s.n("n3") != 0);
+        let (rq, ra) = (ms(s.n("n2"), s.n("n3")), ms(s.n("n5"), s.n("n6")));
+        uncached.put("uncached read->query", rq);
+        uncached.put("uncached reply->answer", ra);
+        uncached.put("uncached span (read->query + reply->answer)", rq.zip(ra).map(|(rq, ra)| rq + ra));
+    }
+
+    // #883's K4: the job's lookup either side of `host`'s.
+    let k4: Vec<(&str, Vec<&Stamp>)> = ["k4_warm", "k4_a", "k4_host", "k4_b"]
+        .into_iter()
+        .map(|p| (p, stamps.iter().filter(|s| s.kind == "lookup" && in_phase(p, s.n("n1"))).collect()))
+        .collect();
+    let host_exit = said(log, JOB).find_map(|l| l.strip_prefix("k4 host exit=")).map(str::to_string);
+
     if !toyos.0.is_empty() {
+        let _ = writeln!(out, "setup: K2 fetches whose lookup sent a query: {asked} of {fetches} ({unstamped} with no lookup stamp)");
+        let med = |name: &str| {
+            toyos.0.iter().find(|(n, _)| n == name).map(|(_, v)| {
+                let mut v = v.clone();
+                v.sort_by(f64::total_cmp);
+                if v.len() % 2 == 1 { v[v.len() / 2] } else { v[v.len() / 2 - 1] / 2.0 + v[v.len() / 2] / 2.0 }
+            })
+        };
+        let parts = [med("lookup_local"), med("lookup read->query"), med("lookup wake"), med("lookup reply->answer")];
+        match parts {
+            [Some(b), Some(r), Some(w), Some(a)] => {
+                let _ = writeln!(out, "setup: K3 reference B-(R+W+A) = {b:.3} - ({r:.3} + {w:.3} + {a:.3}) = {:.3}", b - (r + w + a));
+            }
+            _ => {
+                let _ = writeln!(out, "setup: K3 reference B-(R+W+A): - (no fetch's lookup was asked and stamped whole)");
+            }
+        }
+        cached.render(&mut out, "toyos lookups (J2-J1) by whether they sent a query");
         toyos.render(&mut out, "toyos, over the fetches");
         by_addr.render(&mut out, "toyos syn_wire by whether the fetch's first address was the last fetch's");
     }
@@ -307,6 +375,50 @@ pub fn table(log: &str) -> String {
             stats(wakes.clone()),
             wakes.iter().filter(|w| **w > 0.05).count()
         );
+    }
+    if gate_lookups > 0 {
+        let _ = writeln!(out, "setup: uncached lookups: {gate_lookups}, of which {gate_asked} sent a query");
+        uncached.render(&mut out, "toyos, the no-regression gate's uncached lookups");
+    }
+    if k4.iter().any(|(_, stamps)| !stamps.is_empty()) || host_exit.is_some() {
+        let mut fails: Vec<String> = Vec::new();
+        for (phase, stamps) in &k4 {
+            for s in stamps {
+                let _ = writeln!(
+                    out,
+                    "setup: k4 {phase}: row={} query={} keep_s={}",
+                    s.w.get("row").map_or("-", String::as_str),
+                    if s.n("n3") != 0 { "yes" } else { "no" },
+                    s.w.get("keep_s").map_or("-", String::as_str),
+                );
+            }
+        }
+        let _ = writeln!(out, "setup: k4 host exit={}", host_exit.as_deref().unwrap_or("-"));
+        if host_exit.as_deref() != Some("0") {
+            fails.push("host did not exit 0".to_string());
+        }
+        let by = |phase: &str| k4.iter().find(|(p, _)| *p == phase).map_or(&[][..], |(_, s)| s.as_slice());
+        let named = |s: &&Stamp, row: &str| s.w.get("row").is_some_and(|r| r == row);
+        let host: Vec<&&Stamp> = by("k4_host").iter().filter(|s| named(s, "host")).collect();
+        if host.len() != 1 || host[0].n("n3") == 0 {
+            fails.push(format!("{} lookup(s) between the brackets name host, and K4 asks for one that sent a query", host.len()));
+        }
+        for bracket in ["k4_a", "k4_b"] {
+            let job: Vec<&&Stamp> = by(bracket).iter().filter(|s| named(s, "test-runner")).collect();
+            match job.as_slice() {
+                [one] if one.n("n3") == 0 => {}
+                [one] => fails.push(format!("bracket {bracket} sent a query (keep_s={}): K4 was not read", one.w.get("keep_s").map_or("-", String::as_str))),
+                other => fails.push(format!("bracket {bracket} has {} lookup(s) naming test-runner", other.len())),
+            }
+        }
+        match fails.as_slice() {
+            [] => {
+                let _ = writeln!(out, "setup: K4 holds");
+            }
+            fails => {
+                let _ = writeln!(out, "setup: K4 does not hold: {}", fails.join("; "));
+            }
+        }
     }
     for (asked, rows) in &linux {
         rows.render(&mut out, &format!("linux asked={asked}, over the fetches"));

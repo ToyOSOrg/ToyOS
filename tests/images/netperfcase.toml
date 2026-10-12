@@ -33,6 +33,12 @@ devices = ["pci:1af4:1041", "pci:8086:10d3"]
 [programs.test-runner]
 receives = ["netstack", "log"]
 syscap = ["counters", "trace", "dup"]
+# MEASUREMENT ONLY, #883's K4, as on the T14's downloadcase: the job's
+# `host` is a row of its own.
+starts = ["host"]
+
+[programs.host]
+receives = ["netstack"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
