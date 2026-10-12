@@ -325,7 +325,10 @@ fn machine(arch: Arch, iommu: bool) -> String {
     match (arch, iommu) {
         (Arch::X86_64, true) => format!("{base},kernel-irqchip=split"),
         (Arch::X86_64, false) => base.to_string(),
-        (Arch::Aarch64, true) => format!("{base},gic-version=3,iommu=smmuv3"),
+        // HVF's GIC has no ITS; PCI claims need QEMU's GIC to remap their messages.
+        (Arch::Aarch64, true) => {
+            format!("{base},gic-version=3,iommu=smmuv3,its=on,kernel-irqchip=off")
+        }
         (Arch::Aarch64, false) => format!("{base},gic-version=3"),
     }
 }

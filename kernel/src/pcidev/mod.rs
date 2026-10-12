@@ -495,6 +495,11 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     let mut decoded = Vec::new();
     let mut taken: Vec<Window> =
         maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
+    // ECAM decodes configuration space even when firmware lists it as free MMIO.
+    taken.extend(crate::drivers::pci::windows().into_iter().map(|ecam| {
+        let (start, bytes) = ecam.decoded();
+        Window { start, end: start.saturating_add(bytes) }
+    }));
     for device in devices {
         // Bounded by the header's own declaration: a bridge has two BAR slots
         // and four registers past them that are not BARs, and `bar_size` below

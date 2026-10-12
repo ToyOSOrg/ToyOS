@@ -2246,7 +2246,8 @@ fn virt_no_seed_refused(profile: qemu::Profile, test_config: &Path) -> Result<()
 
 /// A machine whose MCFG decodes sixteen buses, with RAM past them: the kernel
 /// maps those sixteen buses' megabytes and no more, and enumerates the
-/// functions QEMU put there and nothing else, and the boot goes on.
+/// functions QEMU put there and nothing else. BAR placement keeps the
+/// configuration window out of its free runs, and the boot goes on.
 fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
     const WINDOW: &str = "ACPI: ECAM window: segment 0 buses 0x00..=0x0f, bus 0 at 0x3f000000";
     const MAPPED: &str = "mmio: 0x3f000000+0x1000000 ";
@@ -2280,6 +2281,21 @@ fn virt_low_ecam(profile: qemu::Profile, test_config: &Path) -> Result<(), Strin
         if !serial.contains(want) {
             return Err(format!("{want:?} not on the PL011\nserial:\n{serial}"));
         }
+    }
+    let mut runs = 0;
+    for line in serial.lines().filter_map(|l| l.split_once("pcidev:   ").map(|(_, run)| run)) {
+        let range = line.split_whitespace().next().ok_or("an empty PCI free run")?;
+        let (start, end) = range.split_once("..").ok_or("a PCI free run without its end")?;
+        let address = |word: &str| u64::from_str_radix(word.trim_start_matches("0x"), 16)
+            .map_err(|why| format!("invalid PCI free-run address {word:?}: {why}"));
+        let (start, end) = (address(start)?, address(end)?);
+        if start < 0x4000_0000 && end > 0x3f00_0000 {
+            return Err(format!("BAR placement offers ECAM configuration space in {range}\nserial:\n{serial}"));
+        }
+        runs += 1;
+    }
+    if runs == 0 {
+        return Err(format!("the boot reported no PCI free runs\nserial:\n{serial}"));
     }
     eprintln!("  [virt] {WINDOW}; {} functions: {found:?}", found.len());
     Ok(())
