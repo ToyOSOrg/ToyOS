@@ -914,7 +914,7 @@ impl Cache {
         let answer = match answer {
             Ok(addrs) => Ok(addrs.to_vec()),
             Err(absent @ (Failure::NoSuchName | Failure::NoAddress)) => Err(absent),
-            Err(_) => return,
+            Err(Failure::TimedOut | Failure::Unreachable | Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases) => return,
         };
         let Some(until) = until.filter(|until| now < *until) else { return };
         if started != self.generation() {
