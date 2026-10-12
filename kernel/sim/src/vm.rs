@@ -777,6 +777,7 @@ impl<'q> Vm<'q> {
         let dst = match self.scenario.placement {
             PlacementShape::LeastLoadedRotating => least_loaded,
             PlacementShape::AllOn(cpu) => cpu,
+            PlacementShape::Listed(cpus) => cpus[self.spawned.len()],
         };
         let builder = TaskBuilder {
             key,

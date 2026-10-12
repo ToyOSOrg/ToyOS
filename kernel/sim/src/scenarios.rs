@@ -1429,6 +1429,27 @@ pub fn lopsided_placement(cpus: usize, threads: usize, work: u64) -> Scenario {
     scenario
 }
 
+/// **Wasted Cores' group imbalance, staged**: an idle CPU whose neighbours all
+/// look busy, beside a victim with work to spare, on the AMD bench's two CCXs.
+///
+/// cpu8 is idle while every other CPU of its CCX holds a task queued behind the
+/// one it runs — load no probe takes — and cpu0, in the other CCX, holds two. A
+/// rule that compares the two CCXs' average load sees cpu8's as the busier and
+/// never probes cpu0, which is how an average in a summary hides an idle CPU,
+/// and work conservation (invariant I15) is the one check that sees it. The
+/// work outlasts I15's bound many times over, so the idle CPU must be reached
+/// rather than outwaited.
+pub fn group_imbalance() -> Scenario {
+    const ON: &[usize] = &[
+        0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
+    ];
+    let mut scenario = lopsided_placement(16, ON.len(), 4 * WORK)
+        .with_placement(PlacementShape::Listed(ON))
+        .with_topology(Shape::amd_bench());
+    scenario.name = "group_imbalance";
+    scenario
+}
+
 /// Negative gate for invariant I9: [`lend_then_block`] under commit `9c2fc4d`'s
 /// park, which cleared the borrowed window only `if now >= until`.
 ///

@@ -193,6 +193,21 @@ fn the_push_keeps_an_idle_cpu_beside_work_inside_its_bound() {
     }
 }
 
+/// **An idle CPU whose whole CCX looks busy is still reached**: the machine
+/// [`scenarios::group_imbalance`] stages, under the shipped balance path. It
+/// must hold, and the idle CPU must have been seen beside the work, or the
+/// staging put nobody there.
+#[test]
+fn an_idle_cpu_whose_ccx_looks_busy_is_reached() {
+    let scenario = scenarios::group_imbalance();
+    let mut worst = 0;
+    for outcome in sweep(&scenario, WC_SEEDS) {
+        assert!(outcome.passed(), "{}", outcome.report());
+        worst = worst.max(outcome.wc_rounds);
+    }
+    assert!(worst > 0, "no CPU of the staged machine was ever idle beside stealable work");
+}
+
 /// **The negative gate: a push that waits for more surplus than a probe takes.**
 /// `PUSH_THRESHOLD`'s own doc names the drift: one above the probe's threshold
 /// leaves a victim holding one stealable task unannounced, so a CPU that halted

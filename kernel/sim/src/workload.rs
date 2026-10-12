@@ -252,6 +252,10 @@ pub enum PlacementShape {
     /// one is a measurement rather than a belief. See
     /// `scenarios::lopsided_placement`.
     AllOn(usize),
+    /// Spawn `i` onto the `i`th CPU listed, whatever the counters say: an
+    /// adversary like [`PlacementShape::AllOn`], for a machine no workload
+    /// stages. See `scenarios::group_imbalance`.
+    Listed(&'static [usize]),
 }
 
 /// Which teardown/balance algorithm the VM drives the core with.
@@ -408,9 +412,14 @@ impl Scenario {
     /// wrong, and a panic at the first spawn of a sweep would name the VM
     /// instead of the scenario that asked for it.
     pub fn with_placement(mut self, placement: PlacementShape) -> Self {
-        if let PlacementShape::AllOn(cpu) = placement {
+        let named: &[usize] = match &placement {
+            PlacementShape::LeastLoadedRotating => &[],
+            PlacementShape::AllOn(cpu) => std::slice::from_ref(cpu),
+            PlacementShape::Listed(cpus) => cpus,
+        };
+        for cpu in named {
             assert!(
-                cpu < self.cpus(),
+                *cpu < self.cpus(),
                 "{}: placement names cpu{cpu} on a {}-cpu machine",
                 self.name,
                 self.cpus(),
