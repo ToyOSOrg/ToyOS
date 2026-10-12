@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{arp, batch, terms, Segment, Wire, A, MAC, MAC_B, MAC_R, R};
+use common::{arp, batch, terms, Segment, Wire, A, BUDGET, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos_net_node::{ConnectRefused, FromClient, Node, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
 use toyos_net_shard::ConnectError;
@@ -424,14 +424,14 @@ impl Net {
         self.node.transmit(self.now, usize::MAX, |frame| frames.push(frame.to_vec()), draw(&mut self.draws));
         for frame in &frames {
             for answer in self.hears(frame) {
-                self.node.receive(self.now, batch(&[&answer]), draw(&mut self.draws));
+                self.node.receive(self.now, BUDGET, batch(&[&answer]), draw(&mut self.draws));
             }
         }
         frames.len()
     }
 
     fn deliver(&mut self, frame: &[u8]) {
-        self.node.receive(self.now, batch(&[frame]), draw(&mut self.draws));
+        self.node.receive(self.now, BUDGET, batch(&[frame]), draw(&mut self.draws));
         self.pump();
     }
 
@@ -660,33 +660,32 @@ fn a_batch_of_frames_moves_an_established_stream_once_with_no_opportunity_after_
     let (mut net, _, client) = established();
     let frames = [net.far.text(b"all "), net.far.text(b"at "), net.far.text(b"once")];
     let (writes, reads) = (client.borrow().writes, client.borrow().reads);
-    net.node.receive(net.now, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
+    net.node.receive(net.now, BUDGET, batch(&[&frames[0], &frames[1], &frames[2]]), draw(&mut net.draws));
     let ends = client.borrow();
     assert_eq!(ends.inbox, b"all at once");
     assert_eq!((ends.writes - writes, ends.reads - reads), (1, 0), "the pipes' calls in the batch's pass");
 }
 
 // A device that refills its ring as fast as it is read never says it has no frame: a batch
-// stops at the bound and answers that another pass is owed, and one that found the ring empty
-// owes none, a ring one short of the bound included.
+// stops at the budget it was given and answers that another pass is owed, and one that found the
+// ring empty owes none, a ring one short of the budget included.
 #[test]
-fn a_batch_stops_at_its_bound_and_says_a_pass_is_owed() {
+fn a_batch_stops_at_its_budget_and_says_a_pass_is_owed() {
     let (mut net, _, client) = established();
     let frame = net.far.text(b"again");
     let mut handed = 0usize;
     let endless = |sink: &mut dyn FnMut(&[u8])| {
         handed += 1;
-        assert!(handed <= 1 << 16, "a batch with no bound");
         sink(&frame);
         true
     };
-    assert!(net.node.receive(net.now, endless, draw(&mut net.draws)), "a pass is owed");
-    assert!(handed > 1, "a bound of one frame is a pass a frame");
+    let owed = net.node.receive(net.now, BUDGET, endless, draw(&mut net.draws));
+    assert_eq!((owed, handed), (true, BUDGET), "the batch is the budget, and a pass is owed");
     assert_eq!(client.borrow().inbox, b"again", "the rest of the batch was the same segment again");
 
     let next = net.far.text(b"once");
-    let short: Vec<&[u8]> = vec![&next; handed - 1];
-    assert!(!net.node.receive(net.now, batch(&short), draw(&mut net.draws)), "the ring was emptied");
+    let short: Vec<&[u8]> = vec![&next; BUDGET - 1];
+    assert!(!net.node.receive(net.now, BUDGET, batch(&short), draw(&mut net.draws)), "the ring was emptied");
     assert_eq!(client.borrow().inbox, b"againonce");
 }
 
@@ -1084,7 +1083,7 @@ fn a_reset_in_the_batch_of_the_text_before_it_ends_the_pipes_after_the_text() {
     let (mut net, _, client) = established();
     let text = net.far.text(b"last");
     let rst = net.far.rst();
-    net.node.receive(net.now, batch(&[&text, &rst]), draw(&mut net.draws));
+    net.node.receive(net.now, BUDGET, batch(&[&text, &rst]), draw(&mut net.draws));
     assert_eq!((client.borrow().inbox.clone(), let_go(&client)), (b"last".to_vec(), vec![PipeEnd::FromClient, PipeEnd::ToClient]));
 }
 
@@ -1096,7 +1095,7 @@ fn text_the_pipe_had_no_room_for_outlives_the_reset() {
     client.borrow_mut().room = 0;
     let text = net.far.text(b"held back");
     let rst = net.far.rst();
-    net.node.receive(net.now, batch(&[&text, &rst]), draw(&mut net.draws));
+    net.node.receive(net.now, BUDGET, batch(&[&text, &rst]), draw(&mut net.draws));
     assert_eq!((client.borrow().inbox.len(), let_go(&client), net.node.streams()), (0, vec![PipeEnd::FromClient], 1));
 
     client.borrow_mut().room = 65_536;

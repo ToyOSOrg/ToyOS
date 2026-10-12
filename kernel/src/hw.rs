@@ -144,7 +144,7 @@ pub fn report_contexts(sp: u64, subject: Option<u64>) {
             && sp <= top
             && sp > top.wrapping_sub(crate::process::KERNEL_STACK_SIZE as u64);
         // idle's `kernel_stack_top` is zero by construction; rendering it as a task would misread as corruption.
-        match ctx.id {
+        match ctx.runs.id() {
             None => crate::log!(
                 "  cpu{cpu} is on ctx {held:#x} (its idle context) stack_top={top:#018x} \
                  saved_sp={:#018x}{}{}",

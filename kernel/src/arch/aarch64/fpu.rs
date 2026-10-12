@@ -7,3 +7,9 @@
 
 /// The state's bytes in a switch frame: 32 128-bit registers, then `FPCR` and `FPSR`.
 pub const STATE_BYTES: usize = 32 * 16 + 16;
+
+/// The bytes a task's kernel stack carries above its top: none, since the
+/// state travels in the switch frame.
+pub fn area_bytes() -> usize {
+    0
+}
