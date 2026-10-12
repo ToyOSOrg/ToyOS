@@ -66,8 +66,12 @@ Beside that order, each waiting on something outside it:
    death leaves is held by `toyos-blockring`'s
    `every_request_is_answered_exactly_once`,
    `what_a_flush_calls_durable_is_on_the_medium` and
-   `what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits`, by
-   fileserver's
+   `what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits` for
+   the transport, by the restart test
+   `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md` owes
+   for diskserver's part, a session reopened over the page a killed server
+   left, red under the mutation that moves the server's stores after its
+   answer, by fileserver's
    `a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed`
    for DATA, and for LOG by the FAT test step 10 owes. **Partly done**
    (#525, #536): diskserver drives NVMe, and the kernel's NVMe driver is
@@ -180,10 +184,15 @@ Beside that order, each waiting on something outside it:
        a stick whose bulk endpoint never answers leaves a keyboard on the
        same controller delivering every report, red on a usbd that waits on
        the stick before it reads the keyboard's ring. `/log`'s, what a killed
-       usbd had on the wire: stage 3's `toyos-blockring` tests, with one test
-       this step owes in `system/fileserver/src/fat.rs`: a disk stopped after
-       each block write in turn of an append and its sync mounts at every
-       stop and reads back all the last whole sync held.
+       usbd had on the wire: stage 3's `toyos-blockring` tests for the
+       transport, and for usbd's session open the reopen test
+       `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
+       owes, red under the mutation that moves usbd's stores after its
+       answer; with one test this step owes in
+       `system/fileserver/src/fat.rs`: a disk stopped after each block write
+       in turn of an append and its sync mounts at every stop and reads back
+       all the last whole sync held, red on a sync that writes a growing
+       file's directory entry before its chain.
 
        **Partly done** (#827), its stage 1: the test-only
        `xhci-leave=<vendor>:<device>` leaves one controller to a claim, and
