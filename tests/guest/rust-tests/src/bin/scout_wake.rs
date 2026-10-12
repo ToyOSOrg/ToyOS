@@ -386,9 +386,10 @@ fn main() {
     phase(3, 2 * cpus, Spinners::Here, Duration::from_secs(5));
     phase(4, cpus, Spinners::Apart, Duration::from_secs(5));
     phase(5, 2 * cpus, Spinners::Apart, Duration::from_secs(5));
+    // Shorter than the natural phases: the boot's whole job list has a minute.
     for id in 6..=8 {
-        staged(id, false, false, Duration::from_secs(3));
+        staged(id, false, false, Duration::from_secs(2));
     }
-    staged(9, true, false, Duration::from_secs(5));
-    staged(10, true, true, Duration::from_secs(5));
+    staged(9, true, false, Duration::from_secs(4));
+    staged(10, true, true, Duration::from_secs(4));
 }
