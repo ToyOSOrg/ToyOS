@@ -5,10 +5,10 @@
 //! **The arrangement is staged and checked before anything is timed**, because
 //! spawn placement alone decides nothing a row can rest on. Each staged thread
 //! reads the CPU it first runs on and is kept only where it was wanted, or let
-//! go and started again: the partner on a CPU other than the waker's, then a
-//! spinner on the partner's. A kernel that leaves the partner's wake on the
-//! busy CPU waits out the spinner's quantum every round; one that hands it to
-//! an idle CPU pays that once.
+//! go and started again: the partner on a CPU other than the waker's and the
+//! one device interrupts target, then a spinner on the partner's. A kernel
+//! that leaves the partner's wake on the busy CPU waits out the spinner's
+//! quantum every round; one that hands it to an idle CPU pays that once.
 //!
 //! Two threads hand a turn back and forth through `park`/`unpark`, each round
 //! two wakes, timed in this program on the kernel's clock and histogrammed at
@@ -67,6 +67,11 @@ fn refuse(why: Refusal, said: &str) -> ! {
     println!("wake_onto_busy: {said}");
     exit(why as i32);
 }
+
+/// The CPU every device interrupt targets (`MSG_DEST` in
+/// `kernel/src/arch/x86_64/apic.rs`). The partner is never staged there: a
+/// pass run for an interrupt's wake would serve its wake early on any kernel.
+const DEVICE_IRQ_CPU: u32 = 0;
 
 const UNSEEN: u32 = u32::MAX;
 const UNDECIDED: u8 = 0;
@@ -159,13 +164,13 @@ impl Staged {
     }
 }
 
-/// Stage the partner on a CPU other than this thread's, then a spinner on the
-/// partner's, and check that this thread is still elsewhere and the spinner
-/// still there.
+/// Stage the partner on a CPU other than this thread's and the interrupts',
+/// then a spinner on the partner's, and check that this thread is still
+/// elsewhere and the spinner still there.
 fn stage(waker: &Thread) -> Result<Staged, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let turn = Arc::new(AtomicU32::new(0));
-    let (partner, partner_on) = place(|on| on != cpu::apic_id(), {
+    let (partner, partner_on) = place(|on| on != cpu::apic_id() && on != DEVICE_IRQ_CPU, {
         let (stop, turn, waker) = (stop.clone(), turn.clone(), waker.clone());
         move || loop {
             while turn.load(Ordering::Acquire) != 1 {
@@ -222,8 +227,8 @@ fn stage(waker: &Thread) -> Result<Staged, String> {
 
 fn main() {
     let cpus = syscall::cpu_count() as usize;
-    if cpus < 2 {
-        refuse(Refusal::NotStaged, "one CPU has no idle CPU beside it");
+    if cpus < 3 {
+        refuse(Refusal::NotStaged, "the waker, the partner and the interrupts' CPU need three");
     }
     let main = thread::current();
     let mut why = String::new();
