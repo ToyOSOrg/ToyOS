@@ -16,7 +16,7 @@ impl<T> Unmapped<T> {
 
 impl<T> Drop for Unmapped<T> {
     fn drop(&mut self) {
-        crate::arch::tlb::shootdown(crate::invalidation::Origin::Unmap);
+        crate::arch::tlb::shootdown(crate::invalidation::Origin::Unmap, crate::invalidation::Half::User);
         // SAFETY: the wrapped value is never taken before this drop.
         unsafe { ManuallyDrop::drop(&mut self.0) };
     }
