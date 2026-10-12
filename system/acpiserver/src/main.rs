@@ -26,8 +26,9 @@
 //! initialisation.
 //!
 //! **Then the namespace is initialised** ([`init`]): PCI_Config announced
-//! where §6.5.4 asks it be, `\_SB._INI`, and every device's `_STA` and
-//! `_INI` by Table 6.67, again over whatever a table loaded meanwhile added.
+//! where §6.5.4 asks it be, `\_SB._INI`, and the `_STA` and `_INI` of each
+//! device at or above an `_INI` by Table 6.67, again over whatever a table
+//! loaded meanwhile added.
 //!
 //! **Then the embedded controller is found in the namespace and armed**
 //! ([`devices::find`], [`devices::attach`]): attached to the AML host in the ECDT's place, so its

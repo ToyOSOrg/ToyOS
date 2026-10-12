@@ -12,13 +12,22 @@
 //! interpreter's own access to such a region does.
 //!
 //! **Then `\_SB._INI`, unconditionally** ("at the beginning of namespace
-//! initialization"), **then every device's `_STA` and `_INI` by Table
-//! 6.67**, parent before child: a device its `_STA` says is present has its
-//! `_INI` run and its children examined; one functional and not present has
-//! its children examined alone; one neither, nothing below it. A device with
-//! no `_STA` is both. A Processor object is a device here. After a run-time
-//! load, the `_INI`s that load defined are run, by the same table, its
-//! ancestors' `_STA` asked again.
+//! initialization"), **then each device's `_STA` and `_INI` by Table 6.67,
+//! where an `_INI` is defined at or below it**, parent before child: a device
+//! its `_STA` says is present has its `_INI` run and its children examined;
+//! one functional and not present has its children examined alone; one
+//! neither, nothing below it. A device with no `_STA` is both. A Processor
+//! object is a device here. After a run-time load, the `_INI`s that load
+//! defined are run, by the same table, their ancestors' `_STA` asked again.
+//!
+//! **Which devices are examined, and a `_STA` refused, are ACPICA's**
+//! (`AcpiNsInitializeDevices` and `AcpiNsInitOneDevice`,
+//! `source/components/namespace/nsinit.c`, ACPICA 20260408), the owner's
+//! "follow ACPICA" for a read of the controller's space before its `_REG`:
+//! a device with no `_INI` at or below it is not examined, and its `_STA` is
+//! asked by what serves it, a battery's once the controller is attached
+//! ([`crate::battery`]); a `_STA` refused has its device's `_INI` not run
+//! and its children examined.
 //!
 //! **EmbeddedControl is announced in each scope that declares a region of
 //! it once the controller is attached** ([`announce`], `crate::devices`),
@@ -250,8 +259,8 @@ fn host_bridge<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, device: &str, cen
 
 /// Table 6.67 over the namespace: each device examined has its `_STA` read,
 /// and each one present whose `_INI` was defined at `since` or after has it
-/// run. A device none of whose descendants defined an `_INI` since is not
-/// asked, on a walk after a run-time load.
+/// run. A device at or below which no `_INI` was defined since is not
+/// examined.
 fn walk<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, since: u32, census: &mut Census) {
     // The devices that own an `_INI` to run, and every scope above one.
     let ini: BTreeSet<&str> =
@@ -264,7 +273,7 @@ fn walk<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, since: u32, census: &mut
             continue;
         }
         closed = None;
-        if !is_device(named.kind) || (since > 0 && !wanted.contains(named.path.as_str())) {
+        if !is_device(named.kind) || !wanted.contains(named.path.as_str()) {
             continue;
         }
         if aml.host.stopping {
@@ -282,9 +291,9 @@ fn walk<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, since: u32, census: &mut
                     }
                     Some(_) => {
                         census.refuse("_STA", &path, &toyos_aml::Error::Type("a _STA that is no Integer (§6.3.7)"));
-                        0
+                        continue;
                     }
-                    None => 0,
+                    None => continue,
                 }
             }
         };
@@ -377,8 +386,9 @@ mod tests {
     }
 
     /// A refused `_INI` is counted by kind and the walk goes on; a `_STA`
-    /// that is refused or no Integer takes its device as neither present nor
-    /// functional, and nothing below it is examined.
+    /// that is refused or no Integer is counted, its device's `_INI` is not
+    /// run, and its children are examined, as ACPICA's `AcpiNsInitOneDevice`
+    /// moves on past a `_STA` that failed.
     #[test]
     fn a_refused_ini_or_sta_is_counted_and_the_walk_goes_on() {
         let dsdt = scope(
@@ -392,12 +402,38 @@ mod tests {
             ]),
         );
         let (kernel, census) = initialised(&dsdt);
-        assert_eq!(posted(&kernel), [5]);
-        assert_eq!((census.sb_ini, census.sta, census.ini), (None, 0, 1));
+        assert_eq!(posted(&kernel), [0xCC, 5]);
+        assert_eq!((census.sb_ini, census.sta, census.ini), (None, 0, 2));
         assert_eq!(
             census.refused.counts(),
             "_INI: Divide by zero (§19.6.32) x1; _STA: a name that does not resolve x1; _STA: a type its operator refuses: a _STA that is no Integer (§6.3.7) x1"
         );
+    }
+
+    /// As ACPICA's walk: a device with no `_INI` at or below it is not
+    /// examined, so a battery's `_STA` that reads the controller's space
+    /// before any controller is attached is not asked, nor one that would
+    /// post, and nothing is refused; a device above an `_INI` has its `_STA`
+    /// asked, and the `_INI` runs.
+    #[test]
+    fn a_device_with_no_ini_at_or_below_it_is_not_examined() {
+        let dsdt = scope(
+            "\\_SB",
+            &cat(&[
+                &op_region("ERAM", 0x03, &int(0), &int(0xFF)),
+                &field("ERAM", 0x01, &[unit("BSTA", 8)]),
+                &device("BAT1", &method("_STA", 0, &ret(&name("\\_SB.BSTA")))),
+                &device("LONE", &method("_STA", 0, &cat(&[&tagged(0x10), &ret(&int(0x0F))]))),
+                &device(
+                    "PARE",
+                    &cat(&[&method("_STA", 0, &cat(&[&tagged(0x20), &ret(&int(0x0F))])), &device("KIDD", &method("_INI", 0, &tagged(0x21)))]),
+                ),
+            ]),
+        );
+        let (kernel, census) = initialised(&dsdt);
+        assert_eq!(posted(&kernel), [0x20, 0x21]);
+        assert_eq!((census.sta, census.ini), (1, 1));
+        assert!(census.refused.is_empty(), "{}", census.refused.counts());
     }
 
     /// §6.5.4: a PCI_Config region on a root bus naming a `_BBN` is always

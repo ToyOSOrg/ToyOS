@@ -41,7 +41,11 @@
 //! attached ([`Firmware::ec`]) and through the kernel, which no row holds its
 //! ports for, each under the Global Lock where the controller's `_GLK` asks
 //! for it (ACPI 6.5 §6.5.7) and AML does not hold it already. With none
-//! attached the space is denied by name. A port of it the kernel refuses
+//! attached the space is denied by name, and one attached is reached whether
+//! or not its `_REG` has run: ACPICA refuses a region no handler serves and
+//! reaches one a handler does, `_REG` or not (`AcpiEvAddressSpaceDispatch`,
+//! `source/components/events/evregion.c`, ACPICA 20260408), the owner's
+//! "follow ACPICA". A port of it the kernel refuses
 //! detaches the controller and is handed to the server ([`Firmware::ended`]),
 //! which serves it no more.
 //!

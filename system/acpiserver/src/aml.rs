@@ -326,28 +326,20 @@ pub mod tests {
     /// What every guest boot does, against the kernel's stand-in: QEMU's
     /// DSDT is fetched, loads asking the machine for nothing, and its `\_S5`
     /// is the `SLP_TYPa=0` the kernel logged on the boot the tables are of.
-    /// Its initialisation runs no `_INI` and reads each device's `_STA` but
-    /// the CPUs', whose `_STA` writes QEMU's CPU hotplug selector, a port
-    /// this server writes for no AML, and the HPET's, which reads the timer
-    /// the kernel drives. Its namespace names no embedded controller, and no
+    /// It defines no `_INI`, so its initialisation runs none and examines no
+    /// device. Its namespace names no embedded controller, and no
     /// control-method button where one is looked for.
     #[test]
     fn qemus_tables_load_and_s5_is_what_its_kernel_decoded() {
-        let mut kernel = machine(QEMU);
-        // The ISA bridge's interrupt routing registers, PIRQA-D and PIRQE-H.
-        kernel.config = [0x60, 0x61, 0x62, 0x63, 0x68, 0x69, 0x6A, 0x6B].map(|offset| (toyos_abi::acpi::pci_address(0, 0, 0x1F, 0, offset), 0x0B)).to_vec();
-        kernel.driven = vec![(0xfed0_0000, 0xfed0_1000)];
+        let kernel = machine(QEMU);
         let (loaded, kept) = load(&kernel, RSDP);
         assert_eq!(loaded, Loaded { blocks: vec![Ok(())], s5: Some((0, 0)), handed: true });
         let mut aml = kept.expect("QEMU's DSDT loads");
         let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
         let mut census = crate::init::Census::default();
         crate::init::initialise(&mut aml, &names, &mut census);
-        assert_eq!((census.sb_ini, census.ini, census.sta), (None, 0, 14));
-        assert_eq!(
-            census.refused.counts(),
-            "_STA: denied by this server: a SystemIO write of a port and width this server asks of the kernel for no AML x2; _STA: denied by this server: a SystemMemory read the kernel refused DeviceMemory, in unlisted firmware memory x1"
-        );
+        assert_eq!((census.sb_ini, census.ini, census.sta), (None, 0, 0));
+        assert!(census.refused.is_empty(), "{}", census.refused.counts());
         let Aml { mut interpreter, mut host } = aml;
         for control_method in [false, true] {
             assert_eq!(crate::devices::find(&mut interpreter, &mut host, &names, crate::devices::tests::GPE0, control_method), crate::devices::Found::default());

@@ -5928,8 +5928,8 @@ const AMD: Bench = Bench {
 /// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
 /// handed to the kernel, which says it powers this machine off with that
 /// value, and never does on this row. Then the namespace initialised (ACPI
-/// 6.5 §6.5.1): every `_STA` and `_INI` run and none refused but by a ruled
-/// refusal, and the controller's `_REG(3, 1)` after them; `\_SB._OSC`
+/// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused but by a
+/// ruled refusal, and the controller's `_REG(3, 1)` after them; `\_SB._OSC`
 /// negotiated, and on an Intel machine each processor's, none refused; every
 /// block they load loaded, none refused. Every other CPU of the machine said
 /// how its range registers stand beside the boot processor's, and none holds
