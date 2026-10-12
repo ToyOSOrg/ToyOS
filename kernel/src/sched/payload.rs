@@ -15,7 +15,8 @@ use kernel::sched::park::WaitTicket;
 use crate::watch::Watch;
 use crate::mm::paging::Root;
 use crate::scheduler::OperationSlot;
-use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId, UserImage};
+use crate::loader::KernelStack;
+use crate::process::{PageTables, ProcessAccounting, TaskId, UserImage};
 use crate::sync::Lock;
 
 /// The environment's leaf lock; holding it raises the preempt count, making a wake path a legal mailbox producer.
@@ -47,16 +48,36 @@ pub struct KernelCtx {
     pub root: Root,
     pub thread_pointer: u64,
     pub kernel_stack_top: u64,
-    /// `None` is this CPU's idle context.
-    pub id: Option<TaskId>,
+    pub runs: Runs,
     /// Swapped with the per-CPU word at every switch; contexts don't all owe the same `enable` count.
     pub preempt: u32,
+}
+
+/// What a context runs.
+#[derive(Clone, Copy)]
+pub enum Runs {
+    /// This CPU's idle loop.
+    Idle,
+    /// A kernel thread, which never enters Ring 3.
+    Kernel(TaskId),
+    /// A thread of a process.
+    User(TaskId),
+}
+
+impl Runs {
+    /// The task, or `None` for the idle loop.
+    pub fn id(self) -> Option<TaskId> {
+        match self {
+            Self::Idle => None,
+            Self::Kernel(id) | Self::User(id) => Some(id),
+        }
+    }
 }
 
 /// Everything the kernel owns per task, released exactly once (the address-space `Arc` cannot double-drop).
 pub struct KernelPayload {
     pub id: TaskId,
-    pub kernel_stack: OwnedAlloc,
+    pub kernel_stack: KernelStack,
     /// The address space this task runs in; never `Option` — a kernel thread runs in the kernel's own.
     pub address_space: PageTables,
     /// The cross-CPU-readable face of this task; a `CpuSched` is `!Sync` and cannot be walked remotely.

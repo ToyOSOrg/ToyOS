@@ -1,15 +1,7 @@
 //! What a transition out of Ring 3 costs, in cycles.
 //!
-//! The syscall entry, which is the busiest of the five places `arch::entry`'s
-//! bracket sits. The exception entry pays the same two instructions, and there
-//! is no cheap way to measure it here: the only demand-paged memory a userland
-//! program can reach is its own file-backed pages — `sys_mmap` allocates and
-//! maps its whole region up front — so a workload of N faults costs N × 2 MiB
-//! of test image.
-//!
 //! **No threshold, and the host reads the numbers instead.** A bound measured
-//! under TCG is meaningless — QEMU implements `FXSAVE` as a helper call and
-//! prices nothing like silicon — and one measured on metal drifts. The number
+//! under TCG is meaningless and one measured on metal drifts. The number
 //! is for a same-session A/B against another build of this tree; what the host
 //! refuses is a counter that did not move (`check_syscall_cost`).
 //!
