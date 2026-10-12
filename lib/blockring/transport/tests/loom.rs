@@ -10,6 +10,7 @@
 //!   cargo test -p toyos-transport --features <control> --test loom
 
 use core::sync::atomic::Ordering;
+use std::rc::Rc;
 
 use loom::cell::Cell;
 use loom::sync::atomic::AtomicU32;
@@ -149,9 +150,10 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
 /// other end's last copy of it is loom's own `Causality violation`. A doorbell
 /// is loom's `Notify`, which keeps one ring and may wake its waiter for
 /// nothing, and loom fails a run that ends with a thread waiting on one. It is
-/// held in std's `Arc`: loom's panics again in its drop when that failure
-/// unwinds the model, which aborts the run before it says which test failed
-/// (`issues/loom-arc-panics-in-its-drop-while-a-failed-model-unwinds.md`).
+/// held in an `Rc`, as loom's threads take no `Send` bound and run on the one
+/// thread that runs the model: loom's `Arc` panics again in its drop when that
+/// failure unwinds the model, which aborts the run before it says which test
+/// failed (`issues/loom-arc-panics-in-its-drop-while-a-failed-model-unwinds.md`).
 struct Stream {
     page: [Shared; 4],
     bytes: [Cell<u32>; RING as usize],
@@ -163,8 +165,8 @@ const RING: u32 = 1;
 const STREAM: stream::Place<RING, 4> = stream::Place::new::<0, 1, 2, 3, 0>();
 type StreamEnds = (stream::Producer<RING, 4>, stream::Consumer<RING, 4>);
 
-fn stream() -> (std::sync::Arc<Stream>, StreamEnds) {
-    let s = std::sync::Arc::new(Stream {
+fn stream() -> (Rc<Stream>, StreamEnds) {
+    let s = Rc::new(Stream {
         page: core::array::from_fn(|_| Shared(AtomicU32::new(0))),
         bytes: core::array::from_fn(|_| Cell::new(0)),
         to_consumer: Notify::new(),
@@ -210,7 +212,7 @@ fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
 fn a_published_byte_is_read_as_written() {
     loom::model(|| {
         let (s, (mut tx, mut rx)) = stream();
-        let producer_side = std::sync::Arc::clone(&s);
+        let producer_side = Rc::clone(&s);
         let producer = loom::thread::spawn(move || {
             for byte in [0x5A, 0xA5] {
                 while tx.room(&producer_side.page).expect("the consumer keeps the protocol") == 0 {
@@ -238,7 +240,7 @@ fn a_published_byte_is_read_as_written() {
 fn a_consumer_that_looked_again_is_rung_for_bytes_it_missed() {
     loom::model(|| {
         let (s, (mut tx, mut rx)) = stream();
-        let producer_side = std::sync::Arc::clone(&s);
+        let producer_side = Rc::clone(&s);
         let producer = loom::thread::spawn(move || send(&producer_side, &mut tx, 0x5A));
         while rx.ready(&s.page).expect("the producer keeps the protocol") == 0 {
             if rx.arm(&s.page).expect("the producer keeps the protocol") == 0 {
@@ -258,7 +260,7 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
     loom::model(|| {
         let (s, (mut tx, mut rx)) = stream();
         send(&s, &mut tx, 0x5A);
-        let consumer_side = std::sync::Arc::clone(&s);
+        let consumer_side = Rc::clone(&s);
         let consumer = loom::thread::spawn(move || {
             assert_eq!(rx.ready(&consumer_side.page), Ok(1), "published before the consumer started");
             receive(&consumer_side, &mut rx)
