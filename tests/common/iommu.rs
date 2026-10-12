@@ -442,13 +442,17 @@ const STICK_BOUND: &str = "usb-storage: 1 device(s)";
 
 /// **A unit an AMD machine's firmware left on is switched off, and the boot
 /// stick's DMA reaches memory.** QEMU's `amd-iommu` is the only AMD-Vi unit
-/// in reach: the T14 is an Intel machine, and the hand-over's register
-/// sequence and the DMA it frees are neither of them a host test's. Two
-/// boots: the shipped kernel finds a unit nothing left on and switches
+/// the merge queue runs: the T14 is an Intel machine, and the hand-over's
+/// register sequence and the DMA it frees are neither of them a host test's.
+/// Two boots: the shipped kernel finds a unit nothing left on and switches
 /// nothing; the test kernel's `iommu-firmware-left` leaves the unit blocking
 /// every device's DMA with its command buffer and event log running, and
 /// each goes off by its own write before the stick is driven. With the
-/// switch-off reverted that boot's stick never binds.
+/// switch-off reverted that boot reds on the fields' lines and on `control`
+/// reading back zero, and its stick still binds: QEMU 11.1.1 moves no
+/// function to translation on `INVALIDATE_IOMMU_ALL`
+/// (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
+/// so the AMD bench's `iommu_firmware_left` row holds the DMA half.
 pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
     let profile = Profile::MetalAmdVi;
     let argv = qemu::profile_argv(&BootOptions { profile, ..Default::default() });
