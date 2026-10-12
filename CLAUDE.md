@@ -19,7 +19,7 @@ There are no spec documents. A rule a reader can check lives in an agent's promp
 
 ## Principles
 
-- **Zero legacy.** No backwards compatibility, no fallbacks, no workarounds, no BIOS, no 32-bit. Research state-of-the-art OS design instead of replicating older OSes.
+- **Zero legacy.** No backwards compatibility, no fallbacks, no workarounds, no BIOS, no 32-bit. Research state-of-the-art OS design instead of replicating older OSes, and read another implementation's source, whatever its licence, only clean-room: one agent writes from it a specification of facts citing no implementation, keeping the provenance in its own evidence, and another builds from that specification alone, handed to it in its brief and never committed.
 - **Zero silent debt.** Dead code is deleted; every abstraction earns its place. A discovered compromise has exactly two legal outcomes: remove it, or record it with ownership, evidence and an exit condition — and it stays a present-state weakness until removed.
 - **Code is liability.** If code can be deleted, it is; code that does not earn its keep is deleted or simplified, and not knowing whether it is needed is no reason to keep it. Tooling is code too: a gate, lock, check or test is added only for what reading cannot see.
 - **Fail fast, trust nothing.** Panics over silent degradation; exhaustive matches; the unimplemented dies loudly; no defensive code. Input that crossed a trust boundary is never trusted and never panics the kernel — it is refused. Never a flat wait, in code or in a test: wait on the event, bounded by a timeout that fails loudly; a fixed delay only where a hardware document mandates it and offers no notification, cited at the site.

@@ -252,11 +252,6 @@ pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Resu
     Ok(starts)
 }
 
-/// The supervisor's line for a refused launch, which the metal judge reads whole.
-pub fn refused(caller: &str, session: Session, target: &str, why: Refusal) -> String {
-    format!("supervisor: launcher: {caller} in {session} may not start {target}: {why}")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
