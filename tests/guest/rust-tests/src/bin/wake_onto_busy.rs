@@ -23,7 +23,7 @@
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread::{self, JoinHandle, Thread};
 
 use toyos_abi::clock::nanos_since_boot;
 use toyos_abi::syscall;
@@ -43,11 +43,14 @@ const WARMUP: usize = 20;
 
 const BUCKETS: usize = 32_768;
 
-/// How many threads staging may start, and how long it may take, before the
-/// run is refused: a candidate lands where spawn placement puts it, which
-/// rotates over the CPUs, so a machine of `n` needs about `n` of them.
+/// How many threads one placement may start, and how long it may take: a
+/// candidate lands where spawn placement puts it, which rotates over the CPUs,
+/// so a machine of `n` needs about `n` of them. And how many times the whole
+/// arrangement is staged again before the run is refused: a thread can be
+/// moved while staging is still under way.
 const TRIES: usize = 64;
 const STAGE_NS: u64 = 5_000_000_000;
+const ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy)]
 #[repr(i32)]
@@ -77,6 +80,19 @@ struct Seat {
     verdict: AtomicU8,
 }
 
+/// Wait, spinning, for `seen` to answer something, or say why not.
+fn spin_for(deadline: u64, seen: impl Fn() -> Option<u32>, what: &str) -> Result<u32, String> {
+    loop {
+        if let Some(on) = seen() {
+            return Ok(on);
+        }
+        if nanos_since_boot() >= deadline {
+            return Err(format!("{what} never said which CPU it ran on"));
+        }
+        std::hint::spin_loop();
+    }
+}
+
 /// Start threads running `body` until one first runs on a CPU `wanted`
 /// accepts, letting every other go; answer it and that CPU. Each candidate
 /// says where it is and parks until it is judged, so the CPU it is kept on is
@@ -85,7 +101,10 @@ struct Seat {
 /// **The caller spins while it waits rather than parking**, so its own CPU is
 /// never idle: a kernel that hands work to idle CPUs would otherwise hand it
 /// a candidate, or hand the caller, woken, to another CPU.
-fn place(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Clone + Send + 'static) -> (JoinHandle<()>, u32) {
+fn place(
+    wanted: impl Fn(u32) -> bool,
+    body: impl FnOnce() + Clone + Send + 'static,
+) -> Result<(JoinHandle<()>, u32), String> {
     let deadline = nanos_since_boot() + STAGE_NS;
     for _ in 0..TRIES {
         let seat = Arc::new(Seat { on: AtomicU32::new(UNSEEN), verdict: AtomicU8::new(UNDECIDED) });
@@ -103,38 +122,51 @@ fn place(wanted: impl Fn(u32) -> bool, body: impl FnOnce() + Clone + Send + 'sta
                 body();
             })
         };
-        let on = loop {
-            let on = seat.on.load(Ordering::Acquire);
-            if on != UNSEEN {
-                break on;
-            }
-            if nanos_since_boot() >= deadline {
-                refuse(Refusal::NotStaged, "a candidate never said which CPU it ran on");
-            }
-            std::hint::spin_loop();
-        };
+        let seen = || Some(seat.on.load(Ordering::Acquire)).filter(|on| *on != UNSEEN);
+        let on = spin_for(deadline, seen, "a candidate")?;
         let keep = wanted(on);
         seat.verdict.store(if keep { KEPT } else { LET_GO }, Ordering::Release);
         candidate.thread().unpark();
         if keep {
-            return (candidate, on);
+            return Ok((candidate, on));
         }
         candidate.join().expect("a candidate let go panicked");
     }
-    refuse(Refusal::NotStaged, &format!("{TRIES} threads started and none where it was wanted"));
+    Err(format!("{TRIES} threads started and none where it was wanted"))
 }
 
-fn main() {
-    let cpus = syscall::cpu_count() as usize;
-    if cpus < 2 {
-        refuse(Refusal::NotStaged, "one CPU has no idle CPU beside it");
+/// The arrangement a run times: the partner parked on `partner_on`, and a
+/// spinner there that says where it spins in `spinner_at`.
+struct Staged {
+    stop: Arc<AtomicBool>,
+    turn: Arc<AtomicU32>,
+    partner: JoinHandle<()>,
+    partner_on: u32,
+    spinner: Option<JoinHandle<()>>,
+    spinner_at: Arc<AtomicU32>,
+}
+
+impl Staged {
+    /// Stop both threads, and answer where the spinner last said it was.
+    fn end(self) -> u32 {
+        self.stop.store(true, Ordering::Release);
+        self.partner.thread().unpark();
+        self.partner.join().expect("the partner panicked");
+        if let Some(spinner) = self.spinner {
+            spinner.join().expect("the spinner panicked");
+        }
+        self.spinner_at.load(Ordering::Relaxed)
     }
+}
+
+/// Stage the partner on a CPU other than this thread's, then a spinner on the
+/// partner's, and check that this thread is still elsewhere and the spinner
+/// still there.
+fn stage(waker: &Thread) -> Result<Staged, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let turn = Arc::new(AtomicU32::new(0));
-    let main = thread::current();
-
     let (partner, partner_on) = place(|on| on != cpu::apic_id(), {
-        let (stop, turn, main) = (stop.clone(), turn.clone(), main.clone());
+        let (stop, turn, waker) = (stop.clone(), turn.clone(), waker.clone());
         move || loop {
             while turn.load(Ordering::Acquire) != 1 {
                 if stop.load(Ordering::Acquire) {
@@ -143,12 +175,13 @@ fn main() {
                 thread::park();
             }
             turn.store(0, Ordering::Release);
-            main.unpark();
+            waker.unpark();
         }
-    });
+    })?;
     let spinner_at = Arc::new(AtomicU32::new(UNSEEN));
-    let (spinner, _) = place(|on| on == partner_on, {
-        let (stop, at) = (stop.clone(), spinner_at.clone());
+    let mut staged = Staged { stop, turn, partner, partner_on, spinner: None, spinner_at };
+    let placed = place(|on| on == partner_on && cpu::apic_id() != partner_on, {
+        let (stop, at) = (staged.stop.clone(), staged.spinner_at.clone());
         move || {
             let mut x = 1u64;
             loop {
@@ -162,24 +195,43 @@ fn main() {
             }
         }
     });
-    // The arrangement is read once the kept spinner has said where it spins.
-    let deadline = nanos_since_boot() + STAGE_NS;
-    while spinner_at.load(Ordering::Relaxed) == UNSEEN {
-        if nanos_since_boot() >= deadline {
-            refuse(Refusal::NotStaged, "the kept spinner never said where it spins");
+    match placed {
+        Ok((spinner, _)) => staged.spinner = Some(spinner),
+        Err(why) => {
+            staged.end();
+            return Err(why);
         }
-        std::hint::spin_loop();
     }
-    let (waker_on, at) = (cpu::apic_id(), spinner_at.load(Ordering::Relaxed));
+    let seen = || Some(staged.spinner_at.load(Ordering::Relaxed)).filter(|at| *at != UNSEEN);
+    let at = match spin_for(nanos_since_boot() + STAGE_NS, seen, "the kept spinner") {
+        Ok(at) => at,
+        Err(why) => {
+            staged.end();
+            return Err(why);
+        }
+    };
+    let waker_on = cpu::apic_id();
     if waker_on == partner_on || at != partner_on {
-        refuse(
-            Refusal::NotStaged,
-            &format!(
-                "the waker is on CPU {waker_on}, the partner parked on {partner_on} and the \
-                 spinner on {at}"
-            ),
-        );
+        staged.end();
+        return Err(format!(
+            "the waker is on CPU {waker_on}, the partner parked on {partner_on} and the spinner on {at}"
+        ));
     }
+    Ok(staged)
+}
+
+fn main() {
+    let cpus = syscall::cpu_count() as usize;
+    if cpus < 2 {
+        refuse(Refusal::NotStaged, "one CPU has no idle CPU beside it");
+    }
+    let main = thread::current();
+    let mut why = String::new();
+    let Some(staged) = (0..ATTEMPTS).find_map(|_| stage(&main).map_err(|said| why = said).ok()) else {
+        refuse(Refusal::NotStaged, &format!("not staged in {ATTEMPTS} attempts, the last: {why}"));
+    };
+    let (waker_on, partner_on) = (cpu::apic_id(), staged.partner_on);
+    let (turn, partner) = (staged.turn.clone(), staged.partner.thread().clone());
 
     let mut histogram = vec![0u32; BUCKETS];
     let mut overflow = 0u32;
@@ -189,7 +241,7 @@ fn main() {
     for round in 0..WARMUP + ROUNDS {
         let sent = nanos_since_boot();
         turn.store(1, Ordering::Release);
-        partner.thread().unpark();
+        partner.unpark();
         while turn.load(Ordering::Acquire) != 0 {
             thread::park();
         }
@@ -208,11 +260,7 @@ fn main() {
         }
     }
     // The spinner is still where it was staged.
-    let held = spinner_at.load(Ordering::Relaxed);
-    stop.store(true, Ordering::Release);
-    partner.thread().unpark();
-    partner.join().expect("the partner panicked");
-    spinner.join().expect("the spinner panicked");
+    let held = staged.end();
     if held != partner_on {
         refuse(Refusal::NotStaged, &format!("the spinner left CPU {partner_on} for {held}"));
     }
