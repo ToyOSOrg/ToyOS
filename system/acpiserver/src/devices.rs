@@ -32,6 +32,10 @@ use toyos_abi::acpi::Block;
 use acpiserver_api::CONTROLLER_NONE;
 use toyos_aml::{Host, Interpreter, Kind, Value};
 
+use crate::aml::Aml;
+use crate::host::Kernel;
+use crate::init::Census;
+
 use crate::aml::kind;
 use crate::host::OWN;
 use crate::init::Names;
@@ -131,6 +135,35 @@ pub fn find(interpreter: &mut Interpreter, host: &mut dyn Host, names: &Names, g
         }
     };
     found
+}
+
+/// Attach `ec` to the AML host, so its space reaches the controller under
+/// the lock rule its `_GLK` names (ACPI 6.5 §6.5.7): none where it is absent
+/// or 0, the Global Lock around each transaction where it is 1. Then tell
+/// each scope that declares a region of its space that the space is there,
+/// by its `_REG` (§6.5.4: Arg0 3 the EmbeddedControl space, Arg1 1 connect),
+/// after the namespace's `_INI`s have run. A `_GLK` that is another value, no
+/// Integer or refused leaves the space unattached, said. `Err` is why a port
+/// of it the kernel refused ended it; `Ok` is the controller as served.
+pub fn attach<K: Kernel>(aml: &mut Aml<'_, K>, mut ec: Ec, names: &Names, census: &mut Census) -> Result<Ec, String> {
+    let glk = format!("{}._GLK", ec.path);
+    let unattached: Option<String> = match names.paths.contains(&glk).then(|| aml.interpreter.evaluate(&mut aml.host, &glk, &[])) {
+        None | Some(Ok(Value::Integer(0))) => None,
+        Some(Ok(Value::Integer(1))) => {
+            ec.glk = true;
+            None
+        }
+        Some(Ok(Value::Integer(_))) => Some("its _GLK is neither 0 nor 1".into()),
+        Some(Ok(_)) => Some("its _GLK is no Integer".into()),
+        Some(Err(why)) => Some(format!("its _GLK was refused, {}", kind(&why))),
+    };
+    if let Some(why) = unattached {
+        println!("acpiserver: the embedded controller's space is not attached to AML: {why}");
+        return Ok(ec);
+    }
+    aml.host.ec = Some(ec.clone());
+    crate::init::announce(aml, names, crate::init::EMBEDDED_CONTROL, 0, census);
+    aml.host.ended.take().map_or(Ok(ec), Err)
 }
 
 /// What became of an embedded-controller query's method.

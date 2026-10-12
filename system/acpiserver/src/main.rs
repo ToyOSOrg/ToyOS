@@ -25,7 +25,7 @@
 //! `_INI` by Table 6.67, again over whatever a table loaded meanwhile added.
 //!
 //! **Then the embedded controller is found in the namespace and armed**
-//! ([`devices::find`]): attached to the AML host in the ECDT's place, so its
+//! ([`devices::find`], [`devices::attach`]): attached to the AML host in the ECDT's place, so its
 //! space reaches it, under the Global Lock where its `_GLK` asks for it
 //! (ACPI 6.5 §6.5.7), and announced by `_REG(3, 1)` in each scope that
 //! declares a region of it (§6.5.4), after every `_INI`; then its GPE
@@ -387,7 +387,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
 
     /// Find the controller, and the buttons where they are control method
     /// devices, in the namespace the load kept; attach the controller to the
-    /// AML host ([`attach`]), enable its GPE and drain its backlog. What
+    /// AML host ([`devices::attach`]), enable its GPE and drain its backlog. What
     /// comes back is the namespace's batteries and adapters, by path.
     fn arm_controller(&mut self, names: Option<&Names>) -> (Vec<String>, Vec<String>) {
         let (Some(aml), Some(names)) = (&mut self.aml, names) else {
@@ -424,7 +424,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             }
             Ok(_) => {}
         }
-        let ec = match attach(aml, ec, names, &mut self.census) {
+        let ec = match devices::attach(aml, ec, names, &mut self.census) {
             Ok(ec) => ec,
             Err(why) => {
                 println!("{CONTROLLER_NONE}{why}");
@@ -630,35 +630,6 @@ impl<'a, P: Ports> Server<'a, Claim<'a>, P> {
             self.kernel.dev.ack().expect("acpiserver: the claim's acknowledgement");
         }
     }
-}
-
-/// Attach `ec` to the AML host, so its space reaches the controller under
-/// the lock rule its `_GLK` names (ACPI 6.5 §6.5.7): none where it is absent
-/// or 0, the Global Lock around each transaction where it is 1. Then tell
-/// each scope that declares a region of its space that the space is there,
-/// by its `_REG` (§6.5.4: Arg0 3 the EmbeddedControl space, Arg1 1 connect),
-/// after the namespace's `_INI`s have run. A `_GLK` that is another value, no
-/// Integer or refused leaves the space unattached, said. `Err` is why a port
-/// of it the kernel refused ended it; `Ok` is the controller as served.
-fn attach<K: Kernel>(aml: &mut Aml<'_, K>, mut ec: Ec, names: &Names, census: &mut Census) -> Result<Ec, String> {
-    let glk = format!("{}._GLK", ec.path);
-    let unattached: Option<String> = match names.paths.contains(&glk).then(|| aml.interpreter.evaluate(&mut aml.host, &glk, &[])) {
-        None | Some(Ok(Value::Integer(0))) => None,
-        Some(Ok(Value::Integer(1))) => {
-            ec.glk = true;
-            None
-        }
-        Some(Ok(Value::Integer(_))) => Some("its _GLK is neither 0 nor 1".into()),
-        Some(Ok(_)) => Some("its _GLK is no Integer".into()),
-        Some(Err(why)) => Some(format!("its _GLK was refused, {}", aml::kind(&why))),
-    };
-    if let Some(why) = unattached {
-        println!("acpiserver: the embedded controller's space is not attached to AML: {why}");
-        return Ok(ec);
-    }
-    aml.host.ec = Some(ec.clone());
-    init::announce(aml, names, init::EMBEDDED_CONTROL, 0, census);
-    aml.host.ended.take().map_or(Ok(ec), Err)
 }
 
 /// What a query no method runs for is said to be.

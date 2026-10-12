@@ -555,14 +555,14 @@ pub mod tests {
     }
 
     /// The fixture loaded and its controller found and attached, as the
-    /// server arms it ([`crate::attach`]).
+    /// server arms it ([`devices::attach`]).
     fn armed(kernel: &Scripted) -> (Aml<'_, Scripted>, Found) {
         let (_, aml) = crate::aml::load(kernel, CRAFTED_RSDP);
         let mut aml = aml.expect("the fixture's DSDT loads");
         let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
         let found = devices::find(&mut aml.interpreter, &mut aml.host, &names, GPE0, false);
         let ec = found.ec.clone().expect("the fixture's controller");
-        crate::attach(&mut aml, ec, &names, &mut crate::init::Census::default()).expect("no port of it refused");
+        devices::attach(&mut aml, ec, &names, &mut crate::init::Census::default()).expect("no port of it refused");
         (aml, found)
     }
 
