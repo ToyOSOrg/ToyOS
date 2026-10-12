@@ -183,9 +183,8 @@ pub const SYS_HANDLE_RECV: u64 = 104;
 /// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
 pub const SYS_SHM_CREATE: u64 = 105;
-/// Map a region into the caller, and answer where, how long, and whether it
-/// is memory the kernel allocated. Idempotent: a second call answers the
-/// first call's address. See [`shm_map`].
+/// Map a region into the caller. Idempotent: a second call answers the first
+/// call's address. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
 
 /// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
@@ -559,13 +558,17 @@ pub enum FileType {
     // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
     // A claim on a PCI function reports `Unknown`: what it is, is the driver's
     // to know, and this kernel does not know it.
-    /// A shared-memory region; `size` is its length. A program's stdout and
-    /// stderr are one when they are its log ring (`toyos::log`).
+    /// A shared-memory region of memory the kernel allocated to it and maps
+    /// write-back, as [`shm_create`] makes; `size` is its length. A program's
+    /// stdout and stderr are one when they are its log ring (`toyos::log`).
     SharedMemory = 10,
     /// A directory, which only [`stat`] answers.
     Directory = 11,
     /// A symbolic link, which only [`stat`] answers; `size` is its target's length.
     Symlink = 12,
+    /// Any other shared-memory region, such as a device's registers; `size`
+    /// is its length. A peer's buffer is never one.
+    DeviceMemory = 13,
 }
 
 impl FileType {
@@ -583,6 +586,7 @@ impl FileType {
             10 => Some(Self::SharedMemory),
             11 => Some(Self::Directory),
             12 => Some(Self::Symlink),
+            13 => Some(Self::DeviceMemory),
             _ => None,
         }
     }
@@ -820,7 +824,7 @@ pub mod debug_action {
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
     /// How many kernel objects of one kind are alive right now. The argument is
-    /// an [`ObjectKind::ALL`](crate::handle::ObjectKind::ALL) index.
+    /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///
     /// **Per kind and not a total**: an object of one kind that is never
     /// released is invisible behind ordinary churn in another.
@@ -2008,38 +2012,7 @@ pub fn shm_create(size: usize) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_SHM_CREATE, size as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
-crate::user_safe! {
-    /// Where [`shm_map`] put a region, and what the region is.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub struct ShmMapping {
-        pub addr: u64,
-        /// The mapping's length: the whole region.
-        pub len: u64,
-        /// 1 for memory the kernel allocated, as [`SYS_SHM_CREATE`] makes; 0
-        /// for anything else, a device's registers or a scanout.
-        pub ram: u32,
-        pub _pad: u32,
-    }
-}
-
-impl ShmMapping {
-    pub fn ptr(&self) -> *mut u8 {
-        core::ptr::with_exposed_provenance_mut(self.addr as usize)
-    }
-
-    /// Whether the region is memory the kernel allocated: the only kind a
-    /// process may take from a peer as a buffer.
-    pub fn is_ram(&self) -> bool {
-        match self.ram {
-            0 => false,
-            1 => true,
-            other => panic!("shm_map answered memory word {other}, which is neither 0 nor 1"),
-        }
-    }
-}
-
-/// Map the region `shm` names into this process, and answer where, how long,
-/// and whether it is memory the kernel allocated. Needs [`Rights::MAP`].
+/// Map the region `shm` names into this process. Needs [`Rights::MAP`].
 ///
 /// Idempotent: a second call answers the first call's address. [`SyscallError::Gone`]
 /// when the region's last handle was closed under the call: nothing is mapped.
@@ -2048,9 +2021,9 @@ impl ShmMapping {
 ///
 /// # Safety
 /// Caller must manage the returned pointer.
-pub unsafe fn shm_map(shm: RawHandle) -> Result<ShmMapping, SyscallError> {
-    let mut out = ShmMapping { addr: 0, len: 0, ram: 0, _pad: 0 };
-    check_unit(syscall(SYS_SHM_MAP, shm.0 as u64, core::ptr::from_mut(&mut out) as u64, 0, 0)).map(|()| out)
+pub unsafe fn shm_map(shm: RawHandle) -> Result<*mut u8, SyscallError> {
+    check(syscall(SYS_SHM_MAP, shm.0 as u64, 0, 0, 0))
+        .map(|addr| core::ptr::with_exposed_provenance_mut(addr as usize))
 }
 
 /// The machine's [header](SYSINFO_HEADER_SIZE), then as much of the process

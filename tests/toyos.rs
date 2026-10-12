@@ -194,8 +194,8 @@ const RUST_SKIP: &[&str] = &[
     // runs it.
     "bar_map_again",
     // It lends fileserver the virtio NIC's BAR, which the T14 has none of:
-    // `lent_window_refused` runs it.
-    "lent_window_refused",
+    // `lent_device_memory_refused` runs it.
+    "lent_device_memory_refused",
     // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
     // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
@@ -415,7 +415,7 @@ const MACHINE_TESTS: &[&str] = &[
     // A region that is not memory the kernel allocated, lent to a file server:
     // the BAR of a function no program of the boot holds, which on the T14 is
     // its I219, as `bar_map_again` says.
-    "lent_window_refused",
+    "lent_device_memory_refused",
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
@@ -3922,7 +3922,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
-        "lent_window_refused" => lent_window_refused(test_config),
+        "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
@@ -4759,16 +4759,16 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// fileserver refuses a hello whose window is a pipe end, a region longer than
-/// `WINDOW_BYTES`, or the virtio NIC's BAR, each by the kernel's answer and by
-/// name, and answers the next client as the process that refused them.
-fn lent_window_refused(test_config: &Path) -> Result<(), String> {
-    const JOB: &str = "lent_window_refused";
+/// fileserver refuses a hello whose window is the virtio NIC's BAR, by the
+/// kernel's answer and by name, and answers the next client as the process
+/// that refused it.
+fn lent_device_memory_refused(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "lent_device_memory_refused";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu =
         QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
     serial::Serial::boot(&qemu).must_be_clean()?;
-    let result = qemu.run_test("test_rs_lent_window_refused", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_lent_device_memory_refused", Duration::from_secs(60));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -4776,10 +4776,8 @@ fn lent_window_refused(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     for said in [
-        ": its hello carried no window",
-        ": its window is not WINDOW_BYTES long",
         ": its window is not memory the kernel allocated",
-        "lent_window_refused: the server that refused answers the next client",
+        "lent_device_memory_refused: the server that let go answers the next client",
     ] {
         let Some(line) = result.stdout.lines().find(|l| l.contains(said)) else {
             return Err(format!("nobody said `{said}`:\n{}", result.stdout));

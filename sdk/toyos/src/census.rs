@@ -18,8 +18,8 @@ pub struct Census([u64; ObjectKind::ALL.len()]);
 impl Census {
     pub fn now() -> Self {
         let mut counts = [0u64; ObjectKind::ALL.len()];
-        for (i, slot) in counts.iter_mut().enumerate() {
-            *slot = syscall::debug_with(CENSUS_KIND, i as u64);
+        for (slot, kind) in counts.iter_mut().zip(ObjectKind::ALL) {
+            *slot = syscall::debug_with(CENSUS_KIND, kind as u64);
         }
         Self(counts)
     }
@@ -37,13 +37,13 @@ impl Census {
     pub fn grown_since(
         &self,
         before: &Census,
-    ) -> impl Iterator<Item = (&'static str, u64, u64)> + '_ {
+    ) -> impl Iterator<Item = (ObjectKind, u64, u64)> + '_ {
         let earlier = before.0;
         ObjectKind::ALL
             .iter()
             .enumerate()
             .filter(move |(i, _)| self.0[*i] > earlier[*i])
-            .map(move |(i, kind)| (kind.name(), earlier[i], self.0[i]))
+            .map(move |(i, kind)| (*kind, earlier[i], self.0[i]))
     }
 }
 
@@ -54,7 +54,7 @@ impl fmt::Display for Census {
             if !first {
                 write!(f, ", ")?;
             }
-            write!(f, "{} {live}", kind.name())?;
+            write!(f, "{kind:?} {live}")?;
             first = false;
         }
         if first {

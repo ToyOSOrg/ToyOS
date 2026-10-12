@@ -220,12 +220,14 @@ macro_rules! kobject {
                 pub(super) static $variant: AtomicU64 = AtomicU64::new(0);
             )+
 
-            /// `(type name, live count)` per kind, in declaration order — a
-            /// summed total would hide one kind's leak in another's churn.
+            /// Live objects of one kind — a summed total would hide one
+            /// kind's leak in another's churn.
             #[cfg(feature = "test-actuators")]
-            pub fn live() -> impl Iterator<Item = (&'static str, u64)> {
+            pub fn live(kind: toyos_abi::handle::ObjectKind) -> u64 {
                 use core::sync::atomic::Ordering;
-                [$((stringify!($variant), $variant.load(Ordering::Relaxed)),)+].into_iter()
+                match kind {
+                    $(toyos_abi::handle::ObjectKind::$variant => $variant.load(Ordering::Relaxed),)+
+                }
             }
         }
     };
@@ -247,7 +249,6 @@ kobject! {
     deferred Connection => service::ConnectionEnd,
     deferred Device => device::DeviceClaim,
     deferred Acceptor => port::Acceptor,
-    // Kind name is the ABI's; `CENSUS_KIND` asserts the two lists agree.
     deferred Inbox => inbox::InboxObject,
     // The flush that makes releasing it safe waits for every CPU, so it runs from the queue, never inline.
     deferred SharedMem => shm::SharedMemObject,

@@ -254,7 +254,17 @@ impl Connection {
     /// protocol here sends a fixed batch per message type, so this is the
     /// shape every caller wants.
     pub fn recv_handles_exact<const N: usize>(&self, kinds: [ObjectKind; N]) -> Option<[RawHandle; N]> {
-        recv_handles_exact(self.0.raw(), kinds)
+        const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
+        let mut batch = [Received { handle: toyos_abi::HANDLE_INVALID, kind: 0 }; syscall::MAX_TRANSFER_HANDLES];
+        let n = self.recv_handles(&mut batch).ok()?;
+        let batch = &batch[..n];
+        if !batch.iter().map(Received::kind).eq(kinds) {
+            for received in batch {
+                syscall::close(received.handle);
+            }
+            return None;
+        }
+        Some(core::array::from_fn(|i| batch[i].handle))
     }
 
     pub fn recv_bytes(&self, header: &IpcHeader, buf: &mut [u8]) -> Result<usize, IpcError> {
@@ -328,25 +338,6 @@ fn move_batch<H: AsHandle>(
     #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
     batch.into_iter().flatten().for_each(core::mem::forget);
     Ok(())
-}
-
-/// The `N` handles the frame just read off `handle` says travel with it.
-///
-/// See [`Connection::recv_handles_exact`]. This is the spelling for a server
-/// that buffers frames and dispatches them by handle rather than holding the
-/// `Connection` — the compositor reads every client this way.
-pub fn recv_handles_exact<const N: usize>(handle: RawHandle, kinds: [ObjectKind; N]) -> Option<[RawHandle; N]> {
-    const { assert!(N <= syscall::MAX_TRANSFER_HANDLES) };
-    let mut batch = [Received { handle: toyos_abi::HANDLE_INVALID, kind: 0 }; syscall::MAX_TRANSFER_HANDLES];
-    let n = syscall::handle_recv(handle, &mut batch).ok()?;
-    let batch = &batch[..n];
-    if !batch.iter().map(Received::kind).eq(kinds) {
-        for received in batch {
-            syscall::close(received.handle);
-        }
-        return None;
-    }
-    Some(core::array::from_fn(|i| batch[i].handle))
 }
 
 /// [`signal`] without blocking. A bare header always fits in one write.

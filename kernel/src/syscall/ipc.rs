@@ -360,8 +360,7 @@ pub(super) fn sys_shm_create(size: u64) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-/// Map a region into the caller and answer where, how long, and whether it is RAM this kernel allocated: what a receiver needs to refuse a region a peer lent it.
-pub(super) fn sys_shm_map(h: RawHandle, out: &mut crate::user_ptr::UserBytesMut) -> u64 {
+pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     let shm = match process::with_process_data(|data| {
         data.handles.get::<crate::object::shm::SharedMemObject>(h, Rights::MAP)
     }) {
@@ -370,11 +369,7 @@ pub(super) fn sys_shm_map(h: RawHandle, out: &mut crate::user_ptr::UserBytesMut)
     };
     let pt = process::current_address_space();
     match shm.map_into(process::current_process(), &pt) {
-        Ok(addr) => {
-            let ram = u32::from(shm.ram().is_some());
-            out.write_at(0, toyos_abi::usersafe::bytes(&ShmMapping { addr, len: shm.size(), ram, _pad: 0 }));
-            0
-        }
+        Ok(vaddr) => vaddr,
         Err(e) => e.to_u64(),
     }
 }

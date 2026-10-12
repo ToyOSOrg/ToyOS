@@ -594,7 +594,7 @@ impl Server {
             };
             match SharedMemory::lent(lent, WINDOW_BYTES) {
                 Ok(window) => client.window = Some(window),
-                Err(Lent::Map(_)) => return Answer::Drop("its window would not map"),
+                Err(Lent::Kernel(_)) => return Answer::Drop("its window would not map"),
                 Err(Lent::NotRam) => return Answer::Drop("its window is not memory the kernel allocated"),
                 Err(Lent::Length { .. }) => return Answer::Drop("its window is not WINDOW_BYTES long"),
             }

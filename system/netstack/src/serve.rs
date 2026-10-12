@@ -774,7 +774,9 @@ impl Sockets {
     /// What the kernel answered one of [`Self::watch`]'s watches, or `false`
     /// for a token that is none of them. An answer about a socket that is
     /// gone since, or a pipe end the node let go, says nothing: closing an
-    /// end ends its watch, and that end is an answer too.
+    /// end ends its watch, and that end is an answer too. A refused watch
+    /// ends what it watched for: an end of the right kind that its client
+    /// moved without `Rights::WAIT` is refused it.
     pub fn answered(&mut self, node: &mut Node, now: Instant, token: u64, answer: Result<u32, SyscallError>) -> bool {
         let socket_id = token as u32;
         match token & TOKEN_KIND {

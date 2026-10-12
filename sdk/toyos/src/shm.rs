@@ -13,14 +13,15 @@
 //! which believes the kernel's answer about it and not the peer's: a handle
 //! of another kind is refused before this is reached
 //! ([`Connection::recv_handles_exact`](crate::ipc::Connection::recv_handles_exact)),
-//! and a region that is not memory the kernel allocated, or not the length
-//! the protocol says, is refused here. [`SharedMemory::adopt`] is for a region
-//! the kernel itself answered: a device's window or a scanout.
+//! and a region the kernel's [`fstat`](syscall::fstat) answers is not memory
+//! it allocated, or not the length the protocol says, is refused here before
+//! it is mapped. [`SharedMemory::adopt`] is for a region the kernel itself
+//! handed this process.
 
 use core::fmt;
 use core::sync::atomic::AtomicU8;
 
-use toyos_abi::syscall::{self, ShmMapping, SyscallError, SHM_PAGE};
+use toyos_abi::syscall::{self, FileType, Stat, SyscallError, SHM_PAGE};
 
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
@@ -43,29 +44,23 @@ impl SharedMemory {
         Self::adopt(syscall::shm_create(size)?, size)
     }
 
-    /// Map a region the kernel answered — a device's window, a scanout, a
-    /// DMA grant — and view its first `size` bytes.
+    /// Map a region the kernel itself handed this process — a device's
+    /// window, a DMA grant — and view its first `size` bytes.
     ///
-    /// Never for a region a peer sent, which is [`Self::lent`]'s. The kernel
-    /// is no peer, so a mapping shorter than `size` is this caller's bug.
+    /// Never for a region a peer sent, which is [`Self::lent`]'s.
     pub fn adopt(handle: RawHandle, size: usize) -> Result<Self, SyscallError> {
-        let (handle, mapping) = map(handle)?;
-        assert!(
-            size <= mapping.len as usize,
-            "shm: a {size}-byte view of a region the kernel maps at {} bytes",
-            mapping.len as usize
-        );
-        Ok(Self { handle, ptr: mapping.ptr(), size })
+        let handle = OwnedHandle(handle);
+        Ok(Self { ptr: map(&handle)?, handle, size })
     }
 
     /// Map a region a peer lent, whose protocol says it is `bytes` long, and
-    /// view those bytes; refused unless the kernel answers it is memory it
-    /// allocated, `bytes` rounded up to whole [`SHM_PAGE`]s, as
-    /// [`Self::create`] makes it. The handle is consumed either way.
+    /// view those bytes; refused, and never mapped, unless the kernel answers
+    /// it is memory it allocated, `bytes` rounded up to whole [`SHM_PAGE`]s,
+    /// as [`Self::create`] makes it. The handle is consumed either way.
     pub fn lent(handle: RawHandle, bytes: usize) -> Result<Self, Lent> {
-        let (handle, mapping) = map(handle).map_err(Lent::Map)?;
-        judge(&mapping, bytes)?;
-        Ok(Self { handle, ptr: mapping.ptr(), size: bytes })
+        let handle = OwnedHandle(handle);
+        judge(&syscall::fstat(handle.raw()).map_err(Lent::Kernel)?, bytes)?;
+        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, size: bytes })
     }
 
     /// A second handle to the same region, for sending to a peer.
@@ -104,21 +99,20 @@ impl SharedMemory {
     }
 }
 
-fn map(handle: RawHandle) -> Result<(OwnedHandle, ShmMapping), SyscallError> {
-    let handle = OwnedHandle(handle);
+fn map(handle: &OwnedHandle) -> Result<*mut u8, SyscallError> {
     // SAFETY: the mapping lives as long as the handle, which the caller keeps beside it.
-    let mapping = unsafe { syscall::shm_map(handle.raw()) }?;
-    assert!(!mapping.ptr().is_null(), "shm_map answered null");
-    Ok((handle, mapping))
+    let ptr = unsafe { syscall::shm_map(handle.raw()) }?;
+    assert!(!ptr.is_null(), "shm_map answered null");
+    Ok(ptr)
 }
 
 /// Why a lent region was refused.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lent {
-    /// The kernel would not map it.
-    Map(SyscallError),
-    /// It is not memory the kernel allocated: a device's registers or a
-    /// scanout, which a reader would read and write as a device.
+    /// The kernel would not describe or map it.
+    Kernel(SyscallError),
+    /// It is not memory the kernel allocated to a region, such as a device's
+    /// registers, which a reader would read and write as a device.
     NotRam,
     /// It is not the length the protocol says: `is` bytes, where `bytes`
     /// rounded up to whole pages was owed.
@@ -128,7 +122,7 @@ pub enum Lent {
 impl fmt::Display for Lent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Map(e) => write!(f, "the kernel would not map it ({e:?})"),
+            Self::Kernel(e) => write!(f, "the kernel would not describe or map it ({e:?})"),
             Self::NotRam => write!(f, "it is not memory the kernel allocated"),
             Self::Length { is, bytes } => write!(f, "it is {is} bytes, not {bytes} in whole pages"),
         }
@@ -136,12 +130,12 @@ impl fmt::Display for Lent {
 }
 
 /// The kernel's answer about a lent region, held to the protocol's length.
-fn judge(mapping: &ShmMapping, bytes: usize) -> Result<(), Lent> {
-    if !mapping.is_ram() {
+fn judge(stat: &Stat, bytes: usize) -> Result<(), Lent> {
+    if stat.file_type != FileType::SharedMemory {
         return Err(Lent::NotRam);
     }
-    if Some(mapping.len as usize) != bytes.checked_next_multiple_of(SHM_PAGE) {
-        return Err(Lent::Length { is: mapping.len as usize, bytes });
+    if Some(stat.size as usize) != bytes.checked_next_multiple_of(SHM_PAGE) {
+        return Err(Lent::Length { is: stat.size as usize, bytes });
     }
     Ok(())
 }
@@ -156,25 +150,25 @@ impl AsHandle for SharedMemory {
 mod tests {
     use super::*;
 
-    fn answer(len: usize, ram: u32) -> ShmMapping {
-        ShmMapping { addr: 1 << 30, len: len as u64, ram, _pad: 0 }
+    fn answer(len: usize, file_type: FileType) -> Stat {
+        Stat { file_type, size: len as u64, ..Stat::default() }
     }
 
     #[test]
     fn a_region_the_kernel_made_for_the_length_is_taken() {
-        assert_eq!(judge(&answer(SHM_PAGE, 1), SHM_PAGE), Ok(()));
-        assert_eq!(judge(&answer(2 * SHM_PAGE, 1), SHM_PAGE + 1), Ok(()));
+        assert_eq!(judge(&answer(SHM_PAGE, FileType::SharedMemory), SHM_PAGE), Ok(()));
+        assert_eq!(judge(&answer(2 * SHM_PAGE, FileType::SharedMemory), SHM_PAGE + 1), Ok(()));
     }
 
     #[test]
     fn a_region_that_is_not_ram_is_refused_whatever_its_length() {
-        assert_eq!(judge(&answer(SHM_PAGE, 0), SHM_PAGE), Err(Lent::NotRam));
+        assert_eq!(judge(&answer(SHM_PAGE, FileType::DeviceMemory), SHM_PAGE), Err(Lent::NotRam));
     }
 
     #[test]
     fn a_region_longer_than_the_protocol_says_is_refused() {
         assert_eq!(
-            judge(&answer(2 * SHM_PAGE, 1), SHM_PAGE),
+            judge(&answer(2 * SHM_PAGE, FileType::SharedMemory), SHM_PAGE),
             Err(Lent::Length { is: 2 * SHM_PAGE, bytes: SHM_PAGE })
         );
     }
@@ -182,7 +176,7 @@ mod tests {
     #[test]
     fn a_region_shorter_than_the_protocol_says_is_refused() {
         assert_eq!(
-            judge(&answer(SHM_PAGE, 1), SHM_PAGE + 1),
+            judge(&answer(SHM_PAGE, FileType::SharedMemory), SHM_PAGE + 1),
             Err(Lent::Length { is: SHM_PAGE, bytes: SHM_PAGE + 1 })
         );
     }
@@ -190,7 +184,7 @@ mod tests {
     #[test]
     fn a_length_whose_rounding_overflows_is_refused() {
         assert_eq!(
-            judge(&answer(SHM_PAGE, 1), usize::MAX),
+            judge(&answer(SHM_PAGE, FileType::SharedMemory), usize::MAX),
             Err(Lent::Length { is: SHM_PAGE, bytes: usize::MAX })
         );
     }

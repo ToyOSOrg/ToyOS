@@ -57,10 +57,9 @@ impl RawHandle {
 /// any table issues.
 pub const HANDLE_INVALID: RawHandle = RawHandle(u32::MAX);
 
-/// Every kind of kernel object a handle can name, in the order the kernel's
-/// `kobject!` declares them: the kernel answers a received handle's kind as
-/// this word, and an index into [`ObjectKind::ALL`] is the one
-/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes.
+/// Every kind of kernel object a handle can name: the kernel answers a
+/// received handle's kind as this word, and
+/// [`CENSUS_KIND`](crate::syscall::debug_action::CENSUS_KIND) takes one.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ObjectKind {
@@ -98,24 +97,6 @@ impl ObjectKind {
 
     pub const fn from_word(word: u32) -> Option<Self> {
         if (word as usize) < Self::ALL.len() { Some(Self::ALL[word as usize]) } else { None }
-    }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::PipeRead => "PipeRead",
-            Self::PipeWrite => "PipeWrite",
-            Self::Connection => "Connection",
-            Self::Device => "Device",
-            Self::Acceptor => "Acceptor",
-            Self::Inbox => "Inbox",
-            Self::SharedMem => "SharedMem",
-            Self::Connector => "Connector",
-            Self::Namespace => "Namespace",
-            Self::File => "File",
-            Self::Console => "Console",
-            Self::SysCap => "SysCap",
-            Self::Process => "Process",
-        }
     }
 }
 
