@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: track
 opened: 2026-10-03
 ---
@@ -189,7 +189,8 @@ otherwise pay to find again:
   refusal.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
-  loaded that way; the interpreter refuses both as unsupported.
+  loaded that way; the interpreter refuses both as unsupported. Owner: S1,
+  below, for `Load`, and S4 for `LoadTable`. **Exit**: theirs.
 - **A refused evaluation keeps what it stored**, and nothing gives an
   interpreter's 16 MiB back: after one method has filled it, an Integer
   still evaluates, a field that fits one among them, and every method that
@@ -449,3 +450,89 @@ and a dry run of the firmware's `_INI` for the controller clears that bit in
 its two variants that answer all ones, the six that answer zero showing no
 bit, so that slice's first reading on the T14 is the same scout's of that bit, clear
 after the initialisation has run, before the press.
+
+**Ruled** (owner, 2026-10-12, in #870's comment 6119715385), asked whether
+deep idle states take the interpreter's missing `Load` and `_OSC`/`_PDC`
+first or wait for this track: "finish aml then continue working on deep idle
+states". What finished is, and the slices below and their order, are #875's
+design, not his.
+
+**Finished** is held to ACPI 6.5, and to Intel's Processor Vendor-Specific
+ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
+
+- `toyos-aml` carries every construct of the grammar (§20.2), and each legacy
+  one real firmware ships, and `Error::Unsupported` is gone.
+- Every space of Table 5.182 reaches the host with its §5.5.2.4 protocol, and
+  `_REG` announces those the server serves.
+- The server does OSPM's side of the protocol. It:
+  - loads every block, static and loaded at run time;
+  - initialises the namespace;
+  - negotiates `\_SB._OSC` and each processor's `_OSC` with only what ToyOS
+    honours;
+  - runs every runtime GPE's method;
+  - delivers every Notify.
+- On the T14 and the AMD bench:
+  - every block loads, and no method is refused;
+  - under Linux's capabilities as the firmware recorded them, the blocks Linux
+    loaded come out;
+  - each `_STA`, `_CST` and battery reading equals Linux's on the same machine.
+
+Not in finished:
+
+- concurrent method execution, which §5.5.2 permits and does not require;
+- the PCI host bridges' `_OSC`;
+- sleep states;
+- `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
+  ACPI 6.5 does not define.
+
+The slices come in this order, each its own pull request. S1 is held by #875
+(`wt/toyos-aml`). Before it is built, a check outside the tree reads both
+benches' tables, their NVS and Linux's readings, which the orchestrator dumps
+from their Ubuntu installs.
+
+- **S1: `Load`, and `_OSC` negotiated.**
+  - `Load` per §19.6.76: its objects outlive the method that loaded it, and
+    its bytes come only from memory Table 15.6 calls reserved or NVS.
+  - `\_SB._OSC` and each Intel processor's `_OSC`, query then commit. The
+    capability set holds only what ToyOS honours, which today is nothing.
+  - Takes up the `Load` bullet above, and the arena's capacity in the heap
+    bullet.
+  - **Exit**:
+    - host tests of `Load` from a region, a field and a buffer;
+    - outside the tree, under Linux's capabilities as the T14's NVS recorded
+      them, the blocks Linux lists, byte for byte;
+    - `acpi_tables_loaded` reads both `_OSC`s evaluated, with nothing
+      refused.
+- **S2: what AML may reach, ruled.**
+  - The policy for memory the firmware types `EfiMemoryMappedIO`.
+  - Whether the kernel's bound stays address-only.
+  - Any write, outside what passes now, that a machine's measured AML makes.
+  - **Exit**:
+    `issues/acpiserver-refuses-the-amd-benchs-dsdt-for-a-read-in-memory-mapped-io.md`'s.
+- **S3: the namespace initialised.**
+  - `\_SB._INI`, then the `_STA`/`_INI` walk by Table 6.67 over each block a
+    load added, then `_REG`.
+  - A root bridge without `_BBN`, found by `_HID` or `_CID`.
+  - `_GLK`.
+  - Takes up:
+    - the `_REG` bullet above;
+    - `issues/qemus-interrupt-links-are-refused-by-the-aml-interpreter.md`;
+    - `issues/the-acpi-server-talks-to-the-embedded-controller-without-the-global-lock.md`.
+  - **Exit**: their exits, and every device's `_STA` on the T14 equal to
+    Linux's.
+- **S4: the grammar whole.**
+  - `LoadTable`, `DataTableRegion`, and every space's protocol.
+  - **Exit**:
+    - `Error::Unsupported` deleted;
+    - a host test for each construct;
+    - both benches' tables loaded outside the tree, none refused for a
+      construct.
+- **S5: every event served.**
+  - Each runtime GPE's `_Lxx` or `_Exx`, and each Notify to its owner.
+  - The SCI served while a table loads.
+  - Takes up the press-wait bullet above.
+  - **Exit**: that bullet's exit, and a held T14 boot reading every enabled
+    GPE's method run with none refused.
+- **S6: the bounds measured.**
+  - The heap, full-interpreter, ten-second and Global Lock bullets above,
+    each by its own exit.
