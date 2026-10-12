@@ -23,6 +23,8 @@ Counted from the code. Priced at the per-prefix cost the Ring 3 controls of PR
 come to about 180 and 66 cycles. That is an estimate, not a measurement of
 these sites.
 
+Owner: `issues/toyos-uses-what-modern-hardware-offers-for-speed.md`.
+
 **Exit**: a syscall that returns to its own thread takes no machine-wide lock and
 no `Arc` reference to count itself, and `syscall_cost` is read on both benches
 before and after.

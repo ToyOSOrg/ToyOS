@@ -17,6 +17,8 @@ generates but nothing written as `asm!` text, and `context_switch` turns on
 `.arch_extension fp` and `simd` for its own block. The x86-64 kernel is judged
 by its decoded instructions (`build/fpgate.rs`). The AArch64 kernel is not.
 
+Owner: `issues/toyos-runs-on-arm64.md`.
+
 **Exit**: the build decodes the AArch64 kernel image and refuses it when an
 instruction outside `arch::aarch64::switch` reads or writes FP/SIMD state. The
 gate has a host test for each refused class, and a build with one such
