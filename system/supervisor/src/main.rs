@@ -1903,7 +1903,7 @@ impl Supervisor<'_> {
         let (starts, binary, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
-                say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
+                say!("supervisor: launcher: {} in {} may not start {}: {why}", caller.row.name, caller.session, program.name);
                 let _ = conn.try_signal(launch::MSG_REFUSED);
                 return;
             }
