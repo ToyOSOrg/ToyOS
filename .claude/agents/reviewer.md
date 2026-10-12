@@ -125,8 +125,8 @@ if it meets the bar above; otherwise it is a NOTE.
   no internet. However loaded the host, no guest test goes red: a guest test's only clock is a
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
-  comparison against Ubuntu — is not a test: it is posted on the pull request as evidence and
-  never becomes a suite row. Another OS's or a reference implementation's output, recorded or
+  comparison against Ubuntu — is not a test: it is its pull request's evidence and never becomes
+  a suite row. Another OS's or a reference implementation's output, recorded or
   live, is an oracle only when it is committed with its provenance and read hermetically, and a
   timing held to another's only when it was read on the same machine. A policy another OS chose is
   never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source

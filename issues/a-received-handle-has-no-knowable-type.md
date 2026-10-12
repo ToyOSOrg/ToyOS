@@ -4,45 +4,46 @@ kind: defect
 opened: 2026-08-10
 ---
 
-# A process cannot ask what it received, and using it wrongly is fatal
+# A process cannot ask what most handles it received are, and using one wrongly is fatal
 
 `SYS_HANDLE_RECV` installs a peer's handles in the receiver's table and answers
-only *how many*. There is no syscall that says what any of them names, and
-`KObjectRef`'s kind is not reported anywhere.
+only *how many*. `SYS_FSTAT` answers what any handle is, needing no right, and
+settles two kinds: only a region of memory the kernel allocated answers
+`SharedMemory`, which is how `SharedMemory::lent` refuses every other handle
+before it maps one (`sdk/toyos/src/shm.rs`), and only a `Connection` answers
+`Socket`. It settles no other. A `Process`, a `Namespace`, a `Connector`, an
+`Inbox` and a `SysCap` all answer `Unknown`, and an `Acceptor` answers `Pipe`,
+as a pipe end does (`fstat` in `kernel/src/object/ops.rs`).
 
 Every typed use of a handle resolves through `HandleTable::get::<T>`, and
-`HandleError::WrongType` is one of the three kinds `HandleError::refuse` treats
-as a bug in the caller: it ends the process, exit 139
-(`kernel/src/object/handle.rs`). The doc argues that *"asking a pipe to accept a
-connection is not something a correct program can do"* — which is true for a
-handle the process made or was endowed, and **false for one a peer sent**. A
+`HandleError::WrongType` ends the caller, exit 139, everywhere but
+`HandleTable::get_sent` (`kernel/src/object/handle.rs`). That is right for a
+handle the process made or was endowed, and wrong for one a peer sent: a
 correct program cannot know.
 
-So: **any process that receives a handle over a connection and then uses it
-typed can be ended by whoever sent it.** The sender needs nothing but
+So: **any process that receives one of those kinds over a connection and then
+uses it typed can be ended by whoever sent it.** The sender needs nothing but
 `Rights::TRANSFER`, which every handle it made carries.
 
 ## Where it is reachable today
 
-- `/system/bin/init`'s launcher takes `extra` connectors from a client and hands them
-  to `SYS_NAMESPACE_BUILD`. That one is closed by making that call's `add` arm
-  answer `InvalidArgument` rather than fault, and `launcher_refusals` gates it —
-  but that is one call site, not the class.
-- An audio client receives two handles from soundd and calls `SYS_SHM_MAP` on
-  the first (`sdk/toyos/src/audio.rs`). A hostile *server* ends every client.
-- A window client receives its buffer the same way (`sdk/window/src/lib.rs`).
-- blockd maps the region a client sends with its open (`Region::adopt` in
-  `userland/blockd/src/region.rs`), so a *client* holding its connector ends it.
-- netstack adopts as pipes the two handles a client sends with a piped socket
-  (`data_pipes`) and the one with a piped bind (`Sockets::listen`), both in
-  `system/netstack/src/serve.rs`: a handle that is no pipe end answers a
-  refusal the node ends that client's stream or listener for
-  (`system/netstack/src/pipes.rs`), and a datagram socket's are netstack's
-  own to read and write.
+- `toyos::launch` answers a started launch with the `Process` handle the
+  supervisor sent (`sdk/toyos/src/launch.rs`), and its caller uses it typed.
+
+A generic use is not reached: a read or a write a handle cannot do answers
+`PermissionDenied`, and a watch `NotSupported`, never `WrongType`, which is how
+netstack's piped ends are refused (`system/netstack/src/pipes.rs`). The
+supervisor hands what a launch's client sent to `SYS_SPAWN` and
+`SYS_NAMESPACE_BUILD`, which answer a handle of the wrong kind
+`InvalidArgument`.
 
 Nothing in the tree is hostile today, so nothing fails. The property the
 architecture claims — that a process cannot be harmed by what it was not given —
 does not hold across a transfer.
+
+**Exit**: a process that receives a handle of one of those kinds refuses one of
+another kind by name before it uses it typed, and a guest test that sends one
+in its place sees it refused while the receiver lives.
 
 ## Three ways out, and none is free
 

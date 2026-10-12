@@ -148,7 +148,7 @@ fn invited() {
     // The frame first, then the handle it was sent ahead of.
     conn.recv_header().expect("the owner's announcement");
     let [handle] = conn.recv_handles_exact::<1>().expect("the region the owner sent");
-    let region = SharedMemory::adopt(handle, REGION).expect("adopt the region");
+    let region = SharedMemory::lent(handle, REGION).expect("take the region");
     println!("read {}", String::from_utf8_lossy(&region.as_slice()[..SECRET.len()]));
     std::io::stdout().flush().expect("invited: flush the report");
 }
