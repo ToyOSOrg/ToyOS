@@ -16,6 +16,7 @@ pub mod disk;
 pub mod fatformat;
 pub mod firmware;
 pub mod flash;
+pub mod fpgate;
 #[cfg(test)]
 pub mod gitfixture;
 pub mod gptwrite;

@@ -21,6 +21,8 @@ mod tls;
 
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::{alloc_kernel_stack, Start};
+#[cfg(feature = "heap-tripwire")]
+pub(crate) use start::kernel_stack_layout;
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
 use alloc::string::String;

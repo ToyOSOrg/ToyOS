@@ -33,6 +33,14 @@ pub(crate) enum Start {
     Kernel { body: extern "C" fn(u64) -> !, arg: u64 },
 }
 
+/// What a task's kernel stack is allocated as: the stack, and above its top
+/// the area its user machine state is kept in while it is switched out
+/// (`arch::fpu`).
+pub(crate) fn kernel_stack_layout() -> core::alloc::Layout {
+    core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE + crate::arch::fpu::area_bytes(), 4096)
+        .expect("a kernel stack's layout")
+}
+
 /// Allocate a kernel stack and lay out the frame `context_switch` will restore.
 pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(OwnedAlloc, u64)> {
     use crate::arch::entry::{kernel_start, process_start, thread_start};
@@ -41,7 +49,8 @@ pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(OwnedAlloc, u64)> {
         Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
         Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg),
     };
-    let alloc = OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)?;
+    let layout = kernel_stack_layout();
+    let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
     scheduler::write_stack_canary(&alloc);
     let top = alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     // SAFETY: `alloc` is fresh and exclusively owned, and `top` is its end.

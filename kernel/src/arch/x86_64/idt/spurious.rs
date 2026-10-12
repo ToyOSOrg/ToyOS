@@ -9,7 +9,6 @@
 use core::arch::naked_asm;
 
 use crate::arch::apic;
-use crate::arch::entry::{restore_user_state, save_user_state};
 
 /// The vector `apic::enable` writes into the SVR; pub because the IDT
 /// gate row hardcodes `0xFF` on its own and must be kept in sync by hand.
@@ -33,18 +32,8 @@ pub(super) extern "sysv64" fn spurious_entry() {
         "push r11",
         "push rbp",
         "mov rbp, rsp",
-        "test dword ptr [rbp + 88], 3",
-        "jz 2f",
-        // `took` reaches no task, but its frames land where the last restore
-        // read: the modified optimisation's invariant (`arch::entry`).
-        save_user_state!(),
-        "2:",
         "and rsp, -16",
         "call {took}",
-        "test dword ptr [rbp + 88], 3",
-        "jz 1f",
-        restore_user_state!(),
-        "1:",
         "mov rsp, rbp",
         "pop rbp",
         "pop r11",
@@ -58,8 +47,6 @@ pub(super) extern "sysv64" fn spurious_entry() {
         "pop rax",
         "iretq",
         took = sym took,
-        fp_area = sym crate::arch::fpu::AREA_BYTES,
-        fp_form = sym crate::arch::fpu::FORM,
     );
 }
 

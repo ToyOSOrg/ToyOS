@@ -786,14 +786,6 @@ const STACK_FILL: u8 = 0xA5;
 #[cfg(feature = "heap-tripwire")]
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
-/// The layout `alloc_kernel_stack` asks for, named once so the tripwire reads
-/// back the bands that request was given.
-#[cfg(feature = "heap-tripwire")]
-fn stack_layout() -> core::alloc::Layout {
-    core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE, 4096)
-        .expect("the kernel stack layout")
-}
-
 /// Rungs of the depth ladder, in bytes above the bottom of the stack, descending so the depths they report
 /// ascend. Touched is monotone up the stack, so the first still-filled rung ends the walk. Read rather than
 /// walked: nine bounded reads stand in for an exact `partition_point`.
@@ -880,8 +872,8 @@ fn check_stack_ownership(payload: &KernelPayload) {
 fn stack_depth(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.ptr();
     // SAFETY: the running task's own stack, allocated with exactly
-    // `stack_layout()`; running on this CPU, so nothing is freeing it.
-    unsafe { crate::mm::check_heap_bands(bottom, stack_layout(), "kernel stack") };
+    // `kernel_stack_layout()`; running on this CPU, so nothing is freeing it.
+    unsafe { crate::mm::check_heap_bands(bottom, crate::loader::kernel_stack_layout(), "kernel stack") };
     let mut used = 0;
     for rung in DEPTH_RUNGS {
         // SAFETY: `rung < KERNEL_STACK_SIZE`, so this reads a word of that

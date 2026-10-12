@@ -1,6 +1,5 @@
 //! Shared device interrupt entry: saves scratch GPRs, brackets the handler
-//! with the percpu preempt count, and from Ring 3 parks the user machine
-//! state on this kernel stack before the handler and restores it after the
+//! with the percpu preempt count, and on Ring 3 return runs the
 //! deferred-preempt epilogue.
 //!
 //! IF stays 0 through the entry (interrupt gate; handlers never sti), satisfying
@@ -24,15 +23,9 @@ macro_rules! device_irq_entry {
                 "push r10",
                 "push r11",
                 "push rbp",
-                "lock add dword ptr gs:[{preempt_count}], 1",
+                "add dword ptr gs:[{preempt_count}], 1",
+                // Ring 0 entry has unknown rsp alignment; align via the rbp save.
                 "mov rbp, rsp",
-                "test dword ptr [rbp + 88], 3", // CS = 10 GPRs + RIP above
-                "jz 2f",
-                // Before the handler's frames, which land where the last
-                // restore read: the modified optimisation's invariant (`arch::entry`).
-                $crate::arch::entry::save_user_state!(),
-                "2:",
-                // Ring 0 entry has unknown rsp alignment; the save left it aligned.
                 "and rsp, -16",
                 #[cfg(feature = "mask-windows")]
                 "call {windows_entered}",
@@ -41,11 +34,10 @@ macro_rules! device_irq_entry {
                 "mov rdi, [rbp + 88]",
                 #[cfg(feature = "mask-windows")]
                 "call {windows_leaving}",
-                "lock sub dword ptr gs:[{preempt_count}], 1",
-                "test dword ptr [rbp + 88], 3",
+                "sub dword ptr gs:[{preempt_count}], 1",
+                "test dword ptr [rbp + 88], 3", // CS = 10 GPRs + RIP above
                 "jz 1f",
                 "call {exit_to_user}",
-                $crate::arch::entry::restore_user_state!(),
                 "1:",
                 "mov rsp, rbp",
                 "pop rbp",

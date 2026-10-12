@@ -1,4 +1,4 @@
-use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
+use crate::arch::entry::ring3_naked_asm;
 
 /// IDT entry point for the TLB-shootdown IPI vector.
 #[unsafe(naked)]
@@ -15,14 +15,8 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "push r10",
         "push r11",
         "push rbp",
-        "lock add dword ptr gs:[{preempt_count}], 1",
+        "add dword ptr gs:[{preempt_count}], 1",
         "mov rbp, rsp",
-        "test dword ptr [rbp + 88], 3",
-        "jz 2f",
-        // Before `flush`'s frames, which land where the last restore read:
-        // the modified optimisation's invariant (`arch::entry`).
-        save_user_state!(),
-        "2:",
         "and rsp, -16",
         #[cfg(feature = "mask-windows")]
         "call {windows_entered}",
@@ -31,13 +25,12 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "mov rdi, [rbp + 88]",
         #[cfg(feature = "mask-windows")]
         "call {windows_leaving}",
-        "lock sub dword ptr gs:[{preempt_count}], 1",
+        "sub dword ptr gs:[{preempt_count}], 1",
         // Only this branch can context-switch.
         "test dword ptr [rbp + 88], 3",
         "jz 1f",
         "cli",
         "call {exit_to_user}",
-        restore_user_state!(),
         "1:",
         "mov rsp, rbp",
         "pop rbp",

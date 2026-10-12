@@ -1,10 +1,29 @@
-//! What a transition out of Ring 3 must save and restore in full; a task
-//! that has never run in Ring 3 starts from the declared state below.
+//! A thread's user machine state: every component `XCR0` enables
+//! (`control_regs`, `kernel::xsave`).
 //!
-//! The user machine state is every component `XCR0` enables
-//! (`control_regs`, `kernel::xsave`): `arch::entry` saves and restores it by
-//! the machine's [`FORM`] into [`AREA_BYTES`] parked on the thread's kernel
-//! stack, compacted under `XSAVES` and `XSAVEC`, standard under `XSAVEOPT`.
+//! It stays in the registers for as long as its thread runs, across every
+//! entry from Ring 3, because the kernel executes no instruction that touches
+//! it but [`save`], [`restore`] and the trampolines' load of the declared state
+//! (`build/fpgate.rs` refuses an image that does). A switch [`save`]s the
+//! outgoing task's registers by the machine's [`FORM`] into the [`area_bytes`]
+//! above its kernel stack's top, the same switch [`restore`]s them when it
+//! returns into that task, and a task that has never run starts from the
+//! declared state below. The area is compacted under `XSAVES` and `XSAVEC`,
+//! standard under `XSAVEOPT`; its header starts zero, as `OwnedAlloc` zeroes
+//! the stack, and is written by nothing but the saves after it.
+//!
+//! **The modified optimisation's invariant.** `XSAVEOPT` and `XSAVES` skip a
+//! component unmodified since the last `XRSTOR` or `XRSTORS` a CPU ran from the
+//! same address (SDM Vol. 1 §13.6), so nothing may write a task's area from
+//! its restore on a CPU to its next save there. Its saves are its area's only
+//! writer: no frame reaches above the stack's top, and every way a task starts
+//! or resumes on a CPU restores before anything that can switch.
+//!
+//! **Ordering.** A save's stores are ordinary write-back stores, which SDM
+//! Vol. 3A §11.2.2 orders before every later store of the same CPU; its
+//! exceptions are the non-temporal moves and string operations alone. So the
+//! area is written before the pass that hands the task to another CPU, with
+//! no fence.
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -141,15 +160,13 @@ pub static INITIAL_COMPACTED: XsaveImage<{ COMPACTED_BASE as usize }> =
     initial_image(1 << 63 | XSTATE_BV_INITIAL);
 
 /// The machine's save form, as [`Form`]'s discriminant; zero until the BSP's
-/// [`declare_area`]. Read by every entry stub and trampoline
-/// (`arch::entry`), which branch on it.
+/// [`declare_area`]. Read by the trampolines (`arch::entry`), which branch on
+/// it.
 pub static FORM: AtomicU8 = AtomicU8::new(0);
 
 /// The bytes one save writes on every CPU of this machine, by the declared
-/// form for the declared `XCR0`. Zero until the BSP's [`declare_area`]; read
-/// by every entry stub (`arch::entry::save_user_state`), which reserves this
-/// much and the line below it.
-pub static AREA_BYTES: AtomicU64 = AtomicU64::new(0);
+/// form for the declared `XCR0`. Zero until the BSP's [`declare_area`].
+static AREA_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// The machine's save form. Panics before the BSP's [`declare_area`].
 pub fn form() -> Form {
@@ -161,9 +178,87 @@ pub fn form() -> Form {
     }
 }
 
+/// The bytes every task's kernel stack carries above its top for its user
+/// machine state. Panics before the BSP's [`declare_area`].
+pub fn area_bytes() -> usize {
+    match AREA_BYTES.load(Ordering::Acquire) {
+        0 => panic!("fpu: a task's area was sized before the BSP declared it"),
+        bytes => bytes as usize,
+    }
+}
+
+/// Saves this CPU's user machine state into the area at `area`.
+///
+/// Not inlined: `build/fpgate.rs` allows the save family only in this
+/// module's own symbols.
+/// # Safety
+/// `area` is the area above the kernel stack top of the task running on this
+/// CPU, which is switching away from it.
+#[inline(never)]
+pub unsafe fn save(area: u64) {
+    // SAFETY: the caller's area is `AREA_BYTES` long and 64-byte aligned (a
+    // stack top is a page boundary), its header zero or as the last save by
+    // this form left it; `XSAVES` runs only under the form that found it.
+    unsafe {
+        match form() {
+            Form::Xsaves => core::arch::asm!(
+                "xsaves64 [{}]",
+                in(reg) area,
+                in("eax") u32::MAX,
+                in("edx") u32::MAX,
+                options(nostack),
+            ),
+            Form::Xsavec => core::arch::asm!(
+                "xsavec64 [{}]",
+                in(reg) area,
+                in("eax") u32::MAX,
+                in("edx") u32::MAX,
+                options(nostack),
+            ),
+            Form::Xsaveopt => core::arch::asm!(
+                "xsaveopt64 [{}]",
+                in(reg) area,
+                in("eax") u32::MAX,
+                in("edx") u32::MAX,
+                options(nostack),
+            ),
+        }
+    }
+}
+
+/// Loads this CPU's user machine state from the area at `area`.
+///
+/// Not inlined, for [`save`]'s reason.
+/// # Safety
+/// `area` is the area [`save`] last wrote for the task now resuming on this
+/// CPU, the one whose switch called that save.
+#[inline(never)]
+pub unsafe fn restore(area: u64) {
+    // SAFETY: the area holds what this form's save wrote, so its header names
+    // only components `XCR0` enables; `XRSTORS` runs only under `XSAVES`.
+    unsafe {
+        match form() {
+            Form::Xsaves => core::arch::asm!(
+                "xrstors64 [{}]",
+                in(reg) area,
+                in("eax") u32::MAX,
+                in("edx") u32::MAX,
+                options(nostack, readonly),
+            ),
+            Form::Xsavec | Form::Xsaveopt => core::arch::asm!(
+                "xrstor64 [{}]",
+                in(reg) area,
+                in("eax") u32::MAX,
+                in("edx") u32::MAX,
+                options(nostack, readonly),
+            ),
+        }
+    }
+}
+
 /// Declares the save form and the area this CPU's `XCR0` implies under it,
 /// and checks both against the machine's. Runs once `XCR0` and `IA32_XSS`
-/// hold the declaration, and before any entry stub that saves can run.
+/// hold the declaration, and before the first task starts.
 pub fn declare_area(cpu_id: u32, xcr0: u64, form: Form) {
     let area = if form.compacted() {
         let component = |i| {
@@ -195,7 +290,8 @@ pub fn declare_area(cpu_id: u32, xcr0: u64, form: Form) {
 }
 
 /// Puts this CPU into the declared state and asserts it matches. Call once
-/// per CPU after [`declare_area`].
+/// per CPU after [`declare_area`]. Not inlined, for [`save`]'s reason.
+#[inline(never)]
 pub fn init(cpu_id: u32) {
     load_initial();
     self_check(cpu_id);
@@ -308,5 +404,5 @@ const _: () = {
 // The header the trampolines' restore reads lies inside each image.
 const _: () = assert!(OFF_XSTATE_BV + 64 <= COMPACTED_BASE as usize);
 const _: () = assert!(COMPACTED_BASE as usize <= IMAGE_BYTES);
-// `arch::entry`'s stubs compare `FORM` against these.
+// `arch::entry`'s trampolines compare `FORM` against these.
 const _: () = assert!(Form::Xsaves as u8 == 1 && Form::Xsavec as u8 == 2 && Form::Xsaveopt as u8 == 3);

@@ -235,7 +235,7 @@ fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
 /// Puts this CPU's `CR4`, `EFER`, `XCR0` and `IA32_XSS` into the declaration,
 /// checks them against it, and declares the save form and the area they imply. Must run
 /// after [`init_cr0`], before `arch::syscall::init`, which needs `SCE` set,
-/// and before the first Ring 3 entry stub can run, which saves by `XCR0`.
+/// and before the first task starts, which loads and saves by `XCR0`.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
     let (xcr0, form) = xsave_declaration(cpu_id);

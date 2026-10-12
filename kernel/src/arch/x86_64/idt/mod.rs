@@ -18,9 +18,7 @@ pub(crate) use user_dev::{claim_vector, slot_interrupt};
 use core::arch::naked_asm;
 
 use super::cpu;
-use super::entry::{
-    restore_user_state, ring3_naked_asm, save_user_state, Ring0Entry, Ring3Entry,
-};
+use super::entry::ring3_naked_asm;
 use super::cpu::{outb, io_wait};
 use super::pio::{Port, PIC_PRIMARY, PIC_SECONDARY};
 use super::percpu;
@@ -96,18 +94,9 @@ impl IdtEntry {
         reserved: 0,
     };
 
-    /// A gate that brackets the user machine state on a Ring 3 arrival.
-    fn ring3(entry: Ring3Entry) -> Self {
-        Self::at(entry.addr())
-    }
-
-    /// A gate that writes no kernel stack a Ring 3 thread returns to.
-    fn ring0(entry: Ring0Entry) -> Self {
-        Self::at(entry.addr())
-    }
-
-    /// Private, so no slot can be filled by a pointer nobody classified.
-    fn at(handler: u64) -> Self {
+    /// An interrupt gate onto `entry`.
+    fn at(entry: unsafe extern "sysv64" fn()) -> Self {
+        let handler = entry as *const () as u64;
         Self {
             offset_low: handler as u16,
             selector: 0x08, // kernel CS
@@ -199,7 +188,7 @@ macro_rules! exception_stub {
 macro_rules! idt_vectors {
     (
         dispatched { $($ex:ident = $exnum:literal, $stub:ident, $err:ident $(, ist $ist:literal)?;)* }
-        direct { $($ring:tt $direct:ident = $dnum:literal, $entry:path $(, ist $dist:literal)?;)* }
+        direct { $($direct:ident = $dnum:literal, $entry:path $(, ist $dist:literal)?;)* }
     ) => {
         /// IDT vector assignments — CPU exceptions and hardware interrupts.
         #[repr(usize)]
@@ -229,24 +218,12 @@ macro_rules! idt_vectors {
 
         fn install_gates(idt: &mut Idt) {
             $(
-                idt.entries[Vector::$ex as usize] =
-                    IdtEntry::ring3(Ring3Entry::new($stub))$(.with_ist($ist))?;
+                idt.entries[Vector::$ex as usize] = IdtEntry::at($stub)$(.with_ist($ist))?;
             )*
             $(
-                idt.entries[Vector::$direct as usize] =
-                    direct_gate!($ring, $entry)$(.with_ist($dist))?;
+                idt.entries[Vector::$direct as usize] = IdtEntry::at($entry)$(.with_ist($dist))?;
             )*
         }
-    };
-}
-
-/// The two answers a `direct` row may give.
-macro_rules! direct_gate {
-    (ring3, $entry:path) => {
-        IdtEntry::ring3(Ring3Entry::new($entry))
-    };
-    (ring0, $entry:path) => {
-        IdtEntry::ring0(Ring0Entry::declare($entry))
     };
 }
 
@@ -274,27 +251,27 @@ idt_vectors! {
         ControlProtection  = 0x15, stub_cp, error_code;
     }
     direct {
-        // ring0: on its own stack, so no thread's. ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
-        ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
-        ring3 Timer        = 0x20, timer::timer_entry;
-        ring3 Xhci         = 0x21, xhci::xhci_entry;
-        ring3 I8042        = 0x24, i8042::i8042_entry;
-        ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;
-        ring3 Hda          = 0x26, hda::hda_entry;
+        // ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
+        Nmi          = 0x02, nmi::nmi_entry, ist 2;
+        Timer        = 0x20, timer::timer_entry;
+        Xhci         = 0x21, xhci::xhci_entry;
+        I8042        = 0x24, i8042::i8042_entry;
+        DmaFault     = 0x25, dma_fault::dma_fault_entry;
+        Hda          = 0x26, hda::hda_entry;
         // One per `pcidev` claim slot: the vector is how the kernel knows
         // which claim a message belongs to.
-        ring3 UserDev0     = 0x28, user_dev::user_dev0_entry;
-        ring3 UserDev1     = 0x29, user_dev::user_dev1_entry;
-        ring3 UserDev2     = 0x2A, user_dev::user_dev2_entry;
-        ring3 UserDev3     = 0x2B, user_dev::user_dev3_entry;
-        ring3 Isa0         = 0x2C, isa::isa0_entry;
-        ring3 Isa1         = 0x2D, isa::isa1_entry;
-        ring3 Kick         = 0xFC, kick::kick_entry;
-        // Ring 0 because it never returns: `cli; hlt` forever.
-        ring0 HaltAll      = 0xFD, stub_halt_all;
-        ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;
+        UserDev0     = 0x28, user_dev::user_dev0_entry;
+        UserDev1     = 0x29, user_dev::user_dev1_entry;
+        UserDev2     = 0x2A, user_dev::user_dev2_entry;
+        UserDev3     = 0x2B, user_dev::user_dev3_entry;
+        Isa0         = 0x2C, isa::isa0_entry;
+        Isa1         = 0x2D, isa::isa1_entry;
+        Kick         = 0xFC, kick::kick_entry;
+        // Never returns: `cli; hlt` forever.
+        HaltAll      = 0xFD, stub_halt_all;
+        TlbFlush     = 0xFE, tlb::tlb_flush_entry;
         // Named via the SVR, not Intel's vector list.
-        ring3 Spurious     = 0xFF, spurious::spurious_entry;
+        Spurious     = 0xFF, spurious::spurious_entry;
     }
 }
 
@@ -333,8 +310,8 @@ extern "sysv64" fn stub_halt_all() {
     naked_asm!("cli", "2: hlt", "jmp 2b");
 }
 
-/// Every exception vector's second half; the bracket exists because `trap_dispatch` can return through another task, which would otherwise leak that task's registers to Ring 3.
-/// `rdi` (the frame pointer) is captured before the state-save macro moves `rsp`.
+/// Every exception vector's second half: the [`TrapFrame`], 22 words below a
+/// 16-byte-aligned stack, so `rsp` is aligned for the calls.
 #[unsafe(naked)]
 extern "sysv64" fn common_entry() {
     ring3_naked_asm!(
@@ -342,19 +319,16 @@ extern "sysv64" fn common_entry() {
         "push r11", "push r10", "push r9",  "push r8",
         "push rbp", "push rdi", "push rsi", "push rdx",
         "push rcx", "push rbx", "push rax",
-        "lock add dword ptr gs:[{preempt_count}], 1",
+        "add dword ptr gs:[{preempt_count}], 1",
         "mov rdi, rsp",
-        save_user_state!(),
         "call {dispatch}",
-        "lock sub dword ptr gs:[{preempt_count}], 1",
+        "sub dword ptr gs:[{preempt_count}], 1",
         // Exit-to-user epilogue runs before the GPR pops: the call clobbers scratch regs that must not leak into user state.
-        "mov r11, [rsp]",
-        "test dword ptr [r11 + 144], 3",
+        "test dword ptr [rsp + 144], 3",
         "jz 9f",
         "cli",
         "call {exit_to_user}",
         "9:",
-        restore_user_state!(),
         "pop rax",  "pop rbx",  "pop rcx",  "pop rdx",
         "pop rsi",  "pop rdi",  "pop rbp",
         "pop r8",   "pop r9",   "pop r10",  "pop r11",
@@ -486,7 +460,7 @@ pub fn init() {
     let mut unclaimed = 0u32;
     for entry in IDT.lock().entries.iter_mut() {
         if entry.type_attr == 0 {
-            *entry = IdtEntry::ring3(Ring3Entry::new(unclaimed::unclaimed_entry));
+            *entry = IdtEntry::at(unclaimed::unclaimed_entry);
             unclaimed += 1;
         }
     }

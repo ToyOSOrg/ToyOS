@@ -288,8 +288,12 @@ impl Hw for KernelHw {
         // moves `IF`; the resumed context's own guard puts back what it had.
         #[cfg(feature = "mask-windows")]
         let _masked = crate::arch::IrqGuard::close();
-        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed.
+        // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
         unsafe {
+            // A task's user state area lies above its stack's top (`fpu`); the
+            // idle context has none. The task resumes in this frame, so the
+            // restore below reads the area its own save wrote.
+            let area = (*save).id.map(|_| (*save).kernel_stack_top);
             (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
@@ -326,7 +330,15 @@ impl Hw for KernelHw {
                 ds = in(reg) percpu::KERNEL_DS as u64,
                 options(nomem, nostack, preserves_flags),
             );
+            if let Some(area) = area {
+                super::fpu::save(area);
+            }
             context_switch(&raw mut (*save).sp, rsp);
+            // The preempt count is still raised: nothing switches this task
+            // out before its state is back.
+            if let Some(area) = area {
+                super::fpu::restore(area);
+            }
         }
     }
 
