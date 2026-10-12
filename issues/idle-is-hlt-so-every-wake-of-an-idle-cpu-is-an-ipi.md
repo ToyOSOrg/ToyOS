@@ -27,7 +27,14 @@ preferable to use MWAIT as the default idle state on these systems, as it has
 lower exit latencies", and at v7.2 Linux's `prefer_mwait_c1_over_halt` checks
 no vendor (`arch/x86/kernel/process.c`). So the stage is backed on
 both benches: on Intel by §11.10.4 and §11.10.6.4, and on AMD from family 17h,
-the AMD bench's, by aebef63cf7ff. The T14 enumerates MONITOR/MWAIT (`monitor`,
+the AMD bench's, by aebef63cf7ff. A CPU whose MONITOR loses wakes keeps the
+kick, as Linux keeps it: Intel's c9a4b55431e5 (v6.13, by Len Brown) adds Lunar
+Lake to Goldmont in `X86_BUG_MONITOR` because "MONITOR wakeups on Lunar Lake
+processors can be lost, resulting in significant user-visible delays", "so
+that wake_up_idle_cpu() always sends an IPI"; at v7.2 such a CPU's MWAIT idle
+sets no polling flag, so every wake of it is an IPI
+(`arch/x86/include/asm/mwait.h`), and `prefer_mwait_c1_over_halt` gives it
+`hlt`. The T14 enumerates MONITOR/MWAIT (`monitor`,
 `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether the AMD bench does is
 unread. `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the
 wait enters; this file is what ends it. The doorbell shares a line with its
@@ -56,5 +63,5 @@ stands in for here, so the share is an upper bound on what the doorbell
 saves.
 
 **Exit**: an idle CPU on every proving machine that enumerates MONITOR/MWAIT
-woken by its doorbell's store with no IPI, and the split above read again on
-both benches after it.
+woken by its doorbell's store with no IPI, a CPU whose MONITOR loses wakes
+still kicked, and the split above read again on both benches after it.

@@ -62,17 +62,8 @@ the deadline into a span, and a deadline written as an absolute
 is an upper bound on what deadline mode saves, which still writes once to arm
 and once to stop; on the AMD bench both sit at its TSC's floor.
 
-**Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
-one-shot armed and stopped through `IA32_TSC_DEADLINE`, timed by the same
-split beside `main` in the same session, with the re-arm segment opening at
-`set_timer` (`kernel/src/hw.rs:49`) in both arms, its reading reported. Its
-clock control: each arm reads APERF and MPERF on CPUs 4 and 5 before and
-after the split, and where the two arms' ratios of APERF's advance to MPERF's
-differ by more than 1 % on either CPU, both arms' readings are void and are
-taken again.
-
-**Exit**: the twin's reading, posted; a deadline armed on every CPU that
-enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the absolute
-value; and the T14's 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` no worse
-than the count's.
+**Exit**: a deadline armed on every CPU that enumerates TSC-deadline as one
+`IA32_TSC_DEADLINE` write of the absolute value; and on the T14, the split
+above read again after it, and the 1 ms timer lateness of
+`issues/no-program-measures-toyos-against-linux-on-one-machine.md` read with
+the count and with the deadline, each reported.

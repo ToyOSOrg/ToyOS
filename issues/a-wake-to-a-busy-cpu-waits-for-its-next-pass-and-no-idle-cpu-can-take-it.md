@@ -52,9 +52,16 @@ preempted the running task for a woken one since CFS (`check_preempt_curr_fair`,
 `kernel/sched_fair.c` at v2.6.23), and since v6.6 by virtual deadline
 (147f3efaa241, "wakeup preemption is driven by the deadline"), the
 vruntime/lag family of ToyOS's fair band (`kernel/pure/sched/fair.rs:1-3`).
-That arm follows it. The 100 µs bound below is the exit's test that the stage
-works, not the judge of its design.
+The same release curbs it (63304558ba5d): under `RUN_TO_PARITY`, on by default
+at v7.2, a wake does not preempt "until the current task has either matched
+the 0-lag point or until is has exhausted it's slice"
+(`kernel/sched/features.h`). That arm follows EEVDF whole, the curb included,
+so its test is that a woken task runs within one protected slice, 1 ms
+(`PROTECTED_RUN_NS`, https://github.com/ToyOSOrg/ToyOS/pull/874), and its p99
+against 100 µs is reported. With 7 spinners the 100 µs bound is the exit's
+test that the stage works, not the judge of its design.
 
 **Exit**: a metal row on the T14 and the AMD bench that wakes a task onto a
-CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs, and
-holds its post-to-dispatch p99 under 100 µs.
+CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs:
+with 7 it holds the post-to-dispatch p99 under 100 µs, and with 8 it holds
+that a woken task runs within one protected slice and reports its p99.

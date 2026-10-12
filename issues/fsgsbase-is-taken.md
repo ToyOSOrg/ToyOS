@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # FSGSBASE is taken
 
-`CR4.FSGSBASE` is forbidden (`kernel/src/arch/x86_64/control_regs.rs:62-75`):
+`CR4.FSGSBASE` is forbidden (`kernel/src/arch/x86_64/control_regs.rs:149-153`):
 GS always holds the kernel's per-CPU base and the kernel runs no `swapgs`.
 Taking it costs a `swapgs` entry and the swapgs barriers of
 `issues/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`.
@@ -31,8 +31,9 @@ nothing.
 enters vector 2 at CPL 0 while the user GS base is live, between entry and its
 `swapgs` or after the exit path's, and the handler finds the kernel's per-CPU
 data; a thread's FS and GS bases, written with WRFSBASE and WRGSBASE, read
-back unchanged after its CPU has run another thread; `CR4_FORBIDDEN`, the
-`user-writable-gsbase` kernel (`build/build.rs:1370`) and the test
-`gsbase_locked` are deleted; the T14's pipe round trips read with and without
-it. **Mutation**: an IST entry that decides `swapgs` from the saved CS alone.
-**Oracle**: Linux's `paranoid_entry`.
+back unchanged after its CPU has run another thread; `CR4_FORBIDDEN` is
+deleted, and so is `gsbase_locked` with its `user-writable-gsbase` kernel from
+stage C of `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`;
+the T14's pipe round trips read with and without FSGSBASE. **Mutation**: an
+IST entry that decides `swapgs` from the saved CS alone. **Oracle**: Linux's
+`paranoid_entry`.
