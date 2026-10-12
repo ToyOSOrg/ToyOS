@@ -19,7 +19,9 @@ prompt does the job; when a review finds a way around a gate, the rule moves int
 gate goes. A brief prefers deleting to adding. Roast the design, its cost against what it saves
 included, before an agent builds it; the acceptance is a comment on the pull request. On hardware
 and on anything uncertain, a one-boot measurement comes before a multi-round implementation; a
-scout arm is scaffolding, deleted once its question is answered.
+scout arm is scaffolding, deleted once its question is answered. No brief or issue makes a bench
+number the condition a design lives by where its hardware's manufacturers or the published state
+of the art back it, or where nothing published covers it and speed is not its only purpose.
 
 ## Agents
 
@@ -57,6 +59,9 @@ re-run away; a fix for a red lands ahead of feature work.
 After a landing, in the primary checkout: `git pull --ff-only origin main`, then remove the landed
 branch's worktree, which its implementer made: `rm -rf ../<name> && git worktree prune && git -C
 rust worktree prune && git -C rust/library/backtrace worktree prune && git branch -d wt/<name>`.
+Remove any worktree that way as soon as nothing will build in it again; an open pull request's
+stays for its fix rounds. A scout's branch, pushed and never merged, goes with `-D`, and a detached
+tree has no branch to delete.
 
 ## Runs
 

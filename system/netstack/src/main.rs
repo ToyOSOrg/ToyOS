@@ -48,6 +48,7 @@ mod i219;
 mod pipes;
 mod serve;
 mod virtio_net;
+mod watches;
 
 use card::Card;
 use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
@@ -356,7 +357,7 @@ fn main() {
         node.link(clock(), true, draw);
     }
 
-    let poller = Poller::new(
+    let mut poller = watches::Watches::new(
         FIXED_WATCHES + serve::WATCHES_PER_PLACE * MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
     );
     const TOKEN_ACCEPTOR: u64 = 0;
@@ -379,7 +380,7 @@ fn main() {
                 node.link(clock(), link_up, draw);
             }
         }
-        let owed = node.receive(clock(), |sink| card.rx(sink), draw);
+        let owed = card.receive(|budget, next| node.receive(clock(), budget, next, draw));
         let now = clock();
         if node.next_deadline().is_some_and(|at| at <= now) {
             node.fire(now, draw);
@@ -410,7 +411,7 @@ fn main() {
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
         poller.watch(card.claim(), READABLE, TOKEN_NIC);
-        sockets.watch(&node, &poller);
+        sockets.watch(&node, &mut poller);
         for p in pending.iter() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }

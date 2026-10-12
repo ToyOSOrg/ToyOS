@@ -247,6 +247,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // reads what the kernel said of two of them.
     "fault_gates",
     "sched_stress",
+    // Its shared run is each bench's verdict, on the T14's AVX-512 and the AMD
+    // bench's AVX; `vector_state_survives_a_switch` runs it under QEMU.
+    "vector_state",
     "std_alloc",
     // Its shared run asserts what holds of one boot's draws on x86-64;
     // `virt_random_differs` builds it for AArch64, runs it on that
@@ -466,6 +469,11 @@ const MACHINE_TESTS: &[&str] = &[
     // CPU count is held to the `-smp` this boot gave QEMU, a count the
     // kernel did not make.
     "toyfetch_reports",
+    // Every vector register a thread holds, across switches to threads holding
+    // others, against a scheduler, which no host build has. The shared boot's
+    // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
+    // the SDM, and the KVM runner's CPU.
+    "vector_state_survives_a_switch",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -992,9 +1000,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // A unit handed over translating, remapping and queueing, on real
-        // silicon: each field goes off by its own write before the unit is
-        // programmed, and the boot goes on.
+        // A unit handed over translating, remapping and queueing, or on an
+        // AMD-Vi machine blocking every DMA with its command buffer and event
+        // log running, on real silicon: each field goes off by its own write
+        // before the unit is programmed or left off, and the boot goes on.
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
@@ -3932,6 +3941,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "toyfetch_reports" => toyfetch_reports(test_config),
+        "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -4728,6 +4738,28 @@ fn usb_keyboard_rollover(test_config: &Path) -> Result<(), String> {
     said.must_be_clean()
 }
 
+/// [`MACHINE_TESTS`]' `vector_state_survives_a_switch`: the shared boot's
+/// `vector_state` alone on two CPUs, so five threads time-share them.
+fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "vector_state";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_vector_state", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains("vector_state: ")) else {
+        return Err(format!("the job never said what it held:\n{}", result.stdout));
+    };
+    eprintln!("  [claims] {}", line.trim());
+    Ok(())
+}
+
 /// A claim's memory BAR asked for again — while an earlier answer is held, and
 /// once its handle is gone, closed or never installed for want of room: each
 /// time the kernel answers a handle whose mapping reads the function's own
@@ -5213,8 +5245,11 @@ fn input_merge_ok(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// Every unit this kernel went on to program said it was handed over with what
-/// the actuator left on.
+/// Every unit this kernel went on to program, and every AMD-Vi unit it
+/// switched off, said it was handed over with what the actuator left on.
+///
+/// An AMD-Vi unit's lines are on the boot stick only because the switch-off
+/// let the stick's DMA through the unit the actuator left blocking it.
 fn iommu_firmware_left(log: &str) -> Result<(), String> {
         let mut units = 0;
         for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
@@ -5242,13 +5277,32 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
             }
             units += 1;
         }
+        let amdvi = log
+            .lines()
+            .filter_map(|l| l.split_once("iommu: amdvi ")?.1.split_once(" handed over control="))
+            .map(|(unit, _)| unit);
+        for unit in amdvi {
+            for line in common::iommu::amdvi_left_on(unit) {
+                if !log.contains(&line) {
+                    return Err(format!(
+                        "amdvi {unit} never said {line:?}, so the state the actuator left was \
+                         never switched off:\n{log}"
+                    ));
+                }
+            }
+            let off = format!("iommu: amdvi {unit} @");
+            if !log.lines().any(|l| l.contains(&off) && l.contains(" switched off control=")) {
+                return Err(format!("amdvi {unit} was handed over and never said it was switched off:\n{log}"));
+            }
+            units += 1;
+        }
         if units == 0 {
-            return Err(format!("no unit was programmed, so nothing was handed over:\n{log}"));
+            return Err(format!("no unit was programmed or switched off, so nothing was handed over:\n{log}"));
         }
         let passed = log.matches("handed over with compatibility-format pass-through on").count();
         eprintln!(
-            "  [iommu-firmware-left] {units} unit(s) programmed after switching off what they were \
-             handed over with; {passed} of them reported compatibility format passed"
+            "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with; \
+             {passed} of them reported compatibility format passed"
         );
         Ok(())
 }
@@ -5466,8 +5520,8 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
-/// hold.
+/// Every CPU's `CR0`, `CR4` and `XCR0`, against what a CPU running this
+/// kernel must hold.
 ///
 /// **Not the same question the kernel's own self-check asks.** That one compares
 /// each CPU against the declaration, so it catches a CPU that missed it and
@@ -5478,11 +5532,11 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
 /// the kernel's own read-only mappings not binding supervisor writes, `NE`
 /// clear routes an unmasked x87 exception to a pin nothing listens on.
 ///
-/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
-/// name components `FXSAVE64` does not save, and this kernel saves user FP
-/// state with `FXSAVE64`.
+/// `XCR0` holds x87, SSE and AVX, and AVX-512's three components all or none
+/// (SDM Vol. 1 §13.3), and nothing else: a component enabled and not declared
+/// is state the kernel's save area may not hold.
 ///
-/// Both halves, because the kernel writes both registers whole: every bit named
+/// Both halves, because the kernel writes every register whole: every bit named
 /// below must hold its named value, **and a bit named nowhere below may not be
 /// set at all**. Silence about a bit is a hole rather than a permission.
 fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
@@ -5511,7 +5565,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         // Clear: `CR4.FSGSBASE` gates RD/WR FS/GS BASE at every CPL (Intel SDM
         // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
         (16, "FSGSBASE", false),
-        (18, "OSXSAVE", false),
+        // Set: user programs use AVX, whose state only `XSAVE` moves.
+        (18, "OSXSAVE", true),
         // Not a bit the machine may withhold: `Arch::cpu`'s two x86-64 CPUs
         // are the only x86-64 CPUs this repository launches and both name
         // `+smep`, so a boot without supervisor-mode execution prevention is a
@@ -5520,25 +5575,39 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     ];
     /// The `CR4` bits the CPU may withhold, so neither answer is wrong.
     const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE"), (21, "SMAP")];
+    const XCR0_BITS: &[(u32, &str, bool)] = &[(0, "x87", true), (1, "SSE", true), (2, "AVX", true)];
+    /// AVX-512's components, which a CPU without AVX-512 does not have.
+    const XCR0_AVX512: &[(u32, &str)] = &[(5, "opmask"), (6, "ZMM_Hi256"), (7, "Hi16_ZMM")];
 
-    let mut seen: Vec<(u32, u64, u64)> = Vec::new();
+    let mut seen: Vec<(u32, u64, u64, u64)> = Vec::new();
+    // The save form each CPU names, which says which path this machine runs;
+    // the kernel asserts they agree.
+    let mut forms: BTreeSet<&str> = BTreeSet::new();
     for line in log.lines() {
         let Some(rest) = line.split("control_regs: cpu").nth(1) else { continue };
         let Some((id, rest)) = rest.split_once(" cr0=0x") else { continue };
-        let Some((cr0, cr4)) = rest.split_once(" cr4=0x") else { continue };
-        let (Ok(id), Ok(cr0), Ok(cr4)) = (
+        let Some((cr0, rest)) = rest.split_once(" cr4=0x") else { continue };
+        let word = |key: &str| {
+            rest.split_whitespace()
+                .find_map(|w| w.strip_prefix(key))
+                .and_then(|v| u64::from_str_radix(v, 16).ok())
+        };
+        let (Ok(id), Ok(cr0), Ok(cr4), Some(xcr0), Some(form)) = (
             id.parse::<u32>(),
             u64::from_str_radix(cr0, 16),
-            u64::from_str_radix(cr4.split_whitespace().next().unwrap_or(""), 16),
+            u64::from_str_radix(rest.split_whitespace().next().unwrap_or(""), 16),
+            word("xcr0=0x"),
+            rest.split_whitespace().find_map(|w| w.strip_prefix("save=")),
         ) else {
             return Err(format!("unreadable control-register line: {line:?}"));
         };
-        seen.push((id, cr0, cr4));
+        seen.push((id, cr0, cr4, xcr0));
+        forms.insert(form);
     }
 
     // Which CPUs answered, not how many lines were printed: a boot where one AP
     // never came up at all must not pass by having the BSP print twice.
-    let ids: BTreeSet<u32> = seen.iter().map(|&(id, _, _)| id).collect();
+    let ids: BTreeSet<u32> = seen.iter().map(|&(id, _, _, _)| id).collect();
     let want: BTreeSet<u32> = (0..cpus).collect();
     if ids != want {
         return Err(format!(
@@ -5559,11 +5628,12 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     // Every wrong bit on a CPU rather than the first: an AP holding INIT's CR0
     // is wrong in five at once and each is a different consequence, so a
     // message naming one sends the next reader after a fifth of it.
-    for &(id, cr0, cr4) in &seen {
+    for &(id, cr0, cr4, xcr0) in &seen {
         let mut wrong = String::new();
         for (reg, value, bits, known) in [
             ("cr0", cr0, CR0_BITS, named(CR0_BITS, &[])),
             ("cr4", cr4, CR4_BITS, named(CR4_BITS, CR4_MAY)),
+            ("xcr0", xcr0, XCR0_BITS, named(XCR0_BITS, XCR0_AVX512)),
         ] {
             for &(bit, name, set) in bits {
                 if (value & (1 << bit) != 0) != set {
@@ -5575,23 +5645,29 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
                 wrong += &format!(" {reg} holds {extra:#x}, which this gate never named");
             }
         }
+        let avx512 = XCR0_AVX512.iter().filter(|&&(bit, _)| xcr0 & (1 << bit) != 0).count();
+        if avx512 != 0 && avx512 != XCR0_AVX512.len() {
+            wrong += " xcr0 holds part of AVX-512's components, which it takes all or none";
+        }
         if !wrong.is_empty() {
-            return Err(format!("cpu{id} cr0={cr0:#010x} cr4={cr4:#010x}:{wrong}"));
+            return Err(format!("cpu{id} cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x}:{wrong}"));
         }
     }
 
     // A CPU that agrees about every bit named above can still differ in one
     // that is not, and a thread migrating onto it would execute differently
     // from one moment to the next.
-    let (_, cr0, cr4) = seen[0];
-    if let Some(&(id, other0, other4)) = seen.iter().find(|&&(_, a, b)| (a, b) != (cr0, cr4)) {
+    let (_, cr0, cr4, xcr0) = seen[0];
+    if let Some(&(id, other0, other4, other_x)) =
+        seen.iter().find(|&&(_, a, b, x)| (a, b, x) != (cr0, cr4, xcr0))
+    {
         return Err(format!(
-            "cpu0 has cr0={cr0:#010x} cr4={cr4:#010x} and cpu{id} has \
-             cr0={other0:#010x} cr4={other4:#010x}"
+            "cpu0 has cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} and cpu{id} has \
+             cr0={other0:#010x} cr4={other4:#010x} xcr0={other_x:#x}"
         ));
     }
 
-    eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x}");
+    eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x} xcr0={xcr0:#x} save={forms:?}");
     Ok(())
 }
 

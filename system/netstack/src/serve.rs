@@ -35,7 +35,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use toyos::net::*;
-use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE, Poller};
+use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE};
 use toyos::port::Acceptor;
 use toyos::{ipc, say, AsHandle, Pipe};
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
@@ -50,6 +50,7 @@ use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
 use crate::pipes::{self, Watched};
+use crate::watches::Watches;
 use crate::HOSTNAME;
 
 /// A watch's token names the socket it was asked of by its id, in the low
@@ -760,7 +761,7 @@ impl Sockets {
     /// one pipe of each datagram socket for its owner's leaving, and the
     /// connection of each client that waits for a lookup, which hangs up by
     /// closing it.
-    pub fn watch(&self, node: &Node, poller: &Poller) {
+    pub fn watch(&self, node: &Node, poller: &mut Watches) {
         for (stream, watch) in node.watches() {
             let Some((socket_id, ends)) = self.by_stream.get(&stream).and_then(|id| Some((*id, self.ends.get(id)?))) else {
                 unreachable!("the node holds a stream whose ends netstack does not")
