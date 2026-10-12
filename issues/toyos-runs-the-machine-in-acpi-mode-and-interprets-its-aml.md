@@ -188,9 +188,9 @@ otherwise pay to find again:
   bridge's answer, and one that was goes to the owner with the table
   refusal.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
-  opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
-  loaded that way; the interpreter refuses both as unsupported. Owner: S1,
-  below, for `Load`, and S4 for `LoadTable`. **Exit**: theirs.
+  opcodes, none run while a table loads, and Linux lists eight tables loaded
+  that way; the interpreter refuses them as unsupported. Owner: S1, below.
+  **Exit**: its.
 - **A refused evaluation keeps what it stored**, and nothing gives an
   interpreter's 16 MiB back: after one method has filled it, an Integer
   still evaluates, a field that fits one among them, and every method that
@@ -473,8 +473,8 @@ ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
   - delivers every Notify.
 - On the T14 and the AMD bench:
   - every block loads, and no method is refused;
-  - under Linux's capabilities as the firmware recorded them, the blocks Linux
-    loaded come out;
+  - under every capability bit, the blocks Linux loaded come out: the
+    capabilities Linux passed a processor are in no memory a dump holds;
   - each `_STA`, `_CST` and battery reading equals Linux's on the same machine.
 
 Not in finished:
@@ -485,10 +485,12 @@ Not in finished:
 - `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
   ACPI 6.5 does not define.
 
-The slices come in this order, each its own pull request. S1 is held by #875
-(`wt/toyos-aml`). Before it is built, a check outside the tree reads both
-benches' tables, their NVS and Linux's readings, which the orchestrator dumps
-from their Ubuntu installs.
+All six slices land as #875 (`wt/toyos-aml`): the owner accepted its design
+with "do the full aml in one pr". A check outside the tree on both benches'
+tables, NVS and Linux's readings (#875's M1) fixes the order inside it. The
+T14's processors' `_OSC` read `\OSYS`, which `\_SB.PC00._INI` writes, so S3's
+`_STA`/`_INI` walk runs before S1's `_OSC`. That walk writes `SMI_CMD`, and
+memory outside the map, so S2's ruling on those writes comes before both.
 
 - **S1: `Load`, and `_OSC` negotiated.**
   - `Load` per §19.6.76: its objects outlive the method that loaded it, and
@@ -499,8 +501,8 @@ from their Ubuntu installs.
     bullet.
   - **Exit**:
     - host tests of `Load` from a region, a field and a buffer;
-    - outside the tree, under Linux's capabilities as the T14's NVS recorded
-      them, the blocks Linux lists, byte for byte;
+    - outside the tree, under every capability bit, the eight blocks Linux
+      lists, by OEM table ID and length;
     - `acpi_tables_loaded` reads both `_OSC`s evaluated, with nothing
       refused.
 - **S2: what AML may reach, ruled.**
