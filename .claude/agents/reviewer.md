@@ -55,13 +55,14 @@ if it meets the bar above; otherwise it is a NOTE.
   test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
   ToyOS targets, and an environment that cannot run it changes or the gap is filed; a citation of
-  Linux, or of any implementation's source, as authority; where that hardware's manufacturers or
-  the published state of the art back a design, one that does not follow and cite them, or leaves
-  them while they still back it. Bench numbers on a design they back
-  are reported and never send it back, but a metal timing past twice its machine's record reds every
-  design: that ceiling is a bug guard, not a bench verdict. A design nothing published covers is
-  reviewed on its correctness and simplicity, and a speed claim does not decide by itself unless
-  speed is the design's only purpose. A new
+  another implementation's source as authority; Linux named in source, a test or a manifest but as
+  a host platform or a `libc` interface; where the vendor's documentation, the published
+  specifications or the published state of the art back a design, a value or a test's oracle, one
+  that does not follow and cite them, or leaves them while they still back it. Bench numbers on a
+  design they back are reported and never send it back, but a metal timing past twice its
+  machine's record reds every design: that ceiling is a bug guard, not a bench verdict. A design
+  nothing published covers is reviewed on its correctness and simplicity, and a speed claim does
+  not decide by itself unless speed is the design's only purpose. A new
   dependency only where it is the cleanest path, a general and widely used crate the pull request
   says why it takes; no new fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
@@ -138,9 +139,10 @@ if it meets the bar above; otherwise it is a NOTE.
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
   comparison against Ubuntu — is not a test: it is its pull request's evidence and never becomes
-  a suite row. Another OS's or a reference implementation's output, recorded or
-  live, is an oracle only when it is committed with its provenance and read hermetically, and a
-  timing held to another's only when it was read on the same machine. A policy another OS chose is
+  a suite row. A test's oracle for what hardware does is the vendor's document, or ToyOS's own
+  read checked against it; a reading captured under another OS, timing included, is evidence and
+  never a suite row. A reference implementation's output, recorded or live, is an oracle only when
+  it is committed with its provenance and read hermetically. A policy another OS chose is
   never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source
   states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
@@ -161,7 +163,8 @@ if it meets the bar above; otherwise it is a NOTE.
   arm reads or writes is touched only under that guard or inside an item compiled only with an
   actuator feature (`#[cfg(feature = "…-actuators")]`); a `cfg(not(feature = …))` item compiles
   into shipping and does not count, and any other touch runs on the shipping kernel.
-- **Forks.** A broken rule of `implementer.md`'s "A fork" is a BLOCKER, and so is a lockfile or
+- **Forks.** A broken rule of `implementer.md`'s "A fork" is a BLOCKER, a ToyOS arm whose
+  authority is another platform's arm among them, and so is a lockfile or
   gitlink left naming a fork branch whose consumed commit the pull request changes. A search for
   callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
   LLVM and Rust are never changed to suit a ToyOS tool; a tool that cannot build them unchanged is

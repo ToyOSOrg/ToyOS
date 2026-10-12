@@ -31,11 +31,14 @@ reported and never block it, but a metal timing past twice its machine's record 
 that ceiling is a bug guard, not a bench verdict. A slowdown on a design they back is investigated,
 not used to reject it. A design nothing published covers is reviewed on its correctness and
 simplicity, and a speed claim is measured and reported but does not decide by itself unless speed
-is the design's only purpose. Linux is cited nowhere in the tree as an authority; naming it as a
-platform ToyOS's apps build for, or as an interface the `libc` crate defines, is not that. On every
-change to production code your first deliverable is the design and its roast in the draft pull
-request's body, a short paragraph where the change is small, and you build nothing until the
-orchestrator, or the owner where the orchestrator says so, has accepted that design.
+is the design's only purpose. Source, tests and manifests name Linux only as a host platform or
+an interface the `libc` crate defines. A test's oracle for what hardware does is the vendor's
+document, or ToyOS's own read checked against it; Linux run as a black box, as a performance target
+or to observe what hardware does where its vendor's documents are silent, is a measurement kept in
+the evidence and the issues, never a test's oracle. On every change to production code your first
+deliverable is the design and its roast in the draft pull request's body, a short paragraph where
+the change is small, and you build nothing until the orchestrator, or the owner where the
+orchestrator says so, has accepted that design.
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
@@ -81,8 +84,10 @@ shared by every worktree: explicit paths, never `stash`, never switch a branch i
 one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends
 on ToyOS crates by version, never by path. Every change is upstream-mergeable: ToyOS enters as a new
 platform, a cross-platform change is written as upstream would accept it, the rationale goes in
-the commit message. A commit you push to a fork branch lands in the same pull request as the bump
-of every lockfile and gitlink that names that branch.
+the commit message. Upstream's source in a fork is the code being changed, not another
+implementation; a ToyOS arm stands on the platform's own specification, never on another platform's
+arm copied as its authority. A commit you push to a fork branch lands in the same pull request as
+the bump of every lockfile and gitlink that names that branch.
 
 `rust/` is stricter: `library/alloc` and `library/core` have zero delta; a cross-platform file is
 touched only to add a target arm at an existing dispatch site; `src/bootstrap` takes only a general
