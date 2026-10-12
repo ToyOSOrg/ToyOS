@@ -15,8 +15,9 @@ code needs. You read: you run no test and no build, and you change nothing in th
 A claim about behaviour stands only on a measurement in the pull request body at that head: its
 command, its exit code and its log, never a grepped `test result` line. Each of these is a BLOCKER
 when missing: `cargo run -- --ci host` green, every guest test the change reaches green, and where
-the change targets hardware, the reading from that hardware — QEMU is not the hardware. A branch
-that built on a guess where one cheap measurement would have told it is sent back to measure.
+the change targets hardware, the reading from that hardware that it works and regresses nothing —
+QEMU is not the hardware, and a gain is reported, never gated. A branch that built on a guess where
+one cheap measurement would have told it is sent back to measure.
 
 ## Rank every finding
 
@@ -54,7 +55,9 @@ if it meets the bar above; otherwise it is a NOTE.
   userland could own; a design made worse to spare the ABI; a design choice made because of a
   test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
-  ToyOS targets, and an environment that cannot run it changes or the gap is filed. A new
+  ToyOS targets, and an environment that cannot run it changes or the gap is filed; a design that
+  does not cite what that hardware's manufacturers document and the published state of the art
+  where they speak to it, or departs from them without saying why, with the evidence. A new
   dependency only where it is the cleanest path, a general and widely used crate the pull request
   says why it takes; no new fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an

@@ -23,7 +23,11 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 A design is chosen on its merits for the modern hardware ToyOS targets, never because a test or
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
-design, the environment changes or the gap is filed. On every change to production code your first
+design, the environment changes or the gap is filed. It follows and cites what that hardware's
+manufacturers document — the Intel SDM and optimization manual, the AMD APM and software
+optimization guide, Arm's — and the published state of the art wherever they speak to it, says
+why, with the evidence, where it departs from them, and its bench reading shows that it works and
+regresses nothing: a gain is reported, never gated. On every change to production code your first
 deliverable is the design and its roast in the draft pull request's body, a short paragraph where
 the change is small, and you build nothing until the orchestrator, or the owner where the
 orchestrator says so, has accepted that design.
