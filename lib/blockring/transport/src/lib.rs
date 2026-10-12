@@ -3,8 +3,9 @@
 //! **A session is one connection and, at most, one region.** The connection
 //! carries the hello, handles, doorbells and the hang-up; the region carries
 //! [`Producer`]/[`Consumer`] queues of fixed-size entries and an arena of
-//! [`Run`]s. A protocol says what the entries mean; this crate says only what
-//! is safe.
+//! [`Run`]s, or byte [`stream`]s and the wants that say when to ring. A
+//! protocol says what the entries and bytes mean; this crate says only what is
+//! safe.
 //!
 //! **Nothing here holds the region.** An adapter hands every call the `N`
 //! [`Word`]s an end was made over, and copies bytes itself, through a run's
@@ -29,6 +30,7 @@
 mod arena;
 mod inflight;
 mod queue;
+pub mod stream;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -42,6 +44,7 @@ pub use toyos_untrusted::Untrusted;
 pub trait Word {
     fn load(&self, order: Ordering) -> u32;
     fn store(&self, value: u32, order: Ordering);
+    fn swap(&self, value: u32, order: Ordering) -> u32;
 }
 
 impl Word for AtomicU32 {
@@ -51,6 +54,29 @@ impl Word for AtomicU32 {
     fn store(&self, value: u32, order: Ordering) {
         AtomicU32::store(self, value, order)
     }
+    fn swap(&self, value: u32, order: Ordering) -> u32 {
+        AtomicU32::swap(self, value, order)
+    }
+}
+
+/// How an end stores the cursor that hands what it wrote to the peer.
+#[cfg(not(feature = "publish-relaxed"))]
+const PUBLISH: Ordering = Ordering::Release;
+#[cfg(feature = "publish-relaxed")]
+const PUBLISH: Ordering = Ordering::Relaxed;
+
+/// Word `at` of an end's words, and the one index into them: every `at` an end
+/// forms is below `N`, because its place is and a ring position is reduced
+/// below the depth.
+#[allow(clippy::indexing_slicing)]
+fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
+    &page[at]
+}
+
+/// A distance the peer's cursor claims, believed only up to `cap`.
+fn clamp(claimed: Untrusted<u32>, cap: u32, broken: Violation) -> Result<u32, Violation> {
+    let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
+    claimed.at_most(u64::from(cap)).ok().and_then(|n| u32::try_from(n).ok()).ok_or(broken)
 }
 
 /// The peer wrote what no peer of the protocol writes. The session is over;
