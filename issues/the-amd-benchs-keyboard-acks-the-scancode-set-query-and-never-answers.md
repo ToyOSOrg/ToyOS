@@ -22,7 +22,7 @@ What the same boots measured, which a fix has to keep:
 - **The wire is set 1.** Under the demo build's assumption, set 2 behind the controller's translation, the bench's volume keys arrived as `E0 30` and `E0 2E`. That assumption is the one the `Refused` arm makes when translate is on, and those bytes are set 1's codes for Volume Up and Down.
 - **The wait for the set byte costs 750 ms of every boot.**
 
-Owner: the i8042 driver, `kernel/src/arch/x86_64/i8042/`, with the decision in `kernel/ps2`. The design is #877's A2.
+Owner: the i8042 driver, `kernel/src/arch/x86_64/i8042/`. The design is #877's A2.
 
 ## Exit condition
 
@@ -30,5 +30,4 @@ All of:
 
 - an AMD bench boot reads `i8042: kbd set2+xlat (assumed, …) scanning on, GSI 1 … on`;
 - a T14 boot reads its `Refused` arm as `main` does, and QEMU reads `Told(0x41)` as `main` does;
-- a host test holds that an exchange that stopped before both acks still disables the keyboard;
 - the set byte's wait is bounded by a device response time cited at its site from a hardware document, or, where no document states one, the 750 ms stays recorded in an open issue.

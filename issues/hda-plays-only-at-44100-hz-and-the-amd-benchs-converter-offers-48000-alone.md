@@ -21,10 +21,10 @@ That was read off a boot of the bench's demo build. On `main` the bench never re
 **Two more things stand on 44.1 kHz:**
 
 - **cpal.** cpal's ToyOS backend advertises 44.1 kHz alone and asserts that soundserver's device rate equals it (`issues/cpal-backend-hardcodes-the-format.md`). A device at 48 kHz therefore aborts every cpal client. virtio-sound already runs at 48 kHz where a device offers no 44.1 kHz.
-- **The resampler.** soundserver's resampler carries a client whose rate is not the device's, and no test holds its quality. Measured on the host against the analytic sine, with soundserver's parameters (#877, issuecomment-6120534796):
-  - in-band THD+N is at least 135 dB below the tone;
-  - the gain at 20 kHz is −0.31 dB from 44.1 to 48 kHz, and −0.43 dB from 48 to 44.1 kHz;
-  - a 25 kHz tone resampled from 96 kHz leaves a −31.5 dB alias at 23 kHz.
+- **The resampler.** soundserver's resampler carries a client whose rate is not the device's, and no test holds its quality. Measured on the host against the analytic sine, with soundserver's parameters, from every client rate in common use to both device rates (#877; [a5-sweep-avx.log](https://github.com/ToyOSOrg/evidence/blob/0e375868c74ce04882bed06e2b188f3271b6e9dd/a5-sweep-avx.log)):
+  - in-band THD+N is at least 133.6 dB below a −1 dBFS tone;
+  - the gain at the passband's edge is −0.31 dB wherever the client's rate is below the device's, and down to −3.63 dB where it is above (192 to 44.1 kHz);
+  - a tone just above 0.5465 of 44.1 kHz, resampled down from 192 kHz, is rejected by only 21.4 dB.
 
 Owner: soundserver's HDA driver (`system/soundserver/src/hda.rs`) and `lib/hda/src/config.rs`. The design is #877's A5.
 
@@ -35,4 +35,4 @@ All of:
 - an AMD bench boot reads soundserver on HDA at 48000 Hz, with its audio rows green;
 - a T14 boot reads 44100 Hz, with its audio rows green;
 - a cpal client takes the rate soundserver answers;
-- a host test holds soundserver's resampler to a bound derived from the 16-bit wire.
+- a host test holds soundserver's resampler, from every client rate in common use to both device rates, to a passband, a stop-band and an in-band THD+N bound, each cited from published practice, under the margin below the dithered 16-bit wire's own noise that the owner signed (#877's A5).
