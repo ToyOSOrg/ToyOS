@@ -20,6 +20,11 @@
 //! kernel refuses every power-off. A controller the ECDT names is attached to
 //! AML before the first table loads.
 //!
+//! **Then what latched during the load is served**, a press taken by a
+//! table's Sleep and any SCI the load left latched: a press then powers the
+//! machine off on the `\_S5` the load handed over, and waits for no
+//! initialisation.
+//!
 //! **Then the namespace is initialised** ([`init`]): PCI_Config announced
 //! where §6.5.4 asks it be, `\_SB._INI`, and every device's `_STA` and
 //! `_INI` by Table 6.67, again over whatever a table loaded meanwhile added.
@@ -149,6 +154,8 @@ fn main() {
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
     server.power_off = loaded.handed;
     server.aml = kept;
+    server.served_aml();
+    server.latched();
     let names = server.initialise();
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
@@ -758,6 +765,17 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
 }
 
 impl<'a, P: Ports> Server<'a, Claim<'a>, P> {
+    /// Each SCI already latched, served without waiting for one.
+    fn latched(&mut self) {
+        match self.kernel.dev.irq() {
+            Ok(record) => self.scis += u64::from(record.count),
+            Err(SyscallError::WouldBlock) => return,
+            Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
+        }
+        self.take();
+        self.kernel.dev.ack().expect("acpiserver: the claim's acknowledgement");
+    }
+
     fn serve(&mut self) -> ! {
         let mut next_count = Instant::now() + COUNTS;
         let mut next_read = Instant::now() + battery::POLL;

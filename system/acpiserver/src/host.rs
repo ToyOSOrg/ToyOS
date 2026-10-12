@@ -298,8 +298,9 @@ pub struct Firmware<'k, K> {
     /// and gives back.
     pub takes: u64,
     pub contended: u64,
-    /// The longest a take waited for the firmware's release: the firmware's
-    /// longest hold of the lock, as far as a take saw it.
+    /// The longest a take waited for the firmware's release, or waited and
+    /// gave up: the firmware's longest hold of the lock, at least, as far as a
+    /// take saw it.
     pub longest_hold: Duration,
     pub given_back: u64,
     pub notifies: u64,
@@ -480,6 +481,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
                 self.contended += 1;
             }
             if !self.kernel.released(until) {
+                self.longest_hold = self.longest_hold.max(asked.elapsed());
                 return Ok(false);
             }
         }
