@@ -7,6 +7,11 @@
 //! task's key; the switch onto the task consumes it, and the switch off a task
 //! drops it, so a wake that raced its own park is never read later as a slow
 //! one. Only the armed process's tasks are recorded.
+//!
+//! A second word per slot holds the CPU the task last ran on, so a phase can say
+//! how many times its tasks were switched in somewhere else: a staged
+//! arrangement that held reads `moved=0`. `WHERE` answers the caller's CPU, for
+//! staging one.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
@@ -17,6 +22,8 @@ use kernel::sched::task::TaskKey;
 /// every class's quantiles under the phase `a2`, then reset.
 pub const ARM: u64 = 0x5C00_0001;
 pub const DUMP: u64 = 0x5C00_0002;
+/// Answer the calling thread's CPU.
+pub const WHERE: u64 = 0x5C00_0003;
 
 const SLOTS: usize = 4096;
 const NS_BITS: u32 = 40;
@@ -30,6 +37,9 @@ static SLOT: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 static ARMED: AtomicU32 = AtomicU32::new(u32::MAX);
 static HIST: [[AtomicU64; BUCKETS]; 3] = [const { [const { AtomicU64::new(0) }; BUCKETS] }; 3];
 static MAX: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Per slot: the task's tag above eight bits of its last CPU, plus one.
+static LAST: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+static MOVED: AtomicU64 = AtomicU64::new(0);
 
 fn slot(task: TaskKey) -> &'static AtomicU64 {
     &SLOT[task.0 as usize % SLOTS]
@@ -87,7 +97,15 @@ pub fn switched(incoming: Option<TaskKey>, incoming_pid: Option<u32>, outgoing: 
     }
     let Some(task) = incoming else { return };
     let word = slot(task).swap(0, Relaxed);
-    if word == 0 || word >> TAG_SHIFT != tag(task) || incoming_pid != Some(armed) {
+    if incoming_pid != Some(armed) {
+        return;
+    }
+    let cpu = u64::from(crate::arch::percpu::cpu_id()) + 1;
+    let last = LAST[task.0 as usize % SLOTS].swap(tag(task) << 8 | cpu, Relaxed);
+    if last >> 8 == tag(task) && last & 0xff != cpu {
+        MOVED.fetch_add(1, Relaxed);
+    }
+    if word == 0 || word >> TAG_SHIFT != tag(task) {
         return;
     }
     let now = crate::clock::nanos_since_boot() & NS_MASK;
@@ -106,6 +124,10 @@ fn reset() {
     for m in &MAX {
         m.store(0, Relaxed);
     }
+    for last in &LAST {
+        last.store(0, Relaxed);
+    }
+    MOVED.store(0, Relaxed);
 }
 
 pub fn debug(action: u64, arg: u64) -> u64 {
@@ -142,9 +164,11 @@ pub fn debug(action: u64, arg: u64) -> u64 {
                     MAX[class].load(Relaxed),
                 );
             }
+            crate::log!("scout-wake: phase={arg} moved={}", MOVED.load(Relaxed));
             reset();
             0
         }
+        WHERE => u64::from(crate::arch::percpu::cpu_id()),
         _ => toyos_abi::syscall::SyscallError::InvalidArgument.to_u64(),
     }
 }
