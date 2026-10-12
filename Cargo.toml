@@ -124,7 +124,6 @@ members = [
     "system/usbd",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
-    "tests/guest/proctest",
     "tests/guest/test-runner",
     "tests/metal",
 ]
