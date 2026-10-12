@@ -145,13 +145,13 @@ fn a_hostile_consumer_yields_room_or_a_violation() {
 }
 
 /// A stream's four words, its bytes, and a doorbell each way. A byte is a loom
-/// cell, as the adapter's copy is no atomic: a copy into or out of it that the
-/// cursors do not order after the other end's last copy of it is loom's own
-/// `Causality violation`. A doorbell is loom's `Notify`, which keeps one ring
-/// and may wake its waiter for nothing, and loom fails a run that ends with a
-/// thread waiting on one. It is held in std's `Arc`: loom's panics again in
-/// its drop when that failure unwinds the model, which aborts the run before
-/// it says which test failed.
+/// cell: a copy into or out of it that the cursors do not order after the
+/// other end's last copy of it is loom's own `Causality violation`. A doorbell
+/// is loom's `Notify`, which keeps one ring and may wake its waiter for
+/// nothing, and loom fails a run that ends with a thread waiting on one. It is
+/// held in std's `Arc`: loom's panics again in its drop when that failure
+/// unwinds the model, which aborts the run before it says which test failed
+/// (`issues/loom-arc-panics-in-its-drop-while-a-failed-model-unwinds.md`).
 struct Stream {
     page: [Shared; 4],
     bytes: [Cell<u32>; RING as usize],
