@@ -14,8 +14,9 @@ one sleeper thread against a sixteen-thread hog process on two CPUs — crosses
 it on `main` as well as with the busy-CPU wake change (PR #874).
 
 Measured with I5's ceiling lifted (`with_fair_allowance(u64::MAX)`), seeds
-0..2000 alternating the seeded and PCT streams as `sim/tests/policy.rs` does;
-the scratch test that ran it is posted on PR #874:
+0..2000 alternating the seeded and PCT streams as `sim/tests/policy.rs` does,
+by [a scratch test](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/scratch-tests/zz_scratch3.rs)
+([its output](https://github.com/ToyOSOrg/evidence/blob/b036b48d71bb81456b770307ccbd9532d80eb175/sim-investigation/i5-2000.txt)):
 
 | tree | runs crossing | worst spread | bound in force there |
 |---|---|---|---|
@@ -34,6 +35,9 @@ whose keys are still the spawn's zero, and each later quantum end on that CPU
 hands it to a hog whose key went stale when it was queued, while the sleeper
 counts as runnable throughout. The spread is the fair band's insertion-time
 keys, the same staleness the bound's `ΣT + 1` term carries, past that term.
+
+Owned by stage S4 of the scheduler design (#872), per-thread EEVDF, which
+deletes the frozen insertion keys and I5's staleness term with them.
 
 **Exit**: `interactive_mix(2, 16)` meets I5's derived bound over 2,000 seeds,
 and `INTERACTIVE_I5_SAMPLE` is deleted.
