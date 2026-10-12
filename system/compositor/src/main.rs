@@ -29,7 +29,6 @@ use toyos_manifest::package;
 
 pub const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
 pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667); // ~60fps
-pub const STATS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long one pass may spend draining clients before it must composite.
 ///
