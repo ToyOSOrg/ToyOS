@@ -130,22 +130,64 @@ impl Card {
         snap.put("errors.crc", wire.crc_errors);
     }
 
+    /// One batch of received frames: `batch` is given the most it may take — the card's ring,
+    /// all of what one wait can bring — and the card's next frame on each call, and every buffer
+    /// it gave back reaches the card once it returns.
+    pub fn receive<R>(&self, batch: impl FnOnce(usize, &mut dyn FnMut(&mut dyn FnMut(&[u8])) -> bool) -> R) -> R {
+        let budget = match self {
+            Self::Virtio(_) => crate::virtio_net::RX_BUF_COUNT,
+            Self::Intel(_) => toyos_i219::RX_RING - 1,
+        };
+        let took = batch(budget, &mut |sink| self.rx(sink));
+        if let Self::Intel(nic) = self {
+            nic.rx_flush();
+        }
+        took
+    }
+
     /// Hands the next received frame to `take` and gives its buffer back to
     /// the card once `take` returns; `false` when none waits.
-    pub fn rx(&self, take: impl FnOnce(&[u8])) -> bool {
+    fn rx(&self, take: &mut dyn FnMut(&[u8])) -> bool {
+        use crate::prof::{Slot, add, now, since};
+        let t0 = now();
         match self {
             Self::Virtio(nic) => {
-                let Some((index, len)) = nic.poll_rx() else { return false };
+                let polled = nic.poll_rx();
+                since(Slot::CyPollRx, t0);
+                let Some((index, len)) = polled else { return false };
                 take(nic.rx_frame(index, len));
+                let t0 = now();
                 nic.rx_done(index);
+                since(Slot::CyRxDone, t0);
             }
             Self::Intel(nic) => {
-                let Some(frame) = nic.poll_rx() else { return false };
+                let polled = nic.poll_rx();
+                since(Slot::CyPollRx, t0);
+                let Some(frame) = polled else { return false };
                 take(nic.rx_frame(&frame));
+                let t0 = now();
                 nic.rx_done(frame);
+                since(Slot::CyRxDone, t0);
             }
         }
+        add(Slot::RxDone, 1);
         true
+    }
+
+    /// MEASUREMENT ONLY, round 4: frames the MAC had no room for so far; virtio counts none.
+    pub fn missed(&self) -> u64 {
+        match self {
+            Self::Virtio(_) => 0,
+            Self::Intel(nic) => nic.missed(),
+        }
+    }
+
+    /// MEASUREMENT ONLY: the card's `RDT` writes so far; virtio has none.
+    pub fn rdt_writes(&self) -> u64 {
+        match self {
+            Self::Virtio(_) => 0,
+            Self::Intel(nic) => u64::from(nic.rdt_writes()),
+        }
     }
 
     /// How many frames the card takes now. [`Self::tx`] is for a caller this

@@ -53,7 +53,9 @@ impl Interrupts for Claim {
     const IDLE: SyscallError = SyscallError::WouldBlock;
 
     fn taken(&self) -> Result<u32, SyscallError> {
-        self.0.irq().map(|record| record.count)
+        let record = self.0.irq();
+        crate::stamps::irq(record.as_ref().ok());
+        record.map(|record| record.count)
     }
 }
 
@@ -243,6 +245,16 @@ impl Nic {
         self.driver.borrow().pass_due_in()
     }
 
+    /// MEASUREMENT ONLY.
+    pub fn missed(&self) -> u64 {
+        self.driver.borrow_mut().missed()
+    }
+
+    /// MEASUREMENT ONLY.
+    pub fn rdt_writes(&self) -> u32 {
+        self.driver.borrow().counters().rdt_writes
+    }
+
     pub fn poll_rx(&self) -> Option<toyos_i219::Frame> {
         self.driver.borrow_mut().poll_rx()
     }
@@ -260,6 +272,11 @@ impl Nic {
     /// Give the buffer back once its frame has been read.
     pub fn rx_done(&self, frame: toyos_i219::Frame) {
         self.driver.borrow_mut().rx_done(frame);
+    }
+
+    /// Hand the part every buffer the batch gave back.
+    pub fn rx_flush(&self) {
+        self.driver.borrow_mut().rx_flush();
     }
 
     /// How many frames the transmit ring takes now.

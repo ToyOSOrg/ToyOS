@@ -692,6 +692,12 @@ impl Lookup {
         (self.keep > 0).then(|| self.began.saturating_add(u64::from(self.keep) * 1_000))
     }
 
+    /// MEASUREMENT ONLY, #883's cache arm: the least TTL of every record read,
+    /// in seconds, capped.
+    pub fn keep_s(&self) -> u32 {
+        self.keep
+    }
+
     /// The queries whose answer is still read, oldest first. The port of any
     /// other query of this lookup can be let go.
     pub fn waiting(&self) -> impl Iterator<Item = Asked> + '_ {

@@ -114,6 +114,8 @@ struct Asking {
 }
 
 pub(crate) struct Resolver {
+    /// MEASUREMENT ONLY, #883's cache arm: each ended lookup's least TTL, until taken.
+    keeps: Vec<(LookupId, u32)>,
     asking: Vec<Asking>,
     /// Ended, and not yet taken.
     ended: Vec<Resolved>,
@@ -195,7 +197,7 @@ fn act(asking: &mut Asking, mut step: Step, now: Instant, stack: &mut Stack, cou
 
 impl Resolver {
     pub(crate) fn new() -> Self {
-        Self { asking: Vec::new(), ended: Vec::new(), next: 0, reply: vec![0; toyos_net_udp::limits::MAX_PAYLOAD] }
+        Self { keeps: Vec::new(), asking: Vec::new(), ended: Vec::new(), next: 0, reply: vec![0; toyos_net_udp::limits::MAX_PAYLOAD] }
     }
 
     /// When the soonest lookup's wait is over.
@@ -238,7 +240,7 @@ impl Resolver {
     /// its sockets and waits to be taken. Returns whether a query was queued, which the next
     /// transmit opportunity carries.
     pub(crate) fn pass(&mut self, now: Instant, stack: &mut Stack, counters: &mut Counters, draw: &mut impl FnMut() -> u32) -> bool {
-        let Self { asking: lookups, ended, reply, .. } = self;
+        let Self { asking: lookups, ended, reply, keeps, .. } = self;
         let ms = millis(now);
         let mut queued = false;
         lookups.retain_mut(|asking| {
@@ -277,6 +279,10 @@ impl Resolver {
             if let Some(answer) = answer {
                 stack.answers().keep(&asking.view, &asking.name, asking.generation, answer, asking.lookup.keep_until(), ms);
             }
+            if keeps.len() >= 64 {
+                keeps.clear();
+            }
+            keeps.push((asking.id, asking.lookup.keep_s()));
             ended.push(Resolved { id: asking.id, result });
             false
         });
@@ -306,6 +312,12 @@ impl Node {
     /// [`Self::take_resolved`].
     pub fn resolve(&mut self, now: Instant, view: &[u8], name: Name, mut draw: impl FnMut() -> u32) -> Result<Resolving, NotStarted> {
         self.resolver.start(now, view, name, &mut self.stack, &mut self.counters, &mut draw)
+    }
+
+    /// MEASUREMENT ONLY, #883's cache arm: the least TTL `id`'s lookup read, once.
+    pub fn take_keep(&mut self, id: LookupId) -> Option<u32> {
+        let at = self.resolver.keeps.iter().position(|(kept, _)| *kept == id)?;
+        Some(self.resolver.keeps.swap_remove(at).1)
     }
 
     /// The lookups that ended since the last call, each once.

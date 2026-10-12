@@ -5,3 +5,7 @@ edition = "2021"
 description = "Ethernet, ARP, IPv4, ICMPv4, IGMP, UDP and TCP wire formats, parsed in place and built, and what every net crate shares: the caller's clock, SipHash, IPv4 address classes and the counters macro (no_std, forbid(unsafe_code))."
 license = "MIT OR Apache-2.0"
 publish = false
+
+[features]
+# MEASUREMENT ONLY, never lands: netstack's per-stage cycle counts.
+prof = []
