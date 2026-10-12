@@ -8,17 +8,52 @@
 //!   route outlives its address;
 //! - a lease is held only against a [`Verified`], which only [`Stack::report`] makes, from [ip]'s
 //!   report for the address under probe, so no address is in use before conflict detection ends;
-//! - the resolvers are the held lease's, so they come and go with it.
+//! - the resolvers are the held lease's, so they come and go with it, and the answers they gave
+//!   go with every write of the state and every link that goes down ([`network::Network`]): after
+//!   either the next lookup may be asking another network, so none is answered from this one's.
 //!
 //! [ip] reports on no address but the one this module added, and one report at a time: each is
 //! read against the state as it stands.
 
 mod tcp;
 
+mod network {
+    use toyos_dns::Cache;
+
+    use super::State;
+
+    /// The state and the answers its resolvers gave, written together: the state only by
+    /// [`Network::set`], which empties the answers as it writes it.
+    pub(super) struct Network {
+        state: State,
+        answers: Cache,
+    }
+
+    impl Network {
+        pub(super) fn new() -> Self {
+            Self { state: State::Unaddressed, answers: Cache::default() }
+        }
+
+        pub(super) fn state(&self) -> &State {
+            &self.state
+        }
+
+        pub(super) fn set(&mut self, state: State) {
+            self.state = state;
+            self.answers.empty();
+        }
+
+        pub(super) fn answers(&mut self) -> &mut Cache {
+            &mut self.answers
+        }
+    }
+}
+
 use alloc::collections::VecDeque;
 use core::net::Ipv4Addr;
 
 use toyos_dhcp::{Lease, Transmission};
+use toyos_dns::Cache;
 use toyos_net_shard::{Config, Event, Refusal, Shard};
 use toyos_net_udp::{Received, SocketId};
 use toyos_net_wire::ethernet::MacAddr;
@@ -54,7 +89,7 @@ pub(crate) struct Stack {
     shard: Shard,
     /// The DHCP client's socket.
     socket: SocketId,
-    state: State,
+    network: network::Network,
     /// What [ip] reported of an address and [`Stack::report`] has not read: never a log line.
     inbox: VecDeque<Fate>,
 }
@@ -79,7 +114,7 @@ impl Stack {
     pub(crate) fn new(now: Instant, config: Config) -> Result<Self, toyos_net_tcp::ConfigError> {
         let mut shard = Shard::new(now, config)?;
         let Ok(socket) = shard.acquisition() else { unreachable!("a new shard has no socket on port 68") };
-        Ok(Self { shard, socket, state: State::Unaddressed, inbox: VecDeque::new() })
+        Ok(Self { shard, socket, network: network::Network::new(), inbox: VecDeque::new() })
     }
 
     pub(crate) fn shard(&self) -> &Shard {
@@ -87,14 +122,14 @@ impl Stack {
     }
 
     pub(crate) fn lease(&self) -> Option<&Lease> {
-        match &self.state {
+        match self.network.state() {
             State::Held(lease) => Some(lease),
             State::Unaddressed | State::Probing(_) => None,
         }
     }
 
     fn address(&self) -> Option<Ipv4Addr> {
-        match &self.state {
+        match self.network.state() {
             State::Unaddressed => None,
             State::Probing(address) => Some(*address),
             State::Held(lease) => Some(lease.address),
@@ -119,8 +154,18 @@ impl Stack {
         self.shard.fire(now);
     }
 
+    /// Down, the answers go and a held lease stays: the link may come back on another network
+    /// that the lease's verification never hears from.
     pub(crate) fn link(&mut self, now: Instant, up: bool) {
         agreed(if up { self.shard.link_up(now) } else { self.shard.link_down(now) });
+        if !up {
+            self.network.answers().empty();
+        }
+    }
+
+    /// What the held lease's resolvers answered, kept by the view that asked.
+    pub(crate) fn answers(&mut self) -> &mut Cache {
+        self.network.answers()
     }
 
     // ---- the DHCP client's socket ----
@@ -202,8 +247,8 @@ impl Stack {
     /// The next report [`Self::refusals`] took, read against the state.
     pub(crate) fn report(&mut self) -> Option<Report> {
         Some(match self.inbox.pop_front()? {
-            Fate::Verified(addr) => match self.state {
-                State::Probing(address) if address == addr => Report::Verified(Verified(addr)),
+            Fate::Verified(addr) => match self.network.state() {
+                State::Probing(address) if *address == addr => Report::Verified(Verified(addr)),
                 _ => unreachable!("[ip] verified {addr}, which is not under probe"),
             },
             Fate::Taken(addr, by) => {
@@ -218,7 +263,7 @@ impl Stack {
         if self.address() != Some(addr) {
             unreachable!("[ip] removed {addr}, which the lease does not name");
         }
-        self.state = State::Unaddressed;
+        self.network.set(State::Unaddressed);
     }
 
     /// Nothing is held: the address goes, and [ip] withdraws the gateway with it.
@@ -226,7 +271,7 @@ impl Stack {
         if let Some(address) = self.address() {
             agreed(self.shard.remove_address(now, address));
         }
-        self.state = State::Unaddressed;
+        self.network.set(State::Unaddressed);
     }
 
     /// A server acknowledged `address`: [ip] probes it, and nothing uses it yet. Refused, the
@@ -234,7 +279,7 @@ impl Stack {
     pub(crate) fn probe(&mut self, now: Instant, address: Ipv4Addr, prefix_len: u8) -> Result<(), toyos_net_ip::Counter> {
         self.release(now);
         self.shard.add_address(now, address, prefix_len)?;
-        self.state = State::Probing(address);
+        self.network.set(State::Probing(address));
         Ok(())
     }
 
@@ -246,7 +291,7 @@ impl Stack {
             unreachable!("the client configured {}, having probed {}", lease.address, verified.0);
         }
         let refused = self.route(now, &mut lease);
-        self.state = State::Held(lease);
+        self.network.set(State::Held(lease));
         refused
     }
 
@@ -254,12 +299,12 @@ impl Stack {
     /// Returns whether [ip] refused its router. A prefix [ip] refuses changes nothing: the lease
     /// stays as it was held.
     pub(crate) fn renew(&mut self, now: Instant, mut lease: Lease) -> Result<bool, toyos_net_ip::Counter> {
-        if !matches!(&self.state, State::Held(held) if held.address == lease.address) {
+        if !matches!(self.network.state(), State::Held(held) if held.address == lease.address) {
             unreachable!("the client renewed {}, which is not held", lease.address);
         }
         self.shard.add_address(now, lease.address, lease.prefix_len)?;
         let refused = self.route(now, &mut lease);
-        self.state = State::Held(lease);
+        self.network.set(State::Held(lease));
         Ok(refused)
     }
 

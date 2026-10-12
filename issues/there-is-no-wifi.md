@@ -4,40 +4,359 @@ kind: track
 opened: 2026-08-03
 ---
 
-# There is no wifi, and the top half of it can be built today with no hardware
+# There is no Wi-Fi
 
-Nothing 802.11 exists in the tree. The T14's radio is an Intel AX210 and the
-plan for it is roughly 18,000 lines of transport and firmware op-mode with no
-harness — the uncomfortable core, and nothing has reduced it.
+Nothing 802.11 exists in the tree. What is to be built is #876's design,
+accepted by the orchestrator in issuecomment-6125972534 with the seven
+changes its body carries:
 
-**But the top half is independent of all of it and fully host-verifiable.** A
-frame and element crate, a WPA supplicant crate (reusable by any future
-supplicant), a station state machine, and the firmware TLV pipeline can all be
-written today with no hardware and no IOMMU. They are blocked on sequencing
-alone.
+- `ax2xx`, one driver program per Intel AX2xx radio function: the AX210 on
+  the T14, the AX200 on the AMD bench;
+- `wlan`, a supplicant program apart from it, alone holding a network's
+  credential;
+- `wifi`, the network settings program;
+- the ports between them: `link` (netstack to each NIC driver), `radio`
+  (`ax2xx` to `wlan`) and `wifi` (`wlan` to settings programs);
+- netstack running every link a driver brings.
 
-**The bottom half needs what the LAN now uses**: a userland driver holding one
-PCI function in its own IOMMU domain, with `SYS_DEVICE_DMA_ALLOC` for its rings
-and its interrupt delivered as a message on the claim. netd drives the T14's
-I219 that way. The radio's firmware is admitted by the dependency rules only as
-vendor-signed and device-verified, pinned by version and hash, recorded in
-`NOTICE`, and loaded by that radio's own driver through its own domain.
+The first version, W6, is an HT, VHT and HE station with block-ack both ways
+that joins WPA2-Personal and WPA3-Personal networks with PMF. The design is
+#876's body; this file repeats only what a stage needs. The specification
+the driver is written from lives outside the tree, revision by revision, on
+`ToyOSOrg/evidence` branch `pr-876`.
 
-**One diagnostic should run before any of the bottom half is costed**, because
-it is the only thing that can invalidate the architecture: read the radio
-function's isolation scope and reserved regions off the real machine. It is
-about 200 lines on a boot the owner is already doing, and it has never been run.
+## Lines the owner drew
 
-Facts that cost real time to establish:
+As the orchestrator recorded them on #876, quoted in its body's §0:
 
-- The firmware pin is exact and single-valued — one API version, two files
-  totalling **1,733,880 bytes** against a 35,651,584-byte boot partition.
-- Licensing is settled: 238 of 285 upstream files are dual GPL/BSD (elect BSD);
-  the 15 GPL-only files in the AX210 path are never read; the mac80211 and
-  cfg80211 headers and the simulator are GPL-only and excluded.
-- The declarative/imperative boundary is a measured cliff, not taste: the
-  firmware API headers need **6** distinct Linux headers and the device configs
-  **2**, against **44** for the op-mode and 75 for the subset as a whole.
-- C is compiled by the toolchain's clang, which lays out `__packed` structs and
-  their bitfields as GCC does, so the 635 `__packed` uses are no longer a
-  compiler question.
+- **The clean room** (issuecomment-6125437246): "one reads source writes a
+  doc. the other reads from the doc not the source."
+  - A reader reads the references and the demo and writes the
+    specification.
+  - A writer writes the driver from it and the public standards, and never
+    reads the references or the demo: "a sentence in the writer's brief and
+    role, not machinery".
+- **The references**: "reference code may only be used as clean room
+  information. we want no notice for it. full speed from start." #876 reads
+  full speed as HT, VHT and HE rates and block-ack in the first version.
+- **The split** (issuecomment-6120490125, ruling 3): "Each card's driver is
+  its own program, and netstack runs every link a driver brings, wired
+  first, with failover. The LAN track's stage 3 (every card behind a link
+  session) is a prerequisite, as the design reads it." The owner chose
+  several interfaces over one picked by the manifest.
+- **WPA3 and PMF in the first version** (ruling 2): "The crypto crate
+  (`lib/crypto`, still being written outside the tree) gains SAE over P-256
+  and AES-CMAC first."
+- **The MSI-X table's page** (issuecomment-6121747502, Q2): "The page is
+  handed over only where interrupt remapping verifies the source, and only
+  once S1's T14 boots read compatibility format blocked. If they don't, that
+  is filed as a kernel-wide defect."
+- **6 GHz** (Q3): "right after the first version, as W9, once a 6 GHz access
+  point is at the bench."
+- **Saved networks** (Q4): "plain text whatever until the key store concept
+  exists", held by the supplicant alone. This overrides ruling 1's
+  "encrypted at rest", and stage P7, the key store, went with it.
+- **Throughput is reported and never blocks**: the standing ruling's "Bench
+  numbers are reported and never block", for a design the manufacturers back,
+  as #876 §0 applies it to the driver.
+- **The link hop's cost is measured and reported, and decides nothing by
+  itself**: the split and `link` are this design's, so the standing ruling's
+  "Review on merits" applies, "reviewed on correctness and simplicity like
+  any code. A speed claim is measured and reported but does not decide by
+  itself, unless the design's only purpose is speed" (#876 §0).
+  `.claude/agents/implementer.md` carries both clauses.
+
+## Stages
+
+Each stage is its own design round. The orchestrator dispatches every stage
+and owns each one this list gives no other owner.
+
+- **Writers.** Every W stage's owner is the orchestrator, who briefs a
+  writer for it: an implementer told never to read the references or the
+  demo. The stage's design round is that writer's. The first W stage's pull
+  request, briefed to, adds that sentence to `.claude/agents/implementer.md`.
+- **Reviews.** The orchestrator's brief for each W stage's review and design
+  acceptance says that they quote no reference. A defect found through a
+  reference reaches the writer only as a reader's revision of the
+  specification.
+- **The S and P stages** are no part of the driver and need neither role.
+- **Metal rows.** Every stage with a row on the T14 or the AMD bench first
+  needs `issues/a-metal-row-names-no-hardware-and-a-bench-without-it-reds.md`.
+
+**S1, the T14's read-out and the compatibility-format A/B: done, both exits
+met.** The orchestrator's scout, never landing, on `ToyOSOrg/evidence`
+`pr-876`: the A/B and the PCI and DMAR read-out in `s1/`
+(https://github.com/ToyOSOrg/evidence/blob/cd368b25b2259a76b80dc31f4219dac1c91d84dc/s1/judge.log),
+and the ACPI read-out in `s1-r2/`
+(https://github.com/ToyOSOrg/evidence/blob/abd63019cfc896d69b59a8acba29fedaec0b48cc/s1-r2/judge.log).
+- **The A/B: compatibility format blocked.** Boot A left the MSI of the xHCI
+  at 00:0d.0 in compatibility format with `IRE` set and `CFIS` clear: fault
+  0x25 and no delivery. Boot B left it remapped: delivered, no fault. P1's
+  Q2 condition and W5's S1 dependency are met.
+- **The read-out.** The AX210 is 09:00.0, behind root port 00:1c.4: BAR 0
+  alone, 16 KiB, mem64, with its MSI-X table at BAR 0 + 0x2000, its PBA at
+  BAR 0 + 0x3000, and MSI with one vector. No DMAR unit's scope names it, so
+  it is the INCLUDE_PCI_ALL unit's, and no reserved region names it. The
+  ACPI read-out found the radio's device under its root port, with its names
+  below it. The T14's NVMe keeps its MSI-X table at BAR 0 + 0x2000 too,
+  which puts it in P1's T14 exit.
+- **What S1 does not separate.** The T14 runs with `EIME` set, and VT-d
+  §5.1.4 blocks compatibility format where `EIME` is set or `CFIS` is
+  clear. Boot A read the block with both true on every unit, so S1 does not
+  show `CFIS=0` alone blocking it, which exit 1 of
+  `issues/qemu-passes-compatibility-format-interrupts.md` still asks. A VT-d
+  machine the kernel leaves without `EIME` (an xAPIC machine, or a unit
+  without `ECAP.EIM`: `kernel/src/arch/x86_64/vtd/mod.rs`) rests on `CFIS=0`
+  alone.
+
+**S2, the link hop's cost on the T14.** A scout, never landing: two
+processes over `toyos-transport`, one entry per 1,514-byte frame, batches of
+1, 8 and 32, both directions, each side copying each frame once. Owner: the
+orchestrator. Depends on: nothing. Exit: cycles per frame and frames a
+second on one CPU, reported in P4's design round. Beside them stands the
+200,163 packets of 1,500 bytes a second each way that full rate needs:
+HE-MCS 11, two streams, 160 MHz, 0.8 µs GI, a standard's bound, not a
+measurement
+(https://github.com/ToyOSOrg/evidence/blob/1e0625eaf0feb22df2a760976b7ac3a2858b4e2c/e4-ceiling.log).
+By itself it decides nothing (the link hop's line above).
+
+**The specification.** Owner: the orchestrator, who briefs its readers.
+Depends on: nothing.
+- **Exit, per W stage:** the revision that stage's brief names, committed
+  to `pr-876`, carries every fact the stage needs. Each fact is a sentence
+  of meaning with its source: a reference by name, a firmware container, a
+  measurement with its run, or a standard's clause. The revision holds no
+  code or pseudo-code of a reference.
+- **Its sources.** Where Intel's published firmware-interface headers state
+  a fact, the specification takes it from them and the bench checks that it
+  works; another reference disagreeing does not reopen it. A fact those
+  headers leave unsaid is taken from the other references. Only a fact those
+  disagree on, or all of them leave unsaid, stays open until a reader's scout
+  measures it. The scout runs on a branch kept off `origin`.
+
+**P1, a BAR stays where firmware put it, in 4 KiB pages, its MSI-X table's
+page included.** Owner: the orchestrator.
+- **Depends on:** 4 KiB user leaves for device windows: stage 3 of
+  `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`,
+  or the slice its holder accepts. Its Q2 condition, S1 reading
+  compatibility format blocked, is met.
+- **Exit:**
+  - on the T14, the AX210 claimed with its BAR in place; the NVMe driven
+    through its MSI-X table at BAR 0 + 0x2000 (S1); and
+    `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
+    unchanged;
+  - `msix-exclusive-bar=on` gone from `tests/common/qemu.rs` and
+    `build/qemu.rs`, so the NVMe guests drive QEMU's default controller
+    through its table in BAR 0;
+  - `issues/pcidev-moves-a-bar-behind-a-bridge-out-of-the-range-the-bridge-forwards.md`
+    closed, and each of the two placement issues it names closed or its exit
+    rewritten to the placement P1 lands;
+  - the exit of
+    `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
+    rewritten, from a refused write to the table's page to the NVMe driven
+    through a table in BAR 0.
+
+**P2 and P3, AMD-Vi translation and interrupt remapping.** Owner:
+`issues/an-amd-vi-machine-isolates-no-device.md`, held by the orchestrator's
+AMD track. Depends on: that track.
+- **Exit:** that track's exit, and three readings on the AMD bench:
+  - the stick's xHCI and the NVMe working in their domains under
+    translation;
+  - the AX200's claim handed over with its own remapping table;
+  - before the table's page is mapped there, a message naming no valid entry
+    of the radio's own table, refused into the event log.
+- Only W7 waits on them.
+
+**P4, the LAN track's stage 3, whole.** Owner: the orchestrator; P4 is
+stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
+- **Depends on:** the T14's outbound rows, which
+  `issues/toyos-has-its-own-network-stack.md` owns; and S2, which its round
+  reports.
+- **Exit:** that stage's exit, a driver killed and restarted with the
+  stack's connections intact (held in a guest) and an unlisted but matching
+  NIC up with no configuration change; and with it:
+  - the `link` protocol on `toyos-transport`, adding no transport primitive;
+  - `Card` gone;
+  - the supervisor binding drivers from a declared match table by vendor,
+    device and class;
+  - the network suite unchanged under QEMU;
+  - a T14 row reading the I219 working, with nothing regressed;
+  - S2 rerun and reported.
+
+**P5, netstack over several links.** Owner: the orchestrator; its defect is
+`issues/netstack-drives-one-card.md`. Depends on: P4.
+- **Exit:**
+  - host tests of rank (wired before wireless, then arrival), failover and
+    return, resolvers, mDNS per link, and a flow bound to a lost address;
+  - a guest with two virtio NICs, in which the first's link is set off over
+    QMP and traffic leaves on the second;
+  - `issues/netstack-drives-one-card.md` closed, and the NIC taken out of
+    the virtio bullet of `issues/first-match-selection-that-remains.md`.
+- Its T14 row, both links leasing with the wired one the default route, is
+  W6's: it needs a radio.
+
+**P6, `lib/crypto`'s AES-CMAC and SAE.** Owner: the orchestrator, whose
+pull request brings the crate in unchanged at the commit the crypto agent,
+who writes it outside the tree, names as qualified. Depends on: that commit.
+- **Exit:** `lib/crypto` in the tree with these, each with the crypto
+  agent's vectors:
+  - AES-CMAC-128 (RFC 4493);
+  - SAE over P-256 by hash-to-element (IEEE 802.11 Annex J, RFC 9380);
+  - a constant-time comparison;
+  - an owned secret that wipes on drop.
+- **Nothing more enters:** no RustCrypto crate, and none of the crate's
+  `tools/*.py`.
+
+**P8, acpiserver serves a driver its own device's tables.** Owner: the
+orchestrator; its defect is `issues/acpiserver-serves-no-client.md`.
+Depends on: nothing; W6 waits on it.
+- **Exit:**
+  - acpiserver evaluates the methods under one PCI function's ACPI device for
+    that function's driver alone, over a connection the supervisor opens for
+    that binding;
+  - host tests of the binding's refusals;
+  - a T14 row reads the AX210's tables.
+
+**W1, frames**, a `lib/` crate. Depends on: nothing.
+- **Scope:**
+  - management, control (BAR, BA) and data frames;
+  - the elements: SSID, rates, DS, TIM, country, RSN, RSNXE, HT, VHT, HE,
+    extended capabilities and WMM;
+  - A-MSDU;
+  - 802.11 to Ethernet and back (RFC 1042, bridge-tunnel);
+  - the reorder window.
+- **Exit:** host tests of every refusal and hostile length, a malformed
+  country element among them; a seeded structured fuzz of a fixed count, as
+  `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
+  references, beside the crate, with provenance, terms and `NOTICE` rows,
+  pinned by hash.
+
+**W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
+handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
+KDE read from message 3 of an SAE join once its MIC verifies. Depends on:
+W1, P6.
+- **Exit:** host tests against Annex J, RFCs 6070, 3394, 4493 and 9380, and
+  a captured handshake; and these refusals, each tested:
+  - a replayed counter;
+  - a retransmitted message 3 that reinstalls nothing;
+  - a resent message 1 keeping its SNonce;
+  - message 3's RSNE or RSNXE differing from the beacon's;
+  - group key ID 0;
+  - a MIC mismatch;
+  - an SAE Confirm that does not verify;
+  - an SAE Commit with an invalid scalar or element;
+  - a PSK handshake for a network marked by Transition Disable.
+
+**W3, the firmware.** Depends on: the specification's first revision.
+- **Scope:**
+  - the firmware containers;
+  - commands and notifications typed per declared version;
+  - the parts served, and any other refused by name;
+  - each part's newest linux-firmware build at the pin: one file for the
+    AX200, two for the AX210, committed unmodified in
+    `system/ax2xx/firmware/` with `NOTICE` and `COMMITTED_FILES` rows.
+- **A file ships only once the specification shows, from a vendor
+  statement, that its part verifies it**; one nothing shows verified waits
+  for the owner.
+- **Its licence forbids reverse engineering**, so of a file, only the
+  container a loader parses is read.
+- **Exit:** host tests that the pinned files decode; that every command
+  sent is declared at a typed version; that sizes match those the
+  specification asserts; and that recorded bench traces, addresses
+  scrubbed, are answered.
+
+**W4, `wlan`, `radio`, `wifi` and the settings program.** Depends on: W1,
+W2.
+- **Exit:** host tests of:
+  - BSS choice: joinable security, SAE before PSK, band, signal, and a
+    marked network's PSK-only BSS refused by name ("transition disabled:
+    this network is WPA3-only");
+  - the mark, kept per network for the boot;
+  - connect, disconnect and status;
+  - the wrong-credential refusal, on evidence the station holds;
+  - hostile `radio` answers.
+- The pull request landing it files the Transition Disable weakness below.
+
+**W5, bring-up and passive scan on the T14**, the first stage that ships
+`ax2xx`. Depends on: S1 (met), P1, P4 (its match table), W3, W4; and the test
+networks, an access point at the T14's bench serving a WPA2-Personal network
+and a WPA3-Personal one by hash-to-element, with PMF and HE, an instrument
+the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC
+address, and the test network seen. The network's name arrives per run
+through a test job holding `wifi`, so no shipping path reads the ESP.
+
+**W6, the first version: a full-rate join.** Depends on: W5 and its test
+networks, P4, P5, P6, P8.
+- **Exit, host tests:**
+  - block-ack state;
+  - a firmware restart's decisions;
+  - each channel's limit as the tighter of the platform's table and the
+    AP's country element;
+  - a country element that would raise a limit;
+  - a platform with no table, refused by name.
+- **Exit, T14 rows:**
+  - WPA2 and WPA3 joins, each with a lease, DNS and TCP;
+  - HE, else VHT, at the AP's width;
+  - block-ack both ways;
+  - transmit limits applied before the first frame;
+  - a wrong credential refused with its evidence;
+  - `ax2xx` killed, and rejoining;
+  - both links leasing, the I219's and the radio's, with the wired one the
+    default route (P5's).
+- **Reported, never gated:** the HT, VHT and HE rates, and throughput
+  against Linux on the same machine, AP and position.
+- `issues/a-platform-with-no-transmit-power-table-joins-no-wifi-network.md`
+  is its.
+
+**W7, the AX200 on the AMD bench.** Depends on: P2, P3, W6, and W5's test
+networks in reach of the AMD bench. Exit: W5's and W6's rows on the AMD
+bench, all but the I219's.
+
+**W8, power save, background scan, roaming, beacon loss and RF-kill.**
+Depends on: W6; W7, for the AMD bench's rows; and, at each bench, two
+instruments of `issues/no-access-point-answers-to-the-harness.md`: an
+access point the harness silences, for beacon loss, and two access points of
+one network, for roaming. Exit: host tests of the decisions, and rows on both
+benches; power and latency are reported.
+
+**W9, 6 GHz on the AX210**, directly after W6. Depends on: W6, and a 6 GHz
+access point at the T14's bench, an instrument the orchestrator owns (Q3).
+Exit: host tests of 6 GHz discovery's rules, and a T14 row joining the
+6 GHz access point.
+
+**W10, the desktop's Wi-Fi status and settings.** Depends on: W4. Exit: a
+host test of its state machine, and a guest test on the compositor's
+surface whose round says why no cheaper tier holds it.
+
+**W11, saved networks**: for each network, its passphrase as typed and its
+Transition Disable mark, in a plain-text file in `wlan`'s own state that no
+other row names. Depends on: W6, and stage 2 of
+`issues/every-program-sees-only-the-files-it-was-given.md`, with `wlan`'s
+row the only one whose view holds the file. Exit: host tests of the file's
+format (a mark included) and its refusals, and a T14 row joining a saved
+network at boot. The pull request landing it files the plain-text weakness
+below.
+
+## Weaknesses the rulings record
+
+**Saved networks are plain text** (Q4). From W11's landing, whoever reads the
+disk reads every saved network's passphrase: another OS booted on the
+machine, the disk taken out, or a program holding the disk's claim or
+serving the file. With it they join that network, decrypt every handshake
+they saw under PSK, and hold the passphrase wherever else it is used.
+- **Owner:** the orchestrator.
+- **Exit:** a ToyOS key store, a concept the owner rules on.
+
+**A network's Transition Disable mark lasts only the boot until W11.** From
+W4's landing a reboot loses every mark. Until a network's first SAE join of
+the boot, a BSS offering its SSID with PSK alone draws the station's message
+2 and attacks the passphrase offline. That is the downgrade of Vanhoef and
+Ronen, "Dragonblood" (IEEE S&P 2020, §4.1.1).
+- **Owner:** the orchestrator.
+- **Exit:** W11 keeps the mark in the saved file.
+
+## Owed beside the stages
+
+- `issues/no-access-point-answers-to-the-harness.md`: deauthentication and a
+  group rekey on demand, and W8's access points.
+- `issues/the-wifi-demos-commits-still-resolve-on-origin.md`.

@@ -13,10 +13,10 @@ mod lan;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{arp, from_server, message, message_of, sum, terms, xid, A, ACK, DNS, MAC, MAC_B, MAC_R, NAK, R};
+use common::{arp, from_server, message, message_of, option, sum, terms, xid, A, ACK, BROADCAST, DISCOVER, DNS, MAC, MAC_B, MAC_R, NAK, OFFER, R, REQUEST};
 use lan::{udp, Lan, Seen, Udp, B};
 use toyos_dns::{Failure, Name, MAX_LOOKUPS, ROUNDS, WAIT_MS};
-use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved};
+use toyos_net_node::{Counter, Ended, LookupId, NotStarted, Refused, Resolved, Resolving};
 use toyos_net_udp::limits::{EPHEMERAL_COUNT, EPHEMERAL_FIRST, TX_DATAGRAMS};
 use toyos_net_udp::Counter as Rule;
 use toyos_net_wire::{Instant, Port};
@@ -49,11 +49,25 @@ const RESPONSE: u16 = 0x8180;
 /// RFC 1035 §3.2.2.
 const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
+const TYPE_SOA: u16 = 6;
+/// RFC 1035 §4.1.1: a response, recursion desired and available, RCODE 3: the name does not exist.
+const NXDOMAIN: u16 = RESPONSE | 3;
 /// No lookup has ended.
 const NONE: [Resolved; 0] = [];
+/// The view every lookup is made for where a test names none.
+const ONE: &[u8] = b"one";
+const TWO: &[u8] = b"two";
 
 fn name(text: &str) -> Name {
     Name::parse(text).expect("a host name")
+}
+
+/// The lookup a resolve started, where nothing was kept to answer it.
+fn asking(resolving: Resolving) -> LookupId {
+    match resolving {
+        Resolving::Asking(id) => id,
+        Resolving::Kept(kept) => panic!("answered from what the view keeps: {kept:?}"),
+    }
 }
 
 /// The draw of a call that draws nothing.
@@ -110,21 +124,40 @@ fn asked_name(query: &[u8]) -> String {
 /// and one answer a record; §4.1.2's question as the query spelled it; then §4.1.3's records, each
 /// owned by a §4.1.4 pointer to the question's name at octet 12, in class IN with a TTL of 60.
 fn reply(query: &[u8], flags: u16, records: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let owned: Vec<(Vec<u8>, u16, u32, Vec<u8>)> = records.iter().map(|(rtype, data)| (vec![0xc0, 12], *rtype, 60, data.clone())).collect();
+    message_for(query, flags, &owned, &[])
+}
+
+/// A reply to `query` as [`reply`] spells one, each record with its own owner, spelled whole or
+/// as a pointer, and its own TTL, and `authority` as §4.1.1's authority section.
+fn message_for(query: &[u8], flags: u16, answers: &[(Vec<u8>, u16, u32, Vec<u8>)], authority: &[(Vec<u8>, u16, u32, Vec<u8>)]) -> Vec<u8> {
     let mut out = query[..2].to_vec();
     out.extend_from_slice(&flags.to_be_bytes());
     out.extend_from_slice(&[0, 1]);
-    out.extend_from_slice(&u16::try_from(records.len()).unwrap().to_be_bytes());
-    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&u16::try_from(answers.len()).unwrap().to_be_bytes());
+    out.extend_from_slice(&u16::try_from(authority.len()).unwrap().to_be_bytes());
+    out.extend_from_slice(&[0, 0]);
     out.extend_from_slice(&query[12..]);
-    for (rtype, data) in records {
-        out.extend_from_slice(&[0xc0, 12]);
+    for (owner, rtype, ttl, data) in answers.iter().chain(authority) {
+        out.extend_from_slice(owner);
         out.extend_from_slice(&rtype.to_be_bytes());
         out.extend_from_slice(&[0, 1]);
-        out.extend_from_slice(&60u32.to_be_bytes());
+        out.extend_from_slice(&ttl.to_be_bytes());
         out.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
         out.extend_from_slice(data);
     }
     out
+}
+
+/// RFC 1035 §3.3.13: the SOA record of `zone`, with a TTL of `ttl`: MNAME and RNAME, then
+/// SERIAL, REFRESH, RETRY and EXPIRE, and MINIMUM, `minimum`.
+fn soa(zone: &str, ttl: u32, minimum: u32) -> (Vec<u8>, u16, u32, Vec<u8>) {
+    let mut data = labels("ns.example");
+    data.extend_from_slice(&labels("hostmaster.example"));
+    for field in [1u32, 7_200, 900, 1_209_600, minimum] {
+        data.extend_from_slice(&field.to_be_bytes());
+    }
+    (labels(zone), TYPE_SOA, ttl, data)
 }
 
 /// A reply to `query` that gives `address`.
@@ -168,6 +201,8 @@ enum Says {
     Address([u8; 4]),
     /// A CNAME to this name and nothing else, which the resolver asks again at its end.
     Alias(&'static str),
+    /// NXDOMAIN, with the SOA of `example` whose TTL and MINIMUM are this, or with none.
+    Absent(Option<u32>),
 }
 
 /// A query that reached the wire.
@@ -200,17 +235,21 @@ struct Net {
     /// The last draw [`Self::resolve`] handed out: its ids are 0x8000 and up, and those the node
     /// draws for itself from `lan`'s count are below it.
     draws: u32,
+    /// The TTL of every record [`ANSWERS`] answers with.
+    ttl: u32,
 }
 
 impl Net {
     /// The node holding a day's lease of `A`/24 that names `servers`, through `router`, at a whole
     /// millisecond of its clock.
     fn leased(servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Self {
-        let mut options = terms(86_400, router);
-        options.retain(|(code, _)| *code != 6);
-        options.push((6, servers.iter().flat_map(Ipv4Addr::octets).collect()));
+        Self::leased_for(86_400, servers, router)
+    }
+
+    /// [`Self::leased`], for a lease of `seconds`.
+    fn leased_for(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Self {
         let mut lan = Lan::new();
-        lan.lease_on(&options);
+        lan.lease_on(&lease_of(seconds, servers, router));
         assert_eq!(lan.node.lease().expect("held").dns, servers, "the premise: the lease names these resolvers");
         // `toyos-dns` keeps whole milliseconds and conflict detection's waits are drawn finer: the
         // origin is the next whole one, so a wait counted from it ends on the millisecond named.
@@ -227,6 +266,7 @@ impl Net {
             failed: Vec::new(),
             ended: Vec::new(),
             draws: 0x7c00_8000,
+            ttl: 60,
         }
     }
 
@@ -244,7 +284,11 @@ impl Net {
     }
 
     fn resolve(&mut self, text: &str) -> Result<LookupId, NotStarted> {
-        self.lan.node.resolve(self.lan.now, name(text), counter(&mut self.draws))
+        self.resolve_in(ONE, text).map(asking)
+    }
+
+    fn resolve_in(&mut self, view: &[u8], text: &str) -> Result<Resolving, NotStarted> {
+        self.lan.node.resolve(self.lan.now, view, name(text), counter(&mut self.draws))
     }
 
     /// `message` from the resolver's port 53 to the node's `to`.
@@ -284,11 +328,12 @@ impl Net {
                 assert_eq!((udp.to, udp.destination), (MAC_S, ANSWERS), "a query left for a server the wire cannot reach");
                 let query = Query { at, udp: udp.clone(), id: u16::from_be_bytes([udp.payload[0], udp.payload[1]]), name: asked_name(&udp.payload) };
                 if let Some((_, not_before, says)) = self.zone.iter().find(|(name, ..)| *name == query.name) {
-                    let record = match says {
-                        Says::Address(address) => (TYPE_A, address.to_vec()),
-                        Says::Alias(target) => (TYPE_CNAME, labels(target)),
+                    let owner = vec![0xc0, 12];
+                    let message = match says {
+                        Says::Address(address) => message_for(&udp.payload, RESPONSE, &[(owner, TYPE_A, self.ttl, address.to_vec())], &[]),
+                        Says::Alias(target) => message_for(&udp.payload, RESPONSE, &[(owner, TYPE_CNAME, self.ttl, labels(target))], &[]),
+                        Says::Absent(soa_ttl) => message_for(&udp.payload, NXDOMAIN, &[], &soa_ttl.map(|ttl| soa("example", ttl, ttl)).into_iter().collect::<Vec<_>>()),
                     };
-                    let message = reply(&udp.payload, RESPONSE, &[record]);
                     let due = self.at(*not_before).max(self.lan.now);
                     self.held.push((due, lan::udp(MAC, MAC_S, (ANSWERS, 53), (A, udp.source_port), &message)));
                 }
@@ -367,7 +412,7 @@ impl Net {
 #[test]
 fn a_query_is_rfc_1035s_octets_from_a_port_and_with_an_id_of_its_own_draws() {
     let mut net = Net::leased(&[ANSWERS], Some(R));
-    net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0xabcd_1234, 7])).expect("two draws: the id, then the port");
+    net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0xabcd_1234, 7])).expect("two draws: the id, then the port");
     net.pass();
     #[rustfmt::skip]
     let payload = vec![
@@ -498,7 +543,7 @@ fn a_query_udp_refuses_is_counted_holds_no_port_and_the_next_resolver_is_asked_a
     let mut net = Net::leased(&[UNROUTED, ANSWERS], None);
     net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
     let refused = net.lan.counted(Rule::NoRoute);
-    let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, 9, 0x8002, 10])).expect("a lookup whose first query cannot leave");
+    let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0x8001, 9, 0x8002, 10])).expect("a lookup whose first query cannot leave"));
     assert_eq!(net.lan.counted(Rule::NoRoute), refused + 1, "the premise: [udp] refused the query for want of a route");
     assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 1);
     assert!(!net.port_held(49_152 + 9), "the refused query's socket");
@@ -519,14 +564,14 @@ fn a_query_udp_refuses_is_counted_holds_no_port_and_the_next_resolver_is_asked_a
 fn a_lookup_udp_refuses_every_resolver_of_ends_in_the_call_that_started_it() {
     let mut net = Net::leased(&[UNROUTED, UNROUTED_TOO], None);
     let refused = net.lan.counted(Rule::NoRoute);
-    let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, 9, 0x8002, 10])).expect("started, and ended");
+    let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0x8001, 9, 0x8002, 10])).expect("started, and ended"));
     assert_eq!(net.lan.counted(Rule::NoRoute), refused + 2, "the premise: [udp] refused both queries for want of a route");
     assert_eq!(net.lan.node.counters().get(Counter::QueryUnsent), 2);
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::Failed(Failure::Unreachable)) }]);
     assert!(!net.port_held(49_152 + 9) && !net.port_held(49_152 + 10), "the refused queries' sockets");
     net.pass();
     assert!(net.queried.is_empty() && net.refused.is_empty(), "a query left");
-    let next = net.lan.node.resolve(net.lan.now, name("other.example"), sequence([0x8003, 11, 0x8004, 12])).expect("the next lookup");
+    let next = asking(net.lan.node.resolve(net.lan.now, ONE, name("other.example"), sequence([0x8003, 11, 0x8004, 12])).expect("the next lookup"));
     assert_ne!(next, id, "an ended lookup's id is not given again");
 }
 
@@ -700,9 +745,9 @@ fn the_lookup_past_the_cap_is_refused_until_an_answer_is_taken() {
     for held in 1..MAX_LOOKUPS {
         net.resolve("www.example").unwrap_or_else(|why| panic!("lookup {held} was refused: {why:?}"));
     }
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted));
+    assert_eq!(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted));
     net.until(1_000);
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted), "an answer nobody took holds its place");
+    assert_eq!(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::ResourceExhausted), "an answer nobody took holds its place");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id: first, result: Ok(vec![ADDRESS]) }]);
     net.resolve("www.example").expect("a taken answer's place is another's");
 }
@@ -712,17 +757,17 @@ fn the_lookup_past_the_cap_is_refused_until_an_answer_is_taken() {
 #[test]
 fn a_lookup_with_no_resolver_to_ask_is_refused_as_not_connected() {
     let mut lan = Lan::new();
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "before a lease");
+    assert_eq!(lan.node.resolve(lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::NotConnected), "before a lease");
     let mut options = terms(3_600, Some(R));
     options.retain(|(code, _)| *code != 6);
     lan.lease_on(&options);
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "a lease that names no resolver");
+    assert_eq!(lan.node.resolve(lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::NotConnected), "a lease that names no resolver");
 
     let mut lan = Lan::new();
     lan.lease(600);
-    lan.node.resolve(lan.now, name("www.example"), sequence([1, 2])).expect("the premise: a held lease's resolver is asked");
+    lan.node.resolve(lan.now, ONE, name("www.example"), sequence([1, 2])).expect("the premise: a held lease's resolver is asked");
     assert!(lan.run_until(Duration::from_secs(700), |lan| lan.node.lease().is_none()), "the lease runs out");
-    assert_eq!(lan.node.resolve(lan.now, name("www.example"), undrawn), Err(NotStarted::NotConnected), "after the lease");
+    assert_eq!(lan.node.resolve(lan.now, ONE, name("www.example"), undrawn), Err(NotStarted::NotConnected), "after the lease");
 }
 
 // A lookup nobody waits for is let go at once: the ports its queries left from are free, and its
@@ -799,8 +844,8 @@ fn a_query_with_no_port_to_leave_from_ends_its_lookup_by_name() {
         net.lan.node.udp_bind(ANY, None, || offset).unwrap();
     }
     assert_eq!(net.lan.node.udp_bind(ANY, None, || last), Err(toyos_net_node::Refused::ResourceExhausted), "every place is a client's socket");
-    let id = net.lan.node.resolve(net.lan.now, name("www.example"), sequence([0x8001, last])).expect("the one port left, and a query needs no place");
-    assert_eq!(net.lan.node.resolve(net.lan.now, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
+    let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("www.example"), sequence([0x8001, last])).expect("the one port left, and a query needs no place"));
+    assert_eq!(net.lan.node.resolve(net.lan.now, ONE, name("other.example"), sequence([0x8002, 0])), Err(NotStarted::ResourceExhausted));
     assert_eq!(net.run(id, 10 * WAIT_MS), Some(Err(Ended::NoPort)));
     assert_eq!(net.ms(), WAIT_MS);
     let left: Vec<u16> = net.queried.iter().map(|query| query.udp.source_port).collect();
@@ -926,7 +971,7 @@ fn a_recorded_reply_of_a_public_resolver_answers_the_nodes_query() {
         0x00, 0x04, 0x08, 0x08, 0x08, 0x08,
     ];
     let mut net = Net::leased(&[ANSWERS], Some(R));
-    let id = net.lan.node.resolve(net.lan.now, name("dns.google"), sequence([0x1001, 3])).unwrap();
+    let id = asking(net.lan.node.resolve(net.lan.now, ONE, name("dns.google"), sequence([0x1001, 3])).unwrap());
     net.pass();
     let asked = net.queried[0].clone();
     assert_eq!((asked.id, &asked.udp.payload[12..]), (0x1001, &RECORDED[12..28]), "the premise: the node's query carries the reply's id and question");
@@ -1016,9 +1061,14 @@ fn renewing_under_a_lookup() -> (Net, LookupId, u32) {
 
 /// The options of a day's lease through the router that names `resolver`.
 fn naming(resolver: Ipv4Addr) -> Vec<(u8, Vec<u8>)> {
-    let mut options = terms(86_400, Some(R));
+    lease_of(86_400, &[resolver], Some(R))
+}
+
+/// The options of a lease of `seconds` that names `servers`, through `router`.
+fn lease_of(seconds: u32, servers: &[Ipv4Addr], router: Option<Ipv4Addr>) -> Vec<(u8, Vec<u8>)> {
+    let mut options = terms(seconds, router);
     options.retain(|(code, _)| *code != 6);
-    options.push((6, resolver.octets().to_vec()));
+    options.push((6, servers.iter().flat_map(Ipv4Addr::octets).collect()));
     options
 }
 
@@ -1056,4 +1106,182 @@ fn a_lookup_ends_when_its_lease_is_lost() {
     net.lan.deliver(&from_server(common::BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
     assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
     assert_eq!(net.lan.node.take_resolved(), [Resolved { id, result: Err(Ended::LeaseChanged) }]);
+}
+
+// --- What a view keeps (`toyos_dns::Cache`) ---
+
+/// A lease of `seconds` naming [`ANSWERS`], which answers `www.example` with an hour's TTL, and
+/// the answer kept for [`ONE`]: the far end has heard one query.
+fn kept(seconds: u32) -> Net {
+    let mut net = Net::leased_for(seconds, &[ANSWERS], Some(R));
+    net.ttl = 3_600;
+    net.zone.push(("www.example", 0, Says::Address(ADDRESS)));
+    let id = net.resolve("www.example").unwrap();
+    assert_eq!(net.run(id, WAIT_MS), Some(Ok(vec![ADDRESS])));
+    assert_eq!(net.resolve_in(ONE, "www.example"), Ok(Resolving::Kept(Ok(vec![ADDRESS]))), "the premise: the view keeps the answer");
+    net
+}
+
+/// The next resolve of `www.example` for [`ONE`] asks [`ANSWERS`], and is answered.
+fn asks_again(net: &mut Net) {
+    let asked = net.queried.len();
+    let id = net.resolve("www.example").expect("a lookup");
+    let until = net.ms() + WAIT_MS;
+    assert_eq!(net.run(id, until), Some(Ok(vec![ADDRESS])));
+    assert_eq!(net.queried.len(), asked + 1);
+}
+
+/// The DHCP client's last message.
+fn last_dhcp(net: &Net) -> Vec<u8> {
+    net.lan.udp().into_iter().rfind(|udp| udp.port == 67).expect("a DHCP message").payload.clone()
+}
+
+/// The lease of `kept(600)`'s first renewal, sent at T1, with the answer still kept.
+fn renewing() -> (Net, u32) {
+    let mut net = kept(600);
+    let sent = net.lan.udp().iter().filter(|udp| udp.port == 67).count();
+    assert!(net.lan.run_until(Duration::from_secs(400), |lan| lan.udp().iter().filter(|udp| udp.port == 67).count() > sent), "the renewal leaves");
+    assert_eq!(option(&last_dhcp(&net), 53), Some(&[REQUEST][..]));
+    assert_eq!(net.resolve_in(ONE, "www.example"), Ok(Resolving::Kept(Ok(vec![ADDRESS]))), "the premise: kept until the renewal is answered");
+    let renewal = xid(&last_dhcp(&net));
+    (net, renewal)
+}
+
+// RFC 1035 §4.1.3: a record may be kept for its TTL. Kept, it is answered in the call that asks,
+// an hour less a second after it was asked, and nothing leaves.
+#[test]
+fn a_name_its_view_keeps_is_answered_in_the_call_and_sends_nothing() {
+    let mut net = kept(86_400);
+    net.until(3_599_000);
+    let sent = net.lan.sent.len();
+    assert_eq!(net.resolve_in(ONE, "www.example"), Ok(Resolving::Kept(Ok(vec![ADDRESS]))));
+    net.pass();
+    assert_eq!(net.lan.sent.len(), sent, "{:?}", &net.lan.sent[sent..]);
+}
+
+// A kept answer holds no place: it is given while every lookup place is held.
+#[test]
+fn a_kept_answer_is_given_while_every_lookup_place_is_held() {
+    let mut net = kept(86_400);
+    for held in 0..MAX_LOOKUPS {
+        net.resolve(&format!("held{held}.example")).unwrap_or_else(|why| panic!("lookup {held} was refused: {why:?}"));
+    }
+    assert_eq!(net.resolve_in(ONE, "other.example"), Err(NotStarted::ResourceExhausted), "the premise: every place is held");
+    assert_eq!(net.resolve_in(ONE, "www.example"), Ok(Resolving::Kept(Ok(vec![ADDRESS]))));
+}
+
+// What one view keeps answers no other: the same name for another view is its own query.
+#[test]
+fn the_same_name_for_another_view_sends_its_own_query() {
+    let mut net = kept(86_400);
+    let id = asking(net.resolve_in(TWO, "www.example").expect("a lookup"));
+    assert_eq!(net.run(id, WAIT_MS), Some(Ok(vec![ADDRESS])));
+    assert_eq!(net.queried.len(), 2);
+}
+
+// RFC 2131 §4.3.2 has a server with no record of the client stay silent, so a held lease's
+// INIT-REBOOT goes unanswered on another network as on its own, and the client keeps the lease in
+// use (`toyos-dhcp`): only the link that went down says the network may be another one.
+#[test]
+fn a_link_that_goes_down_empties_what_every_view_keeps_though_the_lease_stays() {
+    let mut net = kept(86_400);
+    net.lan.link(false);
+    let up = net.lan.sent.len();
+    net.lan.link(true);
+    net.until(100_000);
+    let requests = net.lan.sent[up..].iter().filter(|(_, seen)| matches!(seen, Seen::Udp(udp) if udp.port == 67)).count();
+    assert_eq!(requests, usize::try_from(toyos_dhcp::limits::REQUEST_TRANSMISSIONS).unwrap(), "the premise: every INIT-REBOOT went unanswered");
+    assert_eq!(net.lan.node.lease().map(|lease| lease.dns.clone()), Some(vec![ANSWERS]), "the premise: the lease is in use, its resolver the same");
+    asks_again(&mut net);
+}
+
+// A lease lost and a new one naming the same resolver are two writes of the lease, each of which
+// empties what is kept: no list of resolvers is compared.
+#[test]
+fn a_lease_lost_and_another_naming_the_same_resolver_empty_what_every_view_keeps() {
+    let (mut net, renewal) = renewing();
+    net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message(NAK, renewal, Ipv4Addr::UNSPECIFIED, &[(54, R.octets().to_vec())])));
+    assert_eq!(net.lan.node.lease(), None, "the premise: the lease is gone");
+    let discover = last_dhcp(&net);
+    assert_eq!(option(&discover, 53), Some(&[DISCOVER][..]));
+    let terms = lease_of(600, &[ANSWERS], Some(R));
+    net.lan.deliver(&from_server(MAC, A, &message_of(OFFER, xid(&discover), &terms)));
+    net.lan.deliver(&from_server(BROADCAST, Ipv4Addr::BROADCAST, &message_of(ACK, xid(&discover), &terms)));
+    assert!(net.lan.run_until(Duration::from_secs(10), |lan| lan.node.lease().is_some()), "the new lease is held");
+    assert_eq!(net.lan.node.lease().expect("held").dns, [ANSWERS], "the premise: it names the same resolver");
+    asks_again(&mut net);
+}
+
+// An INIT-REBOOT another network's server acknowledges with the same prefix, router and resolvers
+// is a renewal like this one (`toyos_dhcp::Config::Extended`): it empties what is kept too.
+#[test]
+fn a_renewal_with_the_same_terms_empties_what_every_view_keeps() {
+    let (mut net, renewal) = renewing();
+    let expiry = |net: &Net| net.lan.node.lease().and_then(|lease| lease.timers).map(|timers| timers.expiry);
+    let before = expiry(&net);
+    net.lan.deliver(&from_server(MAC, A, &message_of(ACK, renewal, &lease_of(600, &[ANSWERS], Some(R)))));
+    assert_ne!(expiry(&net), before, "the premise: the renewal was taken");
+    asks_again(&mut net);
+}
+
+// A lookup that spans a link going down may have read its answer on another network: the answer
+// is its client's, and is not kept.
+#[test]
+fn a_lookup_in_flight_as_the_link_goes_down_is_answered_and_keeps_nothing() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    net.ttl = 3_600;
+    net.zone.push(("www.example", 500, Says::Address(ADDRESS)));
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    assert_eq!(net.queried.len(), 1, "the premise: the query left");
+    net.lan.link(false);
+    net.lan.link(true);
+    assert_eq!(net.run(id, WAIT_MS), Some(Ok(vec![ADDRESS])), "its answer, read after the link came back");
+    asks_again(&mut net);
+}
+
+// RFC 2308 §5: an absence is kept for its SOA's TTL, and "Negative responses without SOA records
+// SHOULD NOT be cached".
+#[test]
+fn an_absence_is_kept_where_an_soa_says_for_how_long_and_asked_again_where_none_does() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    net.zone.push(("gone.example", 0, Says::Absent(Some(3_600))));
+    net.zone.push(("lost.example", 0, Says::Absent(None)));
+    let absent = Err(Ended::Failed(Failure::NoSuchName));
+    for text in ["gone.example", "lost.example"] {
+        let id = net.resolve(text).unwrap();
+        assert_eq!(net.run(id, WAIT_MS), Some(absent.clone()), "{text}");
+    }
+    assert_eq!(net.resolve_in(ONE, "gone.example"), Ok(Resolving::Kept(absent)));
+    let asked = net.queried.len();
+    net.resolve("lost.example").expect("a lookup");
+    net.pass();
+    assert_eq!(net.queried.len(), asked + 1);
+}
+
+// RFC 2181 §5.4.1: a reply's records about names not asked are not read. Neither they nor the
+// alias the asked name leads to are kept under their own names.
+#[test]
+fn nothing_is_kept_under_a_name_the_view_did_not_ask() {
+    let mut net = Net::leased(&[ANSWERS], Some(R));
+    net.ttl = 3_600;
+    net.zone.push(("cdn.example", 0, Says::Address(ADDRESS)));
+    let id = net.resolve("www.example").unwrap();
+    net.pass();
+    let asked = net.queried[0].clone();
+    let alias = message_for(
+        &asked.udp.payload,
+        RESPONSE,
+        &[(vec![0xc0, 12], TYPE_CNAME, 3_600, labels("cdn.example")), (labels("bank.example"), TYPE_A, 3_600, FORGED.to_vec())],
+        &[],
+    );
+    net.resolver_says(asked.udp.source_port, &alias);
+    assert_eq!(net.run(id, WAIT_MS), Some(Ok(vec![ADDRESS])), "the alias's end, asked in its own right");
+    assert_eq!(net.resolve_in(ONE, "www.example"), Ok(Resolving::Kept(Ok(vec![ADDRESS]))), "the premise: the name asked is kept");
+    for other in ["cdn.example", "bank.example"] {
+        let before = net.queried.len();
+        net.resolve(other).expect("a lookup");
+        net.pass();
+        assert_eq!(net.queried.len(), before + 1, "{other}");
+    }
 }
