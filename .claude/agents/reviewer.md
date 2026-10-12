@@ -143,12 +143,12 @@ if it meets the bar above; otherwise it is a NOTE.
   a suite row. A test's oracle for what hardware does is the vendor's document, or ToyOS's own
   read checked against it; a reading of hardware captured under another OS, timing included, is
   evidence and never a suite row. A reference implementation's recorded output is an oracle only
-  when it is committed with its provenance and read hermetically. A host test may compare live
-  against the host's own implementation of a published interface, its TCP or its `libc`, as a
-  differential implementation on every host the suite runs on; where the two disagree, the
-  specification decides and the row says so. A policy another OS chose is
-  never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source
-  states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
+  when it is committed with its provenance and read hermetically, and never when it was captured
+  under Linux. A host test may compare live against the host's own implementation of a published
+  interface, its TCP or its `libc`, as a differential implementation on every host the suite runs
+  on; where the two disagree, the specification decides and the row says so. A policy another OS
+  chose is never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary
+  source states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an

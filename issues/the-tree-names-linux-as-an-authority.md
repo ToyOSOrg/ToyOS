@@ -14,7 +14,8 @@ hardware does is the vendor's document or ToyOS's own read checked against it, n
 captured under Linux. The tree breaks all three: a design cites Linux's source (`kernel/cpuvuln`,
 `kernel/src/mm/mmio.rs`, `system/netstack/shard/tcp/src/rx.rs`), a value is set as Linux's
 (`system/fileserver/src/resolve.rs`, `kernel/src/arch/x86_64/vtd/queue.rs`,
-`sdk/libc/src/linkreq.rs`, `sdk/libc/src/sockopt.rs`, `sdk/libc/src/memreq.rs`), and tests hold
+`sdk/libc/src/linkreq.rs`, `sdk/libc/src/sockopt.rs`, `sdk/libc/src/memreq.rs`,
+`sdk/libc/src/posix_io.rs`, `sdk/libc/src/sigmask.rs`), and tests hold
 ToyOS to Linux's code or readings (`system/netstack/i219/src/tests.rs`, `kernel/cpuvuln`'s fixtures,
 `lib/acpi/tests/thinkpad_t14.rs`, the T14 rows in `tests/toyos.rs` reading
 `tests/metal/t14-linux/`).
