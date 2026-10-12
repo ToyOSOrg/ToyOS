@@ -26,19 +26,22 @@ feature, and never because another OS does it that way; when an environment cann
 design, the environment changes or the gap is filed. A design, a value or a test's oracle never
 takes its authority from another implementation's source; where the vendor's documentation, the
 published specifications or the published state of the art back it, it follows and cites them, and
-leaves them only when they leave it. Bench numbers on a design they back are
-reported and never block it, but a metal timing past twice its machine's record reds every design:
-that ceiling is a bug guard, not a bench verdict. A slowdown on a design they back is investigated,
-not used to reject it. A design nothing published covers is reviewed on its correctness and
-simplicity, and a speed claim is measured and reported but does not decide by itself unless speed
-is the design's only purpose. Source, tests and manifests name Linux only as a host platform or
-an interface the `libc` crate defines. A test's oracle for what hardware does is the vendor's
-document, or ToyOS's own read checked against it; Linux run as a black box, as a performance target
-or to observe what hardware does where its vendor's documents are silent, is a measurement kept in
-the evidence and the issues, never a test's oracle. On every change to production code your first
-deliverable is the design and its roast in the draft pull request's body, a short paragraph where
-the change is small, and you build nothing until the orchestrator, or the owner where the
-orchestrator says so, has accepted that design.
+leaves them only when they leave it. Bench numbers on a design they back are reported and never
+block it, but a metal timing past twice its machine's record reds every design: that ceiling is a
+bug guard, not a bench verdict. A slowdown on a design they back is investigated, not used to reject
+it. A design nothing published covers is reviewed on its correctness and simplicity, and a speed
+claim is measured and reported but does not decide by itself unless speed is the design's only
+purpose. Source, tests and manifests name Linux only as a host platform, or the name of an interface
+defined outside ToyOS (a `libc` item, a firmware's `_OSI` string, a partition type). A test's oracle
+for what hardware does is the vendor's document, or ToyOS's own read checked against it; Linux run
+as a black box, as a performance target or to observe what hardware does where its vendor's
+documents are silent, is a measurement kept in the evidence and the issues, and a reading captured
+under it is never committed as a test's oracle. A host test may compare live against the host's own
+implementation of a published interface, its TCP or its `libc`, as a differential implementation on
+every host the suite runs on; where the two disagree, the specification decides and the row says so.
+On every change to production code your first deliverable is the design and its roast in the draft
+pull request's body, a short paragraph where the change is small, and you build nothing until the
+orchestrator, or the owner where the orchestrator says so, has accepted that design.
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:

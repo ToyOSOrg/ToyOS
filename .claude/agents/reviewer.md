@@ -56,7 +56,8 @@ if it meets the bar above; otherwise it is a NOTE.
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
   ToyOS targets, and an environment that cannot run it changes or the gap is filed; a citation of
   another implementation's source as authority; Linux named in source, a test or a manifest but as
-  a host platform or a `libc` interface; where the vendor's documentation, the published
+  a host platform, or the name of an interface defined outside ToyOS (a `libc` item, a firmware's
+  `_OSI` string, a partition type); where the vendor's documentation, the published
   specifications or the published state of the art back a design, a value or a test's oracle, one
   that does not follow and cite them, or leaves them while they still back it. Bench numbers on a
   design they back are reported and never send it back, but a metal timing past twice its
@@ -140,9 +141,12 @@ if it meets the bar above; otherwise it is a NOTE.
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
   comparison against Ubuntu — is not a test: it is its pull request's evidence and never becomes
   a suite row. A test's oracle for what hardware does is the vendor's document, or ToyOS's own
-  read checked against it; a reading captured under another OS, timing included, is evidence and
-  never a suite row. A reference implementation's output, recorded or live, is an oracle only when
-  it is committed with its provenance and read hermetically. A policy another OS chose is
+  read checked against it; a reading of hardware captured under another OS, timing included, is
+  evidence and never a suite row. A reference implementation's recorded output is an oracle only
+  when it is committed with its provenance and read hermetically. A host test may compare live
+  against the host's own implementation of a published interface, its TCP or its `libc`, as a
+  differential implementation on every host the suite runs on; where the two disagree, the
+  specification decides and the row says so. A policy another OS chose is
   never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source
   states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
