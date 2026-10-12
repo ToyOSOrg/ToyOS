@@ -262,6 +262,11 @@ impl Nic {
         self.driver.borrow_mut().rx_done(frame);
     }
 
+    /// Hand the part every buffer the batch gave back.
+    pub fn rx_flush(&self) {
+        self.driver.borrow_mut().rx_flush();
+    }
+
     /// How many frames the transmit ring takes now.
     pub fn tx_room(&self) -> usize {
         self.driver.borrow_mut().tx_room()

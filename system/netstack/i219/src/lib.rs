@@ -148,25 +148,39 @@ pub trait Interrupts {
     fn taken(&self) -> Result<u32, Self::Refused>;
 }
 
-/// How many receive descriptors the ring holds. §7.1.8: `RDLEN` "must be a
-/// multiple of 128", so the count is a multiple of eight.
-pub const RX_RING: usize = 256;
+/// How much memory the driver asks to be granted, in one region: one 2 MiB
+/// span, which is what the kernel maps a grant of any smaller size in, so
+/// every byte of it is the receive ring's that the transmit ring does not
+/// need.
+pub const GRANT_BYTES: u64 = 2 << 20;
+/// How many receive descriptors the ring holds: the most whose descriptors
+/// and buffers fit the grant beside the transmit ring's. §7.1.8: `RDLEN`
+/// "must be a multiple of 128", so the count is a multiple of eight.
+pub const RX_RING: usize = 1000;
 /// How many transmit descriptors the ring holds. A frame is handed to the
 /// device the moment it is filled and reclaimed when room is next asked for,
 /// so what this bounds is how many may be in flight at once: one fewer than
 /// this, [`I219::tx_room`]'s most.
 pub const TX_RING: usize = 16;
-/// `ITR` (§10.2.4.2): the least interval between two of the function's
-/// interrupts, in 256 ns units — 128 µs. It runs from the last interrupt, so a
-/// frame after a quiet spell that long interrupts at once, and a gigabit
-/// stream's full-sized frames, one each 12.3 µs, wake their reader about ten at
-/// a time.
-const THROTTLE: u32 = 500;
+/// Free receive descriptors at which the part reports itself short:
+/// `RCTL.RDMTS = 00b`, "1/2" of `RDLEN` (§10.2.5.1), raising `RXDMT0`.
+const RX_SHORT: usize = RX_RING / 2;
+/// Receive buffers given back and not yet handed to the part at most: the
+/// tail moves once a batch ([`I219::rx_flush`]), and sooner once this many
+/// wait. A quarter of [`RX_SHORT`], so what a batch holds back never brings
+/// the part to its report alone.
+pub const HELD_MAX: usize = RX_SHORT / 4;
 /// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
 /// Bytes per transmit buffer, and therefore the longest frame [`I219::tx_reserve`]
 /// takes.
 pub const TX_BUF_BYTES: usize = 2048;
+/// `ITR` (§10.2.4.2): the least interval between two of the function's
+/// interrupts, in 256 ns units — 131 µs. It runs from the last interrupt, so a
+/// frame after a quiet spell that long interrupts at once, and a gigabit
+/// stream's full-sized frames, one each 12.3 µs, wake their reader about ten at
+/// a time.
+const THROTTLE: u32 = 512;
 
 const _: () = {
     // §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
@@ -181,20 +195,30 @@ const _: () = {
 
 /// The grant's layout. One grant, because every byte of it is this process's
 /// own: what a wrong offset here corrupts is this driver's memory and nobody
-/// else's.
+/// else's. Each buffer starts on a multiple of its own size.
 const OFF_RX_RING: usize = 0x0000;
 const OFF_TX_RING: usize = OFF_RX_RING + RX_RING * rx_desc::BYTES;
-const OFF_RX_BUFS: usize = 0x2000;
+const OFF_RX_BUFS: usize = layout(RX_RING).0;
 const OFF_TX_BUFS: usize = OFF_RX_BUFS + RX_RING * RX_BUF_BYTES;
-/// How much memory the driver needs granted, in one region.
-pub const GRANT_BYTES: u64 = (OFF_TX_BUFS + TX_RING * TX_BUF_BYTES) as u64;
+
+/// Where the receive buffers start, and where the grant's last byte ends, for
+/// a receive ring of `rx` descriptors.
+const fn layout(rx: usize) -> (usize, usize) {
+    let rings = rx * rx_desc::BYTES + TX_RING * tx_desc::BYTES;
+    let rx_bufs = rings.div_ceil(RX_BUF_BYTES) * RX_BUF_BYTES;
+    (rx_bufs, rx_bufs + rx * RX_BUF_BYTES + TX_RING * TX_BUF_BYTES)
+}
 
 const _: () = {
     assert!(OFF_TX_RING + TX_RING * tx_desc::BYTES <= OFF_RX_BUFS);
+    // The grant holds this ring and not the next multiple of eight.
+    assert!(layout(RX_RING).1 <= GRANT_BYTES as usize);
+    assert!(layout(RX_RING + 8).1 > GRANT_BYTES as usize);
     // §7.1.8 and §7.2.4: the ring base "is aligned on a 16-byte boundary" and
     // "hardware ignores the lower 4 bits", so a ring at an unaligned offset
     // would be programmed somewhere else entirely.
     assert!(OFF_RX_RING.is_multiple_of(16) && OFF_TX_RING.is_multiple_of(16));
+    assert!(HELD_MAX > 0);
 };
 
 /// Why the function was not brought up. Each keeps its own word: a caller asks
@@ -765,6 +789,8 @@ pub struct I219<R: Registers, C, D, I> {
     /// receive ring keeps in software's hands (§7.1.8: the queue is empty when
     /// head equals tail).
     rx_tail: usize,
+    /// Buffers given back since the tail last moved.
+    rx_held: usize,
     /// Next transmit descriptor to hand out, which is also `TDT`.
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
@@ -913,6 +939,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             link_up_at: None,
             rx_next: 0,
             rx_tail: RX_RING - 1,
+            rx_held: 0,
             tx_next: 0,
             tx_clean: 0,
             tx_wake: false,
@@ -1253,19 +1280,20 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     }
 
     /// Give a frame's buffer back to the device, its bytes having been read.
+    /// It reaches the device at the next [`Self::rx_flush`], or here once
+    /// [`HELD_MAX`] buffers wait.
     pub fn rx_done(&mut self, frame: Frame) {
         self.give_back(frame.index);
     }
 
-    /// Republish descriptor `index` and move the tail over every ready
-    /// descriptor from where it stands.
-    ///
-    /// **The tail moves over a run, never to an index.** §7.1.8's tail
-    /// "identifies the location beyond the last descriptor hardware can
-    /// process", so writing it with the descriptor that came back last would
-    /// hand the device every descriptor between — including one whose bytes
-    /// their reader still holds — and, for a buffer returned before an older
-    /// one, walk `RDT` backwards over the rest of the ring.
+    /// Hand the device every buffer given back since the tail last moved: the
+    /// end of a batch, and one `RDT` write for all of it.
+    pub fn rx_flush(&mut self) {
+        self.move_tail();
+    }
+
+    /// Republish descriptor `index`, and move the tail once [`HELD_MAX`]
+    /// buffers wait for it.
     ///
     /// **Ready is read out of the descriptor, so there is no second record of
     /// it to disagree.** [`publish_rx`] zeroes the status word, and a
@@ -1274,6 +1302,22 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// touches neither until the tail passes it.
     fn give_back(&mut self, index: usize) {
         self.publish_rx(index);
+        self.rx_held += 1;
+        if self.rx_held >= HELD_MAX {
+            self.move_tail();
+        }
+    }
+
+    /// Move the tail over every ready descriptor from where it stands.
+    ///
+    /// **The tail moves over a run, never to an index.** §7.1.8's tail
+    /// "identifies the location beyond the last descriptor hardware can
+    /// process", so writing it with the descriptor that came back last would
+    /// hand the device every descriptor between — including one whose bytes
+    /// their reader still holds — and, for a buffer returned before an older
+    /// one, walk `RDT` backwards over the rest of the ring.
+    fn move_tail(&mut self) {
+        self.rx_held = 0;
         let mut tail = self.rx_tail;
         loop {
             let next = (tail + 1) % RX_RING;

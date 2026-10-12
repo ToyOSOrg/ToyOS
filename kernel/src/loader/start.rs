@@ -33,20 +33,60 @@ pub(crate) enum Start {
     Kernel { body: extern "C" fn(u64) -> !, arg: u64 },
 }
 
+/// A task's kernel stack, which only [`alloc_kernel_stack`] builds. A thread
+/// of a process has above its top the area its user machine state is kept in
+/// while it is switched out (`arch::fpu`), and a kernel thread has none: a
+/// switch's save above [`top`](Self::top) lands inside this allocation.
+pub(crate) struct KernelStack {
+    alloc: OwnedAlloc,
+    user: bool,
+}
+
+impl KernelStack {
+    /// What one is allocated as, with the area or without it.
+    fn layout_for(user: bool) -> core::alloc::Layout {
+        let area = if user { crate::arch::fpu::area_bytes() } else { 0 };
+        core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE + area, crate::mm::PAGE_BYTES)
+            .expect("a kernel stack's layout")
+    }
+
+    /// The stack's lowest byte, where its canary sits.
+    pub(crate) fn bottom(&self) -> *mut u8 {
+        self.alloc.ptr()
+    }
+
+    /// The stack's end, and where its area starts.
+    pub(crate) fn top(&self) -> u64 {
+        self.alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64
+    }
+
+    /// Whether its task is a thread of a process, which has the area.
+    pub(crate) fn is_user(&self) -> bool {
+        self.user
+    }
+
+    /// The layout it was allocated with.
+    #[cfg(feature = "heap-tripwire")]
+    pub(crate) fn layout(&self) -> core::alloc::Layout {
+        Self::layout_for(self.user)
+    }
+}
+
 /// Allocate a kernel stack and lay out the frame `context_switch` will restore.
-pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(OwnedAlloc, u64)> {
+pub(crate) fn alloc_kernel_stack(start: Start) -> Option<(KernelStack, u64)> {
     use crate::arch::entry::{kernel_start, process_start, thread_start};
-    let (trampoline, user_entry, user_sp, arg): (unsafe extern "C" fn(), _, _, _) = match start {
-        Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0),
-        Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg),
-        Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg),
+    let (trampoline, user_entry, user_sp, arg, user): (unsafe extern "C" fn(), _, _, _, _) = match start {
+        Start::Process { entry, sp } => (process_start, entry.addr(), sp, 0, true),
+        Start::Thread { entry, sp, arg } => (thread_start, entry.addr(), sp, arg, true),
+        Start::Kernel { body, arg } => (kernel_start, body as usize as u64, 0, arg, false),
     };
-    let alloc = OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)?;
+    let layout = KernelStack::layout_for(user);
+    let alloc = OwnedAlloc::new(layout.size(), layout.align())?;
     scheduler::write_stack_canary(&alloc);
-    let top = alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64;
-    // SAFETY: `alloc` is fresh and exclusively owned, and `top` is its end.
-    let frame = unsafe { crate::arch::entry::initial_frame(top, trampoline, user_entry, user_sp, arg) };
-    Some((alloc, frame))
+    let stack = KernelStack { alloc, user };
+    // SAFETY: `stack` is fresh and exclusively owned, and its `top` ends the stack.
+    let frame = unsafe { crate::arch::entry::initial_frame(stack.top(), trampoline, user_entry, user_sp, arg) };
+    Some((stack, frame))
 }
 
 /// The last path component, truncated to what a process entry can hold.
