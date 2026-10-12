@@ -85,7 +85,6 @@ use toyos::power::{self, Stop};
 use toyos::AcpiDev;
 use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_aml::Value;
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
 use aml::Aml;
@@ -807,6 +806,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_aml::Value;
     use toyos_abi::acpi::{Space, Width};
     use crate::aml::load;
     use crate::aml::tests::{crafted, sealed, CRAFTED_RSDP};

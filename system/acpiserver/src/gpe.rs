@@ -32,7 +32,8 @@ const SHARED: [&str; 4] = ["PNP0C0C", "PNP0C0D", "PNP0C0E", "PNP0A03"];
 /// The runtime GPEs of GPE0 `gpe0`, but the controller's `ec_gpe`, each with
 /// its method's trigger.
 pub fn runtime<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, gpe0: Block, ec_gpe: Option<u16>) -> BTreeMap<u16, Trigger> {
-    let inputs = u16::try_from(gpe0.len / 2 * 8).unwrap_or(u16::MAX);
+    // §5.2.9: a GPE block's status half holds eight GPEs a byte; its length is the FADT's byte.
+    let inputs = gpe0.len / 2 * 8;
     let mut methods: BTreeMap<u16, Vec<Trigger>> = BTreeMap::new();
     for named in names.objects.iter().filter(|named| named.kind == Kind::Method) {
         let Some(name) = named.path.strip_prefix("\\_GPE.") else { continue };
