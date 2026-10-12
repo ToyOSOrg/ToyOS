@@ -3,21 +3,23 @@
 //!
 //! It stays in the registers for as long as its thread runs, across every
 //! entry from Ring 3, because the kernel executes no instruction that touches
-//! it but [`save`], [`restore`] and the trampolines' load of the declared state
-//! (`build/fpgate.rs` refuses an image that does). A switch [`save`]s the
-//! outgoing task's registers by the machine's [`FORM`] into the [`area_bytes`]
-//! above its kernel stack's top, the same switch [`restore`]s them when it
-//! returns into that task, and a task that has never run starts from the
-//! declared state below. The area is compacted under `XSAVES` and `XSAVEC`,
+//! it but [`save`], [`restore`] and [`load_initial`] (`build/fpgate.rs`
+//! refuses an image that does). A switch [`save`]s the outgoing thread's
+//! registers by the machine's [`FORM`] into the [`area_bytes`] above its
+//! kernel stack's top, the same switch [`restore`]s them when it returns into
+//! that thread, and a thread that has never run starts from the declared state
+//! [`load_initial`] puts. The area is compacted under `XSAVES` and `XSAVEC`,
 //! standard under `XSAVEOPT`; its header starts zero, as `OwnedAlloc` zeroes
-//! the stack, and is written by nothing but the saves after it.
+//! the stack, and is written by nothing but the saves after it. A kernel
+//! thread never enters Ring 3, so it has no area and its switches neither save
+//! nor restore: the registers keep the state of the last thread that ran.
 //!
 //! **The modified optimisation's invariant.** `XSAVEOPT` and `XSAVES` skip a
 //! component unmodified since the last `XRSTOR` or `XRSTORS` a CPU ran from the
-//! same address (SDM Vol. 1 §13.6), so nothing may write a task's area from
+//! same address (SDM Vol. 1 §13.6), so nothing may write a thread's area from
 //! its restore on a CPU to its next save there. Its saves are its area's only
-//! writer: no frame reaches above the stack's top, and every way a task starts
-//! or resumes on a CPU restores before anything that can switch.
+//! writer: no frame reaches above the stack's top, and every way a thread
+//! starts or resumes on a CPU restores before anything that can switch.
 //!
 //! **Ordering.** A save's stores are ordinary write-back stores, which SDM
 //! Vol. 3A §11.2.2 orders before every later store of the same CPU; its
@@ -38,7 +40,7 @@ struct Legacy([u8; 512]);
 
 /// An `XSAVE` area of `N` bytes, aligned as every save instruction needs.
 #[repr(C, align(64))]
-pub struct XsaveImage<const N: usize>([u8; N]);
+struct XsaveImage<const N: usize>([u8; N]);
 
 /// The x87 control word `FNINIT` leaves.
 const FCW_INITIAL: u16 = 0x037F;
@@ -147,22 +149,20 @@ const fn initial_image<const N: usize>(xcomp_bv: u64) -> XsaveImage<N> {
     XsaveImage(b)
 }
 
-/// The state a task that has never been in Ring 3 starts from under
-/// `XSAVEOPT`, in memory for stackless trampolines to load in one `XRSTOR`:
-/// standard form, as long as any area a standard save writes.
-pub static INITIAL_STANDARD: XsaveImage<IMAGE_BYTES> = initial_image(0);
+/// The state a thread that has never been in Ring 3 starts from under
+/// `XSAVEOPT`: standard form, as long as any area a standard save writes.
+static INITIAL_STANDARD: XsaveImage<IMAGE_BYTES> = initial_image(0);
 
 /// The same state under `XSAVES` and `XSAVEC`: compacted form, holding x87
 /// and SSE alone, so the restore puts every component past them in its
 /// initial configuration and reads nothing past the header (SDM Vol. 1
 /// §13.8.2).
-pub static INITIAL_COMPACTED: XsaveImage<{ COMPACTED_BASE as usize }> =
+static INITIAL_COMPACTED: XsaveImage<{ COMPACTED_BASE as usize }> =
     initial_image(1 << 63 | XSTATE_BV_INITIAL);
 
 /// The machine's save form, as [`Form`]'s discriminant; zero until the BSP's
-/// [`declare_area`]. Read by the trampolines (`arch::entry`), which branch on
-/// it.
-pub static FORM: AtomicU8 = AtomicU8::new(0);
+/// [`declare_area`].
+static FORM: AtomicU8 = AtomicU8::new(0);
 
 /// The bytes one save writes on every CPU of this machine, by the declared
 /// form for the declared `XCR0`. Zero until the BSP's [`declare_area`].
@@ -178,7 +178,7 @@ pub fn form() -> Form {
     }
 }
 
-/// The bytes every task's kernel stack carries above its top for its user
+/// The bytes a thread's kernel stack carries above its top for its user
 /// machine state. Panics before the BSP's [`declare_area`].
 pub fn area_bytes() -> usize {
     match AREA_BYTES.load(Ordering::Acquire) {
@@ -192,8 +192,8 @@ pub fn area_bytes() -> usize {
 /// Not inlined: `build/fpgate.rs` allows the save family only in this
 /// module's own symbols.
 /// # Safety
-/// `area` is the area above the kernel stack top of the task running on this
-/// CPU, which is switching away from it.
+/// `area` is the area above the kernel stack top of the thread running on
+/// this CPU, which is switching away from it.
 #[inline(never)]
 pub unsafe fn save(area: u64) {
     // SAFETY: the caller's area is `AREA_BYTES` long and 64-byte aligned (a
@@ -230,7 +230,7 @@ pub unsafe fn save(area: u64) {
 ///
 /// Not inlined, for [`save`]'s reason.
 /// # Safety
-/// `area` is the area [`save`] last wrote for the task now resuming on this
+/// `area` is the area [`save`] last wrote for the thread now resuming on this
 /// CPU, the one whose switch called that save.
 #[inline(never)]
 pub unsafe fn restore(area: u64) {
@@ -297,8 +297,11 @@ pub fn init(cpu_id: u32) {
     self_check(cpu_id);
 }
 
-/// The first-entry image by the instruction the first-entry trampolines use.
-fn load_initial() {
+/// Loads the declared state by the machine's form. Each thread's trampoline
+/// (`arch::entry`) calls it before anything that can switch the thread, so
+/// the thread's first save follows a restore on its CPU, and from an image
+/// no save writes.
+pub(crate) extern "C" fn load_initial() {
     // SAFETY: both images are 64-byte aligned and name only x87 and SSE, both
     // in every declared `XCR0`, with an `MXCSR` that sets no reserved bit; the
     // standard one is as long as any standard area this machine's `XCR0`
@@ -401,8 +404,6 @@ const _: () = {
     }
 };
 
-// The header the trampolines' restore reads lies inside each image.
+// The header `load_initial`'s restore reads lies inside each image.
 const _: () = assert!(OFF_XSTATE_BV + 64 <= COMPACTED_BASE as usize);
 const _: () = assert!(COMPACTED_BASE as usize <= IMAGE_BYTES);
-// `arch::entry`'s trampolines compare `FORM` against these.
-const _: () = assert!(Form::Xsaves as u8 == 1 && Form::Xsavec as u8 == 2 && Form::Xsaveopt as u8 == 3);

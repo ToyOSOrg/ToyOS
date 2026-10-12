@@ -3,9 +3,10 @@
 //!
 //! No gate saves the user machine state: the kernel touches none of it, so it
 //! stays in the registers across every entry, and `arch::fpu` moves it only
-//! where a switch takes a thread off its CPU. A task's trampoline loads the
-//! declared state before anything that can switch, so every save of a task's
-//! area follows a restore on that CPU (`arch::fpu`'s invariant).
+//! where a switch takes a thread off its CPU. A thread's trampoline loads the
+//! declared state before anything that can switch, so every save of its area
+//! follows a restore on that CPU (`arch::fpu`'s invariant); a kernel thread's
+//! loads none, having no user state.
 
 /// `naked_asm!` for a gate a Ring 3 thread can arrive through: prepends
 /// `cld`. The body must end with a trailing comma.
@@ -33,58 +34,14 @@ macro_rules! ring3_naked_asm {
     };
 }
 
-/// `naked_asm!` for a task's trampoline: supplies the form and the declared
-/// state's two images from `fpu`.
-macro_rules! trampoline_asm {
-    ($($body:tt)*) => {
-        core::arch::naked_asm!(
-            $($body)*
-            fp_form = sym $crate::arch::fpu::FORM,
-            fp_standard = sym $crate::arch::fpu::INITIAL_STANDARD,
-            fp_compacted = sym $crate::arch::fpu::INITIAL_COMPACTED,
-        )
-    };
-}
-
-// The numbers `FORM` is compared against are `kernel::xsave::Form`'s
-// discriminants, which `fpu` asserts: 1 `XSAVES`, 2 `XSAVEC`, 3 `XSAVEOPT`;
-// any other is `ud2`.
-
-/// The declared state: every component `XCR0` enables, so no upper half of a
-/// register is left from the CPU's last tenant. Clobbers `rax`, `rdx` and
-/// the flags.
-macro_rules! initial_user_state {
-    () => {
-        concat!(
-            "mov eax, -1\n",
-            "mov edx, -1\n",
-            "cmp byte ptr [rip + {fp_form}], 1\n",
-            "je 71f\n",
-            "cmp byte ptr [rip + {fp_form}], 2\n",
-            "je 72f\n",
-            "cmp byte ptr [rip + {fp_form}], 3\n",
-            "je 79f\n",
-            "ud2\n",
-            "71:\n",
-            "xrstors64 [rip + {fp_compacted}]\n",
-            "jmp 73f\n",
-            "72:\n",
-            "xrstor64 [rip + {fp_compacted}]\n",
-            "jmp 73f\n",
-            "79:\n",
-            "xrstor64 [rip + {fp_standard}]\n",
-            "73:\n",
-        )
-    };
-}
-
 pub(crate) use ring3_naked_asm;
 
 /// Entry point for new processes, reached through `context_switch`'s `ret`. r12 = entry point, r13 = user stack pointer.
+// `rsp` is the stack's top here, aligned for the first `call`.
 #[unsafe(naked)]
 pub(crate) extern "C" fn process_start() {
-    trampoline_asm!(
-        initial_user_state!(),
+    core::arch::naked_asm!(
+        "call {load_initial}",
         "push r12",
         "push r13",
         "call {unlock}",
@@ -96,6 +53,7 @@ pub(crate) extern "C" fn process_start() {
         "push {user_cs}",
         "push r12",         // RIP: entry point
         "iretq",
+        load_initial = sym crate::arch::fpu::load_initial,
         unlock = sym crate::sched::driver::trampoline_entry,
         user_ss = const crate::arch::percpu::USER_DS,
         user_cs = const crate::arch::percpu::USER_CS,
@@ -103,10 +61,11 @@ pub(crate) extern "C" fn process_start() {
 }
 
 /// Entry point for new threads. r14 carries the argument, which lands in rdi.
+// `rsp` is the stack's top here, aligned for the first `call`.
 #[unsafe(naked)]
 pub(crate) extern "C" fn thread_start() {
-    trampoline_asm!(
-        initial_user_state!(),
+    core::arch::naked_asm!(
+        "call {load_initial}",
         "push r12",
         "push r13",
         "push r14",
@@ -122,20 +81,18 @@ pub(crate) extern "C" fn thread_start() {
         "push {user_cs}",
         "push r12",
         "iretq",
+        load_initial = sym crate::arch::fpu::load_initial,
         unlock = sym crate::sched::driver::trampoline_entry,
         user_ss = const crate::arch::percpu::USER_DS,
         user_cs = const crate::arch::percpu::USER_CS,
     );
 }
 
-/// Entry point for a kernel thread: r12 = body, r14 = argument. Never reaches
-/// Ring 3, but its switches save and restore the user machine state as every
-/// task's do.
+/// Entry point for a kernel thread: r12 = body, r14 = argument. Never reaches Ring 3.
 // The `sti` is load-bearing: `alloc_kernel_stack` leaves `IF` clear, and `trampoline_entry` requires it clear on entry.
 #[unsafe(naked)]
 pub(crate) extern "C" fn kernel_start() {
-    trampoline_asm!(
-        initial_user_state!(),
+    core::arch::naked_asm!(
         "call {unlock}",
         "sti",
         "mov rdi, r14",

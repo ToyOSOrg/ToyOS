@@ -1,6 +1,6 @@
 //! The x86-64 kernel executes no instruction that touches a thread's user FP
-//! or vector state but where `arch::fpu` and `arch::entry` save, restore and
-//! first load it. That state stays in the registers across every entry
+//! or vector state but where `arch::fpu` saves, restores and first loads it.
+//! That state stays in the registers across every entry
 //! (`kernel/src/arch/x86_64/fpu.rs`), so one stray instruction anywhere else
 //! corrupts a thread silently; rustc refuses an `xmm` operand on the
 //! soft-float target but not an instruction written as `asm!` text, and the
@@ -16,7 +16,7 @@
 //! opmask or tile register, explicitly or implicitly; the fences, whose
 //! features say SSE and which touch no state, are the exception
 //! ([`STATE_FREE`]). Of those instructions only the [`ALLOWED`] mnemonics
-//! pass, and only in a function of an [`OWNERS`] module.
+//! pass, and only in a function of the [`OWNER`] module.
 
 use iced_x86::{CpuidFeature, Decoder, DecoderOptions, Instruction, InstructionInfoFactory, Mnemonic, Register};
 use toyos_elf::section::SectionHeader;
@@ -72,9 +72,9 @@ const ALLOWED: [Mnemonic; 6] = [
 /// write no register state: the fences the kernel orders memory with.
 const STATE_FREE: [Mnemonic; 3] = [Mnemonic::Lfence, Mnemonic::Mfence, Mnemonic::Sfence];
 
-/// The modules whose functions may run an [`ALLOWED`] instruction, as their
+/// The module whose functions may run an [`ALLOWED`] instruction, as their
 /// demangled paths begin.
-const OWNERS: [&str; 2] = ["kernel::arch::x86_64::fpu::", "kernel::arch::x86_64::entry::"];
+const OWNER: &str = "kernel::arch::x86_64::fpu::";
 
 /// How many refused instructions a refusal names before it counts the rest.
 const NAMED: usize = 16;
@@ -195,8 +195,7 @@ fn sweep(code: &[u8], at: u64, bitness: u32, functions: &Functions) -> Vec<Strin
         if !touches_state(&instr, &mut factory) {
             continue;
         }
-        let owned = || OWNERS.iter().any(|owner| functions.name(from).0.starts_with(owner));
-        if !(ALLOWED.contains(&instr.mnemonic()) && owned()) {
+        if !(ALLOWED.contains(&instr.mnemonic()) && functions.name(from).0.starts_with(OWNER)) {
             refused.push(say(&format!("{:?}", instr.mnemonic())));
         }
     }
@@ -382,22 +381,25 @@ mod tests {
 
     #[test]
     fn the_saves_the_owners_use_pass_inside_them() {
-        for owner in ["kernel::arch::x86_64::fpu::save", "kernel::arch::x86_64::entry::thread_start"] {
+        for function in [FPU_SAVE, "kernel::arch::x86_64::fpu::load_initial"] {
             for &(bytes, mnemonic) in SAVES {
                 assert_eq!(decoded(bytes), mnemonic, "{bytes:02x?}");
-                assert_eq!(refusals(bytes, owner), Vec::<String>::new(), "{mnemonic:?} in {owner}");
+                assert_eq!(refusals(bytes, function), Vec::<String>::new(), "{mnemonic:?} in {function}");
             }
         }
     }
 
+    /// The trampolines among the rest: they call `fpu::load_initial`.
     #[test]
     fn the_saves_the_owners_use_are_refused_anywhere_else() {
-        let passed: Vec<Mnemonic> = SAVES
-            .iter()
-            .filter(|&&(bytes, _)| refusals(bytes, ELSEWHERE).is_empty())
-            .map(|&(_, mnemonic)| mnemonic)
-            .collect();
-        assert!(passed.is_empty(), "passed outside the owners: {passed:?}");
+        for function in [ELSEWHERE, "kernel::arch::x86_64::entry::thread_start"] {
+            let passed: Vec<Mnemonic> = SAVES
+                .iter()
+                .filter(|&&(bytes, _)| refusals(bytes, function).is_empty())
+                .map(|&(_, mnemonic)| mnemonic)
+                .collect();
+            assert!(passed.is_empty(), "passed in {function}: {passed:?}");
+        }
     }
 
     #[test]

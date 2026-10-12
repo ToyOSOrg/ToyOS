@@ -9,7 +9,7 @@ use kernel::sched::task::{TaskAccounting, TaskKey};
 use crate::arch::{cpu, percpu};
 use crate::hw::{report_contexts, KernelHw};
 use super::switch::context_switch;
-use crate::sched::payload::{KernelCtx, KernelPayload};
+use crate::sched::payload::{KernelCtx, KernelPayload, Runs};
 
 /// `sti; hlt`, the atomic enable-and-wait pair: a wake landing between the two is not lost.
 pub fn halt() {
@@ -26,7 +26,7 @@ pub fn halt() {
 #[inline(never)]
 fn switch_frame_is_wrong(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> ! {
     let rsp = ctx.sp;
-    let (pid, tid) = ctx.id.map_or((u32::MAX, u32::MAX), |id| (id.0.raw(), id.1.raw()));
+    let (pid, tid) = ctx.runs.id().map_or((u32::MAX, u32::MAX), |id| (id.0.raw(), id.1.raw()));
     crate::log!(
         "CONTEXT SWITCH ONTO A FRAME THAT IS NOT ONE: cpu={} pid={pid} tid={tid} \
          rsp={:#018x} top={:#018x} (top-rsp={}, and 64 is the entry frame, so a \
@@ -71,7 +71,7 @@ fn check_switch_frame(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> u64 {
     // The idle context is not exempt: its stack is knowable only here, on the CPU it belongs to.
     #[cfg(feature = "stack-witness")]
     {
-        let top = match ctx.id {
+        let top = match ctx.runs.id() {
             Some(_) => ctx.kernel_stack_top,
             None => percpu::idle_stack_top(),
         };
@@ -128,7 +128,7 @@ fn switch_witness_capture(ctx: &KernelCtx, token: &RunToken<KernelPayload>, rsp:
     shadow.rsp = rsp;
     shadow.ctx = ctx as *const KernelCtx;
     shadow.save = token.save_ptr() as u64;
-    shadow.top = match ctx.id {
+    shadow.top = match ctx.runs.id() {
         Some(_) => ctx.kernel_stack_top,
         None => percpu::idle_stack_top(),
     };
@@ -290,10 +290,14 @@ impl Hw for KernelHw {
         let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed; `area` is the outgoing task's own, saved as it leaves this CPU and restored when it returns into this frame.
         unsafe {
-            // A task's user state area lies above its stack's top (`fpu`); the
-            // idle context has none. The task resumes in this frame, so the
-            // restore below reads the area its own save wrote.
-            let area = (*save).id.map(|_| (*save).kernel_stack_top);
+            // A thread's user state area lies above its stack's top (`fpu`); a
+            // kernel thread and the idle context have none, and switch with
+            // neither a save nor a restore. The thread resumes in this frame,
+            // so the restore below reads the area its own save wrote.
+            let area = match (*save).runs {
+                Runs::User(_) => Some((*save).kernel_stack_top),
+                Runs::Kernel(_) | Runs::Idle => None,
+            };
             (*save).thread_pointer = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
@@ -305,10 +309,11 @@ impl Hw for KernelHw {
             ))]
             switch_witness_mutate(restore);
             crate::preempt::set_count(incoming.preempt);
-            percpu::set_current_tid(incoming.id.map(|id| id.1));
-            percpu::set_current_pid(incoming.id.map(|id| id.0));
-            super::pio::switch_to(incoming.id.map(|id| id.0));
-            match incoming.id {
+            let incoming_id = incoming.runs.id();
+            percpu::set_current_tid(incoming_id.map(|id| id.1));
+            percpu::set_current_pid(incoming_id.map(|id| id.0));
+            super::pio::switch_to(incoming_id.map(|id| id.0));
+            match incoming_id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
