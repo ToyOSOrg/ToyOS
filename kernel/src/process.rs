@@ -1079,6 +1079,8 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32, c
     let name = proc.name_str();
     // The verdict first: a record past `MAX_RECORD_MESSAGE` loses its end.
     log!("exit: {name} pid={process_pid} code={code} cpu={}ms {consumed}", cpu_ns / 1_000_000);
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::hw::slot_probe::report(name, process_pid.raw());
     cpu_ns
 }
 

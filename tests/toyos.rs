@@ -4816,11 +4816,12 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
+    eprintln!("PROBE job capture, whole:\n{}", result.stdout);
     let Some(line) = result.stdout.lines().find(|l| l.contains("vector_state: ")) else {
         return Err(format!("the job never said what it held:\n{}", result.stdout));
     };
     eprintln!("  [claims] {}", line.trim());
-    Ok(())
+    Err("PROBE: red on purpose, so the run keeps its serial logs".to_string())
 }
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and

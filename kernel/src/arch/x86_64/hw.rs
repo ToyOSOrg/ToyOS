@@ -21,6 +21,128 @@ pub fn halt() {
     unsafe { asm!("sti; hlt", options(nomem, nostack)); }
 }
 
+/// PROBE, never lands: what the stack-slot mutant's slot holds between a
+/// restore and the same CPU's next save from the same address, the only case
+/// in which `XSAVEOPT` or `XSAVES` may skip a component (SDM Vol. 1 §13.6).
+/// Per CPU, the restore's address and a copy of the whole 4096-byte slot; a
+/// save invalidates it, since every later save on that CPU follows a restore
+/// or a trampoline's load from another address.
+pub mod slot_probe {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    const CPUS: usize = crate::sched::MAX_CPUS;
+    const SLOT: usize = 4096;
+    const LINES: usize = SLOT / 64;
+    /// Pids below this are counted on their own; the rest only in the total.
+    const PIDS: usize = 128;
+
+    #[repr(C, align(64))]
+    struct Snap([u8; SLOT]);
+
+    static mut LAST: [u64; CPUS] = [0; CPUS];
+    static mut SNAP: [Snap; CPUS] = [const { Snap([0; SLOT]) }; CPUS];
+
+    /// Saves from a slot, as the total and per pid.
+    struct Counts {
+        saves: AtomicU64,
+        /// Of those, saves from the address of this CPU's last restore.
+        same: AtomicU64,
+        /// Per 64-byte line of the slot, the `same` saves that found it changed since that restore.
+        line: [AtomicU64; LINES],
+        /// The shallowest and deepest slot (stack top minus slot address) over `same` saves.
+        depth_min: AtomicU64,
+        depth_max: AtomicU64,
+    }
+
+    impl Counts {
+        const fn new() -> Self {
+            Counts {
+                saves: AtomicU64::new(0),
+                same: AtomicU64::new(0),
+                line: [const { AtomicU64::new(0) }; LINES],
+                depth_min: AtomicU64::new(u64::MAX),
+                depth_max: AtomicU64::new(0),
+            }
+        }
+
+        fn line(&self, who: &str) -> alloc::string::String {
+            use core::fmt::Write;
+            let mut lines = alloc::string::String::new();
+            for (i, n) in self.line.iter().enumerate() {
+                let n = n.load(Relaxed);
+                if n != 0 {
+                    let _ = write!(lines, " {i}:{n}");
+                }
+            }
+            alloc::format!(
+                "{who}: saves={} same={} same_depth={}..{} changed_lines(line:saves):{}",
+                self.saves.load(Relaxed),
+                self.same.load(Relaxed),
+                self.depth_min.load(Relaxed),
+                self.depth_max.load(Relaxed),
+                lines
+            )
+        }
+    }
+
+    static TOTAL: Counts = Counts::new();
+    static PER_PID: [Counts; PIDS] = [const { Counts::new() }; PIDS];
+
+    pub unsafe fn before_save(area: u64, top: u64, pid: u32) {
+        let cpu = super::percpu::cpu_id() as usize;
+        let last = unsafe { (*(&raw const LAST))[cpu] };
+        let mut changed = [false; LINES];
+        if last == area {
+            let now = unsafe { core::slice::from_raw_parts(area as *const u8, SLOT) };
+            let then = unsafe { &(*(&raw const SNAP))[cpu].0 };
+            for (line, c) in changed.iter_mut().enumerate() {
+                let at = line * 64;
+                *c = now[at..at + 64] != then[at..at + 64];
+            }
+        }
+        let depth = top.wrapping_sub(area);
+        let pid_counts = PER_PID.get(pid as usize);
+        for counts in core::iter::once(&TOTAL).chain(pid_counts) {
+            counts.saves.fetch_add(1, Relaxed);
+            if last == area {
+                counts.same.fetch_add(1, Relaxed);
+                counts.depth_min.fetch_min(depth, Relaxed);
+                counts.depth_max.fetch_max(depth, Relaxed);
+                for (line, &c) in changed.iter().enumerate() {
+                    if c {
+                        counts.line[line].fetch_add(1, Relaxed);
+                    }
+                }
+            }
+        }
+        unsafe { (*(&raw mut LAST))[cpu] = 0 };
+    }
+
+    pub unsafe fn after_restore(area: u64) {
+        let cpu = super::percpu::cpu_id() as usize;
+        unsafe {
+            (*(&raw mut LAST))[cpu] = area;
+            core::ptr::copy_nonoverlapping(area as *const u8, (*(&raw mut SNAP))[cpu].0.as_mut_ptr(), SLOT);
+        }
+    }
+
+    /// The exiting process's counts and the total; a panic carrying both
+    /// when `name` is a probed job, since a guest test keeps the panic's words.
+    pub fn report(name: &str, pid: u32) {
+        let own = match PER_PID.get(pid as usize) {
+            Some(counts) => counts.line(&alloc::format!("slot-probe {name} pid={pid}")),
+            None => alloc::format!("slot-probe {name} pid={pid}: not counted"),
+        };
+        let total = TOTAL.line("slot-probe total");
+        let area = crate::arch::fpu::area_bytes();
+        crate::log!("{own} | area={area}");
+        crate::log!("{total}");
+        if name.contains("vector_state") || name.contains("syscall_cost") {
+            panic!("{own} | area={area} || {total}");
+        }
+    }
+}
+
 /// Panics before the wild `ret` would restore register state that makes the failure unnameable.
 #[cold]
 #[inline(never)]
@@ -342,6 +464,7 @@ impl Hw for KernelHw {
                 options(nomem, nostack, preserves_flags),
             );
             if let Some(area) = area {
+                slot_probe::before_save(area, (*save).kernel_stack_top, (*save).id.map_or(u32::MAX, |id| id.0.raw()));
                 super::fpu::save(area);
             }
             context_switch(&raw mut (*save).sp, rsp);
@@ -349,6 +472,7 @@ impl Hw for KernelHw {
             // out before its state is back.
             if let Some(area) = area {
                 super::fpu::restore(area);
+                slot_probe::after_restore(area);
             }
         }
     }
