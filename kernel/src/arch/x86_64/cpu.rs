@@ -238,7 +238,7 @@ pub fn invlpg(addr: u64) {
     unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack)); }
 }
 
-/// Descriptor type for [`invpcid`] (SDM Vol. 3A §4.10.4.1); three variants, not four, because this kernel issues no global-page discard.
+/// Descriptor type for [`invpcid`] (SDM Vol. 3A §4.10.4.1).
 #[derive(Clone, Copy)]
 #[repr(u64)]
 pub enum Invpcid {
