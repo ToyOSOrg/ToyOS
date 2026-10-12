@@ -4,6 +4,8 @@ extern crate toyos_build;
 mod common;
 #[path = "guest/rust-tests/src/netperf_table.rs"]
 mod netperf_table;
+#[path = "guest/rust-tests/src/setup_table.rs"]
+mod setup_table;
 #[path = "guest/rust-tests/src/stream_ends.rs"]
 mod stream_ends;
 
@@ -1119,9 +1121,13 @@ fn https_download_on_metal(back: &metal::Readback) -> Result<(), String> {
         if let Some(at) = line.find("netstack: prof ") {
             eprintln!("  [prof] {}", &line[at + "netstack: prof ".len()..]);
         }
+        if let Some(at) = line.find("netstack: stamp ") {
+            eprintln!("  [stamp] {}", &line[at + "netstack: stamp ".len()..]);
+        }
     }
-    // MEASUREMENT ONLY: the per-MB table.
+    // MEASUREMENT ONLY: the per-MB table, and the connection-setup scout's rows.
     eprint!("{}", netperf_table::table(log.text()));
+    eprint!("{}", setup_table::table(log.text()));
     back.job_passed("test_rs_https_download")?;
     let said = said.ok_or_else(|| format!("https_download exited 0 and said no line opening {SAID:?}"))?;
     let field = |name: &str| said.split_whitespace().find_map(|word| word.strip_prefix(name)?.strip_prefix('='));
@@ -3981,13 +3987,26 @@ fn netperf_qemu() -> Result<(), String> {
         eprintln!("  [netperf] {line}");
     }
     eprint!("{}", netperf_table::table(&result.stdout));
+    eprint!("{}", setup_table::table(&result.stdout));
     if let Some(why) = &result.error {
         return Err(format!("https_download: {why}"));
     }
     if result.exit_code != Some(0) {
         return Err(format!("https_download ended {:?}", result.exit_code));
     }
-    for said in ["https_download: perf idle ", "https_download: bench ", "https_download: perf run=2 ", "netstack: prof "] {
+    for said in [
+        "https_download: perf idle ",
+        "https_download: bench ",
+        "https_download: perf run=2 ",
+        "netstack: prof ",
+        // The connection-setup scout's: every kind of stamp, and the LAN control's last connect.
+        "https_download: setup run=6 ",
+        "https_download: lan control i=5 ",
+        "netstack: stamp lookup ",
+        "netstack: stamp connect ",
+        "netstack: stamp setopt ",
+        "netstack: stamp data ",
+    ] {
         if !result.stdout.contains(said) {
             return Err(format!("nothing said {said:?}"));
         }

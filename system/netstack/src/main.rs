@@ -98,6 +98,7 @@ mod client;
 mod i219;
 mod pipes;
 mod serve;
+mod stamps;
 mod virtio_net;
 mod watches;
 
@@ -428,6 +429,7 @@ fn main() {
         let t0 = prof::now();
         let begun = card.begin_pass();
         prof::since(prof::Slot::CyBeginPass, t0);
+        stamps::pass();
         if let Some(link) = begun {
             // A change of state only: a speed change is no new network.
             if link.is_up() != link_up {
@@ -440,7 +442,13 @@ fn main() {
         let t0 = prof::now();
         let owed = card.receive(|budget, next| {
             node.receive(clock(), budget, |sink| {
-                let one = next(sink);
+                let one = next(&mut |frame: &[u8]| {
+                    stamps::rx(frame);
+                    sink(frame)
+                });
+                if !one {
+                    stamps::emptied();
+                }
                 got += u64::from(one);
                 one
             }, draw)
@@ -478,6 +486,7 @@ fn main() {
                     |frame| {
                         let t0 = prof::now();
                         card.tx(frame.len(), |slot| slot.copy_from_slice(frame));
+                        stamps::tx(frame);
                         prof::since(prof::Slot::CyCardTx, t0);
                     },
                     draw,
@@ -552,6 +561,7 @@ fn main() {
             }
             answering += prof::now().wrapping_sub(t0);
         });
+        let woke = stamps::now();
         prof::add(prof::Slot::CyWait, prof::now().wrapping_sub(t_wait).wrapping_sub(answering));
         prof::add(prof::Slot::CyAnswers, answering);
         let t0 = prof::now();
@@ -600,7 +610,7 @@ fn main() {
                     conn.as_handle().0
                 );
             } else {
-                pending.push(PendingConn { conn, rx: ClientRx::new(), since: Wall::now() });
+                pending.push(PendingConn { conn, rx: ClientRx::new(), since: Wall::now(), n1: woke });
             }
         }
 
@@ -637,6 +647,7 @@ fn main() {
                     pending.remove(i);
                 }
                 RxStep::Frame { msg_type, payload_len } => {
+                    let n2 = stamps::now();
                     let mut payload = [0u8; MAX_KEPT_REQUEST];
                     payload[..payload_len].copy_from_slice(pending[i].rx.payload(payload_len));
                     let p = pending.remove(i);
@@ -645,6 +656,7 @@ fn main() {
                         msg_type,
                         payload,
                         payload_len,
+                        asked: stamps::Asked { n1: p.n1, n2 },
                     });
                 }
             }

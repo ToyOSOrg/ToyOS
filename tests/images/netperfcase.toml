@@ -17,6 +17,7 @@ start = ["logkeeper", "diskserver", "fileserver", "netstack", "test-runner"]
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
@@ -27,8 +28,10 @@ service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041", "pci:8086:10d3"]
 
+# `log` for netstack's word on its lease, which names the router the
+# connection-setup scout's LAN control connects to.
 [programs.test-runner]
-receives = ["netstack"]
+receives = ["netstack", "log"]
 syscap = ["counters", "trace", "dup"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven

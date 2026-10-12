@@ -9,8 +9,15 @@
 //! through its `msr` device; `app.*` is `getrusage(RUSAGE_SELF)`; `lx.*` is
 //! `/proc/stat`'s whole-machine `cpu` line in ms, `ctxt` and `intr`, and
 //! `/proc/softirqs`' `NET_RX`.
+//!
+//! The connection-setup scout: each download also says `setup run=<n>
+//! os=linux asked=<any|v4> <words>` (`netperf::Fetched::setup_words`), its
+//! connection's `TCP_INFO` read as the TCP connector returns it. `netperf-linux
+//! v4` connects only to IPv4 addresses (`ureq`'s `IpFamily::Ipv4Only`), and
+//! `netperf-linux table <file>...` renders the setup rows of runs said before.
 
 use std::fs::File;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::FileExt;
 use std::time::Instant;
 
@@ -21,6 +28,8 @@ mod https_client;
 mod netperf;
 #[path = "netperf_table.rs"]
 mod netperf_table;
+#[path = "setup_table.rs"]
+mod setup_table;
 
 use netperf::{Machine, Snap};
 
@@ -113,7 +122,68 @@ impl Machine for Linux {
     }
 }
 
+/// The established TCP connection to one of `addrs`, as the kernel holds it:
+/// its peer's family, whether that peer is the first address, and the round
+/// trip the handshake measured.
+fn tcp_info(addrs: &[SocketAddr]) -> String {
+    for fd in 3..1024 {
+        // SAFETY: each call writes at most the length it is handed into the
+        // struct it is handed, and an fd that is no socket is refused.
+        let (info, peer) = unsafe {
+            let mut info = std::mem::zeroed::<libc::tcp_info>();
+            let mut len = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
+            if libc::getsockopt(fd, libc::IPPROTO_TCP, libc::TCP_INFO, &mut info as *mut _ as *mut libc::c_void, &mut len) != 0 {
+                continue;
+            }
+            let mut ss = std::mem::zeroed::<libc::sockaddr_storage>();
+            let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            if libc::getpeername(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut sl) != 0 {
+                continue;
+            }
+            let peer = match i32::from(ss.ss_family) {
+                libc::AF_INET => {
+                    let sin = &*(&ss as *const _ as *const libc::sockaddr_in);
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))), u16::from_be(sin.sin_port))
+                }
+                libc::AF_INET6 => {
+                    let sin6 = &*(&ss as *const _ as *const libc::sockaddr_in6);
+                    SocketAddr::new(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)), u16::from_be(sin6.sin6_port))
+                }
+                _ => continue,
+            };
+            (info, peer)
+        };
+        // TCP_ESTABLISHED.
+        if info.tcpi_state != 1 {
+            continue;
+        }
+        let Some(at) = addrs.iter().position(|a| a.ip() == peer.ip() && a.port() == peer.port()) else { continue };
+        return format!(
+            " peer_family={} peer_index={at} tcpi_rtt_us={} tcpi_rttvar_us={} tcpi_rto_us={}",
+            if peer.is_ipv4() { "v4" } else { "v6" },
+            info.tcpi_rtt,
+            info.tcpi_rttvar,
+            info.tcpi_rto
+        );
+    }
+    " tcpi=none".to_string()
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("table") {
+        let mut log = String::new();
+        for path in &args[1..] {
+            log.push_str(&std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}")));
+        }
+        print!("{}", setup_table::table(&log));
+        return;
+    }
+    let (family, asked) = match args.first().map(String::as_str) {
+        None => (ureq::config::IpFamily::Any, "any"),
+        Some("v4") => (ureq::config::IpFamily::Ipv4Only, "v4"),
+        Some(other) => panic!("{other:?}: the one argument is `v4`, or `table` and files"),
+    };
     let machine = Linux::open();
     let mut said = String::new();
     let mut say = |line: String| {
@@ -126,12 +196,15 @@ fn main() {
     let suite = netperf::suite(&pem, HOST, 443, PATH);
     say(netperf::benches(&machine, &suite, &idle));
     let url = format!("https://{HOST}{PATH}");
+    let mut previous = None;
     for run in 1..=RUNS {
         let before = machine.snap();
         let at = Instant::now();
-        let fetched = netperf::fetch(https_client::config(ROOTS), &url, |_| {});
+        let fetched = netperf::fetch(https_client::config_family(ROOTS, family), &url, tcp_info, |_| {});
         let secs = at.elapsed().as_secs_f64();
         let d = netperf::delta(&before, &machine.snap());
+        say(format!("setup run={run} os=linux asked={asked} {}", fetched.setup_words(previous)));
+        previous = fetched.addrs.first().copied();
         say(format!(
             "whole bytes={} sha256={} secs={secs:.3} mbps={:.1} tcp_ms={:.1} tls_ms={:.1}",
             fetched.bytes,
@@ -143,4 +216,5 @@ fn main() {
         say(format!("perf run={run} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d)));
     }
     print!("{}", netperf_table::table(&said));
+    print!("{}", setup_table::table(&said));
 }

@@ -53,7 +53,9 @@ impl Interrupts for Claim {
     const IDLE: SyscallError = SyscallError::WouldBlock;
 
     fn taken(&self) -> Result<u32, SyscallError> {
-        self.0.irq().map(|record| record.count)
+        let record = self.0.irq();
+        crate::stamps::irq(record.as_ref().ok());
+        record.map(|record| record.count)
     }
 }
 

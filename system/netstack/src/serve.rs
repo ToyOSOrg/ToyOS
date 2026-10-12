@@ -106,8 +106,8 @@ pub struct Sockets {
     by_stream: BTreeMap<StreamId, u32>,
     /// The client each unanswered connect is answered to, and the id it is
     /// told.
-    connecting: BTreeMap<StreamId, (Client, u32)>,
-    lookups: Vec<(LookupId, Client, toyos_dns::Name)>,
+    connecting: BTreeMap<StreamId, (Client, u32, crate::stamps::Asked, ([u8; 4], u16))>,
+    lookups: Vec<(LookupId, Client, toyos_dns::Name, crate::stamps::Asked)>,
     /// At most one receive waits on a socket, so a client's requests alone
     /// hold no more of netstack's handles than its sockets do.
     receiving: BTreeMap<u32, Receiving>,
@@ -375,7 +375,12 @@ impl Sockets {
             return;
         };
         match req.option {
-            OPT_NODELAY if node.set_nodelay(now, id, req.value != 0) => msg.client.done(),
+            OPT_NODELAY if node.set_nodelay(now, id, req.value != 0) => {
+                // MEASUREMENT ONLY: stamped as the answer is about to go.
+                let n6 = crate::stamps::now();
+                msg.client.done();
+                crate::stamps::answered("setopt", msg.asked, n6);
+            }
             OPT_NODELAY => msg.client.error(ERR_NOT_CONNECTED),
             _ => msg.client.error(ERR_INVALID_INPUT),
         }
@@ -429,7 +434,7 @@ impl Sockets {
         match node.connect(now, remote, timeout, pipes) {
             Ok(stream) => {
                 let id = self.hold_stream(stream, to_client, from_client);
-                self.connecting.insert(stream, (msg.client, id));
+                self.connecting.insert(stream, (msg.client, id, msg.asked, (req.addr, req.port)));
             }
             Err(refusal) => {
                 if refusal == ConnectRefused::Full {
@@ -650,7 +655,7 @@ impl Sockets {
             return;
         };
         match node.resolve(now, name.clone(), draw) {
-            Ok(id) => self.lookups.push((id, msg.client, name)),
+            Ok(id) => self.lookups.push((id, msg.client, name, msg.asked)),
             Err(NotStarted::NotConnected) => msg.client.error(ERR_NOT_CONNECTED),
             Err(NotStarted::ResourceExhausted) => msg.client.error(ERR_RESOURCE_EXHAUSTED),
         }
@@ -679,20 +684,34 @@ impl Sockets {
                     continue;
                 }
             };
-            let Some((client, socket_id)) = self.connecting.remove(&id) else {
+            let Some((client, socket_id, asked, remote)) = self.connecting.remove(&id) else {
                 unreachable!("the node answered a connect nobody waits for")
+            };
+            // MEASUREMENT ONLY: stamped as the answer is about to go.
+            let n6 = crate::stamps::now();
+            let local = answer.ok().map(|local| local.get());
+            let outcome = match answer {
+                Ok(_) => "connected",
+                Err(ERR_CONNECTION_REFUSED) => "refused",
+                Err(ERR_CONNECTION_RESET) => "reset",
+                Err(ERR_TIMED_OUT) => "timedout",
+                Err(_) => "other",
             };
             match answer {
                 Ok(local) => client.result(&TcpConnectResponse { socket_id, local_port: local.get(), _pad: 0 }),
                 Err(code) => client.error(code),
             }
+            crate::stamps::connected(remote, local, asked, n6, outcome);
         }
 
+        let mut stamped = Vec::new();
         for resolved in node.take_resolved() {
             let Some(at) = self.lookups.iter().position(|(id, ..)| *id == resolved.id) else {
                 unreachable!("the node ended a lookup nobody waits for")
             };
-            let (_, client, name) = self.lookups.swap_remove(at);
+            let (_, client, name, asked) = self.lookups.swap_remove(at);
+            // MEASUREMENT ONLY: stamped as the answer is about to go.
+            stamped.push((asked, crate::stamps::now()));
             use toyos_dns::Failure as Dns;
             match resolved.result {
                 Ok(addrs) => answer_lookup(&client, &addrs),
@@ -715,6 +734,8 @@ impl Sockets {
                 }
             }
         }
+
+        crate::stamps::lookups(&stamped);
 
         let ended: Vec<(ListenerId, WriteRefusal)> = node.drain_ended_listeners().collect();
         for (ended, refusal) in ended {
@@ -795,7 +816,7 @@ impl Sockets {
                 Socket::Stream(_) => {}
             }
         }
-        for (_, client, _) in &self.lookups {
+        for (_, client, _, _) in &self.lookups {
             poller.watch(&client.conn, READABLE, TOKEN_LOOKUP | u64::from(client.conn.as_handle().0));
         }
     }
@@ -860,7 +881,7 @@ impl Sockets {
                 // A lookup whose client has left ends now: its sockets and
                 // its place are another client's.
                 let spoke = |client: &Client| u64::from(client.conn.as_handle().0) == u64::from(socket_id);
-                self.lookups.retain(|(id, client, _)| {
+                self.lookups.retain(|(id, client, _, _)| {
                     let left = spoke(client) && client.gone();
                     if left {
                         node.let_go(now, *id);

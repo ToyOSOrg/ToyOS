@@ -20,8 +20,16 @@
 //! connect; and the busy fraction each CPU's MPERF ran of its stamp across the
 //! transfer (`busy=unread` where no CPU counts MPERF). An I/O or TLS error
 //! panics.
+//!
+//! MEASUREMENT ONLY, the connection-setup scout: each download also says
+//! `https_download: setup run=<n> <words>` (`netperf::Fetched::setup_words`),
+//! the LAN control says `https_download: lan control i=<k> port=<p> c0=<ns>
+//! c1=<ns> outcome=<word>` for each of [`LAN_CONNECTS`] connects to a port of
+//! the lease's router that serves nothing, and each phase says
+//! `https_download: phase name=<name> from=<ns> to=<ns>`, all on
+//! `netperf::now_ns`'s clock, which netstack's `stamp` lines are on too.
 
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -54,30 +62,20 @@ const ROOTS: &str = "/system/etc/ssl/cert.pem";
 /// Handshakes timed before the transfer, one after another.
 const PROBES: usize = 5;
 
-/// MEASUREMENT ONLY: downloads of the file, one after another, each with the
-/// cadence's stretch `S` netstack is told before it: a palindrome, so drift
-/// across the boot weighs every `S` alike. A netstack with no stretch refuses
-/// the word, and the label is then the run's place in the order.
-const K_ORDER: [u32; 6] = [8, 16, 32, 32, 16, 8];
+/// MEASUREMENT ONLY: downloads of the file, one after another.
+const RUNS: usize = 6;
 
-/// MEASUREMENT ONLY: the word that sets netstack's stretch: `S=` and the value.
-fn set_k(k: u32) {
-    use toyos::ipc::{FrameRx, RxStep};
-    let conn = toyos::endow::service("netstack").expect("the job holds a netstack connector");
-    conn.signal(u32::from_le_bytes([b'S', b'=', 0, 0]) | k << 16).expect("netstack takes the word");
-    let mut rx: Box<FrameRx<64>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        match rx.pump(&conn) {
-            RxStep::Idle => std::thread::sleep(Duration::from_millis(1)),
-            _ => return,
-        }
-    }
-    panic!("netstack did not answer S={k} in 2 s");
-}
+/// MEASUREMENT ONLY: the router's port the LAN control connects to. A router
+/// serves nothing on it, so its answer is a reset: one round trip on the LAN,
+/// with no NAT and no WAN in it. A router that does serve it answers a SYN-ACK,
+/// the same round trip; one that drops it is said `timedout`.
+const LAN_PORT: u16 = 1;
+const LAN_CONNECTS: usize = 5;
+/// The control's bound on each connect, past which its outcome is `timedout`.
+const LAN_BOUND: Duration = Duration::from_secs(1);
 
-/// MEASUREMENT ONLY: one lookup of the file's host, timed: a round trip to
-/// the LAN's resolver, which netstack asks every time.
+/// MEASUREMENT ONLY: one lookup of the file's host, timed: netstack asks the
+/// lease's resolver every time, and that resolver is off the LAN.
 fn lan_probe() -> f64 {
     let at = Instant::now();
     let _ = (HOST, 443).to_socket_addrs().unwrap_or_else(|e| panic!("look up {HOST}: {e}"));
@@ -194,10 +192,11 @@ fn main() {
             }
         });
         let (host, port) = authority(&url);
-        if args.is_empty() {
-            leased();
-        }
+        // MEASUREMENT ONLY: the QEMU check's lease too, for its router.
+        let router = leased();
+        let from = netperf::now_ns();
         *rtt.lock().unwrap_or_else(PoisonError::into_inner) = handshakes(&host, port);
+        phase("probes", from);
 
         // MEASUREMENT ONLY: the machine idle, the suite this client's offer
         // gets, and what the job's own kernels cost on this CPU.
@@ -207,22 +206,29 @@ fn main() {
         println!("https_download: {idle}");
         let pem = std::fs::read(&roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
         let path = url.splitn(4, '/').nth(3).map_or("/".to_string(), |p| format!("/{p}"));
+        let from = netperf::now_ns();
         let suite = netperf::suite(&pem, &host, port, &path);
+        phase("suite", from);
         println!("https_download: {}", netperf::benches(&machine, &suite, &idle));
 
-        // MEASUREMENT ONLY: the LAN's round trip with nothing else moving.
+        // MEASUREMENT ONLY: the lookup's round trip with nothing else moving.
+        let from = netperf::now_ns();
         let idle_lan: Vec<f64> = (0..10)
             .map(|_| {
                 std::thread::sleep(Duration::from_millis(50));
                 lan_probe()
             })
             .collect();
+        phase("lan_idle", from);
         println!("https_download: lan idle lan_ms={}", spread(idle_lan));
 
-        // MEASUREMENT ONLY: the file once per `K`, back to back.
-        for (index, k) in K_ORDER.into_iter().enumerate() {
-            let run = index + 1;
-            set_k(k);
+        let from = netperf::now_ns();
+        lan_control(router);
+        phase("lan_control", from);
+
+        // MEASUREMENT ONLY: the file [`RUNS`] times, back to back.
+        let mut previous: Option<SocketAddr> = None;
+        for run in 1..=RUNS {
             *progress.lock().unwrap_or_else(PoisonError::into_inner) = Progress { bytes: 0, first: None, last: None };
             let before = machine.snap();
             let at = Instant::now();
@@ -239,7 +245,7 @@ fn main() {
                     }
                     ms
                 });
-                let fetched = netperf::fetch(https_client::config(&roots), &url, |bytes| {
+                let fetched = netperf::fetch(https_client::config(&roots), &url, |_| String::new(), |bytes| {
                     let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
                     progress.bytes = bytes;
                     progress.last = Some(Instant::now());
@@ -251,17 +257,20 @@ fn main() {
                 (fetched, lan.join().expect("the probe thread"))
             });
             let secs = at.elapsed().as_secs_f64();
-            println!("https_download: lan run={run} k={k} lan_ms={}", spread(lan));
+            println!("https_download: setup run={run} os=toyos {}", fetched.setup_words(previous));
+            println!("https_download: phase name=run{run} from={} to={}", fetched.j[0], fetched.done);
+            previous = fetched.addrs.first().copied();
+            println!("https_download: lan run={run} lan_ms={}", spread(lan));
             let d = netperf::delta(&before, &machine.snap());
             let progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
             let rtt = rtt.lock().unwrap_or_else(PoisonError::into_inner);
             println!(
-                "https_download: {} tcp_ms={:.1} tls_ms={:.1} run={run} k={k}",
+                "https_download: {} tcp_ms={:.1} tls_ms={:.1} run={run}",
                 report("whole", Some(&fetched.sha256), &progress, &rtt, cap),
                 fetched.tcp_ms,
                 fetched.tls_ms
             );
-            println!("https_download: perf run={run} k={k} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
+            println!("https_download: perf run={run} bytes={} secs={secs:.3} {}", fetched.bytes, netperf::words(&d));
         }
         drop(transferring);
     });
@@ -278,13 +287,54 @@ fn authority(url: &str) -> (String, u16) {
 }
 
 /// Wait for netstack to say it holds a lease; panics where it says it took
-/// none.
-fn leased() {
+/// none. MEASUREMENT ONLY: answers the lease's router, never said.
+fn leased() -> Option<Ipv4Addr> {
+    let mut router = None;
     served_log::Log::open().until("netstack's word on its lease", LEASE_WAIT, |line| {
         let Some(said) = program_line(line).filter(|said| said.tag == "netstack") else { return false };
         assert!(!said.text.starts_with(toyos_tco::NO_LEASE_SAID), "{}", said.text);
-        said.text.starts_with(toyos_tco::LEASE_SAID)
+        if !said.text.starts_with(toyos_tco::LEASE_SAID) {
+            return false;
+        }
+        router = said
+            .text
+            .split_once(", gateway ")
+            .and_then(|(_, rest)| rest.split(',').next())
+            .and_then(|word| word.parse::<Ipv4Addr>().ok());
+        true
     });
+    router
+}
+
+/// MEASUREMENT ONLY: `name`'s phase ran from `from` to now.
+fn phase(name: &str, from: u64) {
+    println!("https_download: phase name={name} from={from} to={}", netperf::now_ns());
+}
+
+/// MEASUREMENT ONLY: [`LAN_CONNECTS`] connects to the router's [`LAN_PORT`],
+/// one after another, each closed as it is answered.
+fn lan_control(router: Option<Ipv4Addr>) {
+    let Some(router) = router else {
+        println!("https_download: lan control none: the lease names no router");
+        return;
+    };
+    let addr = SocketAddr::from((router, LAN_PORT));
+    for i in 1..=LAN_CONNECTS {
+        // A window of nothing before each, as the lookups': the last one's
+        // segments are done with.
+        std::thread::sleep(Duration::from_millis(50));
+        let c0 = netperf::now_ns();
+        let answered = TcpStream::connect_timeout(&addr, LAN_BOUND);
+        let c1 = netperf::now_ns();
+        let outcome = match &answered {
+            Ok(_) => "connected".to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => "refused".to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => "timedout".to_string(),
+            Err(e) => format!("error:{:?}", e.kind()),
+        };
+        drop(answered);
+        println!("https_download: lan control i={i} port={LAN_PORT} c0={c0} c1={c1} outcome={outcome}");
+    }
 }
 
 /// [`PROBES`] handshakes with `host`'s first address, each closed as it is

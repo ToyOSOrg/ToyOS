@@ -508,16 +508,14 @@ pub mod prof {
     /// Round 4: a duplicate `ns` after the text it duplicates first arrived, or, `acked`, after
     /// the acknowledgment that covered it left.
     pub fn age(acked: bool, ns: u64) {
-        let bucket = match ns {
-            0..500_000 => 0,
-            500_000..2_000_000 => 1,
-            2_000_000..8_000_000 => 2,
-            8_000_000..32_000_000 => 3,
-            _ => 4,
+        let (first, since_ack) = match ns {
+            0..500_000 => (Slot::DaLt500us, Slot::DkLt500us),
+            500_000..2_000_000 => (Slot::Da500us2ms, Slot::Dk500us2ms),
+            2_000_000..8_000_000 => (Slot::Da2_8ms, Slot::Dk2_8ms),
+            8_000_000..32_000_000 => (Slot::Da8_32ms, Slot::Dk8_32ms),
+            _ => (Slot::DaGe32ms, Slot::DkGe32ms),
         };
-        let first = [Slot::DaLt500us, Slot::Da500us2ms, Slot::Da2_8ms, Slot::Da8_32ms, Slot::DaGe32ms];
-        let since_ack = [Slot::DkLt500us, Slot::Dk500us2ms, Slot::Dk2_8ms, Slot::Dk8_32ms, Slot::DkGe32ms];
-        add(if acked { since_ack[bucket] } else { first[bucket] }, 1);
+        add(if acked { since_ack } else { first }, 1);
     }
 
     /// Round 4: a new out-of-order range with `segs` full-sized segments missing below it.

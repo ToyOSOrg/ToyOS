@@ -15,6 +15,11 @@ pub fn agent(roots: &str) -> ureq::Agent {
 
 /// MEASUREMENT ONLY: [`agent`]'s configuration, for an agent of other parts.
 pub fn config(roots: &str) -> ureq::config::Config {
+    config_family(roots, ureq::config::IpFamily::Any)
+}
+
+/// MEASUREMENT ONLY: [`config`], connecting only to addresses of `family`.
+pub fn config_family(roots: &str, family: ureq::config::IpFamily) -> ureq::config::Config {
     let pem = std::fs::read(roots).unwrap_or_else(|e| panic!("read {roots}: {e}"));
     let certs: Vec<_> = ureq::tls::parse_pem(&pem)
         .map(|item| match item.unwrap_or_else(|e| panic!("{roots}: {e}")) {
@@ -23,7 +28,7 @@ pub fn config(roots: &str) -> ureq::config::Config {
         })
         .collect();
     let tls = TlsConfig::builder().root_certs(RootCerts::new_with_certs(&certs)).build();
-    ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).build()
+    ureq::Agent::config_builder().user_agent(USER_AGENT).tls_config(tls).ip_family(family).build()
 }
 
 /// A digest as lower-case hex.

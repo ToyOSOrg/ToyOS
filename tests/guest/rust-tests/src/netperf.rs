@@ -15,14 +15,19 @@
 //! ```
 //!
 //! and netstack says `netstack: prof <words>` as each stream ends.
+//!
+//! The connection-setup scout's stamps ([`fetch`]) are nanoseconds on [`now_ns`]'s clock: J0 the
+//! call, J1 and J2 either side of the resolver, J3 the TCP connector entered, J4 it returned a
+//! connection, J5 the TLS session is up. `setup_table.rs` renders them.
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::io::Read;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{ConnectionDetails, Connector, RustlsConnector, TcpConnector, Transport};
 
 use crate::netperf_table::field;
@@ -158,19 +163,86 @@ pub fn suite(roots: &[u8], host: &str, port: u16, path: &str) -> String {
     suite
 }
 
+/// The clock every stamp is on: on ToyOS the clock page's nanoseconds since boot, which
+/// netstack's stamps and the claim's interrupt record are on too; elsewhere the monotonic clock
+/// from the first stamp.
+#[allow(unexpected_cfgs, reason = "the Linux arm's toolchain knows no ToyOS")]
+pub fn now_ns() -> u64 {
+    #[cfg(target_os = "toyos")]
+    {
+        toyos_abi::clock::nanos_since_boot()
+    }
+    #[cfg(not(target_os = "toyos"))]
+    {
+        static ZERO: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        ZERO.get_or_init(Instant::now).elapsed().as_nanos() as u64
+    }
+}
+
+type Stamp = Arc<Mutex<Option<u64>>>;
+
 /// A link of an agent's connector chain that passes its transport on and
 /// keeps when it did.
 #[derive(Clone, Debug, Default)]
-pub struct Mark(pub Arc<Mutex<Option<Instant>>>);
+pub struct Mark(pub Stamp);
 
 impl<In: Transport> Connector<In> for Mark {
     type Out = In;
 
     fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<In>, ureq::Error> {
         if chained.is_some() {
-            *self.0.lock().unwrap() = Some(Instant::now());
+            *self.0.lock().unwrap() = Some(now_ns());
         }
         Ok(chained)
+    }
+}
+
+/// The chain's first link: when the chain was entered, the TCP connector next.
+#[derive(Clone, Debug, Default)]
+pub struct Entry(pub Stamp);
+
+impl<In: Transport> Connector<In> for Entry {
+    type Out = In;
+
+    fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<In>, ureq::Error> {
+        *self.0.lock().unwrap() = Some(now_ns());
+        Ok(chained)
+    }
+}
+
+/// What the machine says of the connection the TCP connector just made, asked
+/// of its resolved addresses: the Linux arm's `TCP_INFO`.
+pub type Ask = fn(&[SocketAddr]) -> String;
+
+#[derive(Clone, Debug)]
+pub struct Probe(pub Ask, pub Arc<Mutex<String>>);
+
+impl<In: Transport> Connector<In> for Probe {
+    type Out = In;
+
+    fn connect(&self, details: &ConnectionDetails, chained: Option<In>) -> Result<Option<In>, ureq::Error> {
+        if chained.is_some() {
+            *self.1.lock().unwrap() = (self.0)(&details.addrs);
+        }
+        Ok(chained)
+    }
+}
+
+/// The agent's own resolver, timed, keeping what it answered.
+#[derive(Debug, Default)]
+pub struct Timed {
+    inner: DefaultResolver,
+    pub said: Arc<Mutex<Option<(u64, u64, Vec<SocketAddr>)>>>,
+}
+
+impl Resolver for Timed {
+    fn resolve(&self, uri: &ureq::http::Uri, config: &ureq::config::Config, timeout: ureq::unversioned::transport::NextTimeout) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let j1 = now_ns();
+        let answered = self.inner.resolve(uri, config, timeout);
+        let j2 = now_ns();
+        let addrs = answered.as_ref().map(|addrs| addrs.to_vec()).unwrap_or_default();
+        *self.said.lock().unwrap() = Some((j1, j2, addrs));
+        answered
     }
 }
 
@@ -179,19 +251,63 @@ pub struct Fetched {
     pub sha256: String,
     pub tcp_ms: f64,
     pub tls_ms: f64,
+    /// J0 to J5.
+    pub j: [u64; 6],
+    /// What the resolver answered, in its order.
+    pub addrs: Vec<SocketAddr>,
+    /// The machine's words on the connection, from [`Ask`].
+    pub probe: String,
+    /// When the body's last byte was read.
+    pub done: u64,
+}
+
+impl Fetched {
+    /// The `setup` line's words: every stamp, how many addresses the resolver
+    /// answered, whether the first is the one `previous` fetch's was (never the
+    /// address), and its family.
+    pub fn setup_words(&self, previous: Option<SocketAddr>) -> String {
+        let first = self.addrs.first().copied();
+        let addr = match (first, previous) {
+            (Some(now), Some(was)) if now == was => "same",
+            (Some(_), Some(_)) => "new",
+            (Some(_), None) => "first",
+            (None, _) => "none",
+        };
+        let family = first.map_or("none", |a| if a.is_ipv4() { "v4" } else { "v6" });
+        let [j0, j1, j2, j3, j4, j5] = self.j;
+        format!(
+            "j0={j0} j1={j1} j2={j2} j3={j3} j4={j4} j5={j5} done={} addrs={} addr={addr} family={family}{}",
+            self.done,
+            self.addrs.len(),
+            self.probe
+        )
+    }
 }
 
 /// One GET of `url` on an agent of `config`, every 64 KiB read hashed, `each`
 /// told the bytes so far; the agent, and with it the connection, is gone on
-/// return.
-pub fn fetch(config: ureq::config::Config, url: &str, mut each: impl FnMut(u64)) -> Fetched {
-    let (tcp, tls) = (Mark::default(), Mark::default());
-    let connector = ().chain(TcpConnector::default()).chain(tcp.clone()).chain(RustlsConnector::default()).chain(tls.clone());
-    let agent = ureq::Agent::with_parts(config, connector, DefaultResolver::default());
-    let called = Instant::now();
+/// return. `ask` is asked of the connection as it is made.
+pub fn fetch(config: ureq::config::Config, url: &str, ask: Ask, mut each: impl FnMut(u64)) -> Fetched {
+    let (entry, tcp, tls) = (Entry::default(), Mark::default(), Mark::default());
+    let probe = Probe(ask, Arc::default());
+    let connector = ()
+        .chain(entry.clone())
+        .chain(TcpConnector::default())
+        .chain(tcp.clone())
+        .chain(probe.clone())
+        .chain(RustlsConnector::default())
+        .chain(tls.clone());
+    let resolver = Timed::default();
+    let resolved = Arc::clone(&resolver.said);
+    let agent = ureq::Agent::with_parts(config, connector, resolver);
+    let called = now_ns();
     let response = agent.get(url).call().unwrap_or_else(|e| panic!("GET {url}: {e}"));
-    let ready = |mark: &Mark| mark.0.lock().unwrap().map_or(-1.0, |at| at.duration_since(called).as_secs_f64() * 1e3);
-    let (tcp_ms, tls_ms) = (ready(&tcp), ready(&tls));
+    let at = |stamp: &Stamp| stamp.lock().unwrap().unwrap_or(0);
+    let (j3, j4, j5) = (at(&entry.0), at(&tcp.0), at(&tls.0));
+    let (j1, j2, addrs) = resolved.lock().unwrap().take().unwrap_or_default();
+    let ms = |to: u64| if to == 0 { -1.0 } else { to.saturating_sub(called) as f64 / 1e6 };
+    let (tcp_ms, tls_ms) = (ms(j4), ms(j5));
+    let probe = std::mem::take(&mut *probe.1.lock().unwrap());
     let mut body = response.into_body().into_reader();
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
     let mut chunk = vec![0u8; 64 * 1024];
@@ -205,9 +321,9 @@ pub fn fetch(config: ureq::config::Config, url: &str, mut each: impl FnMut(u64))
         bytes += n as u64;
         each(bytes);
     }
+    let done = now_ns();
     drop(body);
     drop(agent);
     let sha256 = digest.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    Fetched { bytes, sha256, tcp_ms, tls_ms }
+    Fetched { bytes, sha256, tcp_ms, tls_ms, j: [called, j1, j2, j3, j4, j5], addrs, probe, done }
 }
-
