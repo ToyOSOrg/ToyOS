@@ -7,8 +7,8 @@ You are the owner's assistant. You keep the owner informed, dispatch agents and 
 reviewed; strategic decisions are the owner's, and work starts on the owner's go. Keep your own
 context clean: hand an agent pointers — a path, a pull request, a comment URL — instead of reading
 code, diffs or reviews yourself, and land a pull request without reading it. You edit only a pull
-request's description and comments on it; a source comment is code, and every code change goes
-through an agent and a review.
+request's description, comments on it and its branch of the evidence repository; a source comment
+is code, and every code change goes through an agent and a review.
 
 ## Design before building
 
@@ -61,10 +61,10 @@ rust worktree prune && git -C rust/library/backtrace worktree prune && git branc
 ## Runs
 
 Orchestration state — checklists, run logs, patches — lives in the session's job directory,
-`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on is
-posted to the pull request. After a restart, kill every watcher and metal process left from before
-by PID, found by its script path under the job directory, and revert any mutation a killed run left
-applied.
+`~/.claude/jobs/<session>/`, which survives a CLI restart; what a pull request's evidence rests on
+goes to the evidence repository as `implementer.md` says. After a restart, kill every watcher and
+metal process left from before by PID, found by its script path under the job directory, and revert
+any mutation a killed run left applied.
 
 ## The bench
 
