@@ -83,20 +83,31 @@ and owns each one this list gives no other owner.
 - **Metal rows.** Every stage with a row on the T14 or the AMD bench first
   needs `issues/a-metal-row-names-no-hardware-and-a-bench-without-it-reds.md`.
 
-**S1, the T14's read-out and the compatibility-format A/B.** A scout of two
-boots in one session, never landing. Owner: the orchestrator. Depends on:
-nothing; it runs first.
-- **Exit, the read-out**, on `pr-876`: the AX210's position, every bridge
-  window on its path to the root, its BARs, its MSI and MSI-X capabilities
-  (table and PBA BIR and offset), the DMAR scope and reserved regions naming
-  it, the ACPI names under its device, and where the T14's NVMe keeps its
-  MSI-X table.
-- **Exit, the A/B**, the one exit 1 of
-  `issues/qemu-passes-compatibility-format-interrupts.md` asks for. Boot A
-  leaves one kernel-armed MSI source in compatibility format with `IRE` set
-  and `CFIS` clear; boot B leaves it remapped. Green is fault 0x25 and no
-  delivery in A, and delivery in B. A red A is filed as a kernel-wide
-  isolation defect against every claim, and P1 waits.
+**S1, the T14's read-out and the compatibility-format A/B: done, both exits
+met.** The orchestrator's scout, never landing, on `ToyOSOrg/evidence`
+`pr-876`: the A/B and the PCI and DMAR read-out in `s1/`
+(https://github.com/ToyOSOrg/evidence/blob/cd368b25b2259a76b80dc31f4219dac1c91d84dc/s1/judge.log),
+and the ACPI read-out in `s1-r2/`
+(https://github.com/ToyOSOrg/evidence/blob/abd63019cfc896d69b59a8acba29fedaec0b48cc/s1-r2/judge.log).
+- **The A/B: compatibility format blocked.** Boot A left the MSI of the xHCI
+  at 00:0d.0 in compatibility format with `IRE` set and `CFIS` clear: fault
+  0x25 and no delivery. Boot B left it remapped: delivered, no fault. P1's
+  Q2 condition and W5's S1 dependency are met.
+- **The read-out.** The AX210 is 09:00.0, behind root port 00:1c.4: BAR 0
+  alone, 16 KiB, mem64, with its MSI-X table at BAR 0 + 0x2000, its PBA at
+  BAR 0 + 0x3000, and MSI with one vector. No DMAR unit's scope names it, so
+  it is the INCLUDE_PCI_ALL unit's, and no reserved region names it. The
+  ACPI read-out found the radio's device under its root port, with its names
+  below it. The T14's NVMe keeps its MSI-X table at BAR 0 + 0x2000 too,
+  which puts it in P1's T14 exit.
+- **What S1 does not separate.** The T14 runs with `EIME` set, and VT-d
+  §5.1.4 blocks compatibility format where `EIME` is set or `CFIS` is
+  clear. Boot A read the block with both true on every unit, so S1 does not
+  show `CFIS=0` alone blocking it, which exit 1 of
+  `issues/qemu-passes-compatibility-format-interrupts.md` still asks. A VT-d
+  machine the kernel leaves without `EIME` (an xAPIC machine, or a unit
+  without `ECAP.EIM`: `kernel/src/arch/x86_64/vtd/mod.rs`) rests on `CFIS=0`
+  alone.
 
 **S2, the link hop's cost on the T14.** A scout, never landing: two
 processes over `toyos-transport`, one entry per 1,514-byte frame, batches of
@@ -125,12 +136,13 @@ Depends on: nothing.
 
 **P1, a BAR stays where firmware put it, in 4 KiB pages, its MSI-X table's
 page included.** Owner: the orchestrator.
-- **Depends on:** S1 reading compatibility format blocked (Q2), and 4 KiB
-  user leaves for device windows: stage 3 of
+- **Depends on:** 4 KiB user leaves for device windows: stage 3 of
   `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`,
-  or the slice its holder accepts.
+  or the slice its holder accepts. Its Q2 condition, S1 reading
+  compatibility format blocked, is met.
 - **Exit:**
-  - on the T14, the AX210 claimed with its BAR in place, and
+  - on the T14, the AX210 claimed with its BAR in place; the NVMe driven
+    through its MSI-X table at BAR 0 + 0x2000 (S1); and
     `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     unchanged;
   - `msix-exclusive-bar=on` gone from `tests/common/qemu.rs` and
@@ -266,7 +278,7 @@ W2.
 - The pull request landing it files the Transition Disable weakness below.
 
 **W5, bring-up and passive scan on the T14**, the first stage that ships
-`ax2xx`. Depends on: S1, P1, P4 (its match table), W3, W4; and the test
+`ax2xx`. Depends on: S1 (met), P1, P4 (its match table), W3, W4; and the test
 networks, an access point at the T14's bench serving a WPA2-Personal network
 and a WPA3-Personal one by hash-to-element, with PMF and HE, an instrument
 the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC

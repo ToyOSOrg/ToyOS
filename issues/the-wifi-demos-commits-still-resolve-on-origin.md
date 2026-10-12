@@ -18,12 +18,22 @@ At `c0cdddf4e` E10 had counted 11 branches holding it that touched a
 Wi-Fi-named path
 (https://github.com/ToyOSOrg/evidence/blob/5d27b8209199228ccc1e133b69ad4c3758f18510/e10-demo-branches-on-origin.log).
 
-Their commits still resolve there by hash. GitHub's commit API for `origin`
-answers each of the 12 tips E10 prints past `wt/toyos-survey`, and each
-answer carries the model name (E12 §2). E10 and E11 print those tips in full
-on `ToyOSOrg/evidence`, whose branches only grow.
+Their commits still resolve there by hash. Over the 12 tips E10 prints past
+`wt/toyos-survey`, `git rev-list <tips> --not --remotes=origin` prints 52
+commits. No ref on `origin` holds any of them, pull requests' refs included,
+`origin` has no fork, and GitHub's commit API for `origin` answers all 52
+(E15,
+https://github.com/ToyOSOrg/evidence/blob/6196aad98a0bf5eff937a25b9dad4ec10e59376f/e15-demo-commits-on-origin.log).
+The API's answer for each of the 12 tips carries the model name (E12 §2).
 
-What they carry:
+Three logs on `ToyOSOrg/evidence`, whose branches only grow, print hashes
+that resolve there:
+
+- E10 and E11 print the 12 tips in full;
+- E13 §2 quotes a build by its hash, abbreviated to nine hex digits (its
+  line 80). Nine of the tips hold that commit, and it is one of the 52.
+
+What the demo's commits carry:
 
 - the model name, which E10 to E13 mask: in commit subjects (E13 §2 quotes
   two,
@@ -38,11 +48,13 @@ What they carry:
   notice (#876 §0); code written against one is not that, and carries none
   [I].
 
-Owner: the orchestrator, who takes it to the owner, whose call the demo's
-branches were.
+Owner: the orchestrator. The owner, whose call the demo's branches were,
+ruled to leave the commits on GitHub: "leave it". Nothing asks GitHub to
+remove them, so the exit waits for GitHub's garbage collection of commits no
+ref holds.
 
 **Exit**: no ref on `origin` carries the model name, which E12 §1 already
-reads; and GitHub's commit API for `origin` answers none of the 12 tips E10
-prints past `wt/toyos-survey`, where E12 §2 reads 12 of 12. The local branches
-are kept for readers' scouts, and every reader's scout stays off `origin`
-(#876 §7).
+reads; and GitHub's commit API for `origin` answers none of the commits
+`git rev-list <tips> --not --remotes=origin` prints over those 12 tips, where
+E15 reads 52 of 52. The local branches are kept for readers' scouts, and
+every reader's scout stays off `origin` (#876 §7).
