@@ -204,6 +204,19 @@ actuators! {
     /// claim: `drivers::xhci` never touches it. Read through [`xhci_left`];
     /// judged by `usbd_drives_the_spare`.
     xhci_leave = "xhci-leave=";
+
+    /// Measurement scout, never landed: log where every radio and NVMe
+    /// function sits, its bridges' windows, its BARs and its message
+    /// capabilities (`crate::pci_readout`). Judged by `wifi_s1_readout`.
+    pci_readout = "pci-readout";
+
+    /// Measurement scout, never landed: write a claim's message in
+    /// compatibility format, its remapping entry written as ever. With `IRE`
+    /// set, VT-d 4.0 §5.1.4 blocks such a message where `CFIS` is clear or
+    /// `EIME` set. Judged by `wifi_s1_compat_format`.
+    // VT-d is x86-64's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    claim_compat_format = "claim-compat-format";
 }
 
 #[cfg(feature = "boot-actuators")]

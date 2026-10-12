@@ -1,0 +1,110 @@
+# Measurement scout, never landed: the Wi-Fi design's S1 boots, which are
+# `tests/images/testcases.toml` with acpiserver reading out the namespace's PCI
+# devices. The `wifi_s1_*` metal rows and `scout_wifi_s1` boot it.
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "soundserver", "acpiserver", "test-runner"]
+
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does. The kernel keeps the record ring and writes no file at all, so a
+# boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one.
+# It claims no device: its row's authority is `logread`, which is
+# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
+# it every program's output beside that. `log` is the port it hands a reader
+# the log on.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+serves = ["log"]
+
+# The machine's ACPI fixed hardware, as `images/system.toml` serves it, and the
+# read-out of the namespace's PCI devices (`system/acpiserver/src/readout.rs`).
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
+args = ["--pci-readout"]
+
+[programs.soundserver]
+service = true
+serves = ["soundserver"]
+devices = ["hda-audio", "pci:1af4:1059"]
+syscap = ["rt"]
+
+# The test estate's authority.
+# `device` because five of the guest binaries claim the keyboard or the mouse
+# and no manifest row can name them — they are not `[programs]` keys — and `dup`
+# because a claim moves and one boot runs several of them.
+# `logread` because the log gate reads the kernel's own records and cannot be
+# a spawned binary: a `SysCap` dup is not part of the namespace test-runner
+# hands down.
+# `power` because `endowment_denied` narrows it *away* to prove the two power
+# syscalls refuse a capability without it, which a capability that never
+# carried it would make vacuous. `run shutdown` does not use it: the applet asks
+# the supervisor through the `power` connector, and the supervisor has `logkeeper` make the log whole
+# before it stops the machine.
+# `roster` because guest binaries read `SYS_SYSINFO`'s per-thread entries —
+# soundserver's, for the idle-suspend certification, and their own, which arrive in
+# the same machine-wide answer and have no narrower question in the ABI. It is
+# also what `endowment_denied` narrows *away* to prove the refusal, so an estate
+# without it would make that arm vacuous rather than red.
+# `counters` and `trace` because `counters_read` reads every counter there is,
+# and narrows each away to prove its refusal.
+# `log` because `counters_metal` measures its idle second only once the log
+# holds its own line, read back off logkeeper.
+[programs.test-runner]
+receives = ["soundserver", "power", "log"]
+syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
+
+[programs.toybox]
+receives = ["soundserver"]
+
+# `disk_backtrace` names its child's crash record with it.
+[programs.symbolize]
+
+# `toyfetch_reports` runs it, holding nothing, as the image's row does.
+[programs.toyfetch]
+
+# One xHCI controller driven from userland: `usbd_spare` claims the controller
+# the kernel was told to leave alone (`xhci-leave=`, `pci:1b36:000d` on the
+# guest and the Type-C controller on the T14), and starts and ends this itself,
+# holding the claim, its `usb` port and its process.
+[programs.usbd]
+
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
+# The shipped audio client, and the one the T14 hangs on. The raw-API tone in
+# `toyos-rust-tests` drains the same sink perfectly, so a suite that ran only
+# that one certified a path no user takes.
+"bin/tone" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

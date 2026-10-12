@@ -292,6 +292,20 @@ pub fn claim(slot: usize, source: StreamId) -> Result<Msi, Refused> {
         (index, table.read_pair(slot))
     };
     report(index, source, MSG_DEST, read);
+    // Measurement scout, never landed. VT-d 4.0 §5.1.4: with `IRE` set, "if
+    // Extended Interrupt Mode is enabled (EIME ...), or if the Compatibility
+    // format interrupts are disabled (CFIS ... Clear), the Compatibility format
+    // interrupts are blocked". The entry above is written as ever, so this
+    // message differs from the remapped one in its format alone.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::claim_compat_format() {
+        let (address, data) = super::super::apic::msi_message(vector);
+        log!(
+            "iommu: claim slot {slot}'s message for {source} left in compatibility format \
+             (claim-compat-format): address={address:#010x} data={data:#010x}"
+        );
+        return Ok(Msi { address, data });
+    }
     Ok(message(index))
 }
 

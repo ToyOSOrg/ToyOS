@@ -58,6 +58,8 @@ mod file_cache;
 mod leak_selftest;
 #[cfg(feature = "boot-actuators")]
 mod revoke_selftest;
+#[cfg(feature = "boot-actuators")]
+mod pci_readout;
 mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
@@ -441,6 +443,11 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
+    }
+    // Before any driver `init`, for `pcidev::publish`'s reason: it sizes BARs.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::pci_readout() {
+        pci_readout::readout(&pci_devices);
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.

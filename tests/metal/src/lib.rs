@@ -814,6 +814,19 @@ pub const FLASHABLE: &[&str] = &[
     // and firmware takes the controller back at the next power-on. Only this
     // id: the other controller carries the boot stick.
     "xhci-leave=8086:9a13",
+    // Measurement scout, never landed (the Wi-Fi design's S1). It reads the
+    // configuration space of every radio and NVMe function and of the bridges
+    // above each, and sizes their BARs by the probe `pcidev::publish` runs on
+    // every function of every boot, before any driver binds. It writes back
+    // every register it probed and reaches no firmware state.
+    "pci-readout",
+    // Measurement scout, never landed (the Wi-Fi design's S1). A claim's
+    // message is written in compatibility format, the claimed function's own
+    // register, which the claim's release and the next power-on rewrite. The
+    // unit blocks it and records a fault against the claim, whose holder ends;
+    // where the unit does not, it raises the claim's own vector on cpu0, as the
+    // remapped message does. It reaches no firmware state.
+    "claim-compat-format",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and

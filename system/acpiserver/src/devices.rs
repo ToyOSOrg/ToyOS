@@ -176,7 +176,7 @@ fn devices(interpreter: &Interpreter) -> Result<(Vec<String>, BTreeSet<String>),
 /// A `_HID` as the text it names (§6.1.5): a string as it is, and an integer
 /// as the EISA ID it compresses, three letters of five bits each and four
 /// hex digits, its bytes in the order AML stores them.
-fn id(value: &Value) -> Option<String> {
+pub(crate) fn id(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => String::from_utf8(text.clone()).ok(),
         &Value::Integer(compressed) => {

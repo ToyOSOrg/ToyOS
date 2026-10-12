@@ -211,6 +211,9 @@ const RUST_SKIP: &[&str] = &[
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
+    // Measurement scout, never landed: the same claim on the Wi-Fi design's
+    // S1 boots, which `scout_wifi_s1` and the `wifi_s1_*` metal rows run.
+    "scout_compat_format",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -461,6 +464,10 @@ const MACHINE_TESTS: &[&str] = &[
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
     "usb_keyboard_rollover",
+    // Measurement scout, never landed: the Wi-Fi design's S1 A/B and
+    // read-out on QEMU, as far as QEMU reaches. QEMU passes compatibility
+    // format, so its A is delivered; the T14's is the reading.
+    "scout_wifi_s1",
     // What `toyfetch` reads through the `sysinfo` fork's ToyOS backend: the
     // backend calls `SYS_SYSINFO` and reads ROOT, which no host has, and the
     // CPU count is held to the `-smp` this boot gave QEMU, a count the
@@ -1071,6 +1078,33 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- measurement scout, never landed: the Wi-Fi design's S1, two boots ----
+    (
+        // A claim's message in compatibility format with `IRE` set and `CFIS`
+        // clear on A, remapped on B: fault 0x25 and no delivery in A, delivery
+        // in B (VT-d 4.0 §5.1.4).
+        "wifi_s1_compat_format",
+        metal::Metal {
+            arms: WIFI_S1,
+            judge: |b| common::wifis1::compat_on_metal(b[0].log().text(), b[1].log().text()),
+        },
+    ),
+    (
+        // The radio's and the NVMe's place, windows, BARs and message
+        // capabilities, the DMAR's scope and regions reaching the radio, and
+        // the names under its ACPI device; both boots read the same.
+        "wifi_s1_readout",
+        metal::Metal {
+            arms: WIFI_S1,
+            judge: |b| {
+                let (a, b) = (b[0].log(), b[1].log());
+                if common::wifis1::kernel_lines(a.text()) != common::wifis1::kernel_lines(b.text()) {
+                    return Err("A and B, one machine in one session, read out differently".to_string());
+                }
+                common::wifis1::readout(b.text(), true)
+            },
+        },
+    ),
     (
         "crash_report_reads_no_kernel_memory",
         metal::Metal {
@@ -1080,6 +1114,23 @@ const METAL: &[(&str, metal::Metal)] = &[
                 faults::crash_report_reads_no_kernel_memory(&b[0].kernel())
             },
         },
+    ),
+];
+
+/// Measurement scout, never landed: the Wi-Fi design's S1 boots, one machine
+/// in one session, differing in `claim-compat-format` alone.
+const WIFI_S1: &[metal::Arm] = &[
+    metal::once(
+        "wifi-s1-a",
+        "tests/images/wifis1case.toml",
+        &["xhci-leave=8086:9a13", "pci-readout", "claim-compat-format"],
+        &["test_rs_scout_compat_format"],
+    ),
+    metal::once(
+        "wifi-s1-b",
+        "tests/images/wifis1case.toml",
+        &["xhci-leave=8086:9a13", "pci-readout"],
+        &["test_rs_scout_compat_format"],
     ),
 ];
 
@@ -3932,6 +3983,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "toyfetch_reports" => toyfetch_reports(test_config),
+        "scout_wifi_s1" => scout_wifi_s1(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -4664,6 +4716,31 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
     refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
     Ok(())
+}
+
+/// Measurement scout, never landed: the Wi-Fi design's S1 on QEMU's
+/// `qemu-xhci` spare, each boot judged on its whole console. QEMU passes
+/// compatibility format through, so A is delivered as B is; the read-out
+/// reads QEMU's NVMe and its namespace, and no radio.
+fn scout_wifi_s1() -> Result<(), String> {
+    const JOB: &str = "scout_compat_format";
+    let case = compile::repo_root().join("tests/images/wifis1case.toml");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut said = Vec::new();
+    for params in [
+        &["xhci-leave=1b36:000d", "pci-readout", "claim-compat-format"][..],
+        &["xhci-leave=1b36:000d", "pci-readout"][..],
+    ] {
+        let options = BootOptions { profile: qemu::Profile::HeadlessUsbSpare, kernel_params: params, ..Default::default() };
+        let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin.clone())], options);
+        let mut console = format!("{}\n", serial::Serial::boot(&qemu).text());
+        // The server's lines reach the console by another road than the kernel's.
+        qemu::await_marker(&mut qemu, &mut console, "acpiserver: acpi-readout: ", "acpiserver's read-out")?;
+        let job = job_window(&mut qemu, "test_rs_scout_compat_format")?;
+        said.push(format!("{console}\n{job}"));
+    }
+    common::wifis1::compat_on_qemu(&said[0], &said[1])?;
+    common::wifis1::readout(&said[1], false)
 }
 
 /// The T14's Type-C controller left to a claim and driven by usbd: the

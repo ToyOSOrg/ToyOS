@@ -20,3 +20,5 @@ pub mod qemu;
 pub mod screen;
 pub mod serial;
 pub mod usb;
+/// Measurement scout, never landed: the Wi-Fi design's S1 readings.
+pub mod wifis1;

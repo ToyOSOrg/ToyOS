@@ -3015,6 +3015,7 @@ mod tests {
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
         "tests/images/virtsmpcase.toml",
+        "tests/images/wifis1case.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {

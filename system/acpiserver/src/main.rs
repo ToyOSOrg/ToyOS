@@ -59,6 +59,7 @@ mod devices;
 mod ec;
 mod host;
 mod ledger;
+mod readout;
 mod sci;
 mod tables;
 
@@ -125,6 +126,12 @@ fn main() {
     server.aml = kept;
     let (batteries, adapters) = server.arm_controller();
     server.find_power(batteries, adapters);
+    if std::env::args().any(|arg| arg == readout::ARG) {
+        match &mut server.aml {
+            Some(aml) => readout::pci(&mut aml.interpreter, &mut aml.host),
+            None => println!("acpiserver: acpi-readout: no namespace was kept"),
+        }
+    }
     server.serve();
 }
 
