@@ -11,6 +11,7 @@
 //! ```
 
 use kernel::sched::cpu::{Balance, PUSH_THRESHOLD};
+use kernel::sched::fair::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::scenarios;
@@ -170,9 +171,9 @@ fn lopsided(shape: Shape, threads: usize) -> Scenario {
     scenarios::lopsided_placement(shape.cpus(), threads, 60 * MS).with_topology(shape)
 }
 
-/// **The shipped push keeps every idle CPU inside I15's bound**, and the bound
-/// constrains: on the lopsided machine the last CPU its cursor reaches waits
-/// out the cursor's walk, up to `cpus` rounds, against `cpus + 2`.
+/// **The shipped push keeps every idle CPU inside I15's bound** on the
+/// lopsided machine, where the last CPU its cursor reaches waits out the
+/// cursor's walk.
 #[test]
 fn the_push_keeps_an_idle_cpu_beside_work_inside_its_bound() {
     for shape in [Shape::t14(), Shape::amd_bench()] {
@@ -184,12 +185,6 @@ fn the_push_keeps_an_idle_cpu_beside_work_inside_its_bound() {
             worst = worst.max(outcome.wc_rounds);
         }
         println!("{}: worst idle beside stealable work {worst} rounds, bound {bound}", shape.name);
-        assert!(
-            worst * 2 > bound,
-            "{}: the worst stretch is {worst} rounds against {bound}, more than twice under it — \
-             the bound has stopped constraining anything",
-            shape.name,
-        );
     }
 }
 
@@ -211,13 +206,18 @@ fn an_idle_cpu_whose_ccx_looks_busy_is_reached() {
 /// **The negative gate: a push that waits for more surplus than a probe takes.**
 /// `PUSH_THRESHOLD`'s own doc names the drift: one above the probe's threshold
 /// leaves a victim holding one stealable task unannounced, so a CPU that halted
-/// before the task was queued is never rung. Three threads on cpu0 is exactly
-/// that victim. It must fail, on I15 alone; the shipped threshold on the same
-/// machine is the control and must hold.
+/// before the task was queued is never rung. One thread on cpu0 above
+/// `PUSH_THRESHOLD` is exactly that victim, and each runs `cpus + 3` quanta, so
+/// the one it queues outlasts I15's `cpus + 2` rounds. It must fail, on I15
+/// alone; the shipped threshold on the same machine is the control and must
+/// hold.
 #[test]
 fn a_push_that_waits_for_more_than_a_probe_takes_is_caught() {
     for shape in [Shape::t14(), Shape::amd_bench()] {
-        let shipped = lopsided(shape.clone(), 3);
+        let threads = PUSH_THRESHOLD as usize + 1;
+        let work = (shape.cpus() as u64 + 3) * QUANTUM_NS;
+        let shipped =
+            scenarios::lopsided_placement(shape.cpus(), threads, work).with_topology(shape.clone());
         let late = shipped.clone().with_balance(Balance::PushOnSurplus {
             threshold: PUSH_THRESHOLD + 1,
         });

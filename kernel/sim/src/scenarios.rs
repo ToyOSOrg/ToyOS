@@ -1540,7 +1540,7 @@ pub fn lopsided_placement(cpus: usize, threads: usize, work: u64) -> Scenario {
 /// look busy, beside a victim with work to spare, on the AMD bench's two CCXs.
 ///
 /// cpu8 is idle while every other CPU of its CCX holds a task queued behind the
-/// one it runs — load no probe takes — and cpu0, in the other CCX, holds two. A
+/// one it runs, and cpu0, in the other CCX, holds two. A
 /// rule that compares the two CCXs' average load sees cpu8's as the busier and
 /// never probes cpu0, which is how an average in a summary hides an idle CPU,
 /// and work conservation (invariant I15) is the one check that sees it. The

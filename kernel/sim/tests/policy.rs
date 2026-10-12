@@ -682,9 +682,9 @@ const LOPSIDED: [(usize, usize); 4] = [(2, 8), (4, 16), (4, 64), (8, 64)];
 ///
 /// Both halves of the pull path stop at the same inequality:
 /// `answer_steal_requests` hands over only a stealable task and
-/// `post_steal_probe` will not probe a victim publishing none — and the
-/// stealable count is sampled after the pick, so it excludes the task the CPU
-/// is about to run. So the floor a loaded CPU can be drained to is the one task
+/// `post_steal_probe` will not probe a victim publishing no queued one — and
+/// both are sampled after the pick, so they exclude the task the CPU is about
+/// to run. So the floor a loaded CPU can be drained to is the one task
 /// it runs, and everything above that floor is stealable, one task per
 /// answered probe.
 ///
@@ -710,7 +710,10 @@ fn stealable(threads: usize) -> u64 {
 /// [`Balance::PushOnSurplus`] since the owner's 2026-08-23 decision.
 ///
 /// **Two findings.** Where the balance path runs at all it drains the loaded
-/// CPU to within one task of [`stealable`], one task per answered probe.
+/// CPU *completely*: the best seed at every width moves exactly [`stealable`]
+/// tasks — all but the one cpu0 is running — so a machine an adversary piled
+/// onto one CPU is emptied to the protocol's own floor, one task per answered
+/// probe.
 ///
 /// And the pull alone **only ever reaches the CPUs that are still awake.** The
 /// probe is posted from an idle pass, one per idle trip, and only against a
@@ -769,18 +772,15 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
         );
         // **The drain, asserted where it is a law.** The best seed is the one in
         // which a thief was awake for the whole run, and there the balance path
-        // has to empty cpu0 to within one task of the floor. The last stealable
-        // task queues only behind cpu0's last runner, and a thief is idle to
-        // ask for it only if its own stolen task ended first, which is the
-        // schedule's; every task above it is taken. Anything less is a path
-        // that gives up while surplus is still published; anything more is the
-        // ceiling above.
-        assert!(
-            best + 1 >= floor,
+        // has to empty cpu0 down to the floor and no further. Anything less is a
+        // path that gives up while surplus is still published; anything more is
+        // the ceiling above.
+        assert_eq!(
+            best, floor,
             "at {cpus} cpus and {threads} threads on cpu0, the best of {LOPSIDED_SEEDS} \
              schedules moved {best} tasks and the surplus floor leaves {floor} stealable. A \
-             machine with a thief awake for the whole run must be drained to within one task \
-             of that floor: one task per answered probe, while a stealable task is published",
+             machine with a thief awake for the whole run must be drained to that floor: one \
+             task per answered probe, while a task is queued",
         );
         // **The shipped default reaches every CPU in every schedule.** This is
         // the push's whole reason to ship: under plain `Balance::Pull` a CPU
@@ -1078,8 +1078,8 @@ fn a_bounded_re_arm_reaches_every_cpu_the_pull_path_left_asleep() {
             // And the drain is unchanged: a cure that reaches every CPU by
             // moving more tasks than cpu0 has to give would be a different
             // machine, not a repaired one.
-            assert!(
-                cured.best_migrations + 1 >= floor,
+            assert_eq!(
+                cured.best_migrations, floor,
                 "the best of {LOPSIDED_SEEDS} schedules moved {} tasks and the surplus floor \
                  leaves {floor} stealable — the re-arm changes when a probe is posted and \
                  nothing about what answering one hands over",
@@ -1184,8 +1184,8 @@ fn a_push_on_surplus_reaches_every_cpu_the_pull_path_left_asleep() {
              reaching the same CPU twice instead of walking the machine.",
             cured.gap_ns,
         );
-        assert!(
-            cured.best_migrations + 1 >= floor,
+        assert_eq!(
+            cured.best_migrations, floor,
             "the best of {LOPSIDED_SEEDS} schedules moved {} tasks and the surplus floor leaves \
              {floor} stealable — the push changes which CPU asks and nothing about what \
              answering hands over",

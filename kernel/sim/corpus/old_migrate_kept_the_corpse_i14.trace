@@ -5,6 +5,6 @@
 # note: has just been torn down, on the CPU soundserver itself is running, with a
 # note: sibling asleep: place() forwards the corpse instead of reaping it.
 # note: re-shrunk after an awake CPU with nothing loaded came to owe its pass at
-# note: once, which renumbers every decision.
-1 1 1 2 0 0 0 0 1 2 2 2 0 1 1 2 0 1 2 0 1 0 1 0 0 3 1 2 0 0 2 0
-2 0 0 0 2 0 2 2 1 1 0 3 
+# note: once, which renumbers every decision, and again after a busy CPU is kicked
+# note: and a fair wake behind fair work is forwarded too.
+2 0 1 1 1 1 1 1 1 1 1 1 1 1 1 2 1 2 1 2 1 2 0 2 

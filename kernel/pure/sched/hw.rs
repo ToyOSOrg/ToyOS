@@ -104,9 +104,11 @@ pub trait Machine: Kicker + 'static {
     /// state, so it lives above the boundary and its proof is [`SleepToken`].
     fn halt(&self);
 
-    /// Ask `cpu` to take its next safe point. Needed for one case: a `Retire`
+    /// Ask `cpu` to take its next safe point. Needed for two cases: a `Retire`
     /// whose target is the *running* task cannot be yanked mid-syscall, so it
-    /// is asked to die at its next safe point instead.
+    /// is asked to die at its next safe point instead; and a steal probe that
+    /// only the task this CPU still stands on could answer waits for the pass
+    /// after the switch.
     fn need_resched(&self, cpu: CpuId);
 
     fn trace(&self, ev: TraceEvent);
