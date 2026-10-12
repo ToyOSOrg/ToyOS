@@ -11,9 +11,10 @@ The loom fork, ToyOSOrg/loom `toyos` at `dfe3797`, carries v0.7.2's
 branches the scheduler. A model that deadlocks has no thread active when
 `Execution::schedule` panics, so the drop that panic's unwinding reaches
 unwraps `None` in `rt::thread::Set::active_mut` (`src/rt/thread.rs:276`), and
-a destructor panicking during cleanup aborts the process. The test binary then
-prints neither the test's `FAILED` line nor loom's message: a gate that reads
-the harness's verdicts finds none. Loom's cells and atomics skip their checks
+a destructor panicking during cleanup aborts the process. The test binary
+prints loom's `deadlock; threads = ...`, then aborts before the harness prints
+the test's `FAILED` line or its summary: a gate that reads the harness's
+verdicts finds none. Loom's cells and atomics skip their checks
 while `std::thread::panicking()`; its `Arc` does not.
 
 **Evidence** ([ToyOSOrg/evidence `29c8ebcb`, `arc-probe/`](https://github.com/ToyOSOrg/evidence/tree/29c8ebcb04eae318598ff7cb0a045e6e9a1c4f53/arc-probe)):
