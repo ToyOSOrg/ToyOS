@@ -293,9 +293,8 @@ pub fn budget_smp(ceiling: Duration, smp: u32) -> Duration {
 /// about the host.
 ///
 /// `total` is the second half, and it is a wedge guard rather than a verdict
-/// too. A guest can be stuck and chatty: the compositor prints an interval line
-/// every two seconds whatever else has stopped, so silence alone cannot end a
-/// desktop loop and a suite that never ends is worse than one that reds.
+/// too. A guest can be stuck and chatty, and a suite that never ends is worse
+/// than one that reds.
 ///
 /// The caller owns the capture, so progress is "did it grow" and costs nothing.
 pub struct Liveness {
@@ -355,24 +354,17 @@ pub const TIMED_OUT: &str = "timed out after";
 
 /// How long a guest may say nothing before a wait on it is a stall.
 ///
-/// Every config these waits run on has something on a periodic interval — the
-/// compositor's frame batch and soundserver's stats window are both about 2 s — so
-/// silence here is a machine that has stopped rather than a machine that is
-/// thinking. It is not a verdict about any of them: no assertion in this suite
-/// is satisfied by the guest merely talking.
+/// It is not a verdict: no assertion in this suite is satisfied by the guest
+/// merely talking.
 ///
-/// The other side of that coin: on a shared boot the kernel itself is one of
-/// the periodic speakers, on a 10 s cadence, so a wait whose predicate never
-/// comes true is never ended by this bound — the guest keeps talking, and the
-/// wait runs the whole of [`GUEST_WEDGED`].
+/// On a shared boot the kernel itself is a periodic speaker, on a 10 s cadence,
+/// so a wait whose predicate never comes true is never ended by this bound —
+/// the guest keeps talking, and the wait runs the whole of [`GUEST_WEDGED`].
 pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 
-/// The other end of the same guard: a guest can be stuck and chatty.
-///
-/// The compositor prints its interval line whatever else has stopped, so
-/// silence alone cannot end a desktop wait, and a suite that never ends is
-/// worse than one that reds. [`budget_smp`]'s rule over the tests that wait
-/// through [`await_guest`].
+/// The other end of the same guard: a guest can be stuck and chatty, and a
+/// suite that never ends is worse than one that reds. [`budget_smp`]'s rule
+/// over the tests that wait through [`await_guest`].
 pub const GUEST_WEDGED: Duration = Duration::from_secs(141);
 
 /// A kernel line without its head.
@@ -490,8 +482,8 @@ pub const VERDICT_POLL: Duration = Duration::from_millis(100);
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
-/// but idle guest on a config with no live periodic speaker — no compositor, an
-/// idle soundserver, and the kernel's own ~10 s line halting with the idle loop — was
+/// but idle guest on a config with no live periodic speaker — an idle
+/// soundserver, and the kernel's own ~10 s line halting with the idle loop — was
 /// measured quiet for as long as 102 s, so a guard that fired on 15 s of silence
 /// by itself would red a working machine. A guest's own budget is what says how
 /// long its silence is allowed; only past *that* does quiet mean stopped.

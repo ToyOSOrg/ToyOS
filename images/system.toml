@@ -41,7 +41,6 @@ folder = "read-write"
 # its own `/state/<name>` and makes that directory first. Every other row runs
 # with the session user's home.
 [programs]
-proctest = {}
 # The installer. It holds nothing: it writes under `/apps` because `/apps` is
 # writable to it, and a row that gave it more would make that untrue.
 pkg = {}
@@ -100,7 +99,7 @@ devices = ["pci:1af4:1041"]
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
@@ -160,7 +159,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "grants", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -199,7 +198,7 @@ receives = ["compositor", "filepicker"]
 [programs.toybox]
 receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "toyfetch", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "/apps"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.
@@ -214,14 +213,12 @@ starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "pai
 "bin/ls" = "/system/bin/toybox"
 "bin/mkdir" = "/system/bin/toybox"
 "bin/mv" = "/system/bin/toybox"
-"bin/net" = "/system/bin/toybox"
 "bin/ps" = "/system/bin/toybox"
 "bin/pwd" = "/system/bin/toybox"
 "bin/reboot" = "/system/bin/toybox"
 "bin/rm" = "/system/bin/toybox"
 "bin/screen" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"
-"bin/spin" = "/system/bin/toybox"
 "bin/stats" = "/system/bin/toybox"
 "bin/tone" = "/system/bin/toybox"
 
