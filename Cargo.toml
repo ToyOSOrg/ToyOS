@@ -118,6 +118,7 @@ members = [
     "system/shell",
     "system/soundserver",
     "system/soundserver/mixer",
+    "system/soundserver/resample",
     "system/soundserver/virtio-sound",
     "system/sshserver",
     "system/supervisor",

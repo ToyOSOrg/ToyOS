@@ -490,7 +490,7 @@ pub mod tests {
         let mut kernel = crafted(&dsdt, &[&ssdt, &ssdt]);
         // What the XSDT lists moves into kept memory: the RSDP and the XSDT stay.
         let listed = kernel.memory.split_off(2);
-        kernel.kept = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 5)).collect();
+        kernel.typed_refused = listed.iter().map(|(at, _, bytes)| (*at, at + bytes.len() as u64, 5)).collect();
         let kept = "its bytes could not be read: a SystemMemory read the kernel refused MemoryType, in memory of type 5";
         assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Err(kept.into())], s5: None, handed: false });
     }

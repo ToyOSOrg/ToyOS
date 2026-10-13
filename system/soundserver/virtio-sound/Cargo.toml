@@ -19,6 +19,8 @@ doctest = false
 toyos-virtio = { path = "../../../lib/virtio" }
 # `DmaBuffers`, the grant the three queues and every buffer are laid out in.
 toyos-device-memory = { path = "../../../lib/device-memory" }
+# The device rates soundserver runs at, best first.
+toyos-mixer = { path = "../mixer" }
 
 [lints.rust]
 warnings = "deny"

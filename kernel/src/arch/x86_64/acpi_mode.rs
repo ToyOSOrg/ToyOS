@@ -26,18 +26,18 @@
 //!
 //! **What the firmware's AML names outside the row, this kernel reads and
 //! writes for the claim's holder, one access at a time** ([`access`]): memory
-//! through the direct map and a port both ways, a function's configuration
-//! space through ECAM to read, each only with the witness
-//! `toyos_userbound::firmware` answered for it. Firmware's memory is typed by
+//! through the direct map, a port, and a function's configuration space
+//! through ECAM, each only with the witness `toyos_userbound::firmware`
+//! answered for it. Firmware's memory is typed by
 //! firmware's own map and by its MTRRs: the direct map's leaves select the
 //! PAT's write-back entry, under which the range registers decide (Intel SDM
 //! Vol. 3A, Table 12-7), so a register window the firmware reserved is read as
 //! the firmware typed it. A register at an address the firmware's map does
-//! not list, or in memory it types memory-mapped I/O, is read the same way,
-//! only where the boot processor's registers,
-//! read once at boot, type it uncacheable, and only on a machine none of
-//! whose CPUs holds registers that are on and not those (`mtrr::compare`):
-//! the read is made on whichever CPU the call runs on.
+//! not list, or in memory it types memory-mapped I/O, is accessed the same
+//! way, only where the boot processor's registers, read once at boot, type it
+//! uncacheable, and only on a machine none of whose CPUs holds registers that
+//! are on and not those (`mtrr::compare`): the access is made on whichever
+//! CPU the call runs on.
 //!
 //! **A byte the holder's AML stores to `SMI_CMD` is a call into the firmware,
 //! made here and by nobody else** ([`call`]): the policy answers which byte,
@@ -83,7 +83,7 @@ use toyos_abi::acpi::{Access, AcpiInfo, Block, Refused, Space, Width, FIXED_POWE
 use toyos_abi::syscall::SyscallError;
 use toyos_acpi::{EcamWindow, FixedHardware, LegacyMode, PowerButton};
 use toyos_userbound::firmware::{
-    self, CallRate, FirmwareCall, Function as PciFunction, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
+    self, CallRate, FirmwareCall, Function as PciFunction, HostBridge, LockWordAt, Memory, MemoryAt, MemoryVerdict, PortAt, PortVerdict,
 };
 use toyos_userbound::Ports;
 
@@ -118,6 +118,7 @@ struct Hardware {
     rsdp: u64,
     /// The windows configuration space is reached through, as the MCFG bounds them.
     ecam: Vec<EcamWindow>,
+    host_bridge: HostBridge,
     lock: GlobalLock,
 }
 
@@ -172,8 +173,8 @@ struct Calls {
 /// decision to the last instruction of the act: each mediated access, and
 /// each change of the lock word. Taken with the claim's own lock held
 /// (`object::Held`), and `pcidev`'s machine record and then `paging`'s record
-/// of windows under it; nothing holding one of those two takes this or a
-/// claim's.
+/// of windows, or `pcidev`'s slots, under it; nothing holding one of those
+/// takes this or a claim's.
 static HOLDER: Lock<Holder> = Lock::new(Holder {
     locked: false,
     supplied: false,
@@ -269,7 +270,7 @@ pub fn init(rsdp_addr: u64, facs: Option<Result<toyos_acpi::Facs, toyos_acpi::Fa
     isa::fill(ROW, Function { name: "the ACPI fixed hardware", runs, irqs: vec![], wires: vec![sci] });
     let facs = facs.expect("power::init_reset read the FACS of the FADT this decoded");
     let (ecam, lock) = (crate::drivers::pci::windows(), global_lock(facs));
-    let hardware = Hardware { fixed, control, rsdp: rsdp_addr, ecam, lock };
+    let hardware = Hardware { fixed, control, rsdp: rsdp_addr, ecam, host_bridge: host_bridge(), lock };
     let was = HARDWARE.swap(Box::into_raw(Box::new(hardware)), Ordering::Release);
     assert!(was.is_null(), "acpi: init ran twice");
 }
@@ -302,6 +303,13 @@ fn global_lock(facs: Result<toyos_acpi::Facs, toyos_acpi::FacsRefused>) -> Globa
         firmware::type_word(map, word.at())
     );
     GlobalLock::At(Facs { span: (facs.base, facs.base + u64::from(facs.len)), word })
+}
+
+/// What 00:00.0 says it is, and its quadword at 48h, read as two dwords.
+fn host_bridge() -> HostBridge {
+    let Some(space) = crate::drivers::pci::function_window(0, 0, 0) else { return HostBridge::ABSENT };
+    let at_48h = u64::from(space.read_u32(0x48)) | u64::from(space.read_u32(0x4C)) << 32;
+    HostBridge { vendor: space.read_u16(0), device: space.read_u16(2), at_48h }
 }
 
 fn run(block: Block) -> Ports {
@@ -610,7 +618,8 @@ fn read_memory(passed: &MemoryAt) -> u64 {
 fn write_memory(passed: &MemoryAt, value: u64) {
     let at = crate::mm::DirectMap::from_phys(passed.at());
     // SAFETY: as `read_memory`, and the policy passed the write: the firmware's
-    // own reserved or non-volatile memory, outside its tables and the FACS.
+    // own memory or a register, outside its tables, the FACS, every device the
+    // kernel knows decodes and every register it keeps.
     unsafe {
         match passed.width() {
             Width::Byte => at.as_mut_ptr::<u8>().write_volatile(value as u8),
@@ -645,27 +654,41 @@ fn write_port(passed: &PortAt, value: u64) {
     }
 }
 
-/// One configuration access, decided and, where it is a read, made through
-/// the window the MCFG names, which the policy bounded the function by.
-fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunction, offset: u16, width: Width, write: bool) -> Result<u64, Refused> {
-    let at = firmware::config(&hardware.ecam, segment, function, offset, width, write)?;
+/// One configuration access, decided and made through the window the MCFG
+/// names, which the policy bounded the function by. A write is decided on
+/// what `pcidev` records of the function, read under its own locks and let
+/// go before the write: a claim minted after the decision is one the write
+/// was made a moment before.
+fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunction, offset: u16, width: Width, write: Option<u64>) -> Result<u64, Refused> {
+    let at = firmware::config(&hardware.ecam, segment, function, offset, width)?;
     let PciFunction { bus, device, function } = at.function();
     let space = crate::drivers::pci::function_window(bus, device, function).expect("a machine with a claimable ACPI row enumerated its PCI functions");
-    let offset = u64::from(at.offset());
-    Ok(match at.width() {
-        Width::Byte => u64::from(space.read_u8(offset)),
-        Width::Word => u64::from(space.read_u16(offset)),
-        Width::DWord => u64::from(space.read_u32(offset)),
+    let Some(value) = write else {
+        let offset = u64::from(at.offset());
+        return Ok(match at.width() {
+            Width::Byte => u64::from(space.read_u8(offset)),
+            Width::Word => u64::from(space.read_u16(offset)),
+            Width::DWord => u64::from(space.read_u32(offset)),
+            Width::QWord => unreachable!("the policy passes no qword configuration access"),
+        });
+    };
+    let passed = at.write(crate::pcidev::enumerated(bus, device, function))?.at();
+    let offset = u64::from(passed.offset());
+    match passed.width() {
+        Width::Byte => space.write_u8(offset, value as u8),
+        Width::Word => space.write_u16(offset, value as u16),
+        Width::DWord => space.write_u32(offset, value as u32),
         Width::QWord => unreachable!("the policy passes no qword configuration access"),
-    })
+    }
+    Ok(0)
 }
 
-/// Whether a read of `len` bytes at `at` through the direct map is uncached:
+/// Whether an access of `len` bytes at `at` through the direct map is uncached:
 /// its leaves select the PAT's write-back entry, under which the range
 /// registers decide (Intel SDM Vol. 3A, Table 12-7). The boot processor's
 /// decide it, as read at boot, so the answer is one whichever CPU asks: a
 /// CPU whose own are off answers nothing of what firmware typed the range,
-/// and reads it uncached all the same.
+/// and accesses it uncached all the same.
 fn uncached(at: u64, len: u64) -> bool {
     let (def_type, pairs) = super::mtrr::boot();
     kernel::mtrr::range_type(def_type, pairs.iter().copied(), at, at + (len - 1)).typed_uncacheable()
@@ -689,6 +712,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
                 facs: hardware.lock.facs().map(|facs| facs.span),
                 uncached,
                 registers_differ: super::mtrr::any_differs(),
+                host_bridge: hardware.host_bridge,
             };
             memory.decide(at, width, write.is_some())
         })
@@ -700,7 +724,7 @@ fn memory(hardware: &Hardware, acting: &Holder, request: &mut Access, width: Wid
             Ok(0)
         }
         (MemoryVerdict::AsConfig(function, offset), _) => {
-            config(hardware, acting, toyos_acpi::SEGMENT_GROUP, function, offset, width, write.is_some())
+            config(hardware, acting, toyos_acpi::SEGMENT_GROUP, function, offset, width, write)
         }
         (MemoryVerdict::Refused(refused), _) => Err(refused),
     }
@@ -782,7 +806,7 @@ pub fn access(row: &isa::Row, request: &mut Access) -> Result<(), SyscallError> 
             let at = request.address;
             let function = PciFunction { bus: (at >> 24) as u8, device: (at >> 19 & 0x1F) as u8, function: (at >> 16 & 7) as u8 };
             match at >> 48 {
-                0 => config(hardware, &acting, (at >> 32) as u16, function, at as u16, width, write.is_some()).map_err(Unmade::from),
+                0 => config(hardware, &acting, (at >> 32) as u16, function, at as u16, width, write).map_err(Unmade::from),
                 _ => Err(Refused::ConfigUnreachable.into()),
             }
         }

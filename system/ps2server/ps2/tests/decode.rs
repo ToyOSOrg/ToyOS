@@ -5,10 +5,11 @@
 use toyos_ps2::key::{SET1, SET1_E0};
 use toyos_ps2::{KeyDecoder, KeyOutcome, MouseDecoder, MouseOutcome};
 
-/// Every HID keyboard usage the layouts and the compositor can name. Outside
-/// these two ranges a usage is not a keyboard usage at all.
+/// Every HID keyboard usage the layouts and the compositor can name: the
+/// keys, Mute, Volume Up and Volume Down, and the modifiers. Outside these
+/// ranges a usage is not one this decoder may emit.
 fn is_hid_keyboard_usage(usage: u8) -> bool {
-    (0x04..=0x65).contains(&usage) || (0xE0..=0xE7).contains(&usage)
+    (0x04..=0x65).contains(&usage) || (0x7F..=0x81).contains(&usage) || (0xE0..=0xE7).contains(&usage)
 }
 
 fn press(decoder: &mut KeyDecoder, bytes: &[u8]) -> Vec<(u8, bool)> {
@@ -52,10 +53,12 @@ fn every_usage_the_rest_of_the_tree_names_is_reachable() {
         reachable[usage as usize] = true;
     }
     // Letters, digits and punctuation (layout_lookup's 0x04..=0x38), the ISO
-    // key, the escape-sequence keys, and every modifier.
+    // key, the escape-sequence keys, Mute and the two volume keys the
+    // compositor keeps, and every modifier.
     let required: Vec<u8> = (0x04u8..=0x38)
         .chain([0x64])
         .chain(0x4Au8..=0x52)
+        .chain(0x7Fu8..=0x81)
         .chain(0xE0u8..=0xE7)
         .collect();
     for usage in required {

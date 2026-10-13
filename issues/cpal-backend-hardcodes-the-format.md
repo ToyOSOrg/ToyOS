@@ -4,25 +4,14 @@ kind: defect
 opened: 2026-08-01
 ---
 
-# The cpal ToyOS backend hardcodes 44100/2ch/i16 and rejects everything else
+# The cpal ToyOS backend offers I16 alone
 
-soundd's resampler and channel-conversion paths are unreachable from any real
-client and therefore effectively untested. The backend also `assert_eq!`s the
-device rate against a compile-time constant, so changing the driver's rate
-aborts every cpal app.
-
-**`Drop`'s bound on soundd is built from copies the same way.** A dropped
-`Stream` waits for soundd to close its signal pipe for at most soundd's 5 ms
-fade, in whole periods, plus the 8 periods of the stream's ring: 1280 frames at
-44100 Hz (`RELEASE_WITHIN`). Past it, `Drop` refuses by name and returns. The
-fade (`toyos_mixer::ramp_frames`) and the ring depth (soundd's `slot_count`, see
-`issues/client-ring-depth-is-the-devices-pipeline-depth.md`) are copies:
-`StreamOpenResponse.slot_count` reaches `AudioStream::open` and stays private,
-and no message carries the fade. If soundd's fade grows or a device's pipeline
-deepens, the bound shrinks under what soundd needs, and a healthy soundd is
-refused. That part goes when `AudioStream` says the ring depth and the fade and
-the host derives `RELEASE_WITHIN` from them, which changes `sdk/toyos/src` and the
-audio protocol.
+cpal's ToyOS backend (`toyos-0.18.0`) takes its rate and its release bound from
+soundserver: `default_output_config` is the described device's,
+`supported_output_configs` is mono and stereo over the client range soundserver
+accepts, and `RELEASE_WITHIN` is derived from the fade, the ring and the device
+period (#877). Its sample format is still I16 alone: a client asking for any
+other format is refused.
 
 Deferred to the quiet-tree window, not neglected: editing that fork needs
 `.cargo/config.toml` path overrides, which redirect cpal for **every** agent in

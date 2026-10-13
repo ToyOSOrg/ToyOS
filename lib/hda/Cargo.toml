@@ -11,3 +11,8 @@ description = "HDA codec decoding and output-path selection, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[dev-dependencies]
+# The device rates soundserver declares, best first: the rate choice is tested
+# against the declaration it runs on.
+toyos-mixer = { path = "../../system/soundserver/mixer" }

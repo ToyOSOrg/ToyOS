@@ -313,6 +313,16 @@ fn draw_launcher(
     }
 }
 
+/// The volume overlay: `text` centred in `rect`. Drawn whole whenever a
+/// region touches it, so a region that cuts it is repainted whole.
+pub fn draw_overlay(surface: &Framebuffer, font: &font::Font, rect: Rect, text: &str) {
+    fill(surface, rect, LAUNCHER_BG);
+    let text_w = (text.chars().count() * font.width()) as i32;
+    let x = rect.x0 + (rect.w() - text_w).max(0) / 2;
+    let y = rect.y0 + (rect.h() - GLYPH_H) / 2;
+    font.draw_string(surface, x as usize, y as usize, text, LAUNCHER_TEXT, LAUNCHER_BG);
+}
+
 /// Scale an RGB image to the screen and convert to its pixel format.
 pub fn scale_wallpaper(
     src: &[u8],
