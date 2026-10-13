@@ -24,7 +24,7 @@ A design is chosen on its merits for the modern hardware ToyOS targets, never be
 development environment (QEMU, CI, the dev host) or a particular test machine lacks or has a
 feature, and never because another OS does it that way; when an environment cannot run the right
 design, the environment changes or the gap is filed. A design, a value or a test's oracle never
-takes its authority from another implementation's source; where the vendor's documentation, the
+cites another implementation's source as its authority; where the vendor's documentation, the
 published specifications or the published state of the art back it, it follows and cites them, and
 leaves them only when they leave it. Bench numbers on a design they back are reported and never
 block it, but a metal timing past twice its machine's record reds every design: that ceiling is a

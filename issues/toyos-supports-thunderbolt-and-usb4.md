@@ -12,9 +12,7 @@ design is put to him and ruled, "Refuse external, record reflash" (owner,
 port is refused by name (`issues/the-iommu-refuses-nothing-yet.md`,
 `issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`).
 
-**Constraint.** An external or hot-plug device is outside the trusted base
-(root `CLAUDE.md`, Capabilities): a function tunnelled through the port has
-its DMA behind the IOMMU from the moment it appears.
+**Constraint**: root `CLAUDE.md`, Capabilities.
 
 Owner: the orchestrator.
 
@@ -23,3 +21,5 @@ with a device plugged into that port: the device is enumerated and driven; a
 PCIe function tunnelled through it is claimed by a userland driver and its DMA
 into its grants completes; and that function aimed at memory no grant maps is a
 `DMA FAULT` record, the machine still running, as the row's negative control.
+The owner's ruling on the design retires the external-port refusal and its row
+in `issues/the-iommu-refuses-nothing-yet.md`'s exit.
