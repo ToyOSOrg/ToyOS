@@ -4,28 +4,20 @@ kind: track
 opened: 2026-08-03
 ---
 
-# HDA plays, but there is no jack detection, no volume control and no volume keys
+# HDA plays, but there is no jack detection and nothing persists
 
-The driver is built and audible on both QEMU and the T14: codec decoding and
-output-path selection are a pure crate, the register allowlist is in the kernel
-with soundd holding no physical address, and three guest gates stand on it. What
-was staged after that never started, and it is about 850 lines of greenfield
-blocked on nothing:
+The driver is soundserver's: codec decoding, output-path selection, the
+controller choice and the master are a pure crate, and the kernel lists and
+binds controllers. The master volume and mute are the codec's, served on
+soundserver's `volume` port, and the volume keys set them from the compositor
+(#877). What remains:
 
 - **Jack detection and routing.** `GET_PIN_SENSE` is spelled
-  (`lib/hda/src/verb.rs:107`) and nothing issues it — that constant is its
-  only occurrence in the tree. Still wanted: a poll on the presence bit, a
-  switch between the fixed speaker and the headphone pin, and a ramp across the
-  switch so it is not a click.
-- **Master volume and mute**, at the codec rather than in the mixer, and the
-  message to set it. Path setup already emits `SET_AMP_GAIN_MUTE` once per pin
-  and once per converter (`lib/hda/src/config.rs:89`, `:94`, `:109-117`), at
-  the amp's own `zero_db`; what is missing is a level anyone can change after
-  that, not the verb.
-- **Volume keys.** The premise was never established either — the diagnostic
-  that would say what the T14's keyboard sends for them was never committed.
-- **Persistence** of the chosen output and level, blocked on the kernel keeping
-  anything it enumerates (`issues/the-kernel-keeps-nothing-it-enumerates.md`).
+  (`lib/hda/src/verb.rs`) and nothing issues it. Still wanted: a poll on the
+  presence bit, a switch between the fixed speaker and the headphone pin, and a
+  ramp across the switch so it is not a click.
+- **Persistence** of the chosen output and the master level, blocked on the
+  kernel keeping anything it enumerates (`issues/the-kernel-keeps-nothing-it-enumerates.md`).
 
 **Two pieces of the shipped work are still owed a verdict.** The four HDA
 sections of the audio baseline were never recorded, so the HDA arm asserts harm

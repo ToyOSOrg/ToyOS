@@ -292,19 +292,23 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
 
+/// Bind the `hda-audio` claim's stream to the listed controller it names. See
+/// [`hda_bind`].
+pub const SYS_HDA_BIND: u64 = 129;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 130;
+pub const SYSCALL_PROFILE_BINS: usize = 131;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_HDA_BIND < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1778,16 +1782,17 @@ impl RegWidth {
 
 /// Read one register of the device `handle` claims.
 ///
-/// `offset` is a byte offset inside that device's register window. The kernel
-/// checks it against the device's read allow-list and refuses anything else by
-/// name; there is no way to name an address here and no way to reach a
-/// register the list does not carry.
+/// `offset` names a register inside that device's register window, as the
+/// claim's class spells it: a byte offset, or for an HDA claim a
+/// [`crate::hda::Reg`]'s word. The kernel checks it against the device's read
+/// allow-list and refuses anything else by name; there is no way to name an
+/// address here and no way to reach a register the list does not carry.
 pub fn device_reg_read(
     handle: RawHandle,
-    offset: u32,
+    offset: u64,
     width: RegWidth,
 ) -> Result<u32, SyscallError> {
-    check(syscall(SYS_DEVICE_REG_READ, handle.0 as u64, offset as u64, width.bytes(), 0))
+    check(syscall(SYS_DEVICE_REG_READ, handle.0 as u64, offset, width.bytes(), 0))
         .map(|v| v as u32)
 }
 
@@ -1799,18 +1804,30 @@ pub fn device_reg_read(
 /// the failure mode a refusal list does not have.
 pub fn device_reg_write(
     handle: RawHandle,
-    offset: u32,
+    offset: u64,
     width: RegWidth,
     value: u32,
 ) -> Result<(), SyscallError> {
     check(syscall(
         SYS_DEVICE_REG_WRITE,
         handle.0 as u64,
-        offset as u64,
+        offset,
         width.bytes(),
         value as u64,
     ))
     .map(|_| ())
+}
+
+/// Bind the `hda-audio` claim's stream to the listed controller at
+/// `controller`, and put every other listed controller back into reset.
+///
+/// One-shot for the boot: once a bind has run, the claim's list is the bound
+/// controller alone, at index 0, and binding index 0 again answers success.
+/// [`SyscallError::WouldBlock`] while another bind runs, and
+/// [`SyscallError::Io`] for every call once a bind failed on the device; the
+/// kernel's `hda:` line says why.
+pub fn hda_bind(claim: RawHandle, controller: u8) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_HDA_BIND, claim.0 as u64, controller as u64, 0, 0))
 }
 
 // Ports and namespaces

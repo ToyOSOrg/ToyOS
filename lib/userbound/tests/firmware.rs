@@ -5,8 +5,8 @@
 use toyos_abi::acpi::{Refused, Width};
 use toyos_abi::boot::MemoryMapEntry;
 use toyos_userbound::firmware::{
-    config, lock_word, port, sleep_type, type_word, CallRate, Function, Memory, MemoryVerdict, NoLockWord, PortVerdict, Standing, CALLS,
-    CALL_PERIOD_NS, FIXED_RANGE_END,
+    config, lock_word, port, sleep_type, type_word, CallRate, Enumerated, Function, HostBridge, Memory, MemoryVerdict, NoLockWord,
+    PortVerdict, Standing, CALLS, CALL_PERIOD_NS, FIXED_RANGE_END,
 };
 use toyos_acpi::EcamWindow;
 use toyos_userbound::{KeptCommands, Mediated};
@@ -52,6 +52,8 @@ const Q35: [MemoryMapEntry; 9] = [
 /// The I/O APIC and the HPET, as the kernel maps them on q35.
 const Q35_DRIVEN: &[(u64, u64)] = &[(0xfec0_0000, 0xfec0_0020), (0xfed0_0000, 0xfed0_1000)];
 const Q35_FACS: (u64, u64) = (0x7ff7_7000, 0x7ff7_7040);
+/// q35's MCH, which 631122 does not cover, with a window at 48h all the same.
+const Q35_HOST_BRIDGE: HostBridge = HostBridge { vendor: 0x8086, device: 0x29C0, at_48h: 0xfed1_0001 };
 
 /// The ranges devices decode, as a test lists them.
 type Devices = std::iter::Copied<std::slice::Iter<'static, (u64, u64)>>;
@@ -63,7 +65,7 @@ fn devices(decoded: &'static [(u64, u64)]) -> Devices {
 
 /// A machine of one map and nothing else: no ECAM window, no FACS.
 fn bare(map: &'static [MemoryMapEntry], decoded: &'static [(u64, u64)]) -> Mem {
-    Memory { map, mapped_end: 4 * GIB, ecam: &[], devices: devices(decoded), facs: None, uncached: registers, registers_differ: false }
+    Memory { map, mapped_end: 4 * GIB, ecam: &[], devices: devices(decoded), facs: None, uncached: registers, registers_differ: false, host_bridge: HostBridge::ABSENT }
 }
 
 /// What the range registers type uncacheable on these machines: the hole
@@ -75,7 +77,7 @@ fn registers(at: u64, len: u64) -> bool {
 }
 
 fn q35() -> Mem {
-    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: ecam(0xe000_0000, 0, 0xFF), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS), uncached: registers, registers_differ: false }
+    Memory { map: &Q35, mapped_end: 4 * GIB, ecam: ecam(0xe000_0000, 0, 0xFF), devices: devices(Q35_DRIVEN), facs: Some(Q35_FACS), uncached: registers, registers_differ: false, host_bridge: Q35_HOST_BRIDGE }
 }
 
 /// A map shaped as a laptop's is, at addresses of this test's own: RAM, a
@@ -95,7 +97,7 @@ const LAPTOP: [MemoryMapEntry; 9] = [
 ];
 
 fn laptop() -> Mem {
-    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: ecam(0xc000_0000, 0, 0xFF), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)), uncached: registers, registers_differ: false }
+    Memory { map: &LAPTOP, mapped_end: 4 * GIB, ecam: ecam(0xc000_0000, 0, 0xFF), devices: devices(&[]), facs: Some((0x7400_0040, 0x7400_0080)), uncached: registers, registers_differ: false, host_bridge: HostBridge::ABSENT }
 }
 
 fn passes(memory: &Mem, at: u64, width: Width, write: bool) -> bool {
@@ -184,54 +186,59 @@ fn runtime_services_data_is_read_as_the_tables_memory_is_and_never_written() {
     assert!(passes(&decoding, 0x7495_1000, Width::Byte, false));
 }
 
-/// A chipset's registers at an address the firmware's map lists nowhere, as
-/// one real machine's AML reads them while it loads: read, in each width,
-/// where the kernel maps the address and the range registers type it
-/// uncacheable, and never written. What the kernel drives or a function
-/// decodes there is a device's still, and the ECAM window a configuration
-/// access.
+/// An address the map does not list is a register where the range registers
+/// type it uncacheable, inside what the kernel maps and at or above 1 MiB,
+/// and it is written where it is read: in each width, the T14's pad
+/// configuration byte at 0xFD6E0A70 among them. What the kernel drives or a
+/// function decodes there is a device's still, and the ECAM window a
+/// configuration access.
 #[test]
-fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
+fn an_unlisted_register_is_written_where_it_is_read() {
     let laptop = laptop();
     const AT: u64 = REGISTERS + 0x12_3000;
     assert_eq!(type_word(&LAPTOP, AT), toyos_abi::acpi::UNLISTED);
-    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
-        assert!(passes(&laptop, AT + 0x110, width, false), "{width:?}");
-        assert_eq!(refused(&laptop, AT + 0x110, width, true), Refused::MemoryType, "{width:?}");
+    let t14 = t14();
+    for write in [false, true] {
+        for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+            assert!(passes(&laptop, AT + 0x110, width, write), "{width:?} write={write}");
+        }
+        assert!(passes(&t14, 0xFD6E_0A70, Width::Byte, write), "the T14's GPPC_A_13 pad");
+        // The last byte the range registers type so, and the first they do not.
+        assert!(passes(&laptop, REGISTERS, Width::Byte, write));
+        assert_eq!(refused(&laptop, REGISTERS - 1, Width::Byte, write), Refused::RegisterCached);
+        assert_eq!(refused(&laptop, REGISTERS - 1, Width::Word, write), Refused::RegisterCached, "an access that begins outside it");
+        assert!(passes(&laptop, 4 * GIB - 9, Width::QWord, write));
+        // Past what the kernel maps there is nothing to reach it through.
+        assert_eq!(refused(&laptop, 4 * GIB - 4, Width::QWord, write), Refused::Unmapped);
+        let low = Memory { mapped_end: AT + 0x110, ..bare(&LAPTOP, &[]) };
+        assert_eq!(refused(&low, AT + 0x110, Width::Byte, write), Refused::Unmapped);
+        assert!(passes(&low, AT + 0x10f, Width::Byte, write));
+        // A page the kernel knows a device decodes in, a driven window's and
+        // a BAR's alike, and the local APIC's.
+        let decoding = bare(&LAPTOP, &[(AT, AT + 0x20)]);
+        assert_eq!(refused(&decoding, AT + 0x110, Width::Byte, write), Refused::DeviceMemory);
+        assert_eq!(refused(&q35(), 0xfee0_0000, Width::DWord, write), Refused::DeviceMemory, "the local APIC");
+        assert_eq!(refused(&t14, 0xFED9_0000, Width::DWord, write), Refused::DeviceMemory, "a VT-d unit the kernel drives");
     }
-    // The last byte the range registers type so, and the first they do not.
-    assert!(passes(&laptop, REGISTERS, Width::Byte, false));
-    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Byte, false), Refused::RegisterCached);
-    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Word, false), Refused::RegisterCached, "a read that begins outside it");
-    assert!(passes(&laptop, 4 * GIB - 9, Width::QWord, false));
-    // Past what the kernel maps there is nothing to read it through.
-    assert_eq!(refused(&laptop, 4 * GIB - 4, Width::QWord, false), Refused::Unmapped);
-    let low = Memory { mapped_end: AT + 0x110, ..bare(&LAPTOP, &[]) };
-    assert_eq!(refused(&low, AT + 0x110, Width::Byte, false), Refused::Unmapped);
-    assert!(passes(&low, AT + 0x10f, Width::Byte, false));
-    // A page the kernel knows a device decodes in.
-    let decoding = bare(&LAPTOP, &[(AT, AT + 0x20)]);
-    assert_eq!(refused(&decoding, AT + 0x110, Width::Byte, false), Refused::DeviceMemory);
-    assert_eq!(refused(&q35(), 0xfee0_0000, Width::DWord, false), Refused::DeviceMemory, "the local APIC");
     // Listed memory is decided by its type, whatever the range registers say of it.
     const TYPED: [MemoryMapEntry; 3] = [e(7, REGISTERS, REGISTERS + 0x1000), e(5, REGISTERS + 0x1000, REGISTERS + 0x2000), e(0, REGISTERS + 0x2000, REGISTERS + 0x3000)];
     let typed = bare(&TYPED, &[]);
-    assert_eq!(refused(&typed, REGISTERS, Width::Byte, false), Refused::UsableMemory);
-    assert_eq!(refused(&typed, REGISTERS + 0x1000, Width::Byte, false), Refused::MemoryType);
+    assert_eq!(refused(&typed, REGISTERS, Width::Byte, true), Refused::UsableMemory);
+    assert_eq!(refused(&typed, REGISTERS + 0x1000, Width::Byte, true), Refused::MemoryType);
     assert!(passes(&typed, REGISTERS + 0x2000, Width::Byte, true));
-    // A read across listed memory and a hole is two things.
-    assert_eq!(refused(&typed, REGISTERS + 0x3000 - 1, Width::Word, false), Refused::Straddles);
+    // An access across listed memory and a hole is two things.
+    assert_eq!(refused(&typed, REGISTERS + 0x3000 - 1, Width::Word, true), Refused::Straddles);
 }
 
 /// Memory the firmware's map types `EfiMemoryMappedIO` is a device's
-/// registers, as the AMD bench's DSDT reads one while it loads: read, in each
-/// width, exactly where an unlisted register is (inside the direct map, at or
-/// above 1 MiB, typed uncacheable by the range registers every CPU holds),
-/// and never written. A page the kernel knows a device decodes in, the local
+/// registers, as the AMD bench's DSDT reads one while it loads: read and
+/// written, in each width, exactly where an unlisted register is (inside the
+/// direct map, at or above 1 MiB, typed uncacheable by the range registers
+/// every CPU holds). A page the kernel knows a device decodes in, the local
 /// APIC's and an ECAM window typed so are what they are whatever the map
-/// says, and a read that leaves the range for RAM is refused.
+/// says, and an access that leaves the range for RAM is refused.
 #[test]
-fn memory_mapped_io_is_read_as_a_register_is_and_never_written() {
+fn memory_mapped_io_is_accessed_as_a_register_is() {
     const AT: u64 = REGISTERS + 0x10_0000;
     const MMIO: [MemoryMapEntry; 4] = [
         e(7, 0x0, 0x8000_0000),
@@ -241,14 +248,14 @@ fn memory_mapped_io_is_read_as_a_register_is_and_never_written() {
     ];
     let memory = bare(&MMIO, &[]);
     assert_eq!(type_word(&MMIO, AT), 11);
-    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
-        assert!(passes(&memory, AT + 0x110, width, false), "{width:?}");
-        assert!(passes(&memory, AT + 0x10_0000 - width.bytes(), width, false), "{width:?} at its last byte");
-        assert_eq!(refused(&memory, AT + 0x110, width, true), Refused::MemoryType, "{width:?}");
+    for write in [false, true] {
+        for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+            assert!(passes(&memory, AT + 0x110, width, write), "{width:?}");
+            assert!(passes(&memory, AT + 0x10_0000 - width.bytes(), width, write), "{width:?} at its last byte");
+        }
+        // Typed memory-mapped I/O the range registers cache is no register.
+        assert_eq!(refused(&memory, 0x8000_0000, Width::Byte, write), Refused::RegisterCached);
     }
-    // Typed memory-mapped I/O the range registers cache is no register.
-    assert_eq!(refused(&memory, 0x8000_0000, Width::Byte, false), Refused::RegisterCached);
-    assert_eq!(refused(&memory, 0x8000_0000, Width::Byte, true), Refused::MemoryType);
     // A read across it and the RAM beside it, from either side.
     assert_eq!(refused(&memory, AT - 1, Width::Word, false), Refused::Straddles);
     assert_eq!(refused(&memory, AT - 1, Width::Byte, false), Refused::UsableMemory);
@@ -270,17 +277,18 @@ fn memory_mapped_io_is_read_as_a_register_is_and_never_written() {
 
 /// The range registers the cache check answers from are the boot processor's.
 /// Where some CPU's are on and are not those, no address the map does not
-/// list is read, a register's and one below 1 MiB alike; listed memory, which
-/// its type decides, and every other refusal are as they were.
+/// list is read or written, a register's and one below 1 MiB alike; listed
+/// memory, which its type decides, and every other refusal are as they were.
 #[test]
-fn no_unlisted_address_is_read_where_a_cpus_range_registers_differ() {
+fn no_unlisted_address_is_accessed_where_a_cpus_range_registers_differ() {
     let agreeing = laptop();
     let differing = Memory { registers_differ: true, ..laptop() };
     const AT: u64 = REGISTERS + 0x12_3110;
-    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
-        assert!(passes(&agreeing, AT, width, false), "{width:?}");
-        assert_eq!(refused(&differing, AT, width, false), Refused::RangeRegistersDiffer, "{width:?}");
-        assert_eq!(refused(&differing, AT, width, true), Refused::MemoryType, "{width:?}");
+    for write in [false, true] {
+        for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+            assert!(passes(&agreeing, AT, width, write), "{width:?}");
+            assert_eq!(refused(&differing, AT, width, write), Refused::RangeRegistersDiffer, "{width:?}");
+        }
     }
     assert_eq!(refused(&differing, REGISTERS - 1, Width::Byte, false), Refused::RangeRegistersDiffer);
     const HOLE: &[MemoryMapEntry] = &[e(7, 0x0, 0xa_0000)];
@@ -306,9 +314,10 @@ fn an_unlisted_address_below_1_mib_is_refused_whatever_the_range_registers_answe
     for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
         for at in [0xa_0000, 0xc_0000, FIXED_RANGE_END - 8, FIXED_RANGE_END - width.bytes()] {
             assert_eq!(refused(&memory, at, width, false), Refused::RegisterCached, "{at:#x} {width:?}");
-            assert_eq!(refused(&memory, at, width, true), Refused::MemoryType, "{at:#x} {width:?}");
+            assert_eq!(refused(&memory, at, width, true), Refused::RegisterCached, "{at:#x} {width:?}");
         }
         assert!(passes(&memory, FIXED_RANGE_END, width, false), "{width:?} at the bound");
+        assert!(passes(&memory, FIXED_RANGE_END, width, true), "{width:?} at the bound");
     }
     assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Byte, false), Refused::RegisterCached);
     assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Word, false), Refused::RegisterCached, "a read that begins below the bound");
@@ -328,8 +337,8 @@ fn memory_any_usable_range_holds_is_refused_whatever_lists_it_first() {
             // A usable range over the firmware range's second page and beyond.
             let over = [e(firmware, 0x1000, 0x3000), e(handed_out, 0x2000, 0x4000)];
             for write in [false, true] {
-                let twice = Memory { map: &twice, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
-                let over = Memory { map: &over, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
+                let twice = Memory { map: &twice, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false, host_bridge: HostBridge::ABSENT };
+                let over = Memory { map: &over, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false, host_bridge: HostBridge::ABSENT };
                 let why = MemoryVerdict::Refused(Refused::UsableMemory);
                 assert_eq!(twice.clone().decide(0x1000, Width::Byte, write), why, "type {firmware} listed before {handed_out}");
                 assert_eq!(twice.decide(0x2ff8, Width::QWord, write), why);
@@ -369,15 +378,15 @@ fn runtime_services_code_is_refused_both_ways() {
 #[test]
 fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
     let laptop = laptop();
-    // A hole the map does not list, which no register is in: its write is
-    // refused by the map, and its read by the range registers.
-    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, true), Refused::MemoryType);
+    // A hole the map does not list, which the range registers cache: no
+    // register is there.
+    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, true), Refused::RegisterCached);
     assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, false), Refused::RegisterCached);
     assert_eq!(type_word(&LAPTOP, 0x8000_0000), toyos_abi::acpi::UNLISTED);
     // Every type but the four the policy names, as the only range of a map.
     for ty in (0..=0x20u32).chain([0x7000_0000, 0x8000_0000, u32::MAX]) {
         let map = [e(ty, 0x1000, 0x2000)];
-        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false };
+        let memory = Memory { map: &map, mapped_end: 4 * GIB, ecam: &[], devices: devices(&[]), facs: None, uncached: registers, registers_differ: false, host_bridge: HostBridge::ABSENT };
         let read = memory.clone().decide(0x1000, Width::Byte, false);
         let write = memory.decide(0x1000, Width::Byte, true);
         let through = |verdict| matches!(verdict, MemoryVerdict::Through(_));
@@ -385,7 +394,7 @@ fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
             0 | 10 => assert!(through(read) && through(write), "type {ty}"),
             6 | 9 => assert!(through(read) && write == MemoryVerdict::Refused(Refused::TableWrite), "type {ty}"),
             // Below 1 MiB, where no register is read.
-            11 => assert!(read == MemoryVerdict::Refused(Refused::RegisterCached) && write == MemoryVerdict::Refused(Refused::MemoryType)),
+            11 => assert!(read == write && read == MemoryVerdict::Refused(Refused::RegisterCached), "type {ty}"),
             1 | 2 | 3 | 4 | 7 => assert!(read == write && read == MemoryVerdict::Refused(Refused::UsableMemory), "type {ty}"),
             _ => assert!(read == write && read == MemoryVerdict::Refused(Refused::MemoryType), "type {ty}"),
         }
@@ -517,7 +526,7 @@ fn an_address_in_the_ecam_window_is_a_configuration_access_whatever_the_map_type
 
 /// Every window is read for every access, the first no more than a later one:
 /// an address in the second is a configuration access with its own bus,
-/// refused as a write whatever the map types it, and a read reaches its buses.
+/// decided as one whatever the map types it, and a read reaches its buses.
 #[test]
 fn a_later_window_is_held_as_the_first_is() {
     // Buses 0x40..=0x7f at their own base, after the laptop's 0..=0x3f; both
@@ -532,14 +541,14 @@ fn a_later_window_is_held_as_the_first_is() {
         assert_eq!(verdict, MemoryVerdict::AsConfig(function, 0x10), "write={write}");
         // What the kernel does with that verdict.
         let MemoryVerdict::AsConfig(function, offset) = verdict else { unreachable!() };
-        let made = config(memory.ecam, 0, function, offset, Width::DWord, write).map(|at| (at.function(), at.offset()));
-        assert_eq!(made, if write { Err(Refused::ConfigWrite) } else { Ok((function, 0x10)) }, "write={write}");
+        let made = config(memory.ecam, 0, function, offset, Width::DWord).and_then(|at| if write { at.write(None).map(|passed| passed.at()) } else { Ok(at) });
+        assert_eq!(made.map(|at| (at.function(), at.offset())), if write { Err(Refused::AddressMap) } else { Ok((function, 0x10)) }, "write={write}");
     }
     for bus in [0x3f, 0x40, 0x7f] {
         let function = Function { bus, device: 0, function: 0 };
-        assert!(config(memory.ecam, 0, function, 0, Width::DWord, false).is_ok(), "bus {bus:#x}");
+        assert!(config(memory.ecam, 0, function, 0, Width::DWord).is_ok(), "bus {bus:#x}");
     }
-    assert_eq!(config(memory.ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(memory.ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord), Err(Refused::ConfigUnreachable));
 }
 
 #[test]
@@ -781,36 +790,227 @@ const HOST_BRIDGE: Function = Function { bus: 0, device: 0, function: 0 };
 fn a_configuration_read_is_held_to_the_window_and_to_one_register() {
     let ecam = ecam(0xe000_0000, 0, 0x7F);
     for (offset, width) in [(0, Width::DWord), (0xE, Width::Byte), (0x19, Width::Byte), (0x4A, Width::Word), (0xFFC, Width::DWord), (0xFFF, Width::Byte)] {
-        let at = config(ecam, 0, HOST_BRIDGE, offset, width, false).expect("one register of a reachable function");
+        let at = config(ecam, 0, HOST_BRIDGE, offset, width).expect("one register of a reachable function");
         assert_eq!((at.function(), at.offset(), at.width()), (HOST_BRIDGE, offset, width));
     }
     let last = Function { bus: 0x7F, device: 31, function: 7 };
-    assert!(config(ecam, 0, last, 0, Width::DWord, false).is_ok());
+    assert!(config(ecam, 0, last, 0, Width::DWord).is_ok());
     for (offset, width) in [(0, Width::QWord), (1, Width::DWord), (3, Width::Word), (0xFFE, Width::DWord), (0x1000, Width::Byte), (u16::MAX, Width::Byte)] {
-        assert_eq!(config(ecam, 0, HOST_BRIDGE, offset, width, false), Err(Refused::ConfigSpan), "{offset:#x} {width:?}");
+        assert_eq!(config(ecam, 0, HOST_BRIDGE, offset, width), Err(Refused::ConfigSpan), "{offset:#x} {width:?}");
     }
-    assert_eq!(config(ecam, 1, HOST_BRIDGE, 0, Width::DWord, false), Err(Refused::ConfigUnreachable), "another segment group");
-    assert_eq!(config(ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
-    assert_eq!(config(ecam, 0, Function { bus: 0, device: 32, function: 0 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
-    assert_eq!(config(ecam, 0, Function { bus: 0, device: 0, function: 8 }, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
-    assert_eq!(config(&[], 0, HOST_BRIDGE, 0, Width::DWord, false), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(ecam, 1, HOST_BRIDGE, 0, Width::DWord), Err(Refused::ConfigUnreachable), "another segment group");
+    assert_eq!(config(ecam, 0, Function { bus: 0x80, device: 0, function: 0 }, 0, Width::DWord), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(ecam, 0, Function { bus: 0, device: 32, function: 0 }, 0, Width::DWord), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(ecam, 0, Function { bus: 0, device: 0, function: 8 }, 0, Width::DWord), Err(Refused::ConfigUnreachable));
+    assert_eq!(config(&[], 0, HOST_BRIDGE, 0, Width::DWord), Err(Refused::ConfigUnreachable));
 }
 
+/// A function nothing claims or drives, of no class the kernel keeps.
+const FREE: Enumerated = Enumerated { vendor: 0x1b36, device: 0x0010, class: 0x01, subclass: 0x08, held: false };
+
+/// The T14's host bridge (`8086:9A14`, 631121-012 Table 15-3: UP3 4 cores),
+/// and the AMD bench's root complex (`1022:1630`).
+const T14_HOST_BRIDGE: Enumerated = Enumerated { vendor: 0x8086, device: 0x9A14, class: 0x06, subclass: 0x00, held: false };
+const AMD_ROOT_COMPLEX: Enumerated = Enumerated { vendor: 0x1022, device: 0x1630, class: 0x06, subclass: 0x00, held: false };
+
+/// A write of `width` at `offset` to a function the kernel enumerated as
+/// `found`, or to one nothing answers at, decided whole: shape, then write.
+fn config_write(found: Option<Enumerated>, offset: u16, width: Width) -> Result<u16, Refused> {
+    let ecam = ecam(0xc000_0000, 0, 0x79);
+    config(ecam, 0, HOST_BRIDGE, offset, width)?.write(found).map(|passed| passed.at().offset())
+}
+
+/// Every width of every register in `first..end`, each as one access.
+fn every_access(first: u16, end: u16) -> impl Iterator<Item = (u16, Width)> {
+    (first..end).flat_map(|offset| {
+        [Width::Byte, Width::Word, Width::DWord].into_iter().filter(move |width| offset % 4 + width.bytes() as u16 <= 4).map(move |width| (offset, width))
+    })
+}
+
+/// 00h–3Fh of every function is its header (PCI Express Base 6.0 §7.5.1),
+/// which places its decode, its BARs and a bridge's buses and windows:
+/// refused [`Refused::AddressMap`] in each width, on a function nothing
+/// claims and on one nothing answers at, by its address and through ECAM.
+/// From 40h such a function's write passes.
 #[test]
-fn every_configuration_write_is_refused_by_one_name() {
-    let ecam = ecam(0xe000_0000, 0, 0x7F);
-    // The header, a capability's place, the registers past them, extended
-    // space: every register a read reaches.
-    for offset in (0..0x1000u16).step_by(4) {
-        for (at, width) in [(offset, Width::DWord), (offset + 2, Width::Word), (offset + 3, Width::Byte)] {
-            assert!(config(ecam, 0, HOST_BRIDGE, at, width, false).is_ok(), "{at:#x} {width:?} reads");
-            assert_eq!(config(ecam, 0, HOST_BRIDGE, at, width, true), Err(Refused::ConfigWrite), "{at:#x} {width:?}");
+fn a_configuration_write_is_refused_in_every_header() {
+    for found in [Some(FREE), Some(AMD_ROOT_COMPLEX), None] {
+        for (offset, width) in every_access(0, 0x40) {
+            assert_eq!(config_write(found, offset, width), Err(Refused::AddressMap), "{found:?} {offset:#x} {width:?}");
+        }
+        assert_eq!(config_write(found, 0x40, Width::Byte), Ok(0x40), "{found:?}");
+        assert_eq!(config_write(found, 0x100, Width::DWord), Ok(0x100), "{found:?}");
+        assert_eq!(config_write(found, 0xFFC, Width::DWord), Ok(0xFFC), "{found:?}");
+    }
+    // Through ECAM it is the same access.
+    let laptop = laptop();
+    let MemoryVerdict::AsConfig(function, offset) = laptop.decide(0xc000_0000 + (0x1f << 15 | 0x3C), Width::Byte, true) else { panic!("in the window") };
+    let ecam = ecam(0xc000_0000, 0, 0xFF);
+    assert_eq!(config(ecam, 0, function, offset, Width::Byte).and_then(|at| at.write(Some(FREE)).map(drop)), Err(Refused::AddressMap));
+}
+
+/// A function a kernel driver drives or a claim holds is its driver's whole,
+/// and an interrupt controller (base class 08h, subclass 00h) and an IOMMU
+/// (08h, 06h) are the kernel's whether or not it programs them (PCI Code and
+/// ID Assignment Specification): refused [`Refused::HeldFunction`] past the
+/// header and in it. Another system peripheral is not.
+#[test]
+fn a_held_function_is_refused_whole() {
+    let held = Enumerated { held: true, ..FREE };
+    let interrupt_controller = Enumerated { vendor: 0x8086, device: 0x0001, class: 0x08, subclass: 0x00, held: false };
+    let iommu = Enumerated { vendor: 0x1022, device: 0x1631, class: 0x08, subclass: 0x06, held: false };
+    for found in [held, interrupt_controller, iommu] {
+        for (offset, width) in [(0x04, Width::Word), (0x40, Width::Byte), (0xB8, Width::DWord), (0x100, Width::DWord), (0xFFF, Width::Byte)] {
+            assert_eq!(config_write(Some(found), offset, width), Err(Refused::HeldFunction), "{found:?} {offset:#x}");
         }
     }
-    // And what no read reaches is a write all the same.
-    assert_eq!(config(ecam, 0, HOST_BRIDGE, 0, Width::QWord, true), Err(Refused::ConfigWrite));
-    assert_eq!(config(ecam, 1, HOST_BRIDGE, 0, Width::DWord, true), Err(Refused::ConfigWrite));
-    assert_eq!(config(&[], 0, HOST_BRIDGE, 0x44, Width::Byte, true), Err(Refused::ConfigWrite));
+    for subclass in [0x01, 0x02, 0x03, 0x04, 0x05, 0x80] {
+        let peripheral = Enumerated { class: 0x08, subclass, ..interrupt_controller };
+        assert_eq!(config_write(Some(peripheral), 0x40, Width::Byte), Ok(0x40), "08h {subclass:#04x}");
+    }
+    // A read is a read: the policy holds its shape and nothing else.
+    let ecam = ecam(0xc000_0000, 0, 0x79);
+    assert!(config(ecam, 0, HOST_BRIDGE, 0x40, Width::Byte).is_ok());
+}
+
+/// On a host bridge 631122 covers, 40h–BFh is its address map (631122
+/// §3.1.13–§3.1.34): PXPEPBAR 40h, MCHBAR 48h, GGC 50h, DEVEN 54h, PAVPC 58h,
+/// DPR 5Ch, PCIEXBAR 60h, DMIBAR 68h, PAM0–6 and LAC 80h–87h, TOM A0h, TOUUD
+/// A8h, BDSM B0h, BGSM B4h, TSEGMB B8h and TOLUD BCh. Refused there in each
+/// width; from C0h, and on any other host bridge, it passes: the AMD bench's
+/// root complex is written at B8h and BCh, where its `ALIB` mailbox is.
+#[test]
+fn the_host_bridges_address_map_is_refused_where_631122_maps_it() {
+    for device in [0x9A02, 0x9A04, 0x9A12, 0x9A14, 0x9A1A] {
+        let covered = Enumerated { device, ..T14_HOST_BRIDGE };
+        for (offset, width) in every_access(0x40, 0xC0) {
+            assert_eq!(config_write(Some(covered), offset, width), Err(Refused::AddressMap), "{device:#x} {offset:#x} {width:?}");
+        }
+        for (offset, width) in [(0xC0, Width::DWord), (0xC8, Width::Word), (0xDC, Width::DWord), (0x100, Width::DWord)] {
+            assert_eq!(config_write(Some(covered), offset, width), Ok(offset), "{device:#x} {offset:#x}");
+        }
+    }
+    // The H line, q35's MCH and the AMD bench's root complex.
+    for other in [Enumerated { device: 0x9A26, ..T14_HOST_BRIDGE }, Enumerated { device: 0x9A36, ..T14_HOST_BRIDGE }, Enumerated { device: 0x29C0, ..T14_HOST_BRIDGE }, AMD_ROOT_COMPLEX] {
+        for (offset, width) in [(0x48, Width::DWord), (0x60, Width::DWord), (0xB8, Width::DWord), (0xBC, Width::DWord), (0xBC, Width::Byte)] {
+            assert_eq!(config_write(Some(other), offset, width), Ok(offset), "{other:?} {offset:#x}");
+        }
+    }
+    // Another vendor's device of a covered number is no covered host bridge.
+    assert_eq!(config_write(Some(Enumerated { vendor: 0x1022, ..T14_HOST_BRIDGE }), 0x48, Width::DWord), Ok(0x48));
+}
+
+/// The registers that place a port block the kernel declared: the 500 Series
+/// eSPI controller's ESPI_IOD_IOE (631119-007 Table 6, A080h–A09Fh;
+/// 631120-002 §2.1.6), which enables COM1's and the i8042's decode, and where
+/// each chipset the watchdog knows places and enables its TCO block
+/// (`toyos_tco::CHIPSETS`): Tiger Lake-LP's SMBus function at TCOBASE 50h and
+/// TCOCTL 54h (631120-002 §6.1.17, §6.1.18), and q35's LPC bridge at 40h.
+/// Refused [`Refused::AddressMap`]; the registers beside them pass.
+#[test]
+fn a_register_that_places_a_declared_port_block_is_refused() {
+    let espi = |device| Enumerated { vendor: 0x8086, device, class: 0x06, subclass: 0x01, held: false };
+    for device in [0xA080, 0xA082, 0xA087, 0xA09F] {
+        for (offset, width) in every_access(0x80, 0x84) {
+            assert_eq!(config_write(Some(espi(device)), offset, width), Err(Refused::AddressMap), "{device:#x} {offset:#x} {width:?}");
+        }
+        assert_eq!(config_write(Some(espi(device)), 0x84, Width::DWord), Ok(0x84), "LGIR1");
+        assert_eq!(config_write(Some(espi(device)), 0x7C, Width::DWord), Ok(0x7C));
+    }
+    for device in [0xA07F, 0xA0A0] {
+        assert_eq!(config_write(Some(espi(device)), 0x80, Width::DWord), Ok(0x80), "{device:#x}");
+    }
+    let smbus = Enumerated { vendor: 0x8086, device: 0xA0A3, class: 0x0C, subclass: 0x05, held: false };
+    for (offset, width) in every_access(0x50, 0x58) {
+        assert_eq!(config_write(Some(smbus), offset, width), Err(Refused::AddressMap), "{offset:#x} {width:?}");
+    }
+    assert_eq!(config_write(Some(smbus), 0x40, Width::DWord), Ok(0x40), "HOSTC");
+    assert_eq!(config_write(Some(smbus), 0x58, Width::DWord), Ok(0x58));
+    let q35_lpc = Enumerated { vendor: 0x8086, device: 0x2918, class: 0x06, subclass: 0x01, held: false };
+    for (offset, width) in every_access(0x40, 0x44) {
+        assert_eq!(config_write(Some(q35_lpc), offset, width), Err(Refused::AddressMap), "{offset:#x} {width:?}");
+    }
+    assert_eq!(config_write(Some(q35_lpc), 0x44, Width::DWord), Ok(0x44));
+}
+
+/// MCHBAR's window as 00:00.0 of the T14 places it, 128 KiB aligned.
+const T14_MCHBAR: u64 = 0xFEDC_0000;
+
+/// The T14's shape: RAM low, the ECAM window at 0xC0000000 for buses
+/// 0..=0x79 (`pr-875` `round3/t14-testcases.log` line 160), everything from it
+/// to 4 GiB typed uncacheable and listed nowhere, its four VT-d units driven,
+/// and its host bridge with MCHBAR on.
+fn t14() -> Mem {
+    const MAP: &[MemoryMapEntry] = &[e(7, 0, 0x8000_0000)];
+    const DRIVEN: &[(u64, u64)] = &[(0xFED9_0000, 0xFED9_1000), (0xFED8_5000, 0xFED8_6000), (0xFED8_6000, 0xFED8_7000), (0xFED9_1000, 0xFED9_2000)];
+    Memory {
+        map: MAP,
+        mapped_end: 4 * GIB,
+        ecam: ecam(0xc000_0000, 0, 0x79),
+        devices: devices(DRIVEN),
+        facs: None,
+        uncached: |at, len| at >= 0xc000_0000 && at + len <= 4 * GIB,
+        registers_differ: false,
+        host_bridge: HostBridge { vendor: 0x8086, device: 0x9A14, at_48h: T14_MCHBAR | 1 },
+    }
+}
+
+/// On a host bridge 631122 covers whose MCHBAR is on, a write that overlaps
+/// a register the kernel keeps there is refused
+/// [`Refused::KernelRegister`], in every width, wherever firmware's map types
+/// its page: GFXVTBAR 5400h–5407h and VTDPVC0BAR 5410h–5417h (§3.4.2,
+/// §3.4.4), INTRDIRCTL 5418h–541Bh (§3.4.5) and PACKAGE_RAPL_LIMIT
+/// 59A0h–59A7h (§3.3.31). Every read passes, as do the T14's writes to the
+/// cTDP control at 5F50h and the turbo activation ratio at 5F54h, and the
+/// bytes either side of each register.
+#[test]
+fn a_register_the_kernel_keeps_is_refused_kernelregister() {
+    const KEPT: [(u64, u64); 4] = [(0x5400, 0x5408), (0x5410, 0x5418), (0x5418, 0x541C), (0x59A0, 0x59A8)];
+    // The same machine with MCHBAR's page typed reserved.
+    const RESERVED: &[MemoryMapEntry] = &[e(7, 0, 0x8000_0000), e(0, T14_MCHBAR, T14_MCHBAR + 0x2_0000)];
+    for memory in [t14(), Memory { map: RESERVED, ..t14() }] {
+        for (start, end) in KEPT {
+            for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+                // Every access that holds a byte of the register.
+                for at in (T14_MCHBAR + start + 1).saturating_sub(width.bytes())..T14_MCHBAR + end {
+                    assert_eq!(refused(&memory, at, width, true), Refused::KernelRegister, "{at:#x} {width:?}");
+                    assert!(passes(&memory, at, width, false), "{at:#x} {width:?} reads");
+                }
+            }
+        }
+        for (at, width) in [(0x59A0 - 1, Width::Byte), (0x59A8, Width::Byte), (0x5408, Width::QWord), (0x541C, Width::DWord), (0x53F8, Width::QWord), (0x5F50, Width::Byte), (0x5F54, Width::Byte), (0x5F50, Width::DWord)] {
+            assert!(passes(&memory, T14_MCHBAR + at, width, true), "{at:#x} {width:?}");
+        }
+    }
+}
+
+/// The kept registers are where 631122 has them only on the host bridges it
+/// covers (631121-012 Table 15-3: 9A02h, 9A04h, 9A12h, 9A14h and 9A1Ah), and
+/// only where MCHBAREN, bit 0 of 48h, is set (§3.1.14): on the H line, q35's
+/// MCH, the AMD bench's root complex, a disabled window or nothing at
+/// 00:00.0 the same write passes.
+#[test]
+fn kept_registers_exist_only_on_the_host_bridges_631122_covers() {
+    let rapl = T14_MCHBAR + 0x59A0;
+    for device in [0x9A02, 0x9A04, 0x9A12, 0x9A14, 0x9A1A] {
+        let memory = Memory { host_bridge: HostBridge { vendor: 0x8086, device, at_48h: T14_MCHBAR | 1 }, ..t14() };
+        assert_eq!(refused(&memory, rapl, Width::DWord, true), Refused::KernelRegister, "{device:#x}");
+    }
+    for host_bridge in [
+        HostBridge { vendor: 0x8086, device: 0x9A26, at_48h: T14_MCHBAR | 1 },
+        HostBridge { vendor: 0x8086, device: 0x9A36, at_48h: T14_MCHBAR | 1 },
+        HostBridge { vendor: 0x8086, device: 0x29C0, at_48h: T14_MCHBAR | 1 },
+        HostBridge { vendor: 0x1022, device: 0x1630, at_48h: T14_MCHBAR | 1 },
+        HostBridge { vendor: 0x1022, device: 0x9A14, at_48h: T14_MCHBAR | 1 },
+        HostBridge { vendor: 0x8086, device: 0x9A14, at_48h: T14_MCHBAR },
+        HostBridge::ABSENT,
+    ] {
+        assert!(passes(&Memory { host_bridge, ..t14() }, rapl, Width::DWord, true), "{host_bridge:?}");
+    }
+    // The window's base is bits 38:17: the low bits beside the enable, and
+    // anything past bit 38, place nothing.
+    let noisy = Memory { host_bridge: HostBridge { vendor: 0x8086, device: 0x9A14, at_48h: 1 << 45 | T14_MCHBAR | 0x1_FFFF }, ..t14() };
+    assert_eq!(refused(&noisy, rapl, Width::Byte, true), Refused::KernelRegister);
 }
 
 /// `SLP_TYPx` is bits 12:10 of PM1 control and `SLP_EN` bit 13 (ACPI 6.5

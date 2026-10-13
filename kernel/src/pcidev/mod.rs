@@ -372,9 +372,9 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 /// `one_claimant_per_device` compares `system.toml` strings, and a host-side
 /// gate is not the capability boundary.
 ///
-/// **Taken alone**: nothing is held while this is, and it is held across
-/// nothing — `reserve` runs after `claim` has dropped `MACHINE`, and `release`
-/// takes it once the teardown is over.
+/// **Held across nothing**, and taken with nothing of this module's held —
+/// `reserve` runs after `claim` has dropped `MACHINE`, and `release` takes it
+/// once the teardown is over — so it may be taken under any lock outside it.
 static SLOTS: Lock<[Slot; MAX_FUNCTIONS]> = Lock::new([Slot::Free; MAX_FUNCTIONS]);
 
 /// One claim's hold on a slot, from its reservation to the release its drop
@@ -429,16 +429,32 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
     out
 }
 
-/// Every range a memory BAR of an enumerated function decoded as firmware
-/// left it, as `(start, end)`. What the `acpi` claim's holder is refused
-/// (`toyos_userbound::firmware`), whoever drives the function. A window this
-/// module cut for a BAR since is not among them: [`publish`] cuts only at
-/// addresses firmware's map does not list, which the mediation refuses by
-/// that. `f` runs under [`MACHINE`]; the mediation takes `paging`'s record of
-/// windows inside it, and nothing holding that record's lock takes this one.
+/// What the kernel enumerated at a function, for the `acpi` claim's holder's
+/// configuration write (`toyos_userbound::firmware::ConfigAt::write`): `None`
+/// where nothing answered. Held where a kernel driver drives it or a claim
+/// holds it.
+pub fn enumerated(bus: u8, dev: u8, func: u8) -> Option<toyos_userbound::firmware::Enumerated> {
+    let who = ((bus as u16) << 8) | ((dev as u16) << 3) | func as u16;
+    let (pci, driven) = {
+        let machine = MACHINE.lock();
+        let pci = *machine.identities.iter().find(|pci| requester_of(pci.at) == who)?;
+        (pci, machine.kernel_driven.contains(&who))
+    };
+    let held = driven || SLOTS.lock().contains(&Slot::Held(who));
+    Some(toyos_userbound::firmware::Enumerated { vendor: pci.vendor, device: pci.device, class: pci.class, subclass: pci.subclass, held })
+}
+
+/// Every range a memory BAR of an enumerated function decodes, as `(start,
+/// end)`: where firmware left it, and each window this module cut for one
+/// since. What the `acpi` claim's holder is refused
+/// (`toyos_userbound::firmware`), whoever drives the function. `f` runs under
+/// [`MACHINE`]; the mediation takes `paging`'s record of windows inside it,
+/// and nothing holding that record's lock takes this one.
 pub fn with_bar_memory<T>(f: impl FnOnce(&mut dyn Iterator<Item = (u64, u64)>) -> T) -> T {
     let machine = MACHINE.lock();
-    f(&mut machine.decoded.iter().map(|&(_, start, end)| (start, end)))
+    let firmware = machine.decoded.iter().map(|&(_, start, end)| (start, end));
+    let cut = machine.windows.iter().map(|&(_, _, at, span)| (at, at + span));
+    f(&mut firmware.chain(cut))
 }
 
 /// The PCI segment group every enumerated function is on.

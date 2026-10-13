@@ -106,6 +106,7 @@ pub const SET_CONNECTION_SELECT: u16 = 0x701;
 pub const GET_CONFIG_DEFAULT: u16 = 0xF1C;
 pub const GET_PIN_SENSE: u16 = 0xF09;
 pub const SET_AMP_GAIN_MUTE: u16 = 0x3;
+pub const GET_AMP_GAIN_MUTE: u16 = 0xB;
 pub const SET_CONVERTER_FORMAT: u16 = 0x2;
 
 pub const PARAM_VENDOR_ID: u8 = 0x00;
