@@ -305,12 +305,13 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
         let mut line = String::new();
         assert!(said.read_line(&mut line).expect("read the chain") > 0, "the chain ended without a refusal");
         let line = line.trim().to_string();
-        if let Some(k) = line.strip_prefix("link ") {
-            started = k.parse().expect("a link's index");
+        // The refusal is a link's too, so it is read before a link's index.
+        if line.contains("refused") {
+            break line;
         } else if line.starts_with("unbounded") {
             panic!("the chain passed link {LINK_BOUND} with no depth refusal: {line}");
-        } else if line.contains("refused") {
-            break line;
+        } else if let Some(k) = line.strip_prefix("link ") {
+            started = k.parse().expect("a link's index");
         }
     };
     assert!(started >= 2, "the chain stopped at link {started}: {stop}");
