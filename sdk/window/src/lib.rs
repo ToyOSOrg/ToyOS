@@ -341,11 +341,6 @@ impl KeyEvent {
     pub fn alt(&self) -> bool { self.modifiers & MOD_ALT != 0 }
     pub fn gui(&self) -> bool { self.modifiers & MOD_GUI != 0 }
 
-    /// Whether this is the copy chord: the press of GUI with HID usage 0x06,
-    /// the key labelled C on a US layout, so the same key on every layout.
-    /// The release that follows is not a second copy.
-    pub fn copies(&self) -> bool { self.pressed() && self.gui() && self.keycode == 0x06 }
-
     pub fn mods(&self) -> Mods {
         Mods { shift: self.shift(), ctrl: self.ctrl(), alt: self.alt() }
     }
@@ -774,27 +769,5 @@ impl std::fmt::Debug for Window {
 impl Drop for Window {
     fn drop(&mut self) {
         let _ = self.conn.signal(MSG_DESTROY_WINDOW);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The chord as a keyboard reports it: GUI down, C down, C up, GUI up.
-    /// One copy, from the press.
-    #[test]
-    fn the_copy_chord_copies_once() {
-        let gui = 0xE3;
-        let c = 0x06;
-        let chord = [
-            KeyEvent { keycode: gui, modifiers: MOD_GUI },
-            KeyEvent { keycode: c, modifiers: MOD_GUI },
-            KeyEvent { keycode: c, modifiers: MOD_GUI | MOD_RELEASED },
-            KeyEvent { keycode: gui, modifiers: MOD_RELEASED },
-        ];
-        let copies: Vec<usize> = chord.iter().enumerate().filter(|(_, key)| key.copies()).map(|(at, _)| at).collect();
-        assert_eq!(copies, [1]);
-        assert!(!KeyEvent { keycode: c, modifiers: MOD_CTRL }.copies(), "Ctrl+C is the shell's interrupt");
     }
 }

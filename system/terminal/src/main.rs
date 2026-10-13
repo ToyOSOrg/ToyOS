@@ -145,7 +145,7 @@ fn main() {
                 // A client holding the grab takes the transition whole, and
                 // the translator is not advanced — see `Window::text`.
                 window::Event::KeyInput(key) if host.deliver(key.into()) == Delivery::Sent => {}
-                window::Event::KeyInput(key) if key.copies() => {
+                window::Event::KeyInput(key) if key.pressed() && key.gui() && key.keycode == 0x06 => {
                     if let Some(text) = console.get_selection() {
                         copy(&text);
                     }
