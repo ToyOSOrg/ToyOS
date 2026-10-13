@@ -19,6 +19,11 @@ logkeeper-api = { path = "../../../lib/logkeeper-api" }
 acpiserver-api = { path = "../../../lib/acpiserver-api" }
 # The diary's decoder, for `trace_read` and `trace_flood`.
 toyos-trace = { path = "../../../lib/trace" }
+# The I219's driver and the claim's register window and grant, for `i219_msi`'s
+# measurement of its interrupts on the T14.
+toyos-i219 = { path = "../../../system/netstack/i219" }
+toyos-device-memory = { path = "../../../lib/device-memory" }
+toyos-pci-claim = { path = "../../../lib/pci-claim" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 memmap2 = "0.9"

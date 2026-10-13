@@ -121,6 +121,9 @@ const RUST_SKIP: &[&str] = &[
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
     "pci_reclaim",
+    // It measures the T14's I219, which no guest has: the
+    // `i219_messages_on_its_msi_vector` metal row runs it.
+    "i219_msi",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -932,6 +935,21 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed(claims::RECLAIM)?;
                 claims::reuses_its_entry(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // The I219's interrupts on the function itself, which QEMU's e1000e
+        // is not: no MSI-X capability, `0x000E4` read before anything writes
+        // it, causes forced through `ICS` counted on the claim's MSI vector
+        // unmasked and masked, `ICR`'s read with auto-mask off and on, and
+        // the driver under traffic on the bench's wire.
+        "i219_messages_on_its_msi_vector",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::MSI])],
+            judge: |b| {
+                b[0].job_passed(claims::MSI)?;
+                claims::messages_on_its_msi_vector(&b[0].kernel(), &b[0].log())
             },
         },
     ),

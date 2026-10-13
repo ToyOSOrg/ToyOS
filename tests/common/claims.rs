@@ -12,6 +12,12 @@ const I219: &str = "8086:15fc";
 /// The job that claims the T14's I219, gives it back and claims it again.
 pub const RECLAIM: &str = "test_rs_pci_reclaim";
 
+/// The job that measures the I219's interrupts on its own claim.
+pub const MSI: &str = "test_rs_i219_msi";
+
+/// What that job prints each reading under.
+const MSI_SAYS: &str = "i219_msi: ";
+
 /// The kernel's reason on a claim's refusal line where the units do not remap.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
 
@@ -144,5 +150,38 @@ pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
     log.must_not_say(&format!(" source={at} "))?;
     log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
     log.must_say(bootlog::COMPLETE)?;
+    Ok(())
+}
+
+/// The I219's claim armed on MSI and its slot answered by a message while the
+/// I219 held it, and the job's readings — each its own line, judged by the
+/// job's exit — read out.
+pub fn messages_on_its_msi_vector(kernel: &Serial, log: &Serial) -> Result<(), String> {
+    let at = function(kernel)?;
+    kernel.must_say(&format!("PCI {at}: msi address="))?;
+    kernel.must_not_say(&format!("PCI {at}: msix address="))?;
+    // A slot is any claim's in turn, so a first message is the I219's only
+    // where the slot's newest hand-over before it was.
+    let mut holder = std::collections::BTreeMap::new();
+    let mut answered = false;
+    for record in records(kernel) {
+        if let Some((what, rest)) = record.split_once("] handed over on slot ") {
+            let slot = rest.split(',').next().unwrap_or_default().to_string();
+            holder.insert(slot, what.ends_with(I219));
+        } else if let Some(rest) = record.strip_prefix("pcidev: slot ") {
+            let slot = rest.split_whitespace().next().unwrap_or_default();
+            answered |= rest.contains(" took its first message on ") && holder.get(slot) == Some(&true);
+        }
+    }
+    if !answered {
+        return Err(format!("no slot took a first message while {I219} held it:\n{}", kernel.text()));
+    }
+    let said: Vec<&str> = log.text().lines().filter_map(|l| Some(l.split_once(MSI_SAYS)?.1)).collect();
+    if said.last() != Some(&"done") {
+        return Err(format!("i219_msi never said it was done:\n{}", said.join("\n")));
+    }
+    for line in said {
+        eprintln!("  [i219] {line}");
+    }
     Ok(())
 }

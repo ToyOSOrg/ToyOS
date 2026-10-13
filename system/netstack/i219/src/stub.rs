@@ -52,10 +52,10 @@ use std::{format, vec};
 
 use crate::phy::{advertise, control, control_1000t, custom_mode, oem_bits, reg};
 use crate::regs::{
-    self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, phy_ctrl, rah, rctl, rx_desc,
-    status, tctl, tx_desc,
+    self, cause, ctrl, ctrl_ext, extcnf, fwsm, lanphypc_timing, mdic, pbeccsts, phy_ctrl, rah, rctl,
+    rx_desc, status, tctl, tx_desc,
 };
-use crate::{phy, wake, Clock, DmaBuffers, Interrupts, Part, Registers};
+use crate::{phy, wake, Clock, Delivery, DmaBuffers, Interrupts, Part, Registers};
 
 /// Where the device reaches the grant. Not zero and not a small number: a
 /// driver that wrote a grant *offset* into a descriptor instead of a device
@@ -128,6 +128,15 @@ pub struct Permits {
     /// are of the same specification, so the model takes one or the other and
     /// a driver has to be right under either.
     pub icr_read_has_no_side_effect: bool,
+    /// §10.2.4.1 clears `ICR` on a read with an interrupt asserted only "if
+    /// auto mask is active" and does not say what the same read does without
+    /// it, so the model leaves `ICR` standing — and its `INT_ASSERTED` with it.
+    pub asserted_read_clears_only_under_auto_mask: bool,
+    /// §10.2.4.1: "a PCIe interrupt is generated whenever one of the bits in
+    /// this register is set, and the corresponding interrupt is enabled", which
+    /// does not say whether a cause landing while one is already asserted is
+    /// another message; the model sends one only as `INT_ASSERTED` rises.
+    pub one_message_per_assertion: bool,
     /// §3.1.3.10: the function "proceeds to issue any pending requests" after
     /// the master disable, so the status bit does not go quiet on the first
     /// read of it.
@@ -233,6 +242,8 @@ impl Default for Permits {
             spurious_interrupts: true,
             link_loss_strands_the_ring: true,
             icr_read_has_no_side_effect: true,
+            asserted_read_clears_only_under_auto_mask: true,
+            one_message_per_assertion: true,
             master_takes_time_to_quiesce: true,
             firmware_takes_the_mdio_interface: true,
             mdi_takes_several_reads: true,
@@ -326,11 +337,6 @@ const OEM_SPEED_BITS: u16 = oem_bits::LOW_POWER_LINK_UP | oem_bits::GIGABIT_DISA
 
 /// How many `STATUS` reads §3.1.3.10's master enable stays set for.
 const MASTER_QUIESCE_READS: u32 = 3;
-
-/// §10.2.4.1's causes below the five §7.4.2 keeps for MSI-X mode: `ICR[19:0]`,
-/// which §7.4.1's fixed mapping makes the whole of what a part outside that
-/// mode signals.
-const CLASSIC_CAUSES: u32 = (1 << 20) - 1;
 
 /// How many reads of `EXTCNF_CTRL` §4.5.2's manageability agent holds the
 /// interface across before the software request registered under it is granted.
@@ -565,6 +571,8 @@ struct Model {
     seed: u64,
     rng: u64,
     part: Part,
+    /// The mode the kernel armed, which [`Self::config`] publishes.
+    delivery: Delivery,
     permits: Permits,
     /// The PHY, on the part that has one behind `MDIC`.
     phy: PhyModel,
@@ -629,6 +637,12 @@ struct Model {
     tx_stranded: bool,
     /// Messages the function has sent that the claim has not read.
     messages: u32,
+    /// The function's messages reach nothing: a fault injector, how a test
+    /// reaches [`crate::Refusal::Undelivered`].
+    vector_dead: bool,
+    /// Causes recorded the moment the next `ICR` read has returned: the event
+    /// that lands between a driver's read and its acknowledgement.
+    after_next_icr_read: u32,
     /// One offset in the window that nothing decodes, which answers ones.
     not_decoding: Option<usize>,
     /// Every register offset the driver has written, so a test about what a
@@ -705,11 +719,12 @@ fn next(rng: &mut u64) -> u64 {
 }
 
 impl Model {
-    fn new(seed: u64, part: Part, permits: Permits) -> Self {
+    fn new(seed: u64, part: Part, delivery: Delivery, permits: Permits) -> Self {
         let mut model = Self {
             seed,
             rng: seed | 1,
             part,
+            delivery,
             phy: PhyModel::new(&permits),
             mdi_answer: 0,
             master_reads: 0,
@@ -736,6 +751,8 @@ impl Model {
             tx_holding: Vec::new(),
             tx_stranded: false,
             messages: 0,
+            vector_dead: false,
+            after_next_icr_read: 0,
             not_decoding: None,
             written: BTreeSet::new(),
             trace: Vec::new(),
@@ -1072,11 +1089,22 @@ impl Model {
                 let value = self.get(regs::ICR);
                 let masked_all = self.get(regs::IMS) == 0;
                 let asserted = value & cause::INT_ASSERTED != 0;
-                // §10.2.4.1's three cases. Case 1 clears unconditionally; case
-                // 3 does nothing at all — and whether case 3 or §7.4.5's
-                // blanket read-to-clear applies is what `Permits` chooses.
-                if masked_all || asserted || !self.permits.icr_read_has_no_side_effect {
+                let auto_mask = self.auto_masks(value);
+                // §10.2.4.1's three cases. Case 1 clears unconditionally, case
+                // 2 clears and auto-masks, case 3 does nothing at all — and
+                // whether case 3 or §7.4.5's blanket read-to-clear applies, and
+                // what an asserted read without auto-mask does, is what
+                // `Permits` chooses.
+                let clears = masked_all
+                    || auto_mask
+                    || !self.permits.icr_read_has_no_side_effect
+                    || (asserted && !self.permits.asserted_read_clears_only_under_auto_mask);
+                if clears {
                     self.set(regs::ICR, 0);
+                }
+                let late = core::mem::take(&mut self.after_next_icr_read);
+                if late != 0 {
+                    self.raise(late);
                 }
                 value
             }
@@ -1204,6 +1232,19 @@ impl Model {
                     self.raise(0);
                 }
             }
+            // §10.2.4.4: "Any bit written with a 1b sets the corresponding
+            // interrupt", and a message follows where it is unmasked.
+            regs::ICS => self.raise(value),
+            regs::IVAR => {
+                assert!(
+                    self.part != Part::I219,
+                    "seed {}: the driver wrote {value:#010x} to {:#x}, which on the PCH's MAC is \
+                     not IVAR but a power and clock control it has just overwritten",
+                    self.seed,
+                    regs::IVAR
+                );
+                self.set(regs::IVAR, value);
+            }
             // §10.2.4.6: clear.
             regs::IMC => {
                 let held = self.get(regs::IMS);
@@ -1214,6 +1255,7 @@ impl Model {
             // `INT_ASSERTED` is not writable and clears with its causes.
             regs::ICR => {
                 let held = self.get(regs::ICR);
+                self.auto_masks(held);
                 let mut left = held & !(value & !cause::INT_ASSERTED);
                 if left & !cause::INT_ASSERTED == 0 {
                     left = 0;
@@ -1785,21 +1827,20 @@ impl Model {
     /// Record a cause and, if it is unmasked and this part's interrupt mode
     /// carries it, send a message.
     ///
-    /// **The 82574 is in MSI-X mode.** §10.2.4.1 gives every event two names:
+    /// **In MSI-X mode**, the 82574's, §10.2.4.1 gives every event two names:
     /// the classic cause and the queue-or-other cause §10.2.4.9 allocates a
     /// vector to. Both are set in `ICR`; only the second can reach a vector,
     /// and only while `IVAR`'s enable bit for it is set. A driver that
     /// programmed no `IVAR` is therefore told nothing at all, which is the
     /// part behaving as specified and not a model being unkind.
     ///
-    /// **The PCH's MAC is in MSI mode**, the only one its function has
-    /// (631120 §8.1.15, and no MSI-X capability in §8.1's table): §7.4.1's
-    /// fixed mapping, where every unmasked classic cause is the message, and
-    /// no second name is set because no document gives its bits 24:20 one.
+    /// **In MSI mode**, the only one the PCH's MAC has (631120 §8.1.15, and no
+    /// MSI-X capability in §8.1's table), §7.4.1's fixed mapping makes every
+    /// unmasked cause the message, and no second name is set.
     fn raise(&mut self, causes: u32) {
         let held = self.get(regs::ICR);
         let mut now = held | causes;
-        if self.part == Part::E82574 {
+        if self.delivery == Delivery::Msix {
             if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
                 now |= cause::RXQ0;
             }
@@ -1811,13 +1852,53 @@ impl Model {
             }
         }
         let unmasked = now & self.get(regs::IMS) & !cause::INT_ASSERTED;
-        let delivered = match self.part {
-            Part::E82574 => unmasked & self.vectored(),
-            Part::I219 => unmasked & CLASSIC_CAUSES,
+        let delivered = match self.delivery {
+            Delivery::Msix => unmasked & self.vectored(),
+            Delivery::Msi => unmasked,
         };
-        self.set(regs::ICR, if delivered != 0 { now | cause::INT_ASSERTED } else { now });
-        if delivered != 0 {
+        if delivered == 0 {
+            self.set(regs::ICR, now);
+            return;
+        }
+        let rising = held & cause::INT_ASSERTED == 0;
+        self.set(regs::ICR, now | cause::INT_ASSERTED);
+        if !self.vector_dead && (rising || !self.permits.one_message_per_assertion) {
             self.messages = self.messages.saturating_add(1);
+        }
+    }
+
+    /// §10.2.4.8: with `CTRL_EXT.IAME` set and `INT_ASSERTED` in `held`, a read
+    /// or write of `ICR` writes `IAM` into `IMC`. Whether it did.
+    fn auto_masks(&mut self, held: u32) -> bool {
+        let on = self.get(regs::CTRL_EXT) & ctrl_ext::IAME != 0 && held & cause::INT_ASSERTED != 0;
+        if on {
+            let mask = self.get(regs::IMS) & !self.get(regs::IAM);
+            self.set(regs::IMS, mask);
+        }
+        on
+    }
+
+    /// One dword of the function's configuration space, as PCI 3.0 §6.7 lays
+    /// the capability list out: the pointer at `34h`, then each capability's
+    /// id, next pointer and, for MSI and MSI-X, Message Control. The 82574's
+    /// list is its §9.1.3 Table 75; the PCH's is 631120 §8.1's. The Enable bit
+    /// set is the one the kernel armed.
+    fn config(&self, at: u8) -> u32 {
+        const MSI_ON: u32 = 1 << 16;
+        const MSIX_ON: u32 = 1 << 31;
+        let (msi, msix) = match self.delivery {
+            Delivery::Msi => (MSI_ON, 0),
+            Delivery::Msix => (0, MSIX_ON),
+        };
+        let cap = |id: u32, next: u32, control: u32| id | next << 8 | control;
+        match (self.part, at) {
+            (_, 0x34) => 0xC8,
+            (_, 0xC8) => cap(0x01, 0xD0, 0),
+            (_, 0xD0) => cap(0x05, 0xE0, msi),
+            (Part::E82574, 0xE0) => cap(0x10, 0xA0, 0),
+            (Part::E82574, 0xA0) => cap(0x11, 0, msix),
+            (Part::I219, 0xE0) => cap(0x13, 0, 0),
+            _ => 0,
         }
     }
 
@@ -2102,8 +2183,46 @@ impl Nic {
         Self::with(seed, Part::I219, Permits::default())
     }
 
+    /// `part` in the mode the kernel arms it in: MSI-X where the function
+    /// publishes it, which the 82574 does and the PCH's MAC does not.
     pub fn with(seed: u64, part: Part, permits: Permits) -> Self {
-        Self(Rc::new(RefCell::new(Model::new(seed, part, permits))))
+        let delivery = match part {
+            Part::E82574 => Delivery::Msix,
+            Part::I219 => Delivery::Msi,
+        };
+        Self::armed(seed, part, delivery, permits)
+    }
+
+    pub fn armed(seed: u64, part: Part, delivery: Delivery, permits: Permits) -> Self {
+        Self(Rc::new(RefCell::new(Model::new(seed, part, delivery, permits))))
+    }
+
+    /// One dword of configuration space, as the claim reads it.
+    pub fn config(&self, at: u8) -> u32 {
+        self.0.borrow().config(at)
+    }
+
+    /// The function's messages reach nothing at all.
+    pub fn vector_never_fires(&self) {
+        self.0.borrow_mut().vector_dead = true;
+    }
+
+    /// Record `causes` the moment the driver's next `ICR` read has returned.
+    pub fn cause_after_next_icr_read(&self, causes: u32) {
+        self.0.borrow_mut().after_next_icr_read = causes;
+    }
+
+    /// The PCH's packet buffer meets an error its ECC cannot correct: counted
+    /// in `PBECCSTS` and raised as `ECCER` where the driver turned both the
+    /// ECC and `CTRL`'s memory error handling on, and nothing otherwise.
+    pub fn packet_buffer_error(&self) {
+        let mut model = self.0.borrow_mut();
+        let ecc = model.get(regs::PBECCSTS);
+        if ecc & pbeccsts::ECC_ENABLE == 0 || model.get(regs::CTRL) & ctrl::MEMORY_ERROR_HANDLING == 0 {
+            return;
+        }
+        model.set(regs::PBECCSTS, ecc + (1 << 8));
+        model.raise(cause::ECCER);
     }
 
     pub fn seed(&self) -> u64 {
@@ -2598,5 +2717,15 @@ impl Interrupts for Line {
             0 => Err(Unanswered::Idle),
             count => Ok(count),
         }
+    }
+
+    /// Nothing arrives in this model while the driver waits, so a wait with
+    /// no message spends its whole bound.
+    fn taken_within(&self, nanos: u64) -> Result<u32, Unanswered> {
+        let answer = self.taken();
+        if answer == Err(Unanswered::Idle) {
+            self.0.borrow_mut().nanos += nanos;
+        }
+        answer
     }
 }
