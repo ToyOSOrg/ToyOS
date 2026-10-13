@@ -92,6 +92,15 @@ Beside that order, each waiting on something outside it:
    program. Ctrl+Alt+D is removed (owner, 2026-10-10: "i dont want it. i want
    it removed."; done, #824). No swap, declared. `SYS_DEVICE_DMA_MAP` for
    zero-copy block I/O. FAT32 on `/log` in the installed product is deferred.
+   **Owed**, the orchestrator's to dispatch, for the restart beyond the
+   bytes stage 3 holds: a module test in `sdk/toyos/src/fs.rs` that a call
+   on an id from an ended connection answers `Gone` and a path call
+   reconnects once, red with the generation check removed; and a module
+   test in `system/supervisor` that an ended role is started again until
+   `toyos_manifest::RESTARTS` ends inside the window and is then closed with
+   its clients answered `Gone`, red on a supervisor that restarts without
+   bound, and that a restart whose partition claim another process holds is
+   refused by name.
    **Partly done**: steps 1, 2, 3, 6 and 7 are done, and 4, 5, 8, 9 and 10
    partly.
 
