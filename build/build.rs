@@ -597,13 +597,15 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// The ports that one row alone may receive, each with that row: the swap
 /// port, whose holder replaces any service's binary, the grants port, whose
 /// holder writes which folder of the home a package sees, the prompt port,
-/// whose holder draws above every window and has every key while it does, and
-/// the input port, whose holder types into the focused window.
+/// whose holder draws above every window and has every key while it does, the
+/// input port, whose holder types into the focused window, and the clipboard
+/// port, whose holder is sent every copy made in the session.
 const HELD_ALONE: &[(&str, &str)] = &[
     (toyos_swap::PORT, toyos_swap::HOLDER),
     (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
     (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
     (toyos_input::wire::PORT, toyos_input::wire::HOLDER),
+    (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
 ];
 
 /// Who may hold the authorities that change what the machine runs or what a
@@ -3014,6 +3016,7 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
+        "tests/images/clipboardcase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
@@ -3100,6 +3103,10 @@ mod tests {
         assert!(held_by_their_holders_alone(&shell).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+        let vdagent: SystemConfig = toml::from_str("[programs.vdagent]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&vdagent).is_ok());
+        let editor: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&editor).is_err());
     }
 
     /// The prompt port reaches its server alone, and the consent port no row,

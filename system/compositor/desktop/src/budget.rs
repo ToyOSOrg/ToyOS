@@ -78,16 +78,27 @@ pub fn create_verdict(requested: (u32, u32), screen: Rect, level: Level, clients
     Verdict::Allow
 }
 
-/// Whether a connection just accepted may wait for its first frame, off
-/// `prompt` or off the clients' port, beside the ones already `waiting` (each
-/// `true` for one off `prompt`): **one off `prompt` has a slot of its own**,
-/// and the clients' share `max`, so no client filling the table keeps the
-/// prompt from being made.
-pub fn pending_admits(prompt: bool, waiting: impl IntoIterator<Item = bool>, max: usize) -> bool {
+/// Which of the compositor's ports a connection came in on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Port {
+    /// `compositor`, the clients'.
+    Compositor,
+    /// `prompt`, the layer above every window.
+    Prompt,
+    /// `clipboard`, its watcher's.
+    Clipboard,
+}
+
+/// Whether a connection just accepted off `port` may wait for its first frame,
+/// beside the ones already `waiting`: **one off `prompt` and one off
+/// `clipboard` each have a slot of their own**, and the clients' share `max`,
+/// so no client filling the table keeps the prompt from being made or the
+/// clipboard from being watched.
+pub fn pending_admits(port: Port, waiting: impl IntoIterator<Item = Port>, max: usize) -> bool {
     let mut waiting = waiting.into_iter();
-    match prompt {
-        true => !waiting.any(|p| p),
-        false => waiting.filter(|p| !p).count() < max,
+    match port {
+        Port::Compositor => waiting.filter(|p| *p == Port::Compositor).count() < max,
+        own => !waiting.any(|p| p == own),
     }
 }
 
@@ -153,10 +164,19 @@ mod tests {
         }
         assert_eq!(create_verdict((600, 400), HD, Level::Prompt, 10, 10), Verdict::Allow);
         assert_eq!(create_verdict((1921, 400), HD, Level::Prompt, 0, 10), Verdict::TooLarge);
-        let full = [false; 32];
-        assert!(!pending_admits(false, full, 32));
-        assert!(pending_admits(true, full, 32));
-        assert!(!pending_admits(true, full.iter().copied().chain([true]), 32));
-        assert!(pending_admits(false, [true; 1].into_iter().chain([false; 31]), 32));
+        let full = [Port::Compositor; 32];
+        assert!(!pending_admits(Port::Compositor, full, 32));
+        assert!(pending_admits(Port::Prompt, full, 32));
+        assert!(!pending_admits(Port::Prompt, full.iter().copied().chain([Port::Prompt]), 32));
+        assert!(pending_admits(Port::Compositor, [Port::Prompt].into_iter().chain([Port::Compositor; 31]), 32));
+    }
+
+    /// The clipboard's watcher waits in a slot of its own, as the prompt does.
+    #[test]
+    fn the_watcher_is_admitted_past_every_client_ceiling() {
+        let full = [Port::Compositor; 32];
+        assert!(pending_admits(Port::Clipboard, full.iter().copied().chain([Port::Prompt]), 32));
+        assert!(!pending_admits(Port::Clipboard, full.iter().copied().chain([Port::Clipboard]), 32));
+        assert!(pending_admits(Port::Compositor, [Port::Clipboard].into_iter().chain([Port::Compositor; 31]), 32));
     }
 }

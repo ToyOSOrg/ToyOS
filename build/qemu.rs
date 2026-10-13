@@ -83,7 +83,8 @@ pub enum Profile {
 struct Shape {
     /// The display device. `Virtio` is the only profile with no firmware GOP.
     virtio_gpu: bool,
-    /// virtio-net, virtio-sound, and the console on virtio-serial.
+    /// virtio-net, virtio-sound, the console on virtio-serial, and the
+    /// clipboard's channel on a virtio-serial function of its own.
     virtio: bool,
     /// A USB HID on the xHCI. The T14's keyboard is PS/2 and its touchpad
     /// I2C-HID; it has no USB HID at all.
@@ -127,6 +128,17 @@ pub struct Options {
 pub fn launch(opts: &Options) {
     let shape = opts.profile.shape();
     let arch = opts.arch;
+    // Before anything launches: every virtio machine carries the clipboard's
+    // channel, and every host's display is the one with its clipboard.
+    let display = display();
+    let wanted = [
+        shape.virtio.then(|| toyos_build::vdagent::available(arch)),
+        (display != "cocoa").then(|| toyos_build::vdagent::gtk(arch)),
+    ];
+    if let Some(refused) = wanted.into_iter().flatten().find_map(Result::err) {
+        eprintln!("Error: {refused}");
+        std::process::exit(1);
+    }
     let mut qemu = Command::new(arch.qemu());
 
     // Without this QEMU runs its default-device pass whenever no network
@@ -155,6 +167,7 @@ pub fn launch(opts: &Options) {
     if let Some(boot) = arch.boot() {
         qemu.arg("-boot").arg(boot);
     }
+    qemu.arg("-display").arg(display);
     qemu.arg("-machine")
         .arg(machine(arch, shape.iommu))
         .arg("-smp")
@@ -242,6 +255,10 @@ pub fn launch(opts: &Options) {
         }
         qemu.arg("-device")
             .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
+
+        // The clipboard's channel, just before the console's function, so it
+        // enumerates first and the kernel's console rule runs.
+        qemu.args(toyos_build::vdagent::args(platform));
 
         // Console wiring: virtio-console on stdio is the primary I/O channel
         // (the kernel switches to it once virtio-console init completes —
@@ -337,6 +354,16 @@ fn iommu_device(arch: Arch) -> Option<&'static str> {
     match arch {
         Arch::X86_64 => Some("intel-iommu,intremap=on,caching-mode=on,aw-bits=48"),
         Arch::Aarch64 => None,
+    }
+}
+
+/// The display, with the host's clipboard: QEMU's own on macOS, and GTK's,
+/// whose clipboard QEMU leaves off unless asked, everywhere else.
+fn display() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "cocoa"
+    } else {
+        "gtk,clipboard=on"
     }
 }
 

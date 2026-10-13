@@ -1,15 +1,20 @@
 //! VirtIO console: single-port (no MULTIPORT), replacing the 16550 UART as
 //! the kernel log channel after init. Uses queues 0 (RX) and 1 (TX).
 //!
+//! **It drives the first console function that does not offer MULTIPORT**
+//! (`toyos_pci::console`), read before any function masters the bus; a
+//! multiport function is reset and left to a claim.
+//!
 //! RX is poll-driven: no UART IRQ handler is wired (see `arch/x86_64/idt/mod.rs`).
 
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::pci::PciDevice;
 use super::serial::BackendGuard;
-use super::virtio::{wait_used, BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
+use super::virtio::{wait_used, BufDir, DescSlot, Offered, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
 use crate::mm::{Dma, Unaligned};
@@ -196,12 +201,34 @@ pub fn has_data_locked(_: &BackendGuard) -> bool {
 }
 
 pub fn init(devices: &[PciDevice]) -> bool {
-    let pci_dev = match devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_CONSOLE_DEVICE)) {
-        Some(d) => *d,
-        None => {
-            log!("virtio-console: no device found");
-            return false;
+    // Every console function's offer, in enumeration order: the one this
+    // driver takes is decided by what each offers (`toyos_pci::console`).
+    let mut offers: Vec<(PciDevice, Offered)> = Vec::new();
+    for pci_dev in devices.iter().filter(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_CONSOLE_DEVICE)) {
+        match VirtioDevice::offer(pci_dev) {
+            Ok(offered) => offers.push((*pci_dev, offered)),
+            Err(why) => log!("virtio-console: PCI {:02x}:{:02x}.{} {why} — device refused",
+                pci_dev.bus, pci_dev.dev, pci_dev.func),
         }
+    }
+    let features: Vec<u64> = offers.iter().map(|(_, offered)| offered.features).collect();
+    let chosen = toyos_pci::console(&features);
+    let mut taken = None;
+    for (at, (pci_dev, offered)) in offers.into_iter().enumerate() {
+        if Some(at) == chosen {
+            taken = Some((pci_dev, offered));
+            continue;
+        }
+        log!(
+            "virtio-console: PCI {:02x}:{:02x}.{} offers MULTIPORT, which this single-port driver \
+             does not drive — reset and left to a claim",
+            pci_dev.bus, pci_dev.dev, pci_dev.func
+        );
+        offered.decline();
+    }
+    let Some((pci_dev, offered)) = taken else {
+        log!("virtio-console: no device found");
+        return false;
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
@@ -212,7 +239,7 @@ pub fn init(devices: &[PciDevice]) -> bool {
     // Before the device is told an address, and after the only mapping it gets.
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1) {
+    let device = match offered.accept(&pci_dev, VIRTIO_F_VERSION_1) {
         Ok(device) => device,
         Err(why) => {
             log!("virtio-console: PCI {:02x}:{:02x}.{} {why} — device refused",
