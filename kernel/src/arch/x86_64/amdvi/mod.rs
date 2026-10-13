@@ -11,6 +11,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use crate::drivers::pci::PciDevice;
 use crate::iommu::StreamId;
 use crate::log;
 use crate::mm::Mmio;
@@ -25,6 +26,8 @@ const REGISTER_WINDOW: u64 = 0x4000;
 
 const EXTENDED_FEATURES: u64 = 0x0030;
 const CONTROL: u64 = 0x0018;
+const EXCLUSION_BASE: u64 = 0x0020;
+const EXCLUSION_LIMIT: u64 = 0x0028;
 const STATUS: u64 = 0x2020;
 
 const IOMMU_EN: u64 = 1 << 0;
@@ -55,7 +58,7 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
 
 /// Every unit the IVRS describes, switched off; `false` where firmware
 /// published no IVRS.
-pub fn init(rsdp_addr: u64) -> bool {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
         Err(IvrsRefused::Table(TableError::Absent)) => return false,
@@ -79,6 +82,7 @@ pub fn init(rsdp_addr: u64) -> bool {
         match block {
             IvrsBlock::Unit(unit) => {
                 describe(units, &unit);
+                function(units, &unit, devices);
                 for entry in ivrs.devices(&unit) {
                     match entry {
                         Ok(entry) => log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry)),
@@ -155,6 +159,27 @@ fn describe(index: usize, unit: &Unit) {
     );
 }
 
+/// The unit's own PCI function: its capability ids, which say whether its
+/// event interrupt is an MSI or an MSI-X one (§3.1), and its Miscellaneous
+/// Information Register 0 (Capability Offset 10h, §3.2): the address widths
+/// and the message number that interrupt is raised with.
+fn function(index: usize, unit: &Unit, devices: &[PciDevice]) {
+    let at = requester(unit.device);
+    let Some(function) = devices.iter().find(|d| StreamId::pci(d.bus, d.dev, d.func) == at) else {
+        log!("iommu: amdvi unit{index} function {at} is not among the enumerated functions");
+        return;
+    };
+    let ids: String = function.capabilities().map(|cap| format!(" {:#04x}", cap.id())).collect();
+    let misc = function.read_config_u32(u64::from(unit.capability) + 0x10);
+    log!(
+        "iommu: amdvi unit{index} function {at} caps=[{}] misc0={misc:#010x} va={} pa={} msinum={}",
+        ids.trim_start(),
+        (misc >> 15) & 0x7F,
+        (misc >> 8) & 0x7F,
+        misc & 0x1F,
+    );
+}
+
 /// What one device entry names, and its DTE setting byte.
 fn served(ivrs: &Ivrs<impl Phys>, entry: &DeviceEntry) -> String {
     let id = requester;
@@ -226,10 +251,13 @@ fn spin_until(mut done: impl FnMut() -> bool, stuck: impl Fn() -> String) {
 /// the next.
 fn switch_off(index: usize, unit: &Unit, regs: Mmio) {
     log!(
-        "iommu: amdvi unit{index} handed over control={:#018x} status={:#010x} efr={:#018x}",
+        "iommu: amdvi unit{index} handed over control={:#018x} status={:#010x} efr={:#018x} \
+         exclusion={:#018x}..{:#018x}",
         regs.read_u64(CONTROL),
         regs.read_u32(STATUS),
         regs.read_u64(EXTENDED_FEATURES),
+        regs.read_u64(EXCLUSION_BASE),
+        regs.read_u64(EXCLUSION_LIMIT),
     );
     for (bit, run, what) in FIRMWARE_LEFT {
         if regs.read_u64(CONTROL) & bit == 0 {
