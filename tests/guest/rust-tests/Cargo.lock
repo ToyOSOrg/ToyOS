@@ -797,6 +797,7 @@ dependencies = [
  "toyos-i219",
  "toyos-inspect",
  "toyos-logstream",
+ "toyos-pci",
  "toyos-pci-claim",
  "toyos-tco",
  "toyos-trace",
