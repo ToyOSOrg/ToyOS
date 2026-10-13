@@ -21,7 +21,12 @@
 //! **A device that resets itself** (`0xAA 0x00`) has its reporting enabled
 //! again with `0xD4 0xF4` (TP 13), whose `0xFA` comes in the stream within
 //! TP 46's 25 ms; [`REENABLES`] failures in a row write the pointer off with
-//! `0xA7` alone (C 12), so its line never rises again.
+//! `0xA7` alone (C 12), so its line never rises again, and its buttons are
+//! released by a report holding none.
+//!
+//! **A loss is the device's that lost something.** The keyboard's overrun
+//! code sends `LOST`, which releases keys alone; a pointer byte dropped sends
+//! nothing, since every packet states the buttons whole.
 
 use toyos_abi::input::{RawKeyEvent, MOD_RELEASED};
 use toyos_input::wire::{Motion, Record, Report};
@@ -228,10 +233,10 @@ impl Stream {
                 return;
             }
             // Nothing is reported until the enable is out, and nothing after
-            // the write-off: a byte now is one this stream had to drop.
+            // the write-off.
             Aux::Off | Aux::Owed { .. } => {
                 self.counts.discarded += 1;
-                return out.push(Record::Lost);
+                return;
             }
         }
         match self.pointer.feed(byte, self.device_ns) {
@@ -239,14 +244,10 @@ impl Stream {
             MouseOutcome::Packet { buttons, dx, dy } => {
                 self.counts.motion += 1;
                 // A 9-bit count, which an `i16` holds.
-                let motion = Motion::Relative { dx: dx as i16, dy: dy as i16 };
-                out.push(Record::Pointer(Report { source: 0, buttons, scroll: 0, motion }));
+                out.push(pointer(buttons, dx as i16, dy as i16));
             }
             MouseOutcome::Reset => self.aux = Aux::Owed { failures: 0 },
-            MouseOutcome::Discarded => {
-                self.counts.discarded += 1;
-                out.push(Record::Lost);
-            }
+            MouseOutcome::Discarded => self.counts.discarded += 1,
         }
         self.aux_run.0.clear();
     }
@@ -264,7 +265,7 @@ impl Stream {
         let deadline = c.now() + ACK_NS;
         if failures >= REENABLES {
             self.aux = Aux::Off;
-            out.push(Record::Lost);
+            out.push(pointer(0, 0, 0));
             let sent = self.send(c, Port::Command, DISABLE_AUX, deadline, out, say);
             say(format!("ps2server: aux enable failed {failures} times — pointer written off ({sent:?})"));
             return;
@@ -313,6 +314,11 @@ impl Stream {
     }
 }
 
+/// The one pointer's report: it is source 0 of this connection.
+fn pointer(buttons: u8, dx: i16, dy: i16) -> Record {
+    Record::Pointer(Report { source: 0, buttons, scroll: 0, motion: Motion::Relative { dx, dy } })
+}
+
 #[cfg(test)]
 mod tests {
     use toyos_abi::input::MOD_RELEASED;
@@ -327,7 +333,7 @@ mod tests {
     /// `fake` probed and armed, and the stream over it.
     fn armed(fake: &mut Fake) -> Stream {
         let mut said = |line: String| eprintln!("{line}");
-        let Probed::Armed { aux, backlog, .. } = probe(fake, &mut said) else { panic!("the probe armed nothing") };
+        let Probed::Armed { aux, backlog } = probe(fake, &mut said) else { panic!("the probe armed nothing") };
         let (stream, records) = Stream::new(fake, aux, &backlog, &mut said);
         assert!(records.is_empty(), "{records:?}");
         stream
@@ -408,6 +414,21 @@ mod tests {
         assert!(said.iter().any(|l| l == "ps2server: aux reset itself, reporting enabled again"), "{said:#?}");
     }
 
+    /// Shift held, then an aux byte with bit 3 clear, which no packet starts
+    /// with: the framer drops it, and nothing tells the owner to release a key.
+    #[test]
+    fn a_discarded_aux_byte_sends_nothing() {
+        let mut fake = Fake::qemu();
+        let mut stream = armed(&mut fake);
+        let at = fake.now + MS;
+        fake.kbd_sends(at, &[0x12]);
+        fake.aux_sends(at + 5 * MS, &[0x00]);
+        let (records, _) = run(&mut fake, &mut stream, at + 20 * MS);
+        let shift = toyos_abi::input::RawKeyEvent { keycode: 0xE1, modifiers: 0 };
+        assert_eq!(records, [Record::Key(shift)]);
+        assert_eq!(stream.counts.discarded, 1, "the byte reached the framer, which dropped it");
+    }
+
     #[test]
     fn three_failed_reenables_write_the_pointer_off_with_0xa7() {
         let mut fake = Fake::qemu();
@@ -418,7 +439,7 @@ mod tests {
         let before = fake.commands.len();
         let (records, said) = run(&mut fake, &mut stream, at + 200 * MS);
         assert_eq!(fake.commands[before..], [0xD4, 0xD4, 0xD4, 0xA7], "the enable thrice, then 0xA7 alone");
-        assert_eq!(records, [Record::Lost], "the pointer's buttons released");
+        assert_eq!(records, [pointer(0, 0, 0)], "the pointer's buttons released, and no key");
         assert!(said.iter().any(|l| l.starts_with("ps2server: aux enable failed 3 times — pointer written off")), "{said:#?}");
     }
 

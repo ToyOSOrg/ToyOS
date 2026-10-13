@@ -826,7 +826,6 @@ impl Session {
                 Ok(Record::Lost) => {
                     let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
                     released.into_iter().for_each(|key| self.key(key));
-                    states.push(self.pointers.end(slot));
                 }
                 Err(why) => {
                     ended = Some(format!("a record refused: {why:?}"));

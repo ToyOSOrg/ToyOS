@@ -21,7 +21,8 @@ pub const CONNECTIONS: usize = 4;
 pub const MSG_KEY: u32 = 1;
 /// A pointer report: one [`MouseEvent`].
 pub const MSG_POINTER: u32 = 2;
-/// No payload: release everything this source holds.
+/// No payload: the source's keyboard lost a transition, so every key it
+/// holds is released. Its pointers keep their buttons: a report restates them.
 pub const MSG_LOST: u32 = 3;
 
 /// A key's bytes on the wire.
