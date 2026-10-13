@@ -33,7 +33,7 @@ use core::marker::PhantomData;
 
 use crate::sched::cpu::CpuHandles;
 use crate::sched::hw::{CpuId, Kicker};
-use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg};
+use crate::sched::mailbox::{Kick, PreemptGuard, SchedMsg, Urgency};
 use crate::sched::sync::Arc;
 use crate::sched::task::{Gen, Notify, ParkOutcome, Refused, TaskShared, WaitClass, WakeCause};
 
@@ -121,7 +121,13 @@ fn deliver<M: SchedMsg>(
             .claim()
             .expect("the wake claim admits one poster: node must be free");
         let handle = cpus.get(cpu);
-        if handle.post(slot, M::wake(shared.key(), cause), cause.urgency(), preempt) == Kick::Send {
+        let msg = M::wake(shared.key(), cause);
+        // An ordinary wake posted on the CPU it goes to rings nothing: that CPU's
+        // own next pass drains it, so the poster pays no pass for it now, and
+        // no edge stands with no pass owed to elide other CPUs' kicks.
+        if cause.urgency() == Urgency::Normal && kicker.runs_on(cpu) {
+            handle.post_unrung(slot, msg, preempt);
+        } else if handle.post(slot, msg, cause.urgency(), preempt) == Kick::Send {
             kicker.kick(cpu);
         }
     }
@@ -254,6 +260,7 @@ mod tests {
 
     use super::*;
     use crate::sched::cpu::{CpuHandle, CpuHandles};
+    use crate::sched::hw::Nanos;
     use crate::sched::mailbox::{mailbox, MailboxConsumer, MailboxNode, NoPreempt};
     use crate::sched::task::{TaskKey, TaskState, WakeReason};
     use alloc::vec;
@@ -280,6 +287,9 @@ mod tests {
     impl Kicker for Kicks {
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
+        }
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
         }
     }
 
@@ -329,6 +339,45 @@ mod tests {
         assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1), WakeReason::Woken)));
         assert_eq!(rx.pop(&NoPreempt), None);
         assert!(t.finish_wake(C0));
+    }
+
+    /// A poster running on `.0`.
+    struct On(CpuId, Kicks);
+    impl Kicker for On {
+        fn kick(&self, target: CpuId) {
+            self.1.kick(target);
+        }
+        fn runs_on(&self, cpu: CpuId) -> bool {
+            cpu == self.0
+        }
+    }
+
+    /// Queued for that CPU's own next pass: no edge stands, and no kick.
+    #[test]
+    fn an_ordinary_wake_posted_on_its_own_cpu_rings_nothing() {
+        let (handles, mut rx) = cpus();
+        let here = On(C0, Kicks::default());
+        let t = task(1);
+        let _ = park(&t);
+
+        assert_eq!(notify(&t, woken(), &handles, &here, &NoPreempt), Notify::Parked(C0));
+        assert!(!handles.get(C0).doorbell().kick_pending());
+        assert_eq!(here.1.count(), 0);
+        assert_eq!(rx.pop(&NoPreempt), Some(Msg::Wake(TaskKey(1), WakeReason::Woken)));
+    }
+
+    /// A boosted wake must preempt, wherever it is posted from.
+    #[test]
+    fn a_boosted_wake_posted_on_its_own_cpu_still_kicks() {
+        let (handles, mut rx) = cpus();
+        let here = On(C0, Kicks::default());
+        let t = task(1);
+        let _ = park(&t);
+
+        let cause = WakeCause::boosted(WakeReason::Woken, Nanos(1));
+        assert_eq!(notify(&t, cause, &handles, &here, &NoPreempt), Notify::Parked(C0));
+        assert_eq!(here.1.count(), 1);
+        assert!(rx.pop(&NoPreempt).is_some());
     }
 
     #[test]

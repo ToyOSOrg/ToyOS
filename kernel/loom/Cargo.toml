@@ -225,11 +225,11 @@ serial-try-lock-then-some = []
 # `tests/loom_mailbox.rs` asserts exactly that.
 no-preempt-guard = []
 # The negative control for the sleep handshake's kick edge.
-# It makes `mailbox.rs`'s `Doorbell::ring` read the doorbell's bits `Relaxed`
-# instead of `AcqRel`, so a producer can miss a consumer's freshly published
-# `SLEEPING` bit and elide the IPI that would have woken it, and
-# `loom_sleep.rs` must red under it — the one command that proves the model
-# has teeth:
+# It makes `mailbox.rs`'s `Doorbell::ring` read-modify-write the doorbell's
+# bits `Relaxed` instead of `AcqRel`, so a producer that coalesces into a kick
+# the consumer has already spent can leave its message out of that consumer's
+# drain, and `loom_sleep.rs` must red under it — the one command that proves
+# the model has teeth:
 #
 #   cargo test -p kernel-loom --features doorbell-kick-relaxed \
 #     --test loom_sleep

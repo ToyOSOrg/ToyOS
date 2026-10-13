@@ -161,6 +161,10 @@ impl Kicker for Kicks {
     fn kick(&self, _target: CpuId) {
         self.count.fetch_add(1, Ordering::AcqRel);
     }
+
+    fn runs_on(&self, _cpu: CpuId) -> bool {
+        false
+    }
 }
 
 /// Loom explores every interleaving of the modelled threads; the preemption

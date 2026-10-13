@@ -153,9 +153,9 @@ fn a_cpu_that_halts_without_seeing_the_surplus_was_pushed() {
 /// The other direction, and the one that says the fence is not simply making
 /// everything look asleep: the push does not ring a CPU that is awake.
 ///
-/// A ring on a busy target sets the kick edge with no message behind it, which
-/// costs that target's next idle disposition a spurious extra pass — harmless,
-/// and exactly what the push is allowed to cost. What it may not do is ring a
+/// A ring on a busy target kicks it with no message behind it, which costs
+/// that target an interrupt and a spurious extra pass — harmless, and exactly
+/// what the push is allowed to cost. What it may not do is ring a
 /// CPU that never armed a sleep at all, because then the count this policy is
 /// priced by is measuring something that is not a wake.
 #[test]
