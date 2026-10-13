@@ -95,11 +95,12 @@ impl Log {
 
     /// Take every whole line in `bytes` that goes on the screen.
     ///
-    /// **Every program's line but this program's own**, which it has already
-    /// drawn, and **the kernel's records of the boot before this program
-    /// asked** — the boot so far, as the panel it took over would have shown
-    /// it. A record after that is not drawn: it would put a `spawn:` and an
-    /// `exit:` beside every command typed.
+    /// **Every program's line but this program's own**, and **the kernel's
+    /// records of the boot before this program asked** — the boot so far, as
+    /// the panel it took over would have shown it. A record after that is not
+    /// drawn: it would put a `spawn:` and an `exit:` beside every command
+    /// typed, as this program's own lines would put a grab and a release beside
+    /// every program that takes the keyboard.
     ///
     /// Each is drawn as [`Showing`] shows it.
     fn take(&mut self, bytes: &[u8]) {
@@ -257,7 +258,6 @@ fn main() {
                 }
                 n => {
                     console.write_bytes(&buf[..n]);
-                    std::io::stdout().lock().write_all(&buf[..n]).ok();
                     unfinished(&mut partial, &buf[..n]);
                     painted = true;
                 }
@@ -269,7 +269,6 @@ fn main() {
             let n = shell.stderr.read(&mut buf).unwrap_or(0);
             if n > 0 {
                 console.write_bytes(&buf[..n]);
-                std::io::stdout().lock().write_all(&buf[..n]).ok();
                 unfinished(&mut partial, &buf[..n]);
                 painted = true;
             }

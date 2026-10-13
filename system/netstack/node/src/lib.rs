@@ -58,7 +58,7 @@ use toyos_net_wire::Instant;
 
 pub use datagram::{Datagram, DatagramId, Refused};
 use lease::{Report, Stack, Verified};
-pub use resolve::{Ended, LookupId, NotStarted, Resolved};
+pub use resolve::{Ended, LookupId, NotStarted, Resolved, Resolving};
 
 toyos_net_wire::counters! {
     DhcpUnsent = "node.dhcp-unsent";
