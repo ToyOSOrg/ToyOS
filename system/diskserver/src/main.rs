@@ -308,8 +308,7 @@ struct Service {
 /// A session decided on and not yet told to its client.
 struct Opening {
     region: Region,
-    rings: ServerRings,
-    opened: Opened,
+    blocks: u64,
     device_addr: u64,
     first: u64,
     writes: bool,
@@ -358,10 +357,7 @@ impl Service {
         let (first, blocks) = self.place(guid, grant)?;
         let writes = grant.expect("placed through a grant").writes;
         match self.ctrl.up().claim().dma_map(region.handle()) {
-            Ok(mapping) => {
-                let (rings, opened) = Opened::over(region.words(), blocks, guid);
-                Ok(Opening { region, rings, opened, device_addr: mapping.device_addr, first, writes })
-            }
+            Ok(mapping) => Ok(Opening { region, blocks, device_addr: mapping.device_addr, first, writes }),
             Err(why) => {
                 self.holds.release(first);
                 Err(match why {
@@ -372,8 +368,9 @@ impl Service {
         }
     }
 
-    /// The client heard its session is open: from here it is served.
-    fn admit(&mut self, opening: Opening, conn: Connection) -> u64 {
+    /// The client heard its session is open, over the ends `Opened::over`
+    /// made: from here it is served.
+    fn admit(&mut self, opening: Opening, rings: ServerRings, opened: Opened, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.sessions.insert(
@@ -382,9 +379,9 @@ impl Service {
                 conn,
                 region: opening.region,
                 device_addr: opening.device_addr,
-                rings: opening.rings,
-                state: ServerSession::new(opening.first, opening.opened.blocks(), opening.writes),
-                unique: opening.opened.unique(),
+                rings,
+                state: ServerSession::new(opening.first, opened.blocks(), opening.writes),
+                unique: opened.unique(),
                 closing: false,
                 requests: 0,
                 posted: false,
@@ -772,12 +769,13 @@ fn handshake(service: &mut Service, acceptor: &toyos::port::Acceptor, p: Pending
             refuse(&p.conn, why);
         }
         Ok(opening) => {
-            let (opened, writes) = (opening.opened, opening.writes);
+            let (rings, opened) = Opened::over(opening.region.words(), opening.blocks, guid);
             if p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
                 service.abandon(opening);
                 return;
             }
-            let id = service.admit(opening, p.conn);
+            let writes = opening.writes;
+            let id = service.admit(opening, rings, opened, p.conn);
             let access = if writes { "" } else { ", read-only" };
             println!("diskserver: session {id} opened {} ({} blocks{access})", guid_text(guid), opened.blocks());
         }

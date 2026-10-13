@@ -803,6 +803,13 @@ pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
     include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
 );
 
+/// Where on ROOT the licence of the Intel microcode an x86-64 kernel embeds
+/// is, and its text: the licence asks that a redistribution carry it.
+pub const MICROCODE_LICENCE: (&str, &[u8]) = (
+    "share/licenses/Intel-microcode-license.txt",
+    include_bytes!("../licenses/Intel-microcode-license.txt"),
+);
+
 /// The Mozilla root program's authorities as `webpki-root-certs` publishes
 /// them, each certificate a PEM block in the published order.
 pub fn trust_roots() -> Vec<u8> {
@@ -837,6 +844,10 @@ fn build_and_assemble(
 
     root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
     root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
+    match arch {
+        Arch::X86_64 => root_files.push((MICROCODE_LICENCE.0.to_string(), MICROCODE_LICENCE.1.to_vec())),
+        Arch::Aarch64 => {}
+    }
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {

@@ -4,33 +4,27 @@ kind: tooling
 opened: 2026-10-02
 ---
 
-# Nothing reopens a blockd session over a used page
+# Nothing reopens a diskserver session over a used page
 
 A nightly went red on `blockd_io: FAIL /AFTER.BIN after the restart: Io` (run
 36753172688, guest 7). blockd answered an open and only then made its ends of
 the session page. A client that reconnects sends the page its last server
-wrote, and one that looks before the new server's ends are made has no room to
-ask (`Violation::HeadPastTail`) and hears the dead session's completion
-(`Violation::Tag`). The order is a type now: `wire::Opened::over` makes a
-server's ends and its answer together.
+wrote, and one that looks before the new server's ends are made hears the dead
+session's completion. The server's half is a type now: `wire::Opened::over`
+makes a server's ends and its answer together, and diskserver sends the answer
+it returns.
 
-That was fixed by reading. Nothing reproduced the `Io` before it, and nothing
-that runs reopens a session over a used page:
+The client's half is read off the code and not run. `Session::pump`, `drain`
+and `wait` (`system/diskserver/src/session.rs`) hold a `Region`, a
+`Connection` and a `Poller`, so no host reaches them. A page whose completion
+ring holds the dead session's answer ends the session only through `drain`'s
+refusal of a completion for no ticket in flight (`Violation::Tag`, through
+`client.complete`); `disk::Served` then answers its caller `Gone`, which a file
+server's caller hears as `Io`. That nothing else ends it is
+`issues/a-block-session-waits-forever-on-a-server-past-its-submission-ring.md`.
 
-- blockd's host test reaches `Service::place` and `Service::listing`, never
-  `Service::open`;
-- `toyos-blockring`'s model test holds what the transport answers over a page
-  a crashed session left, and is green with blockd's order reverted;
-- no host runs the client's glue (`Session::pump`, `drain` and `wait` in
-  `userland/blockd/src/session.rs`), so that `HeadPastTail` and `Tag` end the
-  session and the caller's call is `Io` is read off it, not run;
-- `520c0d129` cut `blockd_survives_its_death`, the guest test that killed
-  blockd under its client, and no guest test or metal row ends blockd.
+**Exit**: a host test reopens a client's session over a page a killed server
+left its answer on, and the session ends and the caller's call is `Io`, by
+`drain`'s `Tag` refusal: red with that refusal removed, and green with it.
 
-**Exit**: the restart test that Stage D of
-`issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` owes
-for `blockd_survives_its_death`, at the tier that stage builds it on: red with
-that `Io` under a mutation that moves blockd's two stores after its answer,
-and green without it.
-
-Owner: the orchestrator, which dispatches Stage D.
+Owner: the orchestrator.

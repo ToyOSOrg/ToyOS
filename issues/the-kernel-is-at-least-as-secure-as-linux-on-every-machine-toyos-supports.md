@@ -27,7 +27,7 @@ firmware's memory-overwrite request, by the owner's "Keep crash records"
 - `issues/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`
 - `issues/indirect-branches-and-returns-run-without-thunks.md`
 - `issues/tsx-stays-as-firmware-left-it.md`
-- `issues/the-kernel-loads-no-cpu-microcode.md`
+- `issues/the-kernel-loads-no-amd-microcode.md`
 - `issues/no-user-address-is-drawn-per-spawn.md`
 - `issues/the-kernel-has-no-stack-protector.md`
 - `issues/no-kernel-address-is-drawn-per-boot.md`
