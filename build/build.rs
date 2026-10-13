@@ -3035,6 +3035,7 @@ mod tests {
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
         "tests/images/testcases.toml",
+        "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
