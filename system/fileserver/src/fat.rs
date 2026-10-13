@@ -5,7 +5,10 @@
 //! Between them the volume holds clusters its entry does not reach, which
 //! fatgen103 refuses, so every open file is brought level — its entry written,
 //! its chain reconciled — at its last close, at an fsync and at a sync, as
-//! the kernel's adapter did.
+//! the kernel's adapter did. **The two are a cache flush apart**: the cache
+//! writes lowest block first and the disk keeps no order until a flush, so an
+//! entry put into the cache beside its chain and data would reach the disk
+//! before the clusters it names.
 //!
 //! **A create makes the directories on its way**, as the kernel's did: a log
 //! file's path is its own, and FAT has the directories to carry it. A
@@ -180,6 +183,11 @@ impl<D: Disk> FatVolume<D> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         if open.gone {
             return Ok(());
+        }
+        // The chain and the data on the disk before the entry that reaches
+        // them is in the cache.
+        if open.file.needs_reconcile() {
+            self.cache.flush().map_err(|_| logged("the chain", &open.path, Error::Io))?;
         }
         self.fs.flush_meta(&mut open.file, time).map_err(|e| logged("the entry", &open.path, e))?;
         if open.file.needs_reconcile() {
@@ -722,6 +730,85 @@ mod tests {
         assert!(out == spec.bytes[spec_volume::cluster_offset(spec.at("short.txt").first)..][..100], "the file reads as the fixture wrote it");
         v.close(n).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
+    }
+
+    /// A disk that keeps every block it is written, in order, so a test can
+    /// stop it after any one of them.
+    struct Traced {
+        ram: Ram,
+        writes: Rc<std::cell::RefCell<Vec<(u64, Vec<u8>)>>>,
+    }
+
+    impl Disk for Traced {
+        fn blocks(&self) -> u64 {
+            self.ram.blocks()
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            self.ram.read(first, out)
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            let mut writes = self.writes.borrow_mut();
+            for (i, block) in data.chunks_exact(BLOCK).enumerate() {
+                writes.push((first + i as u64, block.to_vec()));
+            }
+            self.ram.write(first, data)
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            self.ram.flush()
+        }
+    }
+
+    /// An append and its sync, stopped after each block write in turn, leave
+    /// a volume that mounts and holds the file as the last whole sync left it
+    /// or as the append made it: never an entry naming bytes its chain does
+    /// not reach or its clusters do not hold yet.
+    #[test]
+    fn an_append_stopped_after_any_block_write_reads_back_the_last_sync() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+        let clock = || 1_717_245_296 * NANOS_PER_SEC;
+        let spec = spec_volume::fixture();
+        let blocks = spec.bytes.len().div_ceil(BLOCK);
+        let mut image = spec.bytes.clone();
+        image.resize(blocks * BLOCK, 0);
+        let disk = |trace: &[(u64, Vec<u8>)]| {
+            let mut ram = Ram::new(blocks as u64);
+            ram.write(0, &image).unwrap();
+            for (block, data) in trace {
+                ram.write(*block, data).unwrap();
+            }
+            ram
+        };
+        let writes = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut v = FatVolume::mount(Traced { ram: disk(&[]), writes: Rc::clone(&writes) }, true, clock).unwrap();
+        let held: Vec<u8> = (0..3000u32).map(|i| (i % 251 + 1) as u8).collect();
+        let appended: Vec<u8> = (0..3 * BLOCK as u32).map(|i| (i % 241 + 2) as u8).collect();
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &held).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let synced = writes.borrow().len();
+        v.write(a, held.len() as u64, &appended).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let trace = writes.borrow().clone();
+        let whole = [&held[..], &appended[..]].concat();
+
+        for stop in synced..=trace.len() {
+            let mut after = FatVolume::mount(disk(&trace[..stop]), false, clock)
+                .unwrap_or_else(|e| panic!("stopped after block write {stop} of {}: {e}", trace.len()));
+            let n = after.open("a.txt", OPEN).unwrap();
+            let size = after.lstat("a.txt").unwrap().size as usize;
+            let mut out = vec![0u8; size];
+            let read = after.read(n, 0, &mut crate::volume::Buf(&mut out));
+            assert_eq!(read, Ok(size), "stopped after block write {stop} of {}: a {size}-byte file", trace.len());
+            assert!(
+                out == held || out == whole,
+                "stopped after block write {stop} of {}: the file is {size} bytes and neither the {} the last \
+                 sync held nor the {} the append made",
+                trace.len(),
+                held.len(),
+                whole.len()
+            );
+        }
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which
