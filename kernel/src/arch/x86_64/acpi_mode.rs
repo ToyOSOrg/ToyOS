@@ -33,7 +33,8 @@
 //! PAT's write-back entry, under which the range registers decide (Intel SDM
 //! Vol. 3A, Table 12-7), so a register window the firmware reserved is read as
 //! the firmware typed it. A register at an address the firmware's map does
-//! not list is read the same way, only where the boot processor's registers,
+//! not list, or in memory it types memory-mapped I/O, is read the same way,
+//! only where the boot processor's registers,
 //! read once at boot, type it uncacheable, and only on a machine none of
 //! whose CPUs holds registers that are on and not those (`mtrr::compare`):
 //! the read is made on whichever CPU the call runs on.

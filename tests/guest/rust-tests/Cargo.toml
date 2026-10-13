@@ -15,7 +15,7 @@ toyos-inspect = { path = "../../../lib/inspect" }
 # wait on the log being quiet.
 toyos-logstream = { path = "../../../lib/logstream" }
 logkeeper-api = { path = "../../../lib/logkeeper-api" }
-# The ACPI server's count line, for `acpi_hold`'s wait on it.
+# The ACPI server's lines, for `acpi_hold`'s and `acpi_counted`'s waits on them.
 acpiserver-api = { path = "../../../lib/acpiserver-api" }
 # The diary's decoder, for `trace_read` and `trace_flood`.
 toyos-trace = { path = "../../../lib/trace" }

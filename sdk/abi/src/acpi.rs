@@ -13,7 +13,8 @@
 //! **What the firmware's AML addresses outside those blocks the holder reaches
 //! one access at a time, through the kernel** ([`Access`]): firmware-owned
 //! memory and a port both ways, the memory its tables are in and a register
-//! at an address firmware lists nowhere to read, a function's configuration space to read. The
+//! at an address firmware lists nowhere or types memory-mapped I/O to read, a
+//! function's configuration space to read. The
 //! kernel decides each
 //! by what the address is and answers a refusal by name ([`Refused`]); nothing
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
@@ -194,13 +195,15 @@ pub enum Refused {
     /// A write to configuration space, by its address or through the ECAM
     /// window: the kernel makes none for the holder.
     ConfigWrite = 14,
-    /// A read at an address firmware's map does not list, which the
-    /// processor's range registers do not type uncacheable: no register.
-    UnlistedCached = 15,
-    /// A read at an address firmware's map does not list, on a machine where
-    /// some CPU's range registers are on and are not the boot processor's:
-    /// what types the address a register is not what every CPU reads it
-    /// under.
+    /// A register's read, at an address firmware's map does not list or in
+    /// memory it types `EfiMemoryMappedIO`, which the processor's range
+    /// registers do not type uncacheable, or below 1 MiB, where the fixed
+    /// range registers the kernel does not read decide: no register.
+    RegisterCached = 15,
+    /// A register's read, as [`Self::RegisterCached`] names one, on a machine
+    /// where some CPU's range registers are on and are not the boot
+    /// processor's: what types the address a register is not what every CPU
+    /// reads it under.
     RangeRegistersDiffer = 16,
     /// A byte for `SMI_CMD` that the FADT gives a meaning (ACPI 6.5 Table
     /// 5.9: `ACPI_ENABLE`, `ACPI_DISABLE`, `S4BIOS_REQ`, `PSTATE_CNT`,
@@ -212,6 +215,9 @@ pub enum Refused {
     /// A byte for `SMI_CMD` past the most the kernel writes for the holder in
     /// a second.
     CommandRate = 19,
+    /// A port the kernel keeps from AML though it declared none of it:
+    /// `toyos_userbound::firmware::PROTECTED`.
+    ProtectedPort = 20,
 }
 
 impl Refused {
@@ -231,11 +237,12 @@ impl Refused {
             12 => Self::ConfigUnreachable,
             13 => Self::ConfigSpan,
             14 => Self::ConfigWrite,
-            15 => Self::UnlistedCached,
+            15 => Self::RegisterCached,
             16 => Self::RangeRegistersDiffer,
             17 => Self::KernelCommand,
             18 => Self::CommandSpan,
             19 => Self::CommandRate,
+            20 => Self::ProtectedPort,
             _ => return None,
         })
     }

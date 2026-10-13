@@ -7,20 +7,43 @@
 //! the kernel's to make or refuse**, and a refusal it names is denied under
 //! that name.
 //!
-//! **Only the port writes in [`FORWARDED`] are asked of the kernel**, each
-//! said the first time it is asked: a write to a register that changes
-//! nothing but an index or a POST code. Every other port write is denied by
-//! name and never reaches the kernel: a reset-capable port, `SMI_CMD`, a data
-//! register. The reset register is the kernel's to keep wherever it is. A
-//! write to memory or to configuration space is denied by name. SystemCMOS
-//! never arrives: the interpreter refuses that space itself.
+//! **A port write is the kernel's to make or refuse, as a read is**, each
+//! port and width said the first time it is asked, as the owner ruled on
+//! #875. The kernel refuses the ports of the devices it drives
+//! (`toyos_userbound::firmware::PROTECTED` among them), and makes a byte to the FADT's
+//! `SMI_CMD` a call into the firmware, or refuses it by the byte and the rate.
+//!
+//! **A write to memory is the kernel's to make or refuse, as a read is**:
+//! firmware records what it was told in its own NVS, `_OSC`'s capabilities
+//! among it, and the kernel passes NVS and reserved memory and refuses every
+//! other by name, a write outside every range the firmware's map lists
+//! among them, which is counted with every refusal. A write to configuration
+//! space is denied by name.
+//!
+//! **The spaces this server serves are SystemMemory, SystemIO, PCI_Config
+//! and EmbeddedControl.** Every other space of Table 5.182 reaches it and is
+//! denied by name: SystemCMOS, PciBarTarget, PCC, the OEM-defined ones, and
+//! the command- and connection-based ones the interpreter carries whole
+//! (SMBus, IPMI, GeneralPurposeIO, GenericSerialBus, PlatformRtMechanism,
+//! FFixedHW), so `_REG` announces none of them.
+//!
+//! **A table the XSDT lists is found by its three identifiers**
+//! ([`Host::find_table`]) through the kernel's reads, and answered only where
+//! it lies in memory Table 15.6 calls AddressRangeReserved or
+//! AddressRangeNVS, as `LoadTable` and a Data Table Region require.
 //!
 //! **The embedded controller's space is its own transactions'** ([`crate::ec`],
-//! [`transact`]), a byte each, on the controller the server attached
-//! ([`Firmware::ec`]) and through the kernel, which no row holds its ports
-//! for. With none attached the space is denied by name. A port of it the
-//! kernel refuses detaches the controller and is handed to the server
-//! ([`Firmware::ended`]), which serves it no more.
+//! [`Firmware::transaction`]), a byte each, on the controller the server
+//! attached ([`Firmware::ec`]) and through the kernel, which no row holds its
+//! ports for, each under the Global Lock where the controller's `_GLK` asks
+//! for it (ACPI 6.5 §6.5.7) and AML does not hold it already. A region is
+//! available while its handler is (§6.5.4: "When an operation region
+//! handler is unavailable, AML cannot access data fields in that region"),
+//! and `_REG` only tells AML so: one attached is reached whether or not its
+//! `_REG` has run, and with none attached the space is denied by name where
+//! §6.5.4 has writes ignored and reads indeterminate. A port of it the kernel refuses
+//! detaches the controller and is handed to the server ([`Firmware::ended`]),
+//! which serves it no more.
 //!
 //! **The Global Lock's word is the kernel's to exchange** (ACPI 6.5
 //! §5.2.10.1). A take that finds the firmware holding it leaves the firmware
@@ -33,7 +56,22 @@
 //! **A Notify of 0x80 to a control-method power button is a press** (ACPI
 //! 6.5 §4.8.2.2.1.2), counted in [`Firmware::presses`] for the server to
 //! serve, once [`Firmware::buttons`] names the button; every other Notify is
-//! said the first time and served by nothing.
+//! kept, once a value and an object, for the server to deliver after the
+//! evaluation that made it ([`Firmware::notified`]).
+//!
+//! **An evaluation's Sleep serves the SCI to its deadline**
+//! ([`Kernel::sleep`], `sci::await_sleep`): a press of the fixed button and
+//! the controller's GPE are taken as they latch and kept
+//! ([`Firmware::latched`]) for the server to serve after the evaluation, so a
+//! press during a table's load is taken then, and powers the machine off once
+//! the load has handed `\_S5` over.
+//!
+//! **A definition block AML loads at run time is read through the kernel
+//! only from memory Table 15.6 calls AddressRangeReserved or
+//! AddressRangeNVS** ([`Host::table`], ACPI 6.5 §19.6.76), each read's type
+//! the kernel's answer; every load is said, its signature and length on a
+//! line anyone may quote, its OEM Table ID and the method that loaded it
+//! under [`OWN`].
 //!
 //! **The power-off's sleep type is the one thing handed to the kernel**
 //! ([`Kernel::s5`]): the kernel writes the register, and reads no AML.
@@ -49,15 +87,14 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
-use toyos_aml::{Address, Denied, Host};
+use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
 use crate::ec::{Do, Transaction, Wait};
 use crate::ledger::Ledger;
+use crate::sci::Latched;
 
-/// What opens a line that carries an address, a PCI function or a name the
-/// firmware chose: this machine's own, and quoted in no record.
-pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
+pub use acpiserver_api::OWN;
 
 /// The most the firmware may hold the Global Lock after a take the AML set no
 /// bound on left it the pending bit: this server's bound, and no measurement,
@@ -67,17 +104,6 @@ pub const RELEASE: Duration = Duration::from_secs(1);
 /// The most a controller is waited for at one step of a transaction: one that
 /// has not moved in this will not.
 const EC_STEP: Duration = Duration::from_millis(500);
-
-/// The port writes asked of the kernel, by port and width: the index
-/// registers of the CMOS's upper bank and of the AMD FCH's power-management
-/// block, a byte each, and the POST port's word. No other: a port write this
-/// server has no account of can be a reset (0x92, 0xCF9), a call into the
-/// firmware (`SMI_CMD`) or a data register's.
-pub const FORWARDED: [(u16, toyos_aml::Access); 3] =
-    [(0x72, toyos_aml::Access::Byte), (0x80, toyos_aml::Access::Word), (0xCD6, toyos_aml::Access::Byte)];
-
-/// The denial of a port write not in [`FORWARDED`].
-pub const UNFORWARDED: &str = "a SystemIO write of a port and width this server asks of the kernel for no AML";
 
 /// The kernel does nothing more for this claim: the machine is stopping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,7 +127,8 @@ pub enum Take {
     Unusable,
 }
 
-/// The `acpi` claim's mediated access, as this server asks for it.
+/// The `acpi` claim as this server asks it, its mediated access and its SCI,
+/// and the power-off it asks of the supervisor.
 pub trait Kernel {
     fn access(&self, access: Access) -> Result<Answer, Stopping>;
     fn lock_take(&self) -> Result<Take, Stopping>;
@@ -114,6 +141,18 @@ pub trait Kernel {
     /// once under a claim: `false` where it is wider than the register's
     /// field, and the kernel kept nothing.
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+    /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
+    /// the fixed power button where the claim serves it and the controller's
+    /// GPE `ec_gpe`: what latched and was taken.
+    fn sleep(&self, until: Instant, ec_gpe: Option<u16>) -> Latched;
+    /// The SCIs the claim latched since its last acknowledgement, without
+    /// waiting: how many, or `None` where none is.
+    fn latched(&self) -> Option<u32>;
+    /// Acknowledge the SCI, whose status this server has cleared.
+    fn ack(&self);
+    /// Ask `/system/bin/supervisor` to power the machine off
+    /// (`toyos::power::stop`), which answers only where it did not.
+    fn power_off(&self) -> toyos::power::Refused;
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -182,6 +221,13 @@ fn space_name(space: Space) -> &'static str {
     }
 }
 
+/// Whether memory of a UEFI type is AddressRangeReserved or AddressRangeNVS
+/// by Table 15.6: types 0, 5, 6, 8, 11, 12, 13 and 15 up, and 10. An address
+/// firmware's map does not list is neither.
+fn reserved_or_nvs(memory_type: u8) -> bool {
+    memory_type != UNLISTED && matches!(memory_type, 0 | 5 | 6 | 8 | 10..=13 | 15..)
+}
+
 /// What memory of a UEFI type is called: an address firmware's map does not
 /// list has no type, and a name of its own.
 fn type_name(memory_type: u8) -> String {
@@ -248,6 +294,10 @@ pub struct Firmware<'k, K> {
     /// and gives back.
     pub takes: u64,
     pub contended: u64,
+    /// The longest a take waited for the firmware's release, or waited and
+    /// gave up: the firmware's longest hold of the lock, at least, as far as a
+    /// take saw it.
+    pub longest_hold: Duration,
     pub given_back: u64,
     pub notifies: u64,
     /// The controller whose space AML reaches, once the server attached it.
@@ -256,15 +306,28 @@ pub struct Firmware<'k, K> {
     /// for the server to serve it no more.
     pub ended: Option<String>,
     pub refused: Ledger,
-    notified: Ledger,
-    /// The [`FORWARDED`] writes asked of the kernel, by port and width.
+    /// The presses said, by button.
+    said: Ledger,
+    /// The port writes asked of the kernel, by port and width.
     written: Ledger,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
+    /// What a Sleep took of the SCI, for the server to serve.
+    pub latched: Latched,
+    /// Each Notify but a press, once a value and an object, for the server
+    /// to deliver.
+    pub notified: std::collections::BTreeSet<(String, u64)>,
     /// Presses of one of them notified and not yet served.
     pub presses: u64,
     /// The kernel answered that the machine is stopping.
     pub stopping: bool,
+    /// AML holds the Global Lock, which a transaction it makes runs under.
+    locked: bool,
+    /// Definition blocks loaded at run time, and refused.
+    pub loaded: u64,
+    pub loads_refused: u64,
+    /// The RSDP the tables were found from, which `LoadTable` searches again.
+    pub rsdp: u64,
 }
 
 impl<'k, K: Kernel> Firmware<'k, K> {
@@ -276,17 +339,46 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             pages: Pages::default(),
             takes: 0,
             contended: 0,
+            longest_hold: Duration::ZERO,
             given_back: 0,
             notifies: 0,
             ec: None,
             ended: None,
             refused: Ledger::default(),
-            notified: Ledger::default(),
+            said: Ledger::default(),
             written: Ledger::default(),
             buttons: Vec::new(),
+            latched: Latched::default(),
+            notified: Default::default(),
             presses: 0,
             stopping: false,
+            locked: false,
+            loaded: 0,
+            loads_refused: 0,
+            rsdp: 0,
         }
+    }
+
+    /// One transaction on the controller at `command` and `data`, under the
+    /// Global Lock where its `_GLK` asks for it (`glk`) and AML does not hold
+    /// it already.
+    pub fn transaction(&mut self, command: u16, data: u16, glk: bool, tx: Transaction) -> Result<u8, Unmade> {
+        let lock = glk && !self.locked;
+        if lock {
+            match self.global_take() {
+                Ok(()) => {}
+                Err(_) if self.stopping => return Err(Unmade::Stopping),
+                Err(Denied(why)) => return Err(Unmade::Refused(why)),
+            }
+        }
+        let made = transact(self.kernel, command, data, tx);
+        if lock {
+            match self.global_release() {
+                Ok(()) => {}
+                Err(_) => return Err(Unmade::Stopping),
+            }
+        }
+        made
     }
 
     /// Deny by the name `what`, said the first time with `own`, the machine's
@@ -299,6 +391,37 @@ impl<'k, K: Kernel> Firmware<'k, K> {
         Denied(what)
     }
 
+    /// A write the kernel makes or refuses, a refusal denied under its name
+    /// and, for memory, the type of what it was refused in.
+    fn written_through(&mut self, space: Space, address: u64, width: toyos_aml::Access, value: u64, at: Address) -> Result<(), Denied> {
+        match self.kernel.access(Access::write(space, address, wide(width), value)) {
+            Err(Stopping) => Err(self.stopped()),
+            Ok(Answer { made: Ok(_), .. }) => Ok(()),
+            Ok(Answer { made: Err(refused), memory_type }) => {
+                let what = match space {
+                    Space::SystemMemory => format!("a SystemMemory write the kernel refused {refused:?}, in {}", type_name(memory_type)),
+                    space => format!("a {} write the kernel refused {refused:?}", space_name(space)),
+                };
+                Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            }
+        }
+    }
+
+    /// The denial of an access to a space this server serves no AML in.
+    fn unserved(&mut self, at: Address, width: toyos_aml::Access) -> Denied {
+        let space = match at {
+            Address::Memory(_) => "SystemMemory",
+            Address::Io(_) => "SystemIO",
+            Address::PciConfig { .. } => "PCI_Config",
+            Address::EmbeddedControl(_) => "EmbeddedControl",
+            Address::SystemCmos(_) => "SystemCMOS",
+            Address::PciBarTarget { .. } => "PciBarTarget",
+            Address::Pcc { .. } => "PCC",
+            Address::Oem { .. } => "an OEM-defined space",
+        };
+        self.deny(format!("an access to {space}, which this server serves no AML in"), format_args!("{width:?} at {at:x?}"))
+    }
+
     fn stopped(&mut self) -> Denied {
         self.stopping = true;
         Denied(Refusal::Stopping.to_string())
@@ -309,10 +432,10 @@ impl<'k, K: Kernel> Firmware<'k, K> {
     /// one of its ports, which detaches it.
     fn controller(&mut self, what: &str, at: Address, width: toyos_aml::Access, tx: Transaction) -> Result<u8, Denied> {
         assert_eq!(width, toyos_aml::Access::Byte, "the interpreter reaches EmbeddedControl a byte at a time (Table 19.34)");
-        let Some(ec) = &self.ec else {
+        let Some((command, data, glk)) = self.ec.as_ref().map(|ec| (ec.command, ec.data, ec.glk)) else {
             return Err(self.deny(format!("{what} {NO_CONTROLLER}"), format_args!("{at:x?}")));
         };
-        match transact(self.kernel, ec.command, ec.data, tx) {
+        match self.transaction(command, data, glk, tx) {
             Ok(byte) => Ok(byte),
             Err(Unmade::Stopping) => Err(self.stopped()),
             Err(Unmade::Refused(why)) => {
@@ -330,10 +453,16 @@ impl<'k, K: Kernel> Firmware<'k, K> {
     fn take(&mut self, until: Instant) -> Result<bool, Denied> {
         self.takes += 1;
         let mut contended = false;
+        let asked = Instant::now();
         loop {
             match self.kernel.lock_take() {
                 Err(Stopping) => return Err(self.stopped()),
-                Ok(Take::Taken) => return Ok(true),
+                Ok(Take::Taken) => {
+                    if contended {
+                        self.longest_hold = self.longest_hold.max(asked.elapsed());
+                    }
+                    return Ok(true);
+                }
                 Ok(Take::Unusable) => {
                     let what = "the Global Lock: the kernel exchanges no lock word in this machine's FACS";
                     return Err(self.deny(what.into(), format_args!("a take")));
@@ -345,6 +474,7 @@ impl<'k, K: Kernel> Firmware<'k, K> {
                 self.contended += 1;
             }
             if !self.kernel.released(until) {
+                self.longest_hold = self.longest_hold.max(asked.elapsed());
                 return Ok(false);
             }
         }
@@ -369,6 +499,7 @@ impl<K: Kernel> Host for Firmware<'_, K> {
             Address::Io(port) => (Space::SystemIo, u64::from(port)),
             Address::PciConfig { segment, bus, device, function, offset } => (Space::PciConfig, pci_address(segment, bus, device, function, offset)),
             Address::EmbeddedControl(address) => return self.controller("a read of", at, width, Transaction::read_at(address)).map(u64::from),
+            other => return Err(self.unserved(other, width)),
         };
         match read(self.kernel, space, address, wide(width)) {
             Ok((value, memory_type)) => {
@@ -384,35 +515,32 @@ impl<K: Kernel> Host for Firmware<'_, K> {
     }
 
     fn write(&mut self, at: Address, width: toyos_aml::Access, value: u64) -> Result<(), Denied> {
-        let what = match at {
-            Address::Io(port) if !FORWARDED.contains(&(port, width)) => UNFORWARDED.into(),
+        match at {
             Address::Io(port) => {
                 if self.written.see(&format!("{port:#x} {width:?}")) {
-                    println!("acpiserver: a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
+                    println!("{OWN}a SystemIO write of {port:#x}, {width:?}, asked of the kernel for the first time");
                 }
-                return match self.kernel.access(Access::write(Space::SystemIo, u64::from(port), wide(width), value)) {
-                    Err(Stopping) => Err(self.stopped()),
-                    Ok(Answer { made: Ok(_), .. }) => Ok(()),
-                    Ok(Answer { made: Err(refused), .. }) => Err(self.deny(
-                        format!("a SystemIO write the kernel refused {refused:?}"),
-                        format_args!("{width:?} {value:#x} to {at:x?}"),
-                    )),
-                };
+                self.written_through(Space::SystemIo, u64::from(port), width, value, at)
             }
-            Address::Memory(_) => "a write to SystemMemory: this server writes no memory for AML".into(),
-            Address::PciConfig { .. } => "a write to PCI_Config: this server writes no configuration space for AML".into(),
+            Address::Memory(address) => self.written_through(Space::SystemMemory, address, width, value, at),
+            Address::PciConfig { .. } => {
+                let what = "a write to PCI_Config: this server writes no configuration space for AML".into();
+                Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            }
             Address::EmbeddedControl(address) => {
                 let byte = u8::try_from(value).expect("a byte access writes a byte");
-                return self.controller("a write to", at, width, Transaction::write_at(address, byte)).map(drop);
+                self.controller("a write to", at, width, Transaction::write_at(address, byte)).map(drop)
             }
-        };
-        Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            other => Err(self.unserved(other, width)),
+        }
     }
 
     fn sleep(&mut self, ms: u64) {
         // The firmware's own delay (§19.6.125), bounded by the interpreter in
-        // what one evaluation may ask for.
-        std::thread::sleep(Duration::from_millis(ms));
+        // what one evaluation may ask for, the SCI served through it.
+        let latched = self.kernel.sleep(Instant::now() + Duration::from_millis(ms), self.ec.as_ref().map(|ec| ec.gpe));
+        self.latched.presses += latched.presses;
+        self.latched.ec |= latched.ec;
     }
 
     fn stall(&mut self, us: u64) {
@@ -429,31 +557,115 @@ impl<K: Kernel> Host for Firmware<'_, K> {
     fn notify(&mut self, object: &str, value: u64) {
         self.notifies += 1;
         // §5.6.6's notification values of a power button: 0x80 is a press in S0.
-        let press = value == 0x80 && self.buttons.iter().any(|button| button == object);
-        if press {
+        if value == 0x80 && self.buttons.iter().any(|button| button == object) {
             self.presses += 1;
+            if self.said.see(object) {
+                println!("{OWN}Notify({object}, {value:#x}) for the first time: a press of the power button");
+            }
+            return;
         }
-        if self.notified.see(&format!("{object} {value:#x}")) {
-            let served = if press { "a press of the power button" } else { "served by nothing" };
-            println!("{OWN}Notify({object}, {value:#x}) for the first time: {served}");
-        }
+        self.notified.insert((object.to_owned(), value));
     }
 
     fn global_take(&mut self) -> Result<(), Denied> {
         if self.take(Instant::now() + RELEASE)? {
+            self.locked = true;
             return Ok(());
         }
         panic!("acpiserver: the firmware held the Global Lock {RELEASE:?} after a take left it the pending bit, and raised no GBL_STS");
     }
 
     fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied> {
-        self.take(Instant::now() + Duration::from_millis(ms.into()))
+        let taken = self.take(Instant::now() + Duration::from_millis(ms.into()))?;
+        self.locked = taken;
+        Ok(taken)
     }
 
     fn global_release(&mut self) -> Result<(), Denied> {
+        self.locked = false;
         self.kernel.lock_release().map_err(|Stopping| self.stopped())?;
         self.given_back += 1;
         Ok(())
+    }
+
+    fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied> {
+        let mut bytes = Vec::with_capacity(len);
+        while bytes.len() < len {
+            let width = if len - bytes.len() >= 8 { Width::QWord } else { Width::Byte };
+            let Some(address) = at.checked_add(bytes.len() as u64) else {
+                return Err(self.deny("a definition block past the end of memory".into(), format_args!("{at:#x}+{len:#x}")));
+            };
+            match read(self.kernel, Space::SystemMemory, address, width) {
+                Ok((value, memory_type)) if reserved_or_nvs(memory_type) => {
+                    self.reads[Space::SystemMemory as usize] += 1;
+                    self.pages.read(address, memory_type);
+                    bytes.extend_from_slice(&value.to_le_bytes()[..width.bytes() as usize]);
+                }
+                Ok((_, memory_type)) => {
+                    let what = format!("a definition block in {}, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS", type_name(memory_type));
+                    return Err(self.deny(what, format_args!("{at:#x}+{len:#x}")));
+                }
+                Err(Refusal::Stopping) => return Err(self.stopped()),
+                Err(refusal) => return Err(self.deny(refusal.to_string(), format_args!("a definition block at {at:#x}+{len:#x}"))),
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn transfer(&mut self, at: &Transfer<'_>, _: Option<&[u8]>) -> Result<Vec<u8>, Denied> {
+        let space = match at.space {
+            0x04 => "SMBus",
+            0x07 => "IPMI",
+            0x08 => "GeneralPurposeIO",
+            0x09 => "GenericSerialBus",
+            0x0B => "PlatformRtMechanism",
+            _ => "FFixedHW",
+        };
+        Err(self.deny(format!("an access to {space}, which this server serves no AML in"), format_args!("{at:x?}")))
+    }
+
+    fn find_table(&mut self, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<(u64, usize)>, Denied> {
+        let tables = crate::tables::Tables::new(self.kernel);
+        let found = toyos_acpi::find_by_id(&tables, self.rsdp, signature, oem_id, oem_table_id);
+        if tables.stopping.get() {
+            return Err(self.stopped());
+        }
+        let ids = format_args!("{:?} {:?} {:?}", signature.escape_ascii().to_string(), oem_id.escape_ascii().to_string(), oem_table_id.escape_ascii().to_string());
+        let table = match found {
+            Ok(Some(table)) => table,
+            Ok(None) => return Ok(None),
+            Err(why) => return Err(self.deny("a table LoadTable or a Data Table Region names: the XSDT was not read".into(), format_args!("{ids}: {why:x?}"))),
+        };
+        match read(self.kernel, Space::SystemMemory, table.base(), Width::Byte) {
+            Ok((_, memory_type)) if reserved_or_nvs(memory_type) => Ok(Some((table.base(), table.len()))),
+            Ok((_, memory_type)) => {
+                let what = format!("a table LoadTable or a Data Table Region names, in {}, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS", type_name(memory_type));
+                Err(self.deny(what, format_args!("{ids}")))
+            }
+            Err(Refusal::Stopping) => Err(self.stopped()),
+            Err(refusal) => Err(self.deny(refusal.to_string(), format_args!("a table {ids}"))),
+        }
+    }
+
+    fn loaded(&mut self, load: &RuntimeLoad<'_>) {
+        let header = load.header.map(|header| {
+            let text = |bytes: &[u8]| bytes.escape_ascii().to_string();
+            (text(&header[..4]), u32::from_le_bytes(header[4..8].try_into().expect("four bytes")), text(&header[16..24]))
+        });
+        let said = header.as_ref().map_or("its header unread".into(), |(signature, length, _)| format!("{signature}, {length} bytes"));
+        let oem = header.as_ref().map_or(String::new(), |(_, _, oem)| format!(", OEM Table ID {oem:?}"));
+        match load.refused {
+            None => {
+                self.loaded += 1;
+                println!("acpiserver: a table loaded at run time: {said}");
+                println!("{OWN}{} loaded it{oem}", load.by);
+            }
+            Some(why) => {
+                self.loads_refused += 1;
+                println!("acpiserver: a table loaded at run time was refused: {said}: {}", crate::aml::kind(why));
+                println!("{OWN}{} loaded it{oem}, refused {why:x?}", load.by);
+            }
+        }
     }
 }
 
@@ -471,13 +683,18 @@ pub mod tests {
 
     /// A kernel that answers reads from bytes at addresses, each range with a
     /// memory type, refuses `kept` ranges as the real one refuses memory of a
-    /// type it passes no read of and every other address as it refuses RAM,
-    /// and answers the Global Lock from a script.
+    /// type it passes no access to and every other address as it refuses RAM,
+    /// writes memory where the real one does, which later reads see, and
+    /// answers the Global Lock from a script.
     #[derive(Default)]
     pub struct Scripted {
         pub memory: Vec<(u64, u8, Vec<u8>)>,
+        /// The bytes of `memory` a write changed, by address.
+        pub written: RefCell<std::collections::BTreeMap<u64, u8>>,
         /// `(start, end, memory type)`.
         pub kept: Vec<(u64, u64, u8)>,
+        /// `(start, end)` of what the kernel drives, refused as device memory.
+        pub driven: Vec<(u64, u64)>,
         pub ports: Vec<(u64, u64)>,
         pub config: Vec<(u64, u64)>,
         pub asked: RefCell<Vec<Access>>,
@@ -491,11 +708,23 @@ pub mod tests {
         /// A controller at [`EC_DATA`] and [`EC_COMMAND`], answering its two
         /// ports before [`Self::ports`] is asked.
         pub controller: RefCell<Option<Emulated>>,
+        /// The controller is reached only under the Global Lock, as a `_GLK`
+        /// of 1 asks: a write to either port or a read of its data, which
+        /// takes the byte, made without it panics.
+        pub lock_rule: bool,
         /// Accesses and lock exchanges answered before the machine stops.
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// What each Sleep's wait takes, in turn; nothing once it runs out.
+        /// Each served set a Sleep was asked to serve.
+        pub sleeps: RefCell<VecDeque<Latched>>,
+        pub slept: RefCell<Vec<Option<u16>>>,
     }
+
+    /// What [`Scripted`] panics with where it is asked to power off: the
+    /// machine stops there, and nothing after the ask runs.
+    pub const POWERED_OFF: &str = "the scripted machine powered off";
 
     impl Scripted {
         fn stopping(&self) -> Result<(), Stopping> {
@@ -514,7 +743,7 @@ pub mod tests {
         fn access(&self, access: Access) -> Result<Answer, Stopping> {
             self.stopping()?;
             self.asked.borrow_mut().push(access);
-            assert!(access.write == 0 || access.space == Space::SystemIo as u8, "this server asks the kernel for no write but a port's");
+            assert!(access.write == 0 || access.space != Space::PciConfig as u8, "this server asks the kernel for no configuration write");
             let width = Width::from_raw(access.width).expect("a width").bytes();
             let listed = |values: &[(u64, u64)]| values.iter().find(|(at, _)| *at == access.address).map(|&(_, value)| value);
             Ok(match Space::from_raw(access.space).expect("a space") {
@@ -523,10 +752,25 @@ pub mod tests {
                         access.address >= *base && access.address + width <= base + bytes.len() as u64
                     });
                     match held {
+                        // ACPI reclaim and runtime-services data, as the real one refuses them.
+                        Some((_, memory_type @ (6 | 9), _)) if access.write != 0 => Answer { made: Err(Refused::TableWrite), memory_type: *memory_type },
+                        Some((_, memory_type, _)) if access.write != 0 => {
+                            let mut written = self.written.borrow_mut();
+                            for i in 0..width {
+                                written.insert(access.address + i, (access.value >> (8 * i)) as u8);
+                            }
+                            Answer { made: Ok(0), memory_type: *memory_type }
+                        }
                         Some((base, memory_type, bytes)) => {
-                            let from = (access.address - base) as usize;
-                            let value = bytes[from..from + width as usize].iter().rev().fold(0u64, |value, &byte| value << 8 | u64::from(byte));
+                            let written = self.written.borrow();
+                            let value = (0..width).rev().fold(0u64, |value, i| {
+                                let at = access.address + i;
+                                value << 8 | u64::from(written.get(&at).copied().unwrap_or(bytes[(at - base) as usize]))
+                            });
                             Answer { made: Ok(value), memory_type: *memory_type }
+                        }
+                        None if self.driven.iter().any(|(start, end)| (*start..*end).contains(&access.address)) => {
+                            Answer { made: Err(Refused::DeviceMemory), memory_type: UNLISTED }
                         }
                         None => match self.kept.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
                             Some(&(.., memory_type)) => Answer { made: Err(Refused::MemoryType), memory_type },
@@ -535,6 +779,9 @@ pub mod tests {
                     }
                 }
                 Space::SystemIo if self.controller.borrow().is_some() && [EC_DATA, EC_COMMAND].contains(&access.address) => {
+                    if access.write != 0 || access.address == EC_DATA {
+                        assert!(!self.lock_rule || self.held.get(), "a transaction on a controller whose _GLK asks for the Global Lock, made without it");
+                    }
                     let mut controller = self.controller.borrow_mut();
                     let ec = controller.as_mut().expect("just seen");
                     let read = match (access.address, access.write != 0) {
@@ -577,6 +824,11 @@ pub mod tests {
             self.releases.borrow_mut().pop_front().unwrap_or(false)
         }
 
+        fn sleep(&self, _: Instant, ec_gpe: Option<u16>) -> Latched {
+            self.slept.borrow_mut().push(ec_gpe);
+            self.sleeps.borrow_mut().pop_front().unwrap_or_default()
+        }
+
         fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
             self.stopping()?;
             assert!(!self.held.get(), "the sleep type was handed over under the Global Lock");
@@ -586,6 +838,18 @@ pub mod tests {
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
             Ok(true)
+        }
+
+        fn latched(&self) -> Option<u32> {
+            None
+        }
+
+        fn ack(&self) {
+            panic!("an SCI acknowledged where none latched");
+        }
+
+        fn power_off(&self) -> toyos::power::Refused {
+            panic!("{POWERED_OFF}");
         }
     }
 
@@ -654,49 +918,120 @@ pub mod tests {
         assert_eq!(host.pages.by_type(), "none");
     }
 
-    /// A port write in [`FORWARDED`] is asked of the kernel, and made or
-    /// refused as it answers; every other port and width, memory and
-    /// configuration space are denied by name, and so is the controller's
-    /// space with no controller attached, none of them asked of the kernel.
+    /// Every port write is asked of the kernel and made or refused as it
+    /// answers, as the owner ruled on #875: the AMD bench's interrupt
+    /// router's index and data, the POST port's word and a byte to
+    /// `SMI_CMD`, made, and a port the kernel keeps, denied under its name
+    /// for the refusal. Configuration space, and the controller's space with
+    /// no controller attached, are denied by name and ask the kernel nothing.
     #[test]
-    fn only_a_forwarded_port_write_is_asked_of_the_kernel() {
-        use toyos_aml::Access::{Byte, DWord, Word};
+    fn every_port_write_is_asked_of_the_kernel_and_made_or_refused_as_it_answers() {
+        use toyos_aml::Access::{Byte, Word};
         let mut kernel = machine();
-        kernel.ports = vec![(0x72, 0), (0x80, 0)];
+        kernel.ports = vec![(0xC00, 0), (0xC01, 0), (0x80, 0), (0xB2, 0)];
         let mut host = Firmware::new(&kernel);
-        assert_eq!(host.write(Address::Io(0x80), Word, 0x28), Ok(()));
-        assert_eq!(host.write(Address::Io(0x72), Byte, 0x08), Ok(()));
-        let refused = host.write(Address::Io(0xCD6), Byte, 0x60);
-        assert_eq!(refused, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
+        let made = [(0xC00, Byte, 0x02), (0xC01, Byte, 0x0B), (0x80, Word, 0x28), (0xB2, Byte, 0xA0)];
+        for (port, width, value) in made {
+            assert_eq!(host.write(Address::Io(port), width, value), Ok(()), "{port:#x} {width:?}");
+        }
+        let kept = host.write(Address::Io(0xCF9), Byte, 0x06);
+        assert_eq!(kept, Err(Denied("a SystemIO write the kernel refused KernelPort".into())));
         assert_eq!(
             *kernel.asked.borrow(),
             [
+                Access::write(Space::SystemIo, 0xC00, Width::Byte, 0x02),
+                Access::write(Space::SystemIo, 0xC01, Width::Byte, 0x0B),
                 Access::write(Space::SystemIo, 0x80, Width::Word, 0x28),
-                Access::write(Space::SystemIo, 0x72, Width::Byte, 0x08),
-                Access::write(Space::SystemIo, 0xCD6, Width::Byte, 0x60),
+                Access::write(Space::SystemIo, 0xB2, Width::Byte, 0xA0),
+                Access::write(Space::SystemIo, 0xCF9, Width::Byte, 0x06),
             ]
         );
-        // Reset-capable ports with the values that reset a machine, the
-        // reset register an AMD laptop shares with `SMI_CMD`, a data
-        // register, and a forwarded port at a width it is not forwarded at.
-        for (port, width, value) in
-            [(0xCF9, Byte, 0x06), (0xCF9, Byte, 0x0E), (0x92, Byte, 0x01), (0xB0, Byte, 0xFB), (0xB2, Byte, 0xA0), (0x73, Byte, 0), (0xCD7, Byte, 0), (0x72, Word, 0), (0x80, Byte, 0), (0x80, DWord, 0)]
-        {
-            assert_eq!(host.write(Address::Io(port), width, value), Err(Denied(UNFORWARDED.into())), "{port:#x} {width:?}");
-        }
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
-        for (at, denied) in [
-            (Address::Memory(NVS), "a write to SystemMemory: this server writes no memory for AML"),
-            (function, "a write to PCI_Config: this server writes no configuration space for AML"),
-        ] {
-            assert_eq!(host.write(at, Byte, 0), Err(Denied(denied.into())));
-        }
+        let config = "a write to PCI_Config: this server writes no configuration space for AML";
+        assert_eq!(host.write(function, Byte, 0), Err(Denied(config.into())));
         let controller = Address::EmbeddedControl(0x38);
         assert_eq!(host.write(controller, Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
         assert_eq!(host.read(controller, Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert_eq!(kernel.asked.borrow().len(), 3, "the kernel was asked for an access this server denies itself");
+        assert_eq!(kernel.asked.borrow().len(), 5, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
-        assert_eq!(host.written.counts(), "0x72 Byte x1; 0x80 Word x1; 0xcd6 Byte x1");
+        assert_eq!(host.written.counts(), "0x80 Word x1; 0xb2 Byte x1; 0xc00 Byte x1; 0xc01 Byte x1; 0xcf9 Byte x1");
+    }
+
+    /// A write to memory is the kernel's to make or refuse: NVS and reserved
+    /// memory are written, which a later read sees, and a write the kernel
+    /// refuses, to the tables' memory or to memory the firmware's map lists
+    /// nowhere, is denied under the kernel's name for it and the type, and
+    /// counted.
+    #[test]
+    fn a_memory_write_is_the_kernels_to_make_or_refuse() {
+        use toyos_aml::Access::{Byte, DWord, QWord};
+        let mut kernel = machine();
+        kernel.memory.push((0x7fb0_0000, 9, vec![0; 8]));
+        kernel.kept = vec![(0xfe00_0000, 0xfe00_1000, UNLISTED)];
+        let mut host = Firmware::new(&kernel);
+        assert_eq!(host.write(Address::Memory(NVS + 4), DWord, 0xdead_beef), Ok(()));
+        assert_eq!(host.read(Address::Memory(NVS), QWord), Ok(0xdead_beef_4433_2211));
+        assert_eq!(host.write(Address::Memory(NVS + 0x2000), Byte, 1), Ok(()));
+        assert_eq!(host.read(Address::Memory(NVS + 0x2000), Byte), Ok(1));
+        let tables = "a SystemMemory write the kernel refused TableWrite, in memory of type 9";
+        assert_eq!(host.write(Address::Memory(0x7fb0_0000), Byte, 1), Err(Denied(tables.into())));
+        let unlisted = "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory";
+        for _ in 0..2 {
+            assert_eq!(host.write(Address::Memory(0xfe00_0010), DWord, 0), Err(Denied(unlisted.into())));
+        }
+        assert_eq!(host.refused.counts(), format!("{unlisted} x2; {tables} x1"));
+    }
+
+    /// Every space of Table 5.182 this server serves no AML in is denied by
+    /// name and asks the kernel nothing: SystemCMOS, PciBarTarget, PCC and an
+    /// OEM-defined space by address, and each carried whole.
+    #[test]
+    fn a_space_this_server_serves_no_aml_in_is_denied_by_name() {
+        use toyos_aml::Access::Byte;
+        let kernel = machine();
+        let mut host = Firmware::new(&kernel);
+        for (at, space) in [
+            (Address::SystemCmos(0x40), "SystemCMOS"),
+            (Address::PciBarTarget { segment: 0, bus: 0, device: 2, function: 0, bar: 0x10, offset: 0 }, "PciBarTarget"),
+            (Address::Pcc { subspace: 2, offset: 4 }, "PCC"),
+            (Address::Oem { space: 0x80, offset: 0 }, "an OEM-defined space"),
+        ] {
+            let denied = Err(Denied(format!("an access to {space}, which this server serves no AML in")));
+            assert_eq!(host.read(at, Byte).map(drop), denied.clone());
+            assert_eq!(host.write(at, Byte, 0), denied);
+        }
+        for (space, name) in [(0x04, "SMBus"), (0x07, "IPMI"), (0x08, "GeneralPurposeIO"), (0x09, "GenericSerialBus"), (0x0B, "PlatformRtMechanism"), (0x7F, "FFixedHW")] {
+            let at = Transfer { space, region: 0, bit: 0, bits: 8, attrib: 0, length: 0, connection: None };
+            assert_eq!(host.transfer(&at, None), Err(Denied(format!("an access to {name}, which this server serves no AML in"))));
+        }
+        assert!(kernel.asked.borrow().is_empty());
+    }
+
+    /// LoadTable's and a Data Table Region's table is found in the XSDT by
+    /// its three identifiers and answered only in memory Table 15.6 calls
+    /// reserved or NVS: QEMU's tables are ACPI reclaim memory, and denied.
+    #[test]
+    fn a_table_is_found_by_its_identifiers_only_in_reserved_or_nvs_memory() {
+        use crate::aml::tests::{crafted_with, sealed, CRAFTED_RSDP};
+        let mut oem = sealed(b"OEM1", &[0; 4]);
+        oem[10..16].copy_from_slice(b"TOYOS ");
+        oem[16..24].copy_from_slice(b"TABLE1  ");
+        oem[9] = 0;
+        oem[9] = 0u8.wrapping_sub(oem.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)));
+        let mut kernel = crafted_with(&sealed(b"DSDT", &[]), &[], &[&oem]);
+        let listed = kernel.memory.iter().position(|(_, _, bytes)| bytes.starts_with(b"OEM1")).expect("the table");
+        let at = kernel.memory[listed].0;
+        for (memory_type, found) in [(0, true), (10, true), (6, true), (9, false)] {
+            kernel.memory[listed].1 = memory_type;
+            let mut host = Firmware::new(&kernel);
+            host.rsdp = CRAFTED_RSDP;
+            let answer = host.find_table(b"OEM1", b"TOYOS", b"TABLE1");
+            match found {
+                true => assert_eq!(answer, Ok(Some((at, oem.len()))), "type {memory_type}"),
+                false => assert_eq!(answer, Err(Denied("a table LoadTable or a Data Table Region names, in memory of type 9, which Table 15.6 calls neither AddressRangeReserved nor AddressRangeNVS".into()))),
+            }
+            assert_eq!(host.find_table(b"OEM1", b"TOYOS", b"TABLE2"), Ok(None));
+        }
     }
 
     /// The controller's space is its own transactions', one a byte, through
@@ -710,7 +1045,7 @@ pub mod tests {
         space[0xA8] = 0x5A;
         *kernel.controller.borrow_mut() = Some(Emulated::new(space));
         let mut host = Firmware::new(&kernel);
-        host.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default() });
+        host.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default(), glk: false });
         assert_eq!(host.read(Address::EmbeddedControl(0xA8), Byte), Ok(0x5A));
         assert_eq!(host.write(Address::EmbeddedControl(0x81), Byte, 0x01), Ok(()));
         assert_eq!(host.read(Address::EmbeddedControl(0x81), Byte), Ok(0x01));
@@ -730,7 +1065,7 @@ pub mod tests {
         use toyos_aml::Access::Byte;
         let kernel = machine();
         let mut host = Firmware::new(&kernel);
-        let ec = Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default() };
+        let ec = Ec { path: "\\_SB_.EC0_".into(), command: EC_COMMAND as u16, data: EC_DATA as u16, gpe: 3, queries: Default::default(), glk: false };
         host.ec = Some(ec.clone());
         let refused = host.read(Address::EmbeddedControl(0xA8), Byte);
         assert_eq!(refused, Err(Denied("a read of EmbeddedControl: the kernel refused a port of the controller".into())));

@@ -125,4 +125,4 @@ pub mod tcb {
     const _: () = assert!(AARCH64_BYTES == 16, "AArch64's psABI TCB is two words");
 }
 
-pub use arch::{current_tid, ioport, TCB_TID};
+pub use arch::{current_tid, ioport, processor_is_intel, TCB_TID};
