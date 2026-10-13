@@ -14,6 +14,11 @@ pub const QUERIES_COUNTED: &str = "embedded controller queries taken: ";
 pub const CONTROLLER_SERVED: &str = "acpiserver: embedded controller on GPE ";
 pub const CONTROLLER_NONE: &str = "acpiserver: embedded controller none: ";
 
+/// The server's census of the batteries and adapters it found, written once
+/// at the end of its start where a battery is present, after their first
+/// reading.
+pub const POWER_SOURCES: &str = "acpiserver: power sources: ";
+
 /// A present battery's static information, once after the controller is
 /// armed: `battery <n> of <count>`, then its numbers.
 pub const BATTERY_INFO: &str = "battery information: ";
@@ -23,3 +28,7 @@ pub const BATTERY_INFO: &str = "battery information: ";
 /// remaining and full capacity, its state, rate, voltage and the power it
 /// moves in mW, then the adapters' state.
 pub const BATTERY_READ: &str = "battery read: ";
+
+/// What opens a line that carries an address, a PCI function or a name the
+/// firmware chose: this machine's own, and quoted in no record.
+pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";

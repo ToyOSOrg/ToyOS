@@ -1,9 +1,16 @@
 //! Field units over operation regions (§19.6.47, §19.6.63, §19.6.7) and
 //! buffer fields over buffers (§19.6.18-23, §19.6.62).
 //!
-//! A field is read and written in access units: aligned, of the width its
-//! access type names, each one [`Host`](crate::Host) access. A unit the field
-//! covers in part is completed by the field's update rule. A Lock field holds
+//! A field of a space addressed by offset is read and written in access
+//! units: aligned, of the width its access type names, each one
+//! [`Host`](crate::Host) access. A unit the field covers in part is
+//! completed by the field's update rule. A field of a space whose protocol is
+//! command- or connection-based (§5.5.2.4: SMBus, IPMI, GeneralPurposeIO,
+//! GenericSerialBus, PlatformRtMechanism, FFixedHW) is one
+//! [`Transfer`](crate::Transfer) whole, with the protocol its AccessAs names
+//! and the descriptor its Connection names; a BufferAcc field's value is the
+//! buffer the host answers, and a store to it answers the response its
+//! buffer became (§5.5.2.4.5.1). A Lock field holds
 //! the Global Lock across the whole access. An IndexField reaches a unit by
 //! writing its byte offset to the index field and then accessing the data
 //! field; a BankField writes its bank value to the bank field first.
@@ -15,6 +22,7 @@
 //! and an Integer stored, without the heap: an interpreter that is full
 //! still does both.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -22,7 +30,7 @@ use crate::exec::Machine;
 use crate::name::Seg;
 use crate::namespace::NodeId;
 use crate::object::{fit, to_buf, to_int, Bytes, Kept, Object};
-use crate::{Address, Error, MAX_BYTES};
+use crate::{Address, Error, Transfer, MAX_BYTES};
 
 pub(crate) struct Region {
     pub(crate) space: u8,
@@ -56,6 +64,46 @@ pub(crate) struct Field {
     pub(crate) lock: bool,
     /// UpdateRule (§20.2.5.2): 0 Preserve, 1 WriteAsOnes, 2 WriteAsZeros.
     pub(crate) update: u8,
+    /// The protocol the AccessAs before it names (Table 5.184), 0 for none,
+    /// and the byte count of AttribBytes and the raw protocols.
+    pub(crate) attrib: (u8, u8),
+    /// The Connection before it (§19.6.15), and the field's bit at which the
+    /// units after that connection begin.
+    pub(crate) connection: Option<(Connection, u64)>,
+}
+
+/// A Connection's resource descriptor (§19.6.15): a buffer the field list
+/// holds, or a named object read as a buffer when the field is accessed.
+#[derive(Clone)]
+pub(crate) enum Connection {
+    Bytes(Bytes),
+    Named(NodeId),
+}
+
+/// A space whose protocol is command- or connection-based (§5.5.2.4): its
+/// field is accessed whole, through the host.
+pub(crate) fn carried(space: u8) -> bool {
+    matches!(space, 0x04 | 0x07 | 0x08 | 0x09 | 0x0B | 0x7F)
+}
+
+/// A space whose protocol is BufferAcc's: its field's value is a buffer.
+fn buffered(space: u8) -> bool {
+    matches!(space, 0x04 | 0x07 | 0x09 | 0x0B | 0x7F)
+}
+
+/// The AccessAs attribute an AccessField's or ExtendedAccessField's bytes
+/// name (§20.2.5.2): the AccessType byte's bits 7:6 name AttribBytes,
+/// AttribRawBytes or AttribRawProcessBytes of the AccessAttrib byte's count,
+/// or, as 0, the AccessAttrib byte itself; an ExtendedAccessField names its
+/// attribute and its count.
+pub(crate) fn attrib(access_type: u8, access_attrib: u8, extended: Option<u8>) -> (u8, u8) {
+    match (extended, access_type >> 6) {
+        (Some(length), _) => (access_attrib, length),
+        (None, 0) => (access_attrib, 0),
+        (None, 1) => (0x0B, access_attrib),
+        (None, 2) => (0x0E, access_attrib),
+        (None, _) => (0x0F, access_attrib),
+    }
 }
 
 pub(crate) struct BufField {
@@ -102,6 +150,19 @@ pub(crate) fn flags(b: u8) -> (u8, bool, u8) {
     (b & 0x0F, b & 0x10 != 0, (b >> 5) & 0x3)
 }
 
+/// The region a field of a carried space is in, or `None` for a field
+/// accessed by unit; a BankField or IndexField reaches a carried space by no
+/// unit, and is refused.
+fn carried_region(f: &Field) -> Result<Option<Kept<Region>>, Error> {
+    match &f.kind {
+        Kind::Region(r) if carried(r.space) => Ok(Some(r.clone())),
+        Kind::Bank { region, .. } if carried(region.space) => {
+            Err(Error::Rule("a BankField of a space whose protocol is command- or connection-based (§5.5.2.4)"))
+        }
+        _ => Ok(None),
+    }
+}
+
 impl Machine<'_> {
     /// The bytes of one access unit, by the access type and, for an access
     /// type of AnyAcc, the narrowest naturally aligned unit that holds the
@@ -112,9 +173,9 @@ impl Machine<'_> {
             Kind::Region(r) | Kind::Bank { region: r, .. } => Some(r),
             Kind::Index { .. } => None,
         };
-        // Table 19.34: EmbeddedControl, SystemCMOS, GeneralPurposeIO and PCC
-        // permit byte access only.
-        let bytes_only = matches!(region.map(|r| r.space), Some(0x03 | 0x05 | 0x08 | 0x0A));
+        // Table 19.34: EmbeddedControl, SystemCMOS and PCC permit byte access
+        // only; GeneralPurposeIO is carried whole.
+        let bytes_only = matches!(region.map(|r| r.space), Some(0x03 | 0x05 | 0x0A));
         let within = |end: u64| region.is_none_or(|r| end <= r.len);
         let w = match f.access {
             0 if bytes_only => 1,
@@ -129,7 +190,7 @@ impl Machine<'_> {
             2 => 2,
             3 => 4,
             4 => 8,
-            5 => return Err(Error::Unsupported("BufferAcc, which only the SMBus, IPMI and GenericSerialBus spaces use")),
+            5 => return Err(Error::Rule("BufferAcc in a space addressed by offset, which takes no buffer (§19.6.47)")),
             _ => return Err(Error::Rule("an access by a reserved AccessType (§20.2.5.2)")),
         };
         if bytes_only && w != 1 {
@@ -140,7 +201,9 @@ impl Machine<'_> {
 
     fn address(&mut self, r: &Region, offset: u64, w: u64) -> Result<Address, Error> {
         let past = || Error::Rule("a field access runs past its operation region (§19.6.47)");
-        if offset.checked_add(w).ok_or_else(past)? > r.len {
+        // A PciBarTarget region's length is its BAR's (§5.5.2.4.4.1), which
+        // the host reads.
+        if r.space != 0x06 && offset.checked_add(w).ok_or_else(past)? > r.len {
             return Err(past());
         }
         let at = r.base.checked_add(offset).ok_or_else(past)?;
@@ -162,17 +225,28 @@ impl Machine<'_> {
                 let at = u8::try_from(at).ok().filter(|&a| u64::from(a) + w <= 0x100);
                 Ok(Address::EmbeddedControl(at.ok_or(Error::Rule("an EmbeddedControl access past its 256 bytes (§12)"))?))
             }
-            0x04 => Err(Error::Unsupported("the SMBus address space")),
-            0x05 => Err(Error::Unsupported("the SystemCMOS address space")),
-            0x06 => Err(Error::Unsupported("the PciBarTarget address space")),
-            0x07 => Err(Error::Unsupported("the IPMI address space")),
-            0x08 => Err(Error::Unsupported("the GeneralPurposeIO address space")),
-            0x09 => Err(Error::Unsupported("the GenericSerialBus address space")),
-            0x0A => Err(Error::Unsupported("the PCC address space")),
-            0x0B => Err(Error::Unsupported("the PlatformRtMechanism address space")),
-            0x7F => Err(Error::Unsupported("the FFixedHW address space")),
-            0x0C..=0x7E => Err(Error::Unsupported("a reserved address space (Table 5.182)")),
-            _ => Err(Error::Unsupported("an OEM-defined address space")),
+            0x05 => {
+                // The RTC/CMOS device's bytes, 256 at the most an extension names.
+                let at = u8::try_from(at).ok().filter(|&a| u64::from(a) + w <= 0x100);
+                Ok(Address::SystemCmos(at.ok_or(Error::Rule("a SystemCMOS access past the CMOS's 256 bytes (§5.5.2.4.3)"))?))
+            }
+            0x06 => {
+                // §5.5.2.4.4.1: the region's offset is a BAR's in the
+                // function's configuration space, 0x10 to 0x24.
+                let bar = u8::try_from(r.base).ok().filter(|b| (0x10..=0x24).contains(b) && b % 4 == 0);
+                let bar = bar.ok_or(Error::Rule("a PciBarTarget region whose offset is no BAR's (§5.5.2.4.4.1)"))?;
+                let p = self.pci(r)?;
+                Ok(Address::PciBarTarget { segment: p.segment, bus: p.bus, device: p.device, function: p.function, bar, offset })
+            }
+            0x0A => {
+                // §5.5.2.4.8.2: the region's offset is the subspace's ID.
+                let subspace = u8::try_from(r.base).map_err(|_| Error::Rule("a PCC region whose subspace ID is past 255 (§5.5.2.4.8.2)"))?;
+                let offset = u32::try_from(offset).map_err(|_| past())?;
+                Ok(Address::Pcc { subspace, offset })
+            }
+            0x80..=0xFF => Ok(Address::Oem { space: r.space, offset: at }),
+            0x0C..=0x7E => Err(Error::Rule("a region of a reserved address space (Table 5.182)")),
+            _ => Err(Error::Rule("a field of a space whose protocol is the host's, accessed by unit")),
         }
     }
 
@@ -181,16 +255,21 @@ impl Machine<'_> {
     /// the high word, function in the low), in the segment group the host
     /// bridge's `_SEG` names or 0 without one (§6.5.6). The host bridge is
     /// the nearest device naming a `_BBN`, which is the bus directly below it
-    /// (§6.5.5); each device between it and the region's is a PCI-to-PCI
+    /// (§6.5.5), or else whose `_HID` or one of whose `_CID`s (§6.1.5,
+    /// §6.1.2) names a PCI or PCI Express host bridge, PNP0A03 or PNP0A08,
+    /// on bus 0, the only root bus a machine that names no `_BBN` has; each
+    /// device between it and the region's is a PCI-to-PCI
     /// bridge by its Header Type register, whose Secondary Bus Number
     /// register is the bus below it (PCI-to-PCI Bridge Architecture
     /// Specification 1.2, §3.2.5.4). A region declared in the host bridge
     /// itself addresses the bridge.
     ///
     /// §6.5.4 holds a PCI_Config region accessible always only on a root bus
-    /// naming a `_BBN`, and one below a bridge once "the bridge controller
-    /// has been programmed with a bus number": a region below anything else
-    /// is refused, where any bus chosen for it would be another device's.
+    /// naming a `_BBN`; one on a root bus that names none once its `_REG(2,
+    /// 1)` has run, which is the caller's to run; and one below a bridge once
+    /// "the bridge controller has been programmed with a bus number": a
+    /// region below anything else is refused, where any bus chosen for it
+    /// would be another device's.
     ///
     /// Every access asks again, firmware's methods and the bridges both:
     /// nothing is kept that a bridge renumbered since would make stale. A
@@ -204,7 +283,7 @@ impl Machine<'_> {
         loop {
             self.step()?;
             if matches!(self.ns.object(host), Some(Object::Device)) {
-                if self.ns.child(host, bbn).is_some() {
+                if self.ns.child(host, bbn).is_some() || self.host_bridge(host)? {
                     break;
                 }
                 if below.len() > usize::from(u8::MAX) {
@@ -213,7 +292,7 @@ impl Machine<'_> {
                 below.push(host);
             }
             let above = self.ns.parent(host);
-            host = above.ok_or(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN"))?;
+            host = above.ok_or(Error::Rule("a PCI_Config region below no host bridge, which names a _BBN or is PNP0A03 or PNP0A08 by its _HID or _CID"))?;
         }
         let bus = self.named_int(host, bbn)?.unwrap_or(0);
         let segment = self.named_int(host, Seg(*b"_SEG"))?.unwrap_or(0);
@@ -249,6 +328,32 @@ impl Machine<'_> {
             bus = answered;
         }
         self.function(device, segment, bus)
+    }
+
+    /// Whether a device is a PCI host bridge by its `_HID` or a `_CID`: an
+    /// EISA ID's integer or a string, a `_CID` one or a package of them.
+    fn host_bridge(&mut self, device: NodeId) -> Result<bool, Error> {
+        // EisaId ("PNP0A03") and EisaId ("PNP0A08") as AML stores them.
+        const IDS: [u64; 2] = [0x030A_D041, 0x080A_D041];
+        const TEXT: [&[u8]; 2] = [b"PNP0A03", b"PNP0A08"];
+        for seg in [Seg(*b"_HID"), Seg(*b"_CID")] {
+            let ids = match self.named_object(device, seg)? {
+                None => continue,
+                Some(Object::Pkg(p)) => p.borrow().clone(),
+                Some(id) => vec![id],
+            };
+            for id in ids {
+                let hit = match self.resolve_lazy(id)? {
+                    Object::Int(id) => IDS.contains(&id),
+                    Object::Str(text) => TEXT.contains(&text.borrow().as_slice()),
+                    _ => false,
+                };
+                if hit {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// The function a device's `_ADR` names on `bus` (§6.1.1).
@@ -300,9 +405,46 @@ impl Machine<'_> {
 
     pub(crate) fn read_field(&mut self, f: &Field) -> Result<Object, Error> {
         self.enter()?;
-        let r = self.locked(f.lock, |m| m.read_units(f));
+        let r = self.locked(f.lock, |m| match carried_region(f)? {
+            Some(region) => m.transfer(f, &region, None),
+            None => m.read_units(f),
+        });
         self.leave();
         r
+    }
+
+    /// One [`Transfer`] of a carried field whole: a read where `write` is
+    /// `None`, else a write of its bytes. A BufferAcc field's value is the
+    /// buffer the host answered; a GeneralPurposeIO field's, its pins as an
+    /// Integer or a Buffer as wide as it is (§19.6.47).
+    fn transfer(&mut self, f: &Field, region: &Region, write: Option<&[u8]>) -> Result<Object, Error> {
+        let connection = match &f.connection {
+            None => None,
+            Some((Connection::Bytes(b), at)) => Some((b.clone(), *at)),
+            Some((Connection::Named(id), at)) => match self.ns.object(*id).cloned() {
+                Some(Object::Buf(b)) => Some((b, *at)),
+                Some(Object::BufField(b)) => match self.read_buf_field(&b)? {
+                    Object::Buf(b) => Some((b, *at)),
+                    _ => return Err(Error::Type("a Connection whose descriptor is no Buffer (§19.6.15)")),
+                },
+                Some(_) => return Err(Error::Type("a Connection whose descriptor is no Buffer (§19.6.15)")),
+                None => return Err(Error::NotFound(String::from("a Connection's descriptor its method's exit destroyed"))),
+            },
+        };
+        let held = connection.as_ref().map(|(b, at)| (b.borrow(), *at));
+        let at = Transfer {
+            space: region.space,
+            region: region.base,
+            bit: f.bit,
+            bits: f.len,
+            attrib: f.attrib.0,
+            length: f.attrib.1,
+            connection: held.as_ref().map(|(b, at)| (b.as_slice(), *at)),
+        };
+        let answer = self.host.transfer(&at, write).map_err(|d| Error::Host(d.0))?;
+        drop(held);
+        crate::object::bounded(answer.len())?;
+        if buffered(region.space) { self.new_buf(answer) } else { self.value(fit(answer, bytes_for(f.len)?), f.len) }
     }
 
     /// Whether a field's value is a Buffer (§19.6.47): an Integer when it
@@ -352,6 +494,28 @@ impl Machine<'_> {
     /// firmware's methods, which may store to the source, and the store is of
     /// what the source held when it began.
     pub(crate) fn write_field(&mut self, f: &Field, v: Object) -> Result<(), Error> {
+        self.write_field_answering(f, v).map(drop)
+    }
+
+    /// A store to a field, answering the response a carried BufferAcc
+    /// field's write became, and `None` for any other field.
+    pub(crate) fn write_field_answering(&mut self, f: &Field, v: Object) -> Result<Option<Object>, Error> {
+        if let Some(region) = carried_region(f)? {
+            let bytes = match &v {
+                Object::Int(x) => fit(x.to_le_bytes().to_vec(), bytes_for(f.len)?),
+                Object::Buf(_) | Object::Str(_) => to_buf(&v, self.w)?,
+                _ => return Err(Error::Type("a store to a field unit of an object that is not an integer, buffer or string")),
+            };
+            let copy = self.bytes(bytes)?;
+            self.enter()?;
+            let r = self.locked(f.lock, |m| m.transfer(f, &region, Some(&copy.borrow())));
+            self.leave();
+            return r.map(|answer| buffered(region.space).then_some(answer));
+        }
+        self.write_by_units(f, v).map(|()| None)
+    }
+
+    fn write_by_units(&mut self, f: &Field, v: Object) -> Result<(), Error> {
         let n = bytes_for(f.len)?;
         let (int, copy, held);
         let (source, piece): (&[u8], usize) = match &v {

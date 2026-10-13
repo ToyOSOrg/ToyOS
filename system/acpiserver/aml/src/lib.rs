@@ -5,22 +5,39 @@
 //! A definition block is firmware's, and so untrusted: whatever its bytes,
 //! [`Interpreter::load`] and [`Interpreter::evaluate`] return a value or a
 //! named [`Error`], never panic, and never run unbounded — every evaluation
-//! is bounded in steps, nesting, object size and time asked to sleep, and
+//! is bounded in steps, nesting, object size, Mutexes held and time asked to
+//! sleep, and
 //! what an interpreter holds of tables, namespace and objects is bounded in
 //! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
 //! without anything that table created, and the interpreter holding what it
-//! held before. What the last load or evaluation took of those bounds is
-//! [`Interpreter::usage`]'s, a refused one's too.
+//! held before. An evaluation refused, at the heap bound as at any other,
+//! gives back everything its methods made (§5.5.2.3: they "are destroyed on
+//! exit") and every Mutex they held (§19.6.88), and keeps what they stored
+//! into an object that outlives them, which ACPI 6.5 never takes back: no
+//! store is journalled. What the
+//! last load or evaluation took of those bounds is [`Interpreter::usage`]'s,
+//! a refused one's too.
 //!
 //! [`Interpreter::walk`] reads the namespace an interpreter holds, and runs
 //! nothing of it: which objects a caller then evaluates, and in which order,
 //! is the caller's.
 //!
+//! A definition block a method loads (`Load`, §19.6.76) lives as long as
+//! the namespace, and what the method itself defined dies at its exit: the
+//! namespace keeps the two apart (`namespace`). A block refused loads false
+//! and keeps nothing; a bound it reaches refuses the evaluation, whose
+//! bounds it shares. Its bytes come through the [`Host`], which reads them
+//! only from memory Table 15.6 calls reserved or NVS, and each load is told
+//! to it ([`Host::loaded`]).
+//!
 //! The library touches no hardware. An operation region's field is read and
-//! written through the [`Host`] the caller passes, in SystemMemory,
-//! SystemIO, PCI_Config and EmbeddedControl space; an access in any other
-//! space is refused as [`Error::Unsupported`], as are `Load`, `LoadTable`
-//! and `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
+//! written through the [`Host`] the caller passes, in every address space of
+//! Table 5.182: a space addressed by offset as an [`Address`] an access unit
+//! at a time, and a space whose protocol is command- or connection-based
+//! (§5.5.2.4) as one [`Transfer`] of the field whole. Which spaces it serves
+//! is the host's to say, and it denies the rest by name. A table the XSDT
+//! lists is found through it too, for `LoadTable` and `DataTableRegion`.
+//! Only one invocation runs at a time, so a Mutex is
 //! never contended and an Event is never signalled by anyone else; `\_GL`'s
 //! other owner is the firmware, whose side the [`Host`] waits out.
 //!
@@ -49,12 +66,13 @@ mod namespace;
 mod object;
 mod stream;
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use exec::{Frame, Machine};
+use exec::Machine;
 use name::{Path, Seg};
 use namespace::Namespace;
 use object::{Body, Meter, Method, Mutex, Object, Ref};
@@ -78,6 +96,29 @@ pub(crate) const MAX_ELEMENTS: usize = 1 << 16;
 /// record, string, buffer and package; what one holds beyond it while it
 /// runs is `object::Meter`'s to say.
 pub const MAX_LIVE: usize = 16 << 20;
+/// The most heap one load or evaluation holds while it runs: [`MAX_LIVE`],
+/// and what it holds beyond the meter's count, each part bounded by another
+/// of this interpreter's bounds:
+/// - an arena's old slots while a doubling moves it, at most half what the
+///   meter admits;
+/// - one operator's bytes before the meter holds them, Concatenate's the
+///   most at its two operands' copies and their sum, four of the largest
+///   object, one level's of them however deep they nest;
+/// - a table's or a loaded block's bytes while they are read in, the
+///   largest object;
+/// - for each frame of the deepest nest, its locals' and arguments' slots,
+///   a name of 255 segments and a PCI_Config region's walk of 257 devices;
+/// - a record and a level for each Mutex held, at most [`MAX_HELD`];
+/// - a node's path for a Notify, a reference or a refusal, a segment and a
+///   separator for each level as deep as the meter admits a node.
+pub const MAX_RUNNING: usize = MAX_LIVE
+    + MAX_LIVE / 2
+    + 5 * MAX_BYTES
+    + MAX_DEPTH as usize * exec::FRAME_HEAP
+    + MAX_HELD * (core::mem::size_of::<object::Kept<object::Mutex>>() + 1) * 2
+    + namespace::DEEPEST * (2 * core::mem::size_of::<name::Seg>() + 5);
+/// The most Mutex acquisitions one evaluation holds at once.
+pub(crate) const MAX_HELD: usize = 256;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;
@@ -135,9 +176,6 @@ pub enum Error {
     Fatal { kind: u8, code: u32, arg: u64 },
     /// What this interpreter bounds was exceeded.
     Bound(&'static str),
-    /// Something the specification defines that this interpreter does not
-    /// carry.
-    Unsupported(&'static str),
     /// The [`Host`] refused an access.
     Host(String),
     /// A function between a PCI_Config region's device and its host bridge
@@ -161,7 +199,8 @@ pub enum Access {
     QWord,
 }
 
-/// Where an access to an operation region lands (Table 5.182).
+/// Where an access to an operation region of a space addressed by offset
+/// lands (Table 5.182).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
     Memory(u64),
@@ -169,6 +208,42 @@ pub enum Address {
     Io(u16),
     PciConfig { segment: u16, bus: u8, device: u8, function: u8, offset: u16 },
     EmbeddedControl(u8),
+    /// A byte of the RTC/CMOS device's non-volatile memory (§5.5.2.4.3).
+    SystemCmos(u8),
+    /// `offset` into the space the BAR at `bar` in the function's
+    /// configuration space decodes (§5.5.2.4.4): its size, I/O or memory,
+    /// is the BAR's.
+    PciBarTarget { segment: u16, bus: u8, device: u8, function: u8, bar: u8, offset: u64 },
+    /// `offset` into the shared memory after the signature of PCC subspace
+    /// `subspace` (§5.5.2.4.8).
+    Pcc { subspace: u8, offset: u32 },
+    /// An OEM-defined space, 0x80 to 0xFF.
+    Oem { space: u8, offset: u64 },
+}
+
+/// A field of a space whose protocol is command- or connection-based:
+/// SMBus, IPMI, GeneralPurposeIO, GenericSerialBus, PlatformRtMechanism and
+/// FFixedHW (§5.5.2.4), accessed whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transfer<'a> {
+    /// The space (Table 5.182).
+    pub space: u8,
+    /// The region's offset: SMBus's and IPMI's device and initial command,
+    /// GenericSerialBus's initial command, a PCC-like subspace's number.
+    pub region: u64,
+    /// The field's place in its region, in bits from its start, and its
+    /// length: a command value is its byte offset, and a GeneralPurposeIO
+    /// field's pins are its bits.
+    pub bit: u64,
+    pub bits: u64,
+    /// The protocol its AccessAs names (Table 5.184), 0 where none does, and
+    /// the byte count an AttribBytes, AttribRawBytes or
+    /// AttribRawProcessBytes carries.
+    pub attrib: u8,
+    pub length: u8,
+    /// The resource descriptor its Connection names (§19.6.15), and the bit
+    /// of the region at which the units that connection reaches begin.
+    pub connection: Option<(&'a [u8], u64)>,
 }
 
 /// What the interpreter asks of the operating system.
@@ -193,6 +268,39 @@ pub trait Host {
     fn global_take_within(&mut self, ms: u16) -> Result<bool, Denied>;
     /// Gives back the Global Lock a take took.
     fn global_release(&mut self) -> Result<(), Denied>;
+    /// `len` bytes of memory at `at`, of a definition block `Load` reads
+    /// from a SystemMemory region or a field of one (§19.6.76): "Any table
+    /// loaded via an operation region must be in memory marked as
+    /// AddressRangeReserved or AddressRangeNVS", which Table 15.6 maps the
+    /// firmware's memory types to, and any other is refused.
+    fn table(&mut self, at: u64, len: usize) -> Result<Vec<u8>, Denied>;
+    /// A definition block an evaluation loaded at run time, or refused.
+    fn loaded(&mut self, load: &RuntimeLoad<'_>);
+    /// A field of a space whose protocol is the host's, read where `write`
+    /// is `None` and written with it otherwise: what it answers is the
+    /// field's value, or the response a write's buffer becomes (§5.5.2.4.5,
+    /// §5.5.2.4.7), whatever its length.
+    fn transfer(&mut self, at: &Transfer<'_>, write: Option<&[u8]>) -> Result<Vec<u8>, Denied>;
+    /// The table the XSDT lists with this signature, OEM ID and OEM Table ID
+    /// (§19.6.77, §19.6.25), each compared byte for byte and a shorter one
+    /// padded: its address and length, `None` where none matches. "Any table
+    /// referenced by LoadTable must be in memory marked by
+    /// AddressRangeReserved or AddressRangeNVS", as by a Data Table Region,
+    /// and one elsewhere is denied.
+    fn find_table(&mut self, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<(u64, usize)>, Denied>;
+}
+
+/// A definition block an evaluation loaded at run time (§19.6.76), or tried
+/// to.
+#[derive(Debug)]
+pub struct RuntimeLoad<'a> {
+    /// The absolute path of the method that loaded it, `\` for a table's
+    /// load.
+    pub by: &'a str,
+    /// Its header (§5.2.6), where it was read.
+    pub header: Option<&'a [u8]>,
+    /// Why it was refused, and nothing of it kept.
+    pub refused: Option<&'a Error>,
 }
 
 /// An object as the caller receives or passes it.
@@ -205,6 +313,10 @@ pub enum Value {
     Package(Vec<Value>),
     /// A reference to the named object at this absolute path.
     Reference(String),
+    /// A reference to an unnamed object — a package's element, a byte or
+    /// field of a buffer, a LocalX or ArgX — as what it referred to when it
+    /// was handed over. Only AML makes one, so it is refused as an argument.
+    Unnamed(Box<Value>),
 }
 
 /// What a load or an evaluation took of its bounds, a refused one as well.
@@ -234,7 +346,8 @@ pub enum Kind {
     Event,
     Method,
     Mutex,
-    OperationRegion,
+    /// In this address space (Table 5.182).
+    OperationRegion { space: u8 },
     PowerResource,
     /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
     Processor,
@@ -252,6 +365,10 @@ pub struct Entry {
     /// below an object follows it at a greater depth, so a caller leaves a
     /// subtree out by skipping to the next entry no deeper than its top.
     pub depth: u32,
+    /// Its place among the objects the interpreter holds, in the order they
+    /// were defined: an object a load defines after [`Interpreter::defined`]
+    /// was read is at that place or past it.
+    pub serial: u32,
     pub name: [u8; 4],
     pub kind: Kind,
 }
@@ -275,7 +392,7 @@ impl Iterator for Walk<'_> {
     type Item = Entry;
 
     fn next(&mut self) -> Option<Entry> {
-        let (depth, seg, object) = self.0.step()?;
+        let (depth, serial, seg, object) = self.0.step()?;
         let kind = match object {
             Object::Uninit => Kind::Uninitialized,
             Object::Int(_) => Kind::Integer,
@@ -293,9 +410,9 @@ impl Iterator for Walk<'_> {
             Object::Method(_) => Kind::Method,
             Object::Mutex(_) => Kind::Mutex,
             Object::Event(_) => Kind::Event,
-            Object::Region(_) => Kind::OperationRegion,
+            Object::Region(r) => Kind::OperationRegion { space: r.space },
         };
-        Some(Entry { depth, name: seg.0, kind })
+        Some(Entry { depth, serial, name: seg.0, kind })
     }
 }
 
@@ -323,7 +440,7 @@ impl Interpreter {
         let root = ns.root();
         let mut put = |name: &[u8; 4], o: Object| {
             let p = Path { root: true, up: 0, segs: alloc::vec![Seg(*name)] };
-            ns.create(root, &p, o, &mut || Ok(())).expect("the root is empty and every predefined name differs");
+            ns.create(namespace::Arena::Static, root, &p, o, &mut || Ok(())).expect("the root is empty and every predefined name differs");
         };
         for scope in [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"] {
             put(scope, Object::Scope);
@@ -357,22 +474,12 @@ impl Interpreter {
             (b"SSDT", None) => return Err(Error::Table("an SSDT before the DSDT, whose revision sets every integer's width")),
             _ => return Err(Error::Table("not a DSDT or SSDT (§5.2.11)")),
         };
-        // Held for as long as a method it defines refers to it.
-        let table = self.meter.bytes(bytes)?;
-        let (root, made) = (self.ns.root(), self.ns.mark());
-        let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
+        let root = self.ns.root();
         let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
-        let bytes = table.borrow();
-        let mut c = stream::Cursor::new(&bytes, toyos_acpi::SDT_HEADER_LEN, bytes.len());
-        let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
-            exec::Flow::Next => Ok(()),
-            _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),
-        });
+        let r = m.run_block(bytes, root);
         let r = m.finish(r, &mut self.last);
         if r.is_ok() {
             self.width = Some(w);
-        } else {
-            self.ns.unwind(made);
         }
         r
     }
@@ -405,6 +512,19 @@ impl Interpreter {
         self.last
     }
 
+    /// How many objects the interpreter holds that the tables defined and it
+    /// predefined: what a [`Walk`] entry's `serial` is read against.
+    pub fn defined(&self) -> u32 {
+        self.ns.defined()
+    }
+
+    /// The slots the namespace's static arena holds, which the meter holds
+    /// it at: what the tables' objects have made it, read rather than
+    /// derived.
+    pub fn slots(&self) -> usize {
+        self.ns.slots()
+    }
+
     /// Every object the loaded tables and this interpreter defined, read-only
     /// and without evaluating any: each after the object it is in, siblings
     /// in the order they were declared, a table's after those of the tables
@@ -429,6 +549,7 @@ impl Interpreter {
                 self.meter.list(p.iter().map(|e| self.object_of(e, w, depth + 1)).collect::<Result<_, _>>()?)?,
             ),
             Value::Reference(path) => Object::Ref(Ref::Node(self.named(path)?)),
+            Value::Unnamed(_) => return Err(Error::Type("an argument that is a reference to an unnamed object, which only AML makes")),
         })
     }
 
@@ -485,6 +606,11 @@ fn value_of(m: &mut Machine<'_>, meter: &Meter, handed: &mut usize, o: Object, d
             hand(meter, handed, path.capacity())?;
             Value::Reference(path)
         }
-        _ => return Err(Error::Unsupported("a reference to an unnamed object, handed to the caller")),
+        Object::Ref(r) => {
+            hand(meter, handed, core::mem::size_of::<Value>())?;
+            let referred = m.deref(&r)?;
+            Value::Unnamed(Box::new(value_of(m, meter, handed, referred, depth + 1)?))
+        }
+        _ => return Err(Error::Type("an object handed to the caller that is no value (§19.6.101)")),
     })
 }
