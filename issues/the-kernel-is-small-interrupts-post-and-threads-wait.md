@@ -67,8 +67,8 @@ Beside that order, each waiting on something outside it:
    `every_request_is_answered_exactly_once`,
    `what_a_flush_calls_durable_is_on_the_medium` and
    `what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits` for
-   the transport, by the restart test
-   `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md` owes
+   the transport, by diskserver's
+   `a_session_opened_over_a_killed_servers_page_is_told_after_its_ends_are_made`
    for diskserver's part, a session reopened over the page a killed server
    left, red under the mutation that moves the server's stores after its
    answer, by fileserver's
@@ -196,10 +196,10 @@ Beside that order, each waiting on something outside it:
        same controller delivering every report, red on a usbd that waits on
        the stick before it reads the keyboard's ring. `/log`'s, what a killed
        usbd had on the wire: stage 3's `toyos-blockring` tests for the
-       transport, and for usbd's session open the reopen test
-       `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
-       owes, red under the mutation that moves usbd's stores after its
-       answer; with one test this step owes in
+       transport, and for usbd's session open diskserver's
+       `a_session_opened_over_a_killed_servers_page_is_told_after_its_ends_are_made`,
+       moved with the open, red under the mutation that moves usbd's stores
+       after its answer; with one test this step owes in
        `system/fileserver/src/fat.rs`: a disk stopped after each block write
        in turn of an append and its sync mounts at every stop and reads back
        all the last whole sync held, red on a sync that writes a growing
