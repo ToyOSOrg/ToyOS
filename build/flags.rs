@@ -79,8 +79,13 @@ declare_flags!(pub CARGO_RUN = {
     /// Write the image `ssh <machine> update` takes to this path, signed with
     /// the owner's key.
     pub UPDATE_IMAGE = "--update-image", Next;
-    /// Publish the packages this `packages.toml` lists into the package
-    /// repository of the key this run signs with (`build/publish.rs`).
+    /// Mint the package repository's signing key where
+    /// `signing::repo_key_path` says, refusing to replace one, and print its
+    /// public line.
+    pub REPO_SIGNING_KEY_NEW = "--repo-signing-key-new", None;
+    /// Publish the packages this `packages.toml` lists, under the roots in
+    /// `roots/` beside it, into the package repository under `$HOME`, signed
+    /// with the repository's signing key (`build/publish.rs`).
     pub PUBLISH = "--publish", Next;
 });
 
