@@ -40,3 +40,9 @@ pub fn ports(kernel: &Serial) -> Result<(), String> {
 pub fn lines(kernel: &Serial) -> Result<(), String> {
     said(kernel, "isa: the i8042 took its first interrupt", 1)
 }
+
+/// `test_rs_isa_claim_refused` under `isa-port-declared`: the claim was
+/// refused naming the port the kernel declared and who holds it.
+pub fn refused(kernel: &Serial) -> Result<(), String> {
+    kernel.must_say("isa: the i8042's ports 0x64+1 are the isa-port-declared actuator's").map(drop)
+}

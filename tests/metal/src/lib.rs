@@ -755,6 +755,10 @@ pub const FLASHABLE: &[&str] = &[
     // A probe rather than staged inputs, and a read: it runs inside the first
     // syscall's own context switch.
     "sysret-ss-probe",
+    // It enters one port in the kernel's table of declared ports at boot. No
+    // kernel path reads or writes a port for that entry, so it reaches no
+    // device; what it changes is that a claim on the i8042's row is refused.
+    "isa-port-declared",
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.

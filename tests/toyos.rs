@@ -113,6 +113,10 @@ const RUST_SKIP: &[&str] = &[
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // It needs a kernel that declared a port of the i8042's row, which only
+    // the `isa-port-declared` actuator makes: the
+    // `isa_claim_refused_on_a_kernel_port` metal row runs it.
+    "isa_claim_refused",
     // It claims the T14's I219, which no guest has: the
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
@@ -988,6 +992,23 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed("test_rs_isa_lines")?;
                 isa::lines(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // A port of the row the kernel declared, as a FADT reset register at
+        // 0x64 is: the claim is refused naming who holds it.
+        "isa_claim_refused_on_a_kernel_port",
+        metal::Metal {
+            arms: &[metal::once(
+                "isa-port-declared",
+                "tests/images/testcases.toml",
+                &["isa-port-declared"],
+                &["test_rs_isa_claim_refused"],
+            )],
+            judge: |b| {
+                b[0].job_passed("test_rs_isa_claim_refused")?;
+                isa::refused(&b[0].kernel())
             },
         },
     ),
