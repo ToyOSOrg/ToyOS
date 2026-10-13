@@ -1,7 +1,8 @@
 //! Scancode set 1 → HID usage.
 //!
 //! Set 1 is what arrives when the keyboard is in set 2 and the controller's
-//! translation bit is on, as the i8042 driver sets it. The translation table lives in
+//! translation bit is on, the mode IBM gives for PC compatibility (84F9735,
+//! "Keyboard and Auxiliary Device Controller", page 10). The translation table lives in
 //! the controller, so it costs this crate nothing; what is left is three
 //! states (base, `0xE0`, `0xE1`) and two 128-byte tables.
 
@@ -110,12 +111,10 @@ enum State {
 
 /// Set-1 scancodes in, key transitions out.
 ///
-/// Deliberately holds no record of what is down. The kernel's `keyboard`
-/// module keeps one held-set across every keyboard in the machine and drops
-/// a transition to a state a usage is already in, so a typematic repeat
-/// costs nothing there. A second held-set here would be derived state that
-/// can disagree with it — and would wedge a key in the one case where they
-/// do: usage released on the *other* keyboard while this one still holds it.
+/// Deliberately holds no record of what is down. The owner of input keeps
+/// one held set per source (`toyos_input::Merge`) and drops a transition to a
+/// state a usage is already in, so a typematic repeat costs nothing there. A
+/// second held set here would be derived state that can disagree with it.
 pub struct KeyDecoder {
     state: State,
 }
@@ -173,8 +172,8 @@ impl KeyDecoder {
                 // **So a keyboard that resets itself is undetectable on this
                 // wire, and that is a property of the mode rather than of this
                 // decoder.** The driver runs the keyboard in set 2 with the
-                // controller translating to set 1,
-                // and `0xAA`, the BAT-complete byte a
+                // controller translating to set 1, the mode IBM gives for PC
+                // compatibility, and `0xAA`, the BAT-complete byte a
                 // self-reset sends, is bit-identical to `0x2A | 0x80`. The
                 // T14's EC does reset the keyboard after suspend and after a
                 // lid event, so this is reached on real hardware rather than in
@@ -184,7 +183,7 @@ impl KeyDecoder {
                 // Shift *release*, which is accidentally the right direction
                 // for the one state that could stick. Untested on metal. If it
                 // does bite, the answer is a controller-side reconnect probe —
-                // `0xF2` identify on a timer, from `kernel/src/arch/x86_64/i8042/`
+                // `0xF2` identify on a timer, from `/system/bin/ps2server`
                 // — and never a wire heuristic, because no wire heuristic
                 // exists.
                 0x00 | 0xFF => KeyOutcome::Lost,

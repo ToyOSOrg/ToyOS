@@ -2,7 +2,6 @@ pub(crate) mod exceptions;
 mod device_irq;
 mod dma_fault;
 mod hda;
-mod i8042;
 mod isa;
 mod kick;
 mod nmi;
@@ -28,9 +27,6 @@ const PIC1_CMD: Port = PIC_PRIMARY.port(0);
 const PIC1_DATA: Port = PIC_PRIMARY.port(1);
 const PIC2_CMD: Port = PIC_SECONDARY.port(0);
 const PIC2_DATA: Port = PIC_SECONDARY.port(1);
-
-/// The vector both PS/2 lines are routed to.
-pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
 
 /// The vector `apic::kick_cpu` raises.
 pub const KICK_VECTOR: u8 = Vector::Kick as u8;
@@ -255,7 +251,6 @@ idt_vectors! {
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
         Xhci         = 0x21, xhci::xhci_entry;
-        I8042        = 0x24, i8042::i8042_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
         Hda          = 0x26, hda::hda_entry;
         // One per `pcidev` claim slot: the vector is how the kernel knows

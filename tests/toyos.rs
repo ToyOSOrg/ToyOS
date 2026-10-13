@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, claims, compile, devices, faults, isa, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_metal::testargs::{self, SUITE};
 
@@ -108,11 +108,15 @@ const RUST_SKIP: &[&str] = &[
     "ccheck",
     "disk_backtrace_child",
     "fault_gate_child",
-    // Each needs a boot whose i8042 the kernel does not drive: the
+    // Each drives the machine's own i8042 through its `isa` claim: the
     // `isa_ports_are_the_binders_alone` and `isa_lines_reach_their_holder`
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // It needs a kernel that declared a port of the i8042's row, which only
+    // the `isa-port-declared` actuator makes: the
+    // `isa_claim_refused_on_a_kernel_port` metal row runs it.
+    "isa_claim_refused",
     // It claims the T14's I219, which no guest has: the
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
@@ -160,14 +164,16 @@ const RUST_SKIP: &[&str] = &[
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
     // `battery_read` metal rows end their boot on it.
     "acpi_hold",
+    // It waits for ps2server's probe to end, which only a boot that starts
+    // ps2server has: every `metalcase` row ends its boot on it.
+    "ps2server_hold",
     // It waits for the ACPI server's count of its embedded controller's
     // queries, and no guest's machine has that controller: the
     // `acpi_server_events` metal row runs it.
     "acpi_counted",
     // It claims the fixed hardware itself, which needs a boot that starts no
-    // server, and stages the firmware's side of the Global Lock and finds the
-    // i8042's row another claim's, which need the test kernel and its
-    // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_is_one_sci`
+    // server, and stages the firmware's side of the Global Lock, which needs
+    // the test kernel: `acpi_mediated_access` and `acpi_press_is_one_sci`
     // run it on tests/images/acpicase.toml.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
@@ -834,13 +840,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         "app_view",
         metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
     ),
-    // ---- one image: tests/images/metalcase.toml, which runs no job ----
+    // ---- one image: tests/images/metalcase.toml, whose one job is the hold ----
     //
     // The rows after the first read what any boot that hands the machine back
     // writes, so they ride this one.
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    (
+        // The machine's own i8042 and EC, driven from userland: the keyboard
+        // reset and armed set 2 translated, its `0xAA`'s time named, the aux
+        // device armed or found absent by name, and no i8042 source in the
+        // kernel's interrupt census.
+        "ps2server_arms",
+        metal::Metal { arms: METALCASE, judge: |b| ps2server::armed(&b[0].log(), &b[0].kernel()) },
     ),
     (
         // Every CPU's microcode line, held to what its bench is held to:
@@ -851,7 +865,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
-        // with no job behind it.
+        // with nothing written behind it but the hold's line.
         "usb_reset_hands_devices_back",
         metal::Metal {
             arms: USB_RESET_BOOTS,
@@ -922,10 +936,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
     ),
     (
-        "input_merge",
-        metal::Metal { arms: SELFTESTS, judge: |b| input_merge_ok(b[0].kernel().text()) },
-    ),
-    (
         "operation_nesting",
         metal::Metal {
             arms: SELFTESTS,
@@ -987,14 +997,14 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
+    // ---- the `isa` claim: the machine's i8042, driven by a test process ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
         // open to the process that bound them, and every other access killed
         // by name.
         "isa_ports_are_the_binders_alone",
         metal::Metal {
-            arms: ISA_WITHHELD,
+            arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_grant")?;
                 isa::ports(&b[0].kernel())
@@ -1006,10 +1016,27 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the claim's holder, and to nobody once the claim is gone.
         "isa_lines_reach_their_holder",
         metal::Metal {
-            arms: ISA_WITHHELD,
+            arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_lines")?;
                 isa::lines(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // A port of the row the kernel declared, as a FADT reset register at
+        // 0x64 is: the claim is refused naming who holds it.
+        "isa_claim_refused_on_a_kernel_port",
+        metal::Metal {
+            arms: &[metal::once(
+                "isa-port-declared",
+                "tests/images/testcases.toml",
+                &["isa-port-declared"],
+                &["test_rs_isa_claim_refused"],
+            )],
+            judge: |b| {
+                b[0].job_passed("test_rs_isa_claim_refused")?;
+                isa::refused(&b[0].kernel())
             },
         },
     ),
@@ -1025,12 +1052,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
 ];
 
-/// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
-/// free: the ports' job first, since its last holder keeps them until it ends.
-const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
-    "isa-withheld",
+/// The plain `tests/images/testcases.toml` boot, which starts no ps2server, so
+/// the one grantable row is free: the ports' job first, since its last holder
+/// keeps them until it ends.
+const ISA: &[metal::Arm] = &[metal::once(
+    "isa",
     "tests/images/testcases.toml",
-    &["i8042-withheld"],
+    &[],
     &["test_rs_isa_grant", "test_rs_isa_lines"],
 )];
 
@@ -1094,7 +1122,8 @@ fn windows_load_exited() -> String {
 }
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
-/// with megabytes behind it, and `metalcase` for one with no job behind it.
+/// with megabytes behind it, and `metalcase` for one with nothing written
+/// behind it but the hold's line.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -1105,7 +1134,12 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once("metalcase", "tests/images/metalcase.toml", &[], &[]),
 ];
 
-const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
+/// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
+/// that ended sooner would cut off what `ps2server_arms` reads.
+const METALCASE: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_ps2server_hold"),
+    ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])
+}];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
@@ -1134,7 +1168,6 @@ const SELFTEST_PARAMS: &[&str] = &[
     "xhci-xecp-selftest",
     "xhci-descriptor-selftest",
     "sysret-ss-probe",
-    "test-input-merge",
     "sched-operation-nesting",
     "iommu-firmware-left",
 ];
@@ -1861,8 +1894,8 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
         &[],
         &[],
         BootOptions {
-            // The test kernel, for the Global Lock's actuator too.
-            kernel_params: &["i8042-withheld"],
+            // The test kernel, for the Global Lock's actuator.
+            kernel_features: ACTUATOR_KERNEL,
             ready_marker: "acpi: the ACPI row: ",
             smp: cpus,
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
@@ -1880,7 +1913,6 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     })?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
-    said.must_say(isa::WITHHELD)?;
     said.must_say("acpi: the Global Lock is the FACS's at ")?;
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
     // Whose range registers passed the unlisted read, and how this
@@ -2029,7 +2061,8 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
 
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
-/// boot: the console up on its panel, having read the log and the keyboard.
+/// boot: the console up on its panel, having read the log and the keyboard,
+/// and ps2server's i8042 armed, its keyboard and QEMU's PS/2 mouse both.
 /// Nothing is typed at its shell, whose only input is the i8042:
 /// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
 fn console_image_boots() -> Result<(), String> {
@@ -2041,7 +2074,10 @@ fn console_image_boots() -> Result<(), String> {
     );
     let mut console = format!("{}\n", qemu.boot_log());
     await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
-    serial::Serial::named("the console image's boot", console).must_be_clean()
+    await_marker(&mut qemu, &mut console, ps2server::ARMED_BOTH, "ps2server to arm the i8042")?;
+    let said = serial::Serial::named("the console image's boot", console);
+    eprintln!("  [ps2server] {}", said.must_say(ps2server::KEYBOARD_RESET)?.trim());
+    said.must_be_clean()
 }
 
 /// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
@@ -4099,14 +4135,6 @@ fn sysret_ss(log: &str) -> Result<(), String> {
             ));
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
-        Ok(())
-}
-
-/// The input core merged what it was handed.
-fn input_merge_ok(log: &str) -> Result<(), String> {
-        if !log.contains("input-merge: ok") {
-            return Err(format!("the input core check never reported:\n{log}"));
-        }
         Ok(())
 }
 

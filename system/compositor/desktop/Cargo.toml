@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 toyos-abi = { path = "../../../sdk/abi" }
+toyos-input = { path = "../../../lib/input" }
 
 [lints.rust]
 warnings = "deny"

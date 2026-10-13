@@ -1,106 +1,42 @@
-//! The machine's single logical keyboard: every driver's key transitions
-//! land here as a HID usage, a direction and the modifier mask across every
-//! keyboard. Layout, dead keys and escape sequences are `toyos-keymap`'s, in
-//! userland.
+//! The kernel's keyboard stream: each USB keyboard's key transitions, as a
+//! HID usage and a direction, queued as they come for the claim's holder.
+//!
+//! **One source to the owner of input, merged nowhere here.** Two keyboards
+//! holding one usage queue two presses; the owner keeps this stream's held
+//! set and every other source's (`toyos_input::Merge`), and makes the
+//! modifier mask. Layout, dead keys and escape sequences are
+//! `toyos-keymap`'s, in userland.
 
 use alloc::collections::VecDeque;
 
 use crate::sync::Lock;
 use crate::watch::Watch;
-pub use toyos_abi::input::{RawKeyEvent, MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_GUI, MOD_RELEASED};
+pub use toyos_abi::input::{RawKeyEvent, MOD_RELEASED};
 
 static KEY_BUF: Lock<VecDeque<RawKeyEvent>> = Lock::new(VecDeque::new());
 
-/// Whether any driver that can ever feed this stream exists — the i8042's
-/// keyboard armed, or an xHCI controller bound (hot-plug). A claim's evidence.
-static SOURCE_EXISTS: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-pub fn declare_source() {
-    SOURCE_EXISTS.store(true, core::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn source_exists() -> bool {
-    SOURCE_EXISTS.load(core::sync::atomic::Ordering::Relaxed)
-}
 /// What a keyboard read and a keyboard poll wait on.
 pub static WATCH: Watch = Watch::new();
 
 /// How many transitions the kernel holds for a reader that is not reading; the oldest is dropped on overflow.
 pub const MAX_QUEUED_EVENTS: usize = 512;
 
-/// Which HID usages are down, one bit each, across every keyboard; keyed by usage, so releasing one keyboard's modifier drops it even if another still holds it.
-static HELD: Lock<[u64; 4]> = Lock::new([0; 4]);
-
-fn is_held(held: &[u64; 4], usage: u8) -> bool {
-    held[usage as usize / 64] & (1 << (usage % 64)) != 0
-}
-
-fn modifiers_of(held: &[u64; 4]) -> u8 {
-    let m = |a: u8, b: u8| is_held(held, a) || is_held(held, b);
-    (if m(0xE1, 0xE5) { MOD_SHIFT } else { 0 })
-        | (if m(0xE0, 0xE4) { MOD_CTRL } else { 0 })
-        | (if m(0xE2, 0xE6) { MOD_ALT } else { 0 })
-        | (if m(0xE3, 0xE7) { MOD_GUI } else { 0 })
-}
-
-/// The held-modifier bitmask; test-only, no shipping caller.
-#[cfg(feature = "boot-actuators")]
-pub fn modifiers() -> u8 {
-    modifiers_of(&HELD.lock())
-}
-
-/// Queue one key transition; a transition to an already-held state queues nothing.
-pub fn handle_key(usage: u8, pressed: bool) -> bool {
-    if usage == 0 {
-        return false;
-    }
-    let modifiers = {
-        let mut held = HELD.lock();
-        if is_held(&held, usage) == pressed {
-            return false;
-        }
-        let word = &mut held[usage as usize / 64];
-        let bit = 1u64 << (usage % 64);
-        if pressed { *word |= bit } else { *word &= !bit }
-        modifiers_of(&held)
-    };
-
-    let mut buf = KEY_BUF.lock();
-    if buf.len() >= MAX_QUEUED_EVENTS {
-        buf.pop_front();
-    }
-    buf.push_back(RawKeyEvent {
-        keycode: usage,
-        modifiers: if pressed { modifiers } else { modifiers | MOD_RELEASED },
-    });
-    true
-}
-
 /// Throw away everything queued; called when the device changes hands so no claimant inherits another's keystrokes.
 pub fn discard_queued() {
     KEY_BUF.lock().clear();
 }
 
-/// Synthesise a release for every held usage; recovers a keyboard that reset without releasing its keys.
-pub fn release_all() -> usize {
-    let held = *HELD.lock();
-    let mut n = 0;
-    for usage in 0..=u8::MAX {
-        if is_held(&held, usage) && handle_key(usage, false) {
-            n += 1;
-        }
-    }
-    n
-}
-
 /// Queue the transitions one USB keyboard's report made, and return how many queued.
 pub fn apply(transitions: toyos_usbhid::keyboard::Transitions) -> usize {
+    let mut buf = KEY_BUF.lock();
     let mut queued = 0;
     for key in transitions {
-        if handle_key(key.usage, key.pressed) {
-            queued += 1;
+        if buf.len() >= MAX_QUEUED_EVENTS {
+            buf.pop_front();
         }
+        let modifiers = if key.pressed { 0 } else { MOD_RELEASED };
+        buf.push_back(RawKeyEvent { keycode: key.usage, modifiers });
+        queued += 1;
     }
     queued
 }

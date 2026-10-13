@@ -14,6 +14,8 @@ pub mod irqcensus;
 pub mod isa;
 pub mod metal;
 pub mod power;
+/// What ps2server says of the i8042 it armed.
+pub mod ps2server;
 pub mod qemu;
 pub mod screen;
 pub mod serial;
