@@ -236,26 +236,26 @@ fn bios_info() -> Vec<u8> {
     formatted[0x01] = 2;
     formatted[0x04] = 3;
     formatted[0x10..0x14].copy_from_slice(&[1, 56, 1, 38]);
-    structure(0, &formatted, &["LENOVO", "DMCN38WW", "06/02/2022"])
+    structure(0, &formatted, &["Vendor", "XYZ12WW", "01/02/2025"])
 }
 
 #[test]
 fn the_bios_information_says_who_made_the_firmware_and_which_it_is() {
     let mut table = structure(1, &[0; 4], &[]);
     table.extend(bios_info());
-    table.extend(structure(11, &[1], &["AGESA!V9 RenoirPI-FP6 1.0.0.7", "SPI flash 16MB"]));
+    table.extend(structure(11, &[1], &["AGESA!V9 RenoirPI-FP6 1.0.0.Eb", "SPI flash 16MB"]));
     table.extend(structure(127, &[], &[]));
     table.extend(structure(0, &[9; 20], &["after the end"]));
 
     let bios = smbios::bios(&table).unwrap();
-    assert_eq!(bios.vendor, Some(&b"LENOVO"[..]));
-    assert_eq!(bios.version, Some(&b"DMCN38WW"[..]));
-    assert_eq!(bios.date, Some(&b"06/02/2022"[..]));
+    assert_eq!(bios.vendor, Some(&b"Vendor"[..]));
+    assert_eq!(bios.version, Some(&b"XYZ12WW"[..]));
+    assert_eq!(bios.date, Some(&b"01/02/2025"[..]));
     assert_eq!((bios.release, bios.ec), (Some((1, 56)), Some((1, 38))));
     assert_eq!(smbios::structures(&table).count(), 4);
 
     let named: Vec<&[u8]> = smbios::platform_versions(&table).collect();
-    assert_eq!(named, [&b"AGESA!V9 RenoirPI-FP6 1.0.0.7"[..]]);
+    assert_eq!(named, [&b"AGESA!V9 RenoirPI-FP6 1.0.0.Eb"[..]]);
 }
 
 #[test]

@@ -287,7 +287,7 @@ fn smbios_table(addr: u64) -> Result<(smbios::EntryPoint, Vec<u8>), &'static str
 fn ladder_if_patch() {
     let vendor = cpu::vendor();
     if vendor != toyos_cpuvuln::Vendor::Amd {
-        log!("amducode: stop: this is a {vendor:?} CPU, and the scout measures AMD's loader");
+        log!("amducode: stop: the CPU is {vendor:?}, and the scout measures AMD's loader");
         return;
     }
     let (signature, ..) = cpu::cpuid(1, 0);
