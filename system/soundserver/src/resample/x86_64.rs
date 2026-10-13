@@ -8,7 +8,7 @@ use rubato::WindowFunction;
 
 /// Each by name, built with the sinc length and cutoff rubato's own dispatch
 /// derives. A CPU that cannot run one panics, naming the feature it lacks.
-pub(super) fn interpolators(
+pub(in crate::resample) fn interpolators(
     sinc_len: usize,
     oversampling: usize,
     cutoff: f32,

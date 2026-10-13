@@ -65,13 +65,7 @@ pub(crate) fn build(
     .expect("the parameters are this module's and every ratio between accepted rates is positive")
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
-mod x86_64;
-#[cfg(all(test, target_arch = "x86_64"))]
-use x86_64 as arch;
-#[cfg(all(test, target_arch = "aarch64"))]
-mod aarch64;
-#[cfg(all(test, target_arch = "aarch64"))]
-use aarch64 as arch;
+#[cfg(test)]
+mod interpolators;
 #[cfg(test)]
 mod tests;

@@ -483,11 +483,12 @@ fn bind_listed(mut list: Vec<Listed>, index: usize, memory: &StreamMemory) -> St
     stream.write_u8(SD_STS, SD_STS_WRITE_CLEAR);
 
     // SAFETY: the bind that left `Listed` is this field's one writer, and no state returns there;
-    // no listed controller raises the vector before the bus mastering and `INTCTL` below.
+    // no listed controller raises the vector before the bus mastering and `INTCTL` below. Bus
+    // mastering is armed here, after the attach, and never at boot.
     unsafe {
         *ISR.stream.get() = Some(stream);
     }
-    pci.start_bus_mastering();
+    pci.enable_bus_master();
     chosen.regs.write_u32(INTCTL, INTCTL_GIE | (1 << chosen.stream_index));
 
     for other in &list {

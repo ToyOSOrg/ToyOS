@@ -11,7 +11,8 @@ use std::f64::consts::PI;
 
 use rubato::{Resampler, SincFixedOut};
 
-use super::{arch, build, parameters, INTERPOLATION, MAX_RATIO_RELATIVE};
+use super::interpolators::interpolators;
+use super::{build, parameters, INTERPOLATION, MAX_RATIO_RELATIVE};
 
 /// The device period, which is the resampler's fixed output chunk.
 const PERIOD: usize = 128;
@@ -56,7 +57,7 @@ fn explicit(client: u32, device: u32) -> Vec<(&'static str, SincFixedOut<f32>)> 
     let ratio = device as f64 / client as f64;
     let sinc_len = 8 * (p.sinc_len as f32 / 8.0).ceil() as usize;
     let cutoff = if ratio >= 1.0 { p.f_cutoff } else { p.f_cutoff * ratio as f32 };
-    arch::interpolators(sinc_len, p.oversampling_factor, cutoff, p.window)
+    interpolators(sinc_len, p.oversampling_factor, cutoff, p.window)
         .into_iter()
         .map(|(name, interpolator)| {
             let resampler = SincFixedOut::<f32>::new_with_interpolator(
