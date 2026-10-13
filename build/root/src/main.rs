@@ -28,10 +28,13 @@
 //! `diskutil list` marks `(external, physical)`: any other is the machine's
 //! own. exFAT and FAT32, the formats sticks come in, keep no Unix mode, and
 //! `new` refuses them. Ownership is then enabled on each,
-//! `sudo diskutil enableOwnership /Volumes/ROOTA` and the same for `ROOTB`,
-//! and `mount` must list neither as `noowners`: a volume that ignores
-//! ownership treats every user as the owner `0600` names. Below, `<A>` is
-//! `/Volumes/ROOTA`, `<B>` is `/Volumes/ROOTB`, and `<C>` is where C mounts.
+//! `sudo diskutil enableOwnership /Volumes/ROOTA` and the same for `ROOTB`
+//! (`diskutil(8)`, `enableOwnership`), and `mount` must list neither as
+//! `noowners`: a volume that ignores ownership treats every user as the owner
+//! `0600` names. The setting lives in the offline machine's volume database,
+//! not on the stick, so anywhere else A and B are guarded by custody alone
+//! (step 2.5). Below, `<A>` is `/Volumes/ROOTA`, `<B>` is `/Volumes/ROOTB`,
+//! and `<C>` is where C mounts.
 //!
 //! 1. Online, before.
 //!    1. `cargo run -q -- --repo-signing-key-new > <C>/signing.pub` mints the
@@ -50,8 +53,7 @@
 //!    2. `<C>/toyos-root new <A>/root-key` mints the root key `0600`. Write its
 //!       fingerprint on the paper.
 //!    3. `cp <A>/root-key <B>/root-key && cmp <A>/root-key <B>/root-key`, and
-//!       `stat -f '%Su %Sp' <A>/root-key <B>/root-key` reads the user that ran
-//!       `new` and `-rw-------`, twice.
+//!       `stat -f %Sp <A>/root-key <B>/root-key` reads `-rw-------` twice.
 //!    4. `<C>/toyos-root sign --key <A>/root-key --signing <C>/signing.pub
 //!       --out <C>/root.1.txt`. Both fingerprints it prints must be the paper's,
 //!       and its expiry a year from today.
