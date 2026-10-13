@@ -127,7 +127,8 @@ pub enum Take {
     Unusable,
 }
 
-/// The `acpi` claim's mediated access, as this server asks for it.
+/// The `acpi` claim as this server asks it, its mediated access and its SCI,
+/// and the power-off it asks of the supervisor.
 pub trait Kernel {
     fn access(&self, access: Access) -> Result<Answer, Stopping>;
     fn lock_take(&self) -> Result<Take, Stopping>;
@@ -144,6 +145,14 @@ pub trait Kernel {
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
     fn sleep(&self, until: Instant, ec_gpe: Option<u16>) -> Latched;
+    /// The SCIs the claim latched since its last acknowledgement, without
+    /// waiting: how many, or `None` where none is.
+    fn latched(&self) -> Option<u32>;
+    /// Acknowledge the SCI, whose status this server has cleared.
+    fn ack(&self);
+    /// Ask `/system/bin/supervisor` to power the machine off
+    /// (`toyos::power::stop`), which answers only where it did not.
+    fn power_off(&self) -> toyos::power::Refused;
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -713,6 +722,10 @@ pub mod tests {
         pub slept: RefCell<Vec<Option<u16>>>,
     }
 
+    /// What [`Scripted`] panics with where it is asked to power off: the
+    /// machine stops there, and nothing after the ask runs.
+    pub const POWERED_OFF: &str = "the scripted machine powered off";
+
     impl Scripted {
         fn stopping(&self) -> Result<(), Stopping> {
             match self.stops_after.get() {
@@ -825,6 +838,18 @@ pub mod tests {
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
             Ok(true)
+        }
+
+        fn latched(&self) -> Option<u32> {
+            None
+        }
+
+        fn ack(&self) {
+            panic!("an SCI acknowledged where none latched");
+        }
+
+        fn power_off(&self) -> toyos::power::Refused {
+            panic!("{POWERED_OFF}");
         }
     }
 

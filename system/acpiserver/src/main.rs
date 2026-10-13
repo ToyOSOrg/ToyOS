@@ -20,10 +20,10 @@
 //! kernel refuses every power-off. A controller the ECDT names is attached to
 //! AML before the first table loads.
 //!
-//! **Then what latched during the load is served**, a press taken by a
-//! table's Sleep and any SCI the load left latched: a press then powers the
-//! machine off on the `\_S5` the load handed over, and waits for no
-//! initialisation.
+//! **Then what latched during the load is served** ([`Server::loaded`]), a
+//! press taken by a table's Sleep and any SCI the load left latched: a press
+//! then powers the machine off on the `\_S5` the load handed over, and waits
+//! for no initialisation.
 //!
 //! **Then the namespace is initialised** ([`init`]): PCI_Config announced
 //! where §6.5.4 asks it be, `\_SB._INI`, and the `_STA` and `_INI` of each
@@ -153,11 +153,7 @@ fn main() {
     let mut server = Server::new(&claim, Machine, info);
     server.arm(&dev);
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
-    server.power_off = loaded.handed;
-    server.aml = kept;
-    server.served_aml();
-    server.latched();
-    let names = server.initialise();
+    let names = server.loaded(loaded.handed, kept);
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
@@ -265,6 +261,22 @@ impl Kernel for Claim<'_> {
             answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
         }
     }
+
+    fn latched(&self) -> Option<u32> {
+        match self.dev.irq() {
+            Ok(record) => Some(record.count),
+            Err(SyscallError::WouldBlock) => None,
+            Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
+        }
+    }
+
+    fn ack(&self) {
+        self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+    }
+
+    fn power_off(&self) -> power::Refused {
+        power::stop(Stop::Shutdown)
+    }
 }
 
 /// The claim's event blocks and SCI for one wait for the firmware's release.
@@ -307,7 +319,7 @@ impl Fixed for Waiting<'_, '_> {
     }
 
     fn ack(&mut self) {
-        self.0.dev.ack().expect("acpiserver: the claim's acknowledgement");
+        Kernel::ack(self.0);
     }
 }
 
@@ -358,6 +370,26 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             "acpiserver: armed: power button {}",
             if self.served.power_button { "served" } else { "a control method device, served once the namespace names it" },
         );
+    }
+
+    /// Take what the load kept: what latched during it is served first, so a
+    /// press then powers the machine off on the `\_S5` it handed over and
+    /// waits for no initialisation, and then the namespace is initialised
+    /// ([`Server::initialise`]).
+    fn loaded(&mut self, handed: bool, kept: Option<Aml<'a, K>>) -> Option<Names> {
+        self.power_off = handed;
+        self.aml = kept;
+        self.served_aml();
+        self.latched();
+        self.initialise()
+    }
+
+    /// Each SCI already latched, served without waiting for one.
+    fn latched(&mut self) {
+        let Some(count) = self.kernel.latched() else { return };
+        self.scis += u64::from(count);
+        self.take();
+        self.kernel.ack();
     }
 
     /// Initialise the namespace the load kept ([`init`]), and again whatever
@@ -682,7 +714,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     /// power-off, which the load said and this says again.
     fn press(&mut self) {
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
-        let refused = power::stop(Stop::Shutdown);
+        let refused = self.kernel.power_off();
         match sci::unstopped(refused, self.power_off) {
             Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
             Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
@@ -766,17 +798,6 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
 }
 
 impl<'a, P: Ports> Server<'a, Claim<'a>, P> {
-    /// Each SCI already latched, served without waiting for one.
-    fn latched(&mut self) {
-        match self.kernel.dev.irq() {
-            Ok(record) => self.scis += u64::from(record.count),
-            Err(SyscallError::WouldBlock) => return,
-            Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
-        }
-        self.take();
-        self.kernel.dev.ack().expect("acpiserver: the claim's acknowledgement");
-    }
-
     fn serve(&mut self) -> ! {
         let mut next_count = Instant::now() + COUNTS;
         let mut next_read = Instant::now() + battery::POLL;
@@ -790,13 +811,7 @@ impl<'a, P: Ports> Server<'a, Claim<'a>, P> {
                 self.log_counts();
                 next_count = Instant::now() + COUNTS;
             }
-            match self.kernel.dev.irq() {
-                Ok(record) => self.scis += u64::from(record.count),
-                Err(SyscallError::WouldBlock) => continue,
-                Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
-            }
-            self.take();
-            self.kernel.dev.ack().expect("acpiserver: the claim's acknowledgement");
+            self.latched();
         }
     }
 }
@@ -1243,6 +1258,34 @@ mod tests {
         assert_eq!(server.counts.get(&0x1C), None);
         server.served_aml();
         assert_eq!(server.counts.get(&0x1C), Some(&1), "the query a Sleep found waiting was not drained");
+    }
+
+    /// A press a table's Sleep took during the load powers the machine off
+    /// before the namespace is initialised: the `_INI` whose Acquire of the
+    /// Global Lock has no bound, while the firmware holds it past
+    /// [`host::RELEASE`], is never reached.
+    #[test]
+    fn a_press_latched_during_the_load_powers_off_before_an_ini_that_waits_on_the_firmware() {
+        use crate::common::{cat, device, method, scope};
+        use crate::host::tests::POWERED_OFF;
+        use crate::host::Take;
+        // Sleep (One); Device (\_SB.GLI) { Method (_INI) { Acquire (\_GL, 0xFFFF) Release (\_GL) } }.
+        let unbounded = cat(&[&[0x5B, 0x23], b"\\_GL_", &[0xFF, 0xFF], &[0x5B, 0x27], b"\\_GL_"]);
+        let dsdt = cat(&[&[0x5B, 0x22, 0x01], &scope("\\_SB", &device("GLI", &method("_INI", 0, &unbounded)))]);
+        let kernel = Scripted {
+            sleeps: RefCell::new([sci::Latched { presses: 1, ec: false }].into()),
+            takes: RefCell::new([Take::Pending].into()),
+            ..crafted(&sealed(b"DSDT", &dsdt), &[])
+        };
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        let (loaded, kept) = load(&kernel, CRAFTED_RSDP);
+
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.loaded(loaded.handed, kept)));
+
+        let why = stopped.err().map(|payload| payload.downcast_ref::<String>().cloned().unwrap_or_default());
+        assert_eq!(why.as_deref(), Some(POWERED_OFF), "the press did not power the machine off first");
+        assert_eq!(*kernel.takes.borrow(), [Take::Pending], "the _INI took the Global Lock before the press was served");
     }
 
     /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a

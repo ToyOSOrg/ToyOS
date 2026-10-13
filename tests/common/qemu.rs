@@ -1108,10 +1108,6 @@ pub struct BootOptions {
     /// update's ROOT of this many bytes: a machine that updates itself.
     /// `None` for every guest whose subject is not the update.
     pub second_slot: Option<u64>,
-    /// Whole ACPI tables, header and checksum included, that QEMU lists
-    /// beside its own (`-acpitable`): firmware AML a guest's own tables do
-    /// not carry. q35's alone.
-    pub acpi_tables: Vec<Vec<u8>>,
     /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
     /// it, and the host's own UTC with `None`.
     pub rtc_base: Option<&'static str>,
@@ -1153,7 +1149,6 @@ impl Default for BootOptions {
             extra_root_files: Vec::new(),
             psci_trace: None,
             second_slot: None,
-            acpi_tables: Vec::new(),
             rtc_base: None,
         }
     }
@@ -1432,9 +1427,6 @@ impl QemuInstance {
         };
 
         let sockets = Sockets::new(&options);
-        for (i, table) in options.acpi_tables.iter().enumerate() {
-            fs::write(acpi_table(&sockets.dir, i), table).expect("[qemu] write an added ACPI table");
-        }
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
 
         // Per-instance, not a fixed /tmp path: a screen test waits on this
@@ -2447,10 +2439,6 @@ fn qemu_command(
     if options.gdb_stub {
         qemu.arg("-s");
     }
-    assert!(options.acpi_tables.is_empty() || arch == Arch::X86_64, "an added ACPI table is q35's");
-    for i in 0..options.acpi_tables.len() {
-        qemu.arg("-acpitable").arg(format!("file={}", acpi_table(socket_dir, i).display()));
-    }
     if let Some(socket) = qmp_socket {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
@@ -2480,11 +2468,6 @@ impl Sockets {
         let qmp = qmp_socket(&dir, options);
         Sockets { dir, qmp }
     }
-}
-
-/// The `i`th of [`BootOptions::acpi_tables`], as a file in a boot's own `dir`.
-fn acpi_table(dir: &Path, i: usize) -> PathBuf {
-    dir.join(format!("acpi-{i}.aml"))
 }
 
 /// The QMP socket `options` asks for, named in `dir`.
