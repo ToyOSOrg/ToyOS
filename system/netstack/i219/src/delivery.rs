@@ -105,11 +105,14 @@ mod tests {
 
     /// 631120 §8.1: the PCH's GbE function points at `C8h`, its power
     /// management capability, then MSI at `D0h`, then the function-level reset
-    /// at `E0h`, which ends the list.
+    /// at `E0h`, which ends the list. The T14's `8086:15fc` ends it at MSI.
     #[test]
     fn the_pch_functions_list_is_msi() {
-        let pch = space(0xC8, &[(0xC8, 0x01, 0xD0, 0), (0xD0, msi::CAP_ID, 0xE0, MSI_ON), (0xE0, 0x13, 0, 0)]);
-        assert_eq!(of(&pch), Ok(Delivery::Msi));
+        let datasheet =
+            space(0xC8, &[(0xC8, 0x01, 0xD0, 0), (0xD0, msi::CAP_ID, 0xE0, MSI_ON), (0xE0, 0x13, 0, 0)]);
+        let t14 = space(0xC8, &[(0xC8, 0x01, 0xD0, 0), (0xD0, msi::CAP_ID, 0, MSI_ON)]);
+        assert_eq!(of(&datasheet), Ok(Delivery::Msi));
+        assert_eq!(of(&t14), Ok(Delivery::Msi));
     }
 
     /// The kernel arms MSI-X where it is published, and leaves MSI off.
