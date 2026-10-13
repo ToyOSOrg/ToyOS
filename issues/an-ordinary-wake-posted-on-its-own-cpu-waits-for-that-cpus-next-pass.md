@@ -8,11 +8,12 @@ opened: 2026-10-12
 
 `park::deliver` (`kernel/pure/sched/park.rs`) posts an ordinary wake
 (`Urgency::Normal`) whose target CPU is the one the poster runs on without
-ringing that CPU's doorbell: the CPU's own next pass drains it. So a thread
-that wakes a task parked on its own CPU and keeps running, or an interrupt
-that wakes one parked on the CPU it interrupted, leaves the woken task in that
-CPU's mailbox until the poster's task blocks or its quantum ends, and no idle
-CPU can take it meanwhile. That is `main`'s behaviour for these wakes, kept by
+ringing that CPU's doorbell: the CPU's own next pass drains it. A device
+interrupt that posts a wake sets `need_resched` before its EOI, so the CPU it
+interrupted runs that pass on the way out. A thread that wakes a task parked
+on its own CPU and keeps running is what is left: the woken task stays in that
+CPU's mailbox until the thread blocks or its quantum ends, and no idle CPU can
+take it meanwhile. That is `main`'s behaviour for these wakes, kept by
 PR #874 where it kicks every other busy target. A thread in the real-time band
 woken without a boost is an ordinary wake too.
 
