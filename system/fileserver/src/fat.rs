@@ -799,7 +799,8 @@ mod tests {
     /// checker refuses only for clusters no file's size reaches, and that mounts and
     /// holds the file as the last whole sync left it or as the append made
     /// it: never an entry naming bytes its chain does not reach or its
-    /// clusters do not hold yet.
+    /// clusters do not hold yet. With every epoch on the disk the checker
+    /// refuses nothing and the file is the append's.
     #[test]
     fn an_append_stopped_with_any_writes_of_a_flush_on_the_disk_reads_back_the_last_sync() {
         use toyos_fat32_check::{check, describe, Complaint};
@@ -829,11 +830,14 @@ mod tests {
                 let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
                 let mut bytes = image.clone();
                 written(&mut bytes, epoch.iter().enumerate().filter(|(i, _)| kept >> i & 1 == 1).map(|(_, w)| w));
+                let synced_whole = kept == (1 << epoch.len()) - 1 && epochs[e + 1..].iter().all(Vec::is_empty);
                 // Clusters no entry reaches yet, and the last sync's entry over
-                // the append's chain: the window between the chain and its entry.
+                // the append's chain: the window between the chain and its
+                // entry, closed once the sync is whole on the disk.
                 let refused: Vec<_> = check(&bytes)
                     .into_iter()
                     .filter(|c| match c {
+                        _ if synced_whole => true,
                         Complaint::LostChain { .. } | Complaint::FsInfoFreeCount { .. } | Complaint::FatMirror { .. } => false,
                         Complaint::ChainTooLong { path, size, .. } => !(path == "/a.txt" && *size == held.len() as u64),
                         _ => true,
@@ -847,7 +851,7 @@ mod tests {
                 let read = after.read(n, 0, &mut crate::volume::Buf(&mut out));
                 assert_eq!(read, Ok(size), "{stop}: a {size}-byte file");
                 assert!(
-                    out == held || out == whole,
+                    out == whole || out == held && !synced_whole,
                     "{stop}: the file is {size} bytes and neither the {} the last sync held nor the {} the append made",
                     held.len(),
                     whole.len()
