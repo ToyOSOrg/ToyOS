@@ -21,8 +21,8 @@ calibration spins the boot for 10 ms (`apic.rs:315-320`, from
 `kernel/src/arch/x86_64/boot.rs:135`). TSC-deadline mode (CPUID.01H:ECX[24])
 takes the absolute deadline in TSC units as one `IA32_TSC_DEADLINE` write,
 with no calibration of a second timebase (SDM 325462-093, Vol. 3A §13.5.4.1).
-The T14 enumerates it (`tsc_deadline_timer`,
-`kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`). AMD documents no such mode: its
+Whether the T14 enumerates it is ToyOS's own read to make, and no boot prints
+CPUID.01H:ECX yet. AMD documents no such mode: its
 CPUID reference has CPUID.01H:ECX[24] reserved (APM 24594 rev. 3.36, Vol. 3,
 §E.3.2), and so does the AMD bench's own (PPR 55922 rev. 3.06,
 `CPUID_Fn00000001_ECX`), so the AMD bench keeps the count, its calibration
@@ -63,12 +63,17 @@ one-shot armed and stopped through `IA32_TSC_DEADLINE`, beside `main` plus
 the scout in the same session. Each arm reads the 1 ms timer lateness of
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md` and the
 split above, its re-arm segment opening at `set_timer` (`kernel/src/hw.rs:49`)
-in both. The arm whose lateness measures better is kept, and the split is
-reported. The twin is a measurement arm, deleted once it has answered.
+in both. Each arm runs 11 times; a run's figure is the median lateness of
+its 1 ms timers, and an arm's is the median of its 11 with their spread,
+lowest to highest. The deadline measures better only where its median is the
+lower and the two spreads do not overlap; where they overlap, the count, the
+path every CPU has, is kept. The split is reported. The twin is a measurement
+arm, deleted once it has answered.
 
-**Exit**: the twin's reading, posted, and the twin deleted. Where the
+**Exit**: a boot line printing CPUID.01H:ECX, and a T14 boot carrying it
+cited for bit 24; the twin's reading, posted, and the twin deleted. Where the
 deadline's lateness measures better, a deadline is armed on every CPU that
 enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the absolute
-value, and the split above is read again after it; where the count's does,
-this file becomes `rejected` with both readings, and the boot's 10 ms
+value, and the split above is read again after it; where it does not, this
+file becomes `rejected` with both readings, and the boot's 10 ms
 calibration spin stays the count's price.

@@ -27,8 +27,7 @@ machine is known to offer is
 `issues/features-no-proving-machine-is-known-to-offer.md`.
 
 **Measurement first.** Each design round starts from a posted measurement,
-never a guess. Three scouts on `main`'s `177e72a9e` have read both benches,
-or the T14 against Ubuntu:
+never a guess. Three scouts on `main`'s `177e72a9e` have read both benches:
 https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119438569 (the
 syscall and wake latency),
 https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198 (the TLB
@@ -52,26 +51,20 @@ is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
-- **The T14's clock against Ubuntu's.** Over the `internet_download` row's
-  download windows the medians read 2.67 against 3.08 GHz effective
-  (`wt/toyos-scout-clock` at `fa6a2a829`). Ruled out: the power limits
-  (5.65 W median against a 20 W PL1, no power, thermal or current limit
-  bit logged), the HWP request (both `0x80002a04`) and C1E promotion (both
-  allow it). The one limit bit ToyOS logged, multi-core turbo, Ubuntu logged
-  in every window too. What differs: ToyOS's cores never go below C1/C1E and
-  its package never leaves PC0, where Ubuntu's cores spend 57 to 79 % of a
-  run in C7; and ToyOS's idle package draws 3.16 W against Ubuntu's 1.18 to
-  1.57 W, which is `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to
-  answer. That the idle state reaches HWP's clock choice is inference, and
-  the gap is not stable across sessions: round 1 of PR #861, `main`'s
-  column, read ToyOS at 2.53 against Ubuntu's 2.03 GHz. Next: a T14 scout
-  whose idle CPUs wait in a deep C-state, read against the same windows.
-- **Cycles per MB.** ToyOS spends 1.98 times Ubuntu's C0 time per MB (6.09
-  against 3.08 ms); the clock is about 1.15 of that and cycles per MB about
-  1.58 (16.20 against 10.22 Mcyc), from about 1.17 times the instructions at
-  an IPC of 0.94 against about 1.26 (Ubuntu's instructions derived from
-  turbostat; ratios of medians). Next: cycles and instructions per MB split
-  by where they run, app, network stack and kernel, on both systems.
+- **The T14's clock under load.** Over the `internet_download` row's
+  download windows ToyOS's median effective clock reads 2.67 GHz
+  (`wt/toyos-scout-clock` at `fa6a2a829`), and read 2.53 GHz in round 1 of
+  PR #861, and what holds it there is unread. Ruled out: the power limits
+  (5.65 W median against a 20 W PL1, no power, thermal or current limit bit
+  logged), the HWP request (`0x80002a04`) and C1E promotion (allowed); the one
+  limit bit logged is multi-core turbo. ToyOS's cores never go below C1/C1E,
+  its package never leaves PC0, and its idle package draws 3.16 W, which is
+  `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
+  idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
+  idle CPUs wait in a deep C-state, read over the same windows.
+- **Cycles per MB.** ToyOS spends 6.09 ms of C0 time and 16.20 Mcyc per MB
+  over the same windows, at an IPC of 0.94. Next: cycles and instructions per
+  MB split by where they run, app, network stack and kernel.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
