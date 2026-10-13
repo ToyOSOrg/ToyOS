@@ -6103,9 +6103,10 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
-/// and at least one reading of it with the adapter's state; every method
-/// answered. The census's Global Lock counts are printed and held to
-/// nothing: an evaluation gives back the lock it still holds as it ends
+/// and at least one reading of it with the adapter's state; nothing refused
+/// but [`T14`]'s ruled refusals, which `acpi_tables_on_metal` holds met.
+/// The census's Global Lock counts are printed and held to nothing: an
+/// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
 /// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
 /// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
@@ -6121,7 +6122,11 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
+    let refused: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: "))
+        .filter(|l| !T14.ruled.iter().any(|ruled| l.contains(ruled)))
+        .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
