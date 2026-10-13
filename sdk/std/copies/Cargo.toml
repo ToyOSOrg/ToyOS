@@ -2,7 +2,7 @@
 name = "toyos-std-copies"
 description = "A host test of std's ToyOS platform: its modules that name nothing but core and std's own sync, compiled as they are."
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 

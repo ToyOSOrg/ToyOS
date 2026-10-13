@@ -17,13 +17,16 @@ fn a_refused_roster_is_no_row() {
 #[test]
 fn a_granted_roster_is_its_header_and_each_whole_entry() {
     let mut answer = vec![0u8; HEADER + ENTRY + ENTRY / 2];
-    let header = toyos_abi::syscall::SysinfoHeader::decode(answer[..HEADER].try_into().unwrap());
+    // `uptime_ns` and `total_cpu_ns` at their ABI offsets, distinct so a swap is seen.
+    let (uptime_ns, total_cpu_ns) = (0x0102_0304_0506_0708u64, 0x1112_1314_1516_1718u64);
+    answer[24..32].copy_from_slice(&uptime_ns.to_le_bytes());
+    answer[32..40].copy_from_slice(&total_cpu_ns.to_le_bytes());
     let entry = &mut answer[HEADER..HEADER + ENTRY];
     entry[..4].copy_from_slice(&7u32.to_le_bytes());
     entry[4..8].copy_from_slice(&1u32.to_le_bytes());
     entry[32..37].copy_from_slice(b"shell");
     let (uptime, cpu, rows) = rows(&answer).expect("a granted roster");
-    assert_eq!((uptime, cpu), (header.uptime_ns, header.total_cpu_ns));
+    assert_eq!((uptime, cpu), (uptime_ns, total_cpu_ns));
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].pid, rows[0].tid, rows[0].name.as_str()), (7, 1, "shell"));
 }
