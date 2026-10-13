@@ -888,7 +888,8 @@ struct Shape {
     /// *size* is a shape dimension exactly as a disk's is, and the tests that
     /// read pixels were all blind to the remainder until one profile had one.
     panel: Option<(u32, u32)>,
-    /// virtio-sound and the console on virtio-serial.
+    /// virtio-sound, the console on virtio-serial, and the clipboard's
+    /// channel on a virtio-serial function of its own.
     virtio: Virtio,
     nic: Nic,
     /// The `-device` argument for each xHCI controller, port and slot counts
@@ -2300,6 +2301,11 @@ fn qemu_command(
                 .arg("-device")
                 .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
         }
+        // The clipboard's channel, just before the console's function, so it
+        // enumerates first and every virtio boot runs the kernel's console
+        // rule. Refused by name where QEMU has no `qemu-vdagent`.
+        toyos_build::vdagent::available(arch).unwrap_or_else(|why| panic!("[qemu] {why}"));
+        qemu.args(toyos_build::vdagent::args(platform));
         qemu
             // virtio-console on stdio is the primary I/O channel; UART goes to
             // a temp file so early-boot logs and panic fallback still land

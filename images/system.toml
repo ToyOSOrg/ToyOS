@@ -19,7 +19,7 @@ assets = ["assets"]
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "vdagent"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -69,10 +69,11 @@ receives = ["power"]
 # makes the local desktop a login session, so `swap` and `update` run from its
 # shell. `prompt` is the layer above every window, which `filepicker` alone
 # reaches: serving it makes the sessions its launches open the screen's, whose
-# packages may ask the person at it for a folder.
+# packages may ask the person at it for a folder. `clipboard` is sent every copy
+# made in the session, and `vdagent` alone receives it.
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt"]
+serves = ["compositor", "prompt", "clipboard"]
 receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
@@ -92,6 +93,15 @@ syscap = ["rt"]
 service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041"]
+
+# The shared clipboard with QEMU's host: the virtio-serial function its
+# vdagent chardev is on, claimed by vendor and device among the functions the
+# kernel does not drive (the kernel's console is `1af4:1043` too), and the
+# compositor's clipboard port. A machine with no such function, the T14 among
+# them, leaves it to say so and exit.
+[programs.vdagent]
+devices = ["pci:1af4:1043"]
+receives = ["clipboard"]
 
 # Every launch it makes is in a login session, the one `update` and `swap`
 # below start in: one it opens when it runs in the machine's session, and the
