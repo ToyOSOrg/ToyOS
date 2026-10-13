@@ -1,8 +1,8 @@
 //! Whether an address reaches the bus at all.
 //!
-//! The windows are the ones firmware named
-//! ([`toyos_abi::boot::KernelArgs::root_bridge_windows`]); what is decided here
-//! is where one extent stands against them, for the BARs firmware assigned and
+//! The windows are a declaration of the memory the root bridges decode
+//! ([`check`] decides whether one can be held at all); what is decided here is
+//! where one extent stands against them, for the BARs firmware assigned and
 //! for the address space this kernel would put one in.
 
 use toyos_abi::boot::RootBridgeWindow;
@@ -16,6 +16,54 @@ pub enum Decode {
     Inside(u64),
     /// Inside none of them.
     Unrouted,
+}
+
+/// Why a declaration of the root bridges' memory is refused whole.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// It names no window, so nothing on the machine is known to be routed.
+    Empty,
+    /// A window of no length, or one whose end is past the address space.
+    Malformed(RootBridgeWindow),
+    /// Two windows name one address: whichever is wrong, the declaration does
+    /// not say what the bridges decode.
+    Overlap(RootBridgeWindow, RootBridgeWindow),
+}
+
+impl core::fmt::Display for Refused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "it names no window"),
+            Self::Malformed(w) => write!(f, "its window {:#x}+{:#x} is no extent of the address space", w.base, w.length),
+            Self::Overlap(a, b) => write!(
+                f,
+                "its windows {:#x}..{:#x} and {:#x}..{:#x} share an address",
+                a.base,
+                a.end(),
+                b.base,
+                b.end()
+            ),
+        }
+    }
+}
+
+/// Whether `windows` can be held as the root bridges' memory: at least one
+/// window, each an extent that ends inside the address space, no two sharing
+/// an address. Refused whole, because a declaration with one window dropped
+/// is one with a hole a BAR would be placed in.
+pub fn check(windows: &[RootBridgeWindow]) -> Result<(), Refused> {
+    if windows.is_empty() {
+        return Err(Refused::Empty);
+    }
+    for (at, window) in windows.iter().enumerate() {
+        if window.length == 0 || window.base.checked_add(window.length).is_none() {
+            return Err(Refused::Malformed(*window));
+        }
+        if let Some(other) = windows[..at].iter().find(|o| o.base < window.end() && window.base < o.end()) {
+            return Err(Refused::Overlap(*other, *window));
+        }
+    }
+    Ok(())
 }
 
 /// Where `base .. end` stands against `windows`.
@@ -53,6 +101,31 @@ mod tests {
             Decode::Inside(0x40_0000_0000)
         );
         assert_eq!(decode(&T14, 0xfe01_0000, 0xfe01_1000), Decode::Unrouted);
+    }
+
+    /// The T14's recorded declaration, seven windows that meet end to end, is
+    /// held; an empty list, a window of no length or past the address space,
+    /// and two windows sharing an address are each refused by name.
+    #[test]
+    fn a_declaration_is_held_only_whole_and_disjoint() {
+        let w = |base, length| RootBridgeWindow { base, length };
+        let recorded = [
+            w(0xa200_0000, 0x1b00_0000),
+            w(0x40_0000_0000, 0x20_3dc0_0000),
+            w(0xa080_0000, 0x180_0000),
+            w(0xbd00_0000, 0x300_0000),
+            w(0xff00_0000, 0xb8_0000),
+            w(0xffd3_a070, 0x2c_5f90),
+            w(0x60_3dc0_0000, 0x1f_c240_0000),
+        ];
+        assert_eq!(check(&recorded), Ok(()));
+        assert_eq!(check(&[]), Err(Refused::Empty));
+        assert_eq!(check(&[w(0x1000, 0)]), Err(Refused::Malformed(w(0x1000, 0))));
+        assert_eq!(check(&[w(u64::MAX, 2)]), Err(Refused::Malformed(w(u64::MAX, 2))));
+        assert_eq!(
+            check(&[w(0x1000_0000, 0x100_0000), w(0x10ff_f000, 0x2000)]),
+            Err(Refused::Overlap(w(0x1000_0000, 0x100_0000), w(0x10ff_f000, 0x2000)))
+        );
     }
 
     /// A machine whose firmware named nothing, and a span of no length: neither
