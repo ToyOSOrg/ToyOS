@@ -27,6 +27,7 @@ pub mod hw;
 pub mod idt;
 pub mod iommu_unit;
 pub mod ioapic;
+pub mod microcode;
 pub mod mtrr;
 pub mod paging;
 pub mod pat;

@@ -1,18 +1,28 @@
-//! Intel microcode update files, read as the SDM defines them, pure.
+//! CPU microcode as Intel publishes it, matched to one CPU, and the file the
+//! kernel loads it from, pure.
 //!
 //! A file Intel publishes for one processor signature is updates laid end to
-//! end. [`select`] validates every one against SDM Vol. 3A §12.11 (order
-//! number 325384-093US) — header, checksum and the optional extended signature
-//! table — and answers with the newest that names a CPU's signature and
-//! platform, or why it loads none. One malformed update refuses the whole file.
+//! end, and so is any number of such files laid end to end. [`select`]
+//! validates every update against SDM Vol. 3A §12.11 (order number
+//! 325384-093US) — header, checksum and the optional extended signature table
+//! — and answers with the newest that names a CPU's signature and platform,
+//! or why it loads none. One malformed update refuses the whole file. Only
+//! the documented headers are read: an update's data is Intel's signed
+//! payload, handed on whole and never interpreted.
 //!
-//! Only the documented header, checksums and signature table are read. The
-//! update data is the maker's signed payload: handed on whole, never
-//! interpreted.
+//! Only an update newer than the revision the CPU runs loads (Example 12-10):
+//! the CPU "may or may not reload" an equal one, and loading an update on one
+//! logical processor loads it on every other in its core.
+//!
+//! Before any file is read, [`loader`] says whether ToyOS has a loader for a
+//! CPU's vendor and [`may_load`] whether the CPU loads at all.
+//!
+//! [`INTEL`] is the file the kernel embeds, as Intel publishes it and pinned
+//! by its digest in `NOTICE`.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
 //!
-//! The file is untrusted, so nothing here may panic on it.
+//! A file is untrusted, so nothing here may panic on one.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -28,8 +38,107 @@
     clippy::unimplemented
 )]
 
+use core::fmt;
+
+use toyos_cpuvuln::Vendor;
+
 #[cfg(test)]
 mod tests;
+
+/// A file the kernel loads from, starting 16-byte aligned: Intel's trigger
+/// takes an update's data only at such an address (SDM §12.11.6), and every
+/// update behind the first starts a multiple of 1024 bytes in, its data 48
+/// bytes after that.
+#[repr(C, align(16))]
+pub struct Aligned<Bytes: ?Sized>(pub Bytes);
+
+/// Intel's updates for the CPUs ToyOS has a bench for, end to end:
+/// `intel-ucode/06-8c-01`, the T14's i5-1135G7.
+pub static INTEL: &Aligned<[u8]> = &Aligned(*include_bytes!("../intel-ucode/06-8c-01"));
+
+/// CPUID.01H:EAX, which Intel's updates name their CPU by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signature(pub u32);
+
+/// An Intel update revision, the dword MSR 8BH reports it in, compared
+/// unsigned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Revision(pub u32);
+
+impl Revision {
+    /// The highest revision, which no update loads over.
+    pub const DISABLED: Self = Self(u32::MAX);
+
+    /// MSR 8BH read after writing it 0 and executing CPUID.01H, whose upper
+    /// dword the revision is (SDM §12.11.7.1).
+    pub const fn from_sign_id(msr: u64) -> Self {
+        Self((msr >> 32) as u32)
+    }
+}
+
+impl fmt::LowerHex for Revision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+/// What a valid file holds for one CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice<'a> {
+    /// The newest update naming the CPU, newer than the revision it runs.
+    Load(Update<'a>),
+    /// The newest update naming the CPU is this revision, and the CPU already
+    /// runs it or a newer one.
+    Current(Revision),
+    /// No update in the file names the CPU.
+    NoMatch,
+}
+
+/// Whether ToyOS has a loader for a CPU of `vendor`: Intel's alone.
+pub fn loader(vendor: Vendor) -> Result<(), Unloaded> {
+    match vendor {
+        Vendor::Intel => Ok(()),
+        Vendor::Amd | Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => {
+            Err(Unloaded::Vendor(vendor))
+        }
+    }
+}
+
+/// Why a CPU loads nothing, said before any file is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unloaded {
+    /// ToyOS has no loader for this vendor, so nothing of its CPU is read.
+    Vendor(Vendor),
+    /// CPUID.01H:ECX[31], which a hypervisor sets for its guest (AMD's APM
+    /// Vol. 3, 24594 rev 3.36, §E.3.2): the guest's microcode is the
+    /// hypervisor's.
+    Hypervisor,
+    /// The CPU reports [`Revision::DISABLED`].
+    Disabled,
+}
+
+impl fmt::Display for Unloaded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Vendor(vendor) => write!(f, "ToyOS has no {vendor:?} microcode loader"),
+            Self::Hypervisor => f.write_str("a hypervisor owns this CPU's microcode"),
+            Self::Disabled => f.write_str("revision 0xffffffff, which no update loads over"),
+        }
+    }
+}
+
+/// Whether a CPU [`loader`] admits may load, from its
+/// CPUID.01H:ECX and the revision it reports. A guest loads nothing whatever
+/// it reports.
+pub fn may_load(cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {
+    if cpuid_1_ecx & 1 << 31 != 0 {
+        return Err(Unloaded::Hypervisor);
+    }
+    if found == Revision::DISABLED {
+        return Err(Unloaded::Disabled);
+    }
+    Ok(())
+}
 
 /// The header's length, and so the offset of the update data (Table 12-7).
 const HEADER: usize = 48;
@@ -40,10 +149,6 @@ const EXT_HEADER: usize = 20;
 const EXT_SIGNATURE: usize = 12;
 /// Total Size is "always a multiple of 1024" (Table 12-7).
 const GRANULE: usize = 1024;
-
-/// CPUID.01H:EAX, compared whole with an update's (§12.11.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Signature(pub u32);
 
 /// Which bit of an update's processor flags names this CPU's platform
 /// (§12.11.4).
@@ -62,16 +167,9 @@ impl PlatformId {
     }
 }
 
-/// An update revision. Signed (Table 12-7): one update is newer than another
-/// only when numerically larger (Example 12-10).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Revision(pub i32);
-
-impl Revision {
-    /// `IA32_BIOS_SIGN_ID` (MSR 8BH) read after writing it 0 and executing
-    /// CPUID.01H: the revision is its upper dword (§12.11.7.1).
-    pub const fn from_sign_id(msr: u64) -> Self {
-        Self((msr >> 32) as u32 as i32)
+impl fmt::Display for PlatformId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -115,18 +213,6 @@ impl<'a> Update<'a> {
             .chain(extended)
             .any(|(signature, flags)| signature == cpu.signature.0 && flags & cpu.platform.flag() != 0)
     }
-}
-
-/// What a valid file holds for one CPU.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice<'a> {
-    /// The newest update naming the CPU, newer than the revision it runs.
-    Load(Update<'a>),
-    /// The newest update naming the CPU is this revision, and the CPU already
-    /// runs it or a newer one.
-    Current(Revision),
-    /// No update in the file names the CPU.
-    NoMatch,
 }
 
 /// Why a file is refused: the offset of the update that is malformed, and how.
@@ -229,7 +315,7 @@ fn parse(bytes: &[u8]) -> Result<(Update<'_>, &[u8]), Refusal> {
         [] => &[],
         table => extended(table, signature.wrapping_add(checksum).wrapping_add(flags))?,
     };
-    let update = Update { revision: Revision(revision as i32), signature, flags, data, extended };
+    let update = Update { revision: Revision(revision), signature, flags, data, extended };
     Ok((update, rest))
 }
 

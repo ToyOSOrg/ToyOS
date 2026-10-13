@@ -280,6 +280,8 @@ extern "C" fn ap_entry() -> ! {
 
     // Must run before `pat::init`, which restores the CR0 this call sets.
     crate::arch::control_regs::init_cr0(percpu::cpu_id());
+    // Before `control_regs::init` reads what an update changes.
+    crate::arch::microcode::load(percpu::cpu_id());
 
     // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();
