@@ -23,9 +23,15 @@
 //! **The ceremony.** The owner brings a machine that is offline for good, two
 //! USB sticks A and B for the root key, and a third, C, that carries files
 //! between it and the online machine. A and B are erased to APFS on the
-//! offline machine, `diskutil eraseDisk APFS <name> GPT <disk>`, with `<disk>`
-//! the stick's whole disk as `diskutil list` names it: exFAT and FAT32, the
-//! formats sticks come in, keep no Unix mode, and `new` refuses them.
+//! offline machine, `diskutil eraseDisk APFS ROOTA GPT <disk>` and the same
+//! for `ROOTB`, with `<disk>` the stick's whole disk taken only from an entry
+//! `diskutil list` marks `(external, physical)`: any other is the machine's
+//! own. exFAT and FAT32, the formats sticks come in, keep no Unix mode, and
+//! `new` refuses them. Ownership is then enabled on each,
+//! `sudo diskutil enableOwnership /Volumes/ROOTA` and the same for `ROOTB`,
+//! and `mount` must list neither as `noowners`: a volume that ignores
+//! ownership treats every user as the owner `0600` names. Below, `<A>` is
+//! `/Volumes/ROOTA`, `<B>` is `/Volumes/ROOTB`, and `<C>` is where C mounts.
 //!
 //! 1. Online, before.
 //!    1. `cargo run -q -- --repo-signing-key-new > <C>/signing.pub` mints the
@@ -44,7 +50,8 @@
 //!    2. `<C>/toyos-root new <A>/root-key` mints the root key `0600`. Write its
 //!       fingerprint on the paper.
 //!    3. `cp <A>/root-key <B>/root-key && cmp <A>/root-key <B>/root-key`, and
-//!       `stat -f %Sp <B>/root-key` reads `-rw-------`.
+//!       `stat -f '%Su %Sp' <A>/root-key <B>/root-key` reads the user that ran
+//!       `new` and `-rw-------`, twice.
 //!    4. `<C>/toyos-root sign --key <A>/root-key --signing <C>/signing.pub
 //!       --out <C>/root.1.txt`. Both fingerprints it prints must be the paper's,
 //!       and its expiry a year from today.
@@ -96,15 +103,7 @@ fn main() {
 fn new(path: &Path) -> Result<String, String> {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).map_err(|e| format!("the operating system's randomness: {e}"))?;
-    let file = create_new(path, 0o600)?;
-    let mode = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        let removed = std::fs::remove_file(path).map_or_else(|e| format!(", and removing it failed: {e}"), |()| String::new());
-        return Err(format!(
-            "{} reads back {mode:04o}, not 0600: its filesystem keeps no Unix mode, so the root key is not written there{removed}",
-            path.display()
-        ));
-    }
+    let file = read_back_0600(create_new(path, 0o600)?, path)?;
     fill(file, path, toyos_update::sig::seed_text(&seed).as_bytes())?;
     let public = toyos_update::sig::public_of(&seed);
     Ok(format!("root key {}\n{}\n", repo::fingerprint(&public), repo::public_line(&public)))
@@ -141,6 +140,20 @@ fn create_new(path: &Path, mode: u32) -> Result<std::fs::File, String> {
         std::io::ErrorKind::AlreadyExists => format!("{} already exists, and it is not replaced", path.display()),
         _ => format!("{}: {e}", path.display()),
     })
+}
+
+/// `file`, just created at `path` and still empty, where its mode reads back
+/// `0600`; otherwise the file is removed and refused.
+fn read_back_0600(file: std::fs::File, path: &Path) -> Result<std::fs::File, String> {
+    let mode = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.permissions().mode() & 0o777;
+    if mode == 0o600 {
+        return Ok(file);
+    }
+    let removed = std::fs::remove_file(path).map_or_else(|e| format!(", and removing it failed: {e}"), |()| String::new());
+    Err(format!(
+        "{} reads back {mode:04o}, not 0600: its filesystem keeps no Unix mode, so the root key is not written there{removed}",
+        path.display()
+    ))
 }
 
 /// `bytes` written to `file`, the one at `path`, and synced.
@@ -180,6 +193,18 @@ mod tests {
     fn the_root_key_is_minted_0600() {
         let c = ceremony();
         assert_eq!(std::fs::metadata(&c.key).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// A key file that reads back other than `0600` is refused and removed.
+    #[test]
+    fn a_key_file_that_reads_back_other_than_0600_is_refused_and_removed() {
+        let dir = TempDir::new("toyos-root");
+        let path = dir.path().join("root-key");
+        let file = create_new(&path, 0o644).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let why = read_back_0600(file, &path).unwrap_err();
+        assert!(why.ends_with("reads back 0644, not 0600: its filesystem keeps no Unix mode, so the root key is not written there"), "{why}");
+        assert!(!path.exists(), "the refused file is removed");
     }
 
     /// A second `new` over the key is refused, and the key is left.
