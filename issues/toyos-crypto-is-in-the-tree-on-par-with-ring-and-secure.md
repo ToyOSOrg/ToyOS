@@ -22,12 +22,10 @@ review has been done, and passing vectors does not show it is safer than ring.
 
 - **Frozen source.** The source is commit
   `2b3f92c0dc6a7b77aaeff57d1291cab8dba78494` (owner, 2026-10-13). Its
-  repository no longer changes, and its uncommitted files are not imported.
-  - Its full history is archived on `ToyOSOrg/evidence` branch
-    `toyos-crypto-2b3f92c`
-    (https://github.com/ToyOSOrg/evidence/tree/2b3f92c0dc6a7b77aaeff57d1291cab8dba78494).
-  - A read-only archive repository under `ToyOSOrg` is still owed by the
-    owner.
+  uncommitted files are not imported. The source of record is
+  `ToyOSOrg/evidence` branch `toyos-crypto-2b3f92c`, which holds its full
+  history
+  (https://github.com/ToyOSOrg/evidence/tree/2b3f92c0dc6a7b77aaeff57d1291cab8dba78494).
 - **Linux on the benches, 16 KiB seal against stock ring with its runtime
   dispatch:**
   - AES-128/256-GCM is 1.80x/1.67x slower on the T14 (VAES) and 1.68x/1.76x
@@ -76,29 +74,31 @@ Not consumers:
    - Its first commit adds `lib/crypto` from the frozen commit and names
      it. Only the crate's `src/` (without `src/arch/aarch64.rs`), `tests/`,
      `tests/data/` and that data's licence files enter.
+     - The same commit removes the AArch64 dispatch and
+       `cpu::initialize_aarch64*`, so that it compiles for AArch64.
+     - It writes the crate's manifest with caret requirements.
    - Nothing else comes in: no `examples/` (the mutation runner and the timing
-     harness), `benchmarks/`, `evidence/`, `tools/`, `claude-comms/`,
-     `Cargo.lock`, `LICENSE-*`, `NOTICE`, `README.md` or `VALIDATION.md`.
-     They stay in the archive.
+     harness), `benchmarks/`, `evidence/`, `tools/`, `Cargo.lock`,
+     `LICENSE-*`, `NOTICE`, `README.md` or `VALIDATION.md`. They stay in the
+     archive.
    - Later commits in the same landing do the following:
-     - Remove the AArch64 dispatch and `cpu::initialize_aarch64*`.
-     - Write the crate's manifest with caret requirements.
      - Replace the `rsa` oracle:
        - `src/test_arithmetic.rs`'s integers come from `num-bigint`;
        - the RSA differential signs with ring, from committed PKCS#8 test
          keys;
        - the provider's RSA certificates use those keys.
-     - Switch `toyos-ssh`'s protocol from `ring`, and move
-       `hostkey::openssh_seed` and `openssh_private` to
-       `toyos_update::sig::public_of`.
+     - Switch `toyos-ssh`'s protocol from `ring`. The public-key derivation
+       in `hostkey::openssh_seed` and `openssh_private` calls
+       `toyos_update::sig::public_of` instead of ring.
    **Exit**:
    - Under `cargo run -- --ci host`, the crate's host tests run in its
      dispatched, `portable` and default-feature forms.
    - Every vector file has a `NOTICE` entry and a `COMMITTED_FILES` row.
    - `Cargo.lock` has no `rsa` package that the crate brings in. There is no
      `rsa` crate in the crate's dependencies of any kind.
-   - `build/ssh/Cargo.toml` names no `ring`. No signing-path code calls the
-     crate: `build/signing.rs` reaches only `toyos-update`'s derivation.
+   - `build/ssh/Cargo.toml` names no `ring`.
+   - `hostkey`'s derivation calls no `lib/crypto` code. `build/signing.rs`
+     derives public keys only through `toyos_update::sig::public_of`.
    - `toyos-ssh`'s OpenSSH recordings replay byte for byte, and
      `issues/toyos-ssh-replays-rest-on-rings-deprecated-test-randomness.md` is
      closed.
@@ -130,11 +130,13 @@ Not consumers:
      counts. Each row also reports the same build with debug assertions off,
      as a column that decides nothing, so that their cost is visible.
    - **Samples.** Ring runs as two interleaved instances, A and B, beside
-     ours, in the same boot. A row is 3 rounds of 7 paired samples, after one
+     ours, in the same boot. The order of ours, A and B rotates from one
+     sample to the next. A row is 3 rounds of 7 paired samples, after one
      discarded warmup sample, so 21 samples per backend. A sample is the mean
      over a batch of at least 1 ms.
    - **Spread.** For sample i, r_i = A_i / B_i. A row's spread is the 90th
-     percentile of |r_i − 1| over its 21 samples.
+     percentile of |r_i − 1| over its 21 samples. A row whose spread exceeds
+     5% gets no verdict and is measured again.
    - **Verdict.** A row passes when the median over i of
      ours_i / ((A_i + B_i) / 2) is at most 1 + spread.
    - **Exit:**
@@ -182,6 +184,10 @@ Not consumers:
      - **Classes.** Fixed-versus-random: one class holds a fixed secret, the
        other a fresh uniform secret per measurement, and the public inputs are
        the same in both.
+     - **The fixed secret.** It is a special value: the scalar 1 for scalar
+       multiplication, the all-zero key for ciphers and MACs, and otherwise
+       the lowest-weight valid secret. A special value exposes
+       data-dependent paths that a typical value does not.
      - **Samples.** 1,000,000 measurements per routine and bench, with the
        class chosen at random per measurement. They are taken in a ToyOS guest
        in `[profile.toyos]`, on the T14 and the AMD bench.
@@ -218,9 +224,13 @@ Not consumers:
      (`issues/toyos-ssh-offers-only-a-classical-key-exchange.md`). sshserver's
      switch, stage 2 of the SSH track, is the shipping step. It waits for
      stage 4 on SSH's primitives.
-   - `toyos-sha2` and `toyos-sha2-hw` fold into the crate's SHA-2, which gains
-     x86-64's SHA instructions; AArch64 stays scalar. Their SHAVS tests come
-     too.
+   - The crate's SHA-2 gains x86-64's SHA instructions; AArch64 stays scalar.
+     These users of `toyos-sha2` and `toyos-sha2-hw` switch to the crate:
+     `build/`'s digests, `pkg` and `lib/swap`. Three keep them until stage 6:
+     - `lib/update`;
+     - the loader;
+     - `system/update`, whose `stream_root` holds ROOT to the signed header's
+       digest.
    - ToyOS's own HTTPS clients use the crate's rustls provider once stages 3
      and 4 hold for TLS's primitives. The owner ruled this on 2026-10-13:
      the crypto goal overrides his ruling of 2026-10-02 in
@@ -248,6 +258,8 @@ Not consumers:
      its verification time measured on each.
    - An AArch64 QEMU loader boot verifies a signed image, because the crate's
      UEFI path has never run.
+   - `lib/update`, the loader and `system/update` hash with the crate's SHA-2. `toyos-sha2`
+     and `toyos-sha2-hw` are deleted, and their SHAVS tests move to the crate.
    - `ed25519-dalek` and the loader's `sha2` leave `Cargo.lock`'s non-dev
      packages.
 
