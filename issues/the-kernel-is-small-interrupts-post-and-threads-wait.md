@@ -180,7 +180,7 @@ Beside that order, each waiting on something outside it:
       Each half measures the kernel's lines and its longest interrupts-off
       and preemption-off windows, by stage 6 step 2's rule.
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID delivered
-       to the screen's owner over the `input` port and mass storage over
+       to the owner of input over the `input` port and mass storage over
        `toyos-blockring`. A USB keyboard's transitions never reach the
        kernel, whose keyboard and mouse streams go when their last kernel
        source leaves (the ruling on #899, applied to usbd on #901).
@@ -189,10 +189,14 @@ Beside that order, each waiting on something outside it:
        over again at its death: the controller's by `usbd_drives_the_spare`
        on the default `qemu-xhci` (below) and
        `usbd_drives_the_type_c_controller`; there is no keyboard claim. The
+       kernel's input streams, deleted: `keyboard.rs`, `mouse.rs` and
+       `input_merge_test.rs` gone from `kernel/src`, and no `Keyboard` or
+       `Mouse` in `sdk/abi`'s `DeviceType` or `FileType`. The
        owner of input's, a key usbd held at its death released:
        `toyos-input`'s test that a connection's end releases every device it
-       carried and a `gone` only its own `source`, red with either release
-       widened or removed. usbd's, a device that stops answering
+       carried and a `gone` only its own `source`, red with `Merge`'s release
+       on a connection's end removed, and red with `gone` releasing its whole
+       connection. usbd's, a device that stops answering
        costing only itself: `toyos-xhci-sim`'s
        `a_controller_that_never_answers_still_releases_the_port`,
        `a_recovery_the_controller_refuses_lets_the_device_go` and
@@ -310,10 +314,11 @@ Beside that order, each waiting on something outside it:
    **Partly done**: step 1.
    1. **The panic console takes no input, and an `isa` claim grants a process
       exact ports and its ISA lines.** **Done** (#592).
-   2. **ps2server**, the server over that claim, delivering to the screen's
-      owner over the `input` port, where userland merges it with USB HID (the
-      ruling on #899); the kernel's keyboard and mouse streams go when their
-      last kernel source leaves; the
+   2. **ps2server**, the server over that claim, delivering to the owner
+      of input over the `input` port, where userland merges it with USB HID
+      (the ruling on #899); the kernel's merge (`HELD`, `merged_buttons`,
+      `SOURCE_EXISTS`) is deleted, and its streams carry its own sources'
+      records unmerged until usbd takes the last of them; the
       kernel's driver, its vector, its actuators and the
       `keyboard_controller` seam deleted. ps2server's one kernel claim is the
       `isa` row; it takes no keyboard claim, and the owner reads its
