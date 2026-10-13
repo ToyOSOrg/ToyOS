@@ -21,11 +21,12 @@
 //! OpenSSH Ed25519 private key without a passphrase, so `ssh-keygen -Y sign -n
 //! toyos-image` over an image's header makes the same signature this does.
 //!
-//! **The package repository's signing key is a third**, never the image key:
-//! the root the owner signs offline grants it the targets and timestamp roles
-//! (`build/root`), and the publisher signs with it alone (`build/publish.rs`).
-//! [`mint_repo_key`] writes it at [`REPO_KEY`] under `$HOME` as the seed in 64
-//! hex digits, the form it is pasted into CI's secret in.
+//! **The package repository's signing key is a third**, a [`RepoKey`], which
+//! signs documents and no image header: the root the owner signs offline
+//! grants it the targets and timestamp roles (`build/root`), and the
+//! publisher signs with it alone (`build/publish.rs`). [`mint_repo_key`]
+//! writes it at [`REPO_KEY`] under `$HOME` as `toyos_update::sig::seed_text`,
+//! the form it is pasted into CI's secret in.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -115,12 +116,6 @@ impl Key {
         out
     }
 
-    /// The `sig` line this key vouches for a package repository document's
-    /// `body` with, as `role` (`build/publish.rs`).
-    pub fn sign_document(&self, role: Role, body: &[u8]) -> String {
-        toyos_update::repo::render::signature(&self.seed, role, body)
-    }
-
     /// A key from a seed the caller chose, for a test that needs a second,
     /// wrong key or a fixed one.
     pub fn throwaway_from(seed: [u8; 32]) -> Self {
@@ -165,7 +160,7 @@ fn checkout_throwaway(root: &Path) -> Result<Key, String> {
             .mode(0o600)
             .open(&mine)
             .and_then(|mut file| {
-                file.write_all(format!("{}\n", hex_of(&key.seed)).as_bytes())?;
+                file.write_all(toyos_update::sig::seed_text(&key.seed).as_bytes())?;
                 file.sync_all()
             });
         let linked = written.and_then(|()| match std::fs::hard_link(&mine, &path) {
@@ -176,24 +171,9 @@ fn checkout_throwaway(root: &Path) -> Result<Key, String> {
         linked.map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let seed = seed_of_hex(text.trim())
+    let seed = toyos_update::sig::seed_of_text(&text)
         .ok_or_else(|| format!("{} is not 64 hex digits; delete it and the next build mints another", path.display()))?;
     Ok(Key::throwaway_from(seed))
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn seed_of_hex(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.is_ascii() {
-        return None;
-    }
-    let mut seed = [0u8; 32];
-    for (i, byte) in seed.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(seed)
 }
 
 /// Sign everything this process builds with the owner's key, or say why not.
@@ -266,17 +246,46 @@ pub fn repo_key_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(REPO_KEY))
 }
 
+/// The package repository's signing key: it signs the documents its root
+/// grants it, and no image header.
+pub struct RepoKey {
+    seed: [u8; 32],
+    public: [u8; 32],
+}
+
+impl RepoKey {
+    pub(crate) fn from_seed(seed: [u8; 32]) -> Self {
+        Self { public: toyos_update::sig::public_of(&seed), seed }
+    }
+
+    pub fn public(&self) -> [u8; 32] {
+        self.public
+    }
+
+    /// `SHA256:<base64>`, as `ssh-keygen -l` prints it.
+    pub fn fingerprint(&self) -> String {
+        toyos_update::repo::fingerprint(&self.public)
+    }
+
+    /// The `sig` line this key vouches for a package repository document's
+    /// `body` with, as `role` (`build/publish.rs`).
+    pub fn sign_document(&self, role: Role, body: &[u8]) -> String {
+        toyos_update::repo::render::signature(&self.seed, role, body)
+    }
+}
+
 /// Mint the package repository's signing key at `path`, refusing to replace
 /// one: a key replaced is one no root grants.
-pub fn mint_repo_key(path: &Path) -> Result<Key, String> {
-    let key = Key::mint();
-    write_secret(path, &format!("{}\n", hex_of(&key.seed)))?;
-    Ok(Key { whose: Whose::Owner(path.to_path_buf()), ..key })
+pub fn mint_repo_key(path: &Path) -> Result<RepoKey, String> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("the operating system's randomness");
+    write_secret(path, &toyos_update::sig::seed_text(&seed))?;
+    Ok(RepoKey::from_seed(seed))
 }
 
 /// The package repository's signing key at `path`, refused by name where it
 /// is not one or others may read it.
-pub fn read_repo_key(path: &Path) -> Result<Key, String> {
+pub fn read_repo_key(path: &Path) -> Result<RepoKey, String> {
     refuse_wide(path)?;
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
@@ -284,8 +293,9 @@ pub fn read_repo_key(path: &Path) -> Result<Key, String> {
             path.display()
         )
     })?;
-    let seed = seed_of_hex(text.trim()).ok_or_else(|| format!("{} is not 64 hex digits", path.display()))?;
-    Ok(Key::from_seed(seed, Whose::Owner(path.to_path_buf())))
+    let seed = toyos_update::sig::seed_of_text(&text)
+        .ok_or_else(|| format!("{} is not 64 lowercase hex digits and a newline", path.display()))?;
+    Ok(RepoKey::from_seed(seed))
 }
 
 /// `text` written to `path`, `0600` and synced, where no file is there.
@@ -346,24 +356,44 @@ mod tests {
         assert!(checkout_throwaway(dir.path()).err().unwrap().contains("is not 64 hex digits"));
     }
 
-    /// **The repository's signing key is minted `0600` once and read back**:
-    /// a second mint is refused rather than replacing it, a bent file is
-    /// refused, and its fingerprint is the one OpenSSH's own implementation in
-    /// this tree prints, so the paper the ceremony compares holds one name.
+    /// The repository's signing key is minted `0600`, with its directory.
     #[test]
-    fn a_repo_key_is_minted_once_and_read_back() {
+    fn a_repo_key_is_minted_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = toyos_tmpdir::TempDir::new("repo-key");
         let path = dir.path().join("config/repo-signing-key");
-        let minted = mint_repo_key(&path).expect("minted");
+        mint_repo_key(&path).expect("minted");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        let read = read_repo_key(&path).expect("read back");
-        assert_eq!((read.public, read.whose()), (minted.public, &Whose::Owner(path.clone())));
-        assert_eq!(read.fingerprint(), toyos_ssh::hostkey::fingerprint(&read.public));
+    }
+
+    /// The repository's signing key reads back as the key minted.
+    #[test]
+    fn a_repo_key_reads_back_as_minted() {
+        let dir = toyos_tmpdir::TempDir::new("repo-key");
+        let path = dir.path().join("repo-signing-key");
+        let minted = mint_repo_key(&path).expect("minted");
+        assert_eq!(read_repo_key(&path).map(|k| k.public), Ok(minted.public));
+    }
+
+    /// A second mint is refused rather than replacing the key.
+    #[test]
+    fn a_second_repo_key_mint_is_refused_and_leaves_the_key() {
+        let dir = toyos_tmpdir::TempDir::new("repo-key");
+        let path = dir.path().join("repo-signing-key");
+        let minted = mint_repo_key(&path).expect("minted");
         assert!(mint_repo_key(&path).err().unwrap().contains("already holds a key, and it is not replaced"));
         assert_eq!(read_repo_key(&path).map(|k| k.public), Ok(minted.public), "the refused mint left the key");
+    }
+
+    /// A repository key file that is not a seed's text is refused by name.
+    #[test]
+    fn a_repo_key_file_that_is_not_a_seed_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = toyos_tmpdir::TempDir::new("repo-key");
+        let path = dir.path().join("repo-signing-key");
         std::fs::write(&path, "not a seed\n").unwrap();
-        assert!(read_repo_key(&path).err().unwrap().contains("is not 64 hex digits"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_repo_key(&path).err().unwrap().contains("is not 64 lowercase hex digits and a newline"));
     }
 
     /// An owner's key anyone else may read is refused by its mode, before its

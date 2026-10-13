@@ -1662,19 +1662,33 @@ mod tests {
         }
     }
 
-    /// Root 1 as the ceremony signs it is self-signed and grants the signing
-    /// key the targets and timestamp roles: a repository that key signs is one
-    /// a machine pinning that root accepts.
+    /// Root 1 as the ceremony signs it is self-signed.
     #[test]
-    fn the_ceremonys_root_is_self_signed_and_grants_the_signing_key() {
+    fn the_ceremonys_root_is_self_signed() {
         let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
         assert_eq!(self_signed(&first).map(|r| r.version), Ok(1));
+    }
+
+    /// Root 1 as the ceremony signs it grants the signing key the targets and
+    /// timestamp roles: a repository that key signs is one a machine pinning
+    /// that root accepts.
+    #[test]
+    fn the_ceremonys_root_accepts_what_the_signing_key_signs() {
+        let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
         let mut repo = Repo::default();
         repo.publish(1, &targets(1, vec![item(3, ARCHIVE)]), 2);
         let image = Held { root: &first, timestamp: None, targets: None };
         refresh(&mut repo, image, None, NOW).expect("targets and timestamp the signing key signed");
+    }
+
+    /// Root 1 as the ceremony signs it gives its root key the root role
+    /// alone: a timestamp that key signs is refused.
+    #[test]
+    fn the_ceremonys_root_refuses_a_timestamp_the_root_key_signs() {
+        let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
         let mut by_root = Repo::default();
         by_root.publish(1, &targets(1, vec![item(3, ARCHIVE)]), 1);
+        let image = Held { root: &first, timestamp: None, targets: None };
         assert!(matches!(
             refused(refresh(&mut by_root, image, None, NOW)),
             Refused::Threshold { role: Role::Timestamp, first: Some(SigRefused::NotTheRolesKey), .. }
@@ -1700,12 +1714,16 @@ mod tests {
         );
     }
 
-    /// A public line reads back as its key, and nothing but the two words of
-    /// an Ed25519 one does.
+    /// A public line reads back as its key.
     #[test]
-    fn a_public_line_names_its_key_and_nothing_else_reads() {
+    fn a_public_line_reads_back_as_its_key() {
+        assert_eq!(parse_public_line(&public_line(&public(1))), Some(public(1)));
+    }
+
+    /// Nothing but the two words of an Ed25519 public line reads as a key.
+    #[test]
+    fn a_line_that_is_not_an_ed25519_public_line_is_refused() {
         let line = public_line(&public(1));
-        assert_eq!(parse_public_line(&line), Some(public(1)));
         let blob = line.split(' ').nth(1).unwrap();
         for bent in [format!("{line} comment"), format!("ssh-rsa {blob}"), format!(" {line}"), blob.to_string()] {
             assert_eq!(parse_public_line(&bent), None, "{bent:?}");

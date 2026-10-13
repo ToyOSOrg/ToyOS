@@ -7,17 +7,16 @@
 //! toyos-root sign --key <key file> --signing <public line file> --out <root.1.txt>
 //! ```
 //!
-//! `new` mints the root key into a file that must not exist yet: its seed in
-//! 64 hex digits and a newline, as the build's other key files hold one. It
-//! prints the key's fingerprint and public line. `sign` writes root 1
+//! `new` mints the root key, `0600`, into a file that must not exist yet: its
+//! seed as `toyos_update::sig::seed_text` writes one. It prints the key's
+//! fingerprint and public line. `sign` writes root 1
 //! (`toyos_update::repo::render::first_root`): the root key alone holds the
 //! root role and the signing key, named by the public line
 //! `cargo run -- --repo-signing-key-new` printed, the timestamp and targets
 //! roles, each at threshold 1, expiring a year from the machine's clock. It
 //! reads root 1 back as self-signed before it writes it, and prints it with
-//! both fingerprints. The key file's mode is not checked: what guards it is
-//! the stick's custody, and a check would bind the tool to one kind of
-//! filesystem and host.
+//! both fingerprints. It builds for a Unix triple, which mints the key
+//! `0600`.
 //!
 //! **The ceremony.** The owner brings a machine that is offline for good, two
 //! USB sticks A and B for the root key, formatted on that machine, and a third,
@@ -28,12 +27,16 @@
 //!       signing key at `~/.config/toyos/repo-signing-key` (`0600`), prints
 //!       its fingerprint, and writes its public line to the stick. Write the
 //!       fingerprint on paper.
-//!    2. `cargo build --release -p toyos-root --target <the offline machine's
-//!       triple>`, and copy `target/<triple>/release/toyos-root` to C.
+//!    2. `cargo build --release -p toyos-root --target aarch64-apple-darwin`
+//!       on this Mac, for an offline Mac of the same macOS and architecture,
+//!       and copy `target/aarch64-apple-darwin/release/toyos-root` to C. That
+//!       path is the measured one; a build for any other offline triple is
+//!       unmeasured.
 //! 2. Offline.
 //!    1. `date -u`: the clock must say today, since root 1 expires a year from
 //!       it.
-//!    2. `toyos-root new <A>/root-key`. Write its fingerprint on the paper.
+//!    2. `toyos-root new <A>/root-key` mints the root key `0600`. Write its
+//!       fingerprint on the paper.
 //!    3. `cp <A>/root-key <B>/root-key && cmp <A>/root-key <B>/root-key`.
 //!    4. `toyos-root sign --key <A>/root-key --signing <C>/signing.pub --out
 //!       <C>/root.1.txt`. Both fingerprints it prints must be the paper's,
@@ -51,6 +54,7 @@
 //! machine holding root 1 is held to its keys until they are.
 
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,8 +89,7 @@ fn main() {
 fn new(path: &Path) -> Result<String, String> {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).map_err(|e| format!("the operating system's randomness: {e}"))?;
-    let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
-    write_new(path, format!("{hex}\n").as_bytes())?;
+    write_new(path, toyos_update::sig::seed_text(&seed).as_bytes(), 0o600)?;
     let public = toyos_update::sig::public_of(&seed);
     Ok(format!("root key {}\n{}\n", repo::fingerprint(&public), repo::public_line(&public)))
 }
@@ -95,8 +98,8 @@ fn new(path: &Path) -> Result<String, String> {
 /// into `out`, which must not exist.
 fn sign(key: &Path, signing: &Path, out: &Path, now: u64) -> Result<String, String> {
     let text = std::fs::read_to_string(key).map_err(|e| format!("{}: {e}", key.display()))?;
-    let seed = seed_of_hex(text.strip_suffix('\n').unwrap_or(&text))
-        .ok_or_else(|| format!("{} is not 64 hex digits, which `toyos-root new` writes", key.display()))?;
+    let seed = toyos_update::sig::seed_of_text(&text)
+        .ok_or_else(|| format!("{} is not the 64 hex digits and newline `toyos-root new` writes", key.display()))?;
     let line = std::fs::read_to_string(signing).map_err(|e| format!("{}: {e}", signing.display()))?;
     let signing_key: PublicKey = repo::parse_public_line(line.strip_suffix('\n').unwrap_or(&line))
         .ok_or_else(|| format!("{} is not one `ssh-ed25519 <base64>` line", signing.display()))?;
@@ -106,7 +109,7 @@ fn sign(key: &Path, signing: &Path, out: &Path, now: u64) -> Result<String, Stri
     }
     let bytes = repo::render::first_root(&seed, &signing_key, now + LIFE);
     let root = repo::self_signed(&bytes).expect("the root this signed is self-signed");
-    write_new(out, &bytes)?;
+    write_new(out, &bytes, 0o644)?;
     Ok(format!(
         "{}root key {}\nsigning key {}\nexpires {}\n",
         String::from_utf8(bytes).expect("a root is ASCII"),
@@ -116,100 +119,104 @@ fn sign(key: &Path, signing: &Path, out: &Path, now: u64) -> Result<String, Stri
     ))
 }
 
-/// `bytes` written to `path` and synced, where no file is there.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| match e.kind() {
+/// `bytes` written to `path` at `mode` and synced, where no file is there.
+fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => format!("{} already exists, and it is not replaced", path.display()),
         _ => format!("{}: {e}", path.display()),
     })?;
     file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn seed_of_hex(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 || !text.is_ascii() {
-        return None;
-    }
-    let mut seed = [0u8; 32];
-    for (i, byte) in seed.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(seed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo::{render, Held, Item, Mirror, Role, Snapshot, Targets, Timestamp};
+    use std::os::unix::fs::PermissionsExt;
     use toyos_tmpdir::TempDir;
 
     /// 2026-10-09T00:00:00Z.
     const NOW: u64 = 1_791_504_000;
     const SIGNING: [u8; 32] = [3; 32];
 
-    struct Repo(Vec<(String, Vec<u8>)>);
-
-    impl Mirror for Repo {
-        fn fetch(&mut self, name: &str, cap: usize) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.0.iter().find(|(n, _)| n == name).map(|(_, b)| b[..b.len().min(cap + 1)].to_vec()))
-        }
+    /// A minted root key, a signing line naming [`SIGNING`], and where root 1
+    /// goes, with what `new` printed.
+    struct Ceremony {
+        _dir: TempDir,
+        key: std::path::PathBuf,
+        signing: std::path::PathBuf,
+        out: std::path::PathBuf,
+        said: String,
     }
 
-    /// A targets and the timestamp naming it, both signed by `seed`.
-    fn repository(seed: &[u8; 32]) -> Repo {
-        let sha256 = toyos_update::sha256(b"archive");
-        let item = Item {
-            name: "gbae".into(),
-            target: "x86_64-unknown-toyos".into(),
-            sequence: 1,
-            version: "1.0".into(),
-            url: "gbae-1-x86_64-unknown-toyos.tar.gz".into(),
-            length: 7,
-            sha256,
-        };
-        let body = render::targets(&Targets { version: 1, expires: NOW + 86_400, items: vec![item] });
-        let targets = (body.clone() + &render::signature(seed, Role::Targets, body.as_bytes())).into_bytes();
-        let snapshot = Snapshot { version: 1, length: targets.len() as u64, sha256: toyos_update::sha256(&targets) };
-        let body = render::timestamp(&Timestamp { version: 1, expires: NOW + 86_400, targets: snapshot });
-        let timestamp = (body.clone() + &render::signature(seed, Role::Timestamp, body.as_bytes())).into_bytes();
-        Repo(vec![("targets.1.txt".into(), targets), ("timestamp.txt".into(), timestamp)])
-    }
-
-    /// **The ceremony's output is a root 1 a machine can pin**: minted and
-    /// signed through the two commands, it reads back self-signed under its
-    /// root key, and a repository the signing key signs is one a machine
-    /// pinning it accepts, where one the root key signs is not.
-    #[test]
-    fn a_root_one_it_signs_is_self_signed_and_grants_the_signing_key() {
+    fn ceremony() -> Ceremony {
         let dir = TempDir::new("toyos-root");
         let (key, signing, out) = (dir.path().join("root-key"), dir.path().join("signing.pub"), dir.path().join("root.1.txt"));
         let said = new(&key).expect("minted");
-        assert!(new(&key).unwrap_err().ends_with("already exists, and it is not replaced"));
         std::fs::write(&signing, format!("{}\n", repo::public_line(&toyos_update::sig::public_of(&SIGNING)))).unwrap();
-        let printed = sign(&key, &signing, &out, NOW).expect("signed");
-        let bytes = std::fs::read(&out).unwrap();
-        let root = repo::self_signed(&bytes).expect("self-signed");
-        assert_eq!((root.version, root.expires), (1, NOW + LIFE));
-        let root_fingerprint = said.lines().next().unwrap().strip_prefix("root key ").unwrap();
-        assert!(printed.contains(&format!("root key {root_fingerprint}\n")), "{printed}");
-        assert!(sign(&key, &signing, &out, NOW).unwrap_err().ends_with("already exists, and it is not replaced"));
-
-        let image = Held { root: &bytes, timestamp: None, targets: None };
-        repo::refresh(&mut repository(&SIGNING), image, None, NOW).expect("what the signing key signs");
-        let seed = seed_of_hex(std::fs::read_to_string(&key).unwrap().trim_end()).unwrap();
-        assert!(repo::refresh(&mut repository(&seed), image, None, NOW).is_err(), "the root key signs roots alone");
+        Ceremony { _dir: dir, key, signing, out, said }
     }
 
-    /// A signing line that is not one Ed25519 public line, or that names the
-    /// root key itself, is refused, and no root is written.
+    /// The root key is minted `0600`.
     #[test]
-    fn a_signing_line_that_is_not_another_key_is_refused() {
-        let dir = TempDir::new("toyos-root");
-        let (key, signing, out) = (dir.path().join("root-key"), dir.path().join("signing.pub"), dir.path().join("root.1.txt"));
-        let said = new(&key).unwrap();
-        std::fs::write(&signing, said.lines().nth(1).unwrap()).unwrap();
-        assert!(sign(&key, &signing, &out, NOW).unwrap_err().ends_with("names the root key, which holds the root role alone"));
-        std::fs::write(&signing, "ssh-ed25519 AAAA comment\n").unwrap();
-        assert!(sign(&key, &signing, &out, NOW).unwrap_err().ends_with("is not one `ssh-ed25519 <base64>` line"));
-        assert!(!out.exists(), "a refused sign wrote no root");
+    fn the_root_key_is_minted_0600() {
+        let c = ceremony();
+        assert_eq!(std::fs::metadata(&c.key).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// A second `new` over the key is refused, and the key is left.
+    #[test]
+    fn new_over_a_key_is_refused_and_leaves_it() {
+        let c = ceremony();
+        let before = std::fs::read(&c.key).unwrap();
+        assert!(new(&c.key).unwrap_err().ends_with("already exists, and it is not replaced"));
+        assert_eq!(std::fs::read(&c.key).unwrap(), before);
+    }
+
+    /// `sign` writes the ceremony's root 1 for the minted key and the signing
+    /// line, expiring a year from the clock it is given.
+    #[test]
+    fn sign_writes_the_ceremonys_root_one_expiring_a_year_on() {
+        let c = ceremony();
+        sign(&c.key, &c.signing, &c.out, NOW).expect("signed");
+        let seed = toyos_update::sig::seed_of_text(&std::fs::read_to_string(&c.key).unwrap()).unwrap();
+        let expected = repo::render::first_root(&seed, &toyos_update::sig::public_of(&SIGNING), NOW + LIFE);
+        assert_eq!(std::fs::read(&c.out).unwrap(), expected);
+    }
+
+    /// The root key fingerprint `sign` prints is the one `new` printed.
+    #[test]
+    fn sign_prints_the_fingerprint_new_printed() {
+        let c = ceremony();
+        let printed = sign(&c.key, &c.signing, &c.out, NOW).expect("signed");
+        let minted = c.said.lines().next().unwrap().strip_prefix("root key ").unwrap();
+        assert!(printed.contains(&format!("\nroot key {minted}\n")), "{printed}");
+    }
+
+    /// `sign` over a root 1 already written is refused.
+    #[test]
+    fn sign_over_an_existing_root_is_refused() {
+        let c = ceremony();
+        std::fs::write(&c.out, b"held").unwrap();
+        assert!(sign(&c.key, &c.signing, &c.out, NOW).unwrap_err().ends_with("already exists, and it is not replaced"));
+    }
+
+    /// A signing line naming the root key itself is refused, and no root is
+    /// written.
+    #[test]
+    fn a_signing_line_naming_the_root_key_is_refused() {
+        let c = ceremony();
+        std::fs::write(&c.signing, c.said.lines().nth(1).unwrap()).unwrap();
+        assert!(sign(&c.key, &c.signing, &c.out, NOW).unwrap_err().ends_with("names the root key, which holds the root role alone"));
+        assert!(!c.out.exists(), "a refused sign wrote no root");
+    }
+
+    /// A signing line that is not one Ed25519 public line is refused, and no
+    /// root is written.
+    #[test]
+    fn a_signing_line_that_is_not_one_public_line_is_refused() {
+        let c = ceremony();
+        std::fs::write(&c.signing, "ssh-ed25519 AAAA comment\n").unwrap();
+        assert!(sign(&c.key, &c.signing, &c.out, NOW).unwrap_err().ends_with("is not one `ssh-ed25519 <base64>` line"));
+        assert!(!c.out.exists(), "a refused sign wrote no root");
     }
 }

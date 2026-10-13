@@ -4,10 +4,11 @@
 //!
 //! **It signs with the repository's signing key and nothing else, and mints no
 //! root.** Every root is the ceremony's (`build/root`): the publisher receives
-//! them as `roots/root.<N>.txt` beside its manifest, copies each the repository
-//! lacks, never rewrites one it holds, and refuses by name a newest root that
-//! does not grant its key the targets and timestamp roles. Root 1 is held to
-//! [`repo::self_signed`], since a machine trusts the root it pins unchecked.
+//! them as `roots/root.<N>.txt` beside its manifest, from root 1 with no gap
+//! and nothing else there, copies each the repository lacks, and never
+//! rewrites one it holds. Root 1 is held to [`repo::self_signed`], since a
+//! machine trusts the root it pins unchecked; a root that does not grant the
+//! key is refused by the read-back.
 //!
 //! **Every file sits at the repository's top level**, under a name of `a-z 0-9
 //! . _ -`, which a GitHub release's flat asset namespace keeps as it is: an
@@ -46,7 +47,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toyos_update::repo::{self, render, Held, Item, Mirror, Role, Root, Snapshot, Targets, Timestamp};
 
-use crate::signing::Key;
+use crate::signing::RepoKey;
 
 const DAY: u64 = 86_400;
 /// How long a targets is good for: the owner signs one at least this often.
@@ -87,7 +88,7 @@ pub struct Published {
 
 /// Publish what `manifest` lists into `dir`, signed by `key`, at `now`, with
 /// the roots under [`ROOTS`] beside `manifest`.
-pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Published, String> {
+pub fn publish(manifest: &Path, dir: &Path, key: &RepoKey, now: u64) -> Result<Published, String> {
     let text = fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let rows: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let beside = manifest.parent().unwrap_or(Path::new("."));
@@ -113,14 +114,6 @@ pub fn publish(manifest: &Path, dir: &Path, key: &Key, now: u64) -> Result<Publi
     };
     repo::self_signed(&first).map_err(|why| format!("root 1 is not self-signed: {why}"))?;
     let (newest, _) = newest_root(&mut Overlay { dir, new: &new })?.expect("root 1, read above");
-    let id = repo::key_id(&key.public());
-    if ![Role::Targets, Role::Timestamp].iter().all(|&role| newest.grant(role).keys.contains(&id)) {
-        return Err(format!(
-            "root {} does not grant {} the targets and timestamp roles, and a publish signs with no other key",
-            newest.version,
-            key.fingerprint()
-        ));
-    }
 
     let mut items = Vec::new();
     for row in &rows.package {
@@ -218,7 +211,7 @@ pub fn pruned(files: &[String], newest: &Targets, previous: Option<&Targets>) ->
     gone
 }
 
-fn signed(body: String, role: Role, key: &Key) -> Vec<u8> {
+fn signed(body: String, role: Role, key: &RepoKey) -> Vec<u8> {
     let line = key.sign_document(role, body.as_bytes());
     (body + &line).into_bytes()
 }
@@ -232,16 +225,30 @@ fn read_if_there(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Every root under `dir`, from root 1 while the next is there.
+/// Every root under `dir`, from root 1 while the next is there; any other
+/// file there, a root past a gap among them, is refused by name.
 fn roots(dir: &Path) -> Result<Vec<(u64, Vec<u8>)>, String> {
     let mut out = Vec::new();
-    for version in 1.. {
-        match read_if_there(&dir.join(repo::root_file(version)))? {
-            Some(bytes) => out.push((version, bytes)),
-            None => return Ok(out),
+    while let Some(bytes) = read_if_there(&dir.join(repo::root_file(out.len() as u64 + 1)))? {
+        out.push((out.len() as u64 + 1, bytes));
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    for entry in entries {
+        let name = entry.map_err(|e| format!("{}: {e}", dir.display()))?.file_name();
+        if !(1..=out.len() as u64).any(|version| name == *repo::root_file(version)) {
+            return Err(format!(
+                "{} holds {}, which is not a root the walk from root 1 reaches: it stops before {}",
+                dir.display(),
+                name.to_string_lossy(),
+                repo::root_file(out.len() as u64 + 1)
+            ));
         }
     }
-    unreachable!("a walk that ends at the first absent root")
+    Ok(out)
 }
 
 /// The newest root `overlay` holds, walked from root 1 as the client walks,
@@ -343,13 +350,14 @@ mod tests {
     /// The ceremony's root key, for these tests.
     const ROOT_KEY: [u8; 32] = [9; 32];
     const TRIPLE: &str = "x86_64-unknown-toyos";
+    const ROWS: &[(&str, u64, &str, &[u8])] = &[("gbae", 3, "gbae-v1.tar.gz", b"gbae bytes")];
 
-    fn key() -> Key {
-        Key::throwaway_from([3; 32])
+    fn key() -> RepoKey {
+        RepoKey::from_seed([3; 32])
     }
 
     /// Root 1 as the ceremony signs it, granting `signing`.
-    fn first_root(signing: &Key) -> Vec<u8> {
+    fn first_root(signing: &RepoKey) -> Vec<u8> {
         render::first_root(&ROOT_KEY, &signing.public(), NOW + 365 * DAY)
     }
 
@@ -422,54 +430,116 @@ mod tests {
         assert_eq!(gbae(&second.targets).sequence, 4);
     }
 
-    /// **The publisher signs only under a root that grants its key.** A
-    /// received root that grants another key the targets and timestamp roles,
-    /// or one its own root key did not sign, is refused by name, and nothing
-    /// is written: no root, no archive.
+    /// A received root 1 that grants another key the targets and timestamp
+    /// roles is refused by the read-back, before anything is written.
     #[test]
-    fn a_root_that_does_not_grant_the_key_is_refused_and_no_root_is_written() {
+    fn a_root_that_does_not_grant_the_key_is_refused_and_nothing_is_written() {
         let src = TempDir::new("publish-src");
         let out = TempDir::new("publish-repo");
-        let rows = [("gbae", 3, "gbae-v1.tar.gz", &b"gbae bytes"[..])];
-        let other = first_root(&Key::throwaway_from([4; 32]));
-        let refused = publish(&manifest(src.path(), &other, &rows), out.path(), &key(), NOW);
-        let why = format!("root 1 does not grant {} the targets and timestamp roles", key().fingerprint());
-        assert!(refused.as_ref().unwrap_err().starts_with(&why), "{refused:?}");
-
-        let mut forged = render::root(&Root::parse(&first_root(&key())).unwrap());
-        forged += &key().sign_document(Role::Root, forged.as_bytes());
-        let refused = publish(&manifest(src.path(), forged.as_bytes(), &rows), out.path(), &key(), NOW);
-        assert!(refused.as_ref().unwrap_err().starts_with("root 1 is not self-signed: "), "{refused:?}");
-        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0, "a refused publish wrote nothing");
+        let other = first_root(&RepoKey::from_seed([4; 32]));
+        let refused = publish(&manifest(src.path(), &other, ROWS), out.path(), &key(), NOW);
+        assert!(refused.as_ref().unwrap_err().contains("refuses what this publish would leave"), "{refused:?}");
+        assert_eq!(listing(out.path()), Vec::<String>::new(), "a refused publish wrote nothing");
     }
 
+    /// A received root 1 its own root key did not sign is refused by name,
+    /// before anything is written.
     #[test]
-    fn a_publish_that_would_move_anything_back_is_refused_by_name() {
+    fn a_root_one_that_is_not_self_signed_is_refused_and_nothing_is_written() {
+        let src = TempDir::new("publish-src");
+        let out = TempDir::new("publish-repo");
+        let mut forged = render::root(&Root::parse(&first_root(&key())).unwrap());
+        forged += &key().sign_document(Role::Root, forged.as_bytes());
+        let refused = publish(&manifest(src.path(), forged.as_bytes(), ROWS), out.path(), &key(), NOW);
+        assert!(refused.as_ref().unwrap_err().starts_with("root 1 is not self-signed: "), "{refused:?}");
+        assert_eq!(listing(out.path()), Vec::<String>::new(), "a refused publish wrote nothing");
+    }
+
+    /// A received root past a gap in `roots/` is refused by name, before
+    /// anything is written.
+    #[test]
+    fn a_root_past_a_gap_in_roots_is_refused_and_nothing_is_written() {
+        let src = TempDir::new("publish-src");
+        let out = TempDir::new("publish-repo");
+        let m = manifest(src.path(), &first_root(&key()), ROWS);
+        fs::write(src.path().join(ROOTS).join("root.3.txt"), first_root(&key())).unwrap();
+        let refused = publish(&m, out.path(), &key(), NOW);
+        assert!(refused.as_ref().unwrap_err().ends_with("holds root.3.txt, which is not a root the walk from root 1 reaches: it stops before root.2.txt"), "{refused:?}");
+        assert_eq!(listing(out.path()), Vec::<String>::new(), "a refused publish wrote nothing");
+    }
+
+    /// One publish of [`ROWS`] under root 1, and what it left.
+    fn published_once() -> (TempDir, TempDir, Vec<u8>, Vec<String>) {
         let src = TempDir::new("publish-src");
         let out = TempDir::new("publish-repo");
         let root = first_root(&key());
-        publish(&manifest(src.path(), &root, &[("gbae", 3, "gbae-v1.tar.gz", b"gbae bytes")]), out.path(), &key(), NOW).unwrap();
+        publish(&manifest(src.path(), &root, ROWS), out.path(), &key(), NOW).unwrap();
         let before = listing(out.path());
-        let timestamp = read(out.path(), "timestamp.txt");
+        (src, out, root, before)
+    }
 
-        // The client's floors, held as the directory holds them.
-        let (name, target, holder) = (String::from("gbae"), String::from(TRIPLE), repo::Holder::Machine);
+    /// A refused publish left `out` holding what it held, timestamp included.
+    fn left_as_it_was(out: &Path, before: &[String], timestamp: &[u8]) {
+        assert_eq!((listing(out), read(out, "timestamp.txt")), (before.to_vec(), timestamp.to_vec()), "a refused publish wrote nothing");
+    }
+
+    /// A sequence below the floor a machine holds is refused by the
+    /// client's name for it, and nothing is written.
+    #[test]
+    fn a_lower_sequence_is_refused_by_name() {
+        let (src, out, root, before) = published_once();
+        let timestamp = read(out.path(), "timestamp.txt");
         let lower = publish(&manifest(src.path(), &root, &[("gbae", 2, "gbae-v0.tar.gz", b"old")]), out.path(), &key(), NOW);
-        let why = repo::Refused::Sequence { name: name.clone(), target: target.clone(), sequence: 2, floor: 3, holder };
+        let why = repo::Refused::Sequence { name: "gbae".into(), target: TRIPLE.into(), sequence: 2, floor: 3, holder: repo::Holder::Machine };
         assert!(lower.as_ref().unwrap_err().ends_with(&why.to_string()), "{lower:?}");
+        left_as_it_was(out.path(), &before, &timestamp);
+    }
+
+    /// An equal sequence naming other bytes is refused by the client's name
+    /// for it, and nothing is written.
+    #[test]
+    fn an_equal_sequence_with_other_bytes_is_refused_by_name() {
+        let (src, out, root, before) = published_once();
+        let timestamp = read(out.path(), "timestamp.txt");
         let same = publish(&manifest(src.path(), &root, &[("gbae", 3, "gbae-v1b.tar.gz", b"other")]), out.path(), &key(), NOW);
-        let why = repo::Refused::Reissued { name, target, sequence: 3, holder };
+        let why = repo::Refused::Reissued { name: "gbae".into(), target: TRIPLE.into(), sequence: 3, holder: repo::Holder::Machine };
         assert!(same.as_ref().unwrap_err().ends_with(&why.to_string()), "{same:?}");
+        left_as_it_was(out.path(), &before, &timestamp);
+    }
+
+    /// A manifest row with a field the format does not name is refused by
+    /// that field's name, and nothing is written.
+    #[test]
+    fn a_manifest_field_the_format_does_not_name_is_refused() {
+        let (src, out, _, before) = published_once();
+        let timestamp = read(out.path(), "timestamp.txt");
         let unknown = src.path().join("unknown.toml");
         fs::write(&unknown, "[[package]]\nname = \"gbae\"\nowner = \"me\"\n").unwrap();
         assert!(publish(&unknown, out.path(), &key(), NOW).unwrap_err().contains("owner"));
+        left_as_it_was(out.path(), &before, &timestamp);
+    }
+
+    /// A package name the client refuses is refused by the read-back, and
+    /// nothing is written.
+    #[test]
+    fn a_name_the_client_refuses_is_refused_by_the_read_back() {
+        let (src, out, root, before) = published_once();
+        let timestamp = read(out.path(), "timestamp.txt");
         let bad_name = publish(&manifest(src.path(), &root, &[("Gbae", 1, "g.tar.gz", b"g")]), out.path(), &key(), NOW);
         assert!(bad_name.as_ref().unwrap_err().contains("refuses what this publish would leave"), "{bad_name:?}");
-        let bent = manifest(src.path(), &first_root(&Key::throwaway_from([4; 32])), &[("gbae", 4, "gbae-v4.tar.gz", b"new")]);
+        left_as_it_was(out.path(), &before, &timestamp);
+    }
+
+    /// A received root 1 other than the one the repository holds is refused
+    /// by name, and nothing is written.
+    #[test]
+    fn a_received_root_that_would_rewrite_a_held_one_is_refused() {
+        let (src, out, _, before) = published_once();
+        let timestamp = read(out.path(), "timestamp.txt");
+        let bent = manifest(src.path(), &first_root(&RepoKey::from_seed([4; 32])), &[("gbae", 4, "gbae-v4.tar.gz", b"new")]);
         let rewritten = publish(&bent, out.path(), &key(), NOW);
         assert!(rewritten.as_ref().unwrap_err().contains("holds another root.1.txt than"), "{rewritten:?}");
-
-        assert_eq!((listing(out.path()), read(out.path(), "timestamp.txt")), (before, timestamp), "a refused publish wrote nothing");
+        left_as_it_was(out.path(), &before, &timestamp);
     }
 
     /// A timestamp on disk naming targets 2^64 − 1 leaves no next version:

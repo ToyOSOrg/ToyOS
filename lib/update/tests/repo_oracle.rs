@@ -98,15 +98,25 @@ fn a_repository_ssh_keygen_signed_is_accepted_and_a_bent_one_is_not() {
     );
 }
 
-/// The root OpenSSH signed is self-signed, and its key's public line and
-/// fingerprint are OpenSSH's: the line is the fixture's own words, and the
-/// fingerprint is what `ssh-keygen -l` printed over that line.
+/// The root OpenSSH signed is self-signed.
 #[test]
-fn the_fixtures_root_is_self_signed_and_its_key_reads_as_openssh_names_it() {
-    let root = repo::self_signed(ROOT).expect("the root OpenSSH signed");
-    let [key] = root.keys[..] else { panic!("the fixture declares one key") };
+fn the_fixtures_root_is_self_signed() {
+    assert_eq!(repo::self_signed(ROOT).map(|r| r.version), Ok(1));
+}
+
+/// The fixture's key renders as the public line the fixture's own words
+/// carry.
+#[test]
+fn the_fixtures_key_renders_as_the_line_it_carries() {
+    let [key] = repo::Root::parse(ROOT).unwrap().keys[..] else { panic!("the fixture declares one key") };
     let line = repo::public_line(&key);
     assert!(String::from_utf8_lossy(ROOT).contains(&format!(" {line}\n")), "{line}");
-    assert_eq!(repo::parse_public_line(&line), Some(key));
+}
+
+/// The fixture's key's fingerprint is what `ssh-keygen -l` printed over its
+/// public line.
+#[test]
+fn the_fixtures_key_has_the_fingerprint_ssh_keygen_printed() {
+    let [key] = repo::Root::parse(ROOT).unwrap().keys[..] else { panic!("the fixture declares one key") };
     assert_eq!(repo::fingerprint(&key), "SHA256:bdWoF+LpZIGawveHnzj/Kd4UofKmRTiHbB9Dk4KaAxc");
 }
