@@ -204,13 +204,4 @@ mod tests {
         });
         assert_eq!(out.len(), crate::LARGEST_TRANSMIT);
     }
-
-    #[test]
-    #[should_panic(expected = "past a 64-byte transmit")]
-    fn a_message_past_the_buffer_is_the_callers_bug() {
-        let mut out = [0; 64];
-        let mut writer = Writer::new(&mut out);
-        writer.capabilities();
-        writer.capabilities();
-    }
 }

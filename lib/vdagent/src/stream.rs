@@ -5,11 +5,12 @@
 //! **Only a chunk past [`MAX_CHUNK`] ends the decode** ([`Unframed`]): no byte
 //! after it can be placed. Everything else is refused by name and the next
 //! message still decodes ([`Refusal`]): a chunk for another port is skipped, a
-//! message of another protocol, past [`MAX_DATA`] or of a size its type does
-//! not have is counted off.
+//! message of another protocol, past [`MAX_DATA`], of a type the agent does not
+//! take or of a size its type does not have is refused at its header, and its
+//! data counted off unread.
 //!
-//! **What is buffered grows with the bytes that arrive**, never to a size a
-//! header declares.
+//! **What is buffered grows with the bytes that arrive**, at most to twice
+//! them and never past the size the header declares.
 //!
 //! Each type's size is its layout in `vd_agent.h` without the selection prefix,
 //! which the agent never announces: QEMU 11.1.1 writes the prefix only to a
@@ -88,12 +89,22 @@ impl core::fmt::Display for Unframed {
     }
 }
 
+/// A type the agent takes, its size judged against its layout.
+#[derive(Clone, Copy)]
+enum Kind {
+    Capabilities,
+    Grab,
+    Request,
+    Clipboard,
+    Release,
+}
+
 /// Where the decode stands in the current message.
 enum Body {
     /// Its header, `filled` bytes of it.
     Header { filled: usize },
     /// Its data, kept: `left` bytes still to come.
-    Keep { protocol: u32, kind: u32, data: Vec<u8>, left: usize },
+    Keep { kind: Kind, data: Vec<u8>, left: usize },
     /// Its data, counted off: `left` bytes still to come.
     Skip { left: usize },
 }
@@ -177,6 +188,11 @@ impl Decoder {
                 }
                 Body::Keep { data, left, .. } => {
                     let take = (*left).min(bytes.len());
+                    // Doubling, as `Vec` grows, but never past what is declared.
+                    if data.capacity() - data.len() < take {
+                        let want = (data.len() * 2).max(take).min(data.len() + *left);
+                        data.reserve_exact(want - data.len());
+                    }
                     data.extend_from_slice(&bytes[..take]);
                     *left -= take;
                     bytes = &bytes[take..];
@@ -196,56 +212,70 @@ impl Decoder {
         }
     }
 
-    /// A whole message header is in: what its data is to be.
+    /// A whole message header is in: what its data is to be. Every refusal is
+    /// made here, and the data of a refused message is counted off unread.
     fn begin(&self, each: &mut impl FnMut(Result<Message, Refusal>)) -> Body {
         let protocol = word(&self.header, 0);
         let kind = word(&self.header, 4);
         let size = word(&self.header, 16);
-        let left = match Untrusted::new(size).at_most(MAX_DATA as u64) {
-            Ok(left) => left as usize,
-            Err(_) => {
-                each(Err(Refusal::TooLarge { kind, size }));
-                return Body::Skip { left: size as usize };
+        match admit(protocol, kind, size) {
+            Ok(kind) => Body::Keep { kind, data: Vec::new(), left: size as usize },
+            Err(refusal) => {
+                each(Err(refusal));
+                Body::Skip { left: size as usize }
             }
-        };
-        Body::Keep { protocol, kind, data: Vec::new(), left }
+        }
     }
 
     /// The current message is whole: decode it, and start the next.
     fn finish(&mut self, each: &mut impl FnMut(Result<Message, Refusal>)) {
-        let Body::Keep { protocol, kind, data, .. } = core::mem::replace(&mut self.body, Body::Header { filled: 0 })
-        else {
+        let Body::Keep { kind, data, .. } = core::mem::replace(&mut self.body, Body::Header { filled: 0 }) else {
             unreachable!("a message is finished only while its data is kept")
         };
-        if protocol != wire::PROTOCOL {
-            return each(Err(Refusal::Protocol { protocol }));
-        }
-        each(message(kind, data));
+        each(Ok(message(kind, data)));
     }
 }
 
-/// A whole message's data, as its type lays it out.
-fn message(kind: u32, data: Vec<u8>) -> Result<Message, Refusal> {
-    let size = data.len();
-    let refused = Err(Refusal::Size { kind, size: size as u32 });
+/// The type of a message of `protocol` declaring `size` bytes, where the agent
+/// takes it and `size` is one its layout has.
+fn admit(protocol: u32, kind: u32, size: u32) -> Result<Kind, Refusal> {
+    if protocol != wire::PROTOCOL {
+        return Err(Refusal::Protocol { protocol });
+    }
+    if Untrusted::new(size).at_most(MAX_DATA as u64).is_err() {
+        return Err(Refusal::TooLarge { kind, size });
+    }
+    let len = size as usize;
+    let (admitted, fits) = match kind {
+        wire::ANNOUNCE_CAPABILITIES => (Kind::Capabilities, len >= 8),
+        wire::GRAB => (Kind::Grab, len >= 4 && len.is_multiple_of(4) && (len - 4) / 4 <= MAX_GRAB_TYPES),
+        wire::REQUEST => (Kind::Request, len == 4),
+        wire::CLIPBOARD => (Kind::Clipboard, len >= 4),
+        wire::RELEASE => (Kind::Release, len == 0),
+        kind => return Err(Refusal::Kind { kind }),
+    };
+    match fits {
+        true => Ok(admitted),
+        false => Err(Refusal::Size { kind, size }),
+    }
+}
+
+/// A whole message's data, whose size [`admit`] held to its type's layout.
+fn message(kind: Kind, data: Vec<u8>) -> Message {
     match kind {
-        wire::ANNOUNCE_CAPABILITIES if size >= 8 => {
-            Ok(Message::Capabilities { request: word(&data, 0) != 0, caps: word(&data, 4) })
-        }
-        wire::GRAB if size >= 4 && size.is_multiple_of(4) && (size - 4) / 4 <= MAX_GRAB_TYPES => Ok(Message::Grab {
+        Kind::Capabilities => Message::Capabilities { request: word(&data, 0) != 0, caps: word(&data, 4) },
+        Kind::Grab => Message::Grab {
             serial: word(&data, 0),
             types: data[4..].as_chunks::<4>().0.iter().map(|t| u32::from_le_bytes(*t)).collect(),
-        }),
-        wire::REQUEST if size == 4 => Ok(Message::Request { kind: word(&data, 0) }),
-        wire::CLIPBOARD if size >= 4 => {
+        },
+        Kind::Request => Message::Request { kind: word(&data, 0) },
+        Kind::Clipboard => {
             let clip = word(&data, 0);
             let mut data = data;
             data.drain(..4);
-            Ok(Message::Clipboard { kind: clip, data })
+            Message::Clipboard { kind: clip, data }
         }
-        wire::RELEASE if size == 0 => Ok(Message::Release),
-        wire::ANNOUNCE_CAPABILITIES | wire::GRAB | wire::REQUEST | wire::CLIPBOARD | wire::RELEASE => refused,
-        kind => Err(Refusal::Kind { kind }),
+        Kind::Release => Message::Release,
     }
 }
 
@@ -409,6 +439,36 @@ mod tests {
             vec![Ok(Message::Grab { serial: 0, types: vec![0; 16] })]
         );
         assert_eq!(decode(&host(wire::GRAB, &words(&[5]))).0, vec![Ok(Message::Grab { serial: 5, types: vec![] })]);
+    }
+
+    /// Only the header has arrived: a message the agent would refuse is named
+    /// before any of its data is buffered.
+    #[test]
+    fn a_refusal_is_named_at_its_header_before_its_data_arrives() {
+        for (protocol, kind, size, refusal) in [
+            (2, wire::REQUEST, 4, Refusal::Protocol { protocol: 2 }),
+            (1, wire::REQUEST, 1000, Refusal::Size { kind: wire::REQUEST, size: 1000 }),
+            (1, wire::RELEASE, 1000, Refusal::Size { kind: wire::RELEASE, size: 1000 }),
+            (1, wire::GRAB, 1000, Refusal::Size { kind: wire::GRAB, size: 1000 }),
+            (1, 1, 1000, Refusal::Kind { kind: 1 }),
+        ] {
+            let header = message_with(protocol, kind, size, &[]);
+            // A chunk declaring the whole message, of which only the header came.
+            let mut bytes = words(&[1, header.len() as u32 + size]);
+            bytes.extend(header);
+            assert_eq!(decode(&bytes), (vec![Err(refusal)], Ok(())), "type {kind}");
+        }
+    }
+
+    /// The largest message the bound admits, fed as QEMU 11.1.1 chunks it,
+    /// keeps no more than it declares.
+    #[test]
+    fn a_kept_message_buffers_no_more_than_it_declares() {
+        let mut data = words(&[wire::UTF8_TEXT]);
+        data.extend(vec![b'x'; crate::MAX_TEXT]);
+        let (out, _) = decode(&host(wire::CLIPBOARD, &data));
+        let [Ok(Message::Clipboard { data, .. })] = out.as_slice() else { panic!("{} messages", out.len()) };
+        assert!(data.capacity() <= MAX_DATA, "{} bytes held for {MAX_DATA} declared", data.capacity());
     }
 
     #[test]

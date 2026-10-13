@@ -33,6 +33,7 @@ use toyos_abi::syscall::PciId;
 use toyos_vdagent::control::{Control, Event};
 use toyos_vdagent::stream::{Decoder, Message};
 use toyos_vdagent::PORT_ID;
+use toyos_vdagent_bridge::sets::Sets;
 use toyos_vdagent_bridge::{Bridge, Effect};
 use window::watcher::{Watched, Watcher};
 
@@ -60,6 +61,7 @@ struct Agent {
     bridge: Bridge,
     decoder: Decoder,
     watcher: Watcher,
+    sets: Sets,
     /// The guest's end of the agent's port is open.
     open: bool,
 }
@@ -119,10 +121,16 @@ impl Agent {
         match effect {
             Effect::None => {}
             Effect::Guest(text) => {
-                self.watcher.set(text).unwrap_or_else(|why| panic!("vdagent: the compositor's clipboard: {why}"))
+                if let Some(text) = self.sets.set(text) {
+                    self.send(text);
+                }
             }
             Effect::Named(named) => say!("vdagent: {named}"),
         }
+    }
+
+    fn send(&mut self, text: String) {
+        self.watcher.set(text).unwrap_or_else(|why| panic!("vdagent: the compositor's clipboard: {why}"))
     }
 
     /// Every frame the compositor sent.
@@ -131,8 +139,14 @@ impl Agent {
             match self.watcher.poll() {
                 Ok(Watched::Idle) => return,
                 Ok(Watched::Committed) => {}
+                Ok(Watched::Answered) => {
+                    if let Some(text) = self.sets.answered() {
+                        self.send(text);
+                    }
+                }
                 Ok(Watched::Copy(text)) => {
                     say!("vdagent: a guest copy of {} bytes", text.len());
+                    self.sets.delivered();
                     let effect = self.bridge.copy(text);
                     self.apply(effect);
                 }
@@ -150,7 +164,7 @@ fn main() {
     let watcher = Watcher::connect(toyos_manifest::clipboard::PORT)
         .unwrap_or_else(|why| panic!("vdagent: the compositor's clipboard: {why}"));
     let mut channel = Channel::open(claim).unwrap_or_else(|why| panic!("vdagent: the function is not driven: {why}"));
-    let mut agent = Agent { bridge: Bridge::default(), decoder: Decoder::default(), watcher, open: false };
+    let mut agent = Agent { bridge: Bridge::default(), decoder: Decoder::default(), watcher, sets: Sets::default(), open: false };
 
     let poller = Poller::new(2);
     poller.watch(channel.claim(), READABLE, TOKEN_CLAIM);

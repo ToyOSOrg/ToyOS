@@ -2,14 +2,17 @@
 //!
 //! **One notification outstanding.** The watcher asks for the next copy, and
 //! a client's copy made while it has asked is sent to it at once; one made
-//! before is sent at its next ask. Only the latest unsent copy goes, so a
-//! client copying in a loop moves one and never fills the watcher's pipe.
+//! before is sent at its next ask, a copy made before any watcher came
+//! included. Only the latest unsent copy goes, so a client copying in a loop
+//! moves one and never fills the watcher's pipe.
 //!
-//! **A watcher's set lands only while its ask is outstanding**, judged at the
-//! frame that lands the text and never at the one that opens a region: the ask
-//! and the set travel on one ordered connection, so an outstanding ask means
-//! the watcher had been sent every client copy before its set. A set that
-//! crossed a delivery is refused, and the client's copy stays the clipboard.
+//! **A watcher's set lands only while its ask is outstanding**: the ask and the
+//! set travel on one ordered connection, so an outstanding ask means the
+//! watcher had been sent every client copy before its set. An inline set is
+//! judged at its frame; a set through a region lands only if the ask was
+//! outstanding when the region was opened and no copy was sent since. A set
+//! that crossed a delivery is refused, and the client's copy stays the
+//! clipboard.
 //!
 //! **A watcher's set is never sent back to it.**
 
@@ -22,11 +25,14 @@ pub enum Landing {
 }
 
 /// The watcher's ask, the copy it has not been sent, and the region of a set
-/// it is writing (`R`, opaque here).
+/// it is writing (`R`, opaque here) with whether that set can still land.
+///
+/// It lives as long as the compositor: a copy made while no watcher is there
+/// is the next one's.
 pub struct Watch<R> {
     asked: bool,
     unsent: bool,
-    region: Option<R>,
+    region: Option<(R, Landing)>,
 }
 
 impl<R> Default for Watch<R> {
@@ -55,17 +61,19 @@ impl<R> Watch<R> {
         if now {
             self.asked = false;
             self.unsent = false;
+            if let Some((_, landing)) = &mut self.region {
+                *landing = Landing::Stale;
+            }
         }
         now
     }
 
     /// The watcher's set, inline.
-    pub fn set(&mut self) -> Landing {
-        if !self.asked {
-            return Landing::Stale;
+    pub fn set(&self) -> Landing {
+        match self.asked {
+            true => Landing::Lands,
+            false => Landing::Stale,
         }
-        self.unsent = false;
-        Landing::Lands
     }
 
     /// The watcher opens `region` for a set; `Err` gives it back where one is
@@ -74,7 +82,7 @@ impl<R> Watch<R> {
         match self.region {
             Some(_) => Err(region),
             None => {
-                self.region = Some(region);
+                self.region = Some((region, self.set()));
                 Ok(())
             }
         }
@@ -83,8 +91,14 @@ impl<R> Watch<R> {
     /// The watcher's set in the open region: the region, and whether what it
     /// holds lands. `None` where none is open, which is out of protocol.
     pub fn commit(&mut self) -> Option<(R, Landing)> {
-        let region = self.region.take()?;
-        Some((region, self.set()))
+        self.region.take()
+    }
+
+    /// The watcher is gone: its ask and its region go with it, and a copy it
+    /// was not sent is the next watcher's.
+    pub fn leave(&mut self) {
+        self.asked = false;
+        self.region = None;
     }
 }
 
@@ -152,12 +166,50 @@ mod tests {
         assert_eq!(w.commit(), Some(((), Landing::Lands)));
     }
 
+    /// The watcher opened its region after a delivery it had not yet read, and
+    /// asked again before the commit: the ask at the commit is the one that
+    /// followed the delivery, and the text was chosen before it.
+    #[test]
+    fn a_region_opened_after_a_delivery_refuses_the_commit_after_the_next_ask() {
+        let mut w = watch();
+        w.ask();
+        assert!(w.client_set());
+        w.begin(()).expect("no region was open");
+        w.ask();
+        assert_eq!(w.commit(), Some(((), Landing::Stale)));
+    }
+
+    /// A copy made while no watcher watches, before the first or after one
+    /// left, is sent at the next watcher's first ask.
+    #[test]
+    fn a_copy_made_while_nobody_watched_is_sent_at_the_next_ask() {
+        let mut w = watch();
+        // A watcher leaves with its ask outstanding, and a client copies.
+        w.ask();
+        w.leave();
+        assert!(!w.client_set(), "a copy was sent to a watcher that had left");
+        assert!(w.ask(), "the copy made while nobody watched was not sent");
+        // A client copies after a delivery, and the watcher leaves before it
+        // asks again.
+        assert!(!w.client_set());
+        w.leave();
+        assert!(w.ask(), "the copy the last watcher was not sent went with it");
+    }
+
     #[test]
     fn a_region_is_opened_once_and_committed_once() {
         let mut w: Watch<u8> = Watch::default();
         assert_eq!(w.begin(1), Ok(()));
         assert_eq!(w.begin(2), Err(2));
         assert_eq!(w.commit().map(|(r, _)| r), Some(1));
+        assert_eq!(w.commit(), None);
+    }
+
+    #[test]
+    fn a_watcher_that_leaves_takes_its_region() {
+        let mut w: Watch<u8> = Watch::default();
+        w.begin(1).expect("no region was open");
+        w.leave();
         assert_eq!(w.commit(), None);
     }
 }

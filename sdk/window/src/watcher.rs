@@ -9,10 +9,11 @@
 //! next copy, and the watcher asks again only once [`Watcher::poll`] has
 //! handed the last one out.
 //!
-//! **One set in flight**, and a newer one replaces the one queued behind it. A
-//! set lands only while the watcher's ask is outstanding, which the compositor
-//! judges at the frame that lands the text: one made before this end saw a
-//! client copy already in its pipe is refused, and the client's copy stays.
+//! **One set in flight**, from [`Watcher::set`] until [`Watched::Answered`]:
+//! the holder keeps what it sets next until then, so its sets never fill the
+//! compositor's pipe. A set lands only while the watcher's ask is outstanding,
+//! which the compositor judges: one made before this end saw a client copy
+//! already in its pipe is refused, and the client's copy stays.
 
 use toyos::endow;
 use toyos::ipc::{FrameRx, RxStep, TrySendError};
@@ -21,7 +22,7 @@ use toyos::Connection;
 
 use crate::{
     copy_fits, ClipboardShmMsg, CreateError, MAX_CLIPBOARD_BYTES, MAX_INLINE_PAYLOAD, MSG_CLIPBOARD_PASTE,
-    MSG_CLIPBOARD_PASTE_SHM, MSG_CLIPBOARD_SET, MSG_CLIPBOARD_WATCH, MSG_COPY_BEGIN, MSG_COPY_COMMIT,
+    MSG_CLIPBOARD_PASTE_SHM, MSG_CLIPBOARD_SET, MSG_CLIPBOARD_SET_ANSWERED, MSG_CLIPBOARD_WATCH, MSG_COPY_BEGIN, MSG_COPY_COMMIT,
     MSG_COPY_REGION,
 };
 
@@ -77,6 +78,8 @@ pub enum Watched {
     Copy(String),
     /// The region for the set in flight, written and committed.
     Committed,
+    /// The set in flight is answered: the next may go.
+    Answered,
 }
 
 /// The clipboard's watcher.
@@ -84,9 +87,9 @@ pub struct Watcher {
     conn: Connection,
     rx: FrameRx<{ MAX_INLINE_PAYLOAD + 1 }>,
     /// A set past [`MAX_INLINE_PAYLOAD`] waiting for its region.
-    in_flight: Option<String>,
-    /// The set behind it.
-    queued: Option<String>,
+    region_owed: Option<String>,
+    /// A set is in flight, unanswered.
+    in_flight: bool,
 }
 
 impl Watcher {
@@ -95,7 +98,7 @@ impl Watcher {
     pub fn connect(port: &str) -> Result<Self, WatchError> {
         let conn = endow::service(port).map_err(CreateError::from)?;
         conn.try_signal(MSG_CLIPBOARD_WATCH)?;
-        Ok(Self { conn, rx: FrameRx::new(), in_flight: None, queued: None })
+        Ok(Self { conn, rx: FrameRx::new(), region_owed: None, in_flight: false })
     }
 
     /// The connection, for a poller: readable means [`Self::poll`] has a frame
@@ -133,36 +136,35 @@ impl Watcher {
                 Ok(Watched::Copy(text))
             }
             MSG_COPY_REGION if len == 0 => {
-                let text = self.in_flight.take().ok_or(CreateError::Protocol(msg_type))?;
+                let text = self.region_owed.take().ok_or(CreateError::Protocol(msg_type))?;
                 let [region] = self.conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
                 let mut region = SharedMemory::lent(region, text.len()).map_err(CreateError::Lent)?;
                 region.as_mut_slice().copy_from_slice(text.as_bytes());
                 self.conn.try_signal(MSG_COPY_COMMIT)?;
-                if let Some(next) = self.queued.take() {
-                    self.set(next)?;
-                }
                 Ok(Watched::Committed)
+            }
+            MSG_CLIPBOARD_SET_ANSWERED if len == 0 && self.in_flight && self.region_owed.is_none() => {
+                self.in_flight = false;
+                Ok(Watched::Answered)
             }
             other => Err(CreateError::Protocol(other).into()),
         }
     }
 
-    /// Set the clipboard to `text`, empty included, behind the set in flight
-    /// if there is one, replacing any queued there.
+    /// Set the clipboard to `text`, empty included.
     ///
     /// # Panics
-    /// `text` longer than [`MAX_CLIPBOARD_BYTES`], which the caller bounds.
+    /// `text` longer than [`MAX_CLIPBOARD_BYTES`], or a set already in flight:
+    /// the caller bounds both.
     pub fn set(&mut self, text: String) -> Result<(), WatchError> {
         assert!(text.len() <= MAX_CLIPBOARD_BYTES, "window: a set of {} bytes", text.len());
-        if self.in_flight.is_some() {
-            self.queued = Some(text);
-            return Ok(());
-        }
+        assert!(!self.in_flight, "window: a set while one is in flight");
+        self.in_flight = true;
         if text.len() <= MAX_INLINE_PAYLOAD {
             return Ok(self.conn.try_send_bytes(MSG_CLIPBOARD_SET, text.as_bytes())?);
         }
         self.conn.try_send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: text.len() as u32 })?;
-        self.in_flight = Some(text);
+        self.region_owed = Some(text);
         Ok(())
     }
 }

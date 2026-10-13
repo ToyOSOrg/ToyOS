@@ -21,7 +21,6 @@ use toyos::shm::SharedMemory;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
-use toyos_desktop::clipboard::Watch;
 use toyos_desktop::{Port, Window};
 
 /// Connections accepted but not yet identified by a first frame.
@@ -147,12 +146,10 @@ impl CopyRegion {
     }
 }
 
-/// The clipboard's watcher: its connection, and what it has asked and is
-/// writing.
+/// The clipboard's watcher: its connection.
 pub struct Watcher {
     pub conn: Connection,
     pub rx: ClientRx,
-    pub watch: Watch<CopyRegion>,
 }
 
 /// Why a client is going.

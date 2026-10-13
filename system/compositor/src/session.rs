@@ -107,6 +107,9 @@ pub struct Session {
     /// program alone holds: its one connection is sent every copy.
     clipboards: Acceptor,
     watcher: Option<Watcher>,
+    /// What the watcher has asked and is sent, for the compositor's whole life:
+    /// a copy made while no watcher is there is the next one's.
+    watch: Watch<CopyRegion>,
     /// Where a launch is made: off the loop, since the supervisor answers one
     /// whose package asks a question only once the question is answered,
     /// through this loop.
@@ -278,6 +281,7 @@ impl Session {
             owed: PromptGate::default(),
             clipboards,
             watcher: None,
+            watch: Watch::default(),
             launcher,
             kb,
             mouse,
@@ -1145,7 +1149,7 @@ impl Session {
     fn client_copy(&mut self, from: RawHandle, bytes: Vec<u8>) {
         let Some(text) = text(from, bytes) else { return };
         self.clipboard = text;
-        if self.watcher.as_mut().is_some_and(|w| w.watch.client_set()) {
+        if self.watch.client_set() {
             self.deliver_clipboard();
         }
     }
@@ -1159,7 +1163,7 @@ impl Session {
         };
         self.poller.watch(&conn, READABLE, frame.handle.0 as u64);
         println!("compositor: the clipboard is watched by client {}", frame.handle.0);
-        self.watcher = Some(Watcher { conn, rx: ClientRx::new(), watch: Watch::default() });
+        self.watcher = Some(Watcher { conn, rx: ClientRx::new() });
         self.watcher_asks();
     }
 
@@ -1183,45 +1187,47 @@ impl Session {
         match msg_type {
             window::MSG_CLIPBOARD_WATCH if payload.is_empty() => self.watcher_asks(),
             window::MSG_CLIPBOARD_SET => {
-                let Some(text) = text(handle, payload) else { return };
-                let Some(landing) = self.watcher.as_mut().map(|w| w.watch.set()) else { return };
-                self.watcher_sets(handle, landing, text);
+                let landing = self.watch.set();
+                self.watcher_sets(handle, landing, payload);
             }
             window::MSG_COPY_BEGIN => self.watcher_begins(handle, &payload),
             window::MSG_COPY_COMMIT if payload.is_empty() => {
-                let committed = self.watcher.as_mut().and_then(|w| w.watch.commit());
-                let Some((region, landing)) = committed else {
+                let Some((region, landing)) = self.watch.commit() else {
                     return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                 };
-                let Some(text) = text(handle, region.take()) else { return };
-                self.watcher_sets(handle, landing, text);
+                self.watcher_sets(handle, landing, region.take());
             }
             _ => mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
         }
     }
 
     fn watcher_asks(&mut self) {
-        if self.watcher.as_mut().is_some_and(|w| w.watch.ask()) {
+        if self.watch.ask() {
             self.deliver_clipboard();
         }
     }
 
-    /// The watcher's set: it lands only where its ask was outstanding at this
-    /// frame (`toyos_desktop::clipboard`).
-    fn watcher_sets(&mut self, from: RawHandle, landing: Landing, text: String) {
-        match landing {
-            Landing::Lands => self.clipboard = text,
-            Landing::Stale => eprintln!(
+    /// The watcher's set: it lands only where `toyos_desktop::clipboard` says,
+    /// and is answered whether or not it did, so the watcher has one in flight.
+    fn watcher_sets(&mut self, from: RawHandle, landing: Landing, bytes: Vec<u8>) {
+        match (landing, text(from, bytes)) {
+            (_, None) => {}
+            (Landing::Lands, Some(text)) => self.clipboard = text,
+            (Landing::Stale, Some(text)) => eprintln!(
                 "compositor: refusing a clipboard of {} bytes from the watcher, client {} — it was \
                  made before the watcher saw the copy now in its pipe",
                 text.len(),
                 from.0
             ),
         }
+        let w = self.watcher.as_ref().expect("a set is read only off the watcher");
+        if let Err(e) = w.conn.try_signal(window::MSG_CLIPBOARD_SET_ANSWERED) {
+            mark_dead(&mut self.dead, from, e.into());
+        }
     }
 
     /// `MSG_COPY_BEGIN` from the watcher: the region its set goes into, held
-    /// by the watcher until its commit.
+    /// until its commit.
     fn watcher_begins(&mut self, from: RawHandle, payload: &[u8]) {
         let exact = payload.len() == std::mem::size_of::<window::ClipboardShmMsg>();
         let (Ok(info), true) = (ipc::decode_payload::<window::ClipboardShmMsg>(payload), exact) else {
@@ -1238,10 +1244,10 @@ impl Session {
                 return mark_dead(&mut self.dead, from, DropReason::Refused(e));
             }
         };
-        let Some(w) = self.watcher.as_mut() else { return };
-        if w.watch.begin(CopyRegion::new(region)).is_err() {
+        if self.watch.begin(CopyRegion::new(region)).is_err() {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         }
+        let w = self.watcher.as_ref().expect("a region is opened only off the watcher");
         if let Err(e) = w.conn.send_handles([theirs]) {
             return mark_dead(&mut self.dead, from, e.into());
         }
@@ -1253,7 +1259,7 @@ impl Session {
     /// Send the watcher the clipboard, in the paste's two encodings, empty
     /// included. A refused send drops it by name.
     fn deliver_clipboard(&mut self) {
-        let Some(w) = &self.watcher else { return };
+        let w = self.watcher.as_ref().expect("an ask is outstanding only while a watcher watches");
         let handle = w.conn.as_handle();
         let len = self.clipboard.len();
         let sent = if len <= window::MAX_INLINE_PAYLOAD {
@@ -1364,6 +1370,7 @@ impl Session {
         self.pending.retain(|p| !dead.iter().any(|(handle, _)| *handle == p.conn.as_handle()));
         if self.watcher.as_ref().is_some_and(|w| dead.iter().any(|(handle, _)| *handle == w.conn.as_handle())) {
             self.watcher = None;
+            self.watch.leave();
         }
         self.dead = dead;
         if self.stack.len() != before {

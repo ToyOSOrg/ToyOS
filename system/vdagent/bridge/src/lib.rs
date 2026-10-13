@@ -1,6 +1,7 @@
 //! Every decision the clipboard agent makes between QEMU's vdagent and the
-//! compositor: who owns the clipboard, the grab serials, and what each
-//! transmit owes. Pure, and host-tested.
+//! compositor: who owns the clipboard, the grab serials, what each transmit
+//! owes, and when a set goes to the compositor ([`sets`]). Pure, and
+//! host-tested.
 //!
 //! **Every statement here about what QEMU does is QEMU 11.1.1's behaviour,
 //! measured black-box** against its `qemu-vdagent` chardev with a VNC client as
@@ -53,6 +54,8 @@ use alloc::vec::Vec;
 use toyos_vdagent::encode::Writer;
 use toyos_vdagent::stream::Message;
 use toyos_vdagent::wire;
+
+pub mod sets;
 
 /// Who holds the clipboard's current text.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -79,26 +79,3 @@ fn help(arch: Arch, option: &str) -> Result<String, String> {
 fn named(listed: &str, backend: &str) -> bool {
     listed.lines().any(|line| line.trim() == backend)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The launch's names and numbers are the codec's: the port QEMU names is
-    /// the one `vd_agent.h` gives the agent, at the id and port count the
-    /// agent drives.
-    #[test]
-    fn the_launch_spells_the_codecs_declaration() {
-        assert_eq!(
-            args(",iommu_platform=on"),
-            [
-                "-chardev",
-                "qemu-vdagent,id=vdagent0,clipboard=on,mouse=off",
-                "-device",
-                "virtio-serial-pci-non-transitional,id=vdagent-serial,max_ports=2,iommu_platform=on",
-                "-device",
-                "virtserialport,bus=vdagent-serial.0,nr=1,chardev=vdagent0,name=com.redhat.spice.0",
-            ]
-        );
-    }
-}

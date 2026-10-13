@@ -1,10 +1,12 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-10-13
 ---
 
 # A `cargo run` boot claims every one of pcidev's slots
+
+Held by the orchestrator.
 
 `images/system.toml`'s rows claim four PCI functions on `cargo run`'s q35:
 virtio-sound (`soundserver`), virtio-net (`netstack`), the NVMe controller

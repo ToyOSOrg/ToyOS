@@ -90,6 +90,10 @@ pub const MSG_COPY_REGION: u32 = 13;
 /// with the clipboard in the paste's two encodings, [`MSG_CLIPBOARD_PASTE`] or
 /// [`MSG_CLIPBOARD_PASTE_SHM`], empty included.
 pub const MSG_CLIPBOARD_WATCH: u32 = 15;
+/// Compositor → watcher, bare: the answer to its [`MSG_CLIPBOARD_SET`] or its
+/// [`MSG_COPY_COMMIT`], whether or not the set landed. A watcher has one set
+/// in flight until it is answered.
+pub const MSG_CLIPBOARD_SET_ANSWERED: u32 = 14;
 
 /// The longest clipboard. Policy: a clipboard is text somebody selected.
 pub const MAX_CLIPBOARD_BYTES: usize = 2 * 1024 * 1024;
