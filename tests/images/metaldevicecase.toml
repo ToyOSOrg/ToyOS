@@ -20,7 +20,7 @@ syscap = ["logread"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver"]
+serves = ["soundserver", "volume"]
 devices = ["hda-audio"]
 syscap = ["rt"]
 

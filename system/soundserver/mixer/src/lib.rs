@@ -66,6 +66,6 @@ pub use gain::{Gain, GainRamp};
 pub use mix::{accumulate, mix_interleaved};
 pub use shape::{
     client_period_frames, deferral_floor_nanos, period_frames, period_nanos, ramp_frames,
-    scratch_frames, Shape, DEFERRAL_RESERVE, MAX_CLIENT_RATE, MAX_PIPELINE, MIN_CLIENT_RATE,
+    scratch_frames, Shape, DEFERRAL_RESERVE, DEVICE_RATES, MAX_CLIENT_RATE, MAX_PIPELINE, MIN_CLIENT_RATE,
 };
 pub use stats::{wake_left_idle, MixStats};

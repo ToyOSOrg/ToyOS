@@ -652,7 +652,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#f46381d27cad65aa5ef5ece5cec1227aa31ef269"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#60031a060b34460e79854ba8d441a0185b50c26a"
 dependencies = [
  "alsa",
  "block2 0.6.2",
@@ -3690,6 +3690,7 @@ dependencies = [
  "toyos-inspect",
  "toyos-mixer",
  "toyos-pci-claim",
+ "toyos-resample",
  "toyos-virtio",
  "toyos-virtio-sound",
 ]
@@ -4222,6 +4223,9 @@ dependencies = [
 [[package]]
 name = "toyos-hda"
 version = "0.1.0"
+dependencies = [
+ "toyos-mixer",
+]
 
 [[package]]
 name = "toyos-i219"
@@ -4412,6 +4416,14 @@ name = "toyos-random"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-resample"
+version = "0.1.0"
+dependencies = [
+ "rubato",
+ "toyos-mixer",
+]
+
+[[package]]
 name = "toyos-root"
 version = "0.1.0"
 dependencies = [
@@ -4562,6 +4574,7 @@ name = "toyos-virtio-sound"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
+ "toyos-mixer",
  "toyos-virtio",
 ]
 

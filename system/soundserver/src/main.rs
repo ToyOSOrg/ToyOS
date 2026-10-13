@@ -13,6 +13,7 @@
 //! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
 //! | [`log`] | soundserver's lines, and why the mix thread's never wait |
 //! | [`hda`], [`virtio`] | the two drivers |
+//! | [`volume`] | the `volume` port: the master level and mute, on the codec |
 //!
 //! This file is the fourth thing: which of them the machine gets. A sound card
 //! this process was endowed with runs the device loop; anything else — no card,
@@ -24,7 +25,7 @@ use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{HdaDev, PciDev};
 use toyos_abi::syscall::{self, DeviceType};
-use toyos_mixer::{period_frames, ramp_frames};
+use toyos_mixer::{period_frames, ramp_frames, DEVICE_RATES};
 
 use std::sync::Arc;
 
@@ -45,6 +46,7 @@ mod mix;
 mod log;
 mod ring;
 mod virtio;
+mod volume;
 
 use backend::{Backend, HdaBackend, VirtioBackend};
 use command::CommandRing;
@@ -52,12 +54,11 @@ use inspect::{Device, Published, State};
 use control::control_thread;
 use mix::{mix_thread, null_sink_thread};
 
-/// The virtual output soundserver presents when the machine has no audio hardware.
-/// These match the one configuration cpal's ToyOS backend advertises
-/// (`src/host/toyos/mod.rs`): 44100 Hz stereo i16, 128 frames per period. A
-/// stream negotiates against them exactly as it would a real device, so a
-/// no-hardware machine is invisible to the client.
-const NULL_SINK_RATE: u32 = 44_100;
+/// The virtual output soundserver presents when the machine has no audio hardware:
+/// the first device rate, stereo, 128 frames per period. A stream negotiates
+/// against them exactly as it would a real device, so a no-hardware machine is
+/// invisible to the client.
+const NULL_SINK_RATE: u32 = DEVICE_RATES[0];
 const NULL_SINK_CHANNELS: u16 = 2;
 const NULL_SINK_PERIOD_FRAMES: usize = 128;
 /// Same DMA-pipeline depth as both hardware backends: the client ring
@@ -70,6 +71,9 @@ fn main() {
     log::claim_lane();
     let acceptor = endow::acceptor("soundserver")
         .expect("the manifest declares this program serves `soundserver`");
+    let volume = endow::acceptor("volume")
+        .expect("the manifest declares this program serves `volume`");
+    let ports = Ports { acceptor, volume };
 
     // **"Which sound card does this machine have?" is already answered.** The supervisor
     // mints a claim per class the manifest names and endows what the machine
@@ -85,28 +89,35 @@ fn main() {
     // no machine in this project has both. The T14 has only the second.
     if let Some(dev) = endow::pci_function::<PciDev>(virtio::PCI_ID) {
         match virtio::Virtio::claim(dev) {
-            Ok((virtio, rate, channels)) => return run_virtio(acceptor, virtio, rate, channels),
+            Ok((virtio, rate, channels)) => return run_virtio(ports, virtio, rate, channels),
             Err(why) => {
                 say!("soundserver: the virtio-sound device cannot carry audio: {why}");
-                return run_null_sink(acceptor);
+                return run_null_sink(ports);
             }
         }
     }
     let Some(dev) = endow::device::<HdaDev>(DeviceType::HdaAudio) else {
-        return run_null_sink(acceptor);
+        return run_null_sink(ports);
     };
     match hda::Hda::claim(dev) {
-        Ok((hda, _path, channels)) => run_hda(acceptor, hda, channels),
+        Ok(claimed) => run_hda(ports, claimed),
         Err(why) => {
             say!("soundserver: the HDA controller cannot carry audio: {why}");
-            run_null_sink(acceptor)
+            run_null_sink(ports)
         }
     }
 }
 
-fn run_virtio(acceptor: Acceptor, virtio: virtio::Virtio, rate: u32, channels: u8) {
+/// The two ports soundserver serves: streams, and the master.
+struct Ports {
+    acceptor: Acceptor,
+    volume: Acceptor,
+}
+
+fn run_virtio(ports: Ports, virtio: virtio::Virtio, rate: u32, channels: u8) {
     run_with_device(
-        acceptor,
+        ports,
+        None,
         "virtio-sound",
         &mut VirtioBackend { virtio },
         toyos_virtio_sound::PERIODS,
@@ -116,7 +127,8 @@ fn run_virtio(acceptor: Acceptor, virtio: virtio::Virtio, rate: u32, channels: u
     );
 }
 
-fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
+fn run_hda(ports: Ports, claimed: hda::Claimed) {
+    let hda::Claimed { hda, rate, channels, master } = claimed;
     let info = hda.info();
     let num_buffers = info.periods as usize;
     let period_bytes = info.period_bytes as usize;
@@ -128,18 +140,20 @@ fn run_hda(acceptor: Acceptor, hda: hda::Hda, channels: u8) {
     let buffers = (0..num_buffers).map(|i| unsafe { base.add(i * period_bytes) }).collect();
 
     run_with_device(
-        acceptor,
+        ports,
+        master,
         "hda",
         &mut HdaBackend { hda, buffers, period_bytes },
         num_buffers,
-        toyos_hda::config::RATE,
+        rate,
         channels as u16,
         period_bytes,
     );
 }
 
 fn run_with_device(
-    acceptor: Acceptor,
+    ports: Ports,
+    master: Option<hda::MasterControl>,
     kind: &'static str,
     backend: &mut dyn Backend,
     num_buffers: usize,
@@ -156,7 +170,7 @@ fn run_with_device(
         Ok(frames) => frames,
         Err(why) => {
             say!("soundserver: this audio device's shape cannot carry audio: {why}");
-            return run_null_sink(acceptor);
+            return run_null_sink(ports);
         }
     };
 
@@ -186,7 +200,9 @@ fn run_with_device(
         .name("soundserver-ctrl".into())
         .spawn(move || {
             control_thread(
-                acceptor,
+                ports.acceptor,
+                ports.volume,
+                master,
                 &cmd_ring2,
                 cmd_pipe.write,
                 device_sample_rate,
@@ -214,7 +230,7 @@ fn run_with_device(
     );
 }
 
-fn run_null_sink(acceptor: Acceptor) {
+fn run_null_sink(ports: Ports) {
     let device_sample_rate = NULL_SINK_RATE;
     let device_channels = NULL_SINK_CHANNELS;
     let device_period_frames = NULL_SINK_PERIOD_FRAMES;
@@ -244,7 +260,9 @@ fn run_null_sink(acceptor: Acceptor) {
         .name("soundserver-ctrl".into())
         .spawn(move || {
             control_thread(
-                acceptor,
+                ports.acceptor,
+                ports.volume,
+                None,
                 &cmd_ring2,
                 cmd_pipe.write,
                 device_sample_rate,

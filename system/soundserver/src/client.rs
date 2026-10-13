@@ -10,12 +10,9 @@
 //! channel conversion, the interleave and the sum are calls into the crate,
 //! whose corpus holds the answer each of them used to give inline.
 //!
-//! The resampler is `rubato`'s, and it is the one thing on this path that
-//! nothing here certifies — what is certified is everything on both sides of it.
+//! The resampler is `rubato`'s, built and held to its bounds in `toyos-resample`.
 
-use rubato::{
-    Resampler, SincFixedOut, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use rubato::{Resampler, SincFixedOut};
 
 use toyos::audio::{
     AudioSlotReader, StreamOpenRequest, StreamOpenResponse, MSG_STREAM_OPENED,
@@ -216,6 +213,7 @@ pub(crate) fn open_stream(
         device_sample_rate,
         device_channels,
         slot_count: slot_count as u16,
+        fade_frames: ramp_frames,
     };
     let sent = control.send_handles([client_shm, signal_read.into()]);
     if sent.is_err() || control.send(MSG_STREAM_OPENED, &opened).is_err() {
@@ -224,21 +222,12 @@ pub(crate) fn open_stream(
     }
 
     let resampler = if req.sample_rate != device_sample_rate {
-        let params = SincInterpolationParameters {
-            sinc_len: 128,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Cubic,
-            oversampling_factor: 128,
-            window: WindowFunction::BlackmanHarris2,
-        };
-        let resample_ratio = device_sample_rate as f64 / req.sample_rate as f64;
-        let resampler = SincFixedOut::<f32>::new(
-            resample_ratio,
-            2.0,
-            params,
+        let resampler = toyos_resample::build(
+            req.sample_rate,
+            device_sample_rate,
             device_period_frames as usize,
             device_channels as usize,
-        ).expect("failed to create resampler");
+        );
         // The pull loop tops accum up to input_frames_next() one slot at a
         // time, so it peaks below input_frames_max + one client period.
         let accum_capacity = resampler.input_frames_max() + client_period_frames as usize;

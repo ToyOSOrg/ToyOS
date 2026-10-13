@@ -100,10 +100,15 @@ const _: () = {
     assert!(PERIOD_BYTES.is_multiple_of(4));
 };
 
-/// The rates this driver can encode, best first. 44100 leads because it is
-/// what the mixer, the resampler and the recorded counters are sized against;
-/// 48000 is the one every other device offers.
-const RATES: [(u32, u8); 2] = [(44100, wire::RATE_44100), (48000, wire::RATE_48000)];
+/// The specification's code for one of soundserver's device rates
+/// ([`toyos_mixer::DEVICE_RATES`]), whose order this driver takes as its own.
+fn rate_code(rate: u32) -> Option<u8> {
+    match rate {
+        44_100 => Some(wire::RATE_44100),
+        48_000 => Some(wire::RATE_48000),
+        _ => None,
+    }
+}
 
 /// How many times a control command's completion is polled before the device
 /// is called silent, and the spins between two looks.
@@ -436,8 +441,9 @@ fn choose(info: &PcmInfo) -> Result<(u32, u8, u8), Refusal> {
     if info.formats & (1 << wire::FMT_S16) == 0 {
         return Err(Refusal::NoFormat { formats: info.formats });
     }
-    let (rate, code) = *RATES
+    let (rate, code) = toyos_mixer::DEVICE_RATES
         .iter()
+        .map(|&rate| (rate, rate_code(rate).expect("every device rate has a code")))
         .find(|(_, code)| info.rates & (1 << code) != 0)
         .ok_or(Refusal::NoRate { rates: info.rates })?;
     // Stereo where the device takes it; the mixer converts either way.

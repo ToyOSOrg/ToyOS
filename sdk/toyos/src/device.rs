@@ -136,7 +136,7 @@ impl PciDev {
         offset: u32,
         width: toyos_abi::syscall::RegWidth,
     ) -> Result<u32, SyscallError> {
-        syscall::device_reg_read(self.0.as_handle(), offset, width)
+        syscall::device_reg_read(self.0.as_handle(), u64::from(offset), width)
     }
 
     /// Map memory BAR `bar`, bounded to the `bar_bytes` the description gave.
@@ -276,12 +276,13 @@ impl AsHandle for PartitionDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
-/// An Intel HDA controller the kernel brought up and drives no policy on.
+/// The Intel HDA controllers the kernel brought up and drives no policy on.
 ///
 /// What the claimant gets is a PCM ring it may write, an interrupt it may wait
-/// on, and two register calls checked against the kernel's allow-list. It gets
-/// no register window and no physical address, so there is nothing here that
-/// can point the device at memory.
+/// on, two register calls checked against the kernel's allow-list, and the
+/// choice of which listed controller the stream is bound to. It gets no
+/// register window and no physical address, so there is nothing here that can
+/// point a device at memory.
 pub struct HdaDev(pub(crate) Device);
 
 impl HdaDev {
@@ -317,19 +318,25 @@ impl HdaDev {
 
     pub fn reg_read(
         &self,
-        offset: u32,
+        reg: toyos_abi::hda::Reg,
         width: toyos_abi::syscall::RegWidth,
     ) -> Result<u32, SyscallError> {
-        syscall::device_reg_read(self.0.as_handle(), offset, width)
+        syscall::device_reg_read(self.0.as_handle(), reg.wire(), width)
     }
 
     pub fn reg_write(
         &self,
-        offset: u32,
+        reg: toyos_abi::hda::Reg,
         width: toyos_abi::syscall::RegWidth,
         value: u32,
     ) -> Result<(), SyscallError> {
-        syscall::device_reg_write(self.0.as_handle(), offset, width, value)
+        syscall::device_reg_write(self.0.as_handle(), reg.wire(), width, value)
+    }
+
+    /// Bind the stream to the listed controller at `controller`; see
+    /// [`syscall::hda_bind`]. From then on that controller is index 0.
+    pub fn bind(&self, controller: u8) -> Result<(), SyscallError> {
+        syscall::hda_bind(self.0.as_handle(), controller)
     }
 }
 

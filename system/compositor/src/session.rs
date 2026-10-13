@@ -26,6 +26,8 @@ use toyos_abi::RawHandle;
 use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN, POINTER_LEN};
 use toyos_input::{Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
+use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
+use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
     CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
@@ -43,7 +45,12 @@ use crate::stats::FrameTotals;
 use crate::{
     launcher_apps, CLIPBOARD_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
     FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
+    VOLUME_POLL_HANDLES,
 };
+
+/// The widest answer on the `volume` port, plus one, so an over-long frame is
+/// refused rather than truncated into an answer.
+const VOLUME_KEPT_PAYLOAD: usize = std::mem::size_of::<Volume>() + 1;
 
 /// The most frames one source's turn takes before the others are served.
 const SOURCE_FRAMES: usize = 64;
@@ -176,6 +183,14 @@ pub struct Session {
     /// Tokens the last `wait` reported ready.
     ready: Vec<u64>,
 
+    /// soundserver's `volume` port, connected on the first volume key and
+    /// again after it ends; the requests on it; and the overlay its answers show.
+    volume: Option<(toyos::Connection, ipc::FrameRx<VOLUME_KEPT_PAYLOAD>)>,
+    volume_requests: Requests,
+    overlay: Overlay,
+    /// What the overlay's clock counts from.
+    epoch: Instant,
+
     totals: FrameTotals,
     cached_stats: SystemStats,
     prev_busy_ticks: u64,
@@ -268,10 +283,7 @@ impl Session {
             total_mem / (1024 * 1024),
         );
 
-        // Sized for the slot ceiling rather than for `max_windows`: the batch
-        // between two `wait` calls is the four fixed registrations, one per
-        // live window and one per pending connection, the prompt's two, the
-        // clipboard's two and the input port's beside them, and
+        // Sized for the slot ceiling rather than for `max_windows`:
         // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
         let poller = Poller::new(
             FIXED_POLL_HANDLES
@@ -279,7 +291,8 @@ impl Session {
                 + MAX_PENDING_CONNS
                 + PROMPT_POLL_HANDLES
                 + CLIPBOARD_POLL_HANDLES
-                + INPUT_POLL_HANDLES,
+                + INPUT_POLL_HANDLES
+                + VOLUME_POLL_HANDLES,
         );
         poller.watch(&inputs, READABLE, inputs.as_handle().0 as u64);
         poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
@@ -349,6 +362,10 @@ impl Session {
             prev_busy_ticks: 0,
             prev_total_ticks: 0,
             last_taskbar_update: now,
+            volume: None,
+            volume_requests: Requests::default(),
+            overlay: Overlay::default(),
+            epoch: now,
         }
     }
 
@@ -375,6 +392,9 @@ impl Session {
             }
         }
         self.tick_taskbar();
+        if self.overlay.expire(self.overlay_now()) {
+            self.damage.add(overlay_rect(&self.desk));
+        }
         self.present();
         self.prompt_gone();
     }
@@ -395,6 +415,7 @@ impl Session {
         let accept_ready = self.is_ready(self.acceptor.as_handle());
         let prompt_ready = self.is_ready(self.prompts.as_handle());
         let clipboard_ready = self.is_ready(self.clipboards.as_handle());
+        let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle()));
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()))
             || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle()));
@@ -421,6 +442,7 @@ impl Session {
             && !prompt_ready
             && !clipboard_ready
             && !client_ready
+            && !volume_ready
         {
             return false;
         }
@@ -447,6 +469,9 @@ impl Session {
         if clipboard_ready {
             self.accept(Port::Clipboard);
         }
+        if volume_ready {
+            self.volume_answers();
+        }
         let frames = self.take_frames();
         self.dispatch(frames);
         self.watched();
@@ -454,6 +479,81 @@ impl Session {
         self.prompt_gone();
         self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready);
         true
+    }
+
+    /// Nanoseconds since the session's epoch, the clock the overlay is timed by.
+    fn overlay_now(&self) -> u64 {
+        self.epoch.elapsed().as_nanos() as u64
+    }
+
+    /// One request to soundserver's `volume` port, by a write that does not
+    /// wait; connected first if it is not. A refusal ends the connection, by
+    /// name, and what was pressed goes on the next one.
+    fn send_volume(&mut self, request: Request) {
+        if self.volume.is_none() {
+            match endow::service("volume") {
+                Ok(conn) => {
+                    self.poller.watch(&conn, READABLE, conn.as_handle().0 as u64);
+                    self.volume = Some((conn, ipc::FrameRx::new()));
+                }
+                Err(e) => {
+                    eprintln!("compositor: soundserver's volume port did not connect ({e:?})");
+                    self.volume_requests.disconnected();
+                    return;
+                }
+            }
+        }
+        let (conn, _) = self.volume.as_ref().expect("connected above");
+        let sent = match request {
+            Request::Step(delta) => conn.try_send(MSG_VOLUME_STEP, &VolumeStep { delta }),
+            Request::Mute => conn.try_send_bytes(MSG_VOLUME_MUTE, &[]),
+        };
+        if let Err(e) = sent {
+            eprintln!("compositor: a volume request was not taken ({e:?}); reconnecting on the next key");
+            self.volume = None;
+            self.volume_requests.disconnected();
+        }
+    }
+
+    /// soundserver's answers, each shown on the overlay, and the next request
+    /// sent behind each.
+    fn volume_answers(&mut self) {
+        loop {
+            let Some((conn, rx)) = self.volume.as_mut() else { return };
+            let shown = match rx.pump(conn) {
+                RxStep::Idle => return,
+                RxStep::Frame { msg_type: MSG_VOLUME, payload_len } => {
+                    match ipc::decode_payload::<Volume>(rx.payload(payload_len)) {
+                        Ok(v) if v.muted != 0 => Shown::Muted,
+                        Ok(v) => Shown::Level { position: v.position, bottom: v.bottom },
+                        Err(e) => {
+                            eprintln!("compositor: a volume answer did not decode ({e:?}); disconnecting");
+                            self.volume = None;
+                            self.volume_requests.disconnected();
+                            return;
+                        }
+                    }
+                }
+                RxStep::Frame { msg_type: MSG_VOLUME_UNAVAILABLE, .. } => Shown::Unavailable,
+                RxStep::Frame { msg_type, .. } => {
+                    eprintln!("compositor: soundserver's volume port sent message {msg_type}; disconnecting");
+                    self.volume = None;
+                    self.volume_requests.disconnected();
+                    return;
+                }
+                RxStep::Eof | RxStep::Malformed => {
+                    eprintln!("compositor: soundserver's volume port ended; reconnecting on the next key");
+                    self.volume = None;
+                    self.volume_requests.disconnected();
+                    return;
+                }
+            };
+            self.overlay.answered(shown, self.overlay_now());
+            self.damage.add(overlay_rect(&self.desk));
+            if let Some(next) = self.volume_requests.answered() {
+                self.send_volume(next);
+            }
+        }
     }
 
     fn is_ready(&self, handle: RawHandle) -> bool {
@@ -526,6 +626,11 @@ impl Session {
                 }
             }
             KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
+            KeyAction::Volume(key) => {
+                if let Some(request) = self.volume_requests.press(key) {
+                    self.send_volume(request);
+                }
+            }
             KeyAction::Paste => {
                 if let Some(i) = focused {
                     self.paste(i);
@@ -1526,6 +1631,12 @@ impl Session {
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
     fn rearm(&mut self, kb: bool, mouse: bool, inputs: bool, acceptor: bool, prompts: bool, clipboards: bool) {
+        if let Some((conn, _)) = &self.volume {
+            let handle = conn.as_handle();
+            if self.is_ready(handle) {
+                self.poller.watch(conn, READABLE, handle.0 as u64);
+            }
+        }
         if inputs {
             self.poller.watch(&self.inputs, READABLE, self.inputs.as_handle().0 as u64);
         }
@@ -1622,6 +1733,14 @@ impl Session {
                 &self.cached_stats,
                 *region,
             );
+        }
+
+        // Above every window and the taskbar, under the cursor.
+        if let Some(shown) = self.overlay.visible(self.overlay_now()) {
+            let rect = overlay_rect(&self.desk);
+            if regions.iter().any(|r| r.overlaps(rect)) {
+                render::draw_overlay(&self.back.surface, &self.font, rect, &shown.text());
+            }
         }
 
         // Into the back buffer, so a region containing the cursor carries it
