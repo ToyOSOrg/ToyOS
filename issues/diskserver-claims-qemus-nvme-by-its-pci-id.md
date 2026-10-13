@@ -8,8 +8,7 @@ opened: 2026-10-12
 
 Both shipped boot configs give diskserver one device, `pci:1b36:0010`
 (`images/system.toml`, `images/console.toml`): the vendor and device id of
-QEMU's own `nvme` model (`hw/nvme/ctrl.c`, `PCI_DEVICE_ID_REDHAT_NVME` under
-Red Hat's vendor id). A claim matches the id exactly (`pcidev::claim`,
+QEMU's own `nvme` model, under Red Hat's vendor id. A claim matches the id exactly (`pcidev::claim`,
 `kernel/src/pcidev/mod.rs`), so on any other NVMe controller the supervisor
 endows diskserver nothing, it says `no NVMe controller this row names is on
 this machine; serving no partition`, and DATA, LOG and BOOT are absent unless
@@ -17,13 +16,13 @@ the image is on a USB stick the kernel drives. The driver is not QEMU's:
 `Controller::open` (`system/diskserver/src/nvme.rs`) takes any function whose
 class code is `01:08:02`.
 
-Read from each hypervisor's source, not booted:
+Read, not booted:
 
 | | NVMe id | MSI-X table |
 |---|---|---|
 | QEMU `nvme` | `1b36:0010`, or `8086:5845` with `use-intel-id=on` | BAR 0, unless `msix-exclusive-bar=on` |
-| VirtualBox, `src/VBox/Devices/Storage/DevNVMe.cpp` | `80ee:4e56` | BAR 5 |
-| bhyve, `usr.sbin/bhyve/pci_nvme.c` | `fb5d:0a0a` | BAR 4 |
+| VirtualBox | `80ee:4e56` | BAR 5 |
+| bhyve | `fb5d:0a0a` | BAR 4 |
 
 Cloud Hypervisor and crosvm offer no NVMe. Every controller on metal carries
 its maker's id.
@@ -47,4 +46,7 @@ its table and grants name (`system/diskserver/src/main.rs`).
 `toyos_abi::syscall::DeviceRequest::parse` takes and refuses malformed; both
 shipped configs name NVMe that way; and a guest boot whose controller is
 QEMU's `nvme` with `use-intel-id=on` serves DATA through diskserver, which a
-row naming `1b36:0010` instead reds.
+row naming `1b36:0010` instead reds. The configs the T14 boots keep their id
+row, outside this exit, until the T14's NVMe holds no Ubuntu: a class row there
+would hand diskserver the disk the metal workflow reboots through (the
+orchestrator's ruling, #896, issuecomment-6131213771, ruling 4).

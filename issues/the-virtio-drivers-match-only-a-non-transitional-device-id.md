@@ -25,24 +25,17 @@ The launcher and the harness hide it: each asks QEMU for
 `virtio-net-pci-non-transitional` and `virtio-serial-pci-non-transitional`
 (`build/qemu.rs`, `tests/common/qemu.rs`). QEMU's own default is transitional
 on q35's root bus — `disable-legacy=auto` resolves to off for a device not
-behind a PCIe port (`virtio_pci_realize`, `hw/virtio/virtio-pci.c`) — and
-VirtualBox's virtio-net is `1af4:1000` (`PCI_DEVICE_ID_VIRTIONET_HOST`,
-`src/VBox/Devices/Network/DevVirtioNet.cpp`). On either, netstack has no card
-and the kernel no virtio console. Cloud Hypervisor and crosvm use the
-`0x1040`-based ids (Cloud Hypervisor's
-`virtio-devices/src/transport/pci_device.rs`, crosvm's
-`devices/src/virtio/virtio_pci_device.rs`). bhyve's virtio-net and
-virtio-blk are legacy-only (its `usr.sbin/bhyve/virtio.c` allocates an I/O BAR
-and no virtio capability), so a conforming driver matches them and refuses
-them by name.
+behind a PCIe port — and VirtualBox's virtio-net is `1af4:1000`. On either,
+netstack has no card and the kernel no virtio console. Cloud Hypervisor and
+crosvm use the `0x1040`-based ids. bhyve's virtio-net and virtio-blk are
+legacy-only, an I/O BAR and no virtio capability, so a conforming driver
+matches them and refuses them by name.
 Virtio-gpu and virtio-sound have no transitional id, so their matches are
 already whole.
 
 A transitional device offers no `VIRTIO_F_ACCESS_PLATFORM` on either: QEMU
-refuses the pair ("VIRTIO_F_IOMMU_PLATFORM was supported by neither legacy nor
-transitional device", `hw/virtio/virtio-pci.c`), and VirtualBox's virtio core
-implements none (`VIRTIO_F_ACCESS_PLATFORM`, "VirtIO 1.1 NYI",
-`src/VBox/Devices/VirtIO/VirtioCore.h`). So behind a unit such a NIC is one no
+refuses `iommu_platform=on` on a transitional device, and VirtualBox's virtio
+devices offer the bit nowhere. So behind a unit such a NIC is one no
 claim may take
 (`issues/a-virtio-function-that-offers-no-access-platform-is-handed-over-as-translated.md`);
 the matches reach a card only on the path

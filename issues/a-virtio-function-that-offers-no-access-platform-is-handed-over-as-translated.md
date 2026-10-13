@@ -21,7 +21,7 @@ whether a virtio function offers the bit; the holder's driver accepts it where
 offered and goes on without it (`Offer::accept`, `lib/virtio/src/pci.rs`). A
 function that does not offer it is not behind the unit at all: QEMU keeps it
 on the machine's own address space whatever the `DMAR` says
-(`hw/virtio/virtio-bus.c`, which `tests/common/iommu.rs` cites). So an honest
+(`tests/common/iommu.rs`). So an honest
 holder's descriptors, which carry domain addresses above all memory
 (`kernel/src/iommu/window.rs`), reach nothing, and a hostile holder's, which
 carry physical addresses, reach all of memory: the claim's isolation is void

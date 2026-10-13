@@ -14,10 +14,13 @@ and the real devices it already drives (NVMe, xHCI and USB HID, the Intel NICs,
 the i8042), and nothing it ships depends on a QEMU-only device or behaviour.
 
 Nothing in this tree records a boot of this image under any hypervisor but
-QEMU. What this file says of the others is read from their documentation and
-source at their default branches, not measured. Cloud Hypervisor and crosvm run
-on Linux hosts and bhyve on FreeBSD, none of them on the macOS development
-host.
+QEMU. What this file and the issues it lists say of the others is read from
+their documentation and source at their default branches, not measured; the
+source is read clean-room, so the files and commits it was read from are
+provenance in
+https://github.com/ToyOSOrg/evidence/blob/0b27193281e0baee2d7a135f6c17934b5d6b456f/sources.md,
+and nothing here cites them. Cloud Hypervisor and crosvm run on Linux hosts
+and bhyve on FreeBSD, none of them on the macOS development host.
 
 ## What the shipped OS takes from QEMU
 
@@ -35,22 +38,24 @@ signature. What they do depend on, each filed:
 
 and, filed before this track:
 
-- `issues/a-machine-without-an-iommu-refuses-every-claim.md` — bhyve, and
-  VirtualBox and QEMU by default.
+- `issues/a-machine-without-an-iommu-refuses-every-claim.md` — bhyve; crosvm
+  for every device it emulates; and VirtualBox, QEMU and Cloud Hypervisor by
+  default (`issues/no-claim-gets-an-address-space-under-virtio-iommu.md`).
 - `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
   — QEMU's NVMe by default; and every virtio function of Cloud Hypervisor and
   crosvm, which keep the MSI-X table and PBA in the BAR their virtio
-  structures are in (Cloud Hypervisor's
-  `virtio-devices/src/transport/pci_device.rs`, crosvm's
-  `devices/src/virtio/virtio_pci_device.rs`).
+  structures are in.
 - `issues/a-hid-interface-outside-the-boot-subclass-is-read-as-qemus-tablet.md`
-  — VirtualBox's USB tablet, a subclass-0 interface (its
-  `src/VBox/Devices/Input/UsbMouse.cpp`); bhyve's declares the boot mouse
-  subclass and protocol (its `usr.sbin/bhyve/usb_mouse.c`).
+  — VirtualBox's USB tablet, a subclass-0 interface; bhyve's declares the
+  boot mouse subclass and protocol.
 - `issues/getsockname-answers-an-address-nobody-asked-netstack-for.md` —
   QEMU's user-mode network address in `sdk/libc`.
 - `issues/pci-is-enumerated-on-segment-group-0-alone.md` — Cloud
   Hypervisor's `num_pci_segments`.
+
+`issues/an-amd-vi-machine-isolates-no-device.md` is met only where a target is
+asked for AMD-Vi, VirtualBox's `--iommu amd` and QEMU's `amd-iommu`, and no
+target's default asks.
 
 Three of the launcher's QEMU options keep three of these off every guest
 test: the `-non-transitional` virtio devices the transitional id,
@@ -63,8 +68,10 @@ the harness's alone.
 Adaptations that degrade nothing: the TCO table's q35 row (`lib/tco`, armed
 only by the `watchdog` parameter and refused by name elsewhere), netstack's
 82574L row for QEMU's `e1000e`, the hard-lockup bound's path for a machine
-with no PMU, `toyos-cpuvuln`'s reading of CPUID's hypervisor bit as Linux
-reads it, and the loader's read of PI's DXE services (`loader/src/gcd.rs`),
+with no PMU, `toyos-cpuvuln`'s reading of `CPUID.1:ECX[31]`, which Intel
+defines as "Not Used: Intel processors always return 0. Allocated for use by
+software emulation" (Intel SDM Vol. 1, 253665-093US, Table 21-9; AMD's APM
+unread), and the loader's read of PI's DXE services (`loader/src/gcd.rs`),
 which hands over the root bridges' windows alone where firmware has none.
 
 ## Each hypervisor, x86-64
@@ -72,8 +79,8 @@ which hands over the root bridges' windows alone where firmware has none.
 | | Firmware | Disk | Display | Network | Input | Platform | IOMMU |
 |---|---|---|---|---|---|---|---|
 | QEMU q35 | edk2 | NVMe `1b36:0010`, virtio-blk, AHCI, USB | std-vga GOP, virtio-gpu | virtio-net (transitional by default), e1000e | i8042, USB HID, virtio-input | HPET, full ACPI | VT-d, AMD-Vi, virtio-iommu |
-| Cloud Hypervisor | `CLOUDHV.fd` (edk2) | virtio-blk | none | virtio-net | none | no HPET; hardware-reduced ACPI; I/O APIC only with the serial port | virtio-iommu |
-| crosvm | a `--bios` image; which UEFI boots under it was not read | virtio-blk, virtio-scsi | virtio-gpu | virtio-net | virtio-input | no HPET, no PM timer | virtio-iommu |
+| Cloud Hypervisor | `CLOUDHV.fd` (edk2) | virtio-blk | none | virtio-net | none | no HPET; hardware-reduced ACPI; an I/O APIC its MADT lists always, which its `docs/device_model.md` disables without the serial port | virtio-iommu, per device and off by default |
+| crosvm | a `--bios` image; which UEFI boots under it was not read | virtio-blk, virtio-scsi | virtio-gpu | virtio-net | virtio-input | no HPET, no PM timer | virtio-iommu for a passed-through host device alone |
 | VirtualBox 7 | EFI with `--firmware efi`; PCIe and MSI only with `--chipset ich9` | NVMe `80ee:4e56`, AHCI, USB, virtio-scsi | VMSVGA GOP | 8254x e1000s, virtio-net `1af4:1000` | i8042, USB HID | HPET off by default | VT-d or AMD-Vi with `--iommu`, off by default |
 | bhyve | `BHYVE_UEFI.fd` (edk2) | NVMe `fb5d:0a0a`, AHCI, legacy virtio-blk | `fbuf` GOP | 82545EM, legacy virtio-net | i8042, xHCI tablet | HPET, full ACPI; HDA on INTx only | none |
 
@@ -82,17 +89,19 @@ this image and enumerate no PCIe; with `--firmware efi` and `--chipset ich9`
 it stops, like Cloud Hypervisor and crosvm, at the HPET `expect`, which on
 Cloud Hypervisor no console carries unless its serial port is on. VirtualBox
 with `--x86-hpet on` too, and bhyve: a desktop on a GOP panel with i8042 or
-USB input, no disk, no network, and on bhyve an HDA the kernel arms no
-interrupt on.
+USB input, no disk, no network, and on bhyve no sound (below).
 
 Once the dependencies close, each still lacks a driver this tree does not
 have: virtio-blk on Cloud Hypervisor and crosvm, whose only disk it is;
 virtio-input on crosvm, whose only input it is; and on bhyve, whose virtio is
-legacy, a driver for its 82545EM, its only other NIC, and an interrupt for its
-HDA, which raises INTx alone where the kernel's driver arms MSI-X or MSI
-(`kernel/src/drivers/hda.rs`, `arm_interrupt`). VirtualBox lacks none: its
-NVMe, GOP, i8042, xHCI and HDA are driven here, and its virtio-net once its
+legacy, a driver for its 82545EM, its only other NIC. VirtualBox lacks none:
+its NVMe, GOP, i8042, xHCI and HDA are driven here, and its virtio-net once its
 transitional id is.
+
+Unsupported, and not owed: bhyve's HDA, which raises INTx alone. ToyOS arms
+MSI-X or MSI only (`kernel/src/drivers/hda.rs`'s `arm_interrupt`, `pcidev`)
+and takes up no line-based interrupt (the orchestrator's ruling, #896,
+issuecomment-6131213771, ruling 3), so bhyve has no sound.
 
 ## AArch64
 
@@ -116,8 +125,10 @@ Hypervisor, crosvm, VirtualBox and bhyve on x86-64 to `Boot: complete` with
 DATA served and a DHCP lease, each boot's log on the evidence repository under
 the hypervisor's version and command line.
 
-**Blocked on**: the owner's ruling on interrupt remapping under virtio-iommu
-(`issues/no-claim-gets-an-address-space-under-virtio-iommu.md`) and the
+**Blocked on**: the owner's rulings on where a virtio-iommu driver lives, on
+both architectures, against his target of a kernel without virtio, and on
+interrupt remapping under virtio-iommu on x86-64
+(`issues/no-claim-gets-an-address-space-under-virtio-iommu.md`); the
 signed-driver design `issues/a-machine-without-an-iommu-refuses-every-claim.md`
 owes, and a host for each hypervisor.
 

@@ -24,14 +24,12 @@ documentation says it implements it "in order to provide a virtual IOMMU to its
 users" and "will not try to implement a full emulation of a physical IOMMU",
 and puts a device behind it only where the device is tagged `iommu=virtio`,
 whose "default value will always be `off`" (its `docs/iommu.md`); it describes
-the unit to the guest in a `VIOT` table (its `vmm/src/acpi.rs`), and offers an
-SMMUv3 only for a passthrough device behind a physical one (`docs/iommu.md`,
-"Emulated ARM SMMUv3"). crosvm puts only a host device passed through with
-`--vfio …,iommu=viommu` behind its virtio-iommu (`src/crosvm/cmdline.rs`), never
-a device it emulates: `PciDevice::supports_iommu` answers false
-(`devices/src/pci/pci_device.rs`) and its `VirtioPciDevice` does not override
-it (`devices/src/virtio/virtio_pci_device.rs`). So Cloud Hypervisor by default,
-and crosvm for every device it emulates, are the no-unit case of
+the unit to the guest in a `VIOT` table, and offers an SMMUv3 only for a
+passthrough device behind a physical one (`docs/iommu.md`, "Emulated ARM
+SMMUv3"). crosvm puts only a host device passed through with
+`--vfio …,iommu=viommu` behind its virtio-iommu, never a device it emulates.
+So Cloud Hypervisor by default, and crosvm for every device it emulates, are
+the no-unit case of
 `issues/a-machine-without-an-iommu-refuses-every-claim.md`, and a device
 Cloud Hypervisor is told to put behind its virtio-iommu is refused here too.
 

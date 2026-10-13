@@ -19,24 +19,26 @@ A hardware-reduced platform has neither PM1 block nor SMI_CMD. ACPI 6.5 gives
 it the FADT's `SLEEP_CONTROL_REG` and `SLEEP_STATUS_REG` for sleep and
 soft-off (§4.8.3.7, Sleep Control and Status Registers), and the Generic Event
 Device, `ACPI0013`, for its events, the power button's among them: an
-interrupt whose `_EVT` method the AML runs. Every AArch64 machine is one, which
-this tree meets with PSCI (`kernel/src/arch/aarch64/power.rs`).
+interrupt whose `_EVT` method the AML runs (§4.1.1.1). Every AArch64 machine
+is one, which this tree meets with PSCI (`kernel/src/arch/aarch64/power.rs`).
+These ACPI sections are as a third-party copy of ACPI 6.6 numbers them; 6.5
+itself is unread.
 
 Cloud Hypervisor's x86-64 FADT sets `HW_REDUCED_ACPI` and names the two sleep
-registers and a reset register (`create_facp_table` in its `vmm/src/acpi.rs`); it
-writes PM1a blocks only under its `legacy_acpi_pm1a` option, at ports it says
-"conforming guests ignore". Its power button, which its API's
-`/vm.power-button` presses, is a GED whose `_EVT` notifies `\_SB_.PWRB`
-(its `devices/src/acpi.rs`). QEMU's `microvm` is hardware-reduced too. q35,
+registers and a reset register, and PM1a blocks only under an option of its
+own, at otherwise unused ports. Its power button, which its API's
+`/vm.power-button` presses (its `docs/api.md`), is a GED whose `_EVT` notifies
+`\_SB_.PWRB`. QEMU's `microvm` is hardware-reduced too. q35,
 crosvm, VirtualBox and bhyve publish the fixed hardware.
 
 **Owner**: whoever holds
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose
 server holds the machine's power button and S5.
 
-**Exit**: a hardware-reduced FADT and DSDT, recorded from a Cloud Hypervisor
-guest with their provenance as `lib/acpi/fixtures/` records QEMU's, decode in
-a host test to the sleep control register and the GED's power-button method,
-and acpiserver's host test runs that method to a press; and a guest boot on a
-hardware-reduced machine, once the harness boots one, powers off on
-`shutdown`.
+**Exit**: a hardware-reduced FADT and DSDT, recorded by ToyOS from a Cloud
+Hypervisor guest with their provenance as `lib/acpi/fixtures/` records QEMU's,
+decode in a host test to the sleep control register and the GED's
+power-button method, and acpiserver's host test runs that method to a press;
+and the image booted by hand under Cloud Hypervisor on x86-64, its log on the
+evidence repository under the hypervisor's version and command line, powers
+off on `shutdown` and on a press through `/vm.power-button`.
